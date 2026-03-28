@@ -1,0 +1,12 @@
+# EdgeGuard-KG — development / testing dependencies
+# Install with: pip install -r requirements-dev.txt
+# DO NOT include these in the production Docker image.
+
+-r requirements.txt
+
+pytest~=8.3
+pytest-cov~=6.0
+pytest-asyncio~=0.24
+httpx~=0.28        # async test client for FastAPI
+ruff~=0.9          # linter / formatter
+mypy~=1.14         # static type checker

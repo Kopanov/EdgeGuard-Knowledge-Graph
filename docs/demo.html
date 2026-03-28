@@ -1,0 +1,1023 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EdgeGuard - Graph-Augmented Threat Intelligence</title>
+    <style>
+        @page { size: A4 landscape; margin: 0; }
+        :root {
+            --primary: #00d4aa;
+            --primary-dark: #00a88a;
+            --bg-dark: #0a0e17;
+            --bg-card: #1a2235;
+            --text: #e0e6ed;
+            --text-dim: #a0a8b0;
+            --danger: #ff6b6b;
+            --warning: #ffd93d;
+            --success: #6bcb77;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            line-height: 1.5;
+        }
+        .page {
+            width: 297mm;
+            min-height: 210mm;
+            padding: 15mm 18mm;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            page-break-after: always;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 3px solid var(--primary);
+            margin-bottom: 15px;
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--primary);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .logo-icon {
+            width: 42px;
+            height: 42px;
+            background: var(--primary);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+        .badge {
+            background: var(--warning);
+            color: #000;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+        .badge-dark {
+            background: var(--bg-card);
+            color: var(--text-dim);
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        .title-page {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+        .title-main {
+            font-size: 72px;
+            font-weight: 700;
+            margin-bottom: 25px;
+            background: linear-gradient(135deg, var(--primary) 0%, #00ffcc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .title-sub {
+            font-size: 26px;
+            color: var(--text-dim);
+            max-width: 800px;
+            margin-bottom: 50px;
+            line-height: 1.4;
+        }
+        .sprint-box {
+            background: var(--bg-card);
+            border-radius: 20px;
+            padding: 28px 45px;
+            border: 2px solid var(--primary);
+        }
+        .sprint-label {
+            font-size: 16px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--text-dim);
+            margin-bottom: 10px;
+        }
+        .sprint-value {
+            font-size: 22px;
+            color: var(--primary);
+            font-weight: 600;
+        }
+        .content-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15mm;
+            flex: 1;
+        }
+        .section { display: flex; flex-direction: column; }
+        .section-title { font-size: 18px; margin-bottom: 8px; color: var(--primary); }
+        .section-subtitle { color: var(--text-dim); font-size: 16px; margin-bottom: 12px; }
+        .stats-row { display: flex; gap: 12px; margin-bottom: 15px; }
+        .stat-card {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 14px 18px;
+            flex: 1;
+            text-align: center;
+        }
+        .stat-value { font-size: 28px; font-weight: 700; color: var(--primary); }
+        .stat-label { color: var(--text-dim); font-size: 12px; text-transform: uppercase; }
+        .list-box {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 14px;
+            margin-bottom: 14px;
+        }
+        .list-title { font-size: 14px; color: var(--text-dim); margin-bottom: 8px; text-transform: uppercase; }
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            font-size: 16px;
+        }
+        .list-item:last-child { border-bottom: none; }
+        .list-item .count { color: var(--primary); font-weight: 600; }
+        .node-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .node-card {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .node-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+        .node-name { font-size: 13px; font-weight: 600; }
+        .node-count { font-size: 20px; font-weight: 700; color: var(--primary); }
+        .explanation {
+            background: rgba(0,212,170,0.1);
+            border-left: 4px solid var(--primary);
+            padding: 10px 14px;
+            border-radius: 0 8px 8px 0;
+            font-size: 13px;
+            color: var(--text-dim);
+            margin-top: auto;
+        }
+        .explanation strong { color: var(--primary); }
+        .goals-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; flex: 1; }
+        .goal-card { background: var(--bg-card); border-radius: 14px; padding: 16px; }
+        .goal-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        .goal-id {
+            background: var(--primary);
+            color: #000;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .goal-name { font-size: 12px; font-weight: 600; }
+        .goal-desc { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+        .verification {
+            background: rgba(0,0,0,0.3);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        .verification strong { color: var(--warning); font-size: 10px; text-transform: uppercase; display: block; margin-bottom: 3px; }
+        .activity-box {
+            background: var(--bg-card);
+            border-radius: 14px;
+            padding: 18px;
+            border: 2px solid var(--primary);
+            margin-bottom: 16px;
+        }
+        .activity-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+        .activity-id {
+            background: var(--primary);
+            color: #000;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .activity-name { font-size: 16px; font-weight: 600; }
+        .activity-label { font-size: 14px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 4px; }
+        .activity-value { font-size: 14px; line-height: 1.6; }
+        .activity-duration { color: var(--primary); font-weight: 600; }
+        .outputs-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+        .output-item {
+            background: rgba(0,0,0,0.3);
+            padding: 12px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-dim);
+        }
+        .samples-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; flex: 1; }
+        .sample-card {
+            background: var(--bg-card);
+            border-radius: 14px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+        }
+        .sample-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .sample-type {
+            background: rgba(0,212,170,0.2);
+            color: var(--primary);
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .sample-value { font-size: 13px; font-weight: 700; margin-bottom: 10px; word-break: break-all; }
+        .sample-props { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 12px; margin-bottom: 10px; }
+        .sample-prop { background: rgba(0,0,0,0.25); padding: 8px 10px; border-radius: 6px; }
+        .sample-prop-label { color: var(--text-dim); font-size: 9px; text-transform: uppercase; }
+        .sample-prop-value { font-weight: 600; font-size: 12px; }
+        .sample-explanation {
+            background: rgba(0,212,170,0.1);
+            border-left: 4px solid var(--primary);
+            padding: 8px 12px;
+            border-radius: 0 6px 6px 0;
+            font-size: 12px;
+            color: var(--text-dim);
+            margin-top: auto;
+            line-height: 1.5;
+        }
+        .sample-explanation strong { color: var(--primary); }
+        .props-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 14px; }
+        .props-table th { background: var(--primary); color: #000; padding: 10px 12px; text-align: left; font-weight: 600; }
+        .props-table td { background: var(--bg-card); padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
+        .props-table tr td:first-child { color: var(--primary); font-weight: 600; }
+        .questions-list { flex: 1; }
+        .question-card {
+            background: var(--bg-card);
+            border-radius: 14px;
+            padding: 16px;
+            margin-bottom: 12px;
+            border-left: 4px solid var(--primary);
+        }
+        .question-q { font-size: 16px; font-weight: 600; color: var(--primary); margin-bottom: 6px; }
+        .question-a { font-size: 12px; color: var(--text-dim); }
+        .question-a.answered { color: var(--success); }
+        .footer {
+            text-align: center;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            color: var(--text-dim);
+            font-size: 12px;
+            margin-top: auto;
+        }
+        .nav-dots {
+            position: fixed;
+            right: 25px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 100;
+        }
+        .nav-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.3);
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 2px solid transparent;
+        }
+        .nav-dot:hover, .nav-dot.active {
+            background: var(--primary);
+            transform: scale(1.4);
+            border-color: #fff;
+        }
+        .page-indicator {
+            position: fixed;
+            left: 25px;
+            bottom: 25px;
+            background: var(--bg-card);
+            padding: 10px 18px;
+            border-radius: 25px;
+            font-size: 14px;
+            color: var(--text-dim);
+            border: 1px solid rgba(255,255,255,0.15);
+        }
+        @media print {
+            body { background: white !important; }
+            .page { 
+                background: white !important; 
+                box-shadow: none;
+                border: 1px solid #ddd;
+                margin-bottom: 10px;
+            }
+            :root {
+                --bg-dark: #ffffff;
+                --bg-card: #f5f5f5;
+                --text: #1a1a1a;
+                --text-dim: #666666;
+            }
+            .nav-dots, .page-indicator { display: none; }
+            .stat-card, .list-box, .goal-card, .activity-box, .sample-card, .question-card, .node-card {
+                background: #f5f5f5 !important;
+                border: 1px solid #ddd;
+            }
+            .explanation, .sample-explanation, .verification, .output-item {
+                background: #f0f0f0 !important;
+            }
+            .props-table th { background: #00d4aa !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .props-table td { background: #f5f5f5 !important; }
+            .goal-id, .activity-id, .badge { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .title-main { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="nav-dots">
+        <div class="nav-dot" data-section="page1"></div>
+        <div class="nav-dot" data-section="page2"></div>
+        <div class="nav-dot" data-section="page3"></div>
+        <div class="nav-dot" data-section="page4"></div>
+        <div class="nav-dot" data-section="page5"></div>
+        <div class="nav-dot" data-section="page6"></div>
+        <div class="nav-dot" data-section="page7"></div>
+    </nav>
+
+    <div class="page-indicator">
+        <span id="page-num">1</span> / 7
+    </div>
+
+    <!-- Page 1: Title -->
+    <div class="page" id="page1">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🛡️</div>
+                EdgeGuard
+            </div>
+            <span class="badge badge-dark">5 March 2026</span>
+        </header>
+
+        <div class="title-page">
+            <div class="title-main">🛡️ EdgeGuard</div>
+            <div class="title-sub">
+                Graph-Augmented xAI for Threat Intelligence on Edge Infrastructure
+            </div>
+            
+            <div class="sprint-box">
+                <div class="sprint-label">Sprint 1 Target</div>
+                <div class="sprint-value">
+                    Knowledge graph with ≥50K entities, automated ingestion logs, and sample Cypher queries
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Proof of Concept
+        </footer>
+    </div>
+
+    <!-- Page 2: Milestones -->
+    <div class="page" id="page2">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🎯</div>
+                Sprint 1 Goals
+            </div>
+            <span class="badge badge-dark">Design & Foundation (Months 1–3)</span>
+        </header>
+
+        <div class="goals-grid">
+            <div class="goal-card">
+                <div class="goal-header">
+                    <span class="goal-id">G1.1</span>
+                    <span class="goal-name">Knowledge Graph Design and Initial Population</span>
+                </div>
+                <div class="goal-desc">
+                    Design graph schema and populate with threat intelligence entities from open-source feeds.
+                </div>
+                <div class="verification">
+                    <strong>Verification</strong>
+                    Neo4j database export; schema documentation; entity count query; R1 report
+                </div>
+            </div>
+
+            <div class="goal-card">
+                <div class="goal-header">
+                    <span class="goal-id">G1.2</span>
+                    <span class="goal-name">Automated Data Ingestion Pipeline</span>
+                </div>
+                <div class="goal-desc">
+                    Implement daily automated ingestion with deduplication and validation.
+                </div>
+                <div class="verification">
+                    <strong>Verification</strong>
+                    GitHub codebase; pipeline logs showing consecutive successful runs; ingestion statistics
+                </div>
+            </div>
+
+            <div class="goal-card">
+                <div class="goal-header">
+                    <span class="goal-id">G1.3</span>
+                    <span class="goal-name">GraphRAG Query Engine Prototype</span>
+                </div>
+                <div class="goal-desc">
+                    Develop prototype query engine with natural language to graph query conversion.
+                </div>
+                <div class="verification">
+                    <strong>Verification</strong>
+                    Functional API endpoints; demo video showing sample queries; latency benchmarks
+                </div>
+            </div>
+
+            <div class="goal-card">
+                <div class="goal-header">
+                    <span class="goal-id">G1.4</span>
+                    <span class="goal-name">ResilMesh Integration Setup</span>
+                </div>
+                <div class="goal-desc">
+                    Configure NATS messaging for zone-based threat intelligence distribution.
+                </div>
+                <div class="verification">
+                    <strong>Verification</strong>
+                    NATS configuration files; publish/subscribe demo; message latency measurements
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Sprint 1: Design & Foundation
+        </footer>
+    </div>
+
+    <!-- Page 3: Current Activity -->
+    <div class="page" id="page3">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                Current Activity
+            </div>
+            <span class="badge badge-dark">5 March 2026</span>
+        </header>
+
+        <!-- Progress toward Sprint Goal -->
+        <div style="background: var(--bg-card); border-radius: 12px; padding: 14px 18px; margin-bottom: 16px; border: 1px solid rgba(0,212,170,0.3);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                <span style="font-size: 13px; color: var(--text-dim);">🎯 Sprint 1 Progress: 14,793 / 50,000 nodes</span>
+                <span style="font-size: 16px; font-weight: 700; color: var(--primary);">28%</span>
+            </div>
+            <div style="background: rgba(0,0,0,0.3); border-radius: 6px; height: 10px; overflow: hidden;">
+                <div style="background: linear-gradient(90deg, var(--primary) 0%, #00ffcc 100%); height: 100%; width: 28%; border-radius: 6px;"></div>
+            </div>
+        </div>
+
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-value">14,793</div>
+                <div class="stat-label">Nodes</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">290</div>
+                <div class="stat-label">Relationships</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">5</div>
+                <div class="stat-label">Data Sources</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value">4</div>
+                <div class="stat-label">Sectors</div>
+            </div>
+        </div>
+
+        <!-- Alert Enrichment Feature Highlight -->
+        <div style="background: linear-gradient(135deg, rgba(255,107,107,0.12) 0%, rgba(0,212,170,0.08) 100%); border: 2px solid #ff6b6b; border-radius: 14px; padding: 18px; margin-bottom: 16px; position: relative; overflow: hidden;">
+            <div style="position: absolute; top: -20px; right: -20px; font-size: 100px; opacity: 0.05;">⚡</div>
+            <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+                <span style="background: linear-gradient(135deg, #ff6b6b 0%, #ff8e8e 100%); color: #000; padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 700;">🚀 NEW</span>
+                <span style="font-size: 18px; font-weight: 600;">Alert Enrichment Engine</span>
+                <span style="margin-left: auto; font-size: 11px; background: rgba(107,203,119,0.2); color: var(--success); padding: 4px 10px; border-radius: 12px;">✓ Production Ready</span>
+            </div>
+            <div style="font-size: 13px; color: var(--text-dim); margin-bottom: 12px; line-height: 1.6;">
+                <strong style="color: var(--text);">What it does:</strong> ResilMesh sends an alert → EdgeGuard queries the knowledge graph → Returns enriched threat context including threat actors, malware families, attack techniques, and CVEs — all with confidence scores.
+            </div>
+            <!-- Visual workflow -->
+            <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 14px; flex-wrap: wrap;">
+                <div style="background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 8px; text-align: center;">
+                    <div style="font-size: 16px;">📥</div>
+                    <div style="font-size: 10px; color: var(--text-dim);">NATS Alert</div>
+                </div>
+                <span style="color: var(--primary);">→</span>
+                <div style="background: rgba(0,212,170,0.15); padding: 8px 12px; border-radius: 8px; text-align: center; border: 1px solid var(--primary);">
+                    <div style="font-size: 16px;">🧠</div>
+                    <div style="font-size: 10px; color: var(--primary);">Graph Query</div>
+                </div>
+                <span style="color: var(--primary);">→</span>
+                <div style="background: rgba(0,0,0,0.3); padding: 8px 12px; border-radius: 8px; text-align: center;">
+                    <div style="font-size: 16px;">📤</div>
+                    <div style="font-size: 10px; color: var(--text-dim);">Enriched Alert</div>
+                </div>
+            </div>
+            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                <div style="background: rgba(0,0,0,0.3); padding: 10px 14px; border-radius: 8px; font-size: 12px; flex: 1; min-width: 140px;">
+                    <div style="color: var(--primary); font-weight: 600; margin-bottom: 2px;">⚡ Query Latency</div>
+                    <div style="color: var(--text-dim);"><150ms typical</div>
+                </div>
+                <div style="background: rgba(0,0,0,0.3); padding: 10px 14px; border-radius: 8px; font-size: 12px; flex: 1; min-width: 140px;">
+                    <div style="color: var(--primary); font-weight: 600; margin-bottom: 2px;">🎯 Enrichment Data</div>
+                    <div style="color: var(--text-dim);">Actors, Malware, CVEs, TTPs</div>
+                </div>
+                <div style="background: rgba(0,0,0,0.3); padding: 10px 14px; border-radius: 8px; font-size: 12px; flex: 1; min-width: 140px;">
+                    <div style="color: var(--primary); font-weight: 600; margin-bottom: 2px;">📊 Confidence Scoring</div>
+                    <div style="color: var(--text-dim);">0.0 - 1.0 per match</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="activity-box">
+            <div class="activity-header">
+                <span class="activity-id">A1</span>
+                <span class="activity-name">Knowledge Graph Development</span>
+            </div>
+            
+            <div class="activity-label">Description</div>
+            <div class="activity-value">
+                Design schema (node/relationship types); integrate open-source APIs (MISP, OTX, NVD, CISA, MITRE); implement ingestion pipeline with deduplication and validation; populate database.
+            </div>
+            <div style="margin-top: 12px;">
+                <span class="activity-label">Planned Duration</span>
+                <span class="activity-duration"> — Weeks 1–6 (Sprint 1)</span>
+            </div>
+        </div>
+
+        <div class="section-title">Planned Outputs</div>
+        <div class="outputs-grid">
+            <div class="output-item">Graph Schema Documentation</div>
+            <div class="output-item">Python Ingestion Modules</div>
+            <div class="output-item">Populated Neo4j Database</div>
+            <div class="output-item">Automated Pipeline Config</div>
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Current Progress: 28% toward 50K node goal
+        </footer>
+    </div>
+
+    <!-- Page 4: Platform Overview -->
+    <div class="page" id="page4">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">📊</div>
+                Platform Overview
+            </div>
+            <span class="badge">Proof of Concept</span>
+        </header>
+
+        <div class="content-grid">
+            <div class="section">
+                <div class="stats-row">
+                    <div class="stat-card">
+                        <div class="stat-value">14,793</div>
+                        <div class="stat-label">Total Nodes</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value">290</div>
+                        <div class="stat-label">Relationships</div>
+                    </div>
+                </div>
+
+                <div class="list-box">
+                    <div class="list-title">📡 Data Sources (5)</div>
+                    <div class="list-item"><span>AlienVault OTX</span><span class="count">13,014</span></div>
+                    <div class="list-item"><span>CISA KEV</span><span class="count">500</span></div>
+                    <div class="list-item"><span>MITRE ATT&CK</span><span class="count">500</span></div>
+                    <div class="list-item"><span>NVD</span><span class="count">100</span></div>
+                    <div class="list-item"><span>MISP</span><span class="count">4</span></div>
+                </div>
+
+                <div class="list-box">
+                    <div class="list-title">🏢 Sectors (4)</div>
+                    <div class="list-item"><span>🏥 Healthcare</span><span class="count">8,657 (61%)</span></div>
+                    <div class="list-item"><span>⚡ Energy</span><span class="count">3,884 (28%)</span></div>
+                    <div class="list-item"><span>💰 Finance</span><span class="count">258 (2%)</span></div>
+                    <div class="list-item"><span>🌍 Global</span><span class="count">1,991 (14%)</span></div>
+                </div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">📊 Node Types in Graph</div>
+                <div class="section-subtitle">Breakdown by entity type</div>
+                
+                <div class="node-grid">
+                    <div class="node-card">
+                        <div class="node-icon" style="background: rgba(0,212,170,0.2);">🌐</div>
+                        <div><div class="node-name">Indicators</div><div class="node-count">6,999</div></div>
+                    </div>
+                    <div class="node-card">
+                        <div class="node-icon" style="background: rgba(255,107,107,0.2);">⚠️</div>
+                        <div><div class="node-name">Vulnerabilities</div><div class="node-count">600</div></div>
+                    </div>
+                    <div class="node-card">
+                        <div class="node-icon" style="background: rgba(255,217,61,0.2);">🎯</div>
+                        <div><div class="node-name">Techniques</div><div class="node-count">300</div></div>
+                    </div>
+                    <div class="node-card">
+                        <div class="node-icon" style="background: rgba(107,203,119,0.2);">👤</div>
+                        <div><div class="node-name">Threat Actors</div><div class="node-count">100</div></div>
+                    </div>
+                    <div class="node-card">
+                        <div class="node-icon" style="background: rgba(77,150,255,0.2);">🦠</div>
+                        <div><div class="node-name">Malware</div><div class="node-count">100</div></div>
+                    </div>
+                    <div class="node-card">
+                        <div class="node-icon" style="background: rgba(168,85,247,0.2);">🔗</div>
+                        <div><div class="node-name">Relationships</div><div class="node-count">290</div></div>
+                    </div>
+                </div>
+                
+                <div class="list-box" style="margin-top: 14px;">
+                    <div class="list-title">📦 Extracted Entities</div>
+                    <div class="list-item"><span>Domain Names</span><span class="count">5,982</span></div>
+                    <div class="list-item"><span>IP Addresses</span><span class="count">33</span></div>
+                </div>
+
+                <div class="list-box" style="margin-top: 14px;">
+                    <div class="list-title">🔗 Relationship Types</div>
+                    <div class="list-item">
+                        <span>ATTRIBUTED_TO</span>
+                        <span class="count">150</span>
+                        <span style="color: var(--text-dim); font-size: 12px;"> — Indicator → Malware</span>
+                    </div>
+                    <div class="list-item">
+                        <span>USES</span>
+                        <span class="count">140</span>
+                        <span style="color: var(--text-dim); font-size: 12px;"> — ThreatActor → Technique</span>
+                    </div>
+                </div>
+
+                <div class="explanation">
+                    <strong>🎯 Why Graph Architecture?</strong> Unlike flat IOC databases, EdgeGuard links indicators → vulnerabilities → threat actors → attack techniques — enabling <em>correlation analysis</em> and <em>contextual enrichment</em> for alerts.
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Data from Neo4j
+        </footer>
+    </div>
+
+    <!-- Page 5: Neo4j Properties -->
+    <div class="page" id="page5">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🔧</div>
+                Neo4j Properties Schema
+            </div>
+            <span class="badge">Technical Details</span>
+        </header>
+
+        <div class="section-title" style="margin-bottom: 10px;">Node Properties</div>
+        <table class="props-table">
+            <thead>
+                <tr>
+                    <th>Node Type</th>
+                    <th>Properties</th>
+                    <th>Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Indicator</td>
+                    <td>indicator_type, value, zone, sources, confidence_score</td>
+                    <td>domain: "malicious-c2.com"</td>
+                </tr>
+                <tr>
+                    <td>Vulnerability</td>
+                    <td>cve_id, cvss_score, severity, attack_vector, sources</td>
+                    <td>CVE-2024-21412, CVSS: 9.8</td>
+                </tr>
+                <tr>
+                    <td>ThreatActor</td>
+                    <td>name, aliases, description, sources, confidence_score</td>
+                    <td>APT29, Cozy Bear</td>
+                </tr>
+                <tr>
+                    <td>Technique</td>
+                    <td>mitre_id, name, platforms, data_sources, sources</td>
+                    <td>T1566.002, Spearphishing</td>
+                </tr>
+                <tr>
+                    <td>Malware</td>
+                    <td>name, aliases, description, is_family, sources</td>
+                    <td>TrickBot, Emotet</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="section-title" style="margin-bottom: 10px;">Relationship Properties</div>
+        <table class="props-table">
+            <thead>
+                <tr>
+                    <th>Relationship</th>
+                    <th>From → To</th>
+                    <th>Properties</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>USES</td>
+                    <td>ThreatActor → Technique</td>
+                    <td>sources, confidence_score</td>
+                </tr>
+                <tr>
+                    <td>ATTRIBUTED_TO</td>
+                    <td>Indicator → Malware</td>
+                    <td>sources, confidence_score</td>
+                </tr>
+                <tr>
+                    <td>INDICATES</td>
+                    <td>Indicator → Vulnerability</td>
+                    <td>sources (Future)</td>
+                </tr>
+                <tr>
+                    <td>RESOLVES_TO</td>
+                    <td>DomainName → IP</td>
+                    <td>sources (Future)</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="explanation">
+            <strong>📌 Key Implementation Details:</strong> All nodes have <em>sources</em> (array of source IDs) and <em>confidence_score</em> (0-1) for data quality tracking. Sector tagging uses word-boundary regex to prevent false positives (e.g., "phishing" ≠ "his" in healthcare).
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Neo4j Schema v1.0
+        </footer>
+    </div>
+
+    <!-- Page 6: Sample Data -->
+    <div class="page" id="page6">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🔍</div>
+                Sample Data & Logic
+            </div>
+            <span class="badge">Proof of Concept</span>
+        </header>
+
+        <div class="section-title">EdgeGuard's Logic in Action</div>
+        <div class="section-subtitle">Demonstrating data merging, scoring, sector tagging, and relationship mapping</div>
+
+        <div class="samples-grid">
+            <div class="sample-card">
+                <div class="sample-header">
+                    <span class="sample-type">🔀 Multi-Source Merge</span>
+                </div>
+                <div class="sample-value">goblpost.cfd</div>
+                <div class="sample-props">
+                    <div class="sample-prop"><div class="sample-prop-label">Type</div><div class="sample-prop-value">Domain</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Sector</div><div class="sample-prop-value">Energy</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Confidence</div><div class="sample-prop-value" style="color:#ff6b6b">0.75 (High)</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Sources</div><div class="sample-prop-value">AlienVault OTX</div></div>
+                </div>
+                <div class="sample-explanation">
+                    <strong>Logic:</strong> When same indicator appears in multiple sources, EdgeGuard keeps highest confidence (0.75) as primary. Raw data preserved on relationship edges.
+                </div>
+            </div>
+
+            <div class="sample-card">
+                <div class="sample-header">
+                    <span class="sample-type">⚠️ Known Exploited Vulnerability</span>
+                </div>
+                <div class="sample-value">CVE-2024-21412</div>
+                <div class="sample-props">
+                    <div class="sample-prop"><div class="sample-prop-label">CVSS</div><div class="sample-prop-value" style="color:#ff6b6b">9.8 Critical</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Source</div><div class="sample-prop-value">CISA KEV</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Vendor</div><div class="sample-prop-value">Microsoft</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Status</div><div class="sample-prop-value">Active Exploit</div></div>
+                </div>
+                <div class="sample-explanation">
+                    <strong>Logic:</strong> CISA KEV provides actively exploited vulnerabilities. EdgeGuard links CVEs to threat actors via MITRE ATT&CK — enabling prioritization based on real-world threat activity.
+                </div>
+            </div>
+
+            <div class="sample-card">
+                <div class="sample-header">
+                    <span class="sample-type">👤 Threat Actor → Techniques</span>
+                </div>
+                <div class="sample-value">APT29 (Cozy Bear)</div>
+                <div class="sample-props">
+                    <div class="sample-prop"><div class="sample-prop-label">Country</div><div class="sample-prop-value">Russia</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Source</div><div class="sample-prop-value">MITRE ATT&CK</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Techniques</div><div class="sample-prop-value">189</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Target</div><div class="sample-prop-value">Energy, Gov</div></div>
+                </div>
+                <div class="sample-explanation">
+                    <strong>Logic:</strong> Threat actors linked to techniques via USES relationship. When indicator matches APT29's TTPs, EdgeGuard surfaces actor context automatically.
+                </div>
+            </div>
+
+            <div class="sample-card">
+                <div class="sample-header">
+                    <span class="sample-type">🎯 Attack Technique</span>
+                </div>
+                <div class="sample-value">T1566 — Phishing</div>
+                <div class="sample-props">
+                    <div class="sample-prop"><div class="sample-prop-label">Tactic</div><div class="sample-prop-value">Initial Access</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Platforms</div><div class="sample-prop-value">Windows/macOS/Linux</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Data Sources</div><div class="sample-prop-value">File, Network</div></div>
+                    <div class="sample-prop"><div class="sample-prop-label">Detection</div><div class="sample-prop-value">Moderate</div></div>
+                </div>
+                <div class="sample-explanation">
+                    <strong>Logic:</strong> Techniques provide TTP context. EdgeGuard maps indicators to techniques — suspicious email → "T1566" for threat hunting.
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Data from Neo4j
+        </footer>
+    </div>
+
+    <!-- Page 7: Integration & Next Steps -->
+    <div class="page" id="page7">
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">🚀</div>
+                Integration & Next Steps
+            </div>
+            <span class="badge">Integration Ready</span>
+        </header>
+
+        <div class="section-title">Questions to Confirm</div>
+        <div class="section-subtitle">Key integration points we need from ResilMesh team</div>
+
+        <div class="questions-list">
+            <div class="question-card">
+                <div class="question-q">1. What format will ResilMesh send alerts?</div>
+                <div class="question-a">Need JSON schema for incoming alerts — what fields will include (IP, hostname, zone, event_type, etc.)</div>
+            </div>
+
+            <div class="question-card">
+                <div class="question-q">2. Will alerts include hostname or just IP?</div>
+                <div class="question-a">Critical for enrichment — hostname enables better domain correlation</div>
+            </div>
+
+            <div class="question-card">
+                <div class="question-q">3. Do you have sample alert payloads we can test with?</div>
+                <div class="question-a">For development and integration testing before production</div>
+            </div>
+
+            <div class="question-card">
+                <div class="question-q">4. Can we confirm the NATS topic `resilmesh.alerts.zone.<zone_id>` is active?</div>
+                <div class="question-a">Need confirmation topics are available for subscription</div>
+            </div>
+
+            <div class="question-card">
+                <div class="question-q">5. How do we initiate the mTLS certificate exchange?</div>
+                <div class="question-a">For NATS connection authentication per proposal</div>
+            </div>
+        </div>
+
+        <div class="explanation" style="margin-top: 14px;">
+            <strong>✅ Pre-Answered (Already in Proposal):</strong><br>
+            • NATS topics: resilmesh.alerts.zone.&lt;zone_id&gt;, resilmesh.threats.zone.&lt;zone_id&gt;, resilmesh.cve.kev<br>
+            • Latency SLA: Median &lt;100-150ms, p95 ≤2.0 seconds<br>
+            • Auth: mTLS with Ratio1 dAuth
+        </div>
+
+        <div style="margin-top: 20px; padding: 15px; background: rgba(0,212,170,0.1); border-radius: 10px; border: 2px solid var(--primary);">
+            <div class="section-title">🕸️ Interactive Graph Visualization</div>
+            <div class="section-subtitle" style="margin-bottom: 10px;">Explore the threat intelligence graph interactively</div>
+            <div style="font-size: 16px; color: var(--text-dim); margin-bottom: 12px;">
+                Open the visualization to see:
+            </div>
+            <div style="font-size: 13px; color: var(--text); margin-bottom: 15px; line-height: 1.6;">
+                • <strong>Actors → Techniques:</strong> See how threat actors (APT29, Wizard Spider, FIN7) map to MITRE ATT&CK techniques<br>
+                • <strong>Indicators by Sector:</strong> Explore IOCs tagged to Healthcare, Energy, Finance sectors<br>
+                • <strong>Interactive:</strong> Drag nodes, zoom, hover for details
+            </div>
+            <a href="visualization.html" target="_blank" style="display: inline-block; background: var(--primary); color: #000; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">
+                🚀 Open Interactive Visualization
+            </a>
+        </div>
+
+        <!-- Alert Enrichment Workflow Demo -->
+        <div style="margin-top: 20px; padding: 15px; background: linear-gradient(135deg, rgba(255,107,107,0.1) 0%, rgba(0,212,170,0.1) 100%); border-radius: 10px; border: 2px solid #ff6b6b;">
+            <div class="section-title" style="color: #ff6b6b;">⚡ Alert Enrichment Workflow</div>
+            <div class="section-subtitle" style="margin-bottom: 12px;">How EdgeGuard enriches ResilMesh alerts in real-time</div>
+            
+            <!-- Workflow Steps -->
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 15px; flex-wrap: wrap;">
+                <div style="background: var(--bg-card); padding: 10px 14px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
+                    <div style="font-size: 20px;">📥</div>
+                    <div style="font-size: 11px; color: var(--text); font-weight: 600;">1. Receive Alert</div>
+                    <div style="font-size: 10px; color: var(--text-dim);">from NATS</div>
+                </div>
+                <div style="color: var(--primary); font-size: 18px;">→</div>
+                <div style="background: var(--bg-card); padding: 10px 14px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
+                    <div style="font-size: 20px;">🔍</div>
+                    <div style="font-size: 11px; color: var(--text); font-weight: 600;">2. Graph Lookup</div>
+                    <div style="font-size: 10px; color: var(--text-dim);">Query Neo4j</div>
+                </div>
+                <div style="color: var(--primary); font-size: 18px;">→</div>
+                <div style="background: var(--bg-card); padding: 10px 14px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
+                    <div style="font-size: 20px;">🔗</div>
+                    <div style="font-size: 11px; color: var(--text); font-weight: 600;">3. Find Context</div>
+                    <div style="font-size: 10px; color: var(--text-dim);">Actors, Malware, CVEs</div>
+                </div>
+                <div style="color: var(--primary); font-size: 18px;">→</div>
+                <div style="background: var(--bg-card); padding: 10px 14px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
+                    <div style="font-size: 20px;">📤</div>
+                    <div style="font-size: 11px; color: var(--text); font-weight: 600;">4. Return Enriched</div>
+                    <div style="font-size: 10px; color: var(--text-dim);">to SOC</div>
+                </div>
+            </div>
+
+            <!-- Example Query -->
+            <div style="background: rgba(0,0,0,0.4); padding: 12px; border-radius: 8px; margin-bottom: 12px;">
+                <div style="font-size: 12px; color: var(--primary); font-weight: 600; margin-bottom: 6px;">📝 Example: Enriched Alert Response</div>
+                <div style="font-family: monospace; font-size: 11px; color: var(--text-dim); line-height: 1.5; overflow-x: auto;">
+{ "alert_id": "evt-12345", "indicator": "192.168.1.100", "enriched": true, <span style="color: #ff6b6b;">"threat_actors": ["APT29"], "malware": ["Cobalt Strike"], "techniques": ["T1059"], "confidence": 0.85, "sector": "healthcare" </span>}
+                </div>
+            </div>
+
+            <!-- Benefits -->
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <div style="background: rgba(0,212,170,0.15); padding: 8px 12px; border-radius: 6px; flex: 1; min-width: 150px;">
+                    <span style="color: var(--primary); font-weight: 600;">⚡ &lt;150ms</span> <span style="font-size: 12px; color: var(--text-dim);">query latency</span>
+                </div>
+                <div style="background: rgba(0,212,170,0.15); padding: 8px 12px; border-radius: 6px; flex: 1; min-width: 150px;">
+                    <span style="color: var(--primary); font-weight: 600;">🎯 Context</span> <span style="font-size: 12px; color: var(--text-dim);">actors + TTPs</span>
+                </div>
+                <div style="background: rgba(0,212,170,0.15); padding: 8px 12px; border-radius: 6px; flex: 1; min-width: 150px;">
+                    <span style="color: var(--primary); font-weight: 600;">🏷️ Sector</span> <span style="font-size: 12px; color: var(--text-dim);">tagging</span>
+                </div>
+            </div>
+        </div>
+
+        <footer class="footer">
+            EdgeGuard Threat Intelligence Platform | Ready for Integration Discussion
+        </footer>
+    </div>
+
+    <script>
+        const navDots = document.querySelectorAll('.nav-dot');
+        const pageNum = document.getElementById('page-num');
+        const pages = document.querySelectorAll('.page');
+        
+        function updateNav() {
+            let current = 1;
+            pages.forEach((page, index) => {
+                const rect = page.getBoundingClientRect();
+                if (rect.top <= window.innerHeight / 2 && rect.bottom >= window.innerHeight / 2) {
+                    current = index + 1;
+                }
+            });
+            
+            navDots.forEach(dot => {
+                dot.classList.remove('active');
+            });
+            
+            const activeDot = document.querySelector(`.nav-dot[data-section="page${current}"]`);
+            if (activeDot) activeDot.classList.add('active');
+            pageNum.textContent = current;
+        }
+        
+        navDots.forEach(dot => {
+            dot.addEventListener('click', () => {
+                const targetPage = document.getElementById(dot.dataset.section);
+                if (targetPage) {
+                    targetPage.scrollIntoView({ behavior: 'smooth' });
+                    setTimeout(updateNav, 100);
+                }
+            });
+        });
+
+        window.addEventListener('scroll', updateNav);
+        updateNav();
+    </script>
+</body>
+</html>

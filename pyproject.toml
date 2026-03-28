@@ -1,0 +1,187 @@
+[project]
+name = "edgeguard"
+# CalVer: release date YYYY.M.D (PEP 440). Bump when you tag/publish a release — not on every commit.
+version = "2026.3.28"
+description = "Threat Intelligence Pipeline - Sources to MISP to Neo4j"
+authors = [
+    {name = "EdgeGuard Team"}
+]
+readme = "README.md"
+# EdgeGuard CI and Docker images use 3.12. Apache Airflow 2.11 supports 3.11+ upstream; this repo
+# standardizes on 3.12+ for one supported interpreter line.
+requires-python = ">=3.12"
+license = {text = "MIT"}
+
+# Version policy: ~= compatible-release pins — allows only patch upgrades
+# within the stated major.minor, blocking silent breaking-version upgrades
+# (e.g. neo4j 6.x, Airflow 3.x).
+dependencies = [
+    # Core
+    "neo4j~=5.27",
+    "requests~=2.32",
+    "pandas~=2.2",
+    "pyyaml~=6.0",
+    "python-dateutil~=2.9",
+    "urllib3~=2.3",
+    # MISP & threat-intel SDKs
+    "pymisp~=2.4",
+    # Correct PyPI name for AlienVault OTX SDK (otx-api is an unrelated package)
+    "OTXv2~=1.5",
+    # STIX 2.1 — required for STIX bundle parsing/export throughout the pipeline
+    "stix2~=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest~=8.3",
+    "pytest-cov~=6.0",
+    "pytest-asyncio~=0.24",
+    "httpx~=0.28",       # async test client for FastAPI
+    "ruff~=0.9",         # linter / formatter
+    "mypy~=1.14",        # static type checker
+]
+# Pinned to Airflow 2.x — Airflow 3.0 has breaking changes in DAG serialization,
+# operator interfaces, and the scheduler protocol.
+# [postgres] pulls psycopg2 + provider so pip-installed Airflow can use PostgreSQL metadata
+# (same backend family as docker-compose service `airflow_postgres`). For MySQL, add the
+# mysql extra or provider per https://airflow.apache.org/docs/apache-airflow/stable/extra-packages-ref.html
+# No sqlite extra: production uses Postgres only. CPython still includes stdlib sqlite3;
+# gitignore covers accidental local airflow.db from default AIRFLOW_HOME.
+# Runtime env (not this table): EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE — MISP→Neo4j chunking; 0 or "all" = single pass (see README).
+airflow = [
+    "apache-airflow[postgres]~=2.11",
+]
+monitoring = [
+    "prometheus-client~=0.21",
+]
+api = [
+    "fastapi~=0.115",
+    "uvicorn~=0.34",
+    "slowapi~=0.1",      # rate limiting
+    "nats-py~=2.9",
+    "opentelemetry-api~=1.29",
+    "opentelemetry-sdk~=1.29",
+    "opentelemetry-instrumentation-fastapi~=0.50b0",
+    "opentelemetry-exporter-otlp~=1.29",
+]
+graphql = [
+    # ISIM-compatible GraphQL endpoint on port 4001
+    "strawberry-graphql~=0.283",
+]
+# Meta-extra: everything needed for a full production deployment
+all = [
+    "edgeguard[api,graphql,monitoring,airflow]",
+]
+
+[project.scripts]
+# After `pip install .`, these commands are available globally in the venv:
+#   edgeguard doctor      — check connectivity and config
+#   edgeguard heal        — auto-fix common issues
+#   edgeguard validate    — check configuration
+#   edgeguard monitor     — live health dashboard
+#   edgeguard update      — git pull + reinstall (auto: Docker if compose available, else pip)
+#   edgeguard --update    — synonym for edgeguard update
+#   edgeguard update --docker | --python — force one install path
+#   edgeguard version   — show CalVer + optional git short SHA (no .env required)
+edgeguard = "edgeguard:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src"]
+# Large integration / CLI modules are covered by manual/e2e runs, not unit tests.
+omit = [
+    "src/neo4j_client.py",
+    "src/run_misp_to_neo4j.py",
+    "src/run_pipeline.py",
+    "src/run_pipeline_misp_spt.py",
+    "src/edgeguard.py",
+    "src/health_check.py",
+    "src/setup.py",
+    "src/debug_zone_check.py",
+    "src/enrichment_jobs.py",
+    "src/metrics_server.py",
+    "src/metrics.py",
+    "src/nats_client.py",
+    "src/migrate_zone_property.py",
+    "src/opentelemetry_config.py",
+    "src/test_*.py",
+    "src/test_enrichment.py",
+    "src/test_otx.py",
+    "src/test_resilmesh_schema.py",
+    "src/edgeguard_operator.py",
+    "src/config_manager.py",
+    "src/enrichment.py",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+no_error_summary = true
+implicit_optional = true
+disable_error_code = ["import-untyped"]
+
+# Legacy modules with partial type coverage — suppress until fully annotated
+[[tool.mypy.overrides]]
+module = [
+    "graphql_api",
+    "graphql_schema",
+    "query_api",
+    "run_pipeline",
+    "run_pipeline_misp_spt",
+    "run_misp_to_neo4j",
+    "edgeguard_operator",
+    "edgeguard",
+    "neo4j_client",
+    "alert_processor",
+    "metrics_server",
+    "metrics",
+    "config",
+    "config_manager",
+    "resilience",
+    "misp_health",
+    "setup",
+    "test_otx",
+    "collectors.*",
+    "debug_zone_check",
+    "enrichment_jobs",
+]
+ignore_errors = true
+
+# Stricter checking for shared collector utilities (incremental typing).
+[[tool.mypy.overrides]]
+module = "collectors.collector_utils"
+ignore_errors = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "B008",   # function call in default arg — common in FastAPI/Depends patterns
+    "B904",   # raise from err — large refactor across APIs; enable incrementally
+]
+
+[tool.ruff.lint.per-file-ignores]
+# DAG files and collector entry-points must modify sys.path before importing
+# project modules — E402 is intentional here.
+"dags/*.py" = ["E402", "F401"]
+# F821: MISP_URL, NEO4J_*, etc. are injected at runtime by _ensure_runtime_imports()
+"src/edgeguard.py" = ["E402", "F821", "F841"]
+"src/collectors/additional_feeds_collector.py" = ["E402"]
+"src/collectors/mitre_collector.py" = ["E402"]
+"src/query_api.py" = ["E402"]
+"src/test_otx.py" = ["E402"]
+# Unused variables in tests are common assertion patterns; E402 when imports follow sys.path / del sys.modules
+"tests/*.py" = ["F841", "E712", "E402"]
+"src/test_*.py" = ["F841", "F541"]
+"src/debug_zone_check.py" = ["E402"]

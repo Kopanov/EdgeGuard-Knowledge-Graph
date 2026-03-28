@@ -1,0 +1,94 @@
+# EdgeGuard-Knowledge-Graph .gitignore
+
+# =============================================================================
+# Credentials & secrets — NEVER commit real values
+# =============================================================================
+# Real credential files (contain actual keys / passwords)
+credentials/config.yaml
+credentials/api_keys.yaml
+# .env files (real values only; .env.example is committed as template)
+.env
+.env.*
+!.env.example
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+src/.venv/
+src/venv/
+
+# =============================================================================
+# IDE & Editor
+# =============================================================================
+.vscode/
+.idea/
+# Ignore local Cursor IDE state but keep Bugbot rules which are repo config
+.cursor/*
+!.cursor/BUGBOT.md
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# OS
+# =============================================================================
+.DS_Store
+Thumbs.db
+
+# =============================================================================
+# Airflow runtime
+# =============================================================================
+logs/
+*.log
+# Local SQLite metadata (standalone / default AIRFLOW_HOME) — can hold connections,
+# Fernet-encrypted Variables, sessions. Keep ignored even when production uses Postgres.
+airflow.db
+airflow.cfg
+webserver_config.py
+
+# =============================================================================
+# Runtime state (sync timestamps, baseline checkpoints)
+# =============================================================================
+state/
+checkpoints/
+
+# =============================================================================
+# Data directories (large, generated at runtime)
+# =============================================================================
+data/raw/
+data/processed/
+
+# =============================================================================
+# Build artifacts
+# =============================================================================
+*.tmp
+pip-audit.json

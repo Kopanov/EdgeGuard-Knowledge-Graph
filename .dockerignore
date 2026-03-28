@@ -1,0 +1,55 @@
+# Never include these in a Docker build context.
+# Credentials and secrets must be injected at runtime.
+
+# Secrets / credentials
+credentials/config.yaml
+credentials/api_keys.yaml
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / CI
+tests/
+.github/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Dev / IDE
+.cursor/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docs (not needed at runtime)
+docs/
+docs-redundant/
+*.md
+!README.md
+
+# Logs and runtime state (mount as volumes)
+logs/
+checkpoints/
+state/

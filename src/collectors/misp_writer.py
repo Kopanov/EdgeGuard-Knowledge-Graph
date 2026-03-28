@@ -1,0 +1,1378 @@
+#!/usr/bin/env python3
+"""
+EdgeGuard - MISP Writer Module
+Pushes indicators to MISP as the single point of truth
+"""
+
+import os
+import sys
+
+# Add src to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import json
+import logging
+import re
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from functools import wraps
+from typing import Any, Dict, List, Optional, Tuple
+
+import requests
+import urllib3
+
+from collectors.collector_utils import retry_with_backoff
+from config import (
+    DEFAULT_SECTOR,
+    MISP_API_KEY,
+    MISP_PREFETCH_EXISTING_ATTRS,
+    MISP_URL,
+    SSL_VERIFY,
+    apply_misp_http_host_header,
+)
+
+# Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
+if not SSL_VERIFY:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
+    """
+    Same rules as ``neo4j_client.resolve_vulnerability_cve_id`` (keep in sync).
+
+    MISP vulnerability attributes often only have ``value`` (CVE id), not ``cve_id``.
+    """
+    cve_id = item.get("cve_id")
+    if cve_id is not None and str(cve_id).strip():
+        return str(cve_id).strip().upper()
+    if item.get("type") == "vulnerability":
+        val = item.get("value")
+        if val is not None and str(val).strip():
+            return str(val).strip().upper()
+    return None
+
+
+# Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
+_TRANSIENT_HTTP_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ReadTimeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _event_id_and_info_from_restsearch_row(row: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Extract (id, info) from one MISP restSearch row (wrapped or flat)."""
+    if not isinstance(row, dict):
+        return None, None
+    ev = row.get("Event")
+    if isinstance(ev, dict):
+        eid, info = ev.get("id"), ev.get("info")
+    else:
+        eid, info = row.get("id"), row.get("info")
+    if eid is not None:
+        eid = str(eid)
+    if info is not None:
+        info = str(info)
+    return eid, info
+
+
+def _event_id_exact_from_restsearch_rows(rows: List[Any], event_name: str) -> Optional[str]:
+    """
+    MISP ``restSearch`` ``info`` filter is often a **substring** match. Parallel tier-1 collectors
+    share the ``EdgeGuard-GLOBAL-`` prefix; taking ``response[0]`` can attach the wrong feed to
+    another source's event. Only accept an **exact** ``Event.info`` match.
+    """
+    for row in rows:
+        eid, info = _event_id_and_info_from_restsearch_row(row)
+        if eid and info == event_name:
+            return eid
+    return None
+
+
+@contextmanager
+def _cross_process_event_creation_lock():
+    """
+    Serialize MISP event creation across processes (e.g. Airflow LocalExecutor workers).
+
+    Without this, two collectors can both see "no event" and create duplicates — or worse, rely on
+    ambiguous restSearch hits. Uses ``fcntl`` (Unix). On platforms without ``fcntl``, the context is a no-op.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+
+    path = os.environ.get(
+        "EDGEGUARD_MISP_EVENT_LOCK_PATH",
+        "/tmp/edgeguard_misp_get_or_create_event.lock",
+    )
+    lock_f = open(path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_f.close()
+
+
+def sanitize_value(value: str, max_length: int = 255) -> str:
+    """Sanitize a threat-intelligence value for safe storage in MISP.
+
+    Removes control characters and null bytes, enforces a maximum length,
+    and strips surrounding whitespace.
+
+    HTML-escaping is intentionally NOT applied: it would corrupt indicator
+    values that legitimately contain ``&``, ``<``, ``>``, or ``"``
+    (e.g. URLs with query strings, file paths, regex patterns).
+
+    Args:
+        value:      Input string to sanitize.
+        max_length: Maximum allowed byte-length (default 255).
+
+    Returns:
+        Sanitized string safe for use in MISP attributes.
+    """
+    if not value or not isinstance(value, str):
+        return ""
+    # Remove null bytes and ASCII control characters (0x00–0x1F except tab/newline)
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", value)
+    value = value.strip()
+    if len(value) > max_length:
+        value = value[: max_length - 3] + "..."
+    return value
+
+
+def rate_limited(max_per_second: float = 2.0):
+    """Rate limiting decorator to avoid overwhelming APIs.
+
+    Args:
+        max_per_second: Maximum calls allowed per second
+    """
+    min_interval = 1.0 / max_per_second if max_per_second > 0 else 0.5
+    last_call_time = [0.0]  # Use list for mutable closure
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = time.time() - last_call_time[0]
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
+            result = func(*args, **kwargs)
+            last_call_time[0] = time.time()
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+class MISPWriter:
+    """
+    Writes indicators to MISP as the single point of truth.
+
+    Features:
+    - Batch uploads for efficiency
+    - Automatic sector-based event organization
+    - Deduplication within batches
+    - Support for all EdgeGuard indicator types
+    """
+
+    # Timeout constants for MISP API calls (defined before use)
+    CONNECT_TIMEOUT = 30  # seconds
+    READ_TIMEOUT = 300  # seconds — MISP needs time for large events (95K+ attributes)
+
+    # Mapping from EdgeGuard indicator types to MISP attribute types
+    TYPE_MAPPING = {
+        "ipv4": "ip-dst",
+        "ipv6": "ip-dst",
+        "ip": "ip-dst",
+        "domain": "domain",
+        "hostname": "hostname",
+        "url": "url",
+        "uri": "url",
+        "hash": "sha256",  # Default to sha256, can be overridden
+        "md5": "md5",
+        "sha1": "sha1",
+        "sha256": "sha256",
+        "sha512": "sha512",
+        "email": "email-src",
+        "cve": "vulnerability",
+        "filename": "filename",
+        "filepath": "filename",
+        "mutex": "mutex",
+        "registry": "regkey",
+        "yara": "yara",
+        "sigma": "sigma",
+        "snort": "snort",
+        "bitcoin": "btc",
+        "unknown": "text",
+    }
+
+    # Source to MISP tag mapping
+    SOURCE_TAGS = {
+        "misp": "source:MISP",
+        "otx": "source:AlienVault-OTX",
+        "alienvault_otx": "source:AlienVault-OTX",
+        "nvd": "source:NVD",
+        "cisa": "source:CISA-KEV",
+        "cisa_kev": "source:CISA-KEV",
+        "mitre": "source:MITRE-ATT&CK",
+        "mitre_attck": "source:MITRE-ATT&CK",
+        "virustotal": "source:VirusTotal",
+        "abuseipdb": "source:AbuseIPDB",
+        "feodo": "source:Feodo-Tracker",
+        "sslbl": "source:SSL-Blacklist",
+        "urlhaus": "source:URLhaus",
+        "cybercure": "source:CyberCure",
+        "threatfox": "source:ThreatFox",
+    }
+
+    def __init__(self, url: str = None, api_key: str = None, verify_ssl: bool = None):
+        """
+        Initialize MISP writer.
+
+        Args:
+            url: MISP instance URL (defaults to config.MISP_URL)
+            api_key: MISP API key (defaults to config.MISP_API_KEY)
+            verify_ssl: Whether to verify SSL certificates (defaults to config.SSL_VERIFY)
+        """
+        self.url = url or MISP_URL
+        self.api_key = api_key or MISP_API_KEY
+
+        # Use config value if not explicitly specified
+        if verify_ssl is None:
+            self.verify_ssl = SSL_VERIFY
+        else:
+            self.verify_ssl = verify_ssl
+
+        # Warn if SSL is disabled
+        if not self.verify_ssl:
+            logger.warning("SSL verification is DISABLED. This is OK for local dev only!")
+            logger.warning("For production, set EDGEGUARD_SSL_VERIFY=true or set SSL_VERIFY=True")
+        else:
+            logger.info("SSL verification is ENABLED")
+
+        self.session = requests.Session()
+        self.session.headers.update(
+            {"Authorization": self.api_key, "Accept": "application/json", "Content-Type": "application/json"}
+        )
+        apply_misp_http_host_header(self.session)
+        self.stats = {
+            "events_created": 0,
+            "attributes_added": 0,
+            "batches_sent": 0,
+            "errors": 0,
+            "attrs_skipped_existing": 0,
+        }
+
+    def _restsearch_events_for_name(self, event_name: str) -> List[Any]:
+        """Call ``/events/restSearch``; returns the ``response`` list (may need exact-info filtering)."""
+        response = self.session.post(
+            f"{self.url}/events/restSearch",
+            # ``limit`` > 1: substring ``info`` can return multiple EdgeGuard-* rows; we pick exact match only.
+            json={"returnFormat": "json", "info": event_name, "limit": 50},
+            verify=self.verify_ssl,
+            timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
+        )
+        if response.status_code != 200:
+            logger.warning(
+                "MISP restSearch failed for event lookup: HTTP %s — %s",
+                response.status_code,
+                (response.text or "")[:500],
+            )
+            return []
+        data = response.json()
+        return data.get("response") or []
+
+    def _get_existing_attribute_keys(self, event_id: str) -> set:
+        """
+        Build a set of (MISP attribute type, value) already on the event.
+
+        Used to avoid re-posting the same indicator when collectors re-run or incremental
+        windows overlap. MISP does not dedupe across different events (e.g. different days).
+        """
+        if not MISP_PREFETCH_EXISTING_ATTRS:
+            return set()
+        eid = sanitize_value(str(event_id), max_length=20)
+        if not eid:
+            return set()
+        keys: set = set()
+        page = 1
+        page_limit = 5000
+        max_pages = 200
+        while page <= max_pages:
+            try:
+                response = self.session.post(
+                    f"{self.url}/attributes/restSearch",
+                    json={
+                        "returnFormat": "json",
+                        "eventid": eid,
+                        "page": page,
+                        "limit": page_limit,
+                    },
+                    verify=self.verify_ssl,
+                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2),
+                )
+            except _TRANSIENT_HTTP_ERRORS:
+                raise
+            except Exception as ex:
+                logger.warning("MISP attributes/restSearch failed for event %s page %s: %s", eid, page, ex)
+                break
+            if response.status_code != 200:
+                logger.warning(
+                    "MISP attributes/restSearch HTTP %s for event %s — skipping prefetch",
+                    response.status_code,
+                    eid,
+                )
+                break
+            try:
+                data = response.json()
+            except ValueError:
+                break
+            resp = data.get("response", data)
+            attrs: List = []
+            if isinstance(resp, list):
+                attrs = resp
+            elif isinstance(resp, dict):
+                raw = resp.get("Attribute")
+                if isinstance(raw, list):
+                    attrs = raw
+                elif isinstance(raw, dict):
+                    attrs = [raw]
+            for a in attrs:
+                if not isinstance(a, dict):
+                    continue
+                t = a.get("type")
+                v = a.get("value")
+                if t is not None and v is not None and str(v).strip():
+                    keys.add((str(t), str(v)))
+            if len(attrs) < page_limit:
+                break
+            page += 1
+        if keys:
+            logger.debug("MISP event %s: prefetched %s existing attribute keys", eid, len(keys))
+        return keys
+
+    @retry_with_backoff(max_retries=4, base_delay=10.0)
+    def _get_or_create_event(self, sector: str, source: str, date: str = None) -> Optional[str]:
+        """Get or create a MISP event for a sector/source/date combination.
+
+        Uses MISP's ``restSearch`` endpoint, then filters to an **exact** ``Event.info`` match.
+        MISP's ``info`` search parameter is typically substring-based; combined with ``limit: 1``,
+        parallel collectors could previously receive another source's event (e.g. all data under the
+        MITRE-named event). Event **creation** is serialized with a file lock so two processes do not
+        create duplicate same-day events after a miss.
+
+        Returns:
+            Event ID if successful, None otherwise.
+        """
+        sector = sanitize_value(sector, max_length=50)
+        source = sanitize_value(source, max_length=50)
+
+        date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        event_name = f"EdgeGuard-{sector.upper()}-{source}-{date}"
+
+        try:
+            rows = self._restsearch_events_for_name(event_name)
+            exact = _event_id_exact_from_restsearch_rows(rows, event_name)
+            if exact:
+                return exact
+        except _TRANSIENT_HTTP_ERRORS:
+            raise
+        except Exception as e:
+            logger.warning(f"Event lookup error: {e}")
+
+        event_data = {
+            "Event": {
+                "info": event_name,
+                "distribution": 1,  # This organization only
+                "threat_level_id": 3,  # Low
+                "analysis": 0,  # Initial
+                "date": date,
+                "Attribute": [],
+                # Event is an organizational container: ``EdgeGuard-{SECTOR}-{source}-{date}`` encodes
+                # grouping; source + zone classification live on **attributes** (``source:…``, ``zone:…``).
+                # Single event tag marks data from this platform for consumers (e.g. ResilMesh).
+                "Tag": [{"name": "EdgeGuard"}],
+            }
+        }
+
+        try:
+            with _cross_process_event_creation_lock():
+                rows2 = self._restsearch_events_for_name(event_name)
+                exact2 = _event_id_exact_from_restsearch_rows(rows2, event_name)
+                if exact2:
+                    return exact2
+
+                response = self.session.post(
+                    f"{self.url}/events",
+                    json=event_data,
+                    verify=self.verify_ssl,
+                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
+                )
+
+                if response.status_code in (200, 201):
+                    result = response.json()
+                    ev = result.get("Event") or {}
+                    event_id = ev.get("id")
+                    created_info = ev.get("info")
+                    if created_info and str(created_info) != event_name:
+                        logger.error(
+                            "MISP created event info mismatch: expected %r got %r (id=%s)",
+                            event_name,
+                            created_info,
+                            event_id,
+                        )
+                    if event_id:
+                        self.stats["events_created"] += 1
+                        logger.info(f"Created MISP event: {event_name} (ID: {event_id})")
+                        return str(event_id)
+                    return None
+                logger.error(f"Failed to create event: {response.status_code} - {response.text}")
+                self.stats["errors"] += 1
+                return None
+
+        except _TRANSIENT_HTTP_ERRORS:
+            raise
+        except Exception as e:
+            logger.error(f"Event creation error: {e}")
+            self.stats["errors"] += 1
+            return None
+
+    def _get_zones_to_tag(self, item: Dict) -> List[str]:
+        """
+        Determine which zone tags to apply based on the new equal-importance logic.
+
+        Rules:
+        - All detected specific zones (healthcare, energy, finance) are equal - tag ALL
+        - Global is special:
+          * If specific zones + global detected → tag only specific zones (global is implicit)
+          * If ONLY global detected → tag global as primary
+
+        Args:
+            item: EdgeGuard item dict with 'zone' key (now an array)
+
+        Returns:
+            List of zone names to tag
+        """
+        # Get zones array (zone is now always an array)
+        zones = item.get("zone", ["global"])
+        if not isinstance(zones, list):
+            zones = [zones] if zones else ["global"]
+
+        # Filter logic:
+        # - If 'global' in zones AND other zones exist: exclude 'global' (it's implicit)
+        # - If ONLY 'global' in zones: keep 'global'
+        # - Otherwise: keep all zones
+        specific_zones = [z for z in zones if z and z != "global"]
+
+        if specific_zones:
+            # We have specific zones - tag them all equally
+            return specific_zones
+        else:
+            # Only global - tag it (or fallback to default)
+            global_zones = [z for z in zones if z]
+            return global_zones if global_zones else [DEFAULT_SECTOR]
+
+    def _primary_sector_for_event_grouping(self, item: Dict) -> str:
+        """
+        Single sector key for MISP event routing in push_items.
+
+        Must stay consistent with _get_zones_to_tag: if specifics exist, ignore global
+        and use a deterministic primary (sorted) so order in item['zone'] does not
+        split one logical batch across two events.
+        """
+        tagged = self._get_zones_to_tag(item)
+        if not tagged:
+            return str(DEFAULT_SECTOR).lower()
+        return sorted(str(z).lower() for z in tagged)[0]
+
+    def map_indicator_type(self, edgeguard_type: str, value: str = None) -> str:
+        """
+        Map EdgeGuard indicator type to MISP attribute type.
+
+        Args:
+            edgeguard_type: EdgeGuard type string
+            value: Optional value for additional type detection
+
+        Returns:
+            MISP attribute type string
+        """
+        # Direct mapping
+        if edgeguard_type in self.TYPE_MAPPING:
+            return self.TYPE_MAPPING[edgeguard_type]
+
+        # Try to detect from value if type is unknown
+        if value:
+            val_lower = value.lower()
+
+            # IP address detection
+            parts = value.split(".")
+            if len(parts) == 4:
+                try:
+                    if all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                        return "ip-dst"
+                except (ValueError, TypeError):
+                    pass
+
+            # Hash detection
+            if len(value) in [32, 40, 64, 128] and all(c in "0123456789abcdefABCDEF" for c in value):
+                if len(value) == 32:
+                    return "md5"
+                elif len(value) == 40:
+                    return "sha1"
+                elif len(value) == 64:
+                    return "sha256"
+                else:
+                    return "sha512"
+
+            # CVE detection
+            if val_lower.startswith("cve-"):
+                return "vulnerability"
+
+            # URL detection
+            if val_lower.startswith(("http://", "https://")):
+                return "url"
+
+            # Email detection
+            if "@" in value and "." in value:
+                return "email-src"
+
+            # Domain detection
+            if "." in value and not val_lower.isdigit():
+                return "domain"
+
+        return "text"
+
+    def create_attribute(self, indicator: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from an EdgeGuard indicator.
+
+        Args:
+            indicator: EdgeGuard indicator dict with keys like:
+                      indicator_type, value, zone, tag, sources, etc.
+
+        Returns:
+            MISP attribute dict or None
+        """
+        ind_type = indicator.get("indicator_type", "unknown")
+        value = indicator.get("value")
+
+        if not value:
+            return None
+
+        # Sanitize the value
+        value = sanitize_value(value, max_length=1024)
+        if not value:
+            return None
+
+        misp_type = self.map_indicator_type(ind_type, value)
+
+        # Build tags for attribute
+        tags = []
+
+        # Add zone/sector tags using new equal-importance logic
+        zones_to_tag = self._get_zones_to_tag(indicator)
+        for z in zones_to_tag:
+            tags.append(f"zone:{z.capitalize()}")
+
+        # Add source tag
+        source = indicator.get("tag", "unknown")
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        # Add confidence tag
+        confidence = indicator.get("confidence_score", 0.5)
+        if confidence >= 0.8:
+            tags.append("confidence:high")
+        elif confidence >= 0.5:
+            tags.append("confidence:medium")
+        else:
+            tags.append("confidence:low")
+
+        # Add first seen date if available
+        first_seen = indicator.get("first_seen")
+
+        # Encode rich metadata as JSON comment for sources with structured data
+        # (same pattern as NVD_META for vulnerabilities).
+        has_otx_meta = indicator.get("attack_ids") or indicator.get("targeted_countries")
+        has_tf_meta = indicator.get("malware_malpedia") or indicator.get("reference") or indicator.get("tags")
+
+        if has_otx_meta:
+            otx_meta = {
+                "attack_ids": indicator.get("attack_ids", []),
+                "targeted_countries": indicator.get("targeted_countries", []),
+                "pulse_tags": indicator.get("pulse_tags", []),
+                "pulse_references": indicator.get("pulse_references", []),
+                "pulse_author": indicator.get("pulse_author", ""),
+                "pulse_tlp": indicator.get("pulse_tlp", ""),
+                "otx_industries": indicator.get("otx_industries", []),
+                "description": indicator.get("description", ""),
+                "pulse_name": indicator.get("pulse_name", ""),
+            }
+            comment = "OTX_META:" + json.dumps(otx_meta, default=str)
+            if len(comment) > 4000:
+                original_len = len(comment)
+                comment = comment[:4000]
+                logger.warning(f"Truncated OTX_META comment for {value}: {original_len} -> 4000 chars")
+        elif has_tf_meta:
+            tf_meta = {
+                "malware_malpedia": indicator.get("malware_malpedia", ""),
+                "reference": indicator.get("reference", ""),
+                "tags": indicator.get("tags", []),
+                "last_seen": indicator.get("last_seen", ""),
+                "threat_type_desc": indicator.get("threat_type_desc", ""),
+                "malware_family": indicator.get("malware_family", ""),
+                "reporter": indicator.get("reporter", ""),
+            }
+            comment = "TF_META:" + json.dumps(tf_meta, default=str)
+            if len(comment) > 4000:
+                original_len = len(comment)
+                comment = comment[:4000]
+                logger.warning(f"Truncated TF_META comment for {value}: {original_len} -> 4000 chars")
+        else:
+            comment = sanitize_value(indicator.get("pulse_name") or indicator.get("description", ""), max_length=255)
+
+        attribute = {
+            "type": misp_type,
+            "value": value,
+            # No max_length truncation when storing JSON — truncation would break JSON parsing.
+            "comment": comment
+            if (has_otx_meta or has_tf_meta or comment)
+            else f"From {sanitize_value(source, max_length=50)}",
+            "to_ids": True,
+            "Tag": [{"name": tag} for tag in tags],
+        }
+
+        # Add first_seen timestamp if available
+        if first_seen:
+            try:
+                # Parse ISO format and convert to MISP format
+                if isinstance(first_seen, str):
+                    attribute["first_seen"] = first_seen
+            except (ValueError, TypeError, KeyError):
+                pass
+
+        return attribute
+
+    def create_vulnerability_attribute(self, vuln: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from an EdgeGuard vulnerability.
+
+        Args:
+            vuln: EdgeGuard vulnerability dict with keys like:
+                  cve_id, description, zone, tag, severity, etc.
+
+        Returns:
+            MISP attribute dict or None
+        """
+        cve_id = vuln.get("cve_id")
+        if not cve_id:
+            return None
+
+        # Sanitize CVE ID
+        cve_id = sanitize_value(cve_id, max_length=50)
+        if not cve_id:
+            return None
+
+        # Build tags
+        tags = []
+
+        # Add zone/sector tags using new equal-importance logic
+        zones_to_tag = self._get_zones_to_tag(vuln)
+        for z in zones_to_tag:
+            tags.append(f"zone:{z.capitalize()}")
+
+        # Add source tag
+        source = sanitize_value(vuln.get("tag", "unknown"), max_length=50)
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        # Add severity tag
+        severity = sanitize_value(vuln.get("severity", "UNKNOWN"), max_length=20)
+        if severity:
+            tags.append(f"severity:{severity.lower()}")
+
+        # Add CVSS score tag if available
+        cvss = vuln.get("cvss_score", 0)
+        if cvss >= 9.0:
+            tags.append("cvss:critical")
+        elif cvss >= 7.0:
+            tags.append("cvss:high")
+        elif cvss >= 4.0:
+            tags.append("cvss:medium")
+        else:
+            tags.append("cvss:low")
+
+        # Add CISA KEV tag if from CISA source or if NVD entry has CISA KEV data
+        if source in ["cisa", "cisa_kev"] or vuln.get("cisa_exploit_add"):
+            tags.append("CISA-KEV")
+
+            # Add ransomware tag if applicable
+            ransomware = vuln.get("known_ransomware_use", "Unknown")
+            if ransomware == "Known":
+                tags.append("ransomware:known")
+
+        description = sanitize_value(vuln.get("description", ""), max_length=200)
+        vendor = sanitize_value(vuln.get("vendor", ""), max_length=100)
+        product = sanitize_value(vuln.get("product", ""), max_length=100)
+
+        # For NVD-sourced CVEs, embed the rich metadata as JSON so the MISP→Neo4j
+        # pipeline can reconstruct the full CVE/CVSS graph without calling NVD again.
+        # The prefix "NVD_META:" acts as a sentinel for the reader.
+        nvd_fields = {
+            "published": vuln.get("published", ""),
+            "last_modified": vuln.get("last_modified", ""),
+            "cwe": vuln.get("cwe", []),
+            "ref_tags": vuln.get("ref_tags", []),
+            "reference_urls": vuln.get("reference_urls", []),
+            "cpe_type": vuln.get("cpe_type", []),
+            "result_impacts": vuln.get("result_impacts", []),
+            "affected_products": vuln.get("affected_products", []),
+            "attack_vector": vuln.get("attack_vector", "UNKNOWN"),
+            "cvss_v40_data": vuln.get("cvss_v40_data"),
+            "cvss_v31_data": vuln.get("cvss_v31_data"),
+            "cvss_v30_data": vuln.get("cvss_v30_data"),
+            "cvss_v2_data": vuln.get("cvss_v2_data"),
+            "description": vuln.get("description", ""),
+            "vendor": vendor,
+            "product": product,
+            # CISA KEV exploitability intelligence
+            "cisa_exploit_add": vuln.get("cisa_exploit_add", ""),
+            "cisa_action_due": vuln.get("cisa_action_due", ""),
+            "cisa_required_action": vuln.get("cisa_required_action", ""),
+            "cisa_vulnerability_name": vuln.get("cisa_vulnerability_name", ""),
+        }
+        has_nvd_meta = any(
+            [
+                nvd_fields["published"],
+                nvd_fields["cwe"],
+                nvd_fields["cvss_v40_data"],
+                nvd_fields["cvss_v31_data"],
+                nvd_fields["cvss_v30_data"],
+                nvd_fields["cvss_v2_data"],
+            ]
+        )
+
+        if has_nvd_meta:
+            import json as _json
+
+            comment = "NVD_META:" + _json.dumps(nvd_fields, default=str)
+        else:
+            comment_parts = []
+            if vendor:
+                comment_parts.append(f"Vendor: {vendor}")
+            if product:
+                comment_parts.append(f"Product: {product}")
+            if description:
+                comment_parts.append(description)
+            comment = " | ".join(comment_parts) if comment_parts else f"CVE from {source}"
+
+        attribute = {
+            "type": "vulnerability",
+            "value": cve_id.upper(),
+            # No max_length truncation when storing JSON — truncation would break JSON parsing.
+            "comment": comment if has_nvd_meta else sanitize_value(comment, max_length=500),
+            "to_ids": False,  # CVEs don't make good IDS indicators
+            "Tag": [{"name": tag} for tag in tags],
+        }
+
+        return attribute
+
+    def create_malware_attribute(self, malware: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from an EdgeGuard malware entry.
+
+        Args:
+            malware: EdgeGuard malware dict with keys like:
+                     name, malware_types, family, description, etc.
+
+        Returns:
+            MISP attribute dict or None
+        """
+        name = malware.get("name")
+        if not name:
+            return None
+
+        # Sanitize the name
+        name = sanitize_value(name, max_length=255)
+        if not name:
+            return None
+
+        # Build tags
+        tags = []
+
+        # Add zone/sector tags using new equal-importance logic
+        zones_to_tag = self._get_zones_to_tag(malware)
+        for z in zones_to_tag:
+            tags.append(f"zone:{z.capitalize()}")
+
+        # Add source tag
+        source = sanitize_value(malware.get("tag", "unknown"), max_length=50)
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        # Add malware type tags
+        malware_types = malware.get("malware_types", [])
+        for mtype in malware_types:
+            mt = sanitize_value(str(mtype), max_length=50).lower()
+            if mt:
+                tags.append(f"malware-type:{mt}")
+
+        # Add family tag
+        family = sanitize_value(malware.get("family", ""), max_length=100)
+        if family and family != name:
+            tags.append(f"malware-family:{family}")
+
+        # Add MITRE ATT&CK galaxy tag for malware - CRITICAL for STIX conversion
+        tags.append(f'misp-galaxy:malware="{name}"')
+
+        description = sanitize_value(malware.get("description", ""), max_length=400)
+        uses_techniques = malware.get("uses_techniques") or []
+
+        # Preserve malware→technique IDs through MISP (same idea as NVD_META for CVEs).
+        # ``run_misp_to_neo4j.parse_attribute`` reads this prefix into ``uses_techniques`` on Malware nodes.
+        if uses_techniques:
+            import json as _json
+
+            # Cap list length so comment stays within typical MISP field limits.
+            meta = {"t": list(uses_techniques)[:400]}
+            comment = "MITRE_USES_TECHNIQUES:" + _json.dumps(meta, separators=(",", ":"))
+            if description:
+                comment = comment + "\n" + description
+        else:
+            comment = description if description else f"Malware from {source}"
+            comment = sanitize_value(comment, max_length=500)
+
+        attribute = {
+            "type": "malware-type",
+            "value": name,
+            "comment": comment,
+            "to_ids": False,
+            "Tag": [{"name": tag} for tag in tags],
+        }
+
+        return attribute
+
+    def create_actor_attribute(self, actor: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from an EdgeGuard threat actor entry.
+
+        Args:
+            actor: EdgeGuard actor dict with keys like:
+                   name, aliases, description, etc.
+
+        Returns:
+            MISP attribute dict or None
+        """
+        name = actor.get("name")
+        if not name:
+            return None
+
+        # Sanitize the name
+        name = sanitize_value(name, max_length=255)
+        if not name:
+            return None
+
+        # Build tags
+        tags = []
+
+        # Add zone/sector tags using new equal-importance logic
+        zones_to_tag = self._get_zones_to_tag(actor)
+        for z in zones_to_tag:
+            tags.append(f"zone:{z.capitalize()}")
+
+        # Add source tag
+        source = sanitize_value(actor.get("tag", "unknown"), max_length=50)
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        # Add alias tags
+        aliases = actor.get("aliases", [])
+        for alias in aliases[:5]:  # Limit to 5 aliases
+            alias_s = sanitize_value(str(alias), max_length=100)
+            if alias_s:
+                tags.append(f"alias:{alias_s}")
+
+        # Add MITRE threat-actor galaxy tag - CRITICAL for STIX conversion
+        tags.append(f'misp-galaxy:threat-actor="{name}"')
+
+        description = sanitize_value(actor.get("description", ""), max_length=255)
+
+        attribute = {
+            "type": "threat-actor",
+            "value": name,
+            "comment": description if description else f"Threat actor from {source}",
+            "to_ids": False,
+            "Tag": [{"name": tag} for tag in tags],
+        }
+
+        return attribute
+
+    def create_technique_attribute(self, technique: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from an EdgeGuard technique entry.
+
+        Args:
+            technique: EdgeGuard technique dict with keys like:
+                      mitre_id, name, description, platforms, etc.
+
+        Returns:
+            MISP attribute dict or None
+        """
+        mitre_id = technique.get("mitre_id")
+        name = technique.get("name")
+
+        if not mitre_id or not name:
+            return None
+
+        # Sanitize inputs
+        mitre_id = sanitize_value(mitre_id, max_length=20)
+        name = sanitize_value(name, max_length=255)
+
+        if not mitre_id or not name:
+            return None
+
+        # Build tags
+        tags = []
+
+        # Add zone/sector tags using new equal-importance logic
+        zones_to_tag = self._get_zones_to_tag(technique)
+        for z in zones_to_tag:
+            tags.append(f"zone:{z.capitalize()}")
+
+        # Add source tag
+        source = sanitize_value(technique.get("tag", "unknown"), max_length=50)
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        # Add platform tags
+        platforms = technique.get("platforms", [])
+        for platform in platforms[:3]:  # Limit to 3 platforms
+            plat = sanitize_value(str(platform), max_length=50).lower()
+            if plat:
+                tags.append(f"platform:{plat}")
+
+        # Add MITRE ATT&CK galaxy tags - CRITICAL for STIX conversion
+        # This enables PyMISP to recognize and convert to attack-pattern
+        tags.append(f'misp-galaxy:mitre-attack-pattern="{name} - {mitre_id}"')
+        tags.append(f'mitre-attack:technique="{mitre_id}"')
+
+        description = sanitize_value(technique.get("description", ""), max_length=255)
+
+        attribute = {
+            "type": "text",
+            "value": f"{mitre_id}: {name}",
+            "comment": description if description else f"MITRE ATT&CK technique from {source}",
+            "to_ids": False,
+            "Tag": [{"name": tag} for tag in tags],
+        }
+
+        return attribute
+
+    def create_tactic_attribute(self, tactic: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from a MITRE ATT&CK tactic (x-mitre-tactic).
+
+        Tactics use the same ``text`` pattern as techniques (``TA0001: Name``) so
+        MISP→Neo4j parsing can recognize them. Previously ``push_items`` had no
+        branch for ``type: tactic``, so tactics were silently skipped.
+        """
+        mitre_id = tactic.get("mitre_id")
+        name = tactic.get("name")
+        if not mitre_id or not name:
+            return None
+
+        mitre_id = sanitize_value(str(mitre_id), max_length=20)
+        name = sanitize_value(str(name), max_length=255)
+        shortname = sanitize_value(str(tactic.get("shortname", "")), max_length=50)
+        if not mitre_id or not name:
+            return None
+
+        tags = []
+        for z in self._get_zones_to_tag(tactic):
+            tags.append(f"zone:{z.capitalize()}")
+
+        source = sanitize_value(tactic.get("tag", "unknown"), max_length=50)
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        if shortname:
+            tags.append(f"mitre-tactic:{shortname.lower()}")
+
+        description = sanitize_value(str(tactic.get("description", "")), max_length=255)
+
+        attribute = {
+            "type": "text",
+            "value": f"{mitre_id}: {name}",
+            "comment": description if description else "MITRE ATT&CK tactic",
+            "to_ids": False,
+            "Tag": [{"name": tag} for tag in tags],
+        }
+        return attribute
+
+    def create_tool_attribute(self, tool: Dict) -> Optional[Dict]:
+        """
+        Create a MISP attribute from a MITRE ATT&CK tool (Cobalt Strike, Mimikatz, etc.).
+
+        Tools are stored as ``text`` attributes with ``S####: Name`` format,
+        following the same pattern as techniques and tactics. The
+        ``uses_techniques`` list is preserved via ``MITRE_USES_TECHNIQUES:``
+        comment prefix for round-trip through MISP→Neo4j.
+        """
+        mitre_id = tool.get("mitre_id")
+        name = tool.get("name")
+        if not mitre_id or not name:
+            return None
+
+        mitre_id = sanitize_value(str(mitre_id), max_length=20)
+        name = sanitize_value(str(name), max_length=255)
+        if not mitre_id or not name:
+            return None
+
+        tags = []
+        for z in self._get_zones_to_tag(tool):
+            tags.append(f"zone:{z.capitalize()}")
+
+        source = sanitize_value(tool.get("tag", "unknown"), max_length=50)
+        if source in self.SOURCE_TAGS:
+            tags.append(self.SOURCE_TAGS[source])
+        else:
+            tags.append(f"source:{source}")
+
+        # Tag as tool type for MISP galaxy compatibility
+        tags.append(f'misp-galaxy:tool="{name}"')
+        for ttype in tool.get("tool_types", []):
+            tt = sanitize_value(str(ttype), max_length=50).lower()
+            if tt:
+                tags.append(f"tool-type:{tt}")
+
+        description = sanitize_value(str(tool.get("description", "")), max_length=400)
+        uses_techniques = tool.get("uses_techniques") or []
+
+        if uses_techniques:
+            meta = {"t": list(uses_techniques)[:400]}
+            comment = "MITRE_USES_TECHNIQUES:" + json.dumps(meta, separators=(",", ":"))
+            if description:
+                comment = comment + "\n" + description
+        else:
+            comment = description if description else f"MITRE ATT&CK tool: {name}"
+            comment = sanitize_value(comment, max_length=500)
+
+        attribute = {
+            "type": "text",
+            "value": f"{mitre_id}: {name}",
+            "comment": comment,
+            "to_ids": False,
+            "Tag": [{"name": tag} for tag in tags],
+        }
+        return attribute
+
+    def push_items(self, items: List[Dict], batch_size: int = 500) -> Tuple[int, int]:
+        """
+        Push a list of items to MISP in batches.
+
+        Args:
+            items: List of EdgeGuard items (indicators, vulnerabilities, etc.)
+            batch_size: Number of items per batch
+
+        Returns:
+            Tuple of (successful_count, failed_count)
+        """
+        if not items:
+            return 0, 0
+
+        # Guard against invalid batch_size (0 would crash range())
+        batch_size = max(1, batch_size)
+
+        # Group items by (sector, source, date)
+        grouped = {}
+
+        for item in items:
+            sector = self._primary_sector_for_event_grouping(item)
+            source = item.get("tag", "unknown")
+            date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+            key = (sector, source, date)
+            if key not in grouped:
+                grouped[key] = []
+
+            # Convert item to MISP attribute
+            item_type = item.get("type", "")
+
+            if "indicator_type" in item and "value" in item:
+                attr = self.create_attribute(item)
+            elif item_type == "vulnerability" or _resolve_vulnerability_cve_id_for_misp(item):
+                attr = self.create_vulnerability_attribute(item)
+            elif item_type == "malware":
+                attr = self.create_malware_attribute(item)
+            elif item_type == "actor":
+                attr = self.create_actor_attribute(item)
+            elif item_type == "technique":
+                attr = self.create_technique_attribute(item)
+            elif item_type == "tactic":
+                attr = self.create_tactic_attribute(item)
+            elif item_type == "tool":
+                attr = self.create_tool_attribute(item)
+            else:
+                logger.warning(f"Unknown item type: {item_type}")
+                continue
+
+            if attr:
+                grouped[key].append(attr)
+
+        # Resolve events + prefetch existing (type, value); build work queue (post-filter batch counts).
+        total_success = 0
+        total_failed = 0
+        processed_batches = 0
+        start_time = time.time()
+        push_queue: List[Tuple[str, List[Dict]]] = []
+
+        for (sector, source, date), attributes in grouped.items():
+            # Deduplicate attributes by value
+            seen = set()
+            unique_attrs = []
+            for attr in attributes:
+                key = f"{attr['type']}:{attr['value']}"
+                if key not in seen:
+                    seen.add(key)
+                    unique_attrs.append(attr)
+
+            # Get or create event
+            event_id = self._get_or_create_event(sector, source, date)
+            if not event_id:
+                total_failed += len(unique_attrs)
+                continue
+
+            existing_keys = self._get_existing_attribute_keys(event_id)
+            before_ct = len(unique_attrs)
+            unique_attrs = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in existing_keys]
+            skipped_ct = before_ct - len(unique_attrs)
+            if skipped_ct:
+                self.stats["attrs_skipped_existing"] += skipped_ct
+                logger.info(
+                    "MISP event %s: skipping %s attributes already present (type+value match)",
+                    event_id,
+                    skipped_ct,
+                )
+            if not unique_attrs:
+                continue
+            push_queue.append((event_id, unique_attrs))
+
+        total_batches = sum((len(attrs) + batch_size - 1) // batch_size for _, attrs in push_queue)
+
+        # Throttle delay between batches — gives MISP time to free memory
+        # when processing large events (e.g. 95K NVD attributes).
+        try:
+            batch_throttle = float(os.environ.get("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "5.0"))
+        except (ValueError, TypeError):
+            batch_throttle = 5.0
+
+        for event_id, unique_attrs in push_queue:
+            # Send attributes in batches
+            for i in range(0, len(unique_attrs), batch_size):
+                batch = unique_attrs[i : i + batch_size]
+
+                # Throttle between batches (skip only the very first batch of the first event)
+                if (i > 0 or processed_batches > 0) and batch_throttle > 0:
+                    time.sleep(batch_throttle)
+
+                # Progress logging
+                processed_batches += 1
+                elapsed = time.time() - start_time
+                progress_pct = (processed_batches / total_batches * 100) if total_batches > 0 else 0
+
+                # Calculate estimated remaining time
+                if processed_batches > 0:
+                    avg_time_per_batch = elapsed / processed_batches
+                    remaining_batches = total_batches - processed_batches
+                    eta_seconds = avg_time_per_batch * remaining_batches
+                    eta_str = f"~{int(eta_seconds)}s remaining"
+                else:
+                    eta_str = "calculating..."
+
+                logger.info(
+                    f"[PUSH] Pushing batch {processed_batches}/{total_batches} ({progress_pct:.1f}%) - {elapsed:.1f}s elapsed, {eta_str}"
+                )
+
+                success, failed = self._push_batch(event_id, batch)
+                total_success += success
+                total_failed += failed
+
+        # Final summary
+        total_elapsed = time.time() - start_time
+        logger.info(
+            f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed in {total_elapsed:.1f}s"
+        )
+
+        return total_success, total_failed
+
+    @retry_with_backoff(max_retries=4, base_delay=10.0)
+    @rate_limited(max_per_second=2.0)
+    def _push_batch(self, event_id: str, attributes: List[Dict]) -> Tuple[int, int]:
+        """
+        Push a batch of attributes to a MISP event.
+
+        Args:
+            event_id: MISP event ID
+            attributes: List of MISP attribute dicts
+
+        Returns:
+            Tuple of (successful_count, failed_count)
+        """
+        # Sanitize event_id first
+        event_id = sanitize_value(event_id, max_length=20)
+        if not event_id or not attributes:
+            return 0, 0
+
+        try:
+            # Prepare payload
+            payload = {"Attribute": attributes}
+
+            response = self.session.post(
+                f"{self.url}/events/{event_id}",
+                json=payload,
+                verify=self.verify_ssl,
+                timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
+            )
+
+            if response.status_code == 200:
+                result = response.json()
+                # MISP returns all attributes in the event, not just the new ones
+                # We can only reliably report how many we attempted to add
+                # The response doesn't tell us exactly which were new vs existing
+                saved = result.get("Event", {}).get("Attribute", [])
+
+                # Count how many attributes we tried to add
+                attempted = len(attributes)
+
+                # If the request succeeded, assume all were added (MISP handles deduplication)
+                # We can't reliably determine how many were truly new from the response
+                success_count = attempted
+                failed_count = 0
+
+                self.stats["attributes_added"] += success_count
+                self.stats["batches_sent"] += 1
+
+                logger.info(f"[OK] Added {success_count} attributes to event {event_id} (total in event: {len(saved)})")
+
+                return success_count, failed_count
+            else:
+                # 400 responses usually include a JSON error body — log enough to debug MISP validation.
+                detail = (response.text or "")[:4000]
+                types_in_batch = [a.get("type") for a in attributes[:30]]
+                logger.error(
+                    "Failed to add attributes: %s — attribute types (first 30): %s — body (truncated): %s",
+                    response.status_code,
+                    types_in_batch,
+                    detail,
+                )
+                self.stats["errors"] += 1
+                return 0, len(attributes)
+
+        except _TRANSIENT_HTTP_ERRORS as e:
+            logger.warning(f"MISP batch transient error (will retry): {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Batch push error: {e}")
+            self.stats["errors"] += 1
+            return 0, len(attributes)
+
+    def push_indicators(self, indicators: List[Dict], source: str, batch_size: int = 500) -> Tuple[int, int]:
+        """
+        Push indicators to MISP (convenience method).
+
+        Args:
+            indicators: List of EdgeGuard indicator dicts
+            source: Source name for the indicators
+            batch_size: Number of indicators per batch
+
+        Returns:
+            Tuple of (successful_count, failed_count)
+        """
+        # Ensure source tag is set
+        for ind in indicators:
+            if "tag" not in ind or not ind["tag"]:
+                ind["tag"] = source
+
+        return self.push_items(indicators, batch_size)
+
+    def get_stats(self) -> Dict[str, int]:
+        """Get writer statistics."""
+        return self.stats.copy()
+
+    def reset_stats(self):
+        """Reset writer statistics."""
+        self.stats = {
+            "events_created": 0,
+            "attributes_added": 0,
+            "batches_sent": 0,
+            "errors": 0,
+            "attrs_skipped_existing": 0,
+        }
+
+
+def test_misp_writer():
+    """Test MISP writer functionality."""
+    writer = MISPWriter()
+
+    # Test indicator type mapping
+    print("Testing type mapping:")
+    print(f"  ipv4 -> {writer.map_indicator_type('ipv4')}")
+    print(f"  domain -> {writer.map_indicator_type('domain')}")
+    print(f"  hash -> {writer.map_indicator_type('hash')}")
+
+    # Test attribute creation
+    print("\nTesting attribute creation:")
+
+    indicator = {
+        "indicator_type": "ipv4",
+        "value": "192.168.1.1",
+        "zone": ["finance"],
+        "tag": "otx",
+        "confidence_score": 0.8,
+        "first_seen": "2024-01-01T00:00:00Z",
+        "pulse_name": "Test pulse",
+    }
+
+    attr = writer.create_attribute(indicator)
+    print(f"  Indicator attribute: {json.dumps(attr, indent=2)}")
+
+    vulnerability = {
+        "type": "vulnerability",
+        "cve_id": "CVE-2024-1234",
+        "description": "Test vulnerability",
+        "zone": ["healthcare"],
+        "tag": "nvd",
+        "severity": "HIGH",
+        "cvss_score": 8.5,
+    }
+
+    vuln_attr = writer.create_vulnerability_attribute(vulnerability)
+    print(f"  Vulnerability attribute: {json.dumps(vuln_attr, indent=2)}")
+
+    print("\nMISP Writer test complete!")
+
+
+if __name__ == "__main__":
+    test_misp_writer()

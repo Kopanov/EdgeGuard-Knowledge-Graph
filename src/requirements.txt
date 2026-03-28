@@ -1,0 +1,35 @@
+# EdgeGuard src/ Requirements
+# Install with: pip install -r src/requirements.txt
+# (or install from the root requirements.txt which is the canonical file)
+#
+# Version policy: ~= compatible-release pins — allows patch upgrades only.
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+neo4j~=5.27
+requests~=2.32
+pandas~=2.2
+python-dateutil~=2.9
+urllib3~=2.3
+
+# ── Data collection ──────────────────────────────────────────────────────────
+pymisp~=2.4
+# Correct PyPI package for AlienVault OTX SDK (otx-api is a different, unrelated package)
+OTXv2~=1.5
+
+# ── STIX 2.1 support ─────────────────────────────────────────────────────────
+stix2~=3.0
+
+# ── Airflow orchestration ────────────────────────────────────────────────────
+# Pinned to 2.x — Airflow 3.0 has breaking API/operator changes.
+# Prefer root requirements.txt; [postgres] matches docker-compose Airflow metadata (PostgreSQL).
+apache-airflow[postgres]~=2.11
+
+# ── Monitoring & Metrics ─────────────────────────────────────────────────────
+prometheus-client~=0.21
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+pyyaml~=6.0
+
+# ── Testing (optional) ───────────────────────────────────────────────────────
+pytest~=8.3
+pytest-cov~=6.0

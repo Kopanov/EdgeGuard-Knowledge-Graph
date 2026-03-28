@@ -1,0 +1,184 @@
+# ================================================================================
+# EdgeGuard Prometheus Alert Rules
+# ================================================================================
+
+groups:
+  # ================================================================================
+  # Collection Alerts
+  # ================================================================================
+  - name: edgeguard_collection
+    rules:
+      - alert: EdgeGuardCollectionHighFailureRate
+        expr: |
+          (
+            sum by (source) (rate(edgeguard_collection_failures_total[5m]))
+            /
+            sum by (source) (rate(edgeguard_indicators_collected_total[5m]) > 0)
+          ) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: collector
+        annotations:
+          summary: "High failure rate for {{ $labels.source }} collector"
+          description: "{{ $labels.source }} collector has a failure rate above 20% for the last 5 minutes."
+
+      - alert: EdgeGuardCollectionStale
+        expr: time() - edgeguard_last_success_timestamp > 3600
+        for: 5m
+        labels:
+          severity: critical
+          component: collector
+        annotations:
+          summary: "Collection stale for {{ $labels.source }}"
+          description: "No successful collection from {{ $labels.source }} in over 1 hour."
+
+      - alert: EdgeGuardNoIndicatorsCollected
+        expr: |
+          sum by (source) (increase(edgeguard_indicators_collected_total[1h])) == 0
+          and
+          edgeguard_source_health{source=~"otx|nvd|cisa|abuseipdb"} == 1
+        for: 30m
+        labels:
+          severity: warning
+          component: collector
+        annotations:
+          summary: "No indicators collected from {{ $labels.source }}"
+          description: "{{ $labels.source }} has not collected any indicators in the last hour."
+
+  # ================================================================================
+  # Circuit Breaker Alerts
+  # ================================================================================
+  - name: edgeguard_circuit_breaker
+    rules:
+      - alert: EdgeGuardCircuitBreakerOpen
+        expr: edgeguard_circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+          component: circuit-breaker
+        annotations:
+          summary: "Circuit breaker OPEN for {{ $labels.service }}"
+          description: "The circuit breaker for {{ $labels.service }} is OPEN. Service is failing."
+
+      - alert: EdgeGuardCircuitBreakerHalfOpen
+        expr: edgeguard_circuit_breaker_state == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: circuit-breaker
+        annotations:
+          summary: "Circuit breaker HALF-OPEN for {{ $labels.service }}"
+          description: "The circuit breaker for {{ $labels.service }} is testing recovery."
+
+      - alert: EdgeGuardConsecutiveFailuresHigh
+        expr: edgeguard_consecutive_failures > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: circuit-breaker
+        annotations:
+          summary: "High consecutive failures for {{ $labels.service }}"
+          description: "{{ $labels.service }} has {{ $value }} consecutive failures."
+
+  # ================================================================================
+  # Service Health Alerts
+  # ================================================================================
+  - name: edgeguard_health
+    rules:
+      - alert: EdgeGuardServiceDown
+        expr: edgeguard_service_up == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: health
+        annotations:
+          summary: "Service {{ $labels.service }} is DOWN"
+          description: "Health check failed for {{ $labels.service }}."
+
+      - alert: EdgeGuardMISPUnhealthy
+        expr: edgeguard_misp_health == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: misp
+        annotations:
+          summary: "MISP {{ $labels.check_type }} is unhealthy"
+          description: "MISP {{ $labels.check_type }} health check has failed."
+
+      - alert: EdgeGuardSourceUnhealthy
+        expr: edgeguard_source_health == 0
+        for: 5m
+        labels:
+          severity: warning
+          component: source
+        annotations:
+          summary: "Source {{ $labels.source }} ({{ $labels.zone }}) is unhealthy"
+          description: "Data source {{ $labels.source }} in zone {{ $labels.zone }} is marked as unhealthy."
+
+  # ================================================================================
+  # Pipeline Alerts
+  # ================================================================================
+  - name: edgeguard_pipeline
+    rules:
+      - alert: EdgeGuardPipelineDurationHigh
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(edgeguard_pipeline_duration_seconds_bucket[5m])) by (le, pipeline_type)
+          ) > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: pipeline
+        annotations:
+          summary: "Pipeline {{ $labels.pipeline_type }} is slow"
+          description: "Pipeline {{ $labels.pipeline_type }} 95th percentile duration is over 5 minutes."
+
+      - alert: EdgeGuardNeo4jSyncStale
+        expr: time() - (edgeguard_neo4j_sync_duration_seconds_count > 0) > 259200
+        for: 1h
+        labels:
+          severity: warning
+          component: neo4j
+        annotations:
+          summary: "Neo4j sync is stale"
+          description: "No Neo4j sync has completed in over 72 hours."
+
+      - alert: EdgeGuardDAGRunFailures
+        expr: |
+          sum by (dag_id) (increase(edgeguard_dag_runs_total{status="failure"}[1h])) > 3
+        for: 15m
+        labels:
+          severity: warning
+          component: airflow
+        annotations:
+          summary: "DAG {{ $labels.dag_id }} has multiple failures"
+          description: "DAG {{ $labels.dag_id }} has had more than 3 failures in the last hour."
+
+  # ================================================================================
+  # Neo4j Alerts
+  # ================================================================================
+  - name: edgeguard_neo4j
+    rules:
+      - alert: EdgeGuardNeo4jNodesLow
+        expr: sum(edgeguard_neo4j_nodes) < 100
+        for: 1h
+        labels:
+          severity: warning
+          component: neo4j
+        annotations:
+          summary: "Neo4j node count is unexpectedly low"
+          description: "Total Neo4j nodes ({{ $value }}) is below expected threshold."
+
+      - alert: EdgeGuardNeo4jQuerySlow
+        expr: |
+          histogram_quantile(0.95, 
+            sum(rate(edgeguard_neo4j_query_duration_seconds_bucket[5m])) by (le, query_type)
+          ) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: neo4j
+        annotations:
+          summary: "Neo4j queries are slow"
+          description: "{{ $labels.query_type }} queries 95th percentile is over 5 seconds."

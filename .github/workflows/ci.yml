@@ -1,0 +1,137 @@
+# Runs ruff, mypy, pytest (with coverage), Docker build, and pip-audit on pushes/PRs.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  # All pull requests (any target branch) — typical for GitHub PR workflow
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ── Lint & static analysis ─────────────────────────────────────────────────
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff — lint
+        run: ruff check src/ dags/ tests/
+
+      - name: Ruff — format check
+        run: ruff format --check src/ dags/ tests/
+
+      - name: Mypy — type check
+        run: mypy src/ --ignore-missing-imports --no-error-summary
+
+  # ── Unit tests ─────────────────────────────────────────────────────────────
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        env:
+          # Dummy env so src/config.py imports succeed during pytest (aligned with Makefile `make test`).
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: test
+          MISP_URL: https://misp.local
+          MISP_API_KEY: test-key-12345678901234567890
+        run: |
+          pytest tests/ -v \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=30
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  # ── Docker build check ────────────────────────────────────────────────────
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t edgeguard-kg:ci .
+
+      - name: Build Airflow worker image
+        run: docker build -f Dockerfile.airflow -t edgeguard-airflow:ci .
+
+  # ── Security scanning ─────────────────────────────────────────────────────
+  security:
+    name: Dependency security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit dependencies for known CVEs
+        run: |
+          # Airflow 2.11.x CVEs: fix versions are 2.11.1 (unreleased) or Airflow 3.x (breaking).
+          # Tracked in backlog — upgrade to Airflow 3.x when stable.
+          # flask/werkzeug/flask-appbuilder CVEs are transitive Airflow deps, same root cause.
+          # requests GHSA-gc5v-m9x4-r6x2: fix is 2.33.0 (not yet universally available).
+          # pygments GHSA-5239-wwwm-4pmq: no fix version available yet (transitive dep).
+          pip-audit -r requirements.txt --output json -o pip-audit.json \
+            --ignore-vuln GHSA-5g2w-9f8g-g5q7 \
+            --ignore-vuln GHSA-7c2f-r6gc-h92h \
+            --ignore-vuln GHSA-gfw7-2v73-69wg \
+            --ignore-vuln GHSA-r837-hpv7-pc2f \
+            --ignore-vuln GHSA-8r55-rv5w-6pfm \
+            --ignore-vuln GHSA-68rp-wp8r-4726 \
+            --ignore-vuln GHSA-99pm-ch96-ccp2 \
+            --ignore-vuln GHSA-765j-9r45-w2q2 \
+            --ignore-vuln GHSA-9r5j-7r2x-rv4g \
+            --ignore-vuln PYSEC-2023-221 \
+            --ignore-vuln GHSA-2g68-c3qc-8985 \
+            --ignore-vuln GHSA-f9vj-2wh5-fj8j \
+            --ignore-vuln GHSA-q34m-jh98-gwm2 \
+            --ignore-vuln GHSA-hgf8-39gv-g3f2 \
+            --ignore-vuln GHSA-87hc-h4r5-73f7 \
+            --ignore-vuln GHSA-29vq-49wr-vm6x \
+            --ignore-vuln GHSA-gc5v-m9x4-r6x2 \
+            --ignore-vuln GHSA-5239-wwwm-4pmq
+
+      - name: Upload audit results
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit
+          path: pip-audit.json

@@ -1,0 +1,30 @@
+{
+  "type": "bundle",
+  "id": "bundle--5db3dcaf-01d3-43f8-ad6d-22e475ef85f9",
+  "spec_version": "2.1",
+  "objects": [
+    {
+      "type": "ipv4-addr",
+      "spec_version": "2.1",
+      "id": "ipv4-addr--6f24439a-ee42-4113-bac7-531d68341aa5",
+      "value": "192.168.1.100"
+    },
+    {
+      "type": "domain-name",
+      "spec_version": "2.1",
+      "id": "domain-name--5d97edba-d3c9-4e29-8514-36606e2ffc8b",
+      "value": "evil.example.com"
+    },
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--dbd5ad6e-42ec-4cc7-af75-6647eecee9f8",
+      "created": "2026-03-20T14:48:39.361367",
+      "modified": "2026-03-20T14:48:39.361369",
+      "name": "Malicious IP Indicator",
+      "pattern": "[ipv4-addr:value = '192.168.1.100']",
+      "pattern_type": "stix",
+      "valid_from": "2026-03-20T14:48:39.361370"
+    }
+  ]
+}

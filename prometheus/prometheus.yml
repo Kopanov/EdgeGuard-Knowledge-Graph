@@ -1,0 +1,107 @@
+# ================================================================================
+# Prometheus Configuration for EdgeGuard
+# ================================================================================
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: edgeguard
+    # replica: '{{.ExternalURL}}' was removed — Go template syntax is not
+    # supported in prometheus.yml external_labels; it is parsed as a literal
+    # string, so the label value becomes the raw template text, not the URL.
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          # - alertmanager:9093  # Uncomment when using AlertManager
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - "alerts.yml"
+
+# ================================================================================
+# Scrape Configurations
+# ================================================================================
+scrape_configs:
+  # ================================================================================
+  # Prometheus Self-Monitoring
+  # ================================================================================
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    metrics_path: /metrics
+
+  # ================================================================================
+  # EdgeGuard Metrics Server (/metrics — port 8001; 8000 is FastAPI REST, not Prometheus)
+  # ================================================================================
+  - job_name: 'edgeguard'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:8001'  # For Docker Desktop/Mac/Windows (metrics DAG / metrics_server.py)
+        # - 'edgeguard-metrics:8001'    # If running metrics server in Docker
+    metrics_path: /metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # ================================================================================
+  # Node Exporter (Host Metrics)
+  # ================================================================================
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 30s
+
+  # ================================================================================
+  # cAdvisor (Container Metrics)
+  # ================================================================================
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+
+  # ================================================================================
+  # Airflow Metrics (if statsd exporter is configured)
+  # ================================================================================
+  - job_name: 'airflow'
+    static_configs:
+      - targets: 
+        - 'host.docker.internal:9102'  # statsd-exporter
+    scrape_interval: 30s
+    metrics_path: /metrics
+
+  # ================================================================================
+  # MISP Metrics
+  # ================================================================================
+  # NOTE: MISP does not expose a Prometheus /metrics endpoint out of the box.
+  # The /health path returns JSON, not the Prometheus text format, which causes
+  # parse errors and produces no data.
+  #
+  # To scrape MISP metrics you have two options:
+  #   1. Deploy a custom MISP Prometheus exporter sidecar and point this job at
+  #      its /metrics endpoint.
+  #   2. Use Blackbox Exporter to probe the /health endpoint for HTTP reachability
+  #      (does not yield MISP-specific metrics, but confirms the service is up).
+  #
+  # The job is commented out until one of the above is in place.
+  #
+  # - job_name: 'misp-health'
+  #   static_configs:
+  #     - targets:
+  #       - 'host.docker.internal:8443'
+  #   metrics_path: /health        # <-- JSON endpoint, NOT a Prometheus endpoint
+  #   scheme: https
+  #   tls_config:
+  #     insecure_skip_verify: true
+  #   scrape_interval: 60s
+
+  # ================================================================================
+  # Neo4j Metrics (if Prometheus plugin enabled)
+  # ================================================================================
+  - job_name: 'neo4j'
+    static_configs:
+      - targets:
+        - 'host.docker.internal:2004'  # Neo4j Prometheus endpoint
+    scrape_interval: 30s

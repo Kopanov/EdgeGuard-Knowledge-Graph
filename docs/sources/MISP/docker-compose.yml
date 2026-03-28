@@ -1,0 +1,42 @@
+services:
+  misp:
+    image: coolacid/misp-docker:latest
+    container_name: misp_misp_1
+    restart: unless-stopped
+    ports:
+      - "8443:443"
+      - "5000:80"
+    environment:
+      - MISP_ADMIN_EMAIL=admin@admin.test
+      - MISP_ADMIN_PASSWORD=admin
+      - MISP_BASEURL=https://localhost:8443
+      - MISP_HOSTNAME=localhost
+    volumes:
+      - misp_data:/var/www/MISP
+      - misp_redis:/var/www/MISP/App/files
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      - misp_network
+
+  misp_db:
+    image: mysql:8.0
+    container_name: misp_db_1
+    restart: unless-stopped
+    environment:
+      - MYSQL_ROOT_PASSWORD=misp
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=misp
+    volumes:
+      - misp_db:/var/lib/mysql
+    networks:
+      - misp_network
+
+volumes:
+  misp_data:
+  misp_redis:
+  misp_db:
+
+networks:
+  misp_network:
+    driver: bridge

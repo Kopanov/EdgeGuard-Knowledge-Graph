@@ -1,0 +1,313 @@
+# ================================================================================
+# EdgeGuard Full Stack — docker-compose.yml
+#
+# Services:
+#   neo4j            — shared graph database (ports 7474 HTTP, 7687 Bolt)
+#   airflow_postgres — Airflow metadata DB only (PostgreSQL, internal — no host port)
+#   airflow          — DAG orchestration (port 8082 — avoids ResilMesh Temporal on 8080)
+#   api              — EdgeGuard REST API (port 8000)
+#   graphql          — EdgeGuard GraphQL API (port 4001 — mirrors ISIM GraphQL convention)
+#
+# Usage:
+#   cp .env.example .env && nano .env        # fill in real secrets
+#   docker compose build airflow             # bake Python deps (neo4j, pymisp, …) — required after clone or requirements change
+#   docker compose up -d                     # start all services
+#   docker compose logs -f graphql           # tail a specific service
+#
+# For Prometheus + Grafana monitoring:
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+#
+# Required environment variables (see .env.example):
+#   NEO4J_PASSWORD, MISP_URL, MISP_API_KEY, EDGEGUARD_API_KEY
+#   MISP_URL: default in compose is https://misp.local — that hostname usually does NOT resolve inside
+#   containers. Set MISP_URL in .env to your MISP container/service URL (shared Docker network).
+# Optional (Airflow metadata DB — defaults shown):
+#   AIRFLOW_POSTGRES_USER, AIRFLOW_POSTGRES_PASSWORD, AIRFLOW_POSTGRES_DB
+# Optional: AIRFLOW_MEMORY_LIMIT (default 4g) — raise if full_neo4j_sync gets SIGKILL (-9) under Docker cgroup limits
+# Optional Neo4j JVM / cgroup (defaults in neo4j service): NEO4J_HEAP_INITIAL, NEO4J_HEAP_MAX, NEO4J_PAGECACHE,
+#   NEO4J_CONTAINER_MEMORY_LIMIT — see docs/DOCKER_SETUP_GUIDE.md
+# Optional MISP→Neo4j tuning (passed via x-common-env to airflow/api/graphql — set in .env):
+#   EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE, EDGEGUARD_REL_BATCH_SIZE, EDGEGUARD_DEBUG_GC, EDGEGUARD_MISP_EVENT_SEARCH
+# ================================================================================
+
+x-common-env: &common-env
+  NEO4J_URI: bolt://neo4j:7687
+  # HTTP API (Browser / transactional endpoint) for optional DAG curl checks — not the Bolt URI.
+  NEO4J_HTTP: ${NEO4J_HTTP:-http://neo4j:7474}
+  NEO4J_USER: ${NEO4J_USER:-neo4j}
+  NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
+  # Host-only /etc/hosts setups use misp.local; from inside Compose services set .env, e.g.
+  # https://<compose_project>_<misp_service>_1:443 (see docs/MISP_SOURCES.md).
+  MISP_URL: ${MISP_URL:-https://misp.local}
+  MISP_API_KEY: ${MISP_API_KEY:-}
+  # When MISP_URL uses Docker DNS but Apache vhost ServerName differs (e.g. localhost, misp-edgeguard).
+  EDGEGUARD_MISP_HTTP_HOST: ${EDGEGUARD_MISP_HTTP_HOST:-}
+  # Must be set for Airflow + API + GraphQL (collectors / MISPWriter / health). Unset = verify ON.
+  EDGEGUARD_SSL_VERIFY: ${EDGEGUARD_SSL_VERIFY:-true}
+  EDGEGUARD_API_KEY: ${EDGEGUARD_API_KEY:-}
+  # Optional: comma-separated allowlist of collectors (see .env.example / docs/AIRFLOW_DAGS.md)
+  EDGEGUARD_COLLECT_SOURCES: ${EDGEGUARD_COLLECT_SOURCES:-}
+  # Collector API keys — leave blank to skip that source
+  OTX_API_KEY: ${OTX_API_KEY:-}
+  NVD_API_KEY: ${NVD_API_KEY:-}
+  VIRUSTOTAL_API_KEY: ${VIRUSTOTAL_API_KEY:-}
+  ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
+  THREATFOX_API_KEY: ${THREATFOX_API_KEY:-}
+  # DAG misp_health_check: optional stricter worker check; emergency skip (see docs/AIRFLOW_DAGS.md)
+  EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS: ${EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS:-}
+  EDGEGUARD_SKIP_MISP_PREFLIGHT: ${EDGEGUARD_SKIP_MISP_PREFLIGHT:-}
+  # edgeguard_baseline DAG: optional smoke-test overrides (see docs/BASELINE_SMOKE_TEST.md)
+  EDGEGUARD_BASELINE_DAYS: ${EDGEGUARD_BASELINE_DAYS:-}
+  EDGEGUARD_BASELINE_COLLECTION_LIMIT: ${EDGEGUARD_BASELINE_COLLECTION_LIMIT:-}
+  # MISP→Neo4j: items per Python sync chunk (default 1000); lower to reduce OOM. "0" or "all" = single pass (risky).
+  EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: ${EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE:-}
+  # Relationship UNWIND batch for create_misp_relationships_batch (default 2000 in code if unset/empty).
+  EDGEGUARD_REL_BATCH_SIZE: ${EDGEGUARD_REL_BATCH_SIZE:-}
+  # Opt-in gc.collect() after each node merge chunk (diagnostics; leave unset in production).
+  EDGEGUARD_DEBUG_GC: ${EDGEGUARD_DEBUG_GC:-}
+  # restSearch substring for EdgeGuard event discovery (default EdgeGuard in code if unset).
+  EDGEGUARD_MISP_EVENT_SEARCH: ${EDGEGUARD_MISP_EVENT_SEARCH:-}
+
+services:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Neo4j — graph database
+  # ─────────────────────────────────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.27-community
+    container_name: edgeguard_neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # Neo4j Browser (HTTP)
+      - "7687:7687"   # Bolt protocol
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      # Memory — JVM + pagecache; Docker limit must exceed heap + pagecache + OS headroom (see DOCKER_SETUP_GUIDE.md)
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2g}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-1g}
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_plugins:/plugins
+    deploy:
+      resources:
+        limits:
+          memory: ${NEO4J_CONTAINER_MEMORY_LIMIT:-4g}
+    networks:
+      - edgeguard_net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:7474"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Airflow metadata DB — PostgreSQL (required for LocalExecutor)
+  #
+  # Airflow metadata must use a database that supports concurrent access (here: Postgres).
+  # This Postgres service is internal-only (no host port); credentials default to
+  # airflow/airflow — override via AIRFLOW_POSTGRES_* in .env for production.
+  # ─────────────────────────────────────────────────────────────────────────────
+  airflow_postgres:
+    image: postgres:16-alpine
+    container_name: edgeguard_airflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AIRFLOW_POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${AIRFLOW_POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${AIRFLOW_POSTGRES_DB:-airflow}
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - edgeguard_net
+    healthcheck:
+      # $$ expands to $ in the container — use image env (POSTGRES_USER / POSTGRES_DB)
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Airflow — DAG orchestration (standalone: webserver + scheduler + triggerer)
+  #
+  # NOTE: Port 8082 is intentional. ResilMesh's Temporal workflow service uses
+  # port 8080 (the Airflow default). See .env.example for details.
+  #
+  # Metadata DB is PostgreSQL (airflow_postgres) — see service above. SQLite is not used for Airflow in this stack.
+  #
+  # Python packages for DAGs (neo4j, pymisp, collectors, …) are NOT installed at runtime — they are in
+  # requirements-airflow-docker.txt and baked by Dockerfile.airflow. Do not pip install inside the container;
+  # recreate would drop them. After pulling code or changing that file: docker compose build airflow && docker compose up -d airflow
+  # ─────────────────────────────────────────────────────────────────────────────
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: edgeguard-airflow:2.11.2-python3.12
+    container_name: edgeguard_airflow
+    restart: unless-stopped
+    # Dockerfile.airflow CMD is `airflow standalone` (tini as PID 1). Do not set `command: standalone`
+    # — that would override CMD and break the entrypoint chain.
+    init: true
+    ports:
+      - "8082:8082"
+    environment:
+      <<: *common-env
+      # Mounted repo src at /opt/airflow/src — ensure all PythonOperator imports resolve without relying only on DAG sys.path hacks.
+      PYTHONPATH: /opt/airflow/src
+      AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8082"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # psycopg2 driver is bundled in the official apache/airflow image
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER:-airflow}:${AIRFLOW_POSTGRES_PASSWORD:-airflow}@airflow_postgres:5432/${AIRFLOW_POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+      # Long collectors (e.g. NVD 15–30+ min) exceed Airflow's default zombie threshold (~600s).
+      AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD: ${AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD:-3600}
+      # Heartbeats + zombie scan: default local_task_job_heartbeat_sec=0 makes heartbeat interval fall back
+      # to scheduler_zombie_task_threshold (see Airflow 2.7+ docs) — bad for LocalExecutor clarity. Explicit
+      # 30s heartbeats; 60s zombie scan (default 10s) reduces scheduler churn during heavy task startup.
+      AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC: ${AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC:-30}
+      AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL: ${AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL:-60}
+      # Use Fernet key for secrets — generate with:
+      #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+      AIRFLOW_CONN_NEO4J_DEFAULT: ${AIRFLOW_CONN_NEO4J_DEFAULT:-}
+      # Prometheus metrics (optional — disabled when metrics server is not started)
+      ENABLE_PROMETHEUS_METRICS: ${ENABLE_PROMETHEUS_METRICS:-false}
+      EDGEGUARD_METRICS_HOST: "127.0.0.1"
+      EDGEGUARD_METRICS_PORT: "8001"
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./src:/opt/airflow/src:ro
+      - airflow_logs:/opt/airflow/logs
+      - airflow_db:/opt/airflow
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      airflow_postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          # LocalExecutor + standalone runs sync in-process; full MISP→Neo4j can spike RSS (driver + batches).
+          # 2g often hits SIGKILL (-9) during large merges — override via AIRFLOW_MEMORY_LIMIT in .env if needed.
+          memory: ${AIRFLOW_MEMORY_LIMIT:-4g}
+    networks:
+      - edgeguard_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 120s
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EdgeGuard REST API — FastAPI on port 8000
+  # ─────────────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: edgeguard-kg:latest
+    container_name: edgeguard_api
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "src.query_api:app",
+              "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
+      EDGEGUARD_ADMIN_TOKEN: ${EDGEGUARD_ADMIN_TOKEN:-}
+      PYTHONPATH: /app/src
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks:
+      - edgeguard_net
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EdgeGuard GraphQL API — Strawberry/FastAPI on port 4001
+  #
+  # Port 4001 mirrors the ISIM GraphQL service in ResilMesh deployments,
+  # making EdgeGuard queryable in the same way as ISIM.
+  #
+  # GraphQL Playground (GraphiQL) is available at http://localhost:4001/graphql
+  # in development. Disable in production:  EDGEGUARD_GRAPHQL_PLAYGROUND=false
+  # ─────────────────────────────────────────────────────────────────────────────
+  graphql:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: edgeguard-kg:latest
+    container_name: edgeguard_graphql
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "src.graphql_api:app",
+              "--host", "0.0.0.0", "--port", "4001", "--workers", "2"]
+    ports:
+      - "4001:4001"
+    environment:
+      <<: *common-env
+      EDGEGUARD_GRAPHQL_PORT: "4001"
+      EDGEGUARD_GRAPHQL_HOST: "0.0.0.0"
+      # Set to "false" in production to disable the interactive GraphiQL explorer
+      EDGEGUARD_GRAPHQL_PLAYGROUND: ${EDGEGUARD_GRAPHQL_PLAYGROUND:-false}
+      PYTHONPATH: /app/src
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks:
+      - edgeguard_net
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:4001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+# ================================================================================
+# Volumes
+# ================================================================================
+volumes:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_plugins:
+  airflow_logs:
+  airflow_db:
+  airflow_postgres_data:
+
+# ================================================================================
+# Networks
+# ================================================================================
+networks:
+  edgeguard_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

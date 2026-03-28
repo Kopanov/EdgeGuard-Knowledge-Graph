@@ -1,0 +1,964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EdgeGuard Architecture - Technical Presentation</title>
+    <style>
+        @page {
+            size: A4;
+            margin: 15mm;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+            background: #ffffff;
+            color: #1a1a2e;
+            padding: 20px;
+            line-height: 1.5;
+            font-size: 11pt;
+        }
+        
+        .title {
+            text-align: center;
+            margin-bottom: 25px;
+            padding-bottom: 15px;
+            border-bottom: 3px solid #00d4aa;
+        }
+        
+        .title h1 {
+            font-size: 22pt;
+            color: #0a1628;
+            margin-bottom: 5px;
+            font-weight: 700;
+        }
+        
+        .title .subtitle {
+            color: #4a5568;
+            font-size: 12pt;
+        }
+        
+        .section {
+            margin: 20px 0;
+            page-break-inside: avoid;
+        }
+        
+        .section-title {
+            font-size: 14pt;
+            color: #0a1628;
+            margin: 20px 0 12px 0;
+            padding-bottom: 6px;
+            border-bottom: 2px solid #00d4aa;
+            font-weight: 600;
+        }
+        
+        .subsection-title {
+            font-size: 12pt;
+            color: #2d3748;
+            margin: 15px 0 8px 0;
+            font-weight: 600;
+        }
+        
+        /* Data Sources Grid */
+        .sources-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        .source-card {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 6px;
+            padding: 12px;
+            text-align: center;
+        }
+        
+        .source-card .icon {
+            font-size: 1.4rem;
+            margin-bottom: 4px;
+        }
+        
+        .source-card .name {
+            font-weight: 600;
+            color: #0a1628;
+            font-size: 10pt;
+        }
+        
+        .source-card .count {
+            font-size: 9pt;
+            color: #4a5568;
+        }
+        
+        /* Pipeline */
+        .pipeline-box {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        
+        .pipeline-steps {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .pipeline-step {
+            flex: 1;
+            text-align: center;
+            padding: 12px 8px;
+            background: #ffffff;
+            border: 1px solid #cbd5e0;
+            border-radius: 6px;
+        }
+        
+        .pipeline-step .step-num {
+            display: inline-block;
+            width: 22px;
+            height: 22px;
+            line-height: 22px;
+            background: #00d4aa;
+            color: #fff;
+            border-radius: 50%;
+            font-weight: bold;
+            font-size: 10pt;
+            margin-bottom: 6px;
+        }
+        
+        .pipeline-step h4 {
+            color: #0a1628;
+            font-size: 10pt;
+            margin-bottom: 4px;
+        }
+        
+        .pipeline-step p {
+            font-size: 8pt;
+            color: #4a5568;
+        }
+        
+        .arrow {
+            font-size: 1.2rem;
+            color: #00a8ff;
+            font-weight: bold;
+        }
+        
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            font-size: 9pt;
+        }
+        
+        th, td {
+            padding: 8px 10px;
+            text-align: left;
+            border: 1px solid #cbd5e0;
+        }
+        
+        th {
+            background: #0a1628;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        
+        tr:nth-child(even) {
+            background: #f7fafc;
+        }
+        
+        tr:hover {
+            background: #edf2f7;
+        }
+        
+        /* Neo4j Stats */
+        .neo4j-box {
+            background: #f7fafc;
+            border: 2px solid #00d4aa;
+            border-radius: 8px;
+            padding: 15px;
+            text-align: center;
+            margin: 10px 0;
+        }
+        
+        .neo4j-logo {
+            font-size: 2rem;
+            color: #00d4aa;
+            margin-bottom: 8px;
+        }
+        
+        .neo4j-box h3 {
+            color: #0a1628;
+            font-size: 14pt;
+            margin-bottom: 12px;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+        }
+        
+        .stat-item {
+            background: #ffffff;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .stat-value {
+            font-size: 1.4rem;
+            font-weight: bold;
+            color: #00d4aa;
+        }
+        
+        .stat-label {
+            font-size: 9pt;
+            color: #4a5568;
+        }
+        
+        /* Node Types */
+        .node-types {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            gap: 8px;
+            margin: 10px 0;
+        }
+        
+        .node-type {
+            background: #ffffff;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+            text-align: center;
+            font-size: 9pt;
+        }
+        
+        .node-type .icon {
+            font-size: 1.2rem;
+            display: block;
+            margin-bottom: 3px;
+        }
+        
+        /* Relationships */
+        .relationships-section {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 10px 0;
+        }
+        
+        .rel-type {
+            background: #ffffff;
+            padding: 12px;
+            border-radius: 6px;
+            border-left: 4px solid;
+        }
+        
+        .rel-type.uses { border-color: #e53e3e; }
+        .rel-type.attributed { border-color: #d69e2e; }
+        .rel-type.sourced { border-color: #3182ce; }
+        
+        .rel-type h4 {
+            color: #0a1628;
+            font-size: 10pt;
+            margin-bottom: 4px;
+        }
+        
+        .rel-type p {
+            font-size: 8pt;
+            color: #4a5568;
+        }
+        
+        .rel-type .example {
+            font-size: 8pt;
+            color: #718096;
+            font-style: italic;
+            margin-top: 4px;
+        }
+        
+        /* Integration Section */
+        .integration-section {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 10px 0;
+        }
+        
+        .resilmesh-box {
+            background: #faf5ff;
+            border: 2px solid #805ad5;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        
+        .resilmesh-box h3 {
+            color: #553c9a;
+            font-size: 12pt;
+            margin-bottom: 12px;
+            text-align: center;
+        }
+        
+        .integration-point {
+            background: #ffffff;
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 10px;
+            border: 1px solid #e9d8fd;
+        }
+        
+        .integration-point h4 {
+            color: #553c9a;
+            font-size: 10pt;
+            margin-bottom: 4px;
+        }
+        
+        .integration-point p {
+            font-size: 9pt;
+            color: #4a5568;
+        }
+        
+        .integration-point code {
+            background: #f3e8ff;
+            padding: 1px 4px;
+            border-radius: 3px;
+            font-size: 8pt;
+            color: #6b46c1;
+        }
+        
+        .capabilities-box {
+            background: #f0fff4;
+            border: 2px solid #00d4aa;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        
+        .capabilities-box h3 {
+            color: #0a1628;
+            font-size: 12pt;
+            margin-bottom: 12px;
+            text-align: center;
+        }
+        
+        .capability {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 12px;
+            padding: 10px;
+            background: #ffffff;
+            border-radius: 6px;
+            border: 1px solid #c6f6d5;
+        }
+        
+        .capability .num {
+            width: 22px;
+            height: 22px;
+            background: #00d4aa;
+            color: #ffffff;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 10pt;
+            flex-shrink: 0;
+        }
+        
+        .capability h4 {
+            color: #0a1628;
+            font-size: 10pt;
+            margin-bottom: 2px;
+        }
+        
+        .capability p {
+            font-size: 9pt;
+            color: #4a5568;
+        }
+        
+        /* NATS Flow */
+        .nats-diagram {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        
+        .nats-flow {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        
+        .nats-node {
+            text-align: center;
+            padding: 12px;
+            background: #ffffff;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+            min-width: 100px;
+        }
+        
+        .nats-node .icon {
+            font-size: 1.4rem;
+            display: block;
+            margin-bottom: 4px;
+        }
+        
+        .nats-node h4 {
+            color: #553c9a;
+            font-size: 9pt;
+        }
+        
+        .nats-arrow {
+            color: #805ad5;
+            font-size: 1.2rem;
+        }
+        
+        /* Example Box */
+        .example-box {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 10px 0;
+        }
+        
+        .example-input, .example-output {
+            background: #f7fafc;
+            padding: 12px;
+            border-radius: 6px;
+            border: 1px solid #e2e8f0;
+        }
+        
+        .example-input h4, .example-output h4 {
+            font-size: 10pt;
+            margin-bottom: 8px;
+        }
+        
+        .example-input h4 { color: #805ad5; }
+        .example-output h4 { color: #00d4aa; }
+        
+        .example-box pre {
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 7pt;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        
+        /* Methodology Box */
+        .methodology-box {
+            background: #fffaf0;
+            border: 1px solid #fbd38d;
+            border-radius: 6px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        
+        .methodology-box h4 {
+            color: #c05621;
+            font-size: 11pt;
+            margin-bottom: 10px;
+        }
+        
+        .keyword-table {
+            font-size: 9pt;
+        }
+        
+        .keyword-table th {
+            background: #c05621;
+        }
+        
+        /* Footer */
+        .footer {
+            text-align: center;
+            margin-top: 25px;
+            padding-top: 15px;
+            border-top: 1px solid #e2e8f0;
+            color: #718096;
+            font-size: 9pt;
+        }
+        
+        /* Page break control */
+        .page-break {
+            page-break-after: always;
+        }
+        
+        /* Print styles */
+        @media print {
+            body {
+                background: #ffffff;
+                padding: 0;
+                font-size: 10pt;
+            }
+            
+            .section {
+                page-break-inside: avoid;
+            }
+            
+            .source-card, .pipeline-step, .stat-item, .node-type, 
+            .rel-type, .integration-point, .capability, .nats-node,
+            .example-input, .example-output, .methodology-box {
+                break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="title">
+        <h1>🔬 EdgeGuard Architecture</h1>
+        <div class="subtitle">Threat Intelligence Graph Platform - Technical Presentation</div>
+    </div>
+
+    <!-- Section 1: Data Sources -->
+    <div class="section">
+        <h2 class="section-title">📊 Data Sources (5 Active Sources)</h2>
+        <div class="sources-grid" style="grid-template-columns: repeat(5, 1fr);">
+            <div class="source-card">
+                <div class="icon">🛸</div>
+                <div class="name">AlienVault OTX</div>
+                <div class="count">13,087 IOCs</div>
+            </div>
+            <div class="source-card">
+                <div class="icon">🎯</div>
+                <div class="name">CISA KEV</div>
+                <div class="count">500 CVEs</div>
+            </div>
+            <div class="source-card">
+                <div class="icon">📋</div>
+                <div class="name">MITRE ATT&CK</div>
+                <div class="count">500 TTPs</div>
+            </div>
+            <div class="source-card">
+                <div class="icon">🔓</div>
+                <div class="name">NVD</div>
+                <div class="count">100 CVEs</div>
+            </div>
+            <div class="source-card">
+                <div class="icon">🔄</div>
+                <div class="name">MISP</div>
+                <div class="count">6 Test Data</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section 2: Data Pipeline -->
+    <div class="section">
+        <h2 class="section-title">⚙️ Data Processing Pipeline (ETL)</h2>
+        <div class="pipeline-box">
+            <div class="pipeline-steps">
+                <div class="pipeline-step">
+                    <div class="step-num">1</div>
+                    <h4>API Collection</h4>
+                    <p>REST APIs fetch raw data from each source</p>
+                </div>
+                <div class="arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">2</div>
+                    <h4>Normalization</h4>
+                    <p>Standardize: IPs, URLs, CVEs, MITRE IDs</p>
+                </div>
+                <div class="arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">3</div>
+                    <h4>Enrichment</h4>
+                    <p>Confidence scoring, sector classification</p>
+                </div>
+                <div class="arrow">→</div>
+                <div class="pipeline-step">
+                    <div class="step-num">4</div>
+                    <h4>Graph Import</h4>
+                    <p>Create nodes & relationships in Neo4j</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section 3: Sector Classification Methodology -->
+    <div class="section">
+        <h2 class="section-title">🎯 Sector Classification: Keyword-Based Approach</h2>
+        <div class="methodology-box">
+            <h4>How We Classify Threats by Zone/Sector</h4>
+            
+            <p style="margin-bottom: 10px; font-size: 10pt;">
+                <strong>Approach:</strong> We use regex word-boundary matching to classify indicators into sectors (zones). 
+                This prevents false positives like "phishing" matching within "hospital".
+            </p>
+            
+            <table class="keyword-table">
+                <thead>
+                    <tr>
+                        <th>Sector</th>
+                        <th>Primary Keywords</th>
+                        <th>Threat Context Keywords</th>
+                        <th>Current %</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Healthcare</strong></td>
+                        <td>hospital, medical, patient, pharma, clinic</td>
+                        <td>healthcare sector, medical device, covid</td>
+                        <td>~61%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Energy</strong></td>
+                        <td>scada, grid, power, industrial, ics</td>
+                        <td>energy sector, power grid, ot</td>
+                        <td>~28%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Finance</strong></td>
+                        <td>bank, payment, trading, wallet</td>
+                        <td>banking trojan, financial theft, crypto</td>
+                        <td>~2%</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Global</strong></td>
+                        <td>(default)</td>
+                        <td>generic threats</td>
+                        <td>~6%</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <p style="margin-top: 10px; font-size: 9pt; color: #4a5568;">
+                <strong>False Positive Prevention:</strong> Word boundaries ensure "phishing" doesn't match in "hospital" or "his". 
+                We also map malware families (Emotet, TrickBot, QakBot) → Finance sector automatically.
+            </p>
+        </div>
+    </div>
+
+    <!-- Section 4: Node Properties -->
+    <div class="section">
+        <h2 class="section-title">🛢️ Neo4j Data Model: Node Properties</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Node Type</th>
+                    <th>Properties</th>
+                    <th>Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Indicator</strong></td>
+                    <td>value, indicator_type, sector, source, confidence_score, tags[], last_updated</td>
+                    <td>192.168.1.100, ipv4, healthcare, 0.85</td>
+                </tr>
+                <tr>
+                    <td><strong>Vulnerability</strong></td>
+                    <td>cve_id, description, cvss_score, severity, cwe_id, last_updated</td>
+                    <td>CVE-2024-1234, 9.8, critical</td>
+                </tr>
+                <tr>
+                    <td><strong>Technique</strong></td>
+                    <td>mitre_id, name, platforms[], description, tactics[]</td>
+                    <td>T1059, PowerShell, [Windows]</td>
+                </tr>
+                <tr>
+                    <td><strong>ThreatActor</strong></td>
+                    <td>name, aliases[], description, country, confidence, last_updated</td>
+                    <td>APT29, [Cozy Bear], RU, 0.95</td>
+                </tr>
+                <tr>
+                    <td><strong>Malware</strong></td>
+                    <td>name, family, types[], description, confidence, last_updated</td>
+                    <td>TrickBot, [banking], trojan, 0.85</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Section 5: Relationship Edge Properties -->
+    <div class="section">
+        <h2 class="section-title">🔗 Neo4j Data Model: Relationship Edge Properties</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Relationship</th>
+                    <th>Direction</th>
+                    <th>Edge Properties</th>
+                    <th>Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>USES</strong></td>
+                    <td>ThreatActor → Technique</td>
+                    <td>confidence, source, timestamp</td>
+                    <td>APT29 uses T1059 (0.95)</td>
+                </tr>
+                <tr>
+                    <td><strong>ATTRIBUTED_TO</strong></td>
+                    <td>Malware → ThreatActor</td>
+                    <td>confidence, source, timestamp</td>
+                    <td>TrickBot → Wizard Spider</td>
+                </tr>
+                <tr>
+                    <td><strong>INDICATES</strong></td>
+                    <td>Indicator → Vulnerability</td>
+                    <td>confidence, source, timestamp</td>
+                    <td>IP indicates CVE-2024-1234</td>
+                </tr>
+                <tr>
+                    <td><strong>SOURCED_FROM</strong></td>
+                    <td>Any Node → Source</td>
+                    <td>raw_data, confidence, source, timestamp</td>
+                    <td>Raw data preserved on edge</td>
+                </tr>
+            </tbody>
+        </table>
+        
+        <p style="margin-top: 8px; font-size: 9pt; color: #4a5568;">
+            <strong>Design Decision:</strong> Raw source data is stored on the <em>SOURCED_FROM</em> edge, not node properties. 
+            This keeps nodes clean while preserving all original data for verification and comparison.
+        </p>
+    </div>
+
+    <!-- Section 6: Neo4j Stats -->
+    <div class="section">
+        <h2 class="section-title">📈 Current Knowledge Base Statistics</h2>
+        <div class="neo4j-box">
+            <div class="neo4j-logo">◇◇◇</div>
+            <h3>Neo4j Graph Database</h3>
+            
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value">14,793</div>
+                    <div class="stat-label">Total Nodes</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">290</div>
+                    <div class="stat-label">Relationships</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">5</div>
+                    <div class="stat-label">Data Sources</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value">4</div>
+                    <div class="stat-label">Sectors</div>
+                </div>
+            </div>
+            
+            <h4 class="subsection-title" style="margin-top: 15px;">Node Distribution</h4>
+            <div class="node-types">
+                <div class="node-type">
+                    <span class="icon">🌐</span>
+                    <div><strong>Indicators</strong></div>
+                    <small>14,793</small>
+                </div>
+                <div class="node-type">
+                    <span class="icon">⚠️</span>
+                    <div><strong>Vulnerabilities</strong></div>
+                    <small>600</small>
+                </div>
+                <div class="node-type">
+                    <span class="icon">🎯</span>
+                    <div><strong>Techniques</strong></div>
+                    <small>300</small>
+                </div>
+                <div class="node-type">
+                    <span class="icon">👤</span>
+                    <div><strong>ThreatActors</strong></div>
+                    <small>100</small>
+                </div>
+                <div class="node-type">
+                    <span class="icon">🦠</span>
+                    <div><strong>Malware</strong></div>
+                    <small>100</small>
+                </div>
+                <div class="node-type">
+                    <span class="icon">📡</span>
+                    <div><strong>Sources</strong></div>
+                    <small>5</small>
+                </div>
+            </div>
+            
+            <h4 class="subsection-title">Relationships</h4>
+            <div class="relationships-section">
+                <div class="rel-type uses">
+                    <h4>USES (140)</h4>
+                    <p>ThreatActor → Technique</p>
+                    <div class="example">APT29 → T1059 PowerShell</div>
+                </div>
+                <div class="rel-type attributed">
+                    <h4>ATTRIBUTED_TO (150)</h4>
+                    <p>Malware → ThreatActor</p>
+                    <div class="example">TrickBot → Wizard Spider</div>
+                </div>
+                <div class="rel-type sourced">
+                    <h4>SOURCED_FROM</h4>
+                    <p>Any Node → Source</p>
+                    <div class="example">Raw data preserved</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="page-break"></div>
+
+    <!-- Section 7: ResilMesh Integration -->
+    <div class="section">
+        <h2 class="section-title">🔄 ResilMesh Integration</h2>
+        
+        <div class="integration-section">
+            <div class="resilmesh-box">
+                <h3>🚀 ResilMesh → EdgeGuard</h3>
+                
+                <div class="integration-point">
+                    <h4>📥 NATS Subscription</h4>
+                    <p>Subscribe to: <code>resilmesh.alerts.zone.&lt;zone_id&gt;</code></p>
+                    <p>Receive alerts with IPs, domains, hashes</p>
+                </div>
+                
+                <div class="integration-point">
+                    <h4>🔍 Alert Enrichment</h4>
+                    <p>Query Neo4j for related threats, actors, techniques</p>
+                    <p>Return contextualized threat intelligence</p>
+                </div>
+                
+                <div class="integration-point">
+                    <h4>📤 Response via NATS</h4>
+                    <p>Publish enriched alerts back to ResilMesh</p>
+                    <p>JSON with full threat context</p>
+                </div>
+                
+                <div class="integration-point">
+                    <h4>🔐 mTLS Authentication</h4>
+                    <p>Secure certificate exchange</p>
+                    <p>Using ResilMesh dAuth system</p>
+                </div>
+            </div>
+            
+            <div class="capabilities-box">
+                <h3>⚡ EdgeGuard Capabilities</h3>
+                
+                <div class="capability">
+                    <div class="num">1</div>
+                    <div>
+                        <h4>Automated Alert Enrichment</h4>
+                        <p>Instantly enrich with malware families, threat actors, MITRE techniques, CVEs</p>
+                    </div>
+                </div>
+                
+                <div class="capability">
+                    <div class="num">2</div>
+                    <div>
+                        <h4>GraphRAG Interface</h4>
+                        <p>Natural language queries: "What threats target our finance sector?"</p>
+                    </div>
+                </div>
+                
+                <div class="capability">
+                    <div class="num">3</div>
+                    <div>
+                        <h4>Attack Chain Analysis</h4>
+                        <p>Multi-hop queries to trace full attack paths</p>
+                    </div>
+                </div>
+                
+                <div class="capability">
+                    <div class="num">4</div>
+                    <div>
+                        <h4>Sector-Aware Intelligence</h4>
+                        <p>Filter by zone: Healthcare, Energy, Finance, Global</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section 8: NATS Flow -->
+    <div class="section">
+        <h2 class="section-title">📡 NATS Message Flow</h2>
+        <div class="nats-diagram">
+            <div class="nats-flow">
+                <div class="nats-node">
+                    <span class="icon">🛡️</span>
+                    <h4>ResilMesh</h4>
+                </div>
+                <div class="nats-arrow">→</div>
+                <div class="nats-node">
+                    <span class="icon">📥</span>
+                    <h4>NATS</h4>
+                </div>
+                <div class="nats-arrow">→</div>
+                <div class="nats-node">
+                    <span class="icon">🔬</span>
+                    <h4>EdgeGuard</h4>
+                </div>
+                <div class="nats-arrow">→</div>
+                <div class="nats-node">
+                    <span class="icon">◇◇◇</span>
+                    <h4>Neo4j</h4>
+                </div>
+                <div class="nats-arrow">→</div>
+                <div class="nats-node">
+                    <span class="icon">📤</span>
+                    <h4>Response</h4>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section 9: Example -->
+    <div class="section">
+        <h2 class="section-title">💡 Example: Alert Enrichment Flow</h2>
+        <div class="example-box">
+            <div class="example-input">
+                <h4>📥 Input: Raw Alert (from ResilMesh)</h4>
+                <pre>{
+  "alert_id": "ALT-001",
+  "type": "lateral_movement",
+  "zone": "healthcare",
+  "indicator": "192.168.1.100",
+  "timestamp": "2026-03-03T10:30:00Z"
+}</pre>
+            </div>
+            <div class="example-output">
+                <h4>📤 Output: Enriched Alert (to ResilMesh)</h4>
+                <pre>{
+  "alert_id": "ALT-001",
+  "indicator": "192.168.1.100",
+  "enrichment": {
+    "malware": "TrickBot",
+    "actor": "Wizard Spider",
+    "techniques": [
+      "T1021.002 (SMB)",
+      "T1059 (PowerShell)"
+    ],
+    "cves": ["CVE-2023-1234"],
+    "confidence": "HIGH",
+    "sector": "healthcare"
+  }
+}</pre>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+        <p><strong>Progress:</strong> Sprint 1 - 30% to 50K node goal | <strong>Integration:</strong> NATS Prototype Ready</p>
+        <p>🔬 EdgeGuard - Threat Intelligence Graph Platform | Proof of Concept</p>
+    </div>
+
+</body>
+</html>

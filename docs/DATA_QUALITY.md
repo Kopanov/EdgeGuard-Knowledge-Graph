@@ -1,0 +1,102 @@
+# EdgeGuard Data Quality Strategy
+
+> **Confidence scores per relationship type:** See [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) § EdgeGuard ThreatIntel Relationships.
+
+## Overview
+
+When merging threat intelligence from multiple sources, quality management is critical. This document outlines our approach.
+
+**Canonical doc for the “deterministic workflow”:** how we **upsert** into Neo4j (**`MERGE`** + composite keys), preserve **provenance**, and why we prefer **exact** matching over **fuzzy** text/graph inference for production relationships (fewer **false-positive** links — see § fixes below). High-level pipeline placement: **[ARCHITECTURE.md](ARCHITECTURE.md)**; schema detail: **[KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)**.
+
+**Code reference:** `src/neo4j_client.py` implements `MERGE` semantics, `Source` nodes, and optional **`SOURCED_FROM`** edges with per-source metadata — see `merge_indicator` / related helpers.
+
+**MISP→Neo4j ingest path:** **Per MISP event** — dedupe within the event, same-event cross-item edges, then batched UNWIND node merges plus optional Python-side chunking via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **1000**; **`0`** / **`all`** = single pass, OOM risk). Relationship writes are batched separately (**`EDGEGUARD_REL_BATCH_SIZE`**). Does not change merge semantics — only peak RAM / transaction size. See [README.md](../README.md) and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
+
+## Merge Strategy
+
+### Current Logic
+```cypher
+// Higher confidence always wins for primary
+SET n.source = CASE 
+  WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score 
+  THEN $source_id 
+  ELSE n.source END
+```
+
+### Unique Key
+**Unique key is `(indicator_type, value, tag)`** where `tag` is the originating source ID. This allows the same IOC to exist as separate nodes per source while still deduplicating within a single source across pipeline runs.
+
+## Exact Matching Rules (March 2026)
+
+### Fix 1: Zone Array Handling in Stats
+**Problem**: When zone is stored as an array (e.g., `['healthcare', 'global']`), the stats query counted nodes multiple times.
+
+**Solution**: Updated `get_stats()` in `neo4j_client.py` to use `UNWIND`:
+```cypher
+// Before (broken)
+MATCH (n) WHERE n.zone IS NOT NULL
+RETURN n.zone as zone, count(n) as count
+
+// After (fixed)
+MATCH (n) WHERE n.zone IS NOT NULL
+UNWIND n.zone AS z
+RETURN z as zone, count(DISTINCT n) as count
+```
+
+### Fix 2: Relationship Building with Exact Matching
+**Problem**: `build_relationships.py` used fuzzy `CONTAINS` matching which created false positives (e.g., "APT" matched "AP").
+
+**Solution**: Changed to exact matching with confidence scoring:
+```cypher
+// Before (false positives)
+WHERE m.attributed_to CONTAINS a.name
+
+// After (exact match)
+WHERE m.attributed_to = a.name OR a.name = m.attributed_to
+```
+
+**Confidence Scoring**:
+| Match Type | Confidence | Description |
+|------------|------------|-------------|
+| Exact | 1.0 | Direct property match |
+| Partial | 0.6 | One field contains another |
+| Fuzzy | 0.3 | Loose matching (deprecated) |
+
+**Malware ↔ Technique:** A previous **`CAN_USE`** / description-based approach was **not** used — it risked the same class of false links. **`(Malware)-[:USES]->(Technique)`** is created only from **MITRE STIX `uses`** relationships, stored as **`uses_techniques`** (with MISP **`MITRE_USES_TECHNIQUES:`** round-trip), matching **`Technique.mitre_id`** exactly in `build_relationships.py`.
+
+### Fix 3: Audit Logging for Confidence Skips
+**Problem**: When lower-confidence source data was ignored, no audit trail existed.
+
+**Solution**: Added logging in `merge_node_with_source()`:
+```python
+logger.info(f"AUDIT: Skipping lower-confidence update for {label}({key}): "
+          f"existing={0.8} (source=nvd), new={0.5} (source=otx)")
+```
+
+### Fix 4: Enhanced Relationship Stats
+Now reports average confidence per relationship type:
+```python
+# Output:
+# ATTRIBUTED_TO: 15 (avg confidence: 1.00)
+# USES: 42 (avg confidence: 1.00)
+```
+
+---
+
+## Best Practices
+
+### Do's ✅
+- Use exact matching for production relationships
+- Keep raw data on edges for audit trails
+- Log confidence skips for debugging
+- Use zone arrays for multi-sector indicators
+
+### Don'ts ❌
+- Don't use `CONTAINS` for production matching
+- Don't overwrite higher-confidence with lower-confidence without audit
+- Don't assume zone is a single string (it's an array)
+
+
+---
+
+_Last updated: 2026-03-28_

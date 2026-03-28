@@ -1,0 +1,55 @@
+# EdgeGuard crontab entries
+# Install with: crontab crontab.txt
+# Adjust EDGEGUARD_DIR to match your actual deployment path.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# IMPORTANT — CHOOSE ONE SCHEDULER, NOT BOTH
+#
+# This crontab is for deployments WITHOUT Apache Airflow.
+# If you are running Airflow (dags/edgeguard_pipeline.py), do NOT install
+# this crontab — the Airflow DAGs already manage all collection and sync
+# schedules. Running both simultaneously will cause duplicate data, resource
+# contention, and potential graph corruption.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# flock is used on every long-running job to prevent overlapping runs if a
+# previous instance is still executing.  Requires util-linux (standard on
+# Linux; install via Homebrew on macOS: brew install util-linux).
+
+EDGEGUARD_DIR=/opt/edgeguard
+LOCK_DIR=/var/lock/edgeguard
+
+# ─── High frequency (every 30 min) ───────────────────────────────────────────
+# OTX: active threat feed, 30-minute cadence
+*/30 * * * * mkdir -p $LOCK_DIR && flock -n $LOCK_DIR/otx.lock \
+    bash -c 'cd $EDGEGUARD_DIR && python3 src/collectors/otx_collector.py' \
+    >> $EDGEGUARD_DIR/logs/otx.log 2>&1
+
+# ─── Medium frequency (every 4 hours) ────────────────────────────────────────
+# CISA KEV and VirusTotal
+0 */4 * * * mkdir -p $LOCK_DIR && flock -n $LOCK_DIR/medium.lock \
+    bash -c 'cd $EDGEGUARD_DIR && python3 src/run_pipeline.py --sources cisa,virustotal' \
+    >> $EDGEGUARD_DIR/logs/medium_freq.log 2>&1
+
+# ─── Low frequency (every 8 hours) ───────────────────────────────────────────
+# NVD vulnerability feed
+0 */8 * * * mkdir -p $LOCK_DIR && flock -n $LOCK_DIR/nvd.lock \
+    bash -c 'cd $EDGEGUARD_DIR && python3 src/collectors/nvd_collector.py' \
+    >> $EDGEGUARD_DIR/logs/nvd.log 2>&1
+
+# ─── Daily (02:00) ───────────────────────────────────────────────────────────
+# MITRE ATT&CK, AbuseIPDB, ThreatFox, URLhaus, CyberCure, Feodo, SSLBlacklist
+0 2 * * * mkdir -p $LOCK_DIR && flock -n $LOCK_DIR/daily.lock \
+    bash -c 'cd $EDGEGUARD_DIR && python3 src/run_pipeline.py --sources mitre,abuseipdb,threatfox,urlhaus,cybercure,feodo,sslblacklist' \
+    >> $EDGEGUARD_DIR/logs/daily_collectors.log 2>&1
+
+# ─── Neo4j sync (every 3 days at 03:00) ──────────────────────────────────────
+# Full MISP → Neo4j sync.  On first run (no state file) this will also be a
+# full historical sync; subsequent runs are incremental (last 3 days).
+# To force a full re-sync: delete $EDGEGUARD_DIR/state/edgeguard_last_neo4j_sync.json
+0 3 */3 * * mkdir -p $LOCK_DIR && flock -n $LOCK_DIR/neo4j_sync.lock \
+    bash -c 'cd $EDGEGUARD_DIR && python3 src/run_misp_to_neo4j.py' \
+    >> $EDGEGUARD_DIR/logs/neo4j_sync.log 2>&1
+
+# ─── Hourly health check ──────────────────────────────────────────────────────
+0 * * * * cd $EDGEGUARD_DIR && python3 src/health_check.py >> $EDGEGUARD_DIR/logs/health.log 2>&1

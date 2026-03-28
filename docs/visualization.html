@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EdgeGuard - Graph Explorer</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+    <style>
+        :root {
+            --primary: #00d4aa;
+            --bg-dark: #0a0e17;
+            --bg-card: #141b2d;
+            --bg-input: #1a2236;
+            --text: #e0e6ed;
+            --text-dim: #8892a0;
+            --red: #e74c3c;
+            --yellow: #ffd93d;
+            --blue: #4d96ff;
+            --purple: #a855f7;
+            --green: #6bcb77;
+            --orange: #ff9f43;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* ---- Header ---- */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 16px;
+            background: var(--bg-card);
+            border-bottom: 2px solid var(--primary);
+            gap: 12px;
+            flex-shrink: 0;
+        }
+
+        .logo {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--primary);
+            white-space: nowrap;
+        }
+
+        .connect-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex: 1;
+            max-width: 600px;
+        }
+
+        .connect-bar input {
+            background: var(--bg-input);
+            border: 1px solid #2a3550;
+            color: var(--text);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+
+        .connect-bar input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        #api-url { flex: 1; min-width: 160px; }
+        #api-key { width: 140px; }
+
+        .controls {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .btn {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid #2a3550;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+
+        .btn:hover { border-color: var(--primary); color: var(--primary); }
+        .btn.active { background: var(--primary); color: #000; border-color: var(--primary); }
+        .btn.connect { background: var(--primary); color: #000; border-color: var(--primary); font-weight: 600; }
+        .btn.connect:hover { opacity: 0.85; }
+
+        select.filter {
+            background: var(--bg-input);
+            color: var(--text);
+            border: 1px solid #2a3550;
+            padding: 5px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        select.filter:focus { outline: none; border-color: var(--primary); }
+
+        /* ---- Main layout ---- */
+        .main { display: flex; flex: 1; overflow: hidden; }
+
+        #cy {
+            flex: 1;
+            background: var(--bg-dark);
+            position: relative;
+        }
+
+        /* ---- Overlay panels ---- */
+        .panel {
+            position: absolute;
+            background: rgba(20, 27, 45, 0.95);
+            border: 1px solid rgba(0, 212, 170, 0.25);
+            border-radius: 8px;
+            padding: 12px 14px;
+            font-size: 12px;
+            z-index: 100;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+
+        .panel-title {
+            color: var(--primary);
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        /* Stats */
+        .stats-panel { top: 16px; right: 16px; min-width: 130px; }
+
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 3px 0;
+        }
+
+        .stats-row .label { color: var(--text-dim); }
+        .stats-row .value { color: var(--primary); font-weight: 700; }
+
+        /* Legend */
+        .legend-panel { bottom: 16px; left: 16px; }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+            font-size: 11px;
+        }
+
+        .legend-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        .legend-diamond {
+            width: 10px;
+            height: 10px;
+            transform: rotate(45deg);
+            flex-shrink: 0;
+        }
+
+        .legend-triangle {
+            width: 0; height: 0;
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-bottom: 12px solid var(--green);
+            flex-shrink: 0;
+        }
+
+        /* Search */
+        .search-panel { top: 16px; left: 16px; }
+
+        .search-panel input {
+            background: var(--bg-input);
+            border: 1px solid #2a3550;
+            color: var(--text);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            width: 200px;
+        }
+
+        .search-panel input:focus { outline: none; border-color: var(--primary); }
+
+        /* Detail panel */
+        .detail-panel {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 320px;
+            height: 100%;
+            background: var(--bg-card);
+            border-left: 1px solid rgba(0, 212, 170, 0.25);
+            padding: 16px;
+            overflow-y: auto;
+            z-index: 200;
+            display: none;
+            font-size: 12px;
+        }
+
+        .detail-panel.open { display: block; }
+
+        .detail-close {
+            position: absolute;
+            top: 10px;
+            right: 12px;
+            background: none;
+            border: none;
+            color: var(--text-dim);
+            font-size: 18px;
+            cursor: pointer;
+        }
+
+        .detail-close:hover { color: var(--text); }
+
+        .detail-header {
+            color: var(--primary);
+            font-size: 15px;
+            font-weight: 700;
+            margin-bottom: 4px;
+            padding-right: 24px;
+        }
+
+        .detail-type {
+            font-size: 11px;
+            color: var(--text-dim);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 14px;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .detail-key { color: var(--text-dim); }
+        .detail-val { color: var(--text); font-weight: 500; text-align: right; max-width: 180px; word-break: break-all; }
+
+        .kev-badge {
+            display: inline-block;
+            background: rgba(231, 76, 60, 0.2);
+            color: var(--red);
+            border: 1px solid var(--red);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            margin-top: 6px;
+        }
+
+        /* Loading overlay */
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: var(--primary);
+            font-size: 14px;
+            z-index: 300;
+            display: none;
+        }
+
+        .loading.show { display: block; }
+
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 3px solid #2a3550;
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 8px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Status indicator */
+        .status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--red);
+            display: inline-block;
+            margin-right: 4px;
+        }
+
+        .status.connected { background: var(--green); }
+
+        /* Tooltip */
+        .cy-tooltip {
+            position: absolute;
+            background: rgba(20, 27, 45, 0.95);
+            border: 1px solid var(--primary);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 11px;
+            z-index: 150;
+            pointer-events: none;
+            display: none;
+            max-width: 250px;
+        }
+
+        .cy-tooltip .tt-label { color: var(--primary); font-weight: 700; }
+        .cy-tooltip .tt-type { color: var(--text-dim); font-size: 10px; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo"><span class="status" id="conn-status"></span> EdgeGuard Graph</div>
+        <div class="connect-bar">
+            <input type="text" id="api-url" placeholder="API URL (e.g. http://localhost:8000)" />
+            <input type="password" id="api-key" placeholder="API Key" />
+            <button class="btn connect" onclick="connect()">Connect</button>
+        </div>
+        <div class="controls">
+            <button class="btn active" data-view="attacks" onclick="switchView('attacks', this)">Malware</button>
+            <button class="btn" data-view="actors" onclick="switchView('actors', this)">Actors</button>
+            <button class="btn" data-view="indicators" onclick="switchView('indicators', this)">Indicators</button>
+            <button class="btn" data-view="vulnerabilities" onclick="switchView('vulnerabilities', this)">CVEs</button>
+            <select class="filter" id="zone-filter" onchange="loadGraph()">
+                <option value="">All Zones</option>
+                <option value="healthcare">Healthcare</option>
+                <option value="energy">Energy</option>
+                <option value="finance">Finance</option>
+                <option value="global">Global</option>
+            </select>
+            <select class="filter" id="limit-select" onchange="loadGraph()">
+                <option value="50">50 nodes</option>
+                <option value="100" selected>100 nodes</option>
+                <option value="200">200 nodes</option>
+                <option value="500">500 nodes</option>
+            </select>
+            <button class="btn" onclick="cy.fit(40)">Fit</button>
+            <button class="btn" onclick="runLayout()">Layout</button>
+        </div>
+    </header>
+
+    <div class="main">
+        <div id="cy">
+            <!-- Search -->
+            <div class="panel search-panel">
+                <input type="text" id="search-box" placeholder="Search nodes..." oninput="searchNodes(this.value)" />
+            </div>
+
+            <!-- Stats -->
+            <div class="panel stats-panel">
+                <div class="panel-title">Graph Stats</div>
+                <div class="stats-row"><span class="label">Nodes</span><span class="value" id="stat-nodes">0</span></div>
+                <div class="stats-row"><span class="label">Edges</span><span class="value" id="stat-edges">0</span></div>
+                <div class="stats-row"><span class="label">View</span><span class="value" id="stat-view">attacks</span></div>
+            </div>
+
+            <!-- Legend -->
+            <div class="panel legend-panel" id="legend-panel"></div>
+
+            <!-- Loading -->
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                Loading graph data...
+            </div>
+
+            <!-- Tooltip -->
+            <div class="cy-tooltip" id="tooltip"></div>
+        </div>
+
+        <!-- Detail panel (right sidebar) -->
+        <div class="detail-panel" id="detail-panel">
+            <button class="detail-close" onclick="closeDetail()">&times;</button>
+            <div id="detail-content"></div>
+        </div>
+    </div>
+
+    <script>
+        cytoscape.use(cytoscapeDagre);
+
+        // ---- State ----
+        let currentView = 'attacks';
+        let isConnected = false;
+
+        // Restore from localStorage
+        const savedUrl = localStorage.getItem('eg_api_url') || 'http://localhost:8000';
+        const savedKey = localStorage.getItem('eg_api_key') || '';
+        document.getElementById('api-url').value = savedUrl;
+        document.getElementById('api-key').value = savedKey;
+
+        // ---- Cytoscape init ----
+        const cy = cytoscape({
+            container: document.getElementById('cy'),
+            style: [
+                // Base node
+                { selector: 'node', style: {
+                    'label': 'data(label)', 'text-valign': 'bottom', 'text-halign': 'center',
+                    'font-size': '9px', 'color': '#8892a0', 'text-margin-y': 6,
+                    'min-zoomed-font-size': 6
+                }},
+                // Sector triangles
+                { selector: 'node[type="sector"]', style: {
+                    'shape': 'triangle', 'background-color': '#6bcb77', 'width': 55, 'height': 55,
+                    'font-size': '13px', 'font-weight': 'bold', 'color': '#e0e6ed',
+                    'border-width': 3, 'border-color': 'rgba(255,255,255,0.3)'
+                }},
+                { selector: 'node[sector="energy"]', style: { 'background-color': '#4d96ff', 'border-color': 'rgba(77,150,255,0.5)' }},
+                { selector: 'node[sector="finance"]', style: { 'background-color': '#a855f7', 'border-color': 'rgba(168,85,247,0.5)' }},
+                { selector: 'node[sector="healthcare"]', style: { 'background-color': '#6bcb77', 'border-color': 'rgba(107,203,119,0.5)' }},
+                { selector: 'node[sector="global"]', style: { 'background-color': '#8892a0', 'border-color': 'rgba(136,146,160,0.5)' }},
+                // Malware
+                { selector: 'node[type="malware"]', style: {
+                    'shape': 'ellipse', 'background-color': '#e74c3c', 'width': 44, 'height': 44,
+                    'font-size': '10px', 'font-weight': 'bold', 'color': '#fff',
+                    'border-width': 3, 'border-color': '#c0392b'
+                }},
+                // Actors
+                { selector: 'node[type="actor"]', style: {
+                    'shape': 'ellipse', 'background-color': '#e74c3c', 'width': 40, 'height': 40,
+                    'font-size': '10px', 'font-weight': 'bold', 'color': '#fff'
+                }},
+                // Techniques
+                { selector: 'node[type="technique"]', style: {
+                    'shape': 'diamond', 'background-color': '#ffd93d', 'width': 28, 'height': 28,
+                    'font-size': '8px', 'color': '#333', 'font-weight': '600'
+                }},
+                // Tactics
+                { selector: 'node[type="tactic"]', style: {
+                    'shape': 'hexagon', 'background-color': '#ff9f43', 'width': 34, 'height': 34,
+                    'font-size': '8px', 'font-weight': '600', 'color': '#fff'
+                }},
+                // Indicators
+                { selector: 'node[type="indicator"]', style: {
+                    'shape': 'ellipse', 'background-color': '#00d4aa', 'width': 18, 'height': 18,
+                    'font-size': '7px'
+                }},
+                { selector: 'node[type="indicator"][sector="healthcare"]', style: { 'background-color': '#6bcb77' }},
+                { selector: 'node[type="indicator"][sector="energy"]', style: { 'background-color': '#4d96ff' }},
+                { selector: 'node[type="indicator"][sector="finance"]', style: { 'background-color': '#a855f7' }},
+                // Vulnerabilities
+                { selector: 'node[type="vulnerability"]', style: {
+                    'shape': 'round-rectangle', 'background-color': '#ff9f43',
+                    'width': 'mapData(cvss_score, 0, 10, 24, 60)',
+                    'height': 'mapData(cvss_score, 0, 10, 24, 60)',
+                    'font-size': '8px', 'font-weight': '600', 'color': '#fff',
+                    'border-width': 2, 'border-color': '#e08530'
+                }},
+                // KEV-listed CVEs get red glow
+                { selector: 'node[type="vulnerability"][?is_kev]', style: {
+                    'border-width': 4, 'border-color': '#e74c3c',
+                    'background-color': '#e74c3c',
+                    'shadow-blur': 15, 'shadow-color': '#e74c3c', 'shadow-opacity': 0.6
+                }},
+                // Edges
+                { selector: 'edge', style: {
+                    'width': 1.5, 'line-color': '#444', 'target-arrow-color': '#444',
+                    'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 1
+                }},
+                { selector: 'edge[type="USES"]', style: { 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c', 'width': 2 }},
+                { selector: 'edge[type="BELONGS_TO"]', style: { 'line-color': '#00d4aa', 'target-arrow-color': '#00d4aa', 'line-style': 'dashed', 'width': 1 }},
+                { selector: 'edge[type="IN_TACTIC"]', style: { 'line-color': '#ff9f43', 'target-arrow-color': '#ff9f43', 'line-style': 'dotted' }},
+                { selector: 'edge[type="IN_ZONE"]', style: { 'line-color': '#00d4aa', 'target-arrow-color': '#00d4aa', 'line-style': 'dashed', 'width': 1 }},
+                // Search highlight
+                { selector: '.highlighted', style: { 'border-width': 4, 'border-color': '#fff' }},
+                { selector: '.dimmed', style: { 'opacity': 0.15 }},
+                // Selected
+                { selector: ':selected', style: { 'border-width': 3, 'border-color': '#fff' }}
+            ]
+        });
+
+        // ---- Legends per view ----
+        const legends = {
+            attacks: `
+                <div class="panel-title">Legend</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#e74c3c;border:2px solid #c0392b"></div>Malware</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#00d4aa"></div>Indicator (IOC)</div>
+                <div class="legend-item"><div class="legend-triangle"></div>Sector</div>`,
+            actors: `
+                <div class="panel-title">Legend</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#e74c3c"></div>Threat Actor</div>
+                <div class="legend-item"><div class="legend-diamond" style="background:#ffd93d"></div>Technique</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#ff9f43"></div>Tactic</div>`,
+            indicators: `
+                <div class="panel-title">Legend</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#6bcb77"></div>Healthcare</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#4d96ff"></div>Energy</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#a855f7"></div>Finance</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#8892a0"></div>Global</div>
+                <div class="legend-item"><div class="legend-triangle"></div>Sector</div>`,
+            vulnerabilities: `
+                <div class="panel-title">Legend</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#ff9f43;width:16px;height:16px;border-radius:3px"></div>CVE (size = CVSS)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#e74c3c;width:16px;height:16px;border-radius:3px;box-shadow:0 0 6px #e74c3c"></div>CISA KEV</div>
+                <div class="legend-item"><div class="legend-triangle"></div>Sector</div>`
+        };
+
+        // ---- Connect ----
+        async function connect() {
+            const url = document.getElementById('api-url').value.replace(/\/+$/, '');
+            const key = document.getElementById('api-key').value;
+            localStorage.setItem('eg_api_url', url);
+            localStorage.setItem('eg_api_key', key);
+
+            try {
+                const resp = await fetch(`${url}/health`, { headers: { 'X-API-Key': key } });
+                if (resp.ok) {
+                    isConnected = true;
+                    document.getElementById('conn-status').className = 'status connected';
+                    loadGraph();
+                } else {
+                    alert('Connection failed: ' + resp.status);
+                }
+            } catch (e) {
+                alert('Connection error: ' + e.message);
+            }
+        }
+
+        // ---- Load graph from API ----
+        async function loadGraph() {
+            if (!isConnected) return;
+            const url = localStorage.getItem('eg_api_url');
+            const key = localStorage.getItem('eg_api_key');
+            const zone = document.getElementById('zone-filter').value;
+            const limit = document.getElementById('limit-select').value;
+
+            document.getElementById('loading').classList.add('show');
+
+            let endpoint = `${url}/graph/explore?view=${currentView}&limit=${limit}`;
+            if (zone) endpoint += `&zone=${zone}`;
+
+            try {
+                const resp = await fetch(endpoint, { headers: { 'X-API-Key': key } });
+                if (!resp.ok) throw new Error('API returned ' + resp.status);
+                const data = await resp.json();
+
+                cy.elements().remove();
+                cy.add(data.nodes);
+                cy.add(data.edges);
+
+                document.getElementById('stat-nodes').textContent = data.stats.nodes;
+                document.getElementById('stat-edges').textContent = data.stats.edges;
+                document.getElementById('stat-view').textContent = currentView;
+
+                runLayout();
+            } catch (e) {
+                console.error('Load graph failed:', e);
+                alert('Failed to load graph: ' + e.message);
+            } finally {
+                document.getElementById('loading').classList.remove('show');
+            }
+        }
+
+        // ---- Switch view ----
+        function switchView(view, btn) {
+            currentView = view;
+            document.querySelectorAll('.controls .btn[data-view]').forEach(b => b.classList.remove('active'));
+            if (btn) btn.classList.add('active');
+            document.getElementById('legend-panel').innerHTML = legends[view] || '';
+            if (isConnected) loadGraph();
+        }
+
+        // ---- Layout ----
+        function runLayout() {
+            const layoutOpts = {
+                attacks: { name: 'dagre', rankDir: 'TB', nodeSep: 70, rankSep: 100, animate: true, animationDuration: 400, fit: false },
+                actors: { name: 'cose', animate: true, animationDuration: 500, nodeRepulsion: 8000, idealEdgeLength: 140, gravity: 0.3, numIter: 2000, fit: false },
+                indicators: { name: 'cose', animate: true, animationDuration: 500, nodeRepulsion: 6000, idealEdgeLength: 100, gravity: 0.4, numIter: 1500, fit: false },
+                vulnerabilities: { name: 'cose', animate: true, animationDuration: 500, nodeRepulsion: 7000, idealEdgeLength: 120, gravity: 0.35, numIter: 1500, fit: false }
+            };
+            cy.layout(layoutOpts[currentView] || layoutOpts.attacks).run();
+            setTimeout(() => { cy.fit(50); cy.center(); }, 150);
+        }
+
+        // ---- Search ----
+        function searchNodes(query) {
+            cy.elements().removeClass('highlighted dimmed');
+            if (!query.trim()) return;
+            const q = query.toLowerCase();
+            const matched = cy.nodes().filter(n => {
+                const d = n.data();
+                return (d.label || '').toLowerCase().includes(q)
+                    || (d.id || '').toLowerCase().includes(q)
+                    || (d.name || '').toLowerCase().includes(q);
+            });
+            if (matched.length > 0) {
+                cy.elements().addClass('dimmed');
+                matched.removeClass('dimmed').addClass('highlighted');
+                matched.connectedEdges().removeClass('dimmed');
+                matched.connectedEdges().connectedNodes().removeClass('dimmed');
+            }
+        }
+
+        // ---- HTML sanitization ----
+        function esc(str) {
+            const el = document.createElement('span');
+            el.textContent = String(str);
+            return el.innerHTML;
+        }
+
+        // ---- Node click -> detail panel ----
+        cy.on('tap', 'node', function(e) {
+            const d = e.target.data();
+            let html = `<div class="detail-header">${esc(d.label)}</div>`;
+            html += `<div class="detail-type">${esc(d.type)}</div>`;
+
+            if (d.is_kev) html += '<div class="kev-badge">CISA KEV - Active Exploitation</div>';
+
+            const skip = new Set(['id', 'label', 'type', 'is_kev']);
+            for (const [k, v] of Object.entries(d)) {
+                if (skip.has(k) || v === null || v === undefined || v === '') continue;
+                const display = Array.isArray(v) ? v.join(', ') : String(v);
+                html += `<div class="detail-row"><span class="detail-key">${esc(k)}</span><span class="detail-val">${esc(display)}</span></div>`;
+            }
+
+            // Show connected nodes
+            const neighbors = e.target.neighborhood('node');
+            if (neighbors.length > 0) {
+                html += `<div style="margin-top:14px;"><div class="panel-title">Connected (${neighbors.length})</div>`;
+                neighbors.forEach(n => {
+                    html += `<div class="detail-row"><span class="detail-key">${esc(n.data('type'))}</span><span class="detail-val">${esc(n.data('label'))}</span></div>`;
+                });
+                html += '</div>';
+            }
+
+            document.getElementById('detail-content').innerHTML = html;
+            document.getElementById('detail-panel').classList.add('open');
+        });
+
+        // Click background to close detail
+        cy.on('tap', function(e) {
+            if (e.target === cy) closeDetail();
+        });
+
+        function closeDetail() {
+            document.getElementById('detail-panel').classList.remove('open');
+        }
+
+        // ---- Tooltip on hover ----
+        const tooltip = document.getElementById('tooltip');
+        cy.on('mouseover', 'node', function(e) {
+            const d = e.target.data();
+            let extra = '';
+            if (d.type === 'vulnerability' && d.cvss_score) extra = ` | CVSS ${d.cvss_score}`;
+            if (d.type === 'indicator' && d.indicator_type) extra = ` | ${d.indicator_type}`;
+            if (d.is_kev) extra += ' | KEV';
+            tooltip.innerHTML = `<span class="tt-label">${esc(d.label)}</span><br><span class="tt-type">${esc(d.type)}${esc(extra)}</span>`;
+            tooltip.style.display = 'block';
+        });
+        cy.on('mousemove', 'node', function(e) {
+            tooltip.style.left = (e.originalEvent.offsetX + 14) + 'px';
+            tooltip.style.top = (e.originalEvent.offsetY + 14) + 'px';
+        });
+        cy.on('mouseout', 'node', function() {
+            tooltip.style.display = 'none';
+        });
+
+        // ---- Init ----
+        document.getElementById('legend-panel').innerHTML = legends.attacks;
+
+        // Auto-connect if we have saved credentials
+        if (savedUrl && savedKey) {
+            connect();
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,182 @@
+# ================================================================================
+# EdgeGuard Monitoring Stack
+# Prometheus + Grafana for EdgeGuard Threat Intelligence Pipeline
+# ================================================================================
+
+services:
+  # ================================================================================
+  # Prometheus - Metrics Collection
+  # ================================================================================
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: edgeguard_prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      # SECURITY: admin API allows metric deletion and server shutdown.
+      # Remove or gate behind an auth proxy (e.g. nginx basic-auth) in production.
+      # - '--web.enable-admin-api'
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    networks:
+      - edgeguard_monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ================================================================================
+  # Grafana - Visualization
+  # ================================================================================
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: edgeguard_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      # GRAFANA_ADMIN_PASSWORD must be set — no insecure fallback in production.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/edgeguard-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks:
+      - edgeguard_monitoring
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ================================================================================
+  # Node Exporter - Host Metrics
+  # ================================================================================
+  node-exporter:
+    image: prom/node-exporter:v1.7.0
+    container_name: edgeguard_node_exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - edgeguard_monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Only run on Linux hosts
+    profiles:
+      - host-monitoring
+
+  # ================================================================================
+  # cAdvisor - Container Metrics
+  # ================================================================================
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    container_name: edgeguard_cadvisor
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /cgroup:/cgroup:ro
+    networks:
+      - edgeguard_monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # Only run on Linux hosts with Docker socket access
+    profiles:
+      - host-monitoring
+
+  # ================================================================================
+  # AlertManager - Alert Routing
+  # ================================================================================
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: edgeguard_alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+      - '--web.external-url=http://localhost:9093'
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    networks:
+      - edgeguard_monitoring
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    profiles:
+      - alerts
+
+# ================================================================================
+# Volumes
+# ================================================================================
+volumes:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+
+# ================================================================================
+# Networks
+# ================================================================================
+networks:
+  edgeguard_monitoring:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

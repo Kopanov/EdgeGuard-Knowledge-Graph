@@ -1,0 +1,61 @@
+# EdgeGuard Requirements
+# =============================================================================
+# Install with: pip install -r requirements.txt
+#
+# Version policy: ~= (compatible release) pins to the current major.minor and
+# allows only patch upgrades.  This blocks Airflow 3.x, neo4j 6.x, etc. from
+# silently breaking the pipeline on a fresh install.
+#
+# To upgrade intentionally, update the minor version and re-test.
+# =============================================================================
+
+# ── Core ─────────────────────────────────────────────────────────────────────
+neo4j~=5.27
+requests~=2.32
+pandas~=2.2
+pyyaml~=6.0
+python-dateutil~=2.9
+urllib3~=2.3
+
+# ── Data collection ──────────────────────────────────────────────────────────
+pymisp~=2.4
+# Correct PyPI package for AlienVault OTX SDK (otx-api is a different, unrelated package)
+OTXv2~=1.5
+
+# ── STIX 2.1 support ─────────────────────────────────────────────────────────
+stix2~=3.0
+
+# ── Airflow orchestration ────────────────────────────────────────────────────
+# Pinned to 2.x — Airflow 3.0 has breaking API changes (DAG serialization,
+# operator interfaces, scheduler protocol).
+# [postgres] — psycopg2 + Postgres provider for LocalExecutor against PostgreSQL metadata
+# (aligns with docker-compose service airflow_postgres). For MySQL metadata, switch extra per Airflow docs.
+# Production / compose: metadata is PostgreSQL only — do not point Airflow at SQLite there.
+# There is no separate "install SQLite" step: CPython ships the sqlite3 stdlib; SQLAlchemy (Airflow dep)
+# includes a SQLite dialect for upstream defaults. Local dev may still create airflow.db if
+# SQL_ALCHEMY_CONN is unset — that file is gitignored.
+# NOTE: All known Airflow 2.11.x CVEs are tracked and ignored in CI (see .github/workflows/ci.yml).
+# Runtime (not pip): EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE — MISP→Neo4j merge chunking; 0 or "all" = single pass (see README).
+apache-airflow[postgres]~=2.11
+
+# ── Monitoring & Metrics ─────────────────────────────────────────────────────
+prometheus-client~=0.21
+
+# ── ResilMesh / NATS ─────────────────────────────────────────────────────────
+nats-py~=2.9
+
+# ── FastAPI Query Engine (REST + GraphQL) ────────────────────────────────────
+fastapi~=0.115
+uvicorn~=0.34
+slowapi~=0.1
+# GraphQL layer — ISIM-compatible endpoint on port 4001
+# strawberry-graphql[fastapi] bundles strawberry-graphql + fastapi integration
+strawberry-graphql~=0.283
+
+# ── OpenTelemetry distributed tracing ────────────────────────────────────────
+opentelemetry-api~=1.29
+opentelemetry-sdk~=1.29
+opentelemetry-instrumentation-fastapi~=0.50b0
+opentelemetry-exporter-otlp~=1.29
+
+# ── Dev / test deps are in requirements-dev.txt ──────────────────────────────
