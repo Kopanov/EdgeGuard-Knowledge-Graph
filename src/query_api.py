@@ -955,7 +955,7 @@ if __name__ == "__main__":
     import uvicorn
 
     # Get configuration from environment
-    host = os.getenv("EDGEGUARD_API_HOST", "0.0.0.0")
+    host = os.getenv("EDGEGUARD_API_HOST", "127.0.0.1")
     try:
         port = int(os.getenv("EDGEGUARD_API_PORT", "8000"))
     except (ValueError, TypeError):

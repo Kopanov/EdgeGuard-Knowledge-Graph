@@ -368,7 +368,7 @@ class MetricsServer:
         server.start_threaded()
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8001):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8001):
         self.host = host
         self.port = port
         self.server: Optional[ThreadedHTTPServer] = None
@@ -449,7 +449,7 @@ def start_metrics_server(host: str = None, port: int = None, threaded: bool = Tr
     Convenience function to start the metrics server.
 
     Args:
-        host: Bind host (default: 0.0.0.0)
+        host: Bind host (default: 127.0.0.1)
         port: Bind port (default: 8001)
         threaded: If True, start in background thread; if False, block
 
@@ -474,7 +474,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="EdgeGuard Prometheus Metrics Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8001, help="Bind port (default: 8001)")
     parser.add_argument("--test-metrics", action="store_true", help="Generate test metrics")
 

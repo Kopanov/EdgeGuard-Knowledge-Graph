@@ -6,7 +6,7 @@ Strawberry + FastAPI GraphQL endpoint, mirroring the ISIM GraphQL convention
 queries ISIM.
 
 Run standalone:
-    uvicorn src.graphql_api:app --host 0.0.0.0 --port 4001
+    uvicorn src.graphql_api:app --host 127.0.0.1 --port 4001
 
 Or import `app` into a combined runner alongside the REST API.
 
@@ -641,5 +641,5 @@ if __name__ == "__main__":
         port = int(os.getenv("EDGEGUARD_GRAPHQL_PORT", "4001"))
     except (ValueError, TypeError):
         port = 4001
-    host = os.getenv("EDGEGUARD_GRAPHQL_HOST", "0.0.0.0")
+    host = os.getenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1")
     uvicorn.run("graphql_api:app", host=host, port=port, reload=False)

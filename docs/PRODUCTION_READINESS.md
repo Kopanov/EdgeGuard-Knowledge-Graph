@@ -217,7 +217,7 @@ python3 src/edgeguard.py --baseline
 docker-compose -f docker-compose.monitoring.yml up -d
 
 # 5. (Optional) Start Airflow for automated recurring collection
-airflow webserver --port 8080 &
+airflow webserver --port 8082 &
 airflow scheduler &
 ```
 

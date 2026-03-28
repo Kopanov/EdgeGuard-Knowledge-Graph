@@ -24,7 +24,7 @@ If your deployment uses Neo4j Enterprise or Aura, Bloom can be used alongside or
    docker compose up api
 
    # Or directly
-   uvicorn src.query_api:app --host 0.0.0.0 --port 8000
+   uvicorn src.query_api:app --host 127.0.0.1 --port 8000
    ```
 
 2. **Open the explorer** in your browser:
