@@ -77,8 +77,8 @@ services:
     container_name: edgeguard_neo4j
     restart: unless-stopped
     ports:
-      - "7474:7474"   # Neo4j Browser (HTTP)
-      - "7687:7687"   # Bolt protocol
+      - "127.0.0.1:7474:7474"   # Neo4j Browser (HTTP) — loopback only
+      - "127.0.0.1:7687:7687"   # Bolt protocol — loopback only
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
       NEO4J_PLUGINS: '["apoc"]'
@@ -159,7 +159,7 @@ services:
     # — that would override CMD and break the entrypoint chain.
     init: true
     ports:
-      - "8082:8082"
+      - "127.0.0.1:8082:8082"   # Airflow UI — loopback only
     environment:
       <<: *common-env
       # Mounted repo src at /opt/airflow/src — ensure all PythonOperator imports resolve without relying only on DAG sys.path hacks.
@@ -224,7 +224,7 @@ services:
     command: ["python", "-m", "uvicorn", "src.query_api:app",
               "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"   # REST API — loopback only; use reverse proxy for external access
     environment:
       <<: *common-env
       EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
@@ -266,7 +266,7 @@ services:
     command: ["python", "-m", "uvicorn", "src.graphql_api:app",
               "--host", "0.0.0.0", "--port", "4001", "--workers", "2"]
     ports:
-      - "4001:4001"
+      - "127.0.0.1:4001:4001"   # GraphQL API — loopback only
     environment:
       <<: *common-env
       EDGEGUARD_GRAPHQL_PORT: "4001"
