@@ -106,7 +106,10 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-_MAX_BODY_BYTES = int(os.getenv("EDGEGUARD_MAX_BODY_BYTES", str(1 * 1024 * 1024)))  # 1 MB default
+try:
+    _MAX_BODY_BYTES = int(os.getenv("EDGEGUARD_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
+except (ValueError, TypeError):
+    _MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MB default
 
 
 @app.middleware("http")
@@ -953,7 +956,10 @@ if __name__ == "__main__":
 
     # Get configuration from environment
     host = os.getenv("EDGEGUARD_API_HOST", "0.0.0.0")
-    port = int(os.getenv("EDGEGUARD_API_PORT", "8000"))
+    try:
+        port = int(os.getenv("EDGEGUARD_API_PORT", "8000"))
+    except (ValueError, TypeError):
+        port = 8000
     reload = os.getenv("EDGEGUARD_API_RELOAD", "false").lower() == "true"
 
     logger.info(f"[START] Starting EdgeGuard Query API on {host}:{port}")

@@ -10,7 +10,20 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/actions/workflows/ci.yml"><img src="https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+">
+  <img src="https://img.shields.io/badge/neo4j-5.27-green.svg" alt="Neo4j 5.27">
+  <img src="https://img.shields.io/badge/license-MIT-brightgreen.svg" alt="MIT License">
+  <img src="https://img.shields.io/badge/version-2026.3.28-orange.svg" alt="Version">
+</p>
+
+<p align="center">
   IICT-BAS + Ratio1 | financed by ResilMesh - open call 2
+</p>
+
+<p align="center">
+  <em>This project has received funding through the <strong>ResilMesh Open Call 2</strong>,<br>
+  supported by the European Union's Horizon Europe research and innovation programme.</em>
 </p>
 
 ---
