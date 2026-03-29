@@ -1102,6 +1102,8 @@ class MISPWriter:
         if not items:
             return 0, 0
 
+        total_items = len(items)
+
         # Guard against invalid batch_size (0 would crash range())
         batch_size = max(1, batch_size)
 
@@ -1181,6 +1183,13 @@ class MISPWriter:
 
         total_batches = sum((len(attrs) + batch_size - 1) // batch_size for _, attrs in push_queue)
 
+        if not push_queue and total_items > 0:
+            logger.warning(
+                "[DEDUP] All %d items were already present in MISP — nothing new to push. "
+                "This is normal on re-runs. Use --fresh-baseline to force re-collection.",
+                total_items,
+            )
+
         # Throttle delay between batches — gives MISP time to free memory
         # when processing large events (e.g. 95K NVD attributes).
         try:
@@ -1221,9 +1230,16 @@ class MISPWriter:
 
         # Final summary
         total_elapsed = time.time() - start_time
-        logger.info(
-            f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed in {total_elapsed:.1f}s"
-        )
+        if total_success > 0 or total_failed > 0:
+            logger.info(
+                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed in {total_elapsed:.1f}s"
+            )
+        elif total_items > 0:
+            logger.info(
+                f"[SKIP] MISP push: 0 new attributes to push ({total_items} items all deduplicated) in {total_elapsed:.1f}s"
+            )
+        else:
+            logger.info("[OK] MISP push: no items provided")
 
         return total_success, total_failed
 

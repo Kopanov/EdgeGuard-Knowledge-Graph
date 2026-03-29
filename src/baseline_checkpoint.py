@@ -180,14 +180,33 @@ def update_source_incremental(source: str, **kwargs) -> None:
 
 
 def clear_checkpoint(source: str = None) -> None:
-    """Clear checkpoint for *source*, or all checkpoints if source is None."""
+    """Clear baseline checkpoint for *source*, or all baseline checkpoints if source is None.
+
+    Preserves incremental state (``"incremental"`` sub-dict inside each source
+    entry) so that scheduled runs don't lose their "where I left off" cursors
+    after a fresh baseline.
+    """
     if source:
         checkpoints = load_checkpoint()
         if source in checkpoints:
-            del checkpoints[source]
+            # Preserve incremental sub-dict if it exists
+            inc = checkpoints[source].get("incremental")
+            if inc:
+                checkpoints[source] = {"incremental": inc}
+            else:
+                del checkpoints[source]
             save_checkpoint(checkpoints)
     else:
-        if CHECKPOINT_FILE.exists():
+        checkpoints = load_checkpoint()
+        # Keep only incremental state from each source
+        preserved = {}
+        for src, data in checkpoints.items():
+            inc = data.get("incremental") if isinstance(data, dict) else None
+            if inc:
+                preserved[src] = {"incremental": inc}
+        if preserved:
+            save_checkpoint(preserved)
+        elif CHECKPOINT_FILE.exists():
             CHECKPOINT_FILE.unlink()
 
 

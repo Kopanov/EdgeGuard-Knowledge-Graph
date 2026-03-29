@@ -2398,26 +2398,27 @@ class MISPToNeo4jSync:
                     or item.get("cvss_v30_data")
                     or item.get("cvss_v2_data")
                 ):
-                    self.neo4j.merge_cve(item, source_id=source_id)
+                    ok = self.neo4j.merge_cve(item, source_id=source_id)
                 else:
-                    self.neo4j.merge_vulnerability(item, source_id=source_id)
-                self.stats["vulnerabilities_synced"] += 1
+                    ok = self.neo4j.merge_vulnerability(item, source_id=source_id)
+                if ok:
+                    self.stats["vulnerabilities_synced"] += 1
 
             elif item.get("indicator_type") and item.get("value"):
-                self.neo4j.merge_indicator(item, source_id=source_id)
-                self.stats["indicators_synced"] += 1
+                if self.neo4j.merge_indicator(item, source_id=source_id):
+                    self.stats["indicators_synced"] += 1
 
             elif item_type == "malware":
-                self.neo4j.merge_malware(item, source_id=source_id)
-                self.stats["malware_synced"] += 1
+                if self.neo4j.merge_malware(item, source_id=source_id):
+                    self.stats["malware_synced"] += 1
 
             elif item_type == "actor":
-                self.neo4j.merge_actor(item, source_id=source_id)
-                self.stats["actors_synced"] += 1
+                if self.neo4j.merge_actor(item, source_id=source_id):
+                    self.stats["actors_synced"] += 1
 
             elif item_type == "technique":
-                self.neo4j.merge_technique(item, source_id=source_id)
-                self.stats["techniques_synced"] += 1
+                if self.neo4j.merge_technique(item, source_id=source_id):
+                    self.stats["techniques_synced"] += 1
 
             elif item_type == "tactic":
                 self.neo4j.merge_tactic(item, source_id=source_id)

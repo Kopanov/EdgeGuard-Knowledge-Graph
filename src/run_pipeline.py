@@ -406,7 +406,7 @@ class EdgeGuardPipeline:
                     # Parse pattern to extract indicator value
                     indicator_data = self._parse_stix_pattern(pattern)
                     if indicator_data:
-                        self.neo4j.merge_indicator(
+                        ok = self.neo4j.merge_indicator(
                             {
                                 "indicator_type": indicator_data.get("type", "unknown"),
                                 "value": indicator_data.get("value", ""),
@@ -420,7 +420,8 @@ class EdgeGuardPipeline:
                             },
                             source_id=obj.get("x_edgeguard_source", "unknown"),
                         )
-                        stats["indicators"] += 1
+                        if ok:
+                            stats["indicators"] += 1
 
                 # Handle Vulnerability objects (CVE)
                 elif obj_type == "vulnerability":
@@ -429,7 +430,7 @@ class EdgeGuardPipeline:
                     import re
 
                     if re.match(r"^CVE-\d{4}-\d{4,}$", vuln_name, re.IGNORECASE):
-                        self.neo4j.merge_vulnerability(
+                        ok = self.neo4j.merge_vulnerability(
                             {
                                 "cve_id": vuln_name.upper(),
                                 "description": obj.get("description", ""),
@@ -446,11 +447,12 @@ class EdgeGuardPipeline:
                             },
                             source_id=obj.get("x_edgeguard_source", "unknown"),
                         )
-                        stats["vulnerabilities"] += 1
+                        if ok:
+                            stats["vulnerabilities"] += 1
 
                 # Handle Threat Actor objects
                 elif obj_type == "threat-actor":
-                    self.neo4j.merge_actor(
+                    ok = self.neo4j.merge_actor(
                         {
                             "name": obj.get("name", ""),
                             "aliases": obj.get("aliases", []),
@@ -462,11 +464,12 @@ class EdgeGuardPipeline:
                         },
                         source_id=obj.get("x_edgeguard_source", "unknown"),
                     )
-                    stats["actors"] += 1
+                    if ok:
+                        stats["actors"] += 1
 
                 # Handle Malware objects
                 elif obj_type == "malware":
-                    self.neo4j.merge_malware(
+                    ok = self.neo4j.merge_malware(
                         {
                             "name": obj.get("name", ""),
                             "malware_types": obj.get("malware_types", []),
@@ -479,7 +482,8 @@ class EdgeGuardPipeline:
                         },
                         source_id=obj.get("x_edgeguard_source", "unknown"),
                     )
-                    stats["malware"] += 1
+                    if ok:
+                        stats["malware"] += 1
 
                 # Handle Tool objects (Cobalt Strike, Mimikatz, etc.)
                 elif obj_type == "tool":
@@ -792,6 +796,32 @@ class EdgeGuardPipeline:
             fresh_baseline: If True with baseline, discard any existing checkpoints and start
                 from scratch. Default False preserves partial progress for resume.
         """
+        # ── Pipeline lock: prevent concurrent runs ──
+        lock_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
+        os.makedirs(lock_dir, exist_ok=True)
+        lock_path = os.path.join(lock_dir, "pipeline.lock")
+        try:
+            if os.path.exists(lock_path):
+                with open(lock_path) as f:
+                    old_pid = int(f.read().strip())
+                # Check if the process is still alive
+                try:
+                    os.kill(old_pid, 0)
+                    logger.warning(
+                        f"Another pipeline process (PID {old_pid}) appears to be running. "
+                        "If this is stale, delete checkpoints/pipeline.lock and retry."
+                    )
+                except (OSError, ProcessLookupError):
+                    logger.info(f"Stale lock file found (PID {old_pid} is gone) — removing.")
+        except (ValueError, IOError):
+            pass
+        with open(lock_path, "w") as f:
+            f.write(str(os.getpid()))
+
+        import atexit
+
+        atexit.register(lambda: os.remove(lock_path) if os.path.exists(lock_path) else None)
+
         # Import baseline checkpoint utilities
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
 

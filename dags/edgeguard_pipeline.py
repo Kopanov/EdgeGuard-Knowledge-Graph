@@ -1383,6 +1383,7 @@ baseline_dag = DAG(
     schedule_interval=None,  # MANUAL TRIGGER ONLY
     start_date=_DAG_START_DATE,
     catchup=False,
+    is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )
 
