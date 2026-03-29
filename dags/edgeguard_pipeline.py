@@ -95,6 +95,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -261,6 +262,18 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE:
             "edgeguard_last_success_timestamp", "Unix timestamp of last successful collection", ["source"]
         )
 
+        # DAG-level stuck-run detection
+        DAG_LAST_SUCCESS = Gauge(
+            "edgeguard_dag_last_success_timestamp",
+            "Unix timestamp of last successful DAG run (0 = never succeeded)",
+            ["dag_id"],
+        )
+        DAG_RUN_START = Gauge(
+            "edgeguard_dag_run_start_timestamp",
+            "Unix timestamp when the current DAG run started (0 = idle)",
+            ["dag_id"],
+        )
+
         logger.info("Prometheus metrics enabled (standalone mode)")
     except ImportError:
         logger.warning("prometheus_client not installed. Install with: pip install prometheus_client")
@@ -385,19 +398,52 @@ def send_slack_alert(message: str, channel: str = None):
 
 def _on_task_failure(context):
     """Callback on any task failure — logs prominently and sends Slack if enabled."""
-    dag_id = context.get("dag", {}).dag_id if context.get("dag") else "unknown"
-    task_id = context.get("task_instance", {}).task_id if context.get("task_instance") else "unknown"
+    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    task_id = context.get("task_instance").task_id if context.get("task_instance") else "unknown"
     exc = context.get("exception", "")
     logger.error(f"[ALERT] Task FAILED: {dag_id}.{task_id} — {exc}")
     if ENABLE_SLACK_ALERTS:
         send_slack_alert(f"Task FAILED: {dag_id}.{task_id} — {exc}", level="critical")
     if ENABLE_PROMETHEUS_METRICS:
         try:
-            from resilience import COLLECTION_FAILURES
-
-            COLLECTION_FAILURES.labels(source=task_id, error_type="task_failure").inc()
+            PIPELINE_ERRORS.labels(task=task_id, error_type="task_failure").inc()
         except Exception:
             pass
+
+
+def _on_task_success(context):
+    """Callback on any task success — update DAG-level success gauge for stuck-run detection."""
+    if not ENABLE_PROMETHEUS_METRICS:
+        return
+    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    try:
+        DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(time.time())
+    except Exception:
+        pass
+
+
+def _on_dag_run_start(**kwargs):
+    """Called by the first task in each DAG to mark the run as in-progress."""
+    if not ENABLE_PROMETHEUS_METRICS:
+        return
+    dag_id = kwargs.get("dag", None)
+    dag_id = dag_id.dag_id if dag_id else "unknown"
+    try:
+        DAG_RUN_START.labels(dag_id=dag_id).set(time.time())
+    except Exception:
+        pass
+
+
+def _on_dag_run_end(**kwargs):
+    """Called by the last task in each DAG to clear the in-progress marker."""
+    if not ENABLE_PROMETHEUS_METRICS:
+        return
+    dag_id = kwargs.get("dag", None)
+    dag_id = dag_id.dag_id if dag_id else "unknown"
+    try:
+        DAG_RUN_START.labels(dag_id=dag_id).set(0)
+    except Exception:
+        pass
 
 
 # Default arguments
@@ -409,6 +455,7 @@ default_args = {
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
     "on_failure_callback": _on_task_failure,
+    "on_success_callback": _on_task_success,
 }
 
 # ================================================================================
