@@ -1022,7 +1022,7 @@ dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Prevent pile-up if a run is slow
-    dagrun_timeout=timedelta(hours=2),  # Kill hung runs
+    dagrun_timeout=timedelta(hours=5, minutes=30),  # Worst-case: 4h25m (OTX retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "high-frequency"],
 )
 
@@ -1100,7 +1100,7 @@ medium_freq_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=3),
+    dagrun_timeout=timedelta(hours=5),  # Worst-case: 4h (CISA/VT retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "medium-frequency"],
 )
 
@@ -1147,7 +1147,7 @@ low_freq_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=6),
+    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (NVD retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "low-frequency"],
 )
 
@@ -1187,7 +1187,7 @@ daily_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=6),
+    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (7 collectors parallel + retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1290,7 +1290,7 @@ neo4j_sync_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=8),
+    dagrun_timeout=timedelta(hours=22),  # Worst-case: 18h (full sync + rels + enrich, all with retries)
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
@@ -1416,7 +1416,7 @@ baseline_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Only one baseline at a time
-    dagrun_timeout=timedelta(hours=12),  # Kill if stuck longer than 12h
+    dagrun_timeout=timedelta(hours=32),  # Worst-case: 26h (full collection + sync + retries) + buffer
     is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )
