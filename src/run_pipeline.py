@@ -903,9 +903,10 @@ class EdgeGuardPipeline:
                 try:
                     import requests as _req
 
-                    _misp_url = os.getenv("MISP_URL", "https://localhost:8443")
-                    _misp_key = os.getenv("MISP_API_KEY", "")
-                    _verify = os.getenv("EDGEGUARD_SSL_VERIFY", "true").lower() == "true"
+                    from config import MISP_API_KEY as _misp_key
+                    from config import MISP_URL as _misp_url
+                    from config import SSL_VERIFY as _verify
+
                     _sess = _req.Session()
                     _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
                     _resp = _sess.get(
@@ -915,7 +916,16 @@ class EdgeGuardPipeline:
                         timeout=(15, 60),
                     )
                     if _resp.status_code == 200:
-                        _events = _resp.json() if isinstance(_resp.json(), list) else []
+                        _json = _resp.json()
+                        # MISP may return list, {"response": [...]}, or dict-wrapped events
+                        if isinstance(_json, list):
+                            _events = _json
+                        elif isinstance(_json, dict):
+                            _events = _json.get("response", _json.get("Event", []))
+                            if isinstance(_events, dict):
+                                _events = [_events]
+                        else:
+                            _events = []
                         _deleted = 0
                         for ev in _events:
                             eid = ev.get("id") or ev.get("Event", {}).get("id")
