@@ -280,19 +280,34 @@ def cmd_doctor(args):
         except Exception as e:
             warn(f"Could not verify Neo4j constraints: {e}")
 
-    # Test Airflow
+    # Test Airflow (retry once after 5s if first attempt fails — handles restarts)
     info("Testing Airflow webserver...")
     airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://localhost:8082")
-    try:
-        import requests
+    airflow_ok = False
+    for _attempt in range(2):
+        try:
+            import requests
 
-        resp = requests.get(f"{airflow_url}/health", timeout=10)
-        if resp.status_code == 200:
-            ok(f"Airflow webserver reachable at {airflow_url}")
-        else:
-            warn(f"Airflow webserver returned {resp.status_code} (may still be starting)")
-    except Exception as e:
-        warn(f"Airflow webserver not reachable at {airflow_url}: {e}")
+            resp = requests.get(f"{airflow_url}/health", timeout=10)
+            if resp.status_code == 200:
+                ok(f"Airflow webserver reachable at {airflow_url}")
+                airflow_ok = True
+                break
+            else:
+                if _attempt == 0:
+                    info(f"Airflow returned {resp.status_code} — retrying in 5s (may be starting)...")
+                    import time
+
+                    time.sleep(5)
+        except Exception:
+            if _attempt == 0:
+                info("Airflow not reachable — retrying in 5s (may be starting)...")
+                import time
+
+                time.sleep(5)
+    if not airflow_ok:
+        err(f"Airflow webserver not reachable at {airflow_url} after retry — scheduled DAGs will not run")
+        all_ok = False
 
     # Test NATS (optional)
     nats_url = os.getenv("NATS_URL", "")
