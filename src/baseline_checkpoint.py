@@ -189,12 +189,7 @@ def clear_checkpoint(source: str = None) -> None:
     if source:
         checkpoints = load_checkpoint()
         if source in checkpoints:
-            # Preserve incremental sub-dict if it exists
-            inc = checkpoints[source].get("incremental")
-            if inc:
-                checkpoints[source] = {"incremental": inc}
-            else:
-                del checkpoints[source]
+            del checkpoints[source]
             save_checkpoint(checkpoints)
     else:
         checkpoints = load_checkpoint()

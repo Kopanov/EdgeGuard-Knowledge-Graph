@@ -796,7 +796,9 @@ class EdgeGuardPipeline:
             fresh_baseline: If True with baseline, discard any existing checkpoints and start
                 from scratch. Default False preserves partial progress for resume.
         """
-        # ── Pipeline lock: prevent concurrent runs ──
+        # ── Pipeline lock: prevent concurrent CLI runs ──
+        # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
+        # Airflow DAGs use max_active_runs=1 for concurrency control instead.
         lock_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
         os.makedirs(lock_dir, exist_ok=True)
         lock_path = os.path.join(lock_dir, "pipeline.lock")
@@ -807,10 +809,12 @@ class EdgeGuardPipeline:
                 # Check if the process is still alive
                 try:
                     os.kill(old_pid, 0)
-                    logger.warning(
-                        f"Another pipeline process (PID {old_pid}) appears to be running. "
+                    logger.error(
+                        f"Another pipeline process (PID {old_pid}) is still running. "
+                        "Aborting to prevent data races. "
                         "If this is stale, delete checkpoints/pipeline.lock and retry."
                     )
+                    return False
                 except (OSError, ProcessLookupError):
                     logger.info(f"Stale lock file found (PID {old_pid} is gone) — removing.")
         except (ValueError, IOError):
@@ -819,8 +823,17 @@ class EdgeGuardPipeline:
             f.write(str(os.getpid()))
 
         import atexit
+        import signal
 
-        atexit.register(lambda: os.remove(lock_path) if os.path.exists(lock_path) else None)
+        def _cleanup_lock(*_args):
+            try:
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except OSError:
+                pass
+
+        atexit.register(_cleanup_lock)
+        signal.signal(signal.SIGTERM, lambda s, f: (_cleanup_lock(), sys.exit(1)))
 
         # Import baseline checkpoint utilities
         from baseline_checkpoint import clear_checkpoint, get_baseline_status

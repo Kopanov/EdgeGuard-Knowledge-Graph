@@ -383,6 +383,23 @@ def send_slack_alert(message: str, channel: str = None):
         logger.warning(f"Failed to send Slack alert: {e}")
 
 
+def _on_task_failure(context):
+    """Callback on any task failure — logs prominently and sends Slack if enabled."""
+    dag_id = context.get("dag", {}).dag_id if context.get("dag") else "unknown"
+    task_id = context.get("task_instance", {}).task_id if context.get("task_instance") else "unknown"
+    exc = context.get("exception", "")
+    logger.error(f"[ALERT] Task FAILED: {dag_id}.{task_id} — {exc}")
+    if ENABLE_SLACK_ALERTS:
+        send_slack_alert(f"Task FAILED: {dag_id}.{task_id} — {exc}", level="critical")
+    if ENABLE_PROMETHEUS_METRICS:
+        try:
+            from resilience import COLLECTION_FAILURES
+
+            COLLECTION_FAILURES.labels(source=task_id, error_type="task_failure").inc()
+        except Exception:
+            pass
+
+
 # Default arguments
 default_args = {
     "owner": "edgeguard",
@@ -391,6 +408,7 @@ default_args = {
     "email_on_retry": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": _on_task_failure,
 }
 
 # ================================================================================
@@ -853,15 +871,18 @@ def should_run_neo4j_sync():
         logger.warning(f"Failed to get NEO4J_SYNC_INTERVAL, using default: {e}")
         interval_hours = 72
 
-    if os.path.exists(state_file):
-        with open(state_file, "r") as f:
-            state = json.load(f)
-            _raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
-            last_sync = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r") as f:
+                state = json.load(f)
+                _raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
+                last_sync = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
 
-            if datetime.now(timezone.utc) - last_sync < timedelta(hours=interval_hours):
-                logger.info(f"Skipping Neo4j sync - last sync was {last_sync}, interval is {interval_hours}h")
-                return False
+                if datetime.now(timezone.utc) - last_sync < timedelta(hours=interval_hours):
+                    logger.info(f"Skipping Neo4j sync - last sync was {last_sync}, interval is {interval_hours}h")
+                    return False
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.error(f"Corrupted sync state file ({state_file}): {e} — running sync to be safe")
 
     logger.info(f"Running Neo4j sync - interval {interval_hours}h has passed")
     return True
@@ -1000,6 +1021,8 @@ dag = DAG(
     schedule_interval="*/30 * * * *",
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,  # Prevent pile-up if a run is slow
+    dagrun_timeout=timedelta(hours=2),  # Kill hung runs
     tags=["threat-intel", "edgeguard", "misp", "high-frequency"],
 )
 
@@ -1076,6 +1099,8 @@ medium_freq_dag = DAG(
     schedule_interval="0 */4 * * *",  # Every 4 hours
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=3),
     tags=["threat-intel", "edgeguard", "misp", "medium-frequency"],
 )
 
@@ -1121,6 +1146,8 @@ low_freq_dag = DAG(
     schedule_interval="0 */8 * * *",  # Every 8 hours
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=6),
     tags=["threat-intel", "edgeguard", "misp", "low-frequency"],
 )
 
@@ -1159,6 +1186,8 @@ daily_dag = DAG(
     schedule_interval="0 2 * * *",  # Daily at 2 AM
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=6),
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1260,12 +1289,15 @@ neo4j_sync_dag = DAG(
     schedule_interval="0 3 */3 * *",  # Every 3 days at 3 AM
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=8),
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
 check_neo4j_sync_needed = ShortCircuitOperator(
     task_id="check_sync_needed",
     python_callable=should_run_neo4j_sync,
+    execution_timeout=timedelta(minutes=2),
     dag=neo4j_sync_dag,
 )
 
@@ -1383,6 +1415,8 @@ baseline_dag = DAG(
     schedule_interval=None,  # MANUAL TRIGGER ONLY
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,  # Only one baseline at a time
+    dagrun_timeout=timedelta(hours=12),  # Kill if stuck longer than 12h
     is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )

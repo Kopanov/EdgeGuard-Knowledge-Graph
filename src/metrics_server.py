@@ -134,6 +134,19 @@ PIPELINE_STAGES = Gauge("edgeguard_pipeline_stage", "Current pipeline stage (1=r
 # DAG/Airflow metrics
 DAG_RUNS = Counter("edgeguard_dag_runs_total", "Total DAG runs", ["dag_id", "status", "run_type"])
 
+# Stuck-run detection: set to time.time() on success, alert if stale
+DAG_LAST_SUCCESS = Gauge(
+    "edgeguard_dag_last_success_timestamp",
+    "Unix timestamp of last successful DAG run (0 = never succeeded)",
+    ["dag_id"],
+)
+
+DAG_RUN_START = Gauge(
+    "edgeguard_dag_run_start_timestamp",
+    "Unix timestamp when the current DAG run started (0 = idle)",
+    ["dag_id"],
+)
+
 DAG_RUN_DURATION = Histogram(
     "edgeguard_dag_run_duration_seconds",
     "DAG run duration",
