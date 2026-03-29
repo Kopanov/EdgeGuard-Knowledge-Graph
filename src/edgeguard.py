@@ -1514,15 +1514,10 @@ def _fetch_misp_event_summary() -> dict:
         # Parse zone and source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
         source_tag = "unknown"
         if info_field.startswith("EdgeGuard-"):
-            # New format: EdgeGuard-{source}-{date}
-            # Legacy:     EdgeGuard-{ZONE}-{source}-{date}
-            parts = info_field.split("-", 3)
+            # Format: EdgeGuard-{source}-{date}
+            parts = info_field.split("-", 2)
             if len(parts) >= 2:
-                valid_zones = {"global", "finance", "energy", "healthcare"}
-                if parts[1].lower() in valid_zones and len(parts) >= 3:
-                    source_tag = parts[2]  # Legacy format
-                else:
-                    source_tag = parts[1]  # New format
+                source_tag = parts[1]  # e.g., "nvd", "alienvault_otx"
 
         total_events += 1
         total_attrs += attr_count

@@ -710,19 +710,12 @@ class EdgeGuardPipeline:
                     continue
                 logger.debug(f"   Converting event {event_id} to STIX 2.1")
 
-                # Extract source from event info
-                # New format: EdgeGuard-{SOURCE}-{DATE} -> parts[1]
-                # Legacy:     EdgeGuard-{ZONE}-{SOURCE}-{DATE} -> parts[2]
+                # Extract source from event info (format: EdgeGuard-{source}-{date})
                 source_from_event = "unknown"
                 try:
-                    parts = event_info.split("-", 3)
+                    parts = event_info.split("-", 2)
                     if len(parts) >= 2:
-                        # Check if parts[1] is a zone (legacy) or source (new)
-                        valid_zones = {"global", "finance", "energy", "healthcare"}
-                        if parts[1].lower() in valid_zones and len(parts) >= 3:
-                            source_from_event = parts[2]  # Legacy: EdgeGuard-ZONE-source-date
-                        else:
-                            source_from_event = parts[1]  # New: EdgeGuard-source-date
+                        source_from_event = parts[1]  # e.g., "alienvault_otx"
                 except Exception as e:
                     logger.debug(f"Could not extract source from event info '{event_info}': {e}")
 

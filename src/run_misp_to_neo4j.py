@@ -100,7 +100,7 @@ NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
 # Substring matched against event metadata in MISP restSearch (not exact event title).
 # PyMISP/MISP ``eventinfo=`` filtering is unreliable on some 2.4.x builds (e.g. 2.4.123);
 # ``search`` maps to the server-side substring / full-text style filter our events need
-# (titles look like ``EdgeGuard-{source}-{date}``; legacy: ``EdgeGuard-{sector}-{source}-{date}``).
+# (titles look like ``EdgeGuard-{source}-{date}``).
 MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "EdgeGuard").strip() or "EdgeGuard"
 
 # Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
@@ -1068,29 +1068,13 @@ class MISPToNeo4jSync:
 
     def _extract_zone_from_event_name(self, event_info: str) -> Optional[str]:
         """
-        Extract zone from MISP event name (legacy support).
+        Extract zone from MISP event name — always returns None.
 
-        Current event names: ``EdgeGuard-{source}-{date}`` (no zone in name).
-        Legacy event names:  ``EdgeGuard-{SECTOR}-{source}-{date}`` (zone in name).
-
-        Zone data now lives on attribute-level tags (``zone:Finance`` etc.),
-        so this is only a fallback for legacy events.
-
-        Returns:
-            Zone name (lowercase) or None if not an old-format name.
+        Event names use ``EdgeGuard-{source}-{date}`` (no zone in name).
+        Zone data lives exclusively on attribute-level tags (``zone:Finance``).
+        This method exists as a no-op stub so call sites don't need changing.
         """
-        if not event_info:
-            return None
-
-        parts = event_info.split("-")
-        if len(parts) >= 2 and parts[0].upper() == "EDGEGUARD":
-            # Check if parts[1] is a known zone (legacy format) or a source (new format)
-            candidate = parts[1].lower()
-            valid_zones = ["global", "finance", "energy", "healthcare"]
-            if candidate in valid_zones:
-                return candidate  # Legacy format: EdgeGuard-ZONE-source-date
-
-        return None  # New format: EdgeGuard-source-date (zone from tags only)
+        return None
 
     def _manual_convert_to_stix21(self, misp_event: dict) -> dict:
         """

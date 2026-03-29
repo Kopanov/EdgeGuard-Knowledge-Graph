@@ -141,7 +141,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 |-----|------|
 | **`EdgeGuard`** | Platform provenance (e.g. ResilMesh / EdgeGuard pipeline). **Only** event-level tag added on create. |
 
-**`Event.info`** remains **`EdgeGuard-{SECTOR}-{source}-{date}`** — the `SECTOR` token is the **routing/grouping key** for which MISP event receives the batch, not a duplicate of attribute zones.
+**`Event.info`** uses **`EdgeGuard-{source}-{date}`** (e.g., `EdgeGuard-nvd-2026-03-29`). Zone classification lives on attribute-level tags (`zone:Finance`, `zone:Healthcare`), not in the event name. A single event can contain multi-zone attributes.
 
 **Legacy:** Older events may still carry `sector:…`, `source:…`, or TLP on the event; sync and parsers still understand them. New writes follow the model above — see [MISP_SOURCES.md](MISP_SOURCES.md).
 
