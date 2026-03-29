@@ -24,10 +24,13 @@ def test_exact_info_flat_row_shape():
     assert mw._event_id_exact_from_restsearch_rows(rows, "EdgeGuard-GLOBAL-nvd-2026-03-24") == "7"
 
 
-def test_primary_sector_for_event_grouping_matches_zone_tag_logic():
-    """push_items must not use zones[0] when global is mixed with specifics."""
+def test_event_grouping_by_source_not_zone():
+    """Events are grouped by (source, date) — zone is on attribute tags only."""
     w = mw.MISPWriter.__new__(mw.MISPWriter)
-    assert w._primary_sector_for_event_grouping({"zone": ["global", "energy"]}) == "energy"
-    assert w._primary_sector_for_event_grouping({"zone": ["energy", "global"]}) == "energy"
-    assert w._primary_sector_for_event_grouping({"zone": ["finance", "healthcare"]}) == "finance"
-    assert w._primary_sector_for_event_grouping({"zone": ["global"]}) == "global"
+    # Zone should NOT appear in event names; _primary_sector_for_event_grouping is removed.
+    # Verify _get_zones_to_tag still returns all zones for attribute tags.
+    assert "energy" in w._get_zones_to_tag({"zone": ["global", "energy"]})
+    assert "global" not in w._get_zones_to_tag({"zone": ["global", "energy"]})  # global filtered when specifics exist
+    zones = w._get_zones_to_tag({"zone": ["finance", "healthcare"]})
+    assert "finance" in zones
+    assert "healthcare" in zones

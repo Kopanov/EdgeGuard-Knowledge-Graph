@@ -100,7 +100,7 @@ NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
 # Substring matched against event metadata in MISP restSearch (not exact event title).
 # PyMISP/MISP ``eventinfo=`` filtering is unreliable on some 2.4.x builds (e.g. 2.4.123);
 # ``search`` maps to the server-side substring / full-text style filter our events need
-# (titles look like ``EdgeGuard-{sector}-{source}-{date}``).
+# (titles look like ``EdgeGuard-{source}-{date}``; legacy: ``EdgeGuard-{sector}-{source}-{date}``).
 MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "EdgeGuard").strip() or "EdgeGuard"
 
 # Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
@@ -1068,36 +1068,29 @@ class MISPToNeo4jSync:
 
     def _extract_zone_from_event_name(self, event_info: str) -> Optional[str]:
         """
-        Extract zone from MISP event name.
+        Extract zone from MISP event name (legacy support).
 
-        Event names follow pattern: EdgeGuard-{SECTOR}-{source}-{date}
-        Examples:
-        - "EdgeGuard-FINANCE-alienvault_otx-2024-01-01" → "finance"
-        - "EdgeGuard-ENERGY-cisa-2024-01-01" → "energy"
-        - "EdgeGuard-GLOBAL-nvd-2024-01-01" → "global"
+        Current event names: ``EdgeGuard-{source}-{date}`` (no zone in name).
+        Legacy event names:  ``EdgeGuard-{SECTOR}-{source}-{date}`` (zone in name).
 
-        Args:
-            event_info: MISP event info/name
+        Zone data now lives on attribute-level tags (``zone:Finance`` etc.),
+        so this is only a fallback for legacy events.
 
         Returns:
-            Zone name (lowercase) or None if not found
+            Zone name (lowercase) or None if not an old-format name.
         """
         if not event_info:
             return None
 
-        # Match pattern: EdgeGuard-{SECTOR}-{source}-{date}
-        # Event names are like: EdgeGuard-FINANCE-alienvault_otx-2024-03-08
         parts = event_info.split("-")
-
-        # Check if this is an EdgeGuard event
         if len(parts) >= 2 and parts[0].upper() == "EDGEGUARD":
-            # The second part should be the sector/zone
-            zone = parts[1].lower()
+            # Check if parts[1] is a known zone (legacy format) or a source (new format)
+            candidate = parts[1].lower()
             valid_zones = ["global", "finance", "energy", "healthcare"]
-            if zone in valid_zones:
-                return zone
+            if candidate in valid_zones:
+                return candidate  # Legacy format: EdgeGuard-ZONE-source-date
 
-        return None
+        return None  # New format: EdgeGuard-source-date (zone from tags only)
 
     def _manual_convert_to_stix21(self, misp_event: dict) -> dict:
         """

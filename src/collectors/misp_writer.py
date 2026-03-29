@@ -362,23 +362,24 @@ class MISPWriter:
         return keys
 
     @retry_with_backoff(max_retries=4, base_delay=10.0)
-    def _get_or_create_event(self, sector: str, source: str, date: str = None) -> Optional[str]:
-        """Get or create a MISP event for a sector/source/date combination.
+    def _get_or_create_event(self, source: str, date: str = None, **_kwargs) -> Optional[str]:
+        """Get or create a MISP event for a source/date combination.
+
+        Event naming: ``EdgeGuard-{source}-{date}``.  Zone classification lives
+        on attribute-level tags (``zone:Finance``, ``zone:Healthcare``), not in
+        the event name — a single event can contain multi-zone attributes.
 
         Uses MISP's ``restSearch`` endpoint, then filters to an **exact** ``Event.info`` match.
-        MISP's ``info`` search parameter is typically substring-based; combined with ``limit: 1``,
-        parallel collectors could previously receive another source's event (e.g. all data under the
-        MITRE-named event). Event **creation** is serialized with a file lock so two processes do not
+        Event **creation** is serialized with a file lock so two processes do not
         create duplicate same-day events after a miss.
 
         Returns:
             Event ID if successful, None otherwise.
         """
-        sector = sanitize_value(sector, max_length=50)
         source = sanitize_value(source, max_length=50)
 
         date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        event_name = f"EdgeGuard-{sector.upper()}-{source}-{date}"
+        event_name = f"EdgeGuard-{source}-{date}"
 
         try:
             rows = self._restsearch_events_for_name(event_name)
@@ -398,9 +399,10 @@ class MISPWriter:
                 "analysis": 0,  # Initial
                 "date": date,
                 "Attribute": [],
-                # Event is an organizational container: ``EdgeGuard-{SECTOR}-{source}-{date}`` encodes
-                # grouping; source + zone classification live on **attributes** (``source:…``, ``zone:…``).
-                # Single event tag marks data from this platform for consumers (e.g. ResilMesh).
+                # Event is an organizational container: ``EdgeGuard-{source}-{date}`` groups by
+                # source + day.  Zone classification lives on **attributes** (``zone:…`` tags)
+                # so multi-zone items are handled correctly.  Single event tag marks data
+                # from this platform for consumers (e.g. ResilMesh).
                 "Tag": [{"name": "EdgeGuard"}],
             }
         }
@@ -481,19 +483,6 @@ class MISPWriter:
             # Only global - tag it (or fallback to default)
             global_zones = [z for z in zones if z]
             return global_zones if global_zones else [DEFAULT_SECTOR]
-
-    def _primary_sector_for_event_grouping(self, item: Dict) -> str:
-        """
-        Single sector key for MISP event routing in push_items.
-
-        Must stay consistent with _get_zones_to_tag: if specifics exist, ignore global
-        and use a deterministic primary (sorted) so order in item['zone'] does not
-        split one logical batch across two events.
-        """
-        tagged = self._get_zones_to_tag(item)
-        if not tagged:
-            return str(DEFAULT_SECTOR).lower()
-        return sorted(str(z).lower() for z in tagged)[0]
 
     def map_indicator_type(self, edgeguard_type: str, value: str = None) -> str:
         """
@@ -1107,15 +1096,14 @@ class MISPWriter:
         # Guard against invalid batch_size (0 would crash range())
         batch_size = max(1, batch_size)
 
-        # Group items by (sector, source, date)
+        # Group items by (source, date) — zone lives on attribute tags, not event name
         grouped = {}
 
         for item in items:
-            sector = self._primary_sector_for_event_grouping(item)
             source = item.get("tag", "unknown")
             date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-            key = (sector, source, date)
+            key = (source, date)
             if key not in grouped:
                 grouped[key] = []
 
@@ -1150,7 +1138,7 @@ class MISPWriter:
         start_time = time.time()
         push_queue: List[Tuple[str, List[Dict]]] = []
 
-        for (sector, source, date), attributes in grouped.items():
+        for (source, date), attributes in grouped.items():
             # Deduplicate attributes by value
             seen = set()
             unique_attrs = []
@@ -1161,7 +1149,7 @@ class MISPWriter:
                     unique_attrs.append(attr)
 
             # Get or create event
-            event_id = self._get_or_create_event(sector, source, date)
+            event_id = self._get_or_create_event(source, date)
             if not event_id:
                 total_failed += len(unique_attrs)
                 continue

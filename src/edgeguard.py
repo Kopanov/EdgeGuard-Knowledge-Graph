@@ -1332,37 +1332,64 @@ def cmd_stats(args) -> int:
             if sr:
                 print(f"  {'SOURCED_FROM rels':<20} {sr:>10,}")
 
-    # 2. By zone (with multi-zone detection)
+    # 2. By zone (precise: single-zone counts + combo breakdown)
     if show_zone and neo4j_stats:
-        by_zone = neo4j_stats.get("by_zone", {})
-        result["by_zone"] = by_zone
-        if by_zone and not use_json:
-            zone_total = sum(by_zone.values())
-            # Count total unique nodes that have any zone
-            try:
-                from neo4j_client import Neo4jClient as _NC2
+        try:
+            from neo4j_client import Neo4jClient as _NC2
 
-                _c2 = _NC2()
-                if _c2.connect():
-                    _r = _c2.run("MATCH (n) WHERE n.zone IS NOT NULL RETURN count(n) AS c")
-                    unique_zoned = _r[0]["c"] if _r else 0
-                    _c2.close()
-                else:
-                    unique_zoned = 0
-            except Exception:
-                unique_zoned = 0
-            multi_zone = zone_total - unique_zoned if unique_zoned > 0 else 0
+            _c2 = _NC2()
+            zone_data = {}
+            if _c2.connect():
+                # Precise zone counting: group by the EXACT zone array
+                _r = _c2.run("""
+                    MATCH (n) WHERE n.zone IS NOT NULL
+                    WITH n.zone AS zones, count(n) AS cnt
+                    RETURN zones, cnt ORDER BY cnt DESC
+                """)
+                combo_counts = {tuple(sorted(row["zones"])): row["cnt"] for row in _r} if _r else {}
 
-            print(f"\n  {'Zone':<20} {'Nodes':>10}  (nodes may appear in multiple zones)")
-            print(f"  {'—' * 20} {'—' * 10}")
-            for zone, count in sorted(by_zone.items(), key=lambda x: -x[1]):
-                print(f"  {zone:<20} {count:>10,}")
-            if multi_zone > 0:
-                print(f"  {'—' * 20} {'—' * 10}")
-                print(f"  {'Unique nodes':<20} {unique_zoned:>10,}")
-                print(f"  {'Multi-zone overlap':<20} {multi_zone:>10,}")
-            result["by_zone_unique"] = unique_zoned
-            result["by_zone_overlap"] = multi_zone
+                # Build: single-zone totals (exclusive), combo totals, total
+                single_zone = {}
+                combos = {}
+                for zones, cnt in combo_counts.items():
+                    if len(zones) == 1:
+                        single_zone[zones[0]] = cnt
+                    else:
+                        combos["+".join(zones)] = cnt
+
+                total_nodes = sum(combo_counts.values())
+                _c2.close()
+
+                zone_data = {
+                    "single_zone": single_zone,
+                    "combos": combos,
+                    "total": total_nodes,
+                }
+            result["by_zone"] = zone_data
+
+            if zone_data and not use_json:
+                print(f"\n  {'Zone':<30} {'Nodes':>10}")
+                print(f"  {'—' * 30} {'—' * 10}")
+                # Single-zone counts (exclusive — not counted in combos)
+                for zone, count in sorted(single_zone.items(), key=lambda x: -x[1]):
+                    print(f"  {zone:<30} {count:>10,}")
+                # Combos
+                if combos:
+                    print(f"  {'—' * 30} {'—' * 10}")
+                    for combo, count in sorted(combos.items(), key=lambda x: -x[1]):
+                        print(f"  {combo:<30} {count:>10,}  (multi-zone)")
+                print(f"  {'—' * 30} {'—' * 10}")
+                print(f"  {'TOTAL':<30} {total_nodes:>10,}")
+
+        except Exception as e:
+            # Fallback to the basic by_zone from get_stats
+            by_zone = neo4j_stats.get("by_zone", {})
+            result["by_zone"] = by_zone
+            if by_zone and not use_json:
+                print(f"\n  {'Zone':<30} {'Nodes':>10}")
+                print(f"  {'—' * 30} {'—' * 10}")
+                for zone, count in sorted(by_zone.items(), key=lambda x: -x[1]):
+                    print(f"  {zone:<30} {count:>10,}")
 
     # 3. By source
     if show_source and neo4j_stats:
@@ -1389,11 +1416,6 @@ def cmd_stats(args) -> int:
                     print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
                     for src in sorted(misp_summary["by_source"], key=lambda x: -x["attributes"]):
                         print(f"  {src['source']:<28} {src['events']:>8} {src['attributes']:>12,}")
-                if misp_summary.get("by_zone"):
-                    print(f"\n  {'MISP by Zone':<28} {'Events':>8} {'Attributes':>12}")
-                    print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
-                    for z in sorted(misp_summary["by_zone"], key=lambda x: -x["attributes"]):
-                        print(f"  {z['zone']:<28} {z['events']:>8} {z['attributes']:>12,}")
         except Exception as e:
             warn(f"MISP: {e}")
 
@@ -1484,7 +1506,6 @@ def _fetch_misp_event_summary() -> dict:
     total_events = 0
     total_attrs = 0
     source_map = {}  # source_tag -> {events: N, attributes: N}
-    zone_map = {}  # zone -> {events: N, attributes: N}
 
     for ev in events:
         info_field = ev.get("info", "") or ev.get("Event", {}).get("info", "")
@@ -1492,15 +1513,16 @@ def _fetch_misp_event_summary() -> dict:
 
         # Parse zone and source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
         source_tag = "unknown"
-        zone_tag = "unknown"
         if info_field.startswith("EdgeGuard-"):
-            # Pattern: EdgeGuard-{ZONE}-{source}-{date}
-            # Split with maxsplit=3 so date hyphens (2026-03-29) stay intact
+            # New format: EdgeGuard-{source}-{date}
+            # Legacy:     EdgeGuard-{ZONE}-{source}-{date}
             parts = info_field.split("-", 3)
             if len(parts) >= 2:
-                zone_tag = parts[1].lower()  # e.g., "healthcare"
-            if len(parts) >= 3:
-                source_tag = parts[2]  # e.g., "alienvault_otx"
+                valid_zones = {"global", "finance", "energy", "healthcare"}
+                if parts[1].lower() in valid_zones and len(parts) >= 3:
+                    source_tag = parts[2]  # Legacy format
+                else:
+                    source_tag = parts[1]  # New format
 
         total_events += 1
         total_attrs += attr_count
@@ -1510,20 +1532,12 @@ def _fetch_misp_event_summary() -> dict:
         source_map[source_tag]["events"] += 1
         source_map[source_tag]["attributes"] += attr_count
 
-        if zone_tag not in zone_map:
-            zone_map[zone_tag] = {"events": 0, "attributes": 0}
-        zone_map[zone_tag]["events"] += 1
-        zone_map[zone_tag]["attributes"] += attr_count
-
     return {
         "total_events": total_events,
         "total_attributes": total_attrs,
         "by_source": [
             {"source": src, "events": data["events"], "attributes": data["attributes"]}
             for src, data in source_map.items()
-        ],
-        "by_zone": [
-            {"zone": z, "events": data["events"], "attributes": data["attributes"]} for z, data in zone_map.items()
         ],
     }
 
