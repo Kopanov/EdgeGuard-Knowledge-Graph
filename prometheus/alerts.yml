@@ -157,15 +157,18 @@ groups:
 
       - alert: EdgeGuardDAGRunStuck
         expr: |
-          edgeguard_dag_run_start_timestamp > 0
-          and (time() - edgeguard_dag_run_start_timestamp) > 3600
+          (
+            edgeguard_dag_run_start_timestamp > 0
+            and (time() - edgeguard_dag_run_start_timestamp) > 3600
+            and changes(edgeguard_dag_run_start_timestamp[30m]) == 0
+          )
         for: 5m
         labels:
           severity: critical
           component: pipeline
         annotations:
           summary: "DAG run {{ $labels.dag_id }} appears stuck"
-          description: "DAG {{ $labels.dag_id }} has been running for over 1 hour without completing."
+          description: "DAG {{ $labels.dag_id }} has had no task progress in over 1 hour (gauge unchanged for 30m)."
 
       - alert: EdgeGuardDAGLastSuccessStale
         expr: |

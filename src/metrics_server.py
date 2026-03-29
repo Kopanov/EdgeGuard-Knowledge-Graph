@@ -448,10 +448,11 @@ def get_metrics_server(host: str = None, port: int = None) -> MetricsServer:
 
     if _server_instance is None:
         host = host or os.getenv("EDGEGUARD_METRICS_HOST", "127.0.0.1")
-        try:
-            port = port or int(os.getenv("EDGEGUARD_METRICS_PORT", "8001"))
-        except (ValueError, TypeError):
-            port = port or 8001
+        if port is None:
+            try:
+                port = int(os.getenv("EDGEGUARD_METRICS_PORT", "8001"))
+            except (ValueError, TypeError):
+                port = 8001
         _server_instance = MetricsServer(host=host, port=port)
 
     return _server_instance

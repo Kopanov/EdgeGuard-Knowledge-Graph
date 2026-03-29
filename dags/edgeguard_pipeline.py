@@ -266,7 +266,7 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
         MISP_PUSH_DURATION = Histogram("edgeguard_misp_push_duration_seconds", "Time spent pushing to MISP", ["source"])
         NEO4J_SYNC_DURATION = Histogram("edgeguard_neo4j_sync_duration_seconds", "Time spent syncing to Neo4j")
         NEO4J_NODES = Gauge("edgeguard_neo4j_nodes", "Number of nodes in Neo4j", ["type"])
-        PIPELINE_ERRORS = Counter("edgeguard_pipeline_errors_total", "Total pipeline errors", ["task", "error_type"])
+        PIPELINE_ERRORS = Counter("edgeguard_pipeline_errors_total", "Total pipeline errors", ["task", "error_type", "source"])
         SOURCE_HEALTH = Gauge("edgeguard_source_healthy", "Health status of data sources", ["source"])
 
         # Circuit breaker state metrics
@@ -419,7 +419,7 @@ def _on_task_failure(context):
         send_slack_alert(f"Task FAILED: {dag_id}.{task_id} — {exc}", level="critical")
     if ENABLE_PROMETHEUS_METRICS:
         try:
-            PIPELINE_ERRORS.labels(task=task_id, error_type="task_failure").inc()
+            PIPELINE_ERRORS.labels(task=task_id, error_type="task_failure", source=dag_id).inc()
         except Exception:
             pass
 
