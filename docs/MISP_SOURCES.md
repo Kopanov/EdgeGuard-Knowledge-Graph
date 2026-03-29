@@ -14,7 +14,7 @@ External feeds (OTX, NVD, CISA, MITRE, VirusTotal, abuse.ch, …) push into **MI
 
 ### How EdgeGuard events are found for sync
 
-Collectors create/update MISP events whose **`Event.info`** looks like **`EdgeGuard-{SECTOR}-{source}-{date}`**. The event carries a single tag **`EdgeGuard`** (platform provenance for downstream systems such as ResilMesh). **Sector/source/TLP context** is on **attributes** (`zone:…`, `source:…`, confidence, etc.); the `SECTOR` token in the event name is the **grouping key** for MISP event routing, not a duplicate event-level sector tag. **`MISPWriter._get_or_create_event`** filters **`restSearch`** hits to an **exact** `info` string match (MISP’s `info` parameter is often substring-based; parallel Tier1 collectors share the `EdgeGuard-GLOBAL-` prefix) and serializes event creation with a cross-process file lock — see `src/collectors/misp_writer.py`.
+Collectors create/update MISP events whose **`Event.info`** looks like **`EdgeGuard-{source}-{date}`** (e.g., `EdgeGuard-nvd-2026-03-29`). The event carries a single tag **`EdgeGuard`** (platform provenance for downstream systems such as ResilMesh). **Zone and source classification** lives on **attribute-level tags** (`zone:Finance`, `zone:Healthcare`, `source:NVD`, confidence, etc.) — a single event can contain multi-zone attributes. **`MISPWriter._get_or_create_event`** filters **`restSearch`** hits to an **exact** `info` string match and serializes event creation with a cross-process file lock — see `src/collectors/misp_writer.py`.
 
 ### Collector → MISP duplicate avoidance
 

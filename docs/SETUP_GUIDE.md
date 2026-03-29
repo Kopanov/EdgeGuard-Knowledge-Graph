@@ -101,7 +101,7 @@ Airflow and collectors resolve **`MISP_URL`** from **inside** containers. `local
 
 **Apache vhost / `Host` header:** If MISP only answers for a specific name, set **`EDGEGUARD_MISP_HTTP_HOST`** (no `https://`).
 
-**MISP event vs attribute tags:** New EdgeGuard events carry the **`EdgeGuard`** tag only at event level; **`Event.info`** still uses **`EdgeGuard-{SECTOR}-{source}-{date}`** for grouping. **`zone:`** and **`source:`** tags are on **attributes** (see [MISP_SOURCES.md](MISP_SOURCES.md)). Sector keyword scoring thresholds: **`EDGEGUARD_ZONE_DETECT_THRESHOLD`** / **`EDGEGUARD_ZONE_ITEM_THRESHOLD`** in **`.env.example`**.
+**MISP event vs attribute tags:** EdgeGuard events use **`EdgeGuard-{source}-{date}`** as the event name (e.g., `EdgeGuard-nvd-2026-03-29`). The event carries the **`EdgeGuard`** tag at event level. **Zone and source classification** lives on **attribute-level tags** (`zone:Finance`, `source:NVD`) — a single event can contain multi-zone attributes. See [MISP_SOURCES.md](MISP_SOURCES.md). Sector keyword scoring thresholds: **`EDGEGUARD_ZONE_DETECT_THRESHOLD`** / **`EDGEGUARD_ZONE_ITEM_THRESHOLD`** in **`.env.example`**.
 
 ### 3.4 Build and start
 

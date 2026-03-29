@@ -179,30 +179,69 @@ def update_source_incremental(source: str, **kwargs) -> None:
         save_checkpoint(checkpoints)
 
 
-def clear_checkpoint(source: str = None) -> None:
-    """Clear checkpoint for *source*, or all checkpoints if source is None."""
+def clear_checkpoint(source: str = None, *, include_incremental: bool = False) -> None:
+    """Clear baseline checkpoint for *source*, or all baseline checkpoints if source is None.
+
+    By default, preserves incremental state (``"incremental"`` sub-dict inside
+    each source entry) so that scheduled runs don't lose their cursors after a
+    fresh baseline.  Pass ``include_incremental=True`` to wipe everything
+    (used by database wipe scripts that need a full reset).
+    """
     if source:
         checkpoints = load_checkpoint()
         if source in checkpoints:
-            del checkpoints[source]
+            if include_incremental:
+                del checkpoints[source]
+            else:
+                # Preserve incremental sub-dict for this source
+                inc = checkpoints[source].get("incremental") if isinstance(checkpoints[source], dict) else None
+                if inc:
+                    checkpoints[source] = {"incremental": inc}
+                else:
+                    del checkpoints[source]
             save_checkpoint(checkpoints)
     else:
-        if CHECKPOINT_FILE.exists():
-            CHECKPOINT_FILE.unlink()
+        if include_incremental:
+            # Full wipe — used by clear_misp.py / clear_neo4j.py
+            if CHECKPOINT_FILE.exists():
+                CHECKPOINT_FILE.unlink()
+        else:
+            checkpoints = load_checkpoint()
+            # Keep only incremental state from each source
+            preserved = {}
+            for src, data in checkpoints.items():
+                inc = data.get("incremental") if isinstance(data, dict) else None
+                if inc:
+                    preserved[src] = {"incremental": inc}
+            if preserved:
+                save_checkpoint(preserved)
+            elif CHECKPOINT_FILE.exists():
+                CHECKPOINT_FILE.unlink()
 
 
 def get_baseline_status() -> dict:
-    """Return a summary of all baseline checkpoints."""
+    """Return a summary of all baseline checkpoints.
+
+    Excludes entries that only contain incremental state (no baseline
+    progress) — these are leftover from ``clear_checkpoint()`` which
+    preserves incremental cursors.
+    """
     checkpoints = load_checkpoint()
-    return {
-        src: {
+    result = {}
+    for src, data in checkpoints.items():
+        if not isinstance(data, dict):
+            continue
+        # Skip entries that only have incremental state (no baseline fields)
+        has_baseline = any(k in data for k in ("page", "pages", "items_collected", "completed", "started_at"))
+        if not has_baseline:
+            continue
+        result[src] = {
             "pages_collected": len(data.get("pages", [])),
             "items_collected": data.get("items_collected", 0),
             "completed": data.get("completed", False),
             "last_updated": data.get("updated_at", "unknown"),
         }
-        for src, data in checkpoints.items()
-    }
+    return result
 
 
 if __name__ == "__main__":

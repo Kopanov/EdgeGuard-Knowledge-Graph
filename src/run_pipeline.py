@@ -406,7 +406,7 @@ class EdgeGuardPipeline:
                     # Parse pattern to extract indicator value
                     indicator_data = self._parse_stix_pattern(pattern)
                     if indicator_data:
-                        self.neo4j.merge_indicator(
+                        ok = self.neo4j.merge_indicator(
                             {
                                 "indicator_type": indicator_data.get("type", "unknown"),
                                 "value": indicator_data.get("value", ""),
@@ -420,7 +420,8 @@ class EdgeGuardPipeline:
                             },
                             source_id=obj.get("x_edgeguard_source", "unknown"),
                         )
-                        stats["indicators"] += 1
+                        if ok:
+                            stats["indicators"] += 1
 
                 # Handle Vulnerability objects (CVE)
                 elif obj_type == "vulnerability":
@@ -429,7 +430,7 @@ class EdgeGuardPipeline:
                     import re
 
                     if re.match(r"^CVE-\d{4}-\d{4,}$", vuln_name, re.IGNORECASE):
-                        self.neo4j.merge_vulnerability(
+                        ok = self.neo4j.merge_vulnerability(
                             {
                                 "cve_id": vuln_name.upper(),
                                 "description": obj.get("description", ""),
@@ -446,11 +447,12 @@ class EdgeGuardPipeline:
                             },
                             source_id=obj.get("x_edgeguard_source", "unknown"),
                         )
-                        stats["vulnerabilities"] += 1
+                        if ok:
+                            stats["vulnerabilities"] += 1
 
                 # Handle Threat Actor objects
                 elif obj_type == "threat-actor":
-                    self.neo4j.merge_actor(
+                    ok = self.neo4j.merge_actor(
                         {
                             "name": obj.get("name", ""),
                             "aliases": obj.get("aliases", []),
@@ -462,11 +464,12 @@ class EdgeGuardPipeline:
                         },
                         source_id=obj.get("x_edgeguard_source", "unknown"),
                     )
-                    stats["actors"] += 1
+                    if ok:
+                        stats["actors"] += 1
 
                 # Handle Malware objects
                 elif obj_type == "malware":
-                    self.neo4j.merge_malware(
+                    ok = self.neo4j.merge_malware(
                         {
                             "name": obj.get("name", ""),
                             "malware_types": obj.get("malware_types", []),
@@ -479,7 +482,8 @@ class EdgeGuardPipeline:
                         },
                         source_id=obj.get("x_edgeguard_source", "unknown"),
                     )
-                    stats["malware"] += 1
+                    if ok:
+                        stats["malware"] += 1
 
                 # Handle Tool objects (Cobalt Strike, Mimikatz, etc.)
                 elif obj_type == "tool":
@@ -706,13 +710,12 @@ class EdgeGuardPipeline:
                     continue
                 logger.debug(f"   Converting event {event_id} to STIX 2.1")
 
-                # Extract source from event info (format: EdgeGuard-{ZONE}-{SOURCE}-{DATE})
-                # Example: EdgeGuard-HEALTHCARE-alienvault_otx-2026-03-10 -> alienvault_otx
+                # Extract source from event info (format: EdgeGuard-{source}-{date})
                 source_from_event = "unknown"
                 try:
-                    parts = event_info.split("-")
-                    if len(parts) >= 3:
-                        source_from_event = parts[2]  # alienvault_otx, cisa_kev, etc.
+                    parts = event_info.split("-", 2)
+                    if len(parts) >= 2:
+                        source_from_event = parts[1]  # e.g., "alienvault_otx"
                 except Exception as e:
                     logger.debug(f"Could not extract source from event info '{event_info}': {e}")
 
@@ -776,7 +779,7 @@ class EdgeGuardPipeline:
         stix_event_id: str = None,
         use_stix_flow: bool = False,
         baseline: bool = False,
-        baseline_days: int = 365,
+        baseline_days: int = 730,
         fresh_baseline: bool = False,
     ):
         """
@@ -792,6 +795,82 @@ class EdgeGuardPipeline:
             fresh_baseline: If True with baseline, discard any existing checkpoints and start
                 from scratch. Default False preserves partial progress for resume.
         """
+        # ── Pipeline lock: prevent concurrent CLI runs ──
+        # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
+        # Airflow DAGs use max_active_runs=1 for concurrency control instead.
+        lock_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
+        os.makedirs(lock_dir, exist_ok=True)
+        lock_path = os.path.join(lock_dir, "pipeline.lock")
+        try:
+            if os.path.exists(lock_path):
+                with open(lock_path) as f:
+                    old_pid = int(f.read().strip())
+                # Check if the process is still alive
+                try:
+                    os.kill(old_pid, 0)
+                    # Process exists (signal 0 succeeded) — could be ours or another user's
+                    logger.error(
+                        f"Another pipeline process (PID {old_pid}) is still running. "
+                        "Aborting to prevent data races. "
+                        "If this is stale, delete checkpoints/pipeline.lock and retry."
+                    )
+                    return False
+                except PermissionError:
+                    # PID exists but owned by another user — treat as alive (safe side)
+                    logger.error(
+                        f"Pipeline lock held by PID {old_pid} (different user). "
+                        "Aborting. Delete checkpoints/pipeline.lock if stale."
+                    )
+                    return False
+                except ProcessLookupError:
+                    logger.info(f"Stale lock file found (PID {old_pid} is gone) — removing.")
+        except (ValueError, IOError):
+            pass
+        with open(lock_path, "w") as f:
+            f.write(str(os.getpid()))
+
+        import atexit
+        import signal
+
+        def _cleanup_lock(*_args):
+            try:
+                if os.path.exists(lock_path):
+                    os.remove(lock_path)
+            except OSError:
+                pass
+
+        atexit.register(_cleanup_lock)
+
+        def _sigterm_handler(signum, frame):
+            _cleanup_lock()
+            sys.exit(1)
+
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
+        try:
+            return self._run_pipeline_inner(
+                stix_export=stix_export,
+                stix_output=stix_output,
+                stix_event_id=stix_event_id,
+                use_stix_flow=use_stix_flow,
+                baseline=baseline,
+                baseline_days=baseline_days,
+                fresh_baseline=fresh_baseline,
+            )
+        finally:
+            _cleanup_lock()
+
+    def _run_pipeline_inner(
+        self,
+        stix_export=False,
+        stix_output=None,
+        stix_event_id=None,
+        use_stix_flow=False,
+        baseline=False,
+        baseline_days=730,
+        fresh_baseline=False,
+    ):
+        """Inner pipeline logic, separated so the lock is always cleaned up."""
         # Import baseline checkpoint utilities
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
 

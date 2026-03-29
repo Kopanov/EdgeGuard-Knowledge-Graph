@@ -110,7 +110,7 @@ Priority 2: Event-level zone/sector tags + zone from Event.info  (merged; "globa
 Priority 3: "global"  (fallback only)
 ```
 
-**MISP events created by current `MISPWriter`** carry only the **`EdgeGuard`** tag at event level; **`Event.info`** still encodes **`EdgeGuard-{SECTOR}-{source}-{date}`** for grouping. Attribute **`zone:`** tags remain the primary classification signal for sync.
+**MISP events created by `MISPWriter`** use **`EdgeGuard-{source}-{date}`** as the event name, with the **`EdgeGuard`** tag at event level. **Zone classification** lives exclusively on **attribute-level tags** (`zone:Finance`, `zone:Healthcare`) — a single event can contain multi-zone attributes. Attribute `zone:` tags are the primary classification signal for Neo4j sync.
 
 **Collectors → MISP:** Optional **per-event attribute prefetch** and **source-specific** incremental cursors reduce duplicate writes when event names rotate by date — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance*.
 

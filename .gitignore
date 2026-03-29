@@ -10,6 +10,12 @@ credentials/api_keys.yaml
 .env
 .env.*
 !.env.example
+# TLS certificates and private keys
+*.pem
+*.key
+*.cert
+*.p12
+*.pfx
 
 # =============================================================================
 # Python

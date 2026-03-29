@@ -1,6 +1,6 @@
 # EdgeGuard Airflow DAGs (operations guide)
 
-**Last Updated:** 2026-03-21  
+**Last Updated:** 2026-03-29
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
 
@@ -49,6 +49,23 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_low_freq` | Every 8 hours | Low-frequency sources | NVD |
 | `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, ThreatFox, AbuseIPDB, URLhaus, CyberCure, Feodo, SSLBlacklist |
 | `edgeguard_neo4j_sync` | `0 3 */3 * *` (every 3 days at 03:00) | MISP → Neo4j sync + `build_relationships` + `run_enrichment_jobs` | All sources |
+
+**Concurrency and timeout guards (all 6 DAGs):**
+
+| DAG | `max_active_runs` | `dagrun_timeout` | Notes |
+|-----|-------------------|------------------|-------|
+| `edgeguard_pipeline` | 1 | 5h 30m | Covers OTX with full retry chain |
+| `edgeguard_medium_freq` | 1 | 5h | CISA + VT parallel with retries |
+| `edgeguard_low_freq` | 1 | 8h 30m | NVD with full retry chain |
+| `edgeguard_daily` | 1 | 8h 30m | 7 parallel collectors with retries |
+| `edgeguard_neo4j_sync` | 1 | 22h | Full sync + relationships + enrichment |
+| `edgeguard_baseline` | 1 | 32h | Full historical collection + sync |
+
+`max_active_runs=1` prevents run pile-up when a run is slow. `dagrun_timeout` is wall-clock time from DAG run start — if the entire run (including retries) exceeds this, Airflow marks it as failed. These are calculated as worst-case: `execution_timeout x (1 + retries) + retries x retry_delay` summed across the sequential task chain, with a 20% buffer.
+
+**Callbacks:** All DAGs inherit `on_failure_callback` (logs `[ALERT]`, sends Slack if enabled, increments Prometheus error counter) and `on_success_callback` (updates `edgeguard_dag_last_success_timestamp` gauge for stuck-run detection).
+
+**Baseline note:** `edgeguard_baseline` uses `is_paused_upon_creation=False` so manual triggers execute immediately without needing to unpause first.
 
 **Metrics (optional):** `edgeguard_metrics_server` (+ `…_scheduled`) and **`edgeguard_metrics_helpers`** in `dags/edgeguard_metrics_server.py` — default scrape URL `http://127.0.0.1:8001/metrics` (`EDGEGUARD_METRICS_HOST` / `EDGEGUARD_METRICS_PORT`).
 
@@ -124,7 +141,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 |-----|------|
 | **`EdgeGuard`** | Platform provenance (e.g. ResilMesh / EdgeGuard pipeline). **Only** event-level tag added on create. |
 
-**`Event.info`** remains **`EdgeGuard-{SECTOR}-{source}-{date}`** — the `SECTOR` token is the **routing/grouping key** for which MISP event receives the batch, not a duplicate of attribute zones.
+**`Event.info`** uses **`EdgeGuard-{source}-{date}`** (e.g., `EdgeGuard-nvd-2026-03-29`). Zone classification lives on attribute-level tags (`zone:Finance`, `zone:Healthcare`), not in the event name. A single event can contain multi-zone attributes.
 
 **Legacy:** Older events may still carry `sector:…`, `source:…`, or TLP on the event; sync and parsers still understand them. New writes follow the model above — see [MISP_SOURCES.md](MISP_SOURCES.md).
 
@@ -199,9 +216,15 @@ Neo4j uses unique constraints:
 - ✅ Container health verification
 - ✅ Rate limit awareness (each source group has its own DAG schedule)
 - ✅ Incremental sync support
-- ✅ Error handling and retry logic
+- ✅ Error handling and retry logic (`retries=2`, `retry_delay=5min`; baseline: `retries=1`)
 - ✅ Execution timeouts on all tasks (prevents hung workers)
-- ✅ `ShortCircuitOperator` gates the Neo4j sync (skips when nothing new)
+- ✅ `dagrun_timeout` on all DAGs (prevents entire DAG runs from hanging indefinitely)
+- ✅ `max_active_runs=1` on all DAGs (prevents concurrent run pile-up)
+- ✅ `on_failure_callback` / `on_success_callback` for alerting and metrics
+- ✅ `ShortCircuitOperator` gates the Neo4j sync (skips when nothing new; error-tolerant on corrupted state file)
+- ✅ Pipeline lock file (`checkpoints/pipeline.lock`) for CLI runs to prevent concurrent `run_pipeline.py` invocations
+- ✅ `clear_checkpoint()` preserves incremental state on `--fresh-baseline`
+- ✅ MISP dedup logging: `[DEDUP]` when all items already exist, `[SKIP]` when nothing new to push
 
 ### Metrics Exported
 ```
@@ -235,6 +258,31 @@ airflow tasks list edgeguard_pipeline
 
 # Show DAG runs
 airflow dags list-runs -d edgeguard_pipeline
+```
+
+### EdgeGuard CLI (recommended — wraps Airflow REST API)
+
+```bash
+# See all DAG run states (color-coded)
+python src/edgeguard.py dag status
+
+# See only running/queued runs
+python src/edgeguard.py dag status --state running
+
+# Force-fail stuck DAG runs (preserves checkpoints + incremental state)
+python src/edgeguard.py dag kill
+
+# Kill a specific DAG only
+python src/edgeguard.py dag kill --dag-id edgeguard_baseline
+
+# Check data counts (by zone, by source, MISP breakdown)
+python src/edgeguard.py stats --full
+
+# Check baseline checkpoint progress
+python src/edgeguard.py checkpoint status
+
+# Pre-run readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
+python src/edgeguard.py preflight
 ```
 
 ### View Logs

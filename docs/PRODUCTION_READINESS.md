@@ -23,13 +23,14 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 |-----------|--------|-------|
 | **Knowledge Graph Schema** | ✅ Ready | Full node/relationship design, UNIQUE constraints |
 | **MISP Integration** | ✅ Ready | Writer with sanitization, retry, rate limiting |
-| **Airflow DAGs** | ✅ Ready | **6** DAGs in `edgeguard_pipeline.py` + optional metrics DAGs in `edgeguard_metrics_server.py`; timeouts + `ShortCircuitOperator` on Neo4j sync |
+| **Airflow DAGs** | ✅ Ready | **6** DAGs; `max_active_runs=1` + `dagrun_timeout` on all; `on_failure_callback`/`on_success_callback`; baseline `is_paused_upon_creation=False`; `ShortCircuitOperator` on Neo4j sync |
 | **Data Collectors** | ✅ Ready | 11 active collectors → MISP → Neo4j |
 | **Neo4j Client** | ✅ Ready | Constraints, indexes, batch ops, sector labels applied |
 | **Health Checks** | ✅ Ready | MISP health sensor + Docker service healthchecks |
 | **Documentation** | ✅ Ready | 20+ docs updated to match current code |
+| **Production CLI** | ✅ Ready | 16 commands: `preflight`, `stats --full`, `dag status/kill`, `checkpoint status/clear`, `doctor`, `heal`, `validate`, `monitor` |
 | **Security Hardening** | ✅ Ready | Input sanitization, injection guards, SSL, rate limiting |
-| **Monitoring/Metrics** | ✅ Ready | Prometheus metrics endpoint default **8001** / loopback (`EDGEGUARD_METRICS_*`); Grafana via `docker-compose.monitoring.yml` |
+| **Monitoring/Metrics** | ✅ Ready | Prometheus on **8001** (loopback); Alertmanager enabled; alerts: `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` + 12 others; Grafana dashboard |
 | **CI/CD Pipeline** | ✅ Ready | GitHub Actions: lint, type-check, unit tests, Docker build, security scan |
 | **Automated Code Review** | ✅ Ready | Bugbot active on every PR with comprehensive rules |
 
@@ -217,7 +218,7 @@ python3 src/edgeguard.py --baseline
 docker-compose -f docker-compose.monitoring.yml up -d
 
 # 5. (Optional) Start Airflow for automated recurring collection
-airflow webserver --port 8080 &
+airflow webserver --port 8082 &
 airflow scheduler &
 ```
 

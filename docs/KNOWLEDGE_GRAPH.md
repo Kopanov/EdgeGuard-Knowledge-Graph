@@ -189,7 +189,7 @@ When `run_misp_to_neo4j.py` resolves the zone for an attribute, it applies a str
 | Priority | Source | Logic |
 |----------|--------|-------|
 | 1 (highest) | Attribute-level tags | If the attribute itself carries specific `zone:*` tags, use those exclusively |
-| 2 | Event-level tags + event name | If attribute has no specific zone, merge `zone:*` / `sector:*` tags from the parent event AND the zone keyword extracted from **`Event.info`** (e.g. `EdgeGuard-FINANCE-…` → `finance`). **Note:** new EdgeGuard events may only have the **`EdgeGuard`** event tag; zone then comes from attributes and/or the event name token. |
+| 2 | Event-level tags | If attribute has no specific zone, check `zone:*` / `sector:*` tags from the parent event. Event names (`EdgeGuard-{source}-{date}`) do not contain zone information — zone lives exclusively on attribute tags. |
 | 3 (fallback) | `global` | Only if neither of the above produces a specific sector |
 
 **Merging logic (event name + event tags):**

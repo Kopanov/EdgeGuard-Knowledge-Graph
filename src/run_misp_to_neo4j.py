@@ -100,7 +100,7 @@ NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
 # Substring matched against event metadata in MISP restSearch (not exact event title).
 # PyMISP/MISP ``eventinfo=`` filtering is unreliable on some 2.4.x builds (e.g. 2.4.123);
 # ``search`` maps to the server-side substring / full-text style filter our events need
-# (titles look like ``EdgeGuard-{sector}-{source}-{date}``).
+# (titles look like ``EdgeGuard-{source}-{date}``).
 MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "EdgeGuard").strip() or "EdgeGuard"
 
 # Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
@@ -377,7 +377,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
         @wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
-            for attempt in range(max_retries):
+            for attempt in range(max_retries + 1):  # +1: first attempt + max_retries retries (matches collector_utils)
                 try:
                     return func(*args, **kwargs)
                 except (
@@ -387,9 +387,11 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     requests.exceptions.ChunkedEncodingError,
                 ) as e:
                     last_exception = e
+                    if attempt >= max_retries:
+                        break  # exhausted all retries
                     delay = base_delay * (2**attempt)
                     logger.warning(
-                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s..."
+                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s..."
                     )
                     time.sleep(delay)
                 except Exception as e:
@@ -397,7 +399,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     logger.error(f"{func.__name__} failed with non-retryable error: {type(e).__name__}: {e}")
                     raise
 
-            logger.error(f"{func.__name__} failed after {max_retries} attempts")
+            logger.error(f"{func.__name__} failed after {max_retries + 1} attempts")
             raise last_exception
 
         return wrapper
@@ -1066,35 +1068,12 @@ class MISPToNeo4jSync:
 
     def _extract_zone_from_event_name(self, event_info: str) -> Optional[str]:
         """
-        Extract zone from MISP event name.
+        Extract zone from MISP event name — always returns None.
 
-        Event names follow pattern: EdgeGuard-{SECTOR}-{source}-{date}
-        Examples:
-        - "EdgeGuard-FINANCE-alienvault_otx-2024-01-01" → "finance"
-        - "EdgeGuard-ENERGY-cisa-2024-01-01" → "energy"
-        - "EdgeGuard-GLOBAL-nvd-2024-01-01" → "global"
-
-        Args:
-            event_info: MISP event info/name
-
-        Returns:
-            Zone name (lowercase) or None if not found
+        Event names use ``EdgeGuard-{source}-{date}`` (no zone in name).
+        Zone data lives exclusively on attribute-level tags (``zone:Finance``).
+        This method exists as a no-op stub so call sites don't need changing.
         """
-        if not event_info:
-            return None
-
-        # Match pattern: EdgeGuard-{SECTOR}-{source}-{date}
-        # Event names are like: EdgeGuard-FINANCE-alienvault_otx-2024-03-08
-        parts = event_info.split("-")
-
-        # Check if this is an EdgeGuard event
-        if len(parts) >= 2 and parts[0].upper() == "EDGEGUARD":
-            # The second part should be the sector/zone
-            zone = parts[1].lower()
-            valid_zones = ["global", "finance", "energy", "healthcare"]
-            if zone in valid_zones:
-                return zone
-
         return None
 
     def _manual_convert_to_stix21(self, misp_event: dict) -> dict:
@@ -2398,26 +2377,27 @@ class MISPToNeo4jSync:
                     or item.get("cvss_v30_data")
                     or item.get("cvss_v2_data")
                 ):
-                    self.neo4j.merge_cve(item, source_id=source_id)
+                    ok = self.neo4j.merge_cve(item, source_id=source_id)
                 else:
-                    self.neo4j.merge_vulnerability(item, source_id=source_id)
-                self.stats["vulnerabilities_synced"] += 1
+                    ok = self.neo4j.merge_vulnerability(item, source_id=source_id)
+                if ok:
+                    self.stats["vulnerabilities_synced"] += 1
 
             elif item.get("indicator_type") and item.get("value"):
-                self.neo4j.merge_indicator(item, source_id=source_id)
-                self.stats["indicators_synced"] += 1
+                if self.neo4j.merge_indicator(item, source_id=source_id):
+                    self.stats["indicators_synced"] += 1
 
             elif item_type == "malware":
-                self.neo4j.merge_malware(item, source_id=source_id)
-                self.stats["malware_synced"] += 1
+                if self.neo4j.merge_malware(item, source_id=source_id):
+                    self.stats["malware_synced"] += 1
 
             elif item_type == "actor":
-                self.neo4j.merge_actor(item, source_id=source_id)
-                self.stats["actors_synced"] += 1
+                if self.neo4j.merge_actor(item, source_id=source_id):
+                    self.stats["actors_synced"] += 1
 
             elif item_type == "technique":
-                self.neo4j.merge_technique(item, source_id=source_id)
-                self.stats["techniques_synced"] += 1
+                if self.neo4j.merge_technique(item, source_id=source_id):
+                    self.stats["techniques_synced"] += 1
 
             elif item_type == "tactic":
                 self.neo4j.merge_tactic(item, source_id=source_id)

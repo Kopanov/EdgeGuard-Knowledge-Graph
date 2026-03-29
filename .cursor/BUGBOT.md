@@ -857,3 +857,118 @@ Flag any `/health` implementation that returns 200 unconditionally without check
 `src/neo4j_client.py` maintains a `SOURCES` dict with `reliability` scores for each source.
 If a new collector is added, flag if there is no corresponding entry in `SOURCES` with an appropriate `reliability` value (0.0–1.0).
 Leaving a source out means its nodes get no `SOURCED_FROM` edges and no reliability weighting.
+
+---
+
+## 6. AIRFLOW DAG CONCURRENCY, TIMEOUTS & RETRIES — Blocking
+
+These rules protect against stuck/hung pipelines and concurrent run races. Violations can cause silent data loss or indefinite hangs in production.
+
+### Every DAG must have `max_active_runs=1`
+
+All 6 DAGs in `dags/edgeguard_pipeline.py` must set `max_active_runs=1`. Without this, a slow run causes the scheduler to pile up concurrent runs that race on MISP and Neo4j writes. Flag any DAG definition (`DAG(...)`) that is missing `max_active_runs=1`.
+
+### Every DAG must have `dagrun_timeout`
+
+All 6 DAGs must set `dagrun_timeout=timedelta(...)`. This is wall-clock time from DAG run start — if the entire run (including retries) exceeds this, Airflow marks it failed. Without it, a stuck run hangs indefinitely.
+
+The timeout must be **greater than** the worst-case task chain: `sum of sequential tasks' (execution_timeout x (1 + retries) + retries x retry_delay)`, using `max()` for parallel task groups, with at least 20% buffer. Flag any `dagrun_timeout` that is shorter than the worst-case calculation.
+
+Current correct values:
+
+| DAG | dagrun_timeout |
+|-----|---------------|
+| `edgeguard_pipeline` | 5h 30m |
+| `edgeguard_medium_freq` | 5h |
+| `edgeguard_low_freq` | 8h 30m |
+| `edgeguard_daily` | 8h 30m |
+| `edgeguard_neo4j_sync` | 22h |
+| `edgeguard_baseline` | 32h |
+
+### Every task must have `execution_timeout`
+
+All `PythonOperator` and `BashOperator` tasks must set `execution_timeout`. Without it, a single task can hang forever (e.g., MISP unresponsive) within the DAG run. Flag any task missing `execution_timeout`.
+
+### `dagrun_timeout` must be recalculated when task timeouts or retries change
+
+If someone changes a task's `execution_timeout`, or changes `retries`/`retry_delay` in `default_args`, the parent DAG's `dagrun_timeout` may need updating. Flag such changes without a corresponding `dagrun_timeout` update and ask for verification.
+
+### `default_args` must include `on_failure_callback`
+
+The `default_args` dict must include `on_failure_callback` pointing to `_on_task_failure`. This ensures all task failures are logged with `[ALERT]` and optionally sent to Slack. Flag removal of this callback.
+
+### `default_args` must include `on_success_callback`
+
+The `default_args` dict must include `on_success_callback` pointing to `_on_task_success`. This updates the `edgeguard_dag_last_success_timestamp` Prometheus gauge for stuck-run detection. Without it, the `EdgeGuardDAGLastSuccessStale` alert becomes dead code. Flag removal of this callback.
+
+### Baseline DAG must have `is_paused_upon_creation=False`
+
+`edgeguard_baseline` must set `is_paused_upon_creation=False`. Without this, manual triggers silently queue forever because Airflow starts DAGs paused by default. The `schedule_interval=None` already prevents automatic execution. Flag removal of this setting.
+
+### Neo4j merge return values must be checked before incrementing stats
+
+In `src/run_misp_to_neo4j.py` and `src/run_pipeline.py`, every call to `merge_indicator()`, `merge_vulnerability()`, `merge_cve()`, `merge_malware()`, `merge_actor()`, `merge_technique()` must check the boolean return value before incrementing the stats counter. Flag any pattern like:
+```python
+self.neo4j.merge_vulnerability(item, ...)
+self.stats["vulnerabilities_synced"] += 1  # BUG: not checking return value
+```
+The correct pattern is:
+```python
+if self.neo4j.merge_vulnerability(item, ...):
+    self.stats["vulnerabilities_synced"] += 1
+```
+
+### `clear_checkpoint()` must preserve incremental state
+
+`src/baseline_checkpoint.py` `clear_checkpoint(source=None)` (the `--fresh-baseline` path) must preserve `"incremental"` sub-dicts inside each source entry. These hold OTX `modified_since` cursors, MITRE ETags, etc. Destroying them forces scheduled runs to re-process all historical data. Flag any change to `clear_checkpoint` that deletes incremental state on the global (no-source) path.
+
+### Prometheus stuck-run alerts require gauge wiring
+
+The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_start_timestamp` and `edgeguard_dag_last_success_timestamp` gauges being set by the DAG code. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback` or the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.
+
+---
+
+## 7. CROSS-FILE CONTRACTS — Blocking
+
+These rules catch inconsistencies between Python files that interact through shared data, metrics, or conventions.
+
+### All `datetime.now()` must use `timezone.utc`
+
+Every call to `datetime.now()` across `src/`, `dags/`, `tests/`, and `scripts/` must pass `timezone.utc`. Bare `datetime.now()` produces naive timestamps that crash when compared to timezone-aware values (common in MISP/Airflow/Neo4j data). Flag any bare `datetime.now()` without `timezone.utc`.
+
+### Neo4j timestamps must use Cypher `datetime()`, not Python ISO strings
+
+All Cypher SET clauses for `first_seen`, `last_updated`, `first_imported_at` must use the Neo4j server-side `datetime()` function, not Python-side `$parameter` strings. Storing ISO strings as `last_updated` breaks `duration.between()` in enrichment decay queries. Flag any Cypher that writes `$first_seen` or `$last_updated` as string parameters instead of `datetime()`.
+
+### Prometheus metric labels must match between `metrics_server.py` and `dags/edgeguard_pipeline.py`
+
+Both files define the same Prometheus metrics (standalone and production paths). The label sets MUST be identical:
+- `PIPELINE_ERRORS`: `["task", "error_type", "source"]`
+- `DAG_RUNS_TOTAL`: `["dag_id", "status", "run_type"]`
+- `INDICATORS_COLLECTED`: `["source", "zone", "status"]`
+- `NEO4J_NODES`: `["label", "zone"]`
+- `SOURCE_HEALTH`: `["source", "zone"]` (metric name: `edgeguard_source_health`)
+- `DAG_LAST_SUCCESS`: `["dag_id"]`
+- `DAG_RUN_START`: `["dag_id"]`
+
+Flag any change to metric labels in one file without updating the other. Also flag any `.labels()` call that does not pass ALL required labels.
+
+### Production metrics import must cover all metrics used by DAG functions
+
+When `METRICS_SERVER_AVAILABLE` is True, the DAG imports metrics from `metrics_server.py`. ALL metrics used by unconditionally-defined functions (`record_indicators`, `record_neo4j_nodes`, `record_error`, `set_source_health`, etc.) must be imported. Flag any new metric usage in a DAG function without a corresponding import in the `METRICS_SERVER_AVAILABLE` block.
+
+### `retry_with_backoff` semantics must be consistent
+
+Three implementations exist: `collector_utils.py`, `neo4j_client.py`, `run_misp_to_neo4j.py`. All must use `range(max_retries + 1)` (first attempt + max_retries retries). The final error log must say `max_retries + 1` attempts. Flag any `range(max_retries)` without the `+ 1`.
+
+### Sync state file path must be checked in both `state/` and `dags/` directories
+
+`dags/edgeguard_pipeline.py` writes to `state/edgeguard_last_neo4j_sync.json`. `src/edgeguard.py` reads from multiple paths. Both `get_sync_status()` and `check_last_sync()` must include `state/` as a search path. Flag removal of the `state/` directory from the alt_paths list.
+
+### `source` field contract: singular key, list value, `n.source` Neo4j property
+
+All collector dicts must use `"source": [tag]` (singular key, list value). Neo4j node property is `n.source` (singular). Relationship properties may use `r.sources` (plural, different namespace). Flag any `"sources":` dict key in collector output, any `n.sources` in Cypher matching nodes, or any `.get("sources")` reading from Neo4j node results.
+
+### Changes must be reflected in documentation
+
+When code changes affect user-visible behavior (CLI commands, env vars, DAG settings, API responses), the corresponding documentation must be updated. Check: `README.md` (CLI table, env vars), `docs/AIRFLOW_DAGS.md` (DAG settings, CLI section), `docs/DEPLOYMENT_READINESS_CHECKLIST.md` (preflight steps), `docs/PRODUCTION_READINESS.md` (component status). Flag code changes without matching doc updates.

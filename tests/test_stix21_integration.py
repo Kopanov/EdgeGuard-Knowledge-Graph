@@ -69,7 +69,7 @@ def test_stix21_bundle_creation(tmp_path):
     logger.info("\nTesting STIX 2.1 bundle creation...")
 
     import uuid
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     # Create a STIX 2.1 bundle manually
     bundle = {
@@ -93,12 +93,12 @@ def test_stix21_bundle_creation(tmp_path):
                 "type": "indicator",
                 "spec_version": "2.1",
                 "id": f"indicator--{uuid.uuid4()}",
-                "created": datetime.now().isoformat(),
-                "modified": datetime.now().isoformat(),
+                "created": datetime.now(timezone.utc).isoformat(),
+                "modified": datetime.now(timezone.utc).isoformat(),
                 "name": "Malicious IP Indicator",
                 "pattern": "[ipv4-addr:value = '192.168.1.100']",
                 "pattern_type": "stix",
-                "valid_from": datetime.now().isoformat(),
+                "valid_from": datetime.now(timezone.utc).isoformat(),
             },
         ],
     }

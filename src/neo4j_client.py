@@ -185,7 +185,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
         @wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
-            for attempt in range(max_retries):
+            for attempt in range(max_retries + 1):  # +1: first attempt + max_retries retries (matches collector_utils)
                 try:
                     return func(*args, **kwargs)
                 except (
@@ -195,9 +195,11 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     TimeoutError,
                 ) as e:
                     last_exception = e
+                    if attempt >= max_retries:
+                        break  # exhausted all retries
                     delay = base_delay * (2**attempt)
                     logger.warning(
-                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s..."
+                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s..."
                     )
                     time.sleep(delay)
                 except Exception as e:
@@ -205,7 +207,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     logger.error(f"{func.__name__} failed with non-retryable error: {e}")
                     raise
 
-            logger.error(f"{func.__name__} failed after {max_retries} attempts")
+            logger.error(f"{func.__name__} failed after {max_retries + 1} attempts")
             raise last_exception
 
         return wrapper
@@ -3595,12 +3597,14 @@ class Neo4jClient:
 
         query = """
         MERGE (i:Indicator {indicator_type: $indicator_type, value: $value, tag: $tag})
-        SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
-            i.last_updated = $last_updated,
+        SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
+            i.last_updated = datetime(),
             i.source = CASE WHEN i.source IS NULL THEN $source ELSE apoc.coll.union(i.source, $source) END,
             i.confidence_score = $confidence_score,
             i.original_source = $original_source,
-            i.zone = $zone
+            i.zone = $zone,
+            i.edgeguard_managed = true,
+            i.active = true
         """
 
         try:
