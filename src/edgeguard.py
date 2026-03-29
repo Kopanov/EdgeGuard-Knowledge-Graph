@@ -1208,7 +1208,7 @@ def cmd_checkpoint_status(args) -> int:
 
 def cmd_checkpoint_clear(args) -> int:
     """Clear baseline checkpoints (preserves incremental state by default)."""
-    from baseline_checkpoint import clear_checkpoint, get_baseline_status, load_checkpoint, save_checkpoint
+    from baseline_checkpoint import clear_checkpoint, get_baseline_status
 
     section("Clear Checkpoints")
     source = getattr(args, "source", None)
@@ -1236,20 +1236,9 @@ def cmd_checkpoint_clear(args) -> int:
             info("Aborted.")
             return 0
 
-    clear_checkpoint(source)
+    clear_checkpoint(source, include_incremental=include_inc)
     ok(f"Baseline checkpoint cleared for {source or 'all sources'}.")
-
     if include_inc:
-        cp = load_checkpoint()
-        if source:
-            if source in cp:
-                cp[source].pop("incremental", None)
-                save_checkpoint(cp)
-        else:
-            for s in cp:
-                if isinstance(cp[s], dict):
-                    cp[s].pop("incremental", None)
-            save_checkpoint(cp)
         ok("Incremental state also cleared.")
     else:
         ok("Incremental state preserved (next scheduled run resumes from cursor).")

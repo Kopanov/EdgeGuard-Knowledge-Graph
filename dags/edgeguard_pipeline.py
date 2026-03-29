@@ -234,12 +234,25 @@ def ensure_metrics_server():
 
 PROMETHEUS_AVAILABLE = False
 
-# Only register local Prometheus counters when metrics_server is NOT available.
-# When metrics_server IS available it already registers these same metric names
-# (potentially with different label sets), so attempting to re-register them
-# causes a ValueError: "Duplicated timeseries in CollectorRegistry" on every
-# Airflow DAG re-parse.
-if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE:
+# When metrics_server IS available (production), import gauges from it to avoid
+# duplicate registration.  When NOT available (standalone/dev), define them locally.
+if ENABLE_PROMETHEUS_METRICS and METRICS_SERVER_AVAILABLE:
+    try:
+        from metrics_server import (
+            DAG_LAST_SUCCESS,
+            DAG_RUN_START,
+            PIPELINE_ERRORS,
+        )
+        from metrics_server import (
+            DAG_RUNS as DAG_RUNS_TOTAL,
+        )
+
+        PROMETHEUS_AVAILABLE = True
+        logger.info("Prometheus metrics imported from metrics_server (production mode)")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"Could not import metrics from metrics_server: {e}")
+
+if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS_AVAILABLE:
     try:
         from prometheus_client import Counter, Gauge, Histogram
 
@@ -397,7 +410,7 @@ def send_slack_alert(message: str, channel: str = None):
 
 
 def _on_task_failure(context):
-    """Callback on any task failure — logs prominently and sends Slack if enabled."""
+    """Callback on any task failure — logs prominently, updates metrics, sends Slack if enabled."""
     dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
     task_id = context.get("task_instance").task_id if context.get("task_instance") else "unknown"
     exc = context.get("exception", "")
@@ -412,36 +425,20 @@ def _on_task_failure(context):
 
 
 def _on_task_success(context):
-    """Callback on any task success — update DAG-level success gauge for stuck-run detection."""
+    """Callback on any task success — updates DAG activity timestamp.
+
+    Sets DAG_LAST_SUCCESS on every task completion so the
+    EdgeGuardDAGLastSuccessStale alert can detect DAGs where no task
+    has succeeded recently (covers both partial and full failures).
+    Also refreshes DAG_RUN_START to show the DAG is actively progressing.
+    """
     if not ENABLE_PROMETHEUS_METRICS:
         return
     dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    now = time.time()
     try:
-        DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(time.time())
-    except Exception:
-        pass
-
-
-def _on_dag_run_start(**kwargs):
-    """Called by the first task in each DAG to mark the run as in-progress."""
-    if not ENABLE_PROMETHEUS_METRICS:
-        return
-    dag_id = kwargs.get("dag", None)
-    dag_id = dag_id.dag_id if dag_id else "unknown"
-    try:
-        DAG_RUN_START.labels(dag_id=dag_id).set(time.time())
-    except Exception:
-        pass
-
-
-def _on_dag_run_end(**kwargs):
-    """Called by the last task in each DAG to clear the in-progress marker."""
-    if not ENABLE_PROMETHEUS_METRICS:
-        return
-    dag_id = kwargs.get("dag", None)
-    dag_id = dag_id.dag_id if dag_id else "unknown"
-    try:
-        DAG_RUN_START.labels(dag_id=dag_id).set(0)
+        DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(now)
+        DAG_RUN_START.labels(dag_id=dag_id).set(now)  # keeps refreshing while DAG is active
     except Exception:
         pass
 
