@@ -223,7 +223,7 @@ Neo4j uses unique constraints:
 - ✅ `on_failure_callback` / `on_success_callback` for alerting and metrics
 - ✅ `ShortCircuitOperator` gates the Neo4j sync (skips when nothing new; error-tolerant on corrupted state file)
 - ✅ Pipeline lock file (`checkpoints/pipeline.lock`) for CLI runs to prevent concurrent `run_pipeline.py` invocations
-- ✅ `clear_checkpoint()` preserves incremental state on `--fresh-baseline`
+- ✅ `--fresh-baseline` performs a true clean slate: clears Neo4j graph data + MISP EdgeGuard events + checkpoints, then re-collects from scratch. Incremental cursor state is preserved so scheduled runs resume correctly after the baseline.
 - ✅ MISP dedup logging: `[DEDUP]` when all items already exist, `[SKIP]` when nothing new to push
 
 ### Metrics Exported
@@ -289,6 +289,16 @@ python src/edgeguard.py preflight
 ```bash
 airflow logs <task_id> <dag_run_id>
 ```
+
+### Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| DAG runs stuck in "queued" | Check if DAG is paused: `edgeguard dag status`. Kill stuck runs: `edgeguard dag kill` |
+| Collectors failing repeatedly | Reset circuit breakers + retry: `edgeguard heal` |
+| Need a completely fresh start | `python src/run_pipeline.py --baseline --fresh-baseline --baseline-days N` (clears Neo4j + MISP + checkpoints) |
+| Airflow not reachable | `edgeguard doctor` retries after 10s; check container: `docker compose ps airflow` |
+| Pipeline already running (lock error) | Wait for it to finish, or delete `checkpoints/pipeline.lock` if stale |
 
 ---
 
