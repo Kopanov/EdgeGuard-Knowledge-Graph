@@ -155,6 +155,30 @@ groups:
           summary: "DAG {{ $labels.dag_id }} has multiple failures"
           description: "DAG {{ $labels.dag_id }} has had more than 3 failures in the last hour."
 
+      - alert: EdgeGuardDAGRunStuck
+        expr: |
+          edgeguard_dag_run_start_timestamp > 0
+          and (time() - edgeguard_dag_run_start_timestamp) > 3600
+        for: 5m
+        labels:
+          severity: critical
+          component: pipeline
+        annotations:
+          summary: "DAG run {{ $labels.dag_id }} appears stuck"
+          description: "DAG {{ $labels.dag_id }} has been running for over 1 hour without completing."
+
+      - alert: EdgeGuardDAGLastSuccessStale
+        expr: |
+          edgeguard_dag_last_success_timestamp > 0
+          and (time() - edgeguard_dag_last_success_timestamp) > 21600
+        for: 15m
+        labels:
+          severity: warning
+          component: pipeline
+        annotations:
+          summary: "No successful {{ $labels.dag_id }} run in 6 hours"
+          description: "Last successful run of {{ $labels.dag_id }} was {{ $value | humanizeDuration }} ago."
+
   # ================================================================================
   # Neo4j Alerts
   # ================================================================================

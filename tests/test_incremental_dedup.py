@@ -6,12 +6,12 @@ from unittest.mock import MagicMock, patch
 def test_update_source_incremental_merges_under_incremental_key():
     from baseline_checkpoint import clear_checkpoint, get_source_incremental, update_source_incremental
 
-    clear_checkpoint("testsrc_incr")
+    clear_checkpoint("testsrc_incr", include_incremental=True)  # full cleanup for test isolation
     update_source_incremental("testsrc_incr", foo="bar")
     assert get_source_incremental("testsrc_incr") == {"foo": "bar"}
     update_source_incremental("testsrc_incr", baz=1)
     assert get_source_incremental("testsrc_incr") == {"foo": "bar", "baz": 1}
-    clear_checkpoint("testsrc_incr")
+    clear_checkpoint("testsrc_incr", include_incremental=True)  # cleanup after test
 
 
 def test_misp_writer_push_items_skips_prefetched_type_value():

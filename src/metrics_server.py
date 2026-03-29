@@ -134,6 +134,19 @@ PIPELINE_STAGES = Gauge("edgeguard_pipeline_stage", "Current pipeline stage (1=r
 # DAG/Airflow metrics
 DAG_RUNS = Counter("edgeguard_dag_runs_total", "Total DAG runs", ["dag_id", "status", "run_type"])
 
+# Stuck-run detection: set to time.time() on success, alert if stale
+DAG_LAST_SUCCESS = Gauge(
+    "edgeguard_dag_last_success_timestamp",
+    "Unix timestamp of last successful DAG run (0 = never succeeded)",
+    ["dag_id"],
+)
+
+DAG_RUN_START = Gauge(
+    "edgeguard_dag_run_start_timestamp",
+    "Unix timestamp when the current DAG run started (0 = idle)",
+    ["dag_id"],
+)
+
 DAG_RUN_DURATION = Histogram(
     "edgeguard_dag_run_duration_seconds",
     "DAG run duration",
@@ -368,7 +381,7 @@ class MetricsServer:
         server.start_threaded()
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8001):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8001):
         self.host = host
         self.port = port
         self.server: Optional[ThreadedHTTPServer] = None
@@ -435,7 +448,10 @@ def get_metrics_server(host: str = None, port: int = None) -> MetricsServer:
 
     if _server_instance is None:
         host = host or os.getenv("EDGEGUARD_METRICS_HOST", "127.0.0.1")
-        port = port or int(os.getenv("EDGEGUARD_METRICS_PORT", "8001"))
+        try:
+            port = port or int(os.getenv("EDGEGUARD_METRICS_PORT", "8001"))
+        except (ValueError, TypeError):
+            port = port or 8001
         _server_instance = MetricsServer(host=host, port=port)
 
     return _server_instance
@@ -446,7 +462,7 @@ def start_metrics_server(host: str = None, port: int = None, threaded: bool = Tr
     Convenience function to start the metrics server.
 
     Args:
-        host: Bind host (default: 0.0.0.0)
+        host: Bind host (default: 127.0.0.1)
         port: Bind port (default: 8001)
         threaded: If True, start in background thread; if False, block
 
@@ -471,7 +487,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="EdgeGuard Prometheus Metrics Server")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8001, help="Bind port (default: 8001)")
     parser.add_argument("--test-metrics", action="store_true", help="Generate test metrics")
 

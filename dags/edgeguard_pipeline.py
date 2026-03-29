@@ -95,6 +95,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -233,12 +234,25 @@ def ensure_metrics_server():
 
 PROMETHEUS_AVAILABLE = False
 
-# Only register local Prometheus counters when metrics_server is NOT available.
-# When metrics_server IS available it already registers these same metric names
-# (potentially with different label sets), so attempting to re-register them
-# causes a ValueError: "Duplicated timeseries in CollectorRegistry" on every
-# Airflow DAG re-parse.
-if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE:
+# When metrics_server IS available (production), import gauges from it to avoid
+# duplicate registration.  When NOT available (standalone/dev), define them locally.
+if ENABLE_PROMETHEUS_METRICS and METRICS_SERVER_AVAILABLE:
+    try:
+        from metrics_server import (
+            DAG_LAST_SUCCESS,
+            DAG_RUN_START,
+            PIPELINE_ERRORS,
+        )
+        from metrics_server import (
+            DAG_RUNS as DAG_RUNS_TOTAL,
+        )
+
+        PROMETHEUS_AVAILABLE = True
+        logger.info("Prometheus metrics imported from metrics_server (production mode)")
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"Could not import metrics from metrics_server: {e}")
+
+if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS_AVAILABLE:
     try:
         from prometheus_client import Counter, Gauge, Histogram
 
@@ -259,6 +273,18 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE:
         CIRCUIT_OPEN = Gauge("edgeguard_circuit_open", "Circuit breaker state (1=open, 0=closed)", ["service"])
         LAST_SUCCESS_TIMESTAMP = Gauge(
             "edgeguard_last_success_timestamp", "Unix timestamp of last successful collection", ["source"]
+        )
+
+        # DAG-level stuck-run detection
+        DAG_LAST_SUCCESS = Gauge(
+            "edgeguard_dag_last_success_timestamp",
+            "Unix timestamp of last successful DAG run (0 = never succeeded)",
+            ["dag_id"],
+        )
+        DAG_RUN_START = Gauge(
+            "edgeguard_dag_run_start_timestamp",
+            "Unix timestamp when the current DAG run started (0 = idle)",
+            ["dag_id"],
         )
 
         logger.info("Prometheus metrics enabled (standalone mode)")
@@ -383,6 +409,40 @@ def send_slack_alert(message: str, channel: str = None):
         logger.warning(f"Failed to send Slack alert: {e}")
 
 
+def _on_task_failure(context):
+    """Callback on any task failure — logs prominently, updates metrics, sends Slack if enabled."""
+    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    task_id = context.get("task_instance").task_id if context.get("task_instance") else "unknown"
+    exc = context.get("exception", "")
+    logger.error(f"[ALERT] Task FAILED: {dag_id}.{task_id} — {exc}")
+    if ENABLE_SLACK_ALERTS:
+        send_slack_alert(f"Task FAILED: {dag_id}.{task_id} — {exc}", level="critical")
+    if ENABLE_PROMETHEUS_METRICS:
+        try:
+            PIPELINE_ERRORS.labels(task=task_id, error_type="task_failure").inc()
+        except Exception:
+            pass
+
+
+def _on_task_success(context):
+    """Callback on any task success — updates DAG activity timestamp.
+
+    Sets DAG_LAST_SUCCESS on every task completion so the
+    EdgeGuardDAGLastSuccessStale alert can detect DAGs where no task
+    has succeeded recently (covers both partial and full failures).
+    Also refreshes DAG_RUN_START to show the DAG is actively progressing.
+    """
+    if not ENABLE_PROMETHEUS_METRICS:
+        return
+    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    now = time.time()
+    try:
+        DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(now)
+        DAG_RUN_START.labels(dag_id=dag_id).set(now)  # keeps refreshing while DAG is active
+    except Exception:
+        pass
+
+
 # Default arguments
 default_args = {
     "owner": "edgeguard",
@@ -391,6 +451,8 @@ default_args = {
     "email_on_retry": False,
     "retries": 2,
     "retry_delay": timedelta(minutes=5),
+    "on_failure_callback": _on_task_failure,
+    "on_success_callback": _on_task_success,
 }
 
 # ================================================================================
@@ -853,15 +915,18 @@ def should_run_neo4j_sync():
         logger.warning(f"Failed to get NEO4J_SYNC_INTERVAL, using default: {e}")
         interval_hours = 72
 
-    if os.path.exists(state_file):
-        with open(state_file, "r") as f:
-            state = json.load(f)
-            _raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
-            last_sync = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r") as f:
+                state = json.load(f)
+                _raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
+                last_sync = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
 
-            if datetime.now(timezone.utc) - last_sync < timedelta(hours=interval_hours):
-                logger.info(f"Skipping Neo4j sync - last sync was {last_sync}, interval is {interval_hours}h")
-                return False
+                if datetime.now(timezone.utc) - last_sync < timedelta(hours=interval_hours):
+                    logger.info(f"Skipping Neo4j sync - last sync was {last_sync}, interval is {interval_hours}h")
+                    return False
+    except (json.JSONDecodeError, OSError, ValueError) as e:
+        logger.error(f"Corrupted sync state file ({state_file}): {e} — running sync to be safe")
 
     logger.info(f"Running Neo4j sync - interval {interval_hours}h has passed")
     return True
@@ -1000,6 +1065,8 @@ dag = DAG(
     schedule_interval="*/30 * * * *",
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,  # Prevent pile-up if a run is slow
+    dagrun_timeout=timedelta(hours=5, minutes=30),  # Worst-case: 4h25m (OTX retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "high-frequency"],
 )
 
@@ -1076,6 +1143,8 @@ medium_freq_dag = DAG(
     schedule_interval="0 */4 * * *",  # Every 4 hours
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=5),  # Worst-case: 4h (CISA/VT retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "medium-frequency"],
 )
 
@@ -1121,6 +1190,8 @@ low_freq_dag = DAG(
     schedule_interval="0 */8 * * *",  # Every 8 hours
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (NVD retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "low-frequency"],
 )
 
@@ -1159,6 +1230,8 @@ daily_dag = DAG(
     schedule_interval="0 2 * * *",  # Daily at 2 AM
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (7 collectors parallel + retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1260,12 +1333,15 @@ neo4j_sync_dag = DAG(
     schedule_interval="0 3 */3 * *",  # Every 3 days at 3 AM
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,
+    dagrun_timeout=timedelta(hours=22),  # Worst-case: 18h (full sync + rels + enrich, all with retries)
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
 check_neo4j_sync_needed = ShortCircuitOperator(
     task_id="check_sync_needed",
     python_callable=should_run_neo4j_sync,
+    execution_timeout=timedelta(minutes=2),
     dag=neo4j_sync_dag,
 )
 
@@ -1383,6 +1459,9 @@ baseline_dag = DAG(
     schedule_interval=None,  # MANUAL TRIGGER ONLY
     start_date=_DAG_START_DATE,
     catchup=False,
+    max_active_runs=1,  # Only one baseline at a time
+    dagrun_timeout=timedelta(hours=32),  # Worst-case: 26h (full collection + sync + retries) + buffer
+    is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )
 

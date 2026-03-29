@@ -857,3 +857,71 @@ Flag any `/health` implementation that returns 200 unconditionally without check
 `src/neo4j_client.py` maintains a `SOURCES` dict with `reliability` scores for each source.
 If a new collector is added, flag if there is no corresponding entry in `SOURCES` with an appropriate `reliability` value (0.0–1.0).
 Leaving a source out means its nodes get no `SOURCED_FROM` edges and no reliability weighting.
+
+---
+
+## 6. AIRFLOW DAG CONCURRENCY, TIMEOUTS & RETRIES — Blocking
+
+These rules protect against stuck/hung pipelines and concurrent run races. Violations can cause silent data loss or indefinite hangs in production.
+
+### Every DAG must have `max_active_runs=1`
+
+All 6 DAGs in `dags/edgeguard_pipeline.py` must set `max_active_runs=1`. Without this, a slow run causes the scheduler to pile up concurrent runs that race on MISP and Neo4j writes. Flag any DAG definition (`DAG(...)`) that is missing `max_active_runs=1`.
+
+### Every DAG must have `dagrun_timeout`
+
+All 6 DAGs must set `dagrun_timeout=timedelta(...)`. This is wall-clock time from DAG run start — if the entire run (including retries) exceeds this, Airflow marks it failed. Without it, a stuck run hangs indefinitely.
+
+The timeout must be **greater than** the worst-case task chain: `sum of sequential tasks' (execution_timeout x (1 + retries) + retries x retry_delay)`, using `max()` for parallel task groups, with at least 20% buffer. Flag any `dagrun_timeout` that is shorter than the worst-case calculation.
+
+Current correct values:
+
+| DAG | dagrun_timeout |
+|-----|---------------|
+| `edgeguard_pipeline` | 5h 30m |
+| `edgeguard_medium_freq` | 5h |
+| `edgeguard_low_freq` | 8h 30m |
+| `edgeguard_daily` | 8h 30m |
+| `edgeguard_neo4j_sync` | 22h |
+| `edgeguard_baseline` | 32h |
+
+### Every task must have `execution_timeout`
+
+All `PythonOperator` and `BashOperator` tasks must set `execution_timeout`. Without it, a single task can hang forever (e.g., MISP unresponsive) within the DAG run. Flag any task missing `execution_timeout`.
+
+### `dagrun_timeout` must be recalculated when task timeouts or retries change
+
+If someone changes a task's `execution_timeout`, or changes `retries`/`retry_delay` in `default_args`, the parent DAG's `dagrun_timeout` may need updating. Flag such changes without a corresponding `dagrun_timeout` update and ask for verification.
+
+### `default_args` must include `on_failure_callback`
+
+The `default_args` dict must include `on_failure_callback` pointing to `_on_task_failure`. This ensures all task failures are logged with `[ALERT]` and optionally sent to Slack. Flag removal of this callback.
+
+### `default_args` must include `on_success_callback`
+
+The `default_args` dict must include `on_success_callback` pointing to `_on_task_success`. This updates the `edgeguard_dag_last_success_timestamp` Prometheus gauge for stuck-run detection. Without it, the `EdgeGuardDAGLastSuccessStale` alert becomes dead code. Flag removal of this callback.
+
+### Baseline DAG must have `is_paused_upon_creation=False`
+
+`edgeguard_baseline` must set `is_paused_upon_creation=False`. Without this, manual triggers silently queue forever because Airflow starts DAGs paused by default. The `schedule_interval=None` already prevents automatic execution. Flag removal of this setting.
+
+### Neo4j merge return values must be checked before incrementing stats
+
+In `src/run_misp_to_neo4j.py` and `src/run_pipeline.py`, every call to `merge_indicator()`, `merge_vulnerability()`, `merge_cve()`, `merge_malware()`, `merge_actor()`, `merge_technique()` must check the boolean return value before incrementing the stats counter. Flag any pattern like:
+```python
+self.neo4j.merge_vulnerability(item, ...)
+self.stats["vulnerabilities_synced"] += 1  # BUG: not checking return value
+```
+The correct pattern is:
+```python
+if self.neo4j.merge_vulnerability(item, ...):
+    self.stats["vulnerabilities_synced"] += 1
+```
+
+### `clear_checkpoint()` must preserve incremental state
+
+`src/baseline_checkpoint.py` `clear_checkpoint(source=None)` (the `--fresh-baseline` path) must preserve `"incremental"` sub-dicts inside each source entry. These hold OTX `modified_since` cursors, MITRE ETags, etc. Destroying them forces scheduled runs to re-process all historical data. Flag any change to `clear_checkpoint` that deletes incremental state on the global (no-source) path.
+
+### Prometheus stuck-run alerts require gauge wiring
+
+The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_start_timestamp` and `edgeguard_dag_last_success_timestamp` gauges being set by the DAG code. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback` or the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.

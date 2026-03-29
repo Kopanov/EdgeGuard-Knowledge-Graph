@@ -990,6 +990,641 @@ def cmd_monitor(args):
 
 
 # ================================================================================
+# DAG MANAGEMENT
+# ================================================================================
+
+
+def cmd_dag(args) -> int:
+    """Dispatch dag subcommands."""
+    sub = getattr(args, "dag_command", None)
+    if sub == "status":
+        return cmd_dag_status(args)
+    elif sub == "kill":
+        return cmd_dag_kill(args)
+    else:
+        print("Usage: edgeguard dag {status|kill}")
+        return 1
+
+
+def cmd_dag_status(args) -> int:
+    """Show DAG run status from Airflow REST API."""
+    import airflow_client as ac
+
+    section("Airflow DAG Status")
+
+    health = ac.airflow_health()
+    if "error" in health:
+        err(f"Airflow: {health['error']}")
+        return 1
+    ok("Airflow is reachable")
+
+    dag_ids = [args.dag_id] if getattr(args, "dag_id", None) else ac.EDGEGUARD_DAG_IDS
+    state_filter = getattr(args, "state", None)
+    limit = getattr(args, "limit", 5) or 5
+    use_json = getattr(args, "json", False)
+
+    all_runs = []
+    for dag_id in dag_ids:
+        runs = ac.list_dag_runs(dag_id, state=state_filter, limit=limit)
+        if runs and "error" in runs[0]:
+            warn(f"{dag_id}: {runs[0]['error']}")
+            continue
+        for r in runs:
+            r["dag_id"] = dag_id
+        all_runs.extend(runs)
+
+    if use_json:
+        import json as _json
+
+        print(_json.dumps(all_runs, indent=2, default=str))
+        return 0
+
+    if not all_runs:
+        info("No DAG runs found.")
+        return 0
+
+    # Table header
+    print(f"\n  {'DAG':<28} {'State':<10} {'Start':<20} {'Duration':<12}")
+    print(f"  {'—' * 28} {'—' * 10} {'—' * 20} {'—' * 12}")
+    for r in all_runs:
+        dag_id = r.get("dag_id", "?")
+        state = r.get("state", "?")
+        start = (r.get("start_date") or "")[:19]
+        duration = ac.format_duration(r.get("start_date"), r.get("end_date"))
+
+        # Color-code state
+        if state == "success":
+            state_str = f"{Colors.GREEN}{state}{Colors.RESET}"
+        elif state in ("running", "queued"):
+            state_str = f"{Colors.YELLOW}{state}{Colors.RESET}"
+        elif state == "failed":
+            state_str = f"{Colors.RED}{state}{Colors.RESET}"
+        else:
+            state_str = state
+
+        print(f"  {dag_id:<28} {state_str:<22} {start:<20} {duration:<12}")
+
+    print()
+    return 0
+
+
+def cmd_dag_kill(args) -> int:
+    """Force-fail stuck DAG runs with checkpoint preservation."""
+    import airflow_client as ac
+
+    section("Kill Active DAG Runs")
+
+    health = ac.airflow_health()
+    if "error" in health:
+        err(f"Airflow: {health['error']}")
+        return 1
+
+    dag_id_filter = getattr(args, "dag_id", None)
+    dag_ids = [dag_id_filter] if dag_id_filter else None
+    active = ac.list_all_active_dag_runs(dag_ids)
+
+    if not active:
+        ok("No active (running/queued) DAG runs to kill.")
+        return 0
+
+    info(f"Found {len(active)} active run(s):")
+    for r in active:
+        print(f"  {r.get('dag_id', '?'):<28} {r.get('state', '?'):<10} started {(r.get('start_date') or '?')[:19]}")
+
+    if getattr(args, "dry_run", False):
+        info("Dry run — no action taken.")
+        return 0
+
+    if not getattr(args, "force", False):
+        confirm = input("\nKill these runs? Checkpoints will be preserved. [y/N]: ")
+        if confirm.lower() not in ("y", "yes"):
+            info("Aborted.")
+            return 0
+
+    # Checkpoint preservation — read-only snapshot
+    try:
+        from baseline_checkpoint import get_baseline_status
+
+        cp_status = get_baseline_status()
+        if cp_status:
+            ok(f"Checkpoint state: {len(cp_status)} source(s) tracked — preserved (read-only).")
+    except Exception:
+        pass
+
+    # Kill each run
+    killed = 0
+    for r in active:
+        dag_id = r.get("dag_id", "")
+        run_id = r.get("dag_run_id", "")
+        if not run_id:
+            continue
+
+        result = ac.patch_dag_run_state(dag_id, run_id, "failed")
+        if "error" in result:
+            err(f"  Failed to kill {dag_id}/{run_id}: {result['error']}")
+        else:
+            ok(f"  Killed: {dag_id} / {run_id}")
+            killed += 1
+
+    # Reset circuit breakers since services are fine — it was the DAG that was stuck
+    try:
+        from resilience import reset_all_circuit_breakers
+
+        reset_all_circuit_breakers()
+        ok("Circuit breakers reset.")
+    except Exception:
+        pass
+
+    section(f"Killed {killed}/{len(active)} run(s). Checkpoints preserved.")
+    info("Run 'edgeguard dag status' to verify.")
+    return 0
+
+
+# ================================================================================
+# CHECKPOINT MANAGEMENT
+# ================================================================================
+
+
+def cmd_checkpoint(args) -> int:
+    """Dispatch checkpoint subcommands."""
+    sub = getattr(args, "checkpoint_command", None)
+    if sub == "status":
+        return cmd_checkpoint_status(args)
+    elif sub == "clear":
+        return cmd_checkpoint_clear(args)
+    else:
+        print("Usage: edgeguard checkpoint {status|clear}")
+        return 1
+
+
+def cmd_checkpoint_status(args) -> int:
+    """Show baseline checkpoint state per source."""
+    from baseline_checkpoint import get_source_incremental, load_checkpoint
+
+    section("Checkpoint Status")
+    use_json = getattr(args, "json", False)
+    source_filter = getattr(args, "source", None)
+
+    checkpoints = load_checkpoint()
+    if not checkpoints:
+        info("No checkpoints found.")
+        return 0
+
+    if use_json:
+        import json as _json
+
+        data = {source_filter: checkpoints.get(source_filter, {})} if source_filter else checkpoints
+        print(_json.dumps(data, indent=2, default=str))
+        return 0
+
+    print(f"\n  {'Source':<20} {'Pages':<8} {'Items':<10} {'Status':<12} {'Incremental':<14} {'Last Updated':<20}")
+    print(f"  {'—' * 20} {'—' * 8} {'—' * 10} {'—' * 12} {'—' * 14} {'—' * 20}")
+
+    for source, data in sorted(checkpoints.items()):
+        if source_filter and source != source_filter:
+            continue
+        if not isinstance(data, dict):
+            continue
+
+        pages = data.get("page", data.get("pages_collected", "—"))
+        items = data.get("items_collected", "—")
+        completed = data.get("completed", False)
+        updated = (data.get("updated_at") or "")[:19]
+        inc = get_source_incremental(source)
+        has_inc = "yes" if inc else "no"
+
+        if completed:
+            status = f"{Colors.GREEN}completed{Colors.RESET}"
+        elif items and items != "—":
+            status = f"{Colors.YELLOW}in-progress{Colors.RESET}"
+        else:
+            status = "—"
+
+        print(f"  {source:<20} {str(pages):<8} {str(items):<10} {status:<24} {has_inc:<14} {updated:<20}")
+
+    print()
+    return 0
+
+
+def cmd_checkpoint_clear(args) -> int:
+    """Clear baseline checkpoints (preserves incremental state by default)."""
+    from baseline_checkpoint import clear_checkpoint, get_baseline_status
+
+    section("Clear Checkpoints")
+    source = getattr(args, "source", None)
+    include_inc = getattr(args, "include_incremental", False)
+
+    status = get_baseline_status()
+    if not status:
+        info("No checkpoints to clear.")
+        return 0
+
+    info(f"Current checkpoints: {len(status)} source(s)")
+    for s, d in status.items():
+        if source and s != source:
+            continue
+        print(f"  {s}: {d.get('items_collected', 0)} items, completed={d.get('completed', False)}")
+
+    if include_inc:
+        warn("--include-incremental: This will also clear incremental cursors (modified_since, ETags).")
+        warn("Next collection will do a FULL re-fetch for affected sources.")
+
+    if not getattr(args, "force", False):
+        target = source or "ALL sources"
+        confirm = input(f"\nClear checkpoint for {target}? [y/N]: ")
+        if confirm.lower() not in ("y", "yes"):
+            info("Aborted.")
+            return 0
+
+    clear_checkpoint(source, include_incremental=include_inc)
+    ok(f"Baseline checkpoint cleared for {source or 'all sources'}.")
+    if include_inc:
+        ok("Incremental state also cleared.")
+    else:
+        ok("Incremental state preserved (next scheduled run resumes from cursor).")
+
+    return 0
+
+
+# ================================================================================
+# STATS DASHBOARD
+# ================================================================================
+
+
+def cmd_stats(args) -> int:
+    """Dashboard: node counts, by-zone, by-source, MISP events, sync, runs."""
+    use_json = getattr(args, "json", False)
+    show_full = getattr(args, "full", False)
+    show_zone = show_full or getattr(args, "by_zone", False)
+    show_source = show_full or getattr(args, "by_source", False)
+    show_misp = show_full or getattr(args, "misp", False)
+
+    section("EdgeGuard Stats")
+
+    result = {}
+    neo4j_stats = None
+
+    # ── Neo4j full stats (by_source and by_zone come from get_stats()) ──
+    try:
+        from neo4j_client import Neo4jClient
+
+        client = Neo4jClient()
+        if client.connect():
+            neo4j_stats = client.get_stats()
+            client.close()
+    except Exception as e:
+        warn(f"Neo4j: {e}")
+
+    # 1. Node counts by label
+    if neo4j_stats and "error" not in neo4j_stats:
+        label_order = [
+            "Vulnerability",
+            "Indicator",
+            "CVE",
+            "Malware",
+            "ThreatActor",
+            "Technique",
+            "Tactic",
+            "Campaign",
+            "Tool",
+            "CVSSv31",
+            "CVSSv40",
+            "CVSSv30",
+            "CVSSv2",
+            "Alert",
+            "Sector",
+            "Sources",
+        ]
+        result["nodes"] = {k: neo4j_stats.get(k, 0) for k in label_order if neo4j_stats.get(k, 0) > 0}
+        result["nodes"]["relationships"] = neo4j_stats.get("sourced_relationships", 0)
+
+        if not use_json:
+            print(f"\n  {'Node Type':<20} {'Count':>10}")
+            print(f"  {'—' * 20} {'—' * 10}")
+            for label in label_order:
+                count = neo4j_stats.get(label, 0)
+                if count > 0:
+                    print(f"  {label:<20} {count:>10,}")
+            sr = neo4j_stats.get("sourced_relationships", 0)
+            if sr:
+                print(f"  {'SOURCED_FROM rels':<20} {sr:>10,}")
+
+    # 2. By zone
+    if show_zone and neo4j_stats:
+        by_zone = neo4j_stats.get("by_zone", {})
+        result["by_zone"] = by_zone
+        if by_zone and not use_json:
+            print(f"\n  {'Zone':<20} {'Nodes':>10}")
+            print(f"  {'—' * 20} {'—' * 10}")
+            for zone, count in sorted(by_zone.items(), key=lambda x: -x[1]):
+                print(f"  {zone:<20} {count:>10,}")
+
+    # 3. By source
+    if show_source and neo4j_stats:
+        by_source = neo4j_stats.get("by_source", {})
+        result["by_source"] = by_source
+        if by_source and not use_json:
+            print(f"\n  {'Source':<28} {'Nodes':>10}")
+            print(f"  {'—' * 28} {'—' * 10}")
+            for source, count in sorted(by_source.items(), key=lambda x: -x[1]):
+                print(f"  {source:<28} {count:>10,}")
+
+    # 4. MISP event summary
+    if show_misp:
+        try:
+            misp_summary = _fetch_misp_event_summary()
+            result["misp"] = misp_summary
+            if misp_summary and not use_json:
+                print(
+                    f"\n  MISP Events: {misp_summary['total_events']} events, "
+                    f"{misp_summary['total_attributes']:,} attributes"
+                )
+                if misp_summary.get("by_source"):
+                    print(f"\n  {'MISP Source':<28} {'Events':>8} {'Attributes':>12}")
+                    print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
+                    for src in sorted(misp_summary["by_source"], key=lambda x: -x["attributes"]):
+                        print(f"  {src['source']:<28} {src['events']:>8} {src['attributes']:>12,}")
+        except Exception as e:
+            warn(f"MISP: {e}")
+
+    # 5. Last sync
+    try:
+        sync = get_sync_status()
+        result["last_sync"] = sync
+        if not use_json:
+            if sync.get("last_sync"):
+                ok(f"\nLast sync: {sync['last_sync'][:19]} ({sync.get('age', '?')})")
+            else:
+                warn("\nNo sync recorded yet")
+    except Exception:
+        pass
+
+    # 6. Pipeline metrics
+    try:
+        from metrics import PipelineMetrics
+
+        pm = PipelineMetrics()
+        pm.load()
+        summary = pm.get_summary()
+        result["pipeline"] = summary
+        if not use_json and summary.get("total_runs", 0) > 0:
+            print(f"\n  Pipeline: {summary['total_runs']} runs, {summary.get('success_rate', 0):.0f}% success")
+            if summary.get("avg_duration"):
+                print(f"  Avg duration: {summary['avg_duration']:.0f}s")
+    except Exception:
+        pass
+
+    # 7. Checkpoint summary
+    try:
+        from baseline_checkpoint import get_baseline_status
+
+        cp = get_baseline_status()
+        if cp:
+            completed = sum(1 for d in cp.values() if isinstance(d, dict) and d.get("completed"))
+            in_progress = len(cp) - completed
+            result["checkpoints"] = {"completed": completed, "in_progress": in_progress}
+            if not use_json:
+                print(f"\n  Checkpoints: {completed} completed, {in_progress} in-progress")
+    except Exception:
+        pass
+
+    if use_json:
+        import json as _json
+
+        print(_json.dumps(result, indent=2, default=str))
+
+    if not use_json and not (show_zone or show_source or show_misp):
+        info("\nTip: use --full for zone/source/MISP breakdowns, or --by-zone, --by-source, --misp individually.")
+
+    print()
+    return 0
+
+
+def _fetch_misp_event_summary() -> dict:
+    """Query MISP for event/attribute counts grouped by source tag."""
+    import requests as _requests
+    import urllib3
+
+    if not SSL_VERIFY:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    session = _requests.Session()
+    session.headers.update(
+        {
+            "Authorization": MISP_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    )
+
+    # Fetch EdgeGuard events index (lightweight — no attributes)
+    resp = session.get(
+        f"{MISP_URL}/events/index",
+        params={"limit": 500, "searchall": "EdgeGuard"},
+        verify=SSL_VERIFY,
+        timeout=(15, 60),
+    )
+    resp.raise_for_status()
+    events = resp.json()
+    if not isinstance(events, list):
+        events = []
+
+    total_events = 0
+    total_attrs = 0
+    source_map = {}  # source_tag -> {events: N, attributes: N}
+
+    for ev in events:
+        info_field = ev.get("info", "") or ev.get("Event", {}).get("info", "")
+        attr_count = int(ev.get("attribute_count", 0) or ev.get("Event", {}).get("attribute_count", 0) or 0)
+
+        # Parse source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
+        source_tag = "unknown"
+        if info_field.startswith("EdgeGuard-"):
+            parts = info_field.split("-")
+            if len(parts) >= 3:
+                source_tag = parts[2]  # e.g., "alienvault_otx"
+
+        total_events += 1
+        total_attrs += attr_count
+        if source_tag not in source_map:
+            source_map[source_tag] = {"events": 0, "attributes": 0}
+        source_map[source_tag]["events"] += 1
+        source_map[source_tag]["attributes"] += attr_count
+
+    return {
+        "total_events": total_events,
+        "total_attributes": total_attrs,
+        "by_source": [
+            {"source": src, "events": data["events"], "attributes": data["attributes"]}
+            for src, data in source_map.items()
+        ],
+    }
+
+
+# ================================================================================
+# PREFLIGHT
+# ================================================================================
+
+
+def cmd_preflight(args) -> int:
+    """Comprehensive pre-run readiness check."""
+    strict = getattr(args, "strict", False)
+    use_json = getattr(args, "json", False)
+
+    section("EdgeGuard Preflight Check")
+    errors = 0
+    warnings = 0
+    checks = {}
+
+    # 1. Required env vars
+    section("1. Environment Variables")
+    required = {"NEO4J_PASSWORD": NEO4J_PASSWORD, "MISP_API_KEY": MISP_API_KEY, "MISP_URL": MISP_URL}
+    for name, val in required.items():
+        if val:
+            ok(f"{name}: set")
+        else:
+            err(f"{name}: NOT SET (required)")
+            errors += 1
+    optional = {
+        "OTX_API_KEY": OTX_API_KEY,
+        "NVD_API_KEY": NVD_API_KEY,
+        "VIRUSTOTAL_API_KEY": os.getenv("VIRUSTOTAL_API_KEY"),
+        "ABUSEIPDB_API_KEY": os.getenv("ABUSEIPDB_API_KEY"),
+    }
+    for name, val in optional.items():
+        if val:
+            ok(f"{name}: set ({len(val)} chars)")
+        else:
+            info(f"{name}: not set (optional — source will be skipped)")
+    checks["env_vars"] = {"errors": errors}
+
+    # 2. Neo4j
+    section("2. Neo4j")
+    try:
+        from health_check import health_check_neo4j
+
+        neo4j_result = health_check_neo4j()
+        if neo4j_result.get("status") == "connected":
+            ok(f"Neo4j: connected ({NEO4J_URI})")
+            if neo4j_result.get("apoc_available"):
+                ok("APOC plugin: available")
+            else:
+                err("APOC plugin: NOT available (required)")
+                errors += 1
+        else:
+            err(f"Neo4j: {neo4j_result.get('error', 'unreachable')}")
+            errors += 1
+        checks["neo4j"] = neo4j_result
+    except Exception as e:
+        err(f"Neo4j: {e}")
+        errors += 1
+
+    # 3. MISP
+    section("3. MISP")
+    try:
+        from misp_health import MISPHealthCheck
+
+        checker = MISPHealthCheck()
+        misp_result = checker.check_health()
+        healthy = misp_result.get("healthy", False) if isinstance(misp_result, dict) else False
+        if healthy:
+            ok("MISP: healthy")
+        else:
+            err(f"MISP: unhealthy — {misp_result}")
+            errors += 1
+        checks["misp"] = misp_result
+    except Exception as e:
+        err(f"MISP: {e}")
+        errors += 1
+
+    # 4. Airflow
+    section("4. Airflow")
+    try:
+        import airflow_client as ac
+
+        af_health = ac.airflow_health()
+        if "error" in af_health:
+            warn(f"Airflow: {af_health['error']}")
+            warnings += 1
+        else:
+            ok("Airflow: reachable")
+            dags = ac.get_registered_dags()
+            if dags and "error" not in dags[0]:
+                ok(f"  {len(dags)} EdgeGuard DAG(s) registered")
+            else:
+                warn("  Could not query DAG list")
+                warnings += 1
+        checks["airflow"] = af_health
+    except Exception as e:
+        warn(f"Airflow: {e}")
+        warnings += 1
+
+    # 5. Disk space
+    section("5. Disk Space")
+    try:
+        stat = os.statvfs(".")
+        free_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
+        if free_gb < 1.0:
+            err(f"Disk: {free_gb:.1f} GB free (need at least 1 GB)")
+            errors += 1
+        else:
+            ok(f"Disk: {free_gb:.1f} GB free")
+        checks["disk"] = {"free_gb": round(free_gb, 1)}
+    except Exception as e:
+        warn(f"Disk check: {e}")
+        warnings += 1
+
+    # 6. Checkpoint state
+    section("6. Checkpoints")
+    try:
+        from baseline_checkpoint import get_baseline_status
+
+        cp = get_baseline_status()
+        if cp:
+            incomplete = [s for s, d in cp.items() if isinstance(d, dict) and not d.get("completed")]
+            if incomplete:
+                warn(f"Incomplete baselines: {', '.join(incomplete)}")
+                warnings += 1
+            else:
+                ok(f"{len(cp)} source(s) baselined")
+        else:
+            info("No baselines run yet")
+        checks["checkpoints"] = cp or {}
+    except Exception:
+        pass
+
+    # 7. Circuit breakers
+    section("7. Circuit Breakers")
+    try:
+        from resilience import _circuit_breakers
+
+        open_breakers = [name for name, cb in _circuit_breakers.items() if cb._state != "CLOSED"]
+        if open_breakers:
+            err(f"OPEN circuit breakers: {', '.join(open_breakers)}")
+            errors += 1
+        else:
+            ok("All circuit breakers CLOSED")
+    except Exception:
+        info("No circuit breaker state (fresh start)")
+
+    # Summary
+    section("Preflight Summary")
+    total_checks = 7
+    passed = total_checks - errors - (warnings if strict else 0)
+    if errors == 0 and (warnings == 0 or not strict):
+        ok(f"READY — {passed}/{total_checks} checks passed, {warnings} warning(s)")
+    else:
+        err(f"NOT READY — {errors} error(s), {warnings} warning(s)")
+
+    if use_json:
+        import json as _json
+
+        print(_json.dumps({"errors": errors, "warnings": warnings, "checks": checks}, indent=2, default=str))
+
+    return 1 if errors > 0 or (strict and warnings > 0) else 0
+
+
+# ================================================================================
 # CODE UPDATE (git pull + install.sh --update)
 # ================================================================================
 
@@ -1102,15 +1737,18 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  edgeguard.py doctor           # Run diagnostics (needs .env)
-  edgeguard.py heal             # Auto-repair
-  edgeguard.py validate         # Validate config
-  edgeguard.py monitor          # Show health status
-  edgeguard.py update           # git pull + reinstall (auto: Docker or pip)
-  edgeguard.py update --docker  # force Docker Compose path
-  edgeguard.py update --python  # force pip editable reinstall
-  edgeguard.py --update         # same as: edgeguard update
-  edgeguard.py version          # CalVer + git SHA (no .env required)
+  edgeguard.py doctor             # Run diagnostics (needs .env)
+  edgeguard.py preflight          # Comprehensive pre-run readiness check
+  edgeguard.py stats              # Quick dashboard: nodes, sync, runs
+  edgeguard.py dag status         # Show Airflow DAG run status
+  edgeguard.py dag kill           # Force-fail stuck DAG runs
+  edgeguard.py checkpoint status  # Show per-source checkpoint state
+  edgeguard.py checkpoint clear   # Clear baseline checkpoints
+  edgeguard.py heal               # Auto-repair
+  edgeguard.py validate           # Validate config
+  edgeguard.py monitor            # Show health status
+  edgeguard.py update             # git pull + reinstall
+  edgeguard.py version            # CalVer + git SHA
         """,
     )
 
@@ -1127,6 +1765,49 @@ Examples:
 
     # Monitor command
     subparsers.add_parser("monitor", help="Show health status")
+
+    # DAG management
+    dag_parser = subparsers.add_parser("dag", help="Airflow DAG operations")
+    dag_subparsers = dag_parser.add_subparsers(dest="dag_command", help="DAG commands")
+
+    dag_status_parser = dag_subparsers.add_parser("status", help="Show DAG run status")
+    dag_status_parser.add_argument("--dag-id", help="Filter to specific DAG ID")
+    dag_status_parser.add_argument("--state", choices=["running", "queued", "failed", "success"])
+    dag_status_parser.add_argument("--limit", type=int, default=5, help="Max runs per DAG (default: 5)")
+    dag_status_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    dag_kill_parser = dag_subparsers.add_parser("kill", help="Force-fail stuck DAG runs")
+    dag_kill_parser.add_argument("--dag-id", help="Kill runs for specific DAG (default: all)")
+    dag_kill_parser.add_argument("--dry-run", action="store_true", help="Show what would be killed")
+    dag_kill_parser.add_argument("--force", action="store_true", help="Skip confirmation")
+
+    # Checkpoint management
+    cp_parser = subparsers.add_parser("checkpoint", help="Manage pipeline checkpoints")
+    cp_subparsers = cp_parser.add_subparsers(dest="checkpoint_command", help="Checkpoint commands")
+
+    cp_status_parser = cp_subparsers.add_parser("status", help="Show checkpoint state per source")
+    cp_status_parser.add_argument("--source", help="Filter to specific source")
+    cp_status_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    cp_clear_parser = cp_subparsers.add_parser("clear", help="Clear baseline checkpoints")
+    cp_clear_parser.add_argument("--source", help="Clear specific source only")
+    cp_clear_parser.add_argument("--include-incremental", action="store_true", help="Also clear incremental cursors")
+    cp_clear_parser.add_argument("--force", action="store_true", help="Skip confirmation")
+
+    # Stats dashboard
+    stats_parser = subparsers.add_parser("stats", help="Quick dashboard: node counts, sync, runs")
+    stats_parser.add_argument(
+        "--full", action="store_true", help="Include breakdowns by zone, source, and MISP event summary"
+    )
+    stats_parser.add_argument("--by-zone", action="store_true", help="Show node counts per zone")
+    stats_parser.add_argument("--by-source", action="store_true", help="Show node counts per source")
+    stats_parser.add_argument("--misp", action="store_true", help="Show MISP event summary")
+    stats_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Preflight
+    preflight_parser = subparsers.add_parser("preflight", help="Comprehensive pre-run readiness check")
+    preflight_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    preflight_parser.add_argument("--strict", action="store_true", help="Treat warnings as errors")
 
     # Source management
     source_parser = subparsers.add_parser("source", help="Manage data sources")
@@ -1238,6 +1919,14 @@ Examples:
         return cmd_monitor(args)
     elif args.command == "source":
         return cmd_source(args)
+    elif args.command == "dag":
+        return cmd_dag(args)
+    elif args.command == "checkpoint":
+        return cmd_checkpoint(args)
+    elif args.command == "stats":
+        return cmd_stats(args)
+    elif args.command == "preflight":
+        return cmd_preflight(args)
     else:
         parser.print_help()
         return 1

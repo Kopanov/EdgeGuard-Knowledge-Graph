@@ -303,8 +303,8 @@ Examples:
             try:
                 from baseline_checkpoint import clear_checkpoint
 
-                clear_checkpoint()
-                logging.getLogger(__name__).info("Cleared baseline checkpoint (ETag/cursor cache)")
+                clear_checkpoint(include_incremental=True)
+                logging.getLogger(__name__).info("Cleared baseline checkpoint + incremental cursors (full reset)")
             except Exception as e:
                 logging.getLogger(__name__).warning("Could not clear checkpoint: %s", e)
 
