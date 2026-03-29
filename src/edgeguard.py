@@ -194,9 +194,8 @@ def check_last_sync():
             try:
                 with open(path, "r") as f:
                     state = json.load(f)
-                    last_sync = datetime.fromisoformat(state.get("last_sync", "2000-01-01")).replace(
-                        tzinfo=timezone.utc
-                    )
+                    raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
+                    last_sync = datetime.fromisoformat(raw if "+" in raw or "Z" in raw else raw + "+00:00")
                     age = datetime.now(timezone.utc) - last_sync
 
                     if age > timedelta(days=7):
@@ -915,7 +914,8 @@ def get_sync_status():
             try:
                 with open(path, "r") as f:
                     state = json.load(f)
-                    last_sync = datetime.fromisoformat(state.get("last_sync", "unknown")).replace(tzinfo=timezone.utc)
+                    raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
+                    last_sync = datetime.fromisoformat(raw if "+" in raw or "Z" in raw else raw + "+00:00")
                     return {
                         "last_sync": last_sync.strftime("%Y-%m-%d %H:%M"),
                         "age_hours": (datetime.now(timezone.utc) - last_sync).total_seconds() / 3600,

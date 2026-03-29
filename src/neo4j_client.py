@@ -3597,12 +3597,14 @@ class Neo4jClient:
 
         query = """
         MERGE (i:Indicator {indicator_type: $indicator_type, value: $value, tag: $tag})
-        SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
-            i.last_updated = $last_updated,
+        SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
+            i.last_updated = datetime(),
             i.source = CASE WHEN i.source IS NULL THEN $source ELSE apoc.coll.union(i.source, $source) END,
             i.confidence_score = $confidence_score,
             i.original_source = $original_source,
-            i.zone = $zone
+            i.zone = $zone,
+            i.edgeguard_managed = true,
+            i.active = true
         """
 
         try:

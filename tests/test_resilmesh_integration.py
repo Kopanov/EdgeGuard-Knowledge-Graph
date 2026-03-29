@@ -6,7 +6,7 @@ Validates the Phase 1 integration between EdgeGuard and ResilMesh schemas.
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -34,7 +34,7 @@ def test_alert_node_creation():
         "alert_id": "test-resilmesh-001",
         "source": "wazuh",
         "zone": "healthcare",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "tags": ["healthcare", "finance"],
         "threat": {
             "indicator": "192.168.100.50",
@@ -172,7 +172,7 @@ def test_multi_zone_alert():
         "alert_id": "test-multizone-001",
         "source": "wazuh",
         "zone": "healthcare",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "tags": ["healthcare", "finance", "energy"],  # Multi-zone
         "threat": {
             "indicator": "evil-apt-c2.com",
