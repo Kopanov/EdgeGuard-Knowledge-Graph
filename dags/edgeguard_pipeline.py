@@ -301,10 +301,10 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
 # is unavailable; otherwise the imported versions from metrics_server remain active.
 if not METRICS_SERVER_AVAILABLE:
 
-    def record_dag_run(dag_id: str, status: str = "success"):
+    def record_dag_run(dag_id: str, status: str = "success", run_type: str = "scheduled"):
         """Record a DAG run in metrics."""
         if PROMETHEUS_AVAILABLE:
-            DAG_RUNS_TOTAL.labels(status=status, dag_id=dag_id).inc()
+            DAG_RUNS_TOTAL.labels(dag_id=dag_id, status=status, run_type=run_type).inc()
 
 
 def record_indicators(source: str, zone: str, count: int):
@@ -331,10 +331,10 @@ def record_neo4j_nodes(node_type: str, count: int):
         NEO4J_NODES.labels(type=node_type).set(count)
 
 
-def record_error(task: str, error_type: str):
+def record_error(task: str, error_type: str, source: str = ""):
     """Record a pipeline error."""
     if PROMETHEUS_AVAILABLE:
-        PIPELINE_ERRORS.labels(task=task, error_type=error_type).inc()
+        PIPELINE_ERRORS.labels(task=task, error_type=error_type, source=source).inc()
 
 
 if not METRICS_SERVER_AVAILABLE:
@@ -421,7 +421,7 @@ def _on_task_failure(context):
     logger.error(f"[ALERT] Task FAILED: {dag_id}.{task_id} — {exc}")
     if ENABLE_SLACK_ALERTS:
         send_slack_alert(f"Task FAILED: {dag_id}.{task_id} — {exc}", level="critical")
-    if ENABLE_PROMETHEUS_METRICS:
+    if ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE:
         try:
             PIPELINE_ERRORS.labels(task=task_id, error_type="task_failure", source=dag_id).inc()
         except Exception:
@@ -436,7 +436,7 @@ def _on_task_success(context):
     has succeeded recently (covers both partial and full failures).
     Also refreshes DAG_RUN_START to show the DAG is actively progressing.
     """
-    if not ENABLE_PROMETHEUS_METRICS:
+    if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
         return
     dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
     now = time.time()

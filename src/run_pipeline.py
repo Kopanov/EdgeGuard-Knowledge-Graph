@@ -780,7 +780,7 @@ class EdgeGuardPipeline:
         stix_event_id: str = None,
         use_stix_flow: bool = False,
         baseline: bool = False,
-        baseline_days: int = 365,
+        baseline_days: int = 730,
         fresh_baseline: bool = False,
     ):
         """
@@ -809,13 +809,21 @@ class EdgeGuardPipeline:
                 # Check if the process is still alive
                 try:
                     os.kill(old_pid, 0)
+                    # Process exists (signal 0 succeeded) — could be ours or another user's
                     logger.error(
                         f"Another pipeline process (PID {old_pid}) is still running. "
                         "Aborting to prevent data races. "
                         "If this is stale, delete checkpoints/pipeline.lock and retry."
                     )
                     return False
-                except (OSError, ProcessLookupError):
+                except PermissionError:
+                    # PID exists but owned by another user — treat as alive (safe side)
+                    logger.error(
+                        f"Pipeline lock held by PID {old_pid} (different user). "
+                        "Aborting. Delete checkpoints/pipeline.lock if stale."
+                    )
+                    return False
+                except ProcessLookupError:
                     logger.info(f"Stale lock file found (PID {old_pid} is gone) — removing.")
         except (ValueError, IOError):
             pass
