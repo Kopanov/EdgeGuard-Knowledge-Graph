@@ -139,9 +139,13 @@ python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pi
 | Command | Purpose |
 |---------|---------|
 | `edgeguard preflight` | Pre-run readiness check (7 categories, `--strict` for CI) |
-| `edgeguard stats --full` | Node counts by type/zone/source + MISP event breakdown |
-| `edgeguard dag status` | Airflow DAG run states (running/queued/failed/success) |
-| `edgeguard dag kill` | Force-fail stuck DAG runs (preserves checkpoints) |
+| `edgeguard stats` | Quick dashboard: node counts, last sync, pipeline runs |
+| `edgeguard stats --full` | + breakdown by zone, source, and MISP events/zones |
+| `edgeguard stats --by-zone` | Node counts per zone (shows multi-zone overlap) |
+| `edgeguard stats --by-source` | Node counts per source (nvd, otx, cisa, etc.) |
+| `edgeguard stats --misp` | MISP event/attribute counts by source and by zone |
+| `edgeguard dag status` | Airflow DAG run states (color-coded, `--state running` filter) |
+| `edgeguard dag kill` | Force-fail stuck DAG runs (preserves checkpoints, `--dry-run`) |
 | `edgeguard checkpoint status` | Per-source baseline progress + incremental cursors |
 | `edgeguard checkpoint clear` | Clear baseline state (preserves incremental by default) |
 | `edgeguard doctor` | Diagnose connectivity (MISP, Neo4j, Airflow, NATS, schema) |

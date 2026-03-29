@@ -1779,18 +1779,24 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  edgeguard.py doctor             # Run diagnostics (needs .env)
-  edgeguard.py preflight          # Comprehensive pre-run readiness check
-  edgeguard.py stats              # Quick dashboard: nodes, sync, runs
-  edgeguard.py dag status         # Show Airflow DAG run status
-  edgeguard.py dag kill           # Force-fail stuck DAG runs
-  edgeguard.py checkpoint status  # Show per-source checkpoint state
-  edgeguard.py checkpoint clear   # Clear baseline checkpoints
-  edgeguard.py heal               # Auto-repair
-  edgeguard.py validate           # Validate config
-  edgeguard.py monitor            # Show health status
-  edgeguard.py update             # git pull + reinstall
-  edgeguard.py version            # CalVer + git SHA
+  edgeguard.py preflight             # Pre-run readiness (env vars, APIs, Neo4j, MISP, Airflow)
+  edgeguard.py stats                 # Quick dashboard: node counts, last sync, runs
+  edgeguard.py stats --full          # + breakdown by zone, source, and MISP events
+  edgeguard.py stats --by-zone       # Node counts per zone (shows multi-zone overlap)
+  edgeguard.py stats --by-source     # Node counts per source
+  edgeguard.py stats --misp          # MISP event/attribute counts by source and zone
+  edgeguard.py stats --json          # Machine-readable JSON output
+  edgeguard.py dag status            # Show Airflow DAG run states (color-coded)
+  edgeguard.py dag status --state running  # Only running/queued runs
+  edgeguard.py dag kill              # Force-fail stuck DAG runs (preserves checkpoints)
+  edgeguard.py dag kill --dry-run    # Show what would be killed
+  edgeguard.py checkpoint status     # Per-source baseline progress + incremental cursors
+  edgeguard.py checkpoint clear      # Clear baseline (keeps incremental cursors)
+  edgeguard.py doctor                # Diagnose connectivity issues
+  edgeguard.py heal                  # Auto-repair (circuit breakers, locks, retries)
+  edgeguard.py validate              # Validate config + Neo4j schema
+  edgeguard.py monitor               # Real-time health display
+  edgeguard.py version               # CalVer + git SHA
         """,
     )
 
