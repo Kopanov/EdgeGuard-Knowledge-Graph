@@ -295,6 +295,8 @@ The following alerts are pre-configured in `prometheus/alerts.yml`:
 | `EdgeGuardCircuitBreakerOpen` | Circuit open | critical |
 | `EdgeGuardServiceDown` | Health check fail | critical |
 | `EdgeGuardDAGRunFailures` | >3 failures/hour | warning |
+| `EdgeGuardDAGRunStuck` | DAG run running >1 hour without completing | critical |
+| `EdgeGuardDAGLastSuccessStale` | No successful DAG run in >6 hours | warning |
 
 ### Custom Alerts
 

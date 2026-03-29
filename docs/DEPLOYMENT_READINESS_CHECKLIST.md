@@ -72,6 +72,8 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 | Done | Check | Action | Pass |
 |------|--------|--------|------|
 | [ ] | DAG import | `airflow dags list-import-errors` (after DB init) | Empty |
+| [ ] | DAG concurrency guards | Airflow UI → each DAG → Details | `max_active_runs=1` and `dagrun_timeout` per [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
+| [ ] | Baseline DAG unpaused | Airflow UI → `edgeguard_baseline` | `is_paused_upon_creation=False`; verify DAG is active |
 | [ ] | MISP preflight | Run a tier DAG once; open `misp_health_check` logs | **`healthy`** / **`healthy_for_collection`** (API + DB); workers only if **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS=true`** ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)) |
 | [ ] | Collector tasks | Logs for `collect_*` | Status dict; skips show `skipped` + reason class; real failures → task failed as designed |
 | [ ] | Neo4j sync gate | Observe `full_neo4j_sync` / short-circuit | Matches [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
@@ -85,7 +87,8 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 |------|--------|--------|
 | [ ] | Prometheus / metrics | [PROMETHEUS_SETUP.md](PROMETHEUS_SETUP.md), [docker-compose.monitoring.yml](../docker-compose.monitoring.yml) |
 | [ ] | Collector skips | `edgeguard_collector_skips_total` — [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
-| [ ] | Alerts | [prometheus/alerts.yml](../prometheus/alerts.yml) |
+| [ ] | Alerts | [prometheus/alerts.yml](../prometheus/alerts.yml) — verify `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` and Alertmanager target (`alertmanager:9093`) |
+| [ ] | Failure callbacks | Trigger a task failure; check logs for `[ALERT] Task FAILED:` message |
 
 ---
 
