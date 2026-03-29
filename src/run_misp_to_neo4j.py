@@ -399,7 +399,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     logger.error(f"{func.__name__} failed with non-retryable error: {type(e).__name__}: {e}")
                     raise
 
-            logger.error(f"{func.__name__} failed after {max_retries} attempts")
+            logger.error(f"{func.__name__} failed after {max_retries + 1} attempts")
             raise last_exception
 
         return wrapper

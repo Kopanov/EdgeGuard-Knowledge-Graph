@@ -241,11 +241,24 @@ if ENABLE_PROMETHEUS_METRICS and METRICS_SERVER_AVAILABLE:
         from metrics_server import (
             DAG_LAST_SUCCESS,
             DAG_RUN_START,
+            INDICATORS_COLLECTED,
+            MISP_PUSH_DURATION,
+            NEO4J_NODES,
+            NEO4J_SYNC_DURATION,
             PIPELINE_ERRORS,
+            SOURCE_HEALTH,
         )
         from metrics_server import (
             DAG_RUNS as DAG_RUNS_TOTAL,
         )
+
+        # CIRCUIT_OPEN is not in metrics_server; define locally if needed
+        try:
+            from prometheus_client import Gauge as _Gauge
+
+            CIRCUIT_OPEN = _Gauge("edgeguard_circuit_open", "Circuit breaker state (1=open, 0=closed)", ["service"])
+        except Exception:
+            pass
 
         PROMETHEUS_AVAILABLE = True
         logger.info("Prometheus metrics imported from metrics_server (production mode)")
