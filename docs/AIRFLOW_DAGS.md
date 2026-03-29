@@ -260,6 +260,31 @@ airflow tasks list edgeguard_pipeline
 airflow dags list-runs -d edgeguard_pipeline
 ```
 
+### EdgeGuard CLI (recommended — wraps Airflow REST API)
+
+```bash
+# See all DAG run states (color-coded)
+python src/edgeguard.py dag status
+
+# See only running/queued runs
+python src/edgeguard.py dag status --state running
+
+# Force-fail stuck DAG runs (preserves checkpoints + incremental state)
+python src/edgeguard.py dag kill
+
+# Kill a specific DAG only
+python src/edgeguard.py dag kill --dag-id edgeguard_baseline
+
+# Check data counts (by zone, by source, MISP breakdown)
+python src/edgeguard.py stats --full
+
+# Check baseline checkpoint progress
+python src/edgeguard.py checkpoint status
+
+# Pre-run readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
+python src/edgeguard.py preflight
+```
+
 ### View Logs
 ```bash
 airflow logs <task_id> <dag_run_id>

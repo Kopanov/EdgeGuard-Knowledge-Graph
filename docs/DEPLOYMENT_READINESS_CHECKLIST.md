@@ -57,6 +57,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 | Done | Check | Command | Pass |
 |------|--------|---------|------|
+| [ ] | Preflight (recommended) | `python src/edgeguard.py preflight` | All 7 checks pass (env vars, APIs, Neo4j, MISP, Airflow, disk, breakers) |
 | [ ] | MISP + Neo4j | `python src/health_check.py` or `make health` | `overall_healthy`; APOC noted for Neo4j ([ENVIRONMENTS.md](ENVIRONMENTS.md)) |
 | [ ] | REST API health | `curl -s http://<api-host>:8000/health` (or your URL) | **HTTP 200** always; JSON `status: ok` and `neo4j_connected: true` when Neo4j ping + APOC pass ([README.md](../README.md) § Health) |
 | [ ] | GraphQL health | `curl -sf http://<api-host>:4001/health` | **HTTP 200** when Neo4j is healthy; **503** if no driver or Neo4j/APOC unhealthy (`curl -f` fails on 503 — intended for “must be up” checks) |

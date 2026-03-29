@@ -127,11 +127,30 @@ cd EdgeGuard-Knowledge-Graph
 
 **Post-install validation (run this after any install method):**
 ```bash
+python src/edgeguard.py preflight  # comprehensive readiness check (env vars, APIs, Neo4j, MISP, Airflow, disk)
 python src/edgeguard.py doctor     # checks MISP, Neo4j, Airflow, NATS, schema, API keys, version compatibility
-python src/edgeguard.py validate   # checks config, rate limits, Neo4j labels/constraints, production readiness
+python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pipeline runs
 ```
 
-`doctor` will detect hidden issues like MISP/PyMISP version mismatches that can silently hang the Airflow scheduler, missing Neo4j constraints, unreachable services, and misconfigured API keys. **Always run `doctor` after setup** — it takes 5 seconds and can save hours of debugging.
+`preflight` runs 7 check categories (env vars, API connectivity, Neo4j schema, MISP health, Airflow, disk, circuit breakers) and exits 0 = ready or 1 = issues found. `stats` shows what data is in the system right now.
+
+**EdgeGuard CLI quick reference:**
+
+| Command | Purpose |
+|---------|---------|
+| `edgeguard preflight` | Pre-run readiness check (7 categories, `--strict` for CI) |
+| `edgeguard stats --full` | Node counts by type/zone/source + MISP event breakdown |
+| `edgeguard dag status` | Airflow DAG run states (running/queued/failed/success) |
+| `edgeguard dag kill` | Force-fail stuck DAG runs (preserves checkpoints) |
+| `edgeguard checkpoint status` | Per-source baseline progress + incremental cursors |
+| `edgeguard checkpoint clear` | Clear baseline state (preserves incremental by default) |
+| `edgeguard doctor` | Diagnose connectivity (MISP, Neo4j, Airflow, NATS, schema) |
+| `edgeguard heal` | Auto-repair (reset circuit breakers, clear locks, retry) |
+| `edgeguard validate` | Config validation (rate limits, passwords, Neo4j schema) |
+| `edgeguard monitor` | Real-time health display |
+| `edgeguard version` | CalVer + git SHA |
+
+All commands support `--help`. Data commands support `--json` for automation.
 
 **Then (recommended order):** [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) (finish wiring) → [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md) (run DAGs) → [docs/BASELINE_SMOKE_TEST.md](docs/BASELINE_SMOKE_TEST.md) (first baseline). See **§ Recommended reading order** below.
 
@@ -437,7 +456,8 @@ EdgeGuard/
 │   ├── graphql_schema.py       # Strawberry type definitions (CVE, Indicator, Actor …)
 │   ├── health_check.py         # MISP + Neo4j connectivity checks
 │   ├── resilience.py           # Circuit breakers and retry logic
-│   ├── edgeguard.py            # CLI: doctor / heal / validate / monitor / update / version
+│   ├── edgeguard.py            # CLI: preflight / stats / dag / checkpoint / doctor / heal / validate / monitor
+│   ├── airflow_client.py       # Airflow REST API wrapper (used by CLI dag commands)
 │   └── collectors/             # One module per data source
 │       ├── otx_collector.py
 │       ├── nvd_collector.py    # Extracts CVSSv2, CVSSv31, CVSSv40
@@ -820,7 +840,7 @@ EdgeGuard v2026.3.28 is **production-test ready**. Full pipeline validated on Do
 - **Full-stack Docker Compose**: Neo4j + Airflow + REST API + GraphQL in one `docker compose up -d`; also supports conda/venv/bare-metal with external MISP+Neo4j
 - **CI/CD**: Lint (ruff), type-check (mypy), pytest (161 tests, 30% coverage gate), Docker build, pip-audit, BugBot — all green
 - **Health Checks + Metrics**: MISP (with PyMISP version compatibility detection), Neo4j (with 30s timeout), Airflow, NATS; Prometheus/Grafana monitoring stack
-- **Production CLI**: `edgeguard doctor` (checks MISP/Neo4j/Airflow/NATS/schema/version compatibility), `heal` (real circuit breaker reset + DAG trigger), `validate` (Neo4j labels + constraints)
+- **Production CLI** (16 commands): `preflight` (8-category readiness check), `stats --full` (node counts by zone/source + MISP breakdown), `dag status/kill` (Airflow run monitoring + stuck-run recovery), `checkpoint status/clear` (baseline progress + incremental cursors), `doctor`, `heal`, `validate`, `monitor`, `version`
 - **Circuit Breakers + Retry**: Fixed HALF_OPEN deadlock, monotonic time, resilience patterns for all external service calls
 - **UTC-aware timestamps**: All 70+ datetime instances across 24 files use `timezone.utc` (Python 3.12 compatible)
 

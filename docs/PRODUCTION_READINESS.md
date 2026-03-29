@@ -28,6 +28,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | **Neo4j Client** | ✅ Ready | Constraints, indexes, batch ops, sector labels applied |
 | **Health Checks** | ✅ Ready | MISP health sensor + Docker service healthchecks |
 | **Documentation** | ✅ Ready | 20+ docs updated to match current code |
+| **Production CLI** | ✅ Ready | 16 commands: `preflight`, `stats --full`, `dag status/kill`, `checkpoint status/clear`, `doctor`, `heal`, `validate`, `monitor` |
 | **Security Hardening** | ✅ Ready | Input sanitization, injection guards, SSL, rate limiting |
 | **Monitoring/Metrics** | ✅ Ready | Prometheus on **8001** (loopback); Alertmanager enabled; alerts: `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` + 12 others; Grafana dashboard |
 | **CI/CD Pipeline** | ✅ Ready | GitHub Actions: lint, type-check, unit tests, Docker build, security scan |
