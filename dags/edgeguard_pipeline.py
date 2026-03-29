@@ -263,21 +263,20 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
             "edgeguard_dag_runs_total", "Total number of DAG runs", ["dag_id", "status", "run_type"]
         )
         INDICATORS_COLLECTED = Counter(
-            "edgeguard_indicators_collected_total", "Total indicators collected", ["source", "zone"]
+            "edgeguard_indicators_collected_total", "Total indicators collected", ["source", "zone", "status"]
         )
         MISP_PUSH_DURATION = Histogram("edgeguard_misp_push_duration_seconds", "Time spent pushing to MISP", ["source"])
         NEO4J_SYNC_DURATION = Histogram("edgeguard_neo4j_sync_duration_seconds", "Time spent syncing to Neo4j")
-        NEO4J_NODES = Gauge("edgeguard_neo4j_nodes", "Number of nodes in Neo4j", ["type"])
+        NEO4J_NODES = Gauge("edgeguard_neo4j_nodes", "Number of nodes in Neo4j by label", ["label", "zone"])
         PIPELINE_ERRORS = Counter(
             "edgeguard_pipeline_errors_total", "Total pipeline errors", ["task", "error_type", "source"]
         )
-        SOURCE_HEALTH = Gauge("edgeguard_source_healthy", "Health status of data sources", ["source"])
+        SOURCE_HEALTH = Gauge("edgeguard_source_health", "Data source health status", ["source", "zone"])
 
         # Circuit breaker state metrics
         CIRCUIT_OPEN = Gauge("edgeguard_circuit_open", "Circuit breaker state (1=open, 0=closed)", ["service"])
-        LAST_SUCCESS_TIMESTAMP = Gauge(
-            "edgeguard_last_success_timestamp", "Unix timestamp of last successful collection", ["source"]
-        )
+        # Note: edgeguard_last_success_timestamp is already registered by resilience.py
+        # (imported above). Do NOT re-register here to avoid duplicate timeseries error.
 
         # DAG-level stuck-run detection
         DAG_LAST_SUCCESS = Gauge(
@@ -307,10 +306,10 @@ if not METRICS_SERVER_AVAILABLE:
             DAG_RUNS_TOTAL.labels(dag_id=dag_id, status=status, run_type=run_type).inc()
 
 
-def record_indicators(source: str, zone: str, count: int):
+def record_indicators(source: str, zone: str, count: int, status: str = "success"):
     """Record collected indicators."""
     if PROMETHEUS_AVAILABLE:
-        INDICATORS_COLLECTED.labels(source=source, zone=zone).inc(count)
+        INDICATORS_COLLECTED.labels(source=source, zone=zone, status=status).inc(count)
 
 
 def record_misp_push_duration(source: str, duration: float):
@@ -325,10 +324,10 @@ def record_neo4j_sync_duration(duration: float):
         NEO4J_SYNC_DURATION.observe(duration)
 
 
-def record_neo4j_nodes(node_type: str, count: int):
+def record_neo4j_nodes(node_type: str, count: int, zone: str = "all"):
     """Record Neo4j node counts."""
     if PROMETHEUS_AVAILABLE:
-        NEO4J_NODES.labels(type=node_type).set(count)
+        NEO4J_NODES.labels(label=node_type, zone=zone).set(count)
 
 
 def record_error(task: str, error_type: str, source: str = ""):
@@ -340,9 +339,9 @@ def record_error(task: str, error_type: str, source: str = ""):
 if not METRICS_SERVER_AVAILABLE:
 
     def set_source_health(source: str, zone: str, healthy: bool):
-        """Set source health (standalone mode: gauge has source label only; zone ignored)."""
+        """Set source health status."""
         if PROMETHEUS_AVAILABLE:
-            SOURCE_HEALTH.labels(source=source).set(1 if healthy else 0)
+            SOURCE_HEALTH.labels(source=source, zone=zone).set(1 if healthy else 0)
 
 
 def set_circuit_state(service: str, is_open: bool):
@@ -353,10 +352,8 @@ def set_circuit_state(service: str, is_open: bool):
 
 def set_last_success_timestamp(source: str):
     """Set last successful collection timestamp."""
-    if PROMETHEUS_AVAILABLE:
-        import time
-
-        LAST_SUCCESS_TIMESTAMP.labels(source=source).set(time.time())
+    if RESILIENCE_METRICS_AVAILABLE:
+        LAST_SUCCESS.labels(source=source).set(time.time())
 
 
 def log_circuit_breaker_status():

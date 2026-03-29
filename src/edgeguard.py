@@ -179,11 +179,12 @@ def check_disk_space():
 
 def check_last_sync():
     """Check last sync timestamp from state file."""
-    state_file = os.path.join(os.path.dirname(SCRIPT_DIR), "dags", "edgeguard_last_neo4j_sync.json")
+    repo_root = os.path.dirname(SCRIPT_DIR)
 
-    # Try alternative locations
+    # Try alternative locations (DAG writer uses state/, legacy used dags/)
     alt_paths = [
-        state_file,
+        os.path.join(repo_root, "state", "edgeguard_last_neo4j_sync.json"),
+        os.path.join(repo_root, "dags", "edgeguard_last_neo4j_sync.json"),
         os.path.join(tempfile.gettempdir(), "edgeguard_last_neo4j_sync.json"),
         os.path.expanduser("~/.edgeguard/last_sync.json"),
     ]
@@ -902,10 +903,10 @@ def get_neo4j_status():
 
 def get_sync_status():
     """Get sync status."""
-    state_file = os.path.join(os.path.dirname(SCRIPT_DIR), "dags", "edgeguard_last_neo4j_sync.json")
-
+    repo_root = os.path.dirname(SCRIPT_DIR)
     alt_paths = [
-        state_file,
+        os.path.join(repo_root, "state", "edgeguard_last_neo4j_sync.json"),  # DAG writer path
+        os.path.join(repo_root, "dags", "edgeguard_last_neo4j_sync.json"),  # legacy path
         os.path.join(tempfile.gettempdir(), "edgeguard_last_neo4j_sync.json"),
     ]
 

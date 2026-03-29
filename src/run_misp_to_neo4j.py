@@ -377,7 +377,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
         @wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
-            for attempt in range(max_retries):
+            for attempt in range(max_retries + 1):  # +1: first attempt + max_retries retries (matches collector_utils)
                 try:
                     return func(*args, **kwargs)
                 except (
@@ -387,9 +387,11 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     requests.exceptions.ChunkedEncodingError,
                 ) as e:
                     last_exception = e
+                    if attempt >= max_retries:
+                        break  # exhausted all retries
                     delay = base_delay * (2**attempt)
                     logger.warning(
-                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s..."
+                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s..."
                     )
                     time.sleep(delay)
                 except Exception as e:
