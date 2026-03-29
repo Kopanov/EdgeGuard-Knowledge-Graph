@@ -1309,15 +1309,37 @@ def cmd_stats(args) -> int:
             if sr:
                 print(f"  {'SOURCED_FROM rels':<20} {sr:>10,}")
 
-    # 2. By zone
+    # 2. By zone (with multi-zone detection)
     if show_zone and neo4j_stats:
         by_zone = neo4j_stats.get("by_zone", {})
         result["by_zone"] = by_zone
         if by_zone and not use_json:
-            print(f"\n  {'Zone':<20} {'Nodes':>10}")
+            zone_total = sum(by_zone.values())
+            # Count total unique nodes that have any zone
+            try:
+                from neo4j_client import Neo4jClient as _NC2
+
+                _c2 = _NC2()
+                if _c2.connect():
+                    _r = _c2.run("MATCH (n) WHERE n.zone IS NOT NULL RETURN count(n) AS c")
+                    unique_zoned = _r[0]["c"] if _r else 0
+                    _c2.close()
+                else:
+                    unique_zoned = 0
+            except Exception:
+                unique_zoned = 0
+            multi_zone = zone_total - unique_zoned if unique_zoned > 0 else 0
+
+            print(f"\n  {'Zone':<20} {'Nodes':>10}  (nodes may appear in multiple zones)")
             print(f"  {'—' * 20} {'—' * 10}")
             for zone, count in sorted(by_zone.items(), key=lambda x: -x[1]):
                 print(f"  {zone:<20} {count:>10,}")
+            if multi_zone > 0:
+                print(f"  {'—' * 20} {'—' * 10}")
+                print(f"  {'Unique nodes':<20} {unique_zoned:>10,}")
+                print(f"  {'Multi-zone overlap':<20} {multi_zone:>10,}")
+            result["by_zone_unique"] = unique_zoned
+            result["by_zone_overlap"] = multi_zone
 
     # 3. By source
     if show_source and neo4j_stats:
@@ -1340,10 +1362,15 @@ def cmd_stats(args) -> int:
                     f"{misp_summary['total_attributes']:,} attributes"
                 )
                 if misp_summary.get("by_source"):
-                    print(f"\n  {'MISP Source':<28} {'Events':>8} {'Attributes':>12}")
+                    print(f"\n  {'MISP by Source':<28} {'Events':>8} {'Attributes':>12}")
                     print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
                     for src in sorted(misp_summary["by_source"], key=lambda x: -x["attributes"]):
                         print(f"  {src['source']:<28} {src['events']:>8} {src['attributes']:>12,}")
+                if misp_summary.get("by_zone"):
+                    print(f"\n  {'MISP by Zone':<28} {'Events':>8} {'Attributes':>12}")
+                    print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
+                    for z in sorted(misp_summary["by_zone"], key=lambda x: -x["attributes"]):
+                        print(f"  {z['zone']:<28} {z['events']:>8} {z['attributes']:>12,}")
         except Exception as e:
             warn(f"MISP: {e}")
 
@@ -1434,24 +1461,34 @@ def _fetch_misp_event_summary() -> dict:
     total_events = 0
     total_attrs = 0
     source_map = {}  # source_tag -> {events: N, attributes: N}
+    zone_map = {}  # zone -> {events: N, attributes: N}
 
     for ev in events:
         info_field = ev.get("info", "") or ev.get("Event", {}).get("info", "")
         attr_count = int(ev.get("attribute_count", 0) or ev.get("Event", {}).get("attribute_count", 0) or 0)
 
-        # Parse source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
+        # Parse zone and source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
         source_tag = "unknown"
+        zone_tag = "unknown"
         if info_field.startswith("EdgeGuard-"):
             parts = info_field.split("-")
+            if len(parts) >= 2:
+                zone_tag = parts[1].lower()  # e.g., "healthcare"
             if len(parts) >= 3:
                 source_tag = parts[2]  # e.g., "alienvault_otx"
 
         total_events += 1
         total_attrs += attr_count
+
         if source_tag not in source_map:
             source_map[source_tag] = {"events": 0, "attributes": 0}
         source_map[source_tag]["events"] += 1
         source_map[source_tag]["attributes"] += attr_count
+
+        if zone_tag not in zone_map:
+            zone_map[zone_tag] = {"events": 0, "attributes": 0}
+        zone_map[zone_tag]["events"] += 1
+        zone_map[zone_tag]["attributes"] += attr_count
 
     return {
         "total_events": total_events,
@@ -1459,6 +1496,9 @@ def _fetch_misp_event_summary() -> dict:
         "by_source": [
             {"source": src, "events": data["events"], "attributes": data["attributes"]}
             for src, data in source_map.items()
+        ],
+        "by_zone": [
+            {"zone": z, "events": data["events"], "attributes": data["attributes"]} for z, data in zone_map.items()
         ],
     }
 
