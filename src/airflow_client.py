@@ -180,7 +180,7 @@ def list_all_active_dag_runs(
     dag_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Collect running and queued DAG runs across all EdgeGuard DAGs."""
-    ids = dag_ids or EDGEGUARD_DAG_IDS
+    ids = dag_ids or get_edgeguard_dag_ids()
     active: List[Dict[str, Any]] = []
     for dag_id in ids:
         for state in ("running", "queued"):

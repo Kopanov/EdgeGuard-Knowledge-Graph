@@ -1494,7 +1494,9 @@ def _fetch_misp_event_summary() -> dict:
         source_tag = "unknown"
         zone_tag = "unknown"
         if info_field.startswith("EdgeGuard-"):
-            parts = info_field.split("-")
+            # Pattern: EdgeGuard-{ZONE}-{source}-{date}
+            # Split with maxsplit=3 so date hyphens (2026-03-29) stay intact
+            parts = info_field.split("-", 3)
             if len(parts) >= 2:
                 zone_tag = parts[1].lower()  # e.g., "healthcare"
             if len(parts) >= 3:

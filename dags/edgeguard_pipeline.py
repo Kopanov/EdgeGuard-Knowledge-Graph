@@ -252,13 +252,14 @@ if ENABLE_PROMETHEUS_METRICS and METRICS_SERVER_AVAILABLE:
             DAG_RUNS as DAG_RUNS_TOTAL,
         )
 
-        # CIRCUIT_OPEN is not in metrics_server; define locally if needed
+        # CIRCUIT_OPEN is not in metrics_server; define locally
         try:
             from prometheus_client import Gauge as _Gauge
 
             CIRCUIT_OPEN = _Gauge("edgeguard_circuit_open", "Circuit breaker state (1=open, 0=closed)", ["service"])
-        except Exception:
-            pass
+        except Exception as e:
+            CIRCUIT_OPEN = None
+            logger.warning(f"Could not create CIRCUIT_OPEN gauge: {e}")
 
         PROMETHEUS_AVAILABLE = True
         logger.info("Prometheus metrics imported from metrics_server (production mode)")
@@ -359,7 +360,7 @@ if not METRICS_SERVER_AVAILABLE:
 
 def set_circuit_state(service: str, is_open: bool):
     """Set circuit breaker state."""
-    if PROMETHEUS_AVAILABLE:
+    if PROMETHEUS_AVAILABLE and CIRCUIT_OPEN is not None:
         CIRCUIT_OPEN.labels(service=service).set(1 if is_open else 0)
 
 
