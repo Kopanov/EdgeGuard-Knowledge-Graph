@@ -1353,7 +1353,7 @@ def cmd_stats(args) -> int:
         result["last_sync"] = sync
         if not use_json:
             if sync.get("last_sync"):
-                ok(f"\nLast sync: {sync['last_sync'][:19]} ({sync.get('age', '?')})")
+                ok(f"\nLast sync: {sync['last_sync'][:19]} ({sync.get('age_hours', '?')}h ago)")
             else:
                 warn("\nNo sync recorded yet")
     except Exception:
