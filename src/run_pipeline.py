@@ -840,6 +840,30 @@ class EdgeGuardPipeline:
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
+        try:
+            return self._run_pipeline_inner(
+                stix_export=stix_export,
+                stix_output=stix_output,
+                stix_event_id=stix_event_id,
+                use_stix_flow=use_stix_flow,
+                baseline=baseline,
+                baseline_days=baseline_days,
+                fresh_baseline=fresh_baseline,
+            )
+        finally:
+            _cleanup_lock()
+
+    def _run_pipeline_inner(
+        self,
+        stix_export=False,
+        stix_output=None,
+        stix_event_id=None,
+        use_stix_flow=False,
+        baseline=False,
+        baseline_days=730,
+        fresh_baseline=False,
+    ):
+        """Inner pipeline logic, separated so the lock is always cleaned up."""
         # Import baseline checkpoint utilities
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
 

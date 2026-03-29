@@ -1054,11 +1054,11 @@ def cmd_dag_status(args) -> int:
 
         # Color-code state
         if state == "success":
-            state_str = f"{Colors.GREEN}{state}{Colors.RESET}"
+            state_str = f"{Colors.GREEN}{state}{Colors.END}"
         elif state in ("running", "queued"):
-            state_str = f"{Colors.YELLOW}{state}{Colors.RESET}"
+            state_str = f"{Colors.YELLOW}{state}{Colors.END}"
         elif state == "failed":
-            state_str = f"{Colors.RED}{state}{Colors.RESET}"
+            state_str = f"{Colors.RED}{state}{Colors.END}"
         else:
             state_str = state
 
@@ -1194,9 +1194,9 @@ def cmd_checkpoint_status(args) -> int:
         has_inc = "yes" if inc else "no"
 
         if completed:
-            status = f"{Colors.GREEN}completed{Colors.RESET}"
+            status = f"{Colors.GREEN}completed{Colors.END}"
         elif items and items != "—":
-            status = f"{Colors.YELLOW}in-progress{Colors.RESET}"
+            status = f"{Colors.YELLOW}in-progress{Colors.END}"
         else:
             status = "—"
 
@@ -1402,11 +1402,10 @@ def cmd_stats(args) -> int:
 
 def _fetch_misp_event_summary() -> dict:
     """Query MISP for event/attribute counts grouped by source tag."""
+    import warnings
+
     import requests as _requests
     import urllib3
-
-    if not SSL_VERIFY:
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     session = _requests.Session()
     session.headers.update(
@@ -1418,12 +1417,15 @@ def _fetch_misp_event_summary() -> dict:
     )
 
     # Fetch EdgeGuard events index (lightweight — no attributes)
-    resp = session.get(
-        f"{MISP_URL}/events/index",
-        params={"limit": 500, "searchall": "EdgeGuard"},
-        verify=SSL_VERIFY,
-        timeout=(15, 60),
-    )
+    with warnings.catch_warnings():
+        if not SSL_VERIFY:
+            warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+        resp = session.get(
+            f"{MISP_URL}/events/index",
+            params={"limit": 500, "searchall": "EdgeGuard"},
+            verify=SSL_VERIFY,
+            timeout=(15, 60),
+        )
     resp.raise_for_status()
     events = resp.json()
     if not isinstance(events, list):
@@ -1596,9 +1598,9 @@ def cmd_preflight(args) -> int:
     # 7. Circuit breakers
     section("7. Circuit Breakers")
     try:
-        from resilience import _circuit_breakers
+        from resilience import CircuitState, _circuit_breakers
 
-        open_breakers = [name for name, cb in _circuit_breakers.items() if cb._state != "CLOSED"]
+        open_breakers = [name for name, cb in _circuit_breakers.items() if cb._state != CircuitState.CLOSED]
         if open_breakers:
             err(f"OPEN circuit breakers: {', '.join(open_breakers)}")
             errors += 1
