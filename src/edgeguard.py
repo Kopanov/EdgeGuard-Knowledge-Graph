@@ -295,16 +295,16 @@ def cmd_doctor(args):
                 break
             else:
                 if _attempt == 0:
-                    info(f"Airflow returned {resp.status_code} — retrying in 5s (may be starting)...")
+                    info(f"Airflow returned {resp.status_code} — retrying in 10s (may be starting)...")
                     import time
 
-                    time.sleep(5)
+                    time.sleep(10)
         except Exception:
             if _attempt == 0:
-                info("Airflow not reachable — retrying in 5s (may be starting)...")
+                info("Airflow not reachable — retrying in 10s (may be starting)...")
                 import time
 
-                time.sleep(5)
+                time.sleep(10)
     if not airflow_ok:
         err(f"Airflow webserver not reachable at {airflow_url} after retry — scheduled DAGs will not run")
         all_ok = False
