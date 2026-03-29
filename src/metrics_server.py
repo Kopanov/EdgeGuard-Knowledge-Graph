@@ -390,7 +390,12 @@ class MetricsServer:
 
     def start(self):
         """Start the metrics server (blocking)."""
-        self.server = ThreadedHTTPServer((self.host, self.port), MetricsHandler)
+        try:
+            self.server = ThreadedHTTPServer((self.host, self.port), MetricsHandler)
+        except OSError as e:
+            logger.error(f"Cannot start metrics server on {self.host}:{self.port}: {e}")
+            logger.error("Port may be in use. Pipeline will continue without metrics.")
+            return
         self._running = True
         logger.info(f"Prometheus metrics server starting on http://{self.host}:{self.port}")
         logger.info(f"  - Metrics: http://{self.host}:{self.port}/metrics")
@@ -404,7 +409,12 @@ class MetricsServer:
 
     def start_threaded(self) -> threading.Thread:
         """Start the metrics server in a separate thread (non-blocking)."""
-        self.server = ThreadedHTTPServer((self.host, self.port), MetricsHandler)
+        try:
+            self.server = ThreadedHTTPServer((self.host, self.port), MetricsHandler)
+        except OSError as e:
+            logger.error(f"Cannot start metrics server on {self.host}:{self.port}: {e}")
+            logger.error("Port may be in use. Pipeline will continue without metrics.")
+            return None
         self._running = True
 
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

@@ -1018,7 +1018,7 @@ def cmd_dag_status(args) -> int:
         return 1
     ok("Airflow is reachable")
 
-    dag_ids = [args.dag_id] if getattr(args, "dag_id", None) else ac.EDGEGUARD_DAG_IDS
+    dag_ids = [args.dag_id] if getattr(args, "dag_id", None) else ac.get_edgeguard_dag_ids()
     state_filter = getattr(args, "state", None)
     limit = getattr(args, "limit", 5) or 5
     use_json = getattr(args, "json", False)
@@ -1211,6 +1211,28 @@ def cmd_checkpoint_clear(args) -> int:
     from baseline_checkpoint import clear_checkpoint, get_baseline_status
 
     section("Clear Checkpoints")
+
+    # Safety: check if a pipeline is currently running
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "checkpoints", "pipeline.lock")
+    try:
+        if os.path.exists(lock_path):
+            with open(lock_path) as f:
+                pid = int(f.read().strip())
+            try:
+                os.kill(pid, 0)
+                err(
+                    f"A pipeline process (PID {pid}) is currently running. "
+                    "Clearing checkpoints now could lose completed source progress. "
+                    "Wait for the pipeline to finish, or use --force to override."
+                )
+                if not getattr(args, "force", False):
+                    return 1
+                warn("--force: proceeding despite active pipeline.")
+            except (ProcessLookupError, PermissionError):
+                pass  # Stale lock — safe to proceed
+    except (ValueError, IOError):
+        pass
+
     source = getattr(args, "source", None)
     include_inc = getattr(args, "include_incremental", False)
 

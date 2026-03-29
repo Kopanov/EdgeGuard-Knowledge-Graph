@@ -24,7 +24,9 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-EDGEGUARD_DAG_IDS = [
+# Known DAG IDs — used as fallback when Airflow API is unreachable.
+# Keep in sync with dags/edgeguard_pipeline.py DAG definitions.
+_KNOWN_DAG_IDS = [
     "edgeguard_pipeline",
     "edgeguard_medium_freq",
     "edgeguard_low_freq",
@@ -34,6 +36,35 @@ EDGEGUARD_DAG_IDS = [
 ]
 
 _TIMEOUT = 15  # seconds
+_cached_dag_ids: Optional[List[str]] = None
+
+
+def get_edgeguard_dag_ids() -> List[str]:
+    """Return EdgeGuard DAG IDs, auto-discovered from Airflow if reachable.
+
+    Falls back to the hardcoded ``_KNOWN_DAG_IDS`` list if Airflow is
+    unreachable.  Caches the result for the process lifetime.
+    """
+    global _cached_dag_ids
+    if _cached_dag_ids is not None:
+        return _cached_dag_ids
+
+    try:
+        result = _get("/dags", params={"dag_id_pattern": "edgeguard", "limit": 50})
+        if "error" not in result:
+            ids = [d["dag_id"] for d in result.get("dags", []) if d.get("dag_id", "").startswith("edgeguard")]
+            if ids:
+                _cached_dag_ids = ids
+                return ids
+    except Exception:
+        pass
+
+    _cached_dag_ids = list(_KNOWN_DAG_IDS)
+    return _cached_dag_ids
+
+
+# Backward-compatible alias
+EDGEGUARD_DAG_IDS = _KNOWN_DAG_IDS  # used by existing callers; prefer get_edgeguard_dag_ids()
 
 
 # ---------------------------------------------------------------------------
