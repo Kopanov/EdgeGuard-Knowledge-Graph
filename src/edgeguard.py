@@ -435,25 +435,38 @@ def retry_pending_collections():
         except Exception:
             pass
 
-    # Attempt to trigger the Airflow DAG for a full retry
+    # Attempt to trigger the Airflow DAG — try docker compose exec first (host),
+    # then bare airflow CLI (inside container), then Airflow REST API as fallback.
+    trigger_commands = [
+        ["docker", "compose", "exec", "airflow", "airflow", "dags", "trigger", "edgeguard_pipeline"],
+        ["docker", "exec", "edgeguard_airflow", "airflow", "dags", "trigger", "edgeguard_pipeline"],
+        ["airflow", "dags", "trigger", "edgeguard_pipeline"],
+    ]
+    for cmd in trigger_commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                return True, f"Triggered edgeguard_pipeline DAG via {cmd[0]}"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        except Exception:
+            continue
+
+    # All CLI methods failed — try Airflow REST API
     try:
-        result = subprocess.run(
-            ["airflow", "dags", "trigger", "edgeguard_pipeline"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0:
-            return True, "Triggered edgeguard_pipeline DAG for retry"
-        else:
-            stderr_snippet = result.stderr.strip()[:100] if result.stderr else "unknown error"
-            return True, f"Could not trigger DAG (Airflow CLI returned error): {stderr_snippet}"
-    except FileNotFoundError:
-        return True, "Airflow CLI not available — trigger DAG manually via Airflow UI"
-    except subprocess.TimeoutExpired:
-        return True, "Airflow CLI timed out — trigger DAG manually via Airflow UI"
-    except Exception as e:
-        return True, f"Could not trigger retry: {e}"
+        import airflow_client as ac
+
+        health = ac.airflow_health()
+        if "error" not in health:
+            # Airflow is reachable — use the API (not implemented yet, suggest UI)
+            return True, "Airflow is reachable but CLI trigger failed — use Airflow UI at http://localhost:8082"
+    except Exception:
+        pass
+
+    return (
+        True,
+        "Could not trigger DAG — use Airflow UI at http://localhost:8082 or 'docker compose exec airflow airflow dags trigger edgeguard_pipeline'",
+    )
 
 
 def get_circuit_breaker_state_file():
@@ -547,9 +560,9 @@ def check_production_issues():
     if NEO4J_PASSWORD in ("neo4j", "edgeguard123", "changeme"):
         warnings.append("Using default Neo4j password - change in production!")
 
-    # API keys still hardcoded
-    if len(MISP_API_KEY) > 0 and len(MISP_API_KEY) < 50:
-        warnings.append("API keys appear to be hardcoded - use environment variables in production")
+    # API key format sanity check (MISP keys are typically 40 chars)
+    if len(MISP_API_KEY) > 0 and len(MISP_API_KEY) < 20:
+        warnings.append("MISP API key is suspiciously short (<20 chars) — verify it is correct")
 
     if warnings:
         return warnings
