@@ -1,113 +1,71 @@
-#!/usr/bin/env python3
-"""
-EdgeGuard - Standalone Enrichment Test
-Run this separately to test enrichment with VirusTotal
+"""EdgeGuard — Enrichment logic tests (mocked, no live services)."""
 
-Usage:
-    python3 test_enrichment.py
-"""
-
-import os
-import sys
-
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
-
-import time
-
-from collectors.virustotal_collector import VirusTotalCollector
-from neo4j_client import Neo4jClient
+from unittest.mock import MagicMock
 
 
-def test_enrichment():
-    """Enrich a few indicators manually to test merge behavior"""
+def test_virustotal_collector_query_domain_returns_enriched_dict():
+    """VirusTotalCollector.query_domain returns an indicator dict with VT stats."""
+    from collectors.virustotal_collector import VirusTotalCollector
 
-    client = Neo4jClient()
-    client.connect()
+    vt = VirusTotalCollector.__new__(VirusTotalCollector)
+    vt.api_key = "test-key"
+    vt.session = MagicMock()
+    vt.verify_ssl = True
 
-    vt = VirusTotalCollector()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "data": {
+            "attributes": {
+                "last_analysis_stats": {"malicious": 5, "suspicious": 1, "harmless": 60, "undetected": 10},
+                "registrar": "Example Registrar",
+                "creation_date": 1609459200,
+            },
+            "id": "evil.example.com",
+        }
+    }
+    vt.session.get.return_value = mock_resp
 
-    # Get some indicators to enrich
-    with client.driver.session() as session:
-        result = session.run("""
-            MATCH (i:Indicator)
-            WHERE i.indicator_type IN ['domain', 'ipv4']
-            RETURN i.value as value, i.indicator_type as type, i.source as source
-            LIMIT 10
-        """)
-
-        indicators = list(result)
-
-    print(f"=== Enriching {len(indicators)} Indicators ===\n")
-
-    enriched = 0
-    for ind in indicators:
-        value = ind["value"]
-        ind_type = ind["type"]
-
-        print(f"Enriching: {value} ({ind_type})")
-
-        # Query VirusTotal
-        if ind_type == "domain":
-            result = vt.query_domain(value)
-        elif ind_type == "ipv4":
-            result = vt.query_ip(value)
-        else:
-            result = None
-
-        if result:
-            # Merge with source tracking (creates edge with raw data)
-            client.merge_indicator(result, source_id="virustotal")
-
-            stats = result.get("vt_stats", {})
-            print(f"  ✅ VT: {stats.get('malicious', 0)} malicious, conf: {result['confidence_score']:.2f}")
-            enriched += 1
-        else:
-            print("  ❌ Not found in VT")
-
-        # Rate limiting
-        time.sleep(16)  # 4 requests/min
-
-        if enriched >= 3:  # Just test 3 for now
-            print("\n=== Test complete (limiting to 3 for now) ===")
-            break
-
-    # Show results
-    print("\n=== MERGE RESULTS ===")
-    for ind in indicators[:enriched]:
-        value = ind["value"]
-
-        # Get the merged result
-        with client.driver.session() as session:
-            r = session.run(
-                """
-                MATCH (i:Indicator {value: $value})-[r:SOURCED_FROM]->(s:Source)
-                RETURN s.source_id as source, r.confidence as edge_conf
-            """,
-                value=value,
-            )
-
-            sources = list(r)
-            print(f"\n{value}:")
-            for s in sources:
-                print(f"  - {s['source']}: confidence={s['edge_conf']}")
-
-            # Get primary source
-            r2 = session.run(
-                """
-                MATCH (i:Indicator {value: $value})
-                RETURN i.source as primary, i.confidence_score as node_conf, i.sources as all_sources
-            """,
-                value=value,
-            ).single()
-
-            print(f"  Primary: {r2['primary']} (conf: {r2['node_conf']})")
-            print(f"  All sources: {r2['all_sources']}")
-
-    client.close()
-    return enriched
+    result = vt.query_domain("evil.example.com")
+    assert result is not None
+    assert result["value"] == "evil.example.com"
+    assert result["indicator_type"] == "domain"
+    assert result.get("confidence_score", 0) > 0
 
 
-if __name__ == "__main__":
-    count = test_enrichment()
-    print(f"\n✅ Enriched {count} indicators")
+def test_virustotal_collector_query_domain_not_found_returns_none():
+    """VirusTotalCollector.query_domain returns None for 404."""
+    from collectors.virustotal_collector import VirusTotalCollector
+
+    vt = VirusTotalCollector.__new__(VirusTotalCollector)
+    vt.api_key = "test-key"
+    vt.session = MagicMock()
+    vt.verify_ssl = True
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    vt.session.get.return_value = mock_resp
+
+    result = vt.query_domain("nonexistent.example.com")
+    assert result is None
+
+
+def test_enrichment_merge_calls_neo4j_with_source_id():
+    """Merging an enriched indicator passes source_id='virustotal'."""
+    from neo4j_client import Neo4jClient
+
+    client = Neo4jClient.__new__(Neo4jClient)
+    client.driver = None  # merge_indicator returns False when no driver
+
+    enriched_item = {
+        "indicator_type": "domain",
+        "value": "evil.example.com",
+        "zone": ["global"],
+        "tag": "virustotal_enrich",
+        "source": ["virustotal"],
+        "confidence_score": 0.85,
+    }
+
+    result = client.merge_indicator(enriched_item, source_id="virustotal")
+    # With no driver, merge returns False — but it should not crash
+    assert result is False

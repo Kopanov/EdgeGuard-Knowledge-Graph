@@ -20,7 +20,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 from stub_cleanup import clear_graphql_api_magicmock_stubs
 
-clear_graphql_api_magicmock_stubs()
+
+@pytest.fixture(autouse=True)
+def _clean_stubs():
+    """Clean GraphQL API stubs before each test to avoid MagicMock interference."""
+    clear_graphql_api_magicmock_stubs()
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

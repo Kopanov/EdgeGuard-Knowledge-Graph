@@ -792,8 +792,9 @@ class EdgeGuardPipeline:
             use_stix_flow: If True, use STIX 2.1 as intermediate format (MISP → STIX → Neo4j)
             baseline: If True, collect historical data (all available, not just latest)
             baseline_days: How many days back to collect in baseline mode (default: 365)
-            fresh_baseline: If True with baseline, discard any existing checkpoints and start
-                from scratch. Default False preserves partial progress for resume.
+            fresh_baseline: If True with baseline, perform a true clean slate: clear Neo4j
+                graph data, delete MISP EdgeGuard events, and discard checkpoints before
+                re-collecting. Default False preserves existing data and checkpoints for resume.
         """
         # ── Pipeline lock: prevent concurrent CLI runs ──
         # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
@@ -878,8 +879,67 @@ class EdgeGuardPipeline:
         if baseline:
             logger.info(f"BASELINE MODE: Collecting historical data (last {baseline_days} days)")
             if fresh_baseline:
+                logger.info("=== FRESH BASELINE: clearing all data for clean start ===")
+
+                # 1. Clear checkpoints (preserves incremental by default)
                 clear_checkpoint()
-                logger.info("Cleared existing checkpoints (--fresh-baseline requested)")
+                logger.info("  [1/3] Cleared checkpoints")
+
+                # 2. Clear Neo4j graph data
+                try:
+                    from neo4j_client import Neo4jClient
+
+                    _neo4j = Neo4jClient()
+                    if _neo4j.connect():
+                        _neo4j.clear_all()
+                        _neo4j.close()
+                        logger.info("  [2/3] Cleared Neo4j graph data")
+                    else:
+                        logger.warning("  [2/3] Could not connect to Neo4j — skipping clear")
+                except Exception as e:
+                    logger.warning(f"  [2/3] Could not clear Neo4j: {e}")
+
+                # 3. Clear MISP EdgeGuard events
+                try:
+                    import requests as _req
+
+                    from config import MISP_API_KEY as _misp_key
+                    from config import MISP_URL as _misp_url
+                    from config import SSL_VERIFY as _verify
+
+                    _sess = _req.Session()
+                    _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
+                    _resp = _sess.get(
+                        f"{_misp_url}/events/index",
+                        params={"searchall": "EdgeGuard", "limit": 500},
+                        verify=_verify,
+                        timeout=(15, 60),
+                    )
+                    if _resp.status_code == 200:
+                        _json = _resp.json()
+                        # MISP may return list, {"response": [...]}, or dict-wrapped events
+                        if isinstance(_json, list):
+                            _events = _json
+                        elif isinstance(_json, dict):
+                            _events = _json.get("response", _json.get("Event", []))
+                            if isinstance(_events, dict):
+                                _events = [_events]
+                        else:
+                            _events = []
+                        _deleted = 0
+                        for ev in _events:
+                            eid = ev.get("id") or ev.get("Event", {}).get("id")
+                            if eid:
+                                _del_resp = _sess.delete(f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30))
+                                if _del_resp.status_code in (200, 302):
+                                    _deleted += 1
+                        logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
+                    else:
+                        logger.warning(f"  [3/3] MISP event list returned {_resp.status_code}")
+                except Exception as e:
+                    logger.warning(f"  [3/3] Could not clear MISP events: {e}")
+
+                logger.info("=== Fresh baseline ready — collecting from scratch ===")
             else:
                 existing = get_baseline_status()
                 if existing:
@@ -1295,7 +1355,7 @@ def main():
         "--fresh-baseline",
         action="store_true",
         default=False,
-        help="Discard existing checkpoints and start baseline from scratch (use with --baseline)",
+        help="True clean slate: clear Neo4j graph + MISP events + checkpoints, then re-collect (use with --baseline)",
     )
 
     args = parser.parse_args()

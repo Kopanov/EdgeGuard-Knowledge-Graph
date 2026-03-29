@@ -64,6 +64,11 @@ export EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000   # optional cap per source
 python src/run_pipeline.py --baseline --baseline-days 7
 ```
 
+**For a true clean slate** (wipes Neo4j graph + MISP events + checkpoints, then re-collects):
+```bash
+python src/run_pipeline.py --baseline --fresh-baseline --baseline-days 7
+```
+
 Requires MISP/Neo4j (and API keys) as for a normal run.
 
 ---
