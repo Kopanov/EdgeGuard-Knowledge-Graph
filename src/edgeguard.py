@@ -1263,44 +1263,114 @@ def cmd_checkpoint_clear(args) -> int:
 
 
 def cmd_stats(args) -> int:
-    """Quick dashboard: node counts, last sync, recent runs."""
+    """Dashboard: node counts, by-zone, by-source, MISP events, sync, runs."""
     use_json = getattr(args, "json", False)
+    show_full = getattr(args, "full", False)
+    show_zone = show_full or getattr(args, "by_zone", False)
+    show_source = show_full or getattr(args, "by_source", False)
+    show_misp = show_full or getattr(args, "misp", False)
 
     section("EdgeGuard Stats")
 
     result = {}
+    neo4j_stats = None
 
-    # Neo4j node counts
+    # ── Neo4j full stats (by_source and by_zone come from get_stats()) ──
     try:
-        from health_check import get_neo4j_node_counts
+        from neo4j_client import Neo4jClient
 
-        counts = get_neo4j_node_counts()
-        if counts and "error" not in counts:
-            result["nodes"] = counts
-            print(f"\n  {'Node Type':<20} {'Count':>10}")
-            print(f"  {'—' * 20} {'—' * 10}")
-            for label, count in sorted(counts.items(), key=lambda x: -x[1]):
-                if label != "relationships":
-                    print(f"  {label:<20} {count:>10,}")
-            if "relationships" in counts:
-                print(f"  {'Relationships':<20} {counts['relationships']:>10,}")
-        else:
-            warn("Neo4j: could not fetch node counts")
+        client = Neo4jClient()
+        if client.connect():
+            neo4j_stats = client.get_stats()
+            client.close()
     except Exception as e:
         warn(f"Neo4j: {e}")
 
-    # Last sync
+    # 1. Node counts by label
+    if neo4j_stats and "error" not in neo4j_stats:
+        label_order = [
+            "Vulnerability",
+            "Indicator",
+            "CVE",
+            "Malware",
+            "ThreatActor",
+            "Technique",
+            "Tactic",
+            "Campaign",
+            "Tool",
+            "CVSSv31",
+            "CVSSv40",
+            "CVSSv30",
+            "CVSSv2",
+            "Alert",
+            "Sector",
+            "Sources",
+        ]
+        result["nodes"] = {k: neo4j_stats.get(k, 0) for k in label_order if neo4j_stats.get(k, 0) > 0}
+        result["nodes"]["relationships"] = neo4j_stats.get("sourced_relationships", 0)
+
+        if not use_json:
+            print(f"\n  {'Node Type':<20} {'Count':>10}")
+            print(f"  {'—' * 20} {'—' * 10}")
+            for label in label_order:
+                count = neo4j_stats.get(label, 0)
+                if count > 0:
+                    print(f"  {label:<20} {count:>10,}")
+            sr = neo4j_stats.get("sourced_relationships", 0)
+            if sr:
+                print(f"  {'SOURCED_FROM rels':<20} {sr:>10,}")
+
+    # 2. By zone
+    if show_zone and neo4j_stats:
+        by_zone = neo4j_stats.get("by_zone", {})
+        result["by_zone"] = by_zone
+        if by_zone and not use_json:
+            print(f"\n  {'Zone':<20} {'Nodes':>10}")
+            print(f"  {'—' * 20} {'—' * 10}")
+            for zone, count in sorted(by_zone.items(), key=lambda x: -x[1]):
+                print(f"  {zone:<20} {count:>10,}")
+
+    # 3. By source
+    if show_source and neo4j_stats:
+        by_source = neo4j_stats.get("by_source", {})
+        result["by_source"] = by_source
+        if by_source and not use_json:
+            print(f"\n  {'Source':<28} {'Nodes':>10}")
+            print(f"  {'—' * 28} {'—' * 10}")
+            for source, count in sorted(by_source.items(), key=lambda x: -x[1]):
+                print(f"  {source:<28} {count:>10,}")
+
+    # 4. MISP event summary
+    if show_misp:
+        try:
+            misp_summary = _fetch_misp_event_summary()
+            result["misp"] = misp_summary
+            if misp_summary and not use_json:
+                print(
+                    f"\n  MISP Events: {misp_summary['total_events']} events, "
+                    f"{misp_summary['total_attributes']:,} attributes"
+                )
+                if misp_summary.get("by_source"):
+                    print(f"\n  {'MISP Source':<28} {'Events':>8} {'Attributes':>12}")
+                    print(f"  {'—' * 28} {'—' * 8} {'—' * 12}")
+                    for src in sorted(misp_summary["by_source"], key=lambda x: -x["attributes"]):
+                        print(f"  {src['source']:<28} {src['events']:>8} {src['attributes']:>12,}")
+        except Exception as e:
+            warn(f"MISP: {e}")
+
+    # 5. Last sync
     try:
         sync = get_sync_status()
         result["last_sync"] = sync
-        if sync.get("last_sync"):
-            ok(f"Last sync: {sync['last_sync'][:19]} ({sync.get('age', '?')})")
-        else:
-            warn("No sync recorded yet")
+        if not use_json:
+            if sync.get("last_sync"):
+                ok(f"\nLast sync: {sync['last_sync'][:19]} ({sync.get('age', '?')})")
+            else:
+                warn("\nNo sync recorded yet")
     except Exception:
         pass
 
-    # Pipeline metrics
+    # 6. Pipeline metrics
     try:
         from metrics import PipelineMetrics
 
@@ -1308,14 +1378,14 @@ def cmd_stats(args) -> int:
         pm.load()
         summary = pm.get_summary()
         result["pipeline"] = summary
-        if summary.get("total_runs", 0) > 0:
+        if not use_json and summary.get("total_runs", 0) > 0:
             print(f"\n  Pipeline: {summary['total_runs']} runs, {summary.get('success_rate', 0):.0f}% success")
             if summary.get("avg_duration"):
                 print(f"  Avg duration: {summary['avg_duration']:.0f}s")
     except Exception:
         pass
 
-    # Checkpoint summary
+    # 7. Checkpoint summary
     try:
         from baseline_checkpoint import get_baseline_status
 
@@ -1324,7 +1394,8 @@ def cmd_stats(args) -> int:
             completed = sum(1 for d in cp.values() if isinstance(d, dict) and d.get("completed"))
             in_progress = len(cp) - completed
             result["checkpoints"] = {"completed": completed, "in_progress": in_progress}
-            print(f"\n  Checkpoints: {completed} completed, {in_progress} in-progress")
+            if not use_json:
+                print(f"\n  Checkpoints: {completed} completed, {in_progress} in-progress")
     except Exception:
         pass
 
@@ -1333,8 +1404,72 @@ def cmd_stats(args) -> int:
 
         print(_json.dumps(result, indent=2, default=str))
 
+    if not use_json and not (show_zone or show_source or show_misp):
+        info("\nTip: use --full for zone/source/MISP breakdowns, or --by-zone, --by-source, --misp individually.")
+
     print()
     return 0
+
+
+def _fetch_misp_event_summary() -> dict:
+    """Query MISP for event/attribute counts grouped by source tag."""
+    import requests as _requests
+    import urllib3
+
+    if not SSL_VERIFY:
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    session = _requests.Session()
+    session.headers.update(
+        {
+            "Authorization": MISP_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+    )
+
+    # Fetch EdgeGuard events index (lightweight — no attributes)
+    resp = session.get(
+        f"{MISP_URL}/events/index",
+        params={"limit": 500, "searchall": "EdgeGuard"},
+        verify=SSL_VERIFY,
+        timeout=(15, 60),
+    )
+    resp.raise_for_status()
+    events = resp.json()
+    if not isinstance(events, list):
+        events = []
+
+    total_events = 0
+    total_attrs = 0
+    source_map = {}  # source_tag -> {events: N, attributes: N}
+
+    for ev in events:
+        info_field = ev.get("info", "") or ev.get("Event", {}).get("info", "")
+        attr_count = int(ev.get("attribute_count", 0) or ev.get("Event", {}).get("attribute_count", 0) or 0)
+
+        # Parse source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
+        source_tag = "unknown"
+        if info_field.startswith("EdgeGuard-"):
+            parts = info_field.split("-")
+            if len(parts) >= 3:
+                source_tag = parts[2]  # e.g., "alienvault_otx"
+
+        total_events += 1
+        total_attrs += attr_count
+        if source_tag not in source_map:
+            source_map[source_tag] = {"events": 0, "attributes": 0}
+        source_map[source_tag]["events"] += 1
+        source_map[source_tag]["attributes"] += attr_count
+
+    return {
+        "total_events": total_events,
+        "total_attributes": total_attrs,
+        "by_source": [
+            {"source": src, "events": data["events"], "attributes": data["attributes"]}
+            for src, data in source_map.items()
+        ],
+    }
 
 
 # ================================================================================
@@ -1672,6 +1807,12 @@ Examples:
 
     # Stats dashboard
     stats_parser = subparsers.add_parser("stats", help="Quick dashboard: node counts, sync, runs")
+    stats_parser.add_argument(
+        "--full", action="store_true", help="Include breakdowns by zone, source, and MISP event summary"
+    )
+    stats_parser.add_argument("--by-zone", action="store_true", help="Show node counts per zone")
+    stats_parser.add_argument("--by-source", action="store_true", help="Show node counts per source")
+    stats_parser.add_argument("--misp", action="store_true", help="Show MISP event summary")
     stats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
     # Preflight
