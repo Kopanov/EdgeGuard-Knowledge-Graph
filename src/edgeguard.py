@@ -1511,7 +1511,7 @@ def _fetch_misp_event_summary() -> dict:
         info_field = ev.get("info", "") or ev.get("Event", {}).get("info", "")
         attr_count = int(ev.get("attribute_count", 0) or ev.get("Event", {}).get("attribute_count", 0) or 0)
 
-        # Parse zone and source from event name pattern: EdgeGuard-{ZONE}-{source}-{date}
+        # Parse source from event name: EdgeGuard-{source}-{date}
         source_tag = "unknown"
         if info_field.startswith("EdgeGuard-"):
             # Format: EdgeGuard-{source}-{date}
