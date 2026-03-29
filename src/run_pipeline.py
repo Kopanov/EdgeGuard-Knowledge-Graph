@@ -906,18 +906,26 @@ class EdgeGuardPipeline:
                     from config import MISP_API_KEY as _misp_key
                     from config import MISP_URL as _misp_url
                     from config import SSL_VERIFY as _verify
+                    from config import apply_misp_http_host_header
 
                     _sess = _req.Session()
                     _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
-                    _resp = _sess.get(
-                        f"{_misp_url}/events/index",
-                        params={"searchall": "EdgeGuard", "limit": 500},
-                        verify=_verify,
-                        timeout=(15, 60),
-                    )
-                    if _resp.status_code == 200:
+                    apply_misp_http_host_header(_sess)
+
+                    # Paginate to find ALL EdgeGuard events (not just first 500)
+                    _deleted = 0
+                    _page = 1
+                    while True:
+                        _resp = _sess.get(
+                            f"{_misp_url}/events/index",
+                            params={"searchall": "EdgeGuard", "limit": 100, "page": _page},
+                            verify=_verify,
+                            timeout=(15, 60),
+                        )
+                        if _resp.status_code != 200:
+                            break
+
                         _json = _resp.json()
-                        # MISP may return list, {"response": [...]}, or dict-wrapped events
                         if isinstance(_json, list):
                             _events = _json
                         elif isinstance(_json, dict):
@@ -926,16 +934,19 @@ class EdgeGuardPipeline:
                                 _events = [_events]
                         else:
                             _events = []
-                        _deleted = 0
+
+                        if not _events:
+                            break  # No more events
+
                         for ev in _events:
                             eid = ev.get("id") or ev.get("Event", {}).get("id")
                             if eid:
                                 _del_resp = _sess.delete(f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30))
                                 if _del_resp.status_code in (200, 302):
                                     _deleted += 1
-                        logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
-                    else:
-                        logger.warning(f"  [3/3] MISP event list returned {_resp.status_code}")
+                        _page += 1
+
+                    logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
                 except Exception as e:
                     logger.warning(f"  [3/3] Could not clear MISP events: {e}")
 
