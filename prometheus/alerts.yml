@@ -174,13 +174,26 @@ groups:
         expr: |
           edgeguard_dag_last_success_timestamp > 0
           and (time() - edgeguard_dag_last_success_timestamp) > 21600
+          and edgeguard_dag_last_success_timestamp{dag_id!~"edgeguard_daily|edgeguard_neo4j_sync|edgeguard_baseline"}
         for: 15m
         labels:
           severity: warning
           component: pipeline
         annotations:
           summary: "No successful {{ $labels.dag_id }} run in 6 hours"
-          description: "Last successful run of {{ $labels.dag_id }} was {{ $value | humanizeDuration }} ago."
+          description: "Last successful run of {{ $labels.dag_id }} was over 6 hours ago. Only applies to high/medium-frequency DAGs."
+
+      - alert: EdgeGuardDailyDAGStale
+        expr: |
+          edgeguard_dag_last_success_timestamp{dag_id="edgeguard_daily"} > 0
+          and (time() - edgeguard_dag_last_success_timestamp{dag_id="edgeguard_daily"}) > 90000
+        for: 15m
+        labels:
+          severity: warning
+          component: pipeline
+        annotations:
+          summary: "Daily DAG has not succeeded in over 25 hours"
+          description: "edgeguard_daily runs once per day — no success in 25+ hours indicates a problem."
 
   # ================================================================================
   # Neo4j Alerts

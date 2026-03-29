@@ -259,7 +259,9 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
         PROMETHEUS_AVAILABLE = True
 
         # Define metrics
-        DAG_RUNS_TOTAL = Counter("edgeguard_dag_runs_total", "Total number of DAG runs", ["status", "dag_id"])
+        DAG_RUNS_TOTAL = Counter(
+            "edgeguard_dag_runs_total", "Total number of DAG runs", ["dag_id", "status", "run_type"]
+        )
         INDICATORS_COLLECTED = Counter(
             "edgeguard_indicators_collected_total", "Total indicators collected", ["source", "zone"]
         )

@@ -220,17 +220,28 @@ def clear_checkpoint(source: str = None, *, include_incremental: bool = False) -
 
 
 def get_baseline_status() -> dict:
-    """Return a summary of all baseline checkpoints."""
+    """Return a summary of all baseline checkpoints.
+
+    Excludes entries that only contain incremental state (no baseline
+    progress) — these are leftover from ``clear_checkpoint()`` which
+    preserves incremental cursors.
+    """
     checkpoints = load_checkpoint()
-    return {
-        src: {
+    result = {}
+    for src, data in checkpoints.items():
+        if not isinstance(data, dict):
+            continue
+        # Skip entries that only have incremental state (no baseline fields)
+        has_baseline = any(k in data for k in ("page", "pages", "items_collected", "completed", "started_at"))
+        if not has_baseline:
+            continue
+        result[src] = {
             "pages_collected": len(data.get("pages", [])),
             "items_collected": data.get("items_collected", 0),
             "completed": data.get("completed", False),
             "last_updated": data.get("updated_at", "unknown"),
         }
-        for src, data in checkpoints.items()
-    }
+    return result
 
 
 if __name__ == "__main__":

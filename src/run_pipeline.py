@@ -833,7 +833,12 @@ class EdgeGuardPipeline:
                 pass
 
         atexit.register(_cleanup_lock)
-        signal.signal(signal.SIGTERM, lambda s, f: (_cleanup_lock(), sys.exit(1)))
+
+        def _sigterm_handler(signum, frame):
+            _cleanup_lock()
+            sys.exit(1)
+
+        signal.signal(signal.SIGTERM, _sigterm_handler)
 
         # Import baseline checkpoint utilities
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
