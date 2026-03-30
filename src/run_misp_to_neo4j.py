@@ -105,8 +105,8 @@ MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "Edge
 
 # Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
 # time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
-MISP_EVENTS_INDEX_PAGE_SIZE = 500
-MISP_EVENTS_INDEX_MAX_PAGES = 100
+MISP_EVENTS_INDEX_PAGE_SIZE = int(os.getenv("EDGEGUARD_MISP_PAGE_SIZE", "500"))
+MISP_EVENTS_INDEX_MAX_PAGES = int(os.getenv("EDGEGUARD_MISP_MAX_PAGES", "100"))
 
 
 def _coerce_to_iso(val: Any) -> Optional[str]:
@@ -892,6 +892,13 @@ class MISPToNeo4jSync:
                         type(events).__name__,
                     )
 
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error fetching events: {type(e).__name__}: {e}")
 
@@ -958,6 +965,13 @@ class MISPToNeo4jSync:
             logger.error(f"Failed to fetch event {event_id}: HTTP {response.status_code}")
             return None
 
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error fetching event {event_id}: {type(e).__name__}: {e}")
             return None

@@ -431,12 +431,12 @@ def _on_task_failure(context):
     exc = context.get("exception", "")
     logger.error(f"[ALERT] Task FAILED: {dag_id}.{task_id} — {exc}")
     if ENABLE_SLACK_ALERTS:
-        send_slack_alert(f"Task FAILED: {dag_id}.{task_id} — {exc}", level="critical")
+        send_slack_alert(f"[CRITICAL] Task FAILED: {dag_id}.{task_id} — {exc}")
     if ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE:
         try:
             PIPELINE_ERRORS.labels(task=task_id, error_type="task_failure", source=dag_id).inc()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to record failure metric for {dag_id}.{task_id}: {e}")
 
 
 def _on_task_success(context):
@@ -454,8 +454,8 @@ def _on_task_success(context):
     try:
         DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(now)
         DAG_RUN_START.labels(dag_id=dag_id).set(now)  # keeps refreshing while DAG is active
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to record success metric for {dag_id}: {e}")
 
 
 # Default arguments
@@ -1437,7 +1437,7 @@ def run_build_relationships(**context):
     )
     if result.returncode != 0:
         logger.error(f"build_relationships failed:\n{result.stderr}")
-        raise Exception(f"build_relationships.py exited with code {result.returncode}")
+        raise AirflowException(f"build_relationships.py exited with code {result.returncode}")
     logger.info(result.stdout)
 
 
@@ -1451,6 +1451,9 @@ def run_enrichment_jobs(**context):
         client.connect()
         summary = run_all_enrichment_jobs(client)
         logger.info(f"Enrichment summary: {summary}")
+    except Exception as e:
+        logger.error(f"Enrichment failed: {e}")
+        raise AirflowException(f"Enrichment failed: {e}")
     finally:
         client.close()
 
@@ -1694,6 +1697,9 @@ def run_baseline_enrichment(**context):
         client.connect()
         summary = run_all_enrichment_jobs(client)
         logger.info(f"[BASELINE] Enrichment complete: {summary}")
+    except Exception as e:
+        logger.error(f"[BASELINE] Enrichment failed: {e}")
+        raise AirflowException(f"Baseline enrichment failed: {e}")
     finally:
         client.close()
 

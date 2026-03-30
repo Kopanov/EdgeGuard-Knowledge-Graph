@@ -761,8 +761,10 @@ class EdgeGuardPipeline:
 
                     time.sleep(10)
                     try:
-                        self.neo4j.connect()
-                        logger.info("   Neo4j reconnected")
+                        if self.neo4j.connect():
+                            logger.info("   Neo4j reconnected")
+                        else:
+                            logger.warning(f"   Neo4j reconnect returned False (attempt {_retry + 1}/3)")
                     except Exception as e:
                         logger.warning(f"   Neo4j reconnect failed: {e}")
 
