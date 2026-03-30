@@ -744,7 +744,33 @@ class EdgeGuardPipeline:
             logger.info(f"   [STATS] Total STIX objects created: {len(all_stix_objects)}")
 
             # Step 3c: Load STIX objects into Neo4j
-            logger.info("   🔄 Step 3c: Loading STIX objects into Neo4j...")
+            # Re-verify Neo4j connectivity before heavy write phase (may have died during 5h+ Step 2)
+            logger.info("   🔍 Step 3c: Verifying Neo4j connectivity before write phase...")
+            _neo4j_ok = False
+            for _retry in range(3):
+                try:
+                    _test = self.neo4j.run("RETURN 1 AS ok")
+                    if _test:
+                        _neo4j_ok = True
+                        break
+                except Exception as e:
+                    logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3): {e}")
+                    if _retry < 2:
+                        import time
+
+                        time.sleep(10)
+                        # Try to reconnect
+                        try:
+                            self.neo4j.connect()
+                        except Exception:
+                            pass
+
+            if not _neo4j_ok:
+                logger.error("   [FAIL] Neo4j is unreachable after 3 attempts — cannot load data!")
+                logger.error("   Check: docker compose ps neo4j / docker compose logs neo4j")
+                return loaded  # Return with 0 counts — don't report success
+
+            logger.info("   ✅ Neo4j connectivity verified — starting write phase...")
             master_bundle = {
                 "type": "bundle",
                 "id": f"bundle--{uuid.uuid4()}",
@@ -763,7 +789,13 @@ class EdgeGuardPipeline:
             loaded["relationships_indicates"] = stix_stats.get("relationships_indicates", 0)
             loaded["relationships_attributed_to"] = stix_stats.get("relationships_attributed_to", 0)
 
-            logger.info(f"   [OK] STIX flow complete: {sum(loaded.values())} objects loaded")
+            _stix_total = sum(
+                v for k, v in loaded.items() if k not in ("relationships_indicates", "relationships_attributed_to")
+            )
+            if _stix_total > 0:
+                logger.info(f"   [OK] STIX flow complete: {_stix_total} objects loaded")
+            else:
+                logger.error("   [FAIL] STIX flow complete but 0 objects loaded — Neo4j writes failed!")
             logger.info(f"      - INDICATES relationships: {loaded['relationships_indicates']}")
             logger.info(f"      - ATTRIBUTED_TO relationships: {loaded['relationships_attributed_to']}")
 
@@ -1257,8 +1289,18 @@ class EdgeGuardPipeline:
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
+        # Check if anything was actually loaded to Neo4j
+        total_loaded = sum(
+            loaded.get(k, 0) for k in ("indicators", "vulnerabilities", "malware", "actors", "techniques")
+        )
+
         logger.info("\n" + "=" * 60)
-        logger.info("[OK] EdgeGuard Pipeline Complete!")
+        if total_loaded > 0:
+            logger.info("[OK] EdgeGuard Pipeline Complete!")
+        else:
+            logger.error("[FAIL] EdgeGuard Pipeline Complete — BUT 0 NODES LOADED TO NEO4J!")
+            logger.error("       Data was collected to MISP but NOT synced to Neo4j.")
+            logger.error("       Check Neo4j connectivity: docker compose ps neo4j")
         logger.info("=" * 60)
         logger.info(f"\n⏱️  Total time: {elapsed:.1f} seconds")
         logger.info("\n[STATS] Nodes loaded:")
@@ -1314,7 +1356,7 @@ class EdgeGuardPipeline:
                     logger.info("   [OK] STIX 2.1 export complete")
                     logger.info(f"   [STATS] Total objects: {len(stix_bundle.get('objects', []))}")
 
-        return True
+        return total_loaded > 0
 
 
 def main():
