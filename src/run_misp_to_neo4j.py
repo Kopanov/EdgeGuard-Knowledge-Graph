@@ -2671,6 +2671,27 @@ class MISPToNeo4jSync:
                     )
                     total_errors += 1
                     self.stats["events_failed"] += 1
+
+                    # If this looks like a connection failure, try to reconnect
+                    _exc_str = str(exc).lower()
+                    if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
+                        consecutive_conn_failures = getattr(self, "_consecutive_conn_failures", 0) + 1
+                        self._consecutive_conn_failures = consecutive_conn_failures
+                        if consecutive_conn_failures >= 3:
+                            logger.error(
+                                "3+ consecutive Neo4j connection failures — aborting sync. "
+                                "Check: docker compose ps neo4j / docker compose logs neo4j"
+                            )
+                            break  # Stop burning through events with a dead Neo4j
+                        logger.warning("Attempting Neo4j reconnect after connection failure...")
+                        try:
+                            self.neo4j.connect()
+                            logger.info("Neo4j reconnected successfully")
+                        except Exception:
+                            logger.error("Neo4j reconnect failed")
+                    else:
+                        self._consecutive_conn_failures = 0  # Reset on non-connection errors
+
                     # Free memory after failed event (OOM recovery)
                     import gc
 

@@ -1608,7 +1608,7 @@ def cmd_preflight(args) -> int:
         from health_check import health_check_neo4j
 
         neo4j_result = health_check_neo4j()
-        if neo4j_result.get("status") == "connected":
+        if neo4j_result.get("healthy") or neo4j_result.get("status") == "connected":
             ok(f"Neo4j: connected ({NEO4J_URI})")
             if neo4j_result.get("apoc_available"):
                 ok("APOC plugin: available")

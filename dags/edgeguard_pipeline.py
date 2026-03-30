@@ -1360,6 +1360,32 @@ check_neo4j_sync_needed = ShortCircuitOperator(
     dag=neo4j_sync_dag,
 )
 
+
+def assert_neo4j_preflight(**kwargs):
+    """Verify Neo4j is reachable and healthy before sync."""
+    from neo4j_client import Neo4jClient
+
+    client = Neo4jClient()
+    if not client.connect():
+        raise AirflowException(
+            "Neo4j preflight FAILED — cannot connect. Check: docker compose ps neo4j / docker compose logs neo4j"
+        )
+    try:
+        result = client.run("RETURN 1 AS ok")
+        if not result:
+            raise AirflowException("Neo4j connected but query failed")
+    finally:
+        client.close()
+    logger.info("Neo4j preflight: connected and healthy")
+
+
+neo4j_preflight_task = PythonOperator(
+    task_id="neo4j_health_check",
+    python_callable=assert_neo4j_preflight,
+    execution_timeout=timedelta(minutes=2),
+    dag=neo4j_sync_dag,
+)
+
 run_neo4j_sync_task = PythonOperator(
     task_id="run_neo4j_sync",
     python_callable=run_neo4j_sync,
@@ -1443,9 +1469,10 @@ enrichment_task = PythonOperator(
     dag=neo4j_sync_dag,
 )
 
-# Updated dependency chain: sync → build rels → enrich → quality check
+# Updated dependency chain: check interval → Neo4j preflight → sync → build rels → enrich → quality
 (
     check_neo4j_sync_needed
+    >> neo4j_preflight_task
     >> run_neo4j_sync_task
     >> build_relationships_task
     >> enrichment_task
