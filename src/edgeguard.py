@@ -1298,6 +1298,152 @@ def cmd_checkpoint_clear(args) -> int:
 
 
 # ================================================================================
+# CLEAR (Neo4j / MISP data wipe)
+# ================================================================================
+
+
+def cmd_clear(args) -> int:
+    """Dispatch clear subcommands."""
+    sub = getattr(args, "clear_command", None)
+    if sub == "neo4j":
+        return cmd_clear_neo4j(args)
+    elif sub == "misp":
+        return cmd_clear_misp(args)
+    elif sub == "all":
+        return cmd_clear_all(args)
+    else:
+        print("Usage: edgeguard clear {neo4j|misp|all}")
+        return 1
+
+
+def cmd_clear_neo4j(args) -> int:
+    """Clear all EdgeGuard data from Neo4j (keeps constraints/indexes)."""
+    section("Clear Neo4j")
+
+    if not getattr(args, "force", False):
+        confirm = input("This will DELETE all graph data from Neo4j. Type DELETE to confirm: ")
+        if confirm != "DELETE":
+            info("Aborted.")
+            return 0
+
+    try:
+        from neo4j_client import Neo4jClient
+
+        client = Neo4jClient()
+        if client.connect():
+            client.clear_all()
+            client.close()
+            ok("Neo4j graph data cleared (constraints and indexes preserved)")
+        else:
+            err("Cannot connect to Neo4j")
+            return 1
+    except Exception as e:
+        err(f"Failed to clear Neo4j: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_clear_misp(args) -> int:
+    """Delete all EdgeGuard events from MISP."""
+    import warnings
+
+    import requests as _req
+    import urllib3
+
+    section("Clear MISP EdgeGuard Events")
+
+    if not getattr(args, "force", False):
+        confirm = input("This will DELETE all EdgeGuard events from MISP. Type DELETE to confirm: ")
+        if confirm != "DELETE":
+            info("Aborted.")
+            return 0
+
+    try:
+        _sess = _req.Session()
+        _sess.headers.update({"Authorization": MISP_API_KEY, "Accept": "application/json"})
+
+        with warnings.catch_warnings():
+            if not SSL_VERIFY:
+                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+            resp = _sess.get(
+                f"{MISP_URL}/events/index",
+                params={"searchall": "EdgeGuard", "limit": 500},
+                verify=SSL_VERIFY,
+                timeout=(15, 60),
+            )
+
+        if resp.status_code != 200:
+            err(f"MISP returned {resp.status_code}")
+            return 1
+
+        _json = resp.json()
+        if isinstance(_json, list):
+            events = _json
+        elif isinstance(_json, dict):
+            events = _json.get("response", _json.get("Event", []))
+            if isinstance(events, dict):
+                events = [events]
+        else:
+            events = []
+
+        if not events:
+            info("No EdgeGuard events found in MISP.")
+            return 0
+
+        deleted = 0
+        for ev in events:
+            eid = ev.get("id") or ev.get("Event", {}).get("id")
+            if eid:
+                with warnings.catch_warnings():
+                    if not SSL_VERIFY:
+                        warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                    del_resp = _sess.delete(f"{MISP_URL}/events/{eid}", verify=SSL_VERIFY, timeout=(15, 30))
+                if del_resp.status_code in (200, 302):
+                    deleted += 1
+
+        ok(f"Deleted {deleted}/{len(events)} EdgeGuard events from MISP")
+    except Exception as e:
+        err(f"Failed to clear MISP: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_clear_all(args) -> int:
+    """Clear both Neo4j and MISP + checkpoints (full reset)."""
+    section("Clear All (Neo4j + MISP + Checkpoints)")
+
+    if not getattr(args, "force", False):
+        confirm = input("This will DELETE all data from Neo4j + MISP + checkpoints. Type DELETE to confirm: ")
+        if confirm != "DELETE":
+            info("Aborted.")
+            return 0
+
+    # Force the sub-commands to skip their own confirmation
+    args.force = True
+
+    neo4j_ok = cmd_clear_neo4j(args) == 0
+    misp_ok = cmd_clear_misp(args) == 0
+
+    # Clear checkpoints (including incremental)
+    try:
+        from baseline_checkpoint import clear_checkpoint
+
+        clear_checkpoint(include_incremental=True)
+        ok("Checkpoints cleared (including incremental cursors)")
+    except Exception as e:
+        warn(f"Could not clear checkpoints: {e}")
+
+    if neo4j_ok and misp_ok:
+        ok("Full reset complete — ready for fresh baseline")
+    else:
+        warn("Partial reset — check errors above")
+
+    return 0 if (neo4j_ok and misp_ok) else 1
+
+
+# ================================================================================
 # STATS DASHBOARD
 # ================================================================================
 
@@ -1854,6 +2000,9 @@ Examples:
   edgeguard.py dag kill --dry-run    # Show what would be killed
   edgeguard.py checkpoint status     # Per-source baseline progress + incremental cursors
   edgeguard.py checkpoint clear      # Clear baseline (keeps incremental cursors)
+  edgeguard.py clear neo4j           # Delete all graph data from Neo4j
+  edgeguard.py clear misp            # Delete all EdgeGuard events from MISP
+  edgeguard.py clear all             # Full reset: Neo4j + MISP + checkpoints
   edgeguard.py doctor                # Diagnose connectivity issues
   edgeguard.py heal                  # Auto-repair (circuit breakers, locks, retries)
   edgeguard.py validate              # Validate config + Neo4j schema
@@ -1903,6 +2052,19 @@ Examples:
     cp_clear_parser.add_argument("--source", help="Clear specific source only")
     cp_clear_parser.add_argument("--include-incremental", action="store_true", help="Also clear incremental cursors")
     cp_clear_parser.add_argument("--force", action="store_true", help="Skip confirmation")
+
+    # Clear data
+    clear_parser = subparsers.add_parser("clear", help="Clear data from Neo4j, MISP, or both")
+    clear_subparsers = clear_parser.add_subparsers(dest="clear_command", help="Clear commands")
+
+    clear_neo4j_parser = clear_subparsers.add_parser("neo4j", help="Delete all graph data from Neo4j")
+    clear_neo4j_parser.add_argument("--force", action="store_true", help="Skip DELETE confirmation")
+
+    clear_misp_parser = clear_subparsers.add_parser("misp", help="Delete all EdgeGuard events from MISP")
+    clear_misp_parser.add_argument("--force", action="store_true", help="Skip DELETE confirmation")
+
+    clear_all_parser = clear_subparsers.add_parser("all", help="Clear Neo4j + MISP + checkpoints (full reset)")
+    clear_all_parser.add_argument("--force", action="store_true", help="Skip DELETE confirmation")
 
     # Stats dashboard
     stats_parser = subparsers.add_parser("stats", help="Quick dashboard: node counts, sync, runs")
@@ -2033,6 +2195,8 @@ Examples:
         return cmd_dag(args)
     elif args.command == "checkpoint":
         return cmd_checkpoint(args)
+    elif args.command == "clear":
+        return cmd_clear(args)
     elif args.command == "stats":
         return cmd_stats(args)
     elif args.command == "preflight":
