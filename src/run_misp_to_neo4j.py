@@ -2662,6 +2662,7 @@ class MISPToNeo4jSync:
                     total_parsed_items += ep
                     total_cross_rels_built += ecr
                     total_errors += ee
+                    self._consecutive_conn_failures = 0  # Reset on success
                 except Exception as exc:
                     logger.error(
                         "Event %s failed (%s: %s) — skipping, continuing with remaining events",

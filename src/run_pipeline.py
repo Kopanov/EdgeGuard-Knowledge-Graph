@@ -1290,9 +1290,9 @@ class EdgeGuardPipeline:
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
-        # Check if anything was actually loaded to Neo4j
+        # Check if anything is actually in Neo4j (use real counts, not pipeline counters)
         total_loaded = sum(
-            loaded.get(k, 0) for k in ("indicators", "vulnerabilities", "malware", "actors", "techniques")
+            stats.get(k, 0) for k in ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique")
         )
 
         logger.info("\n" + "=" * 60)

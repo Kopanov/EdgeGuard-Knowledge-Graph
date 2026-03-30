@@ -193,7 +193,9 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     neo4j_exceptions.TransientError,
                     ConnectionError,
                     TimeoutError,
-                    OSError,  # Covers ConnectionRefusedError, BrokenPipeError, ConnectionResetError
+                    ConnectionRefusedError,
+                    ConnectionResetError,
+                    BrokenPipeError,
                 ) as e:
                     last_exception = e
                     if attempt >= max_retries:
