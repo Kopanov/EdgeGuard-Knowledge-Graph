@@ -1382,10 +1382,12 @@ def cmd_clear_misp(args) -> int:
         # (deleted events won't reappear). Max 20 iterations = 10,000 events safety cap.
         deleted = 0
         total_found = 0
+        _http_error = False
         _max_pages = 20
         for _page in range(_max_pages):
             if resp.status_code != 200:
                 err(f"MISP returned {resp.status_code}")
+                _http_error = True
                 break
 
             _json = resp.json()
@@ -1425,6 +1427,9 @@ def cmd_clear_misp(args) -> int:
                     timeout=(15, 60),
                 )
 
+        if _http_error:
+            err("MISP clear failed due to HTTP error — check API key and MISP status")
+            return 1
         if total_found == 0:
             info("No EdgeGuard events found in MISP.")
         else:
