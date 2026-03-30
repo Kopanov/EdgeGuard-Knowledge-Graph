@@ -2337,7 +2337,7 @@ class MISPToNeo4jSync:
         ``[]`` — use the caller's relationship list for ``_create_relationships``.
 
         Env:
-            EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: max items per Python-side chunk (default **1000**).
+            EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: max items per Python-side chunk (default **500**).
             **``0``** or **``all``** (case-insensitive): single pass — all items in one chunk
             (OOM risk on large backfills; see module constants and docs).
             EDGEGUARD_DEBUG_GC: if ``1``/``true``/``yes``, run ``gc.collect()`` after each chunk
