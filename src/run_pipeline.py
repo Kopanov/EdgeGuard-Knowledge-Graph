@@ -936,7 +936,10 @@ class EdgeGuardPipeline:
 
                 # 3. Clear MISP EdgeGuard events
                 try:
+                    import warnings
+
                     import requests as _req
+                    import urllib3
 
                     from config import MISP_API_KEY as _misp_key
                     from config import MISP_URL as _misp_url
@@ -947,16 +950,19 @@ class EdgeGuardPipeline:
                     _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
                     apply_misp_http_host_header(_sess)
 
-                    # Paginate to find ALL EdgeGuard events (not just first 500)
+                    # Delete all EdgeGuard events. Always re-fetch page 1 (deleted events
+                    # disappear, shifting remaining events to page 1). Safety cap: 20 iterations.
                     _deleted = 0
-                    _page = 1
-                    while True:
-                        _resp = _sess.get(
-                            f"{_misp_url}/events/index",
-                            params={"searchall": "EdgeGuard", "limit": 100, "page": _page},
-                            verify=_verify,
-                            timeout=(15, 60),
-                        )
+                    for _round in range(20):
+                        with warnings.catch_warnings():
+                            if not _verify:
+                                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                            _resp = _sess.get(
+                                f"{_misp_url}/events/index",
+                                params={"searchall": "EdgeGuard", "limit": 500},
+                                verify=_verify,
+                                timeout=(15, 60),
+                            )
                         if _resp.status_code != 200:
                             break
 
@@ -976,10 +982,16 @@ class EdgeGuardPipeline:
                         for ev in _events:
                             eid = ev.get("id") or ev.get("Event", {}).get("id")
                             if eid:
-                                _del_resp = _sess.delete(f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30))
+                                with warnings.catch_warnings():
+                                    if not _verify:
+                                        warnings.filterwarnings(
+                                            "ignore", category=urllib3.exceptions.InsecureRequestWarning
+                                        )
+                                    _del_resp = _sess.delete(
+                                        f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30)
+                                    )
                                 if _del_resp.status_code == 200:
                                     _deleted += 1
-                        _page += 1
 
                     logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
                 except Exception as e:

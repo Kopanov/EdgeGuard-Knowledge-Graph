@@ -683,6 +683,7 @@ class MISPToNeo4jSync:
         }
         # Set when ``run()`` returns False so callers (e.g. baseline DAG) can surface a short reason.
         self._last_sync_failure_reason: Optional[str] = None
+        self._consecutive_conn_failures: int = 0
 
     def health_check_misp(self) -> Dict[str, Any]:
         """
