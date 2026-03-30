@@ -924,9 +924,11 @@ class EdgeGuardPipeline:
 
                     _neo4j = Neo4jClient()
                     if _neo4j.connect():
-                        _neo4j.clear_all()
-                        _neo4j.close()
-                        logger.info("  [2/3] Cleared Neo4j graph data")
+                        try:
+                            _neo4j.clear_all()
+                            logger.info("  [2/3] Cleared Neo4j graph data")
+                        finally:
+                            _neo4j.close()
                     else:
                         logger.warning("  [2/3] Could not connect to Neo4j — skipping clear")
                 except Exception as e:

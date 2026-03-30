@@ -1330,13 +1330,14 @@ def cmd_clear_neo4j(args) -> int:
         from neo4j_client import Neo4jClient
 
         client = Neo4jClient()
-        if client.connect():
-            client.clear_all()
-            client.close()
-            ok("Neo4j graph data cleared (constraints and indexes preserved)")
-        else:
+        if not client.connect():
             err("Cannot connect to Neo4j")
             return 1
+        try:
+            client.clear_all()
+            ok("Neo4j graph data cleared (constraints and indexes preserved)")
+        finally:
+            client.close()
     except Exception as e:
         err(f"Failed to clear Neo4j: {e}")
         return 1

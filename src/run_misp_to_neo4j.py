@@ -2544,7 +2544,7 @@ class MISPToNeo4jSync:
         import gc
 
         total_parsed = 0
-        total_rels = 0
+        total_cross_rels = 0
         total_errors = 0
         page_size = self._ATTR_PAGE_SIZE
         total_attrs = len(all_attributes)
@@ -2584,7 +2584,7 @@ class MISPToNeo4jSync:
                 if page_rels:
                     rels_created = self._create_relationships(page_rels, "misp")
                     self.stats["relationships_created"] += rels_created
-                    total_rels += rels_created
+                    total_cross_rels += rels_created
 
                 # Release page memory and pause before next page
                 del page_items, unique_items, page_rels
@@ -2608,7 +2608,7 @@ class MISPToNeo4jSync:
             "Event %s: large-event streaming complete — %s total items, %s rels, %s errors",
             event_id,
             total_parsed,
-            total_rels,
+            total_cross_rels,
             total_errors,
         )
 
