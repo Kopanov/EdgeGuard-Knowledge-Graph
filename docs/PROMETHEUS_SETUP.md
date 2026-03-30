@@ -297,6 +297,7 @@ The following alerts are pre-configured in `prometheus/alerts.yml`:
 | `EdgeGuardDAGRunFailures` | >3 failures/hour | warning |
 | `EdgeGuardDAGRunStuck` | DAG run running >1 hour without completing | critical |
 | `EdgeGuardDAGLastSuccessStale` | No successful DAG run in >6 hours | warning |
+| `EdgeGuardContainerRestartLoop` | >3 container restarts in 1 hour (requires cAdvisor) | critical |
 
 ### Custom Alerts
 

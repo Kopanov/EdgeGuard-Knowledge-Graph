@@ -148,6 +148,9 @@ python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pi
 | `edgeguard dag kill` | Force-fail stuck DAG runs (preserves checkpoints, `--dry-run`) |
 | `edgeguard checkpoint status` | Per-source baseline progress + incremental cursors |
 | `edgeguard checkpoint clear` | Clear baseline state (preserves incremental by default) |
+| `edgeguard clear neo4j` | Delete all graph data from Neo4j (keeps constraints) |
+| `edgeguard clear misp` | Delete all EdgeGuard events from MISP |
+| `edgeguard clear all` | Full reset: Neo4j + MISP + checkpoints (`--force` skips confirmation) |
 | `edgeguard doctor` | Diagnose connectivity (MISP, Neo4j, Airflow, NATS, schema) |
 | `edgeguard heal` | Auto-repair (reset circuit breakers, clear locks, retry) |
 | `edgeguard validate` | Config validation (rate limits, passwords, Neo4j schema) |

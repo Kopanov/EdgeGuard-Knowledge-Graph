@@ -299,6 +299,8 @@ airflow logs <task_id> <dag_run_id>
 | Need a completely fresh start | `python src/run_pipeline.py --baseline --fresh-baseline --baseline-days N` (clears Neo4j + MISP + checkpoints) |
 | Airflow not reachable | `edgeguard doctor` retries after 10s; check container: `docker compose ps airflow` |
 | Pipeline already running (lock error) | Wait for it to finish, or delete `checkpoints/pipeline.lock` if stale |
+| Need to clear just Neo4j or MISP | `edgeguard clear neo4j` / `edgeguard clear misp` / `edgeguard clear all` |
+| OOM on large MISP events (100K+ attrs) | Events >5000 attributes are automatically streamed in pages. Increase `AIRFLOW_MEMORY_LIMIT` in `.env` if still failing |
 
 ---
 
