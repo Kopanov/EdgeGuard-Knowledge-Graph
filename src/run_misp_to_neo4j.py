@@ -781,7 +781,11 @@ class MISPToNeo4jSync:
             self.neo4j = Neo4jClient()
 
         # Connect to Neo4j
-        neo4j_ok = self.neo4j.connect()
+        try:
+            neo4j_ok = self.neo4j.connect()
+        except Exception as e:
+            neo4j_ok = False
+            logger.error("[ERR] Neo4j connect raised after retries: %s", e)
         if not neo4j_ok:
             logger.error("[ERR] Failed to connect to Neo4j")
             self.neo4j_circuit.record_failure()
