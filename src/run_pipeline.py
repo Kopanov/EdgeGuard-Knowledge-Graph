@@ -748,22 +748,23 @@ class EdgeGuardPipeline:
             logger.info("   🔍 Step 3c: Verifying Neo4j connectivity before write phase...")
             _neo4j_ok = False
             for _retry in range(3):
-                try:
-                    _test = self.neo4j.run("RETURN 1 AS ok")
-                    if _test:
-                        _neo4j_ok = True
-                        break
-                except Exception as e:
-                    logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3): {e}")
-                    if _retry < 2:
-                        import time
+                # neo4j.run() catches exceptions internally and returns [] on failure.
+                # Check the return value directly — no exception to catch here.
+                _test = self.neo4j.run("RETURN 1 AS ok")
+                if _test:
+                    _neo4j_ok = True
+                    break
+                # Failed — sleep and try to reconnect
+                logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3)")
+                if _retry < 2:
+                    import time
 
-                        time.sleep(10)
-                        # Try to reconnect
-                        try:
-                            self.neo4j.connect()
-                        except Exception:
-                            pass
+                    time.sleep(10)
+                    try:
+                        self.neo4j.connect()
+                        logger.info("   Neo4j reconnected")
+                    except Exception as e:
+                        logger.warning(f"   Neo4j reconnect failed: {e}")
 
             if not _neo4j_ok:
                 logger.error("   [FAIL] Neo4j is unreachable after 3 attempts — cannot load data!")
