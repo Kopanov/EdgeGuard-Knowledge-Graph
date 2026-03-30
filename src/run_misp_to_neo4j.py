@@ -2482,6 +2482,20 @@ class MISPToNeo4jSync:
         attributes = coerce_misp_attribute_list(full_event.get("Attribute"))
         attr_count = len(attributes)
 
+        # Log MISP Object diagnostic (applies to both normal and paged paths)
+        obj_count = len(full_event.get("Object") or [])
+        if obj_count and not attributes:
+            logger.warning(
+                "Event %s has %s MISP Object(s) but no top-level Attribute list — "
+                "sync uses flat attributes only; object attributes are not ingested yet",
+                event_id,
+                obj_count,
+            )
+        elif obj_count:
+            logger.debug(
+                "Event %s has %s MISP Object(s); only top-level Attribute rows are synced", event_id, obj_count
+            )
+
         # For large events: stream attributes in pages to avoid OOM
         if attr_count > self._ATTR_PAGE_SIZE:
             logger.info(
