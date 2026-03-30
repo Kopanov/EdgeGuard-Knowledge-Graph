@@ -2356,7 +2356,7 @@ class MISPToNeo4jSync:
                 it.pop("relationships", None)
             # Pause between chunks to let Neo4j flush transactions
             if ci < n_chunks - 1:  # Skip delay after the last chunk
-                time.sleep(1)
+                time.sleep(2)
             # Forced full GC on huge graphs can spike RAM in small workers (OOM/SIGKILL).
             # Opt-in only: EDGEGUARD_DEBUG_GC=1
             if os.environ.get("EDGEGUARD_DEBUG_GC", "").strip().lower() in ("1", "true", "yes"):
@@ -2589,7 +2589,7 @@ class MISPToNeo4jSync:
                 # Release page memory and pause before next page
                 del page_items, unique_items, page_rels
                 gc.collect()
-                time.sleep(1)  # Let Neo4j flush transactions between pages
+                time.sleep(2)  # Let Neo4j flush transactions between pages
 
             logger.info(
                 "Event %s: page %s/%s done — %s items synced so far",
