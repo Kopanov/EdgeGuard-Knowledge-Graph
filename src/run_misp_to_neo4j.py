@@ -2548,7 +2548,18 @@ class MISPToNeo4jSync:
             return 0, 0, 0
 
         unique_event_items = _dedupe_parsed_items(event_items)
-        cross_rels = self._build_cross_item_relationships(unique_event_items)
+
+        # Guard against O(n²) blowup on dense events (same cap as paged path).
+        if len(unique_event_items) > self._MAX_COOCCURRENCE_PAGED_ITEMS:
+            logger.warning(
+                "Event %s: %s unique items exceeds co-occurrence cap (%s) — skipping cross-item relationships to avoid O(n²) blowup",
+                event_id,
+                len(unique_event_items),
+                self._MAX_COOCCURRENCE_PAGED_ITEMS,
+            )
+            cross_rels = []
+        else:
+            cross_rels = self._build_cross_item_relationships(unique_event_items)
 
         logger.info(
             "Event %s: %s parsed -> %s unique items; %s embedded rel defs; %s cross-item rel defs",

@@ -551,6 +551,13 @@ class Neo4jClient:
                 except neo4j_exceptions.DatabaseError as e:
                     logger.debug(f"Index (may exist): {e}")
                     success_count += 1
+                except (
+                    neo4j_exceptions.ServiceUnavailable,
+                    neo4j_exceptions.TransientError,
+                    ConnectionError,
+                    TimeoutError,
+                ):
+                    raise  # let @retry_with_backoff handle transient errors
                 except Exception as e:
                     logger.warning(f"Index error: {e}")
                     error_count += 1
