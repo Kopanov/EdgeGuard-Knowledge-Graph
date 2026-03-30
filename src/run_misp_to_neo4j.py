@@ -2589,15 +2589,6 @@ class MISPToNeo4jSync:
         """
         import gc
 
-        # Warn about MISP Objects (same as _process_single_event, but for paged path)
-        obj_count = len(full_event.get("Object") or [])
-        if obj_count:
-            logger.warning(
-                "Event %s (paged): has %s MISP Object(s); only top-level Attribute rows are synced",
-                event_id,
-                obj_count,
-            )
-
         total_parsed = 0
         total_cross_rels = 0
         total_errors = 0
