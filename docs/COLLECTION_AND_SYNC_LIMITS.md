@@ -34,7 +34,7 @@ Several numbers (**200**, **1000**, **2000**) appear across EdgeGuard docs and c
    Event **discovery** uses the **index + client filter** path first (see table above); **restSearch** is fallback only.  
    **Per event:** parse → dedupe within the event → **cross-item relationships** (same-event only) → merge nodes → create edges.  
    **Chunk size** for Neo4j **node** writes is **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500** items, 2s pause between chunks). **Relationship** batches use **`EDGEGUARD_REL_BATCH_SIZE`** (default **2000** definitions).
-   **Large events** (>5000 attributes): processed in **pages** of 5000 via `_process_large_event_paged()` — each page is parsed, synced to Neo4j, and released before the next page loads (2s pause + `gc.collect()` between pages). Keeps peak RAM bounded regardless of event size.
+   **Large events** (>5000 attributes): processed in **pages** of 5000 via `_process_large_event_paged()` — each page is parsed, synced to Neo4j, and released before the next page loads (2s pause + `gc.collect()` between pages). After all pages complete, cross-item relationships (Actor→Technique, Malware→Actor, Indicator→Malware etc.) are built using a lightweight accumulator (~100 bytes/item) that collects only relationship-relevant fields from each page. Keeps peak RAM bounded while preserving full relationship coverage.
 
 3. **Optional `MISPCollector`**  
    Legacy / alternate path to pull from MISP’s **`/events`** API with its **own** caps (**2000** index ceiling, etc.). **Not** the same as (2) and **not** wired into baseline collection.

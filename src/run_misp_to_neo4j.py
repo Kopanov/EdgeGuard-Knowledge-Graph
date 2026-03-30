@@ -2548,6 +2548,12 @@ class MISPToNeo4jSync:
         total_cross_rels = 0
         total_errors = 0
         page_size = self._ATTR_PAGE_SIZE
+
+        # Lightweight accumulator for cross-item relationship building after all pages.
+        # Stores only the fields needed by _build_cross_item_relationships (~100 bytes/item
+        # vs ~2KB/item for full parsed items).
+        _rel_items: List[Dict] = []
+        _REL_KEYS = ("type", "name", "mitre_id", "tag", "indicator_type", "value", "malware_family", "zone", "cve_id")
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size
 
@@ -2582,6 +2588,10 @@ class MISPToNeo4jSync:
                 total_parsed += len(page_items)
                 total_errors += page_errors
 
+                # Collect lightweight data for cross-item relationships (built after all pages)
+                for _item in unique_items:
+                    _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
+
                 if page_rels:
                     rels_created = self._create_relationships(page_rels, "misp")
                     self.stats["relationships_created"] += rels_created
@@ -2604,18 +2614,31 @@ class MISPToNeo4jSync:
         del all_attributes
         gc.collect()
 
+        # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
+        # Uses the lightweight accumulator, not the full parsed items.
+        cross_rels = []
+        if _rel_items:
+            cross_rels = self._build_cross_item_relationships(_rel_items)
+            if cross_rels:
+                logger.info(
+                    "Event %s: building %s cross-item relationships from all pages...", event_id, len(cross_rels)
+                )
+                rels_created = self._create_relationships(cross_rels, "misp")
+                self.stats["relationships_created"] += rels_created
+                total_cross_rels += rels_created
+            del _rel_items
+            gc.collect()
+
         self.stats["events_processed"] += 1
         logger.info(
-            "Event %s: large-event streaming complete — %s total items, %s rels, %s errors",
+            "Event %s: large-event streaming complete — %s total items, %s cross rels, %s errors",
             event_id,
             total_parsed,
             total_cross_rels,
             total_errors,
         )
 
-        # Return format matches _process_event_attributes: (parsed_count, cross_rel_defs, errors)
-        # Paged path doesn't build cross-item rels (pages are independent), so cross_rels = 0
-        return total_parsed, 0, total_errors
+        return total_parsed, len(cross_rels), total_errors
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
