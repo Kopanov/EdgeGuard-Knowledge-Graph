@@ -535,6 +535,7 @@ This README stays the **short** entry (quick start, ports, env vars). Deep onboa
 | Document | Description |
 |----------|-------------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Pipeline data flow, zone detection, chunking strategy |
+| [docs/ARCHITECTURE_DIAGRAMS.md](docs/ARCHITECTURE_DIAGRAMS.md) | **Visual diagrams** (Mermaid) — system overview, graph schema, pipeline flow, retry logic, OOM guards |
 | [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) | Zone/sector architecture, multi-zone support, example queries |
 | [docs/METHODOLOGY.md](docs/METHODOLOGY.md) | Sector classification algorithm — keywords, scoring, thresholds |
 | [docs/DATA_QUALITY.md](docs/DATA_QUALITY.md) | Deterministic MERGE strategy, exact matching rules |
