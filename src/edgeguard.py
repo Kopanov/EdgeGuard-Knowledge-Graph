@@ -1373,36 +1373,53 @@ def cmd_clear_misp(args) -> int:
                 timeout=(15, 60),
             )
 
-        if resp.status_code != 200:
-            err(f"MISP returned {resp.status_code}")
-            return 1
-
-        _json = resp.json()
-        if isinstance(_json, list):
-            events = _json
-        elif isinstance(_json, dict):
-            events = _json.get("response", _json.get("Event", []))
-            if isinstance(events, dict):
-                events = [events]
-        else:
-            events = []
-
-        if not events:
-            info("No EdgeGuard events found in MISP.")
-            return 0
-
+        # Paginate: keep fetching + deleting until no more EdgeGuard events
         deleted = 0
-        for ev in events:
-            eid = ev.get("id") or ev.get("Event", {}).get("id")
-            if eid:
-                with warnings.catch_warnings():
-                    if not SSL_VERIFY:
-                        warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-                    del_resp = _sess.delete(f"{MISP_URL}/events/{eid}", verify=SSL_VERIFY, timeout=(15, 30))
-                if del_resp.status_code in (200, 302):
-                    deleted += 1
+        total_found = 0
+        while True:
+            if resp.status_code != 200:
+                err(f"MISP returned {resp.status_code}")
+                break
 
-        ok(f"Deleted {deleted}/{len(events)} EdgeGuard events from MISP")
+            _json = resp.json()
+            if isinstance(_json, list):
+                events = _json
+            elif isinstance(_json, dict):
+                events = _json.get("response", _json.get("Event", []))
+                if isinstance(events, dict):
+                    events = [events]
+            else:
+                events = []
+
+            if not events:
+                break
+
+            total_found += len(events)
+            for ev in events:
+                eid = ev.get("id") or ev.get("Event", {}).get("id")
+                if eid:
+                    with warnings.catch_warnings():
+                        if not SSL_VERIFY:
+                            warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                        del_resp = _sess.delete(f"{MISP_URL}/events/{eid}", verify=SSL_VERIFY, timeout=(15, 30))
+                    if del_resp.status_code == 200:
+                        deleted += 1
+
+            # Fetch next page (deleted events won't appear again)
+            with warnings.catch_warnings():
+                if not SSL_VERIFY:
+                    warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                resp = _sess.get(
+                    f"{MISP_URL}/events/index",
+                    params={"searchall": "EdgeGuard", "limit": 500},
+                    verify=SSL_VERIFY,
+                    timeout=(15, 60),
+                )
+
+        if total_found == 0:
+            info("No EdgeGuard events found in MISP.")
+        else:
+            ok(f"Deleted {deleted}/{total_found} EdgeGuard events from MISP")
     except Exception as e:
         err(f"Failed to clear MISP: {e}")
         return 1

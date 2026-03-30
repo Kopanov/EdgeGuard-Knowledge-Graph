@@ -975,7 +975,7 @@ class EdgeGuardPipeline:
                             eid = ev.get("id") or ev.get("Event", {}).get("id")
                             if eid:
                                 _del_resp = _sess.delete(f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30))
-                                if _del_resp.status_code in (200, 302):
+                                if _del_resp.status_code == 200:
                                     _deleted += 1
                         _page += 1
 

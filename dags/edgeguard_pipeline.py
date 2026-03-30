@@ -1366,17 +1366,17 @@ def assert_neo4j_preflight(**kwargs):
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient()
-    if not client.connect():
-        raise AirflowException(
-            "Neo4j preflight FAILED — cannot connect. Check: docker compose ps neo4j / docker compose logs neo4j"
-        )
     try:
+        if not client.connect():
+            raise AirflowException(
+                "Neo4j preflight FAILED — cannot connect. Check: docker compose ps neo4j / docker compose logs neo4j"
+            )
         result = client.run("RETURN 1 AS ok")
         if not result:
             raise AirflowException("Neo4j connected but query failed")
+        logger.info("Neo4j preflight: connected and healthy")
     finally:
         client.close()
-    logger.info("Neo4j preflight: connected and healthy")
 
 
 neo4j_preflight_task = PythonOperator(

@@ -2612,7 +2612,9 @@ class MISPToNeo4jSync:
             total_errors,
         )
 
-        return total_parsed, total_rels, total_errors
+        # Return format matches _process_event_attributes: (parsed_count, cross_rel_defs, errors)
+        # Paged path doesn't build cross-item rels (pages are independent), so cross_rels = 0
+        return total_parsed, 0, total_errors
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
@@ -2787,7 +2789,16 @@ class MISPToNeo4jSync:
                     gc.collect()
                     continue
 
-            # Retry deferred large events (now that critical data is in)
+            # Retry deferred large events (only if Neo4j is still alive)
+            _conn_failures = getattr(self, "_consecutive_conn_failures", 0)
+            if skipped_large and _conn_failures >= 3:
+                logger.error(
+                    "Skipping %s deferred large event(s) — Neo4j connection failed (%s consecutive errors)",
+                    len(skipped_large),
+                    _conn_failures,
+                )
+                skipped_large = []  # Don't retry with a dead Neo4j
+
             if skipped_large:
                 logger.info(
                     "Retrying %s deferred large event(s) (>%s attributes)...",
