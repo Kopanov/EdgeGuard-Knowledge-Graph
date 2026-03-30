@@ -46,8 +46,9 @@ EDGEGUARD_BASELINE_COLLECTION_LIMIT=0
 # AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD=3600
 # AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC=30
 
-# Heavy sync: raise if the airflow container is OOM-killed (SIGKILL)
-# AIRFLOW_MEMORY_LIMIT=8g
+# Airflow memory: default 12g for production (100K+ attribute events need 8-12GB).
+# Lower to 4g only for small test deployments.
+# AIRFLOW_MEMORY_LIMIT=12g
 ```
 
 **Note:** A variable named `NEO4J_MEMORY` is **not** read by this repository. Use **`NEO4J_HEAP_MAX`**, **`NEO4J_PAGECACHE`**, and **`NEO4J_CONTAINER_MEMORY_LIMIT`** as above.

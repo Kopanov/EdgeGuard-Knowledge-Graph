@@ -28,7 +28,7 @@ Override any of these in **`.env`** using the same names if needed.
 
 Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies appear in **Airflow scheduler** logs.
 
-**Docker Compose — Airflow container memory:** `docker-compose.yml` sets **`deploy.resources.limits.memory: ${AIRFLOW_MEMORY_LIMIT:-4g}`** on **`airflow`**. **`full_neo4j_sync`** can spike Python RSS (Neo4j driver + batches); **-9** with free host RAM usually means the **container** cgroup limit — check **`docker inspect … OOMKilled`**, **`docker stats`**, and [SETUP_GUIDE.md](SETUP_GUIDE.md) § troubleshooting.
+**Docker Compose — Airflow container memory:** `docker-compose.yml` sets **`deploy.resources.limits.memory: ${AIRFLOW_MEMORY_LIMIT:-12g}`** on **`airflow`**. Large MISP events (100K+ attributes) require **8-12GB** due to PyMISP JSON parsing. Events are processed in pages of 5000 to limit amplification, but the initial event fetch loads the full JSON. **-9** with free host RAM usually means the **container** cgroup limit — check **`docker inspect … OOMKilled`**, **`docker stats`**, and [SETUP_GUIDE.md](SETUP_GUIDE.md) § troubleshooting.
 
 ## MISP → Neo4j–specific notes
 
