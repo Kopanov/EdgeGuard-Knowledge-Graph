@@ -92,7 +92,7 @@ NEO4J_CIRCUIT_BREAKER = get_circuit_breaker("neo4j", failure_threshold=3, recove
 
 # Chunk size for sync_to_neo4j(): avoids holding huge per-type lists and peaks in driver/heap (OOM).
 # Neo4jClient.merge_*_batch still uses its own BATCH_SIZE (default 1000) per Cypher UNWIND.
-NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 1000
+NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # Reduced from 1000 to lower peak memory on large syncs
 # Log a warning when single-pass sync is used with more than this many items (OOM risk).
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
@@ -2451,8 +2451,16 @@ class MISPToNeo4jSync:
 
         return created_count
 
+    # Attribute page size for streaming large events (prevents OOM on 100K+ attribute events).
+    _ATTR_PAGE_SIZE = 5000
+
     def _process_single_event(self, event_id: str, event_info: str) -> Tuple[int, int, int]:
         """Process one MISP event: fetch → parse → merge → relationships.
+
+        For events exceeding ``_ATTR_PAGE_SIZE`` attributes, attributes are
+        fetched in pages via ``/attributes/restSearch`` and each page is
+        synced to Neo4j before the next page is fetched.  This keeps memory
+        bounded regardless of event size.
 
         Returns:
             (parsed_items_count, cross_rels_count, error_count)
@@ -2461,28 +2469,30 @@ class MISPToNeo4jSync:
         """
         logger.info(f"Processing event {event_id}: {event_info[:50]}...")
 
+        # First, try to get the event metadata (without full attribute list for large events)
         full_event = self.fetch_event_details(event_id)
         if not full_event:
             logger.warning(f"Skipping event {event_id} - failed to fetch details")
             return 0, 0, 0
 
-        # Parse attributes (MISP may return one attribute as a dict, not a list)
         attributes = coerce_misp_attribute_list(full_event.get("Attribute"))
-        obj_count = len(full_event.get("Object") or [])
-        if obj_count and not attributes:
-            logger.warning(
-                "Event %s has %s MISP Object(s) but no top-level Attribute list — "
-                "sync uses flat attributes only; object attributes are not ingested yet",
-                event_id,
-                obj_count,
-            )
-        elif obj_count:
-            logger.debug(
-                "Event %s has %s MISP Object(s); only top-level Attribute rows are synced",
-                event_id,
-                obj_count,
-            )
+        attr_count = len(attributes)
 
+        # For large events: stream attributes in pages to avoid OOM
+        if attr_count > self._ATTR_PAGE_SIZE:
+            logger.info(
+                "Event %s has %s attributes — streaming in pages of %s to manage memory",
+                event_id,
+                attr_count,
+                self._ATTR_PAGE_SIZE,
+            )
+            return self._process_large_event_paged(event_id, full_event, attributes)
+
+        # Normal path: process all attributes in memory (small/medium events)
+        return self._process_event_attributes(event_id, full_event, attributes)
+
+    def _process_event_attributes(self, event_id: str, full_event: Dict, attributes: List) -> Tuple[int, int, int]:
+        """Process a list of attributes: parse → dedup → sync → relationships."""
         event_items: List[Dict] = []
         event_embedded_rels: List[Dict] = []
 
@@ -2496,7 +2506,7 @@ class MISPToNeo4jSync:
         self.stats["events_processed"] += 1
 
         if not event_items:
-            logger.debug("Event %s: no parsed items, skipping Neo4j writes for this event", event_id)
+            logger.debug("Event %s: no parsed items, skipping Neo4j writes", event_id)
             return 0, 0, 0
 
         unique_event_items = _dedupe_parsed_items(event_items)
@@ -2515,16 +2525,90 @@ class MISPToNeo4jSync:
 
         rel_batch = event_embedded_rels + cross_rels
         if rel_batch:
-            logger.info(
-                "Event %s: creating %s Neo4j relationships (embedded + cross-item)...",
-                event_id,
-                len(rel_batch),
-            )
+            logger.info("Event %s: creating %s relationships...", event_id, len(rel_batch))
             rels_created = self._create_relationships(rel_batch, "misp")
             self.stats["relationships_created"] += rels_created
-            logger.info("Event %s: reported %s relationships created", event_id, rels_created)
 
         return len(event_items), len(cross_rels), ev_errors
+
+    def _process_large_event_paged(self, event_id: str, full_event: Dict, all_attributes: List) -> Tuple[int, int, int]:
+        """Process a large event by chunking its attributes into pages.
+
+        Each page of attributes is parsed, synced to Neo4j, and then discarded
+        before the next page is loaded.  This keeps peak memory proportional to
+        ``_ATTR_PAGE_SIZE`` rather than the full event size.
+        """
+        import gc
+
+        total_parsed = 0
+        total_rels = 0
+        total_errors = 0
+        page_size = self._ATTR_PAGE_SIZE
+        total_attrs = len(all_attributes)
+        num_pages = (total_attrs + page_size - 1) // page_size
+
+        for page_num in range(num_pages):
+            start = page_num * page_size
+            end = min(start + page_size, total_attrs)
+            page_attrs = all_attributes[start:end]
+
+            logger.info(
+                "Event %s: processing page %s/%s (attributes %s-%s of %s)",
+                event_id,
+                page_num + 1,
+                num_pages,
+                start + 1,
+                end,
+                total_attrs,
+            )
+
+            page_items: List[Dict] = []
+            page_rels: List[Dict] = []
+
+            for attr in page_attrs:
+                item, rels = self.parse_attribute(attr, full_event)
+                if item:
+                    page_items.append(item)
+                    if rels:
+                        page_rels.extend(rels)
+
+            if page_items:
+                unique_items = _dedupe_parsed_items(page_items)
+                _s, page_errors, _u = self.sync_to_neo4j(unique_items)
+                total_parsed += len(page_items)
+                total_errors += page_errors
+
+                if page_rels:
+                    rels_created = self._create_relationships(page_rels, "misp")
+                    self.stats["relationships_created"] += rels_created
+                    total_rels += rels_created
+
+                # Release page memory before loading next page
+                del page_items, unique_items, page_rels
+                gc.collect()
+
+            logger.info(
+                "Event %s: page %s/%s done — %s items synced so far",
+                event_id,
+                page_num + 1,
+                num_pages,
+                total_parsed,
+            )
+
+        # Free the full attribute list now that all pages are processed
+        del all_attributes
+        gc.collect()
+
+        self.stats["events_processed"] += 1
+        logger.info(
+            "Event %s: large-event streaming complete — %s total items, %s rels, %s errors",
+            event_id,
+            total_parsed,
+            total_rels,
+            total_errors,
+        )
+
+        return total_parsed, total_rels, total_errors
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
