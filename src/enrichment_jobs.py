@@ -20,6 +20,8 @@ from typing import Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
@@ -92,7 +94,7 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
                     desc = f"{label} decayed ({min_days}–{max_days}d, ×{multiplier})"
 
                 params = {"min_days": min_days, "max_days": max_days, "mult": multiplier}
-                result = session.run(cypher, **params)
+                result = session.run(cypher, timeout=NEO4J_READ_TIMEOUT, **params)
                 record = result.single()
                 count = record["affected"] if record else 0
                 results[desc] = count
@@ -169,7 +171,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             MERGE (a)-[:RUNS]->(c)
             RETURN count(DISTINCT c) AS campaigns
             """
-            result = session.run(create_cypher)
+            result = session.run(create_cypher, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
 
@@ -180,7 +182,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             MERGE (m)-[:PART_OF]->(c)
             RETURN count(*) AS links
             """
-            result = session.run(link_malware)
+            result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
 
@@ -194,7 +196,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             MERGE (i)-[:PART_OF]->(c)
             RETURN count(*) AS links
             """
-            result = session.run(link_indicators)
+            result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
 
@@ -207,7 +209,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 SET c.active = false
                 RETURN count(c) as count
             """
-            result = session.run(cleanup_query)
+            result = session.run(cleanup_query, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             cleanup_count = record["count"] if record else 0
             logger.info(f"  [OK] Deactivated {cleanup_count} campaigns with no active indicators")
@@ -277,7 +279,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     r.calibrated_at    = datetime()
                 RETURN count(r) AS updated
                 """
-                result = session.run(cypher)
+                result = session.run(cypher, timeout=NEO4J_READ_TIMEOUT)
                 record = result.single()
                 count = record["updated"] if record else 0
                 label = f"size {min_s}–{max_s if max_s else '∞'} → conf={conf}"
@@ -328,7 +330,7 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
-            record = session.run(query).single()
+            record = session.run(query, timeout=NEO4J_READ_TIMEOUT).single()
             results["linked"] = record["linked"] if record else 0
         logger.info(f"[BRIDGE] Vulnerability↔CVE REFERS_TO: {results['linked']} pairs linked")
     except Exception as e:

@@ -212,7 +212,7 @@ Flag new embedded JSON sentinels added on one side without the other, or truncat
 
 ### `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (`sync_to_neo4j`)
 
-Default **`1000`** (Python-side chunk size). **`0`** or **`all`** (case-insensitive) = **single pass** over the sorted item list — same peak-memory shape as unchunked sync (**OOM risk** on large backfills). Flag changes to **`_parse_neo4j_sync_chunk_size`** / **`sync_to_neo4j`** without updates to **`.env.example`**, **`README.md`**, **`docs/AIRFLOW_DAGS.md`**, and related ops docs.
+Default **`500`** (Python-side chunk size). **`0`** or **`all`** (case-insensitive) = **single pass** over the sorted item list — same peak-memory shape as unchunked sync (**OOM risk** on large backfills). Flag changes to **`_parse_neo4j_sync_chunk_size`** / **`sync_to_neo4j`** without updates to **`.env.example`**, **`README.md`**, **`docs/AIRFLOW_DAGS.md`**, and related ops docs.
 
 ### STIX 2.1: never put `labels` on Cyber-observable Objects (SCOs)
 

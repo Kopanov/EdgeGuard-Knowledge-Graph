@@ -62,7 +62,11 @@ def test_step2_branches_and_summary(caplog):
     p.mitre_collector = MagicMock()
     p.mitre_collector.get_relationships.return_value = []
 
-    assert p.run() is True
+    # Without use_stix_flow, pipeline only pushes to MISP (Step 2) and returns True
+    # when collection ran (Neo4j sync is a separate Airflow DAG).
+    # This test validates Step 2 collection branches, not Step 3 Neo4j loading.
+    result = p.run()
+    assert result is True  # non-STIX flow: collection ran, returns True
     p.neo4j.close.assert_called()
 
     text = caplog.text

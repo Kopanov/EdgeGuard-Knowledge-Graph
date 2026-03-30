@@ -191,7 +191,7 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                 except (
                     neo4j_exceptions.ServiceUnavailable,
                     neo4j_exceptions.TransientError,
-                    ConnectionError,
+                    ConnectionError,  # includes ConnectionRefusedError, ConnectionResetError, BrokenPipeError
                     TimeoutError,
                 ) as e:
                     last_exception = e
@@ -238,7 +238,12 @@ class Neo4jClient:
         try:
             logger.info(f"Connecting to Neo4j at {self.uri}")
             self.driver = GraphDatabase.driver(
-                self.uri, auth=(self.user, self.password), connection_timeout=NEO4J_CONNECTION_TIMEOUT
+                self.uri,
+                auth=(self.user, self.password),
+                connection_timeout=NEO4J_CONNECTION_TIMEOUT,
+                max_connection_lifetime=3600,
+                max_connection_pool_size=50,
+                connection_acquisition_timeout=120,
             )
 
             # Verify connection with health check
@@ -254,10 +259,14 @@ class Neo4jClient:
             logger.error(f"Neo4j authentication failed: {e}")
             self._connection_healthy = False
             return False
-        except neo4j_exceptions.ServiceUnavailable as e:
-            logger.error(f"Neo4j service unavailable: {e}")
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
             self._connection_healthy = False
-            return False
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Neo4j connection failed: {type(e).__name__}: {e}")
             self._connection_healthy = False
@@ -366,8 +375,15 @@ class Neo4jClient:
         except neo4j_exceptions.CypherSyntaxError as e:
             logger.error(f"Cypher syntax error: {e}")
             return []
-        except Exception as e:
-            logger.error(f"Query error: {type(e).__name__}: {e}")
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
+        except neo4j_exceptions.DatabaseError as e:
+            logger.error(f"Neo4j database error: {type(e).__name__}: {e}")
             return []
 
     @retry_with_backoff(max_retries=3)
@@ -409,6 +425,13 @@ class Neo4jClient:
             logger.info(f"Cleared {deleted} nodes and relationships")
             return True
 
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error clearing Neo4j: {e}")
             return False
@@ -528,6 +551,13 @@ class Neo4jClient:
                 except neo4j_exceptions.DatabaseError as e:
                     logger.debug(f"Index (may exist): {e}")
                     success_count += 1
+                except (
+                    neo4j_exceptions.ServiceUnavailable,
+                    neo4j_exceptions.TransientError,
+                    ConnectionError,
+                    TimeoutError,
+                ):
+                    raise  # let @retry_with_backoff handle transient errors
                 except Exception as e:
                     logger.warning(f"Index error: {e}")
                     error_count += 1
@@ -570,6 +600,13 @@ class Neo4jClient:
             logger.info(f"Ensured {len(SOURCES)} Source nodes exist")
             return True
 
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error ensuring sources: {e}")
             return False
@@ -625,6 +662,13 @@ class Neo4jClient:
                     total_labeled += record["labeled"] if record else 0
             logger.info(f"Applied sector labels to {total_labeled} nodes")
             return total_labeled
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error applying sector labels: {e}")
             return 0
@@ -797,6 +841,13 @@ class Neo4jClient:
                 params = {**key_props, "source_id": source_id, "raw_data": raw_data_json, "confidence": confidence}
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.warning(f"SOURCED_FROM relationship error: {e}")
             return False
@@ -1076,6 +1127,13 @@ class Neo4jClient:
 
             return results
 
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error marking inactive nodes: {e}")
             return {}
@@ -3609,7 +3667,7 @@ class Neo4jClient:
 
         try:
             with self.driver.session() as session:
-                session.run(query, **data)
+                session.run(query, **data, timeout=NEO4J_READ_TIMEOUT)
                 logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
                 return True
         except Exception:
@@ -3623,7 +3681,7 @@ class Neo4jClient:
             """
             try:
                 with self.driver.session() as session:
-                    session.run(fallback_query, **data)
+                    session.run(fallback_query, **data, timeout=NEO4J_READ_TIMEOUT)
                     return True
             except Exception as e2:
                 logger.error(f"Failed to create indicator: {e2}")

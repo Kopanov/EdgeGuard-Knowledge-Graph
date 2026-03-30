@@ -744,7 +744,39 @@ class EdgeGuardPipeline:
             logger.info(f"   [STATS] Total STIX objects created: {len(all_stix_objects)}")
 
             # Step 3c: Load STIX objects into Neo4j
-            logger.info("   🔄 Step 3c: Loading STIX objects into Neo4j...")
+            # Re-verify Neo4j connectivity before heavy write phase (may have died during 5h+ Step 2)
+            logger.info("   🔍 Step 3c: Verifying Neo4j connectivity before write phase...")
+            _neo4j_ok = False
+            for _retry in range(3):
+                # neo4j.run() re-raises transient errors after retry exhaustion,
+                # so we catch exceptions here to drive our own reconnect loop.
+                try:
+                    _test = self.neo4j.run("RETURN 1 AS ok")
+                except Exception:
+                    _test = []
+                if _test:
+                    _neo4j_ok = True
+                    break
+                # Failed — sleep and try to reconnect
+                logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3)")
+                if _retry < 2:
+                    import time
+
+                    time.sleep(10)
+                    try:
+                        if self.neo4j.connect():
+                            logger.info("   Neo4j reconnected")
+                        else:
+                            logger.warning(f"   Neo4j reconnect returned False (attempt {_retry + 1}/3)")
+                    except Exception as e:
+                        logger.warning(f"   Neo4j reconnect failed: {e}")
+
+            if not _neo4j_ok:
+                logger.error("   [FAIL] Neo4j is unreachable after 3 attempts — cannot load data!")
+                logger.error("   Check: docker compose ps neo4j / docker compose logs neo4j")
+                return loaded  # Return with 0 counts — don't report success
+
+            logger.info("   ✅ Neo4j connectivity verified — starting write phase...")
             master_bundle = {
                 "type": "bundle",
                 "id": f"bundle--{uuid.uuid4()}",
@@ -763,7 +795,13 @@ class EdgeGuardPipeline:
             loaded["relationships_indicates"] = stix_stats.get("relationships_indicates", 0)
             loaded["relationships_attributed_to"] = stix_stats.get("relationships_attributed_to", 0)
 
-            logger.info(f"   [OK] STIX flow complete: {sum(loaded.values())} objects loaded")
+            _stix_total = sum(
+                v for k, v in loaded.items() if k not in ("relationships_indicates", "relationships_attributed_to")
+            )
+            if _stix_total > 0:
+                logger.info(f"   [OK] STIX flow complete: {_stix_total} objects loaded")
+            else:
+                logger.error("   [FAIL] STIX flow complete but 0 objects loaded — Neo4j writes failed!")
             logger.info(f"      - INDICATES relationships: {loaded['relationships_indicates']}")
             logger.info(f"      - ATTRIBUTED_TO relationships: {loaded['relationships_attributed_to']}")
 
@@ -891,9 +929,11 @@ class EdgeGuardPipeline:
 
                     _neo4j = Neo4jClient()
                     if _neo4j.connect():
-                        _neo4j.clear_all()
-                        _neo4j.close()
-                        logger.info("  [2/3] Cleared Neo4j graph data")
+                        try:
+                            _neo4j.clear_all()
+                            logger.info("  [2/3] Cleared Neo4j graph data")
+                        finally:
+                            _neo4j.close()
                     else:
                         logger.warning("  [2/3] Could not connect to Neo4j — skipping clear")
                 except Exception as e:
@@ -901,7 +941,10 @@ class EdgeGuardPipeline:
 
                 # 3. Clear MISP EdgeGuard events
                 try:
+                    import warnings
+
                     import requests as _req
+                    import urllib3
 
                     from config import MISP_API_KEY as _misp_key
                     from config import MISP_URL as _misp_url
@@ -912,16 +955,19 @@ class EdgeGuardPipeline:
                     _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
                     apply_misp_http_host_header(_sess)
 
-                    # Paginate to find ALL EdgeGuard events (not just first 500)
+                    # Delete all EdgeGuard events. Always re-fetch page 1 (deleted events
+                    # disappear, shifting remaining events to page 1). Safety cap: 20 iterations.
                     _deleted = 0
-                    _page = 1
-                    while True:
-                        _resp = _sess.get(
-                            f"{_misp_url}/events/index",
-                            params={"searchall": "EdgeGuard", "limit": 100, "page": _page},
-                            verify=_verify,
-                            timeout=(15, 60),
-                        )
+                    for _round in range(20):
+                        with warnings.catch_warnings():
+                            if not _verify:
+                                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                            _resp = _sess.get(
+                                f"{_misp_url}/events/index",
+                                params={"searchall": "EdgeGuard", "limit": 500},
+                                verify=_verify,
+                                timeout=(15, 60),
+                            )
                         if _resp.status_code != 200:
                             break
 
@@ -941,10 +987,16 @@ class EdgeGuardPipeline:
                         for ev in _events:
                             eid = ev.get("id") or ev.get("Event", {}).get("id")
                             if eid:
-                                _del_resp = _sess.delete(f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30))
-                                if _del_resp.status_code in (200, 302):
+                                with warnings.catch_warnings():
+                                    if not _verify:
+                                        warnings.filterwarnings(
+                                            "ignore", category=urllib3.exceptions.InsecureRequestWarning
+                                        )
+                                    _del_resp = _sess.delete(
+                                        f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30)
+                                    )
+                                if _del_resp.status_code == 200:
                                     _deleted += 1
-                        _page += 1
 
                     logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
                 except Exception as e:
@@ -1257,8 +1309,18 @@ class EdgeGuardPipeline:
 
         elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
 
+        # Check if anything is actually in Neo4j (use real counts, not pipeline counters)
+        total_loaded = sum(
+            stats.get(k, 0) for k in ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique")
+        )
+
         logger.info("\n" + "=" * 60)
-        logger.info("[OK] EdgeGuard Pipeline Complete!")
+        if total_loaded > 0:
+            logger.info("[OK] EdgeGuard Pipeline Complete!")
+        else:
+            logger.error("[FAIL] EdgeGuard Pipeline Complete — BUT 0 NODES LOADED TO NEO4J!")
+            logger.error("       Data was collected to MISP but NOT synced to Neo4j.")
+            logger.error("       Check Neo4j connectivity: docker compose ps neo4j")
         logger.info("=" * 60)
         logger.info(f"\n⏱️  Total time: {elapsed:.1f} seconds")
         logger.info("\n[STATS] Nodes loaded:")
@@ -1314,6 +1376,11 @@ class EdgeGuardPipeline:
                     logger.info("   [OK] STIX 2.1 export complete")
                     logger.info(f"   [STATS] Total objects: {len(stix_bundle.get('objects', []))}")
 
+        if use_stix_flow:
+            return total_loaded > 0
+        # Non-STIX flow: pipeline only pushes to MISP (Step 2).
+        # Neo4j sync is handled separately (Airflow edgeguard_neo4j_sync DAG).
+        # Return True if collection ran (regardless of Neo4j state).
         return True
 
 

@@ -199,9 +199,9 @@ services:
     deploy:
       resources:
         limits:
-          # LocalExecutor + standalone runs sync in-process; full MISP→Neo4j can spike RSS (driver + batches).
-          # 2g often hits SIGKILL (-9) during large merges — override via AIRFLOW_MEMORY_LIMIT in .env if needed.
-          memory: ${AIRFLOW_MEMORY_LIMIT:-4g}
+          # LocalExecutor + standalone runs sync in-process; full MISP→Neo4j can spike RSS.
+          # Large MISP events (100K+ attributes) need 8-12GB. Default 12g for production safety.
+          memory: ${AIRFLOW_MEMORY_LIMIT:-12g}
     networks:
       - edgeguard_net
     healthcheck:

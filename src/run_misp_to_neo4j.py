@@ -92,7 +92,7 @@ NEO4J_CIRCUIT_BREAKER = get_circuit_breaker("neo4j", failure_threshold=3, recove
 
 # Chunk size for sync_to_neo4j(): avoids holding huge per-type lists and peaks in driver/heap (OOM).
 # Neo4jClient.merge_*_batch still uses its own BATCH_SIZE (default 1000) per Cypher UNWIND.
-NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 1000
+NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # Reduced from 1000 to lower peak memory on large syncs
 # Log a warning when single-pass sync is used with more than this many items (OOM risk).
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
@@ -105,8 +105,14 @@ MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "Edge
 
 # Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
 # time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
-MISP_EVENTS_INDEX_PAGE_SIZE = 500
-MISP_EVENTS_INDEX_MAX_PAGES = 100
+try:
+    MISP_EVENTS_INDEX_PAGE_SIZE = int(os.getenv("EDGEGUARD_MISP_PAGE_SIZE", "500"))
+except (ValueError, TypeError):
+    MISP_EVENTS_INDEX_PAGE_SIZE = 500
+try:
+    MISP_EVENTS_INDEX_MAX_PAGES = int(os.getenv("EDGEGUARD_MISP_MAX_PAGES", "100"))
+except (ValueError, TypeError):
+    MISP_EVENTS_INDEX_MAX_PAGES = 100
 
 
 def _coerce_to_iso(val: Any) -> Optional[str]:
@@ -253,7 +259,7 @@ def _parse_neo4j_sync_chunk_size(raw: Optional[str], n_items: int) -> Tuple[int,
 
     Semantics (documented in README / AIRFLOW_DAGS.md):
 
-    - **Unset / empty:** ``1000`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
+    - **Unset / empty:** ``500`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
     - **``0`` or ``all``** (case-insensitive, stripped): one Python chunk for the entire sorted
       list — same memory profile as pre-chunking sync (**OOM risk** on large attribute counts).
       For experts, large-RAM workers, or A/B debugging only.
@@ -683,6 +689,7 @@ class MISPToNeo4jSync:
         }
         # Set when ``run()`` returns False so callers (e.g. baseline DAG) can surface a short reason.
         self._last_sync_failure_reason: Optional[str] = None
+        self._consecutive_conn_failures: int = 0
 
     def health_check_misp(self) -> Dict[str, Any]:
         """
@@ -774,7 +781,11 @@ class MISPToNeo4jSync:
             self.neo4j = Neo4jClient()
 
         # Connect to Neo4j
-        neo4j_ok = self.neo4j.connect()
+        try:
+            neo4j_ok = self.neo4j.connect()
+        except Exception as e:
+            neo4j_ok = False
+            logger.error("[ERR] Neo4j connect raised after retries: %s", e)
         if not neo4j_ok:
             logger.error("[ERR] Failed to connect to Neo4j")
             self.neo4j_circuit.record_failure()
@@ -891,6 +902,13 @@ class MISPToNeo4jSync:
                         type(events).__name__,
                     )
 
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error fetching events: {type(e).__name__}: {e}")
 
@@ -957,6 +975,13 @@ class MISPToNeo4jSync:
             logger.error(f"Failed to fetch event {event_id}: HTTP {response.status_code}")
             return None
 
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Error fetching event {event_id}: {type(e).__name__}: {e}")
             return None
@@ -2316,7 +2341,7 @@ class MISPToNeo4jSync:
         ``[]`` — use the caller's relationship list for ``_create_relationships``.
 
         Env:
-            EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: max items per Python-side chunk (default **1000**).
+            EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: max items per Python-side chunk (default **500**).
             **``0``** or **``all``** (case-insensitive): single pass — all items in one chunk
             (OOM risk on large backfills; see module constants and docs).
             EDGEGUARD_DEBUG_GC: if ``1``/``true``/``yes``, run ``gc.collect()`` after each chunk
@@ -2354,6 +2379,9 @@ class MISPToNeo4jSync:
             total_errors += e
             for it in chunk:
                 it.pop("relationships", None)
+            # Pause between chunks to let Neo4j flush transactions
+            if ci < n_chunks - 1:  # Skip delay after the last chunk
+                time.sleep(2)
             # Forced full GC on huge graphs can spike RAM in small workers (OOM/SIGKILL).
             # Opt-in only: EDGEGUARD_DEBUG_GC=1
             if os.environ.get("EDGEGUARD_DEBUG_GC", "").strip().lower() in ("1", "true", "yes"):
@@ -2451,8 +2479,16 @@ class MISPToNeo4jSync:
 
         return created_count
 
+    # Attribute page size for streaming large events (prevents OOM on 100K+ attribute events).
+    _ATTR_PAGE_SIZE = 5000
+
     def _process_single_event(self, event_id: str, event_info: str) -> Tuple[int, int, int]:
         """Process one MISP event: fetch → parse → merge → relationships.
+
+        For events exceeding ``_ATTR_PAGE_SIZE`` attributes, attributes are
+        fetched in pages via ``/attributes/restSearch`` and each page is
+        synced to Neo4j before the next page is fetched.  This keeps memory
+        bounded regardless of event size.
 
         Returns:
             (parsed_items_count, cross_rels_count, error_count)
@@ -2461,13 +2497,16 @@ class MISPToNeo4jSync:
         """
         logger.info(f"Processing event {event_id}: {event_info[:50]}...")
 
+        # First, try to get the event metadata (without full attribute list for large events)
         full_event = self.fetch_event_details(event_id)
         if not full_event:
             logger.warning(f"Skipping event {event_id} - failed to fetch details")
             return 0, 0, 0
 
-        # Parse attributes (MISP may return one attribute as a dict, not a list)
         attributes = coerce_misp_attribute_list(full_event.get("Attribute"))
+        attr_count = len(attributes)
+
+        # Log MISP Object diagnostic (applies to both normal and paged paths)
         obj_count = len(full_event.get("Object") or [])
         if obj_count and not attributes:
             logger.warning(
@@ -2478,11 +2517,24 @@ class MISPToNeo4jSync:
             )
         elif obj_count:
             logger.debug(
-                "Event %s has %s MISP Object(s); only top-level Attribute rows are synced",
-                event_id,
-                obj_count,
+                "Event %s has %s MISP Object(s); only top-level Attribute rows are synced", event_id, obj_count
             )
 
+        # For large events: stream attributes in pages to avoid OOM
+        if attr_count > self._ATTR_PAGE_SIZE:
+            logger.info(
+                "Event %s has %s attributes — streaming in pages of %s to manage memory",
+                event_id,
+                attr_count,
+                self._ATTR_PAGE_SIZE,
+            )
+            return self._process_large_event_paged(event_id, full_event, attributes)
+
+        # Normal path: process all attributes in memory (small/medium events)
+        return self._process_event_attributes(event_id, full_event, attributes)
+
+    def _process_event_attributes(self, event_id: str, full_event: Dict, attributes: List) -> Tuple[int, int, int]:
+        """Process a list of attributes: parse → dedup → sync → relationships."""
         event_items: List[Dict] = []
         event_embedded_rels: List[Dict] = []
 
@@ -2496,11 +2548,22 @@ class MISPToNeo4jSync:
         self.stats["events_processed"] += 1
 
         if not event_items:
-            logger.debug("Event %s: no parsed items, skipping Neo4j writes for this event", event_id)
+            logger.debug("Event %s: no parsed items, skipping Neo4j writes", event_id)
             return 0, 0, 0
 
         unique_event_items = _dedupe_parsed_items(event_items)
-        cross_rels = self._build_cross_item_relationships(unique_event_items)
+
+        # Guard against O(n²) blowup on dense events (same cap as paged path).
+        if len(unique_event_items) > self._MAX_COOCCURRENCE_PAGED_ITEMS:
+            logger.warning(
+                "Event %s: %s unique items exceeds co-occurrence cap (%s) — skipping cross-item relationships to avoid O(n²) blowup",
+                event_id,
+                len(unique_event_items),
+                self._MAX_COOCCURRENCE_PAGED_ITEMS,
+            )
+            cross_rels = []
+        else:
+            cross_rels = self._build_cross_item_relationships(unique_event_items)
 
         logger.info(
             "Event %s: %s parsed -> %s unique items; %s embedded rel defs; %s cross-item rel defs",
@@ -2515,16 +2578,127 @@ class MISPToNeo4jSync:
 
         rel_batch = event_embedded_rels + cross_rels
         if rel_batch:
-            logger.info(
-                "Event %s: creating %s Neo4j relationships (embedded + cross-item)...",
-                event_id,
-                len(rel_batch),
-            )
+            logger.info("Event %s: creating %s relationships...", event_id, len(rel_batch))
             rels_created = self._create_relationships(rel_batch, "misp")
             self.stats["relationships_created"] += rels_created
-            logger.info("Event %s: reported %s relationships created", event_id, rels_created)
 
         return len(event_items), len(cross_rels), ev_errors
+
+    def _process_large_event_paged(self, event_id: str, full_event: Dict, all_attributes: List) -> Tuple[int, int, int]:
+        """Process a large event by chunking its attributes into pages.
+
+        Each page of attributes is parsed, synced to Neo4j, and then discarded
+        before the next page is loaded.  This keeps peak memory proportional to
+        ``_ATTR_PAGE_SIZE`` rather than the full event size.
+        """
+        import gc
+
+        total_parsed = 0
+        total_cross_rels = 0
+        total_errors = 0
+        page_size = self._ATTR_PAGE_SIZE
+
+        # Lightweight accumulator for cross-item relationship building after all pages.
+        # Stores only the fields needed by _build_cross_item_relationships (~100 bytes/item
+        # vs ~2KB/item for full parsed items).
+        _rel_items: List[Dict] = []
+        _REL_KEYS = ("type", "name", "mitre_id", "tag", "indicator_type", "value", "malware_family", "zone", "cve_id")
+        total_attrs = len(all_attributes)
+        num_pages = (total_attrs + page_size - 1) // page_size
+
+        for page_num in range(num_pages):
+            start = page_num * page_size
+            end = min(start + page_size, total_attrs)
+            page_attrs = all_attributes[start:end]
+
+            logger.info(
+                "Event %s: processing page %s/%s (attributes %s-%s of %s)",
+                event_id,
+                page_num + 1,
+                num_pages,
+                start + 1,
+                end,
+                total_attrs,
+            )
+
+            page_items: List[Dict] = []
+            page_rels: List[Dict] = []
+
+            for attr in page_attrs:
+                item, rels = self.parse_attribute(attr, full_event)
+                if item:
+                    page_items.append(item)
+                    if rels:
+                        page_rels.extend(rels)
+
+            if page_items:
+                unique_items = _dedupe_parsed_items(page_items)
+                _s, page_errors, _u = self.sync_to_neo4j(unique_items)
+                total_parsed += len(page_items)
+                total_errors += page_errors
+
+                # Collect lightweight data for cross-item relationships (built after all pages)
+                for _item in unique_items:
+                    _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
+
+                if page_rels:
+                    rels_created = self._create_relationships(page_rels, "misp")
+                    self.stats["relationships_created"] += rels_created
+
+                # Release page memory and pause before next page
+                del page_items, unique_items, page_rels
+                gc.collect()
+                time.sleep(2)  # Let Neo4j flush transactions between pages
+
+            logger.info(
+                "Event %s: page %s/%s done — %s items synced so far",
+                event_id,
+                page_num + 1,
+                num_pages,
+                total_parsed,
+            )
+
+        # Free the full attribute list now that all pages are processed
+        del all_attributes
+        gc.collect()
+
+        # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
+        # Uses the lightweight accumulator, not the full parsed items.
+        # Guard against O(n²) blowup on very large events.
+        cross_rels = []
+        if _rel_items and len(_rel_items) > self._MAX_COOCCURRENCE_PAGED_ITEMS:
+            logger.warning(
+                "Event %s: %s items exceeds co-occurrence cap (%s) — skipping cross-item relationships to avoid O(n²) blowup",
+                event_id,
+                len(_rel_items),
+                self._MAX_COOCCURRENCE_PAGED_ITEMS,
+            )
+            _rel_items = []
+        if _rel_items:
+            cross_rels = self._build_cross_item_relationships(_rel_items)
+            if cross_rels:
+                logger.info(
+                    "Event %s: building %s cross-item relationships from all pages...", event_id, len(cross_rels)
+                )
+                rels_created = self._create_relationships(cross_rels, "misp")
+                self.stats["relationships_created"] += rels_created
+                total_cross_rels += rels_created
+            del _rel_items
+            gc.collect()
+
+        self.stats["events_processed"] += 1
+        logger.info(
+            "Event %s: large-event streaming complete — %s total items, %s cross rels, %s errors",
+            event_id,
+            total_parsed,
+            total_cross_rels,
+            total_errors,
+        )
+
+        return total_parsed, total_cross_rels, total_errors
+
+    # Maximum items to feed into co-occurrence builder from paged events (O(n²) guard)
+    _MAX_COOCCURRENCE_PAGED_ITEMS = 5000
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
@@ -2662,6 +2836,7 @@ class MISPToNeo4jSync:
                     total_parsed_items += ep
                     total_cross_rels_built += ecr
                     total_errors += ee
+                    self._consecutive_conn_failures = 0  # Reset on successful processing
                 except Exception as exc:
                     logger.error(
                         "Event %s failed (%s: %s) — skipping, continuing with remaining events",
@@ -2671,13 +2846,43 @@ class MISPToNeo4jSync:
                     )
                     total_errors += 1
                     self.stats["events_failed"] += 1
+
+                    # If this looks like a connection failure, try to reconnect
+                    _exc_str = str(exc).lower()
+                    if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
+                        consecutive_conn_failures = getattr(self, "_consecutive_conn_failures", 0) + 1
+                        self._consecutive_conn_failures = consecutive_conn_failures
+                        if consecutive_conn_failures >= 3:
+                            logger.error(
+                                "3+ consecutive Neo4j connection failures — aborting sync. "
+                                "Check: docker compose ps neo4j / docker compose logs neo4j"
+                            )
+                            break  # Stop burning through events with a dead Neo4j
+                        logger.warning("Attempting Neo4j reconnect after connection failure...")
+                        try:
+                            self.neo4j.connect()
+                            logger.info("Neo4j reconnected successfully")
+                        except Exception:
+                            logger.error("Neo4j reconnect failed")
+                    else:
+                        self._consecutive_conn_failures = 0  # Reset on non-connection errors
+
                     # Free memory after failed event (OOM recovery)
                     import gc
 
                     gc.collect()
                     continue
 
-            # Retry deferred large events (now that critical data is in)
+            # Retry deferred large events (only if Neo4j is still alive)
+            _conn_failures = getattr(self, "_consecutive_conn_failures", 0)
+            if skipped_large and _conn_failures >= 3:
+                logger.error(
+                    "Skipping %s deferred large event(s) — Neo4j connection failed (%s consecutive errors)",
+                    len(skipped_large),
+                    _conn_failures,
+                )
+                skipped_large = []  # Don't retry with a dead Neo4j
+
             if skipped_large:
                 logger.info(
                     "Retrying %s deferred large event(s) (>%s attributes)...",
