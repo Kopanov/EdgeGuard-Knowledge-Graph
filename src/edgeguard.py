@@ -1361,8 +1361,11 @@ def cmd_clear_misp(args) -> int:
             return 0
 
     try:
+        from config import apply_misp_http_host_header
+
         _sess = _req.Session()
         _sess.headers.update({"Authorization": MISP_API_KEY, "Accept": "application/json"})
+        apply_misp_http_host_header(_sess)
 
         with warnings.catch_warnings():
             if not SSL_VERIFY:
@@ -1374,10 +1377,13 @@ def cmd_clear_misp(args) -> int:
                 timeout=(15, 60),
             )
 
-        # Paginate: keep fetching + deleting until no more EdgeGuard events
+        # Paginate: keep fetching + deleting until no more EdgeGuard events.
+        # Each iteration deletes up to 500 events, then re-fetches page 1
+        # (deleted events won't reappear). Max 20 iterations = 10,000 events safety cap.
         deleted = 0
         total_found = 0
-        while True:
+        _max_pages = 20
+        for _page in range(_max_pages):
             if resp.status_code != 200:
                 err(f"MISP returned {resp.status_code}")
                 break
@@ -1671,6 +1677,8 @@ def _fetch_misp_event_summary() -> dict:
     import requests as _requests
     import urllib3
 
+    from config import apply_misp_http_host_header
+
     session = _requests.Session()
     session.headers.update(
         {
@@ -1679,6 +1687,7 @@ def _fetch_misp_event_summary() -> dict:
             "Accept": "application/json",
         }
     )
+    apply_misp_http_host_header(session)
 
     # Fetch EdgeGuard events index (lightweight — no attributes)
     with warnings.catch_warnings():
