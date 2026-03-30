@@ -105,8 +105,14 @@ MISP_EDGEGUARD_DISCOVERY_SEARCH = os.getenv("EDGEGUARD_MISP_EVENT_SEARCH", "Edge
 
 # Lightweight event list (no attribute scan). restSearch with ``search=`` can scan all attributes and
 # time out / 500 on very large events (e.g. URLhaus, SSL blacklist).
-MISP_EVENTS_INDEX_PAGE_SIZE = int(os.getenv("EDGEGUARD_MISP_PAGE_SIZE", "500"))
-MISP_EVENTS_INDEX_MAX_PAGES = int(os.getenv("EDGEGUARD_MISP_MAX_PAGES", "100"))
+try:
+    MISP_EVENTS_INDEX_PAGE_SIZE = int(os.getenv("EDGEGUARD_MISP_PAGE_SIZE", "500"))
+except (ValueError, TypeError):
+    MISP_EVENTS_INDEX_PAGE_SIZE = 500
+try:
+    MISP_EVENTS_INDEX_MAX_PAGES = int(os.getenv("EDGEGUARD_MISP_MAX_PAGES", "100"))
+except (ValueError, TypeError):
+    MISP_EVENTS_INDEX_MAX_PAGES = 100
 
 
 def _coerce_to_iso(val: Any) -> Optional[str]:
@@ -2572,6 +2578,15 @@ class MISPToNeo4jSync:
         """
         import gc
 
+        # Warn about MISP Objects (same as _process_single_event, but for paged path)
+        obj_count = len(full_event.get("Object") or [])
+        if obj_count:
+            logger.warning(
+                "Event %s (paged): has %s MISP Object(s); only top-level Attribute rows are synced",
+                event_id,
+                obj_count,
+            )
+
         total_parsed = 0
         total_cross_rels = 0
         total_errors = 0
@@ -2623,7 +2638,6 @@ class MISPToNeo4jSync:
                 if page_rels:
                     rels_created = self._create_relationships(page_rels, "misp")
                     self.stats["relationships_created"] += rels_created
-                    total_cross_rels += rels_created
 
                 # Release page memory and pause before next page
                 del page_items, unique_items, page_rels
@@ -2644,7 +2658,16 @@ class MISPToNeo4jSync:
 
         # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
         # Uses the lightweight accumulator, not the full parsed items.
+        # Guard against O(n²) blowup on very large events.
         cross_rels = []
+        if _rel_items and len(_rel_items) > self._MAX_COOCCURRENCE_PAGED_ITEMS:
+            logger.warning(
+                "Event %s: %s items exceeds co-occurrence cap (%s) — skipping cross-item relationships to avoid O(n²) blowup",
+                event_id,
+                len(_rel_items),
+                self._MAX_COOCCURRENCE_PAGED_ITEMS,
+            )
+            _rel_items = []
         if _rel_items:
             cross_rels = self._build_cross_item_relationships(_rel_items)
             if cross_rels:
@@ -2667,6 +2690,9 @@ class MISPToNeo4jSync:
         )
 
         return total_parsed, len(cross_rels), total_errors
+
+    # Maximum items to feed into co-occurrence builder from paged events (O(n²) guard)
+    _MAX_COOCCURRENCE_PAGED_ITEMS = 5000
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
@@ -2804,7 +2830,7 @@ class MISPToNeo4jSync:
                     total_parsed_items += ep
                     total_cross_rels_built += ecr
                     total_errors += ee
-                    self._consecutive_conn_failures = 0  # Reset on success
+                    self._consecutive_conn_failures = 0  # Reset on successful processing
                 except Exception as exc:
                     logger.error(
                         "Event %s failed (%s: %s) — skipping, continuing with remaining events",

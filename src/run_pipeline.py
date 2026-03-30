@@ -1373,7 +1373,12 @@ class EdgeGuardPipeline:
                     logger.info("   [OK] STIX 2.1 export complete")
                     logger.info(f"   [STATS] Total objects: {len(stix_bundle.get('objects', []))}")
 
-        return total_loaded > 0
+        if use_stix_flow:
+            return total_loaded > 0
+        # Non-STIX flow: pipeline only pushes to MISP (Step 2).
+        # Neo4j sync is handled separately (Airflow edgeguard_neo4j_sync DAG).
+        # Return True if collection ran (regardless of Neo4j state).
+        return True
 
 
 def main():

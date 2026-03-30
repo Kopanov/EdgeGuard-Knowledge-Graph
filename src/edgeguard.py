@@ -1411,6 +1411,8 @@ def cmd_clear_misp(args) -> int:
                         del_resp = _sess.delete(f"{MISP_URL}/events/{eid}", verify=SSL_VERIFY, timeout=(15, 30))
                     if del_resp.status_code == 200:
                         deleted += 1
+                    elif del_resp.status_code == 302:
+                        logger.warning("MISP returned 302 for event %s — likely auth redirect, skipping", eid)
 
             # Fetch next page (deleted events won't appear again)
             with warnings.catch_warnings():

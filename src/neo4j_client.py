@@ -1361,7 +1361,7 @@ class Neo4jClient:
 
             except Exception as e:
                 logger.error(f"Batch vulnerability merge error: {e}")
-                error_count += len(batch_data) + skipped
+                error_count += len(batch)
 
         return success_count, error_count
 
