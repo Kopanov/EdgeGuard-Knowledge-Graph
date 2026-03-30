@@ -748,9 +748,12 @@ class EdgeGuardPipeline:
             logger.info("   🔍 Step 3c: Verifying Neo4j connectivity before write phase...")
             _neo4j_ok = False
             for _retry in range(3):
-                # neo4j.run() catches exceptions internally and returns [] on failure.
-                # Check the return value directly — no exception to catch here.
-                _test = self.neo4j.run("RETURN 1 AS ok")
+                # neo4j.run() re-raises transient errors after retry exhaustion,
+                # so we catch exceptions here to drive our own reconnect loop.
+                try:
+                    _test = self.neo4j.run("RETURN 1 AS ok")
+                except Exception:
+                    _test = []
                 if _test:
                     _neo4j_ok = True
                     break
