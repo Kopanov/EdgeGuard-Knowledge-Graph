@@ -61,7 +61,7 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `PART_OF` | Malware, Indicator → Campaign | `build_campaign_nodes()` |
 | `INVOLVES` | Alert → Indicator | `neo4j_client` |
 | `USES_TECHNIQUE` | Indicator → Technique | OTX pulse `attack_ids` exact MITRE ID match (confidence 0.85) |
-| `IS_SAME_AS` | Malware → Malware | Cross-source name/alias exact match for deduplication (confidence 0.9) |
+| ~~`IS_SAME_AS`~~ | — | Removed: entities now deduplicate via single-key MERGE (name/cve_id) |
 | `AFFECTS` | Vulnerability/CVE → Sector | Zone list unwind (confidence 1.0) |
 | `IN_TACTIC` | Technique → Tactic | Kill-chain phase exact match (confidence 1.0) |
 | `HAS_CVSS_v2/v30/v31/v40` | CVE ↔ CVSS sub-nodes | Bidirectional (ResilMesh schema) |

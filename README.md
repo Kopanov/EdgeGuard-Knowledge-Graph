@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/neo4j-5.27-green.svg" alt="Neo4j 5.27">
   <img src="https://img.shields.io/badge/license-MIT-brightgreen.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/version-2026.3.28-orange.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-2026.3.31-orange.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -831,7 +831,7 @@ Metrics are persisted to `data/metrics.json` for durability across restarts.
 
 ## 📈 Current Status
 
-EdgeGuard v2026.3.28 is **production-test ready**. Full pipeline validated on Docker (Mac Mini), all CI green, BugBot clean.
+EdgeGuard v2026.3.31 is **production-test ready**. Full pipeline validated on Docker (Mac Mini), all CI green, BugBot clean.
 
 ### ✅ Implemented
 

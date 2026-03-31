@@ -173,7 +173,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 | Relationship | Method | Confidence / properties |
 |-------------|--------|-------------------------|
-| `(Indicator)-[:INDICATES]->(Malware)` | Same `misp_event_id` (co-occurrence) in `build_relationships.py` | Initial **0.5**, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; then **0.30–0.90** via `calibrate_cooccurrence_confidence()` from event size |
+| `(Indicator)-[:INDICATES]->(Malware)` | Same `misp_event_id` (co-occurrence) in `build_relationships.py` | Initial **0.5**, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; then **0.30–0.50** via `calibrate_cooccurrence_confidence()` from event size (co-occurrence ceiling: 0.50) |
 | `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'`, `source_id='cve_tag_match'` (not bulk-calibrated like co-occurrence) |
 | `(ThreatActor)-[:USES]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** | **0.95** (`match_type='mitre_explicit'`) |
 | `(Malware)-[:USES]->(Technique)` | `t.mitre_id IN m.uses_techniques` — **same STIX `uses` rows** (malware → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
@@ -222,10 +222,10 @@ Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.source_id IN 
 
 | Event size (indicators in same event) | Confidence set to |
 |--------------------------------------|-------------------|
-| ≤ 10 (tight incident report) | 0.90 |
-| 11–20 (small report) | 0.80 |
-| 21–100 (medium feed) | 0.70 |
-| 101–500 (large feed) | 0.50 |
+| ≤ 10 (tight incident report) | 0.50 |
+| 11–20 (small report) | 0.45 |
+| 21–100 (medium feed) | 0.40 |
+| 101–500 (large feed) | 0.35 |
 | > 500 (bulk dump, e.g. Feodo) | 0.30 |
 
 Only edges with `source_id IN ['misp_cooccurrence', 'misp_correlation']` are modified. Manually curated edges are untouched.
