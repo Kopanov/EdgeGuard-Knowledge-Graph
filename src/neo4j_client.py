@@ -458,6 +458,7 @@ class Neo4jClient:
             "DROP CONSTRAINT technique_key IF EXISTS",
             "DROP CONSTRAINT tactic_key IF EXISTS",
             "DROP CONSTRAINT campaign_key IF EXISTS",
+            "DROP CONSTRAINT tool_key IF EXISTS",
             "DROP CONSTRAINT indicator_key IF EXISTS",
         ]
         with self.driver.session() as session:
@@ -482,6 +483,8 @@ class Neo4jClient:
             "CREATE CONSTRAINT technique_key IF NOT EXISTS FOR (t:Technique) REQUIRE (t.mitre_id) IS UNIQUE",
             # MITRE tactics — 14 fixed nodes; unique by mitre_id only
             "CREATE CONSTRAINT tactic_key IF NOT EXISTS FOR (t:Tactic) REQUIRE (t.mitre_id) IS UNIQUE",
+            # Tool nodes — MITRE tools, keyed by mitre_id only
+            "CREATE CONSTRAINT tool_key IF NOT EXISTS FOR (t:Tool) REQUIRE (t.mitre_id) IS UNIQUE",
             # Sector nodes — created dynamically; must stay unique by name
             "CREATE CONSTRAINT sector_key IF NOT EXISTS FOR (s:Sector) REQUIRE (s.name) IS UNIQUE",
             # ResilMesh-compatible CVSS sub-nodes — keyed by (cve_id, tag)
