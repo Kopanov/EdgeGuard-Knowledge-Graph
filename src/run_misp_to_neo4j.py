@@ -1754,7 +1754,6 @@ class MISPToNeo4jSync:
                 if zone and zone != "global":
                     sector_name = zone.lower()
                     item_type = item.get("type", "")
-                    source_id = item.get("tag", "misp")
 
                     # Only MISP vulnerability rows become :Vulnerability TARGETS (not arbitrary cve_id fields).
                     if item_type == "vulnerability":
