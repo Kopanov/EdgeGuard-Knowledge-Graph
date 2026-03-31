@@ -991,7 +991,7 @@ class Neo4jClient:
             set_clause = ", ".join(prop_assignments) if prop_assignments else "n.created = true"
 
             query = f"""
-            MATCH (cve:CVE {{cve_id: $cve_id, tag: $tag}})
+            MATCH (cve:CVE {{cve_id: $cve_id}})
             MERGE (n:{label} {{cve_id: $cve_id, tag: $tag}})
             SET {set_clause},
                 n.last_updated = datetime()
