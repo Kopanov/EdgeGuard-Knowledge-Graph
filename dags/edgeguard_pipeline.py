@@ -991,8 +991,8 @@ def run_neo4j_sync():
                 skip = _Var.get("SKIP_NEXT_NEO4J_SYNC", default_var="false").lower() == "true"
                 if skip:
                     _Var.set("SKIP_NEXT_NEO4J_SYNC", "false")
-                    logger.info("SKIP_NEXT_NEO4J_SYNC was set — skipping this incremental sync")
-                    return
+                    logger.info("SKIP_NEXT_NEO4J_SYNC was set — skipping this incremental sync (not a failure)")
+                    return  # Task completes as "success" — skip is intentional (post-baseline cooldown)
             except Exception as e:
                 logger.debug("Could not check SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
@@ -1033,8 +1033,16 @@ def run_neo4j_sync():
                 except Exception as e:
                     logger.debug("Could not set SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
-            with open(state_file, "w") as f:
-                json.dump({"last_sync": datetime.now(timezone.utc).isoformat()}, f)
+            try:
+                with open(state_file, "w") as f:
+                    json.dump({"last_sync": datetime.now(timezone.utc).isoformat()}, f)
+                logger.info("Neo4j sync state persisted to %s", state_file)
+            except OSError as e:
+                logger.error(
+                    "Failed to write sync state file %s: %s — sync succeeded but 'last sync' will show stale",
+                    state_file,
+                    e,
+                )
             logger.info("Neo4j sync completed successfully")
             record_dag_run("edgeguard_pipeline", "success")
         else:
@@ -1188,6 +1196,7 @@ log_medium_summary = BashOperator(
     task_id="log_summary",
     bash_command='echo "Medium Frequency Collectors Complete - $(date)"',
     execution_timeout=timedelta(minutes=5),
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=medium_freq_dag,
 )
 
@@ -1319,6 +1328,7 @@ log_daily_summary = BashOperator(
         echo "  - SSL Blacklist"
     """,
     execution_timeout=timedelta(minutes=5),
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=daily_dag,
 )
 
@@ -1443,7 +1453,7 @@ def run_build_relationships(**context):
         ["python3", os.path.join(BASE_DIR, "src", "build_relationships.py")],
         capture_output=True,
         text=True,
-        timeout=1800,
+        timeout=3600,
     )
     if result.returncode != 0:
         logger.error(f"build_relationships failed:\n{result.stderr}")
@@ -1471,7 +1481,7 @@ def run_enrichment_jobs(**context):
 build_relationships_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
-    execution_timeout=timedelta(minutes=30),
+    execution_timeout=timedelta(minutes=60),
     dag=neo4j_sync_dag,
 )
 
@@ -1749,8 +1759,8 @@ baseline_start = PythonOperator(
     dag=baseline_dag,
 )
 
-# Tier 1 — Core intelligence (must complete before feeds, rate-limited APIs)
-with TaskGroup("tier1_core", dag=baseline_dag) as baseline_tier1:
+# Tier 1 — Core intelligence (rate-limited APIs). ALL_DONE: one failure doesn't block others.
+with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",
         python_callable=run_baseline_otx,

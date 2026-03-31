@@ -50,7 +50,7 @@ def build_relationships():
 
     try:
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
-        logger.info("[LINK] 1/13 Technique → Tactic (kill-chain phase match)...")
+        logger.info("[LINK] 1/11 Technique → Tactic (kill-chain phase match)...")
         if not _safe_run(
             client,
             "Technique → Tactic",
@@ -69,7 +69,7 @@ def build_relationships():
             failures += 1
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
-        logger.info("[LINK] 2/13 Malware → ThreatActor (exact name match)...")
+        logger.info("[LINK] 2/11 Malware → ThreatActor (exact name match)...")
         if not _safe_run(
             client,
             "Malware → ThreatActor",
@@ -87,16 +87,15 @@ def build_relationships():
         ):
             failures += 1
 
-        # 3. Indicator → Vulnerability/CVE (EXPLOITS) — exact CVE match
-        logger.info("[LINK] 3/13 Indicator → Vulnerability/CVE (exact CVE match)...")
+        # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
+        logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
         if not _safe_run(
             client,
-            "Indicator → Vulnerability/CVE (EXPLOITS)",
+            "Indicator → Vulnerability (EXPLOITS)",
             """
             MATCH (i:Indicator)
             WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
-            MATCH (v)
-            WHERE (v:Vulnerability OR v:CVE) AND v.cve_id = i.cve_id
+            MATCH (v:Vulnerability {cve_id: i.cve_id})
             MERGE (i)-[r:EXPLOITS]->(v)
             SET r.confidence_score = 1.0,
                 r.match_type = 'cve_tag',
@@ -105,20 +104,45 @@ def build_relationships():
             RETURN count(*) as count
         """,
             stats,
-            "exploits",
+            "exploits_vuln",
+        ):
+            failures += 1
+
+        # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
+        logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
+        if not _safe_run(
+            client,
+            "Indicator → CVE (EXPLOITS)",
+            """
+            MATCH (i:Indicator)
+            WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
+            MATCH (c:CVE {cve_id: i.cve_id})
+            MERGE (i)-[r:EXPLOITS]->(c)
+            SET r.confidence_score = 1.0,
+                r.match_type = 'cve_tag',
+                r.source_id = 'cve_tag_match',
+                r.created_at = datetime()
+            RETURN count(*) as count
+        """,
+            stats,
+            "exploits_cve",
         ):
             failures += 1
 
         # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence
-        logger.info("[LINK] 4/13 Indicator → Malware (MISP event co-occurrence)...")
+        logger.info("[LINK] 4/11 Indicator → Malware (MISP event co-occurrence)...")
         if not _safe_run(
             client,
             "Indicator → Malware (co-occurrence)",
             """
             MATCH (i:Indicator), (m:Malware)
             WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-              AND m.misp_event_id IS NOT NULL AND m.misp_event_id <> ''
-              AND i.misp_event_id = m.misp_event_id
+              AND (
+                  i.misp_event_id = m.misp_event_id
+                  OR i.misp_event_id IN coalesce(m.misp_event_ids, [])
+                  OR m.misp_event_id IN coalesce(i.misp_event_ids, [])
+                  OR size(apoc.coll.intersection(coalesce(i.misp_event_ids, []), coalesce(m.misp_event_ids, []))) > 0
+              )
             MERGE (i)-[r:INDICATES]->(m)
             SET r.confidence_score = 0.5,
                 r.match_type = 'misp_cooccurrence',
@@ -132,7 +156,7 @@ def build_relationships():
             failures += 1
 
         # 5. ThreatActor → Technique (USES) — explicit ATT&CK uses_techniques list
-        logger.info("[LINK] 5/13 ThreatActor → Technique (ATT&CK explicit)...")
+        logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
         if not _safe_run(
             client,
             "ThreatActor → Technique (ATT&CK explicit)",
@@ -153,7 +177,7 @@ def build_relationships():
             failures += 1
 
         # 6. Malware → Technique (USES) — MITRE STIX uses relationships
-        logger.info("[LINK] 6/13 Malware → Technique (MITRE explicit)...")
+        logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
         if not _safe_run(
             client,
             "Malware → Technique (MITRE explicit)",
@@ -174,7 +198,7 @@ def build_relationships():
             failures += 1
 
         # 7a. Indicator → Sector (TARGETS)
-        logger.info("[LINK] 7a/13 Indicator → Sector (TARGETS)...")
+        logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
         if not _safe_run(
             client,
             "Indicator → Sector (TARGETS)",
@@ -196,7 +220,7 @@ def build_relationships():
             failures += 1
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
-        logger.info("[LINK] 7b/13 Vulnerability/CVE → Sector (AFFECTS)...")
+        logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
         if not _safe_run(
             client,
             "Vulnerability/CVE → Sector (AFFECTS)",
@@ -218,7 +242,7 @@ def build_relationships():
             failures += 1
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
-        logger.info("[LINK] 8/13 Indicator → Technique (OTX attack_ids)...")
+        logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
         if not _safe_run(
             client,
             "Indicator → Technique (attack_ids)",
@@ -239,7 +263,7 @@ def build_relationships():
             failures += 1
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
-        logger.info("[LINK] 9/13 Indicator → Malware (malware_family match)...")
+        logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
         if not _safe_run(
             client,
             "Indicator → Malware (family match)",
@@ -262,7 +286,7 @@ def build_relationships():
             failures += 1
 
         # 10. Tool → Technique (USES) — MITRE uses_techniques
-        logger.info("[LINK] 10/13 Tool → Technique (MITRE explicit)...")
+        logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
         if not _safe_run(
             client,
             "Tool → Technique (MITRE explicit)",
@@ -282,68 +306,12 @@ def build_relationships():
         ):
             failures += 1
 
-        # 11. Malware cross-source correlation (IS_SAME_AS)
-        logger.info("[LINK] 11/13 Malware cross-source (IS_SAME_AS)...")
-        if not _safe_run(
-            client,
-            "Malware cross-source (IS_SAME_AS)",
-            """
-            MATCH (m1:Malware), (m2:Malware)
-            WHERE m1.tag < m2.tag
-              AND (toLower(m1.name) = toLower(m2.name)
-                OR toLower(m1.name) IN [x IN coalesce(m2.aliases, []) | toLower(x)]
-                OR toLower(m2.name) IN [x IN coalesce(m1.aliases, []) | toLower(x)])
-            MERGE (m1)-[r:IS_SAME_AS]->(m2)
-            ON CREATE SET r.confidence_score = 0.9,
-                r.match_type = 'name_match',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "malware_same_as",
-        ):
-            failures += 1
-
-        # 12. CVE cross-source correlation (IS_SAME_AS)
-        logger.info("[LINK] 12/13 CVE cross-source (IS_SAME_AS)...")
-        if not _safe_run(
-            client,
-            "CVE cross-source (IS_SAME_AS)",
-            """
-            MATCH (c1:CVE), (c2:CVE)
-            WHERE c1.tag < c2.tag
-              AND c1.cve_id = c2.cve_id
-            MERGE (c1)-[r:IS_SAME_AS]->(c2)
-            ON CREATE SET r.confidence_score = 1.0,
-                r.match_type = 'cve_id_match',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "cve_same_as",
-        ):
-            failures += 1
-
-        # 13. Vulnerability cross-source correlation (IS_SAME_AS)
-        logger.info("[LINK] 13/13 Vulnerability cross-source (IS_SAME_AS)...")
-        if not _safe_run(
-            client,
-            "Vulnerability cross-source (IS_SAME_AS)",
-            """
-            MATCH (v1:Vulnerability), (v2:Vulnerability)
-            WHERE v1.tag < v2.tag
-              AND v1.cve_id IS NOT NULL AND v2.cve_id IS NOT NULL
-              AND v1.cve_id = v2.cve_id
-            MERGE (v1)-[r:IS_SAME_AS]->(v2)
-            ON CREATE SET r.confidence_score = 1.0,
-                r.match_type = 'cve_id_match',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "vuln_same_as",
-        ):
-            failures += 1
+        # 11-13. IS_SAME_AS cross-source correlation
+        # With tag removed from MERGE keys, same-name entities and same-cve_id
+        # nodes already merge into a single node. IS_SAME_AS is no longer needed
+        # for Malware (name-keyed), CVE (cve_id-keyed), or Vulnerability (cve_id-keyed).
+        # Source provenance is tracked via the accumulated `source` and `tags` arrays.
+        logger.info("[LINK] 11/11 Cross-source dedup — skipped (entities merge on name/cve_id, no IS_SAME_AS needed)")
 
         # Get final stats
         try:
@@ -368,7 +336,7 @@ def build_relationships():
         total_rels = sum(v for k, v in stats.items() if k != "multi_zone_indicators")
         logger.info(f"\nTotal relationships created: {total_rels}")
         if failures:
-            logger.warning(f"Relationship types failed: {failures}/13 — partial success")
+            logger.warning(f"Relationship types failed: {failures}/11 — partial success")
 
         return failures == 0
 

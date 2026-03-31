@@ -3,6 +3,8 @@
 > Graph-Augmented xAI for Threat Intelligence on Edge Infrastructure
 > (IICT-BAS + Ratio1, funded by ResilMesh)
 
+**Design philosophy:** Neo4j is the **linked intelligence layer** for fast graph queries and cross-source correlation. MISP holds the **ground truth** with full provenance, raw data, and audit trails. Every node in Neo4j traces back to its MISP source events via `misp_event_ids` and `SOURCED_FROM` relationships.
+
 All diagrams are written in [Mermaid](https://mermaid.js.org/) and render natively on GitHub.
 To export for papers: paste into [mermaid.live](https://mermaid.live) and download as PNG/SVG/PDF.
 
@@ -31,7 +33,7 @@ graph TB
         MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming<br/>OOM-safe chunking]
         NEO4J[(Neo4j 5.27<br/>Knowledge Graph<br/>ports 7474 / 7687)]
-        BREL[build_relationships<br/>13 relationship types]
+        BREL[build_relationships<br/>11 relationship types]
         ENRICH[Enrichment Jobs<br/>Decay / Campaigns /<br/>Calibration / CVE Bridge]
     end
 
@@ -178,7 +180,7 @@ gantt
 flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_preflight<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 4h timeout]
-    C --> D[build_relationships<br/>13 edge types]
+    C --> D[build_relationships<br/>11 edge types]
     D --> E[run_enrichment_jobs<br/>4 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
