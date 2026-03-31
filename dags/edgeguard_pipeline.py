@@ -1192,6 +1192,7 @@ log_medium_summary = BashOperator(
     task_id="log_summary",
     bash_command='echo "Medium Frequency Collectors Complete - $(date)"',
     execution_timeout=timedelta(minutes=5),
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=medium_freq_dag,
 )
 
@@ -1323,6 +1324,7 @@ log_daily_summary = BashOperator(
         echo "  - SSL Blacklist"
     """,
     execution_timeout=timedelta(minutes=5),
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=daily_dag,
 )
 
@@ -1753,8 +1755,8 @@ baseline_start = PythonOperator(
     dag=baseline_dag,
 )
 
-# Tier 1 — Core intelligence (must complete before feeds, rate-limited APIs)
-with TaskGroup("tier1_core", dag=baseline_dag) as baseline_tier1:
+# Tier 1 — Core intelligence (rate-limited APIs). ALL_DONE: one failure doesn't block others.
+with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",
         python_callable=run_baseline_otx,
