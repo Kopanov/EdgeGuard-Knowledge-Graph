@@ -766,15 +766,20 @@ class Neo4jClient:
                 n.edgeguard_managed = true
             """
 
-            # Add misp_event_id if present in data
+            # Add misp_event_id if present — accumulated as array for multi-event provenance.
+            # Keeps scalar misp_event_id for backward compat (first-seen event).
             misp_event_id = data.get("misp_event_id")
             if misp_event_id:
-                query += ", n.misp_event_id = $misp_event_id"
+                query += """,
+                n.misp_event_id = coalesce(n.misp_event_id, $misp_event_id),
+                n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + [$misp_event_id])"""
 
             # Add misp_attribute_id if present in data (for indicators)
             misp_attribute_id = data.get("misp_attribute_id")
             if misp_attribute_id:
-                query += ", n.misp_attribute_id = $misp_attribute_id"
+                query += """,
+                n.misp_attribute_id = coalesce(n.misp_attribute_id, $misp_attribute_id),
+                n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
 
             # Add original_source if present in data
             if original_source:
@@ -1260,7 +1265,9 @@ class Neo4jClient:
                     n.active = true,
                     n.edgeguard_managed = true,
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
+                    n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
+                    n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
                     n.url_status = coalesce(item.url_status, n.url_status),
                     n.last_online = coalesce(item.last_online, n.last_online),
@@ -1384,7 +1391,9 @@ class Neo4jClient:
                     n.active = true,
                     n.edgeguard_managed = true,
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
+                    n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
+                    n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.version_constraints = coalesce(item.version_constraints, n.version_constraints),
                     n.cisa_cwes = apoc.coll.toSet(coalesce(n.cisa_cwes, []) + coalesce(item.cisa_cwes, [])),
                     n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes)
