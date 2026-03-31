@@ -1695,7 +1695,7 @@ class MISPToNeo4jSync:
                         "from_key": {"name": malware["name"]},
                         "to_type": "ThreatActor",
                         "to_key": {"name": actor["name"]},
-                        "confidence": 0.6,
+                        "confidence": 0.5,
                     }
                 )
 
@@ -1717,7 +1717,7 @@ class MISPToNeo4jSync:
                             },
                             "to_type": "Malware",
                             "to_key": {"name": malware["name"]},
-                            "confidence": 0.6,
+                            "confidence": 0.5,
                         }
                     )
 
@@ -2134,7 +2134,9 @@ class MISPToNeo4jSync:
                         "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
                         "to_type": "Vulnerability",
                         "to_key": {"cve_id": exp_cve},
-                        "confidence": max(confidence, 0.9),  # explicit CVE match floors at 0.9, respects tag confidence
+                        "confidence": max(
+                            confidence, 0.7
+                        ),  # explicit CVE tag match floors at 0.7, respects tag confidence
                     }
                 )
 

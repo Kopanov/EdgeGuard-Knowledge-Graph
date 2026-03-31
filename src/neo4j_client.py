@@ -1265,6 +1265,7 @@ class Neo4jClient:
                         ELSE n.confidence_score END,
                     n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
                     n.zone = apoc.coll.toSet(coalesce(n.zone, []) + item.zone),
+                    n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
                     n.active = true,
