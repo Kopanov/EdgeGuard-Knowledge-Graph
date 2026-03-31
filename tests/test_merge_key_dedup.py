@@ -16,12 +16,9 @@ caused ThreatActor/Malware/Technique nodes to fragment: APT28 had 7 separate nod
 8. Tag is accumulated into ``tags`` array, not lost
 """
 
-import json
 import os
 import sys
-from unittest.mock import MagicMock, call, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
@@ -34,7 +31,6 @@ for _mod in ("neo4j_client", "run_misp_to_neo4j"):
 
 from neo4j_client import Neo4jClient  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Helpers

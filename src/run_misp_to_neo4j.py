@@ -2114,7 +2114,7 @@ class MISPToNeo4jSync:
                         "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
                         "to_type": "Vulnerability",
                         "to_key": {"cve_id": exp_cve},
-                        "confidence": confidence,
+                        "confidence": 1.0,  # explicit CVE match = highest confidence
                     }
                 )
 
