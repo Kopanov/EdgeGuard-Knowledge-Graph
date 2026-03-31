@@ -782,12 +782,20 @@ class Neo4jClient:
 
             # Add extra_props (aliases, description, etc.) if provided.
             # Validate every property name before interpolating into Cypher.
+            # Array properties that should ACCUMULATE (deduplicated) across sources,
+            # not overwrite. Scalar properties are set with last-write-wins.
+            _ARRAY_ACCUMULATE_PROPS = frozenset({
+                "aliases", "malware_types", "uses_techniques",
+            })
             extra_props = extra_props or {}
             params_extra = {}
             for prop_name, prop_value in extra_props.items():
                 _validate_prop_name(prop_name)
                 if prop_value is not None and prop_value != "":
-                    query += f", n.{prop_name} = ${prop_name}"
+                    if prop_name in _ARRAY_ACCUMULATE_PROPS and isinstance(prop_value, list):
+                        query += f", n.{prop_name} = apoc.coll.toSet(coalesce(n.{prop_name}, []) + ${prop_name})"
+                    else:
+                        query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
 
             # Check existing confidence before update for audit logging
