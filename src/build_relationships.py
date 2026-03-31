@@ -141,6 +141,7 @@ def build_relationships():
                   i.misp_event_id = m.misp_event_id
                   OR i.misp_event_id IN coalesce(m.misp_event_ids, [])
                   OR m.misp_event_id IN coalesce(i.misp_event_ids, [])
+                  OR size(apoc.coll.intersection(coalesce(i.misp_event_ids, []), coalesce(m.misp_event_ids, []))) > 0
               )
             MERGE (i)-[r:INDICATES]->(m)
             SET r.confidence_score = 0.5,
