@@ -1896,6 +1896,7 @@ class Neo4jClient:
         MATCH (v:Vulnerability {cve_id: row.cve_id})
         MERGE (i)-[r:EXPLOITS]->(v)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.match_type = 'cve_tag',
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -1907,6 +1908,7 @@ class Neo4jClient:
         MATCH (v:CVE {cve_id: row.cve_id})
         MERGE (i)-[r:EXPLOITS]->(v)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.match_type = 'cve_tag',
             r.imported_at = coalesce(r.imported_at, datetime()),
