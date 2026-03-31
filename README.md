@@ -864,5 +864,5 @@ EdgeGuard v2026.3.31 is **production-test ready**. Full pipeline validated on Do
 
 ---
 
-_Last updated: 2026-03-28_
+_Last updated: 2026-03-31_
 
