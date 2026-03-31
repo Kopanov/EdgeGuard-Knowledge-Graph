@@ -489,7 +489,7 @@ class Neo4jClient:
             "CREATE CONSTRAINT cvssv2_key IF NOT EXISTS FOR (n:CVSSv2) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
             "CREATE CONSTRAINT cvssv30_key IF NOT EXISTS FOR (n:CVSSv30) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
             "CREATE CONSTRAINT cvssv40_key IF NOT EXISTS FOR (n:CVSSv40) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
-            # Campaign nodes — one per actor, keyed by (name, tag)
+            # Campaign nodes — one per actor, keyed by name only
             "CREATE CONSTRAINT campaign_key IF NOT EXISTS FOR (c:Campaign) REQUIRE (c.name) IS UNIQUE",
         ]
 
@@ -1818,6 +1818,7 @@ class Neo4jClient:
         MATCH (t:Technique {mitre_id: row.mitre_id})
         MERGE (a)-[r:USES]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1830,6 +1831,7 @@ class Neo4jClient:
         WHERE (a.name = row.actor OR row.actor IN coalesce(a.aliases, []))
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1841,6 +1843,7 @@ class Neo4jClient:
         WHERE (m.name = row.malware OR row.malware IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1854,6 +1857,7 @@ class Neo4jClient:
         MATCH (i:Indicator {value: row.value})
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1867,6 +1871,7 @@ class Neo4jClient:
         MATCH (v:Vulnerability {cve_id: row.cve_id})
         MERGE (v)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1880,6 +1885,7 @@ class Neo4jClient:
         MATCH (v:CVE {cve_id: row.cve_id})
         MERGE (v)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()

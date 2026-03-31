@@ -158,11 +158,11 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                      reduce(z=[], ind IN collect(DISTINCT i) | z + coalesce(ind.zone, []))
                  ) AS all_zones
             WHERE size(malware_list) > 0 AND size(indicators) > 0
-            MERGE (c:Campaign {name: a.name + ' Campaign', tag: a.tag})
+            MERGE (c:Campaign {name: a.name + ' Campaign'})
             ON CREATE SET c.created_at = datetime(),
-                          c.actor_name = a.name,
-                          c.tag        = a.tag
-            SET c.last_updated     = datetime(),
+                          c.actor_name = a.name
+            SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
+                c.last_updated     = datetime(),
                 c.indicator_count  = size(indicators),
                 c.malware_count    = size(malware_list),
                 c.first_seen       = first_seen,
@@ -178,7 +178,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # Step 2: Link malware to their campaigns
             link_malware = """
             MATCH (a:ThreatActor)<-[:ATTRIBUTED_TO]-(m:Malware)
-            MATCH (c:Campaign {actor_name: a.name, tag: a.tag})
+            MATCH (c:Campaign {actor_name: a.name})
             MERGE (m)-[:PART_OF]->(c)
             RETURN count(*) AS links
             """
@@ -190,7 +190,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # Using LIMIT inside WITH to avoid huge relationship fans
             link_indicators = """
             MATCH (c:Campaign)
-            MATCH (a:ThreatActor {name: c.actor_name, tag: c.tag})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
+            MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
             WITH c, collect(i)[0..100] AS indicators
             UNWIND indicators AS i
             MERGE (i)-[:PART_OF]->(c)
