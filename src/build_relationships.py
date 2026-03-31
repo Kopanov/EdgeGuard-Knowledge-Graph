@@ -87,15 +87,16 @@ def build_relationships():
         ):
             failures += 1
 
-        # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
-        logger.info("[LINK] 3a/14 Indicator → Vulnerability (exact CVE match)...")
+        # 3. Indicator → Vulnerability/CVE (EXPLOITS) — exact CVE match
+        logger.info("[LINK] 3/13 Indicator → Vulnerability/CVE (exact CVE match)...")
         if not _safe_run(
             client,
-            "Indicator → Vulnerability (EXPLOITS)",
+            "Indicator → Vulnerability/CVE (EXPLOITS)",
             """
             MATCH (i:Indicator)
             WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
-            MATCH (v:Vulnerability {cve_id: i.cve_id})
+            MATCH (v)
+            WHERE (v:Vulnerability OR v:CVE) AND v.cve_id = i.cve_id
             MERGE (i)-[r:EXPLOITS]->(v)
             SET r.confidence_score = 1.0,
                 r.match_type = 'cve_tag',
@@ -104,28 +105,7 @@ def build_relationships():
             RETURN count(*) as count
         """,
             stats,
-            "exploits_vuln",
-        ):
-            failures += 1
-
-        # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
-        logger.info("[LINK] 3b/14 Indicator → CVE (exact CVE match)...")
-        if not _safe_run(
-            client,
-            "Indicator → CVE (EXPLOITS)",
-            """
-            MATCH (i:Indicator)
-            WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
-            MATCH (c:CVE {cve_id: i.cve_id})
-            MERGE (i)-[r:EXPLOITS]->(c)
-            SET r.confidence_score = 1.0,
-                r.match_type = 'cve_tag',
-                r.source_id = 'cve_tag_match',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "exploits_cve",
+            "exploits",
         ):
             failures += 1
 
@@ -302,12 +282,68 @@ def build_relationships():
         ):
             failures += 1
 
-        # 11-13. IS_SAME_AS cross-source correlation
-        # With tag removed from MERGE keys, same-name entities and same-cve_id
-        # nodes already merge into a single node. IS_SAME_AS is no longer needed
-        # for Malware (name-keyed), CVE (cve_id-keyed), or Vulnerability (cve_id-keyed).
-        # Source provenance is tracked via the accumulated `source` and `tags` arrays.
-        logger.info("[LINK] 11/11 Cross-source dedup — skipped (entities merge on name/cve_id, no IS_SAME_AS needed)")
+        # 11. Malware cross-source correlation (IS_SAME_AS)
+        logger.info("[LINK] 11/13 Malware cross-source (IS_SAME_AS)...")
+        if not _safe_run(
+            client,
+            "Malware cross-source (IS_SAME_AS)",
+            """
+            MATCH (m1:Malware), (m2:Malware)
+            WHERE m1.tag < m2.tag
+              AND (toLower(m1.name) = toLower(m2.name)
+                OR toLower(m1.name) IN [x IN coalesce(m2.aliases, []) | toLower(x)]
+                OR toLower(m2.name) IN [x IN coalesce(m1.aliases, []) | toLower(x)])
+            MERGE (m1)-[r:IS_SAME_AS]->(m2)
+            ON CREATE SET r.confidence_score = 0.9,
+                r.match_type = 'name_match',
+                r.created_at = datetime()
+            RETURN count(*) as count
+        """,
+            stats,
+            "malware_same_as",
+        ):
+            failures += 1
+
+        # 12. CVE cross-source correlation (IS_SAME_AS)
+        logger.info("[LINK] 12/13 CVE cross-source (IS_SAME_AS)...")
+        if not _safe_run(
+            client,
+            "CVE cross-source (IS_SAME_AS)",
+            """
+            MATCH (c1:CVE), (c2:CVE)
+            WHERE c1.tag < c2.tag
+              AND c1.cve_id = c2.cve_id
+            MERGE (c1)-[r:IS_SAME_AS]->(c2)
+            ON CREATE SET r.confidence_score = 1.0,
+                r.match_type = 'cve_id_match',
+                r.created_at = datetime()
+            RETURN count(*) as count
+        """,
+            stats,
+            "cve_same_as",
+        ):
+            failures += 1
+
+        # 13. Vulnerability cross-source correlation (IS_SAME_AS)
+        logger.info("[LINK] 13/13 Vulnerability cross-source (IS_SAME_AS)...")
+        if not _safe_run(
+            client,
+            "Vulnerability cross-source (IS_SAME_AS)",
+            """
+            MATCH (v1:Vulnerability), (v2:Vulnerability)
+            WHERE v1.tag < v2.tag
+              AND v1.cve_id IS NOT NULL AND v2.cve_id IS NOT NULL
+              AND v1.cve_id = v2.cve_id
+            MERGE (v1)-[r:IS_SAME_AS]->(v2)
+            ON CREATE SET r.confidence_score = 1.0,
+                r.match_type = 'cve_id_match',
+                r.created_at = datetime()
+            RETURN count(*) as count
+        """,
+            stats,
+            "vuln_same_as",
+        ):
+            failures += 1
 
         # Get final stats
         try:

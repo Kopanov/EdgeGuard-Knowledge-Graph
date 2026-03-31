@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
-NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
+NEO4J_READ_TIMEOUT = 120  # seconds
 MAX_RETRIES = 5
 RETRY_DELAY_BASE = 2  # seconds (exponential backoff base)
 BATCH_SIZE = 1000  # Maximum items per batch
@@ -448,40 +448,21 @@ class Neo4jClient:
             logger.error("Cannot create constraints: no connection")
             return 0, 0
 
-        # Migration: drop old compound (name/cve_id, tag) constraints before creating
-        # single-key ones. Harmless if they don't exist (IF EXISTS).
-        old_constraints = [
-            "DROP CONSTRAINT cve_key IF EXISTS",
-            "DROP CONSTRAINT vulnerability_key IF EXISTS",
-            "DROP CONSTRAINT malware_key IF EXISTS",
-            "DROP CONSTRAINT actor_key IF EXISTS",
-            "DROP CONSTRAINT technique_key IF EXISTS",
-            "DROP CONSTRAINT tactic_key IF EXISTS",
-            "DROP CONSTRAINT campaign_key IF EXISTS",
-            "DROP CONSTRAINT indicator_key IF EXISTS",
-        ]
-        with self.driver.session() as session:
-            for stmt in old_constraints:
-                try:
-                    session.run(stmt, timeout=NEO4J_READ_TIMEOUT)
-                except Exception:
-                    pass  # constraint didn't exist — fine
-
         constraints = [
             # Source nodes
             "CREATE CONSTRAINT source_key IF NOT EXISTS FOR (s:Source) REQUIRE (s.source_id) IS UNIQUE",
             # CVE / Vulnerability — separate labels kept for backward compat
-            "CREATE CONSTRAINT cve_key IF NOT EXISTS FOR (c:CVE) REQUIRE (c.cve_id) IS UNIQUE",
+            "CREATE CONSTRAINT cve_key IF NOT EXISTS FOR (c:CVE) REQUIRE (c.cve_id, c.tag) IS UNIQUE",
             # Vulnerability: match the 2-field MERGE key used in merge_vulnerabilities_batch
-            "CREATE CONSTRAINT vulnerability_key IF NOT EXISTS FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE",
+            "CREATE CONSTRAINT vulnerability_key IF NOT EXISTS FOR (v:Vulnerability) REQUIRE (v.cve_id, v.tag) IS UNIQUE",
             # Indicator: match the 3-field MERGE key used in merge_indicators_batch
             "CREATE CONSTRAINT indicator_key IF NOT EXISTS FOR (i:Indicator) REQUIRE (i.indicator_type, i.value, i.tag) IS UNIQUE",
             # Threat-graph node types
-            "CREATE CONSTRAINT malware_key IF NOT EXISTS FOR (m:Malware) REQUIRE (m.name) IS UNIQUE",
-            "CREATE CONSTRAINT actor_key IF NOT EXISTS FOR (a:ThreatActor) REQUIRE (a.name) IS UNIQUE",
-            "CREATE CONSTRAINT technique_key IF NOT EXISTS FOR (t:Technique) REQUIRE (t.mitre_id) IS UNIQUE",
-            # MITRE tactics — 14 fixed nodes; unique by mitre_id only
-            "CREATE CONSTRAINT tactic_key IF NOT EXISTS FOR (t:Tactic) REQUIRE (t.mitre_id) IS UNIQUE",
+            "CREATE CONSTRAINT malware_key IF NOT EXISTS FOR (m:Malware) REQUIRE (m.name, m.tag) IS UNIQUE",
+            "CREATE CONSTRAINT actor_key IF NOT EXISTS FOR (a:ThreatActor) REQUIRE (a.name, a.tag) IS UNIQUE",
+            "CREATE CONSTRAINT technique_key IF NOT EXISTS FOR (t:Technique) REQUIRE (t.mitre_id, t.tag) IS UNIQUE",
+            # MITRE tactics — 14 fixed nodes; unique by mitre_id + tag
+            "CREATE CONSTRAINT tactic_key IF NOT EXISTS FOR (t:Tactic) REQUIRE (t.mitre_id, t.tag) IS UNIQUE",
             # Sector nodes — created dynamically; must stay unique by name
             "CREATE CONSTRAINT sector_key IF NOT EXISTS FOR (s:Sector) REQUIRE (s.name) IS UNIQUE",
             # ResilMesh-compatible CVSS sub-nodes — keyed by (cve_id, tag)
@@ -490,7 +471,7 @@ class Neo4jClient:
             "CREATE CONSTRAINT cvssv30_key IF NOT EXISTS FOR (n:CVSSv30) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
             "CREATE CONSTRAINT cvssv40_key IF NOT EXISTS FOR (n:CVSSv40) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
             # Campaign nodes — one per actor, keyed by (name, tag)
-            "CREATE CONSTRAINT campaign_key IF NOT EXISTS FOR (c:Campaign) REQUIRE (c.name) IS UNIQUE",
+            "CREATE CONSTRAINT campaign_key IF NOT EXISTS FOR (c:Campaign) REQUIRE (c.name, c.tag) IS UNIQUE",
         ]
 
         success_count = 0
@@ -556,11 +537,6 @@ class Neo4jClient:
             # Decay / active tracking
             "CREATE INDEX indicator_last_updated IF NOT EXISTS FOR (i:Indicator) ON (i.last_updated)",
             "CREATE INDEX vulnerability_last_updated IF NOT EXISTS FOR (v:Vulnerability) ON (v.last_updated)",
-            # build_relationships performance: CVE.cve_id needed for EXPLOITS query + IS_SAME_AS
-            "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
-            # Co-occurrence join: Malware/ThreatActor by misp_event_id
-            "CREATE INDEX malware_misp_event_id IF NOT EXISTS FOR (m:Malware) ON (m.misp_event_id)",
-            "CREATE INDEX actor_misp_event_id IF NOT EXISTS FOR (a:ThreatActor) ON (a.misp_event_id)",
         ]
 
         success_count = 0
@@ -741,9 +717,6 @@ class Neo4jClient:
 
             confidence = data.get("confidence_score", 0.5)
             zone = data.get("zone", ["global"])  # zone is an array
-            # Accumulate tag into tags array (tag removed from MERGE key)
-            tag_value = data.get("tag", source_id)
-            tag_array = [tag_value] if tag_value else [source_id]
 
             _validate_label(label)
             query = f"""
@@ -758,8 +731,6 @@ class Neo4jClient:
                     ELSE n.confidence_score END,
                 n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array),
                 n.zone = apoc.coll.toSet(coalesce(n.zone, []) + $zone),
-                n.tags = apoc.coll.toSet(coalesce(n.tags, []) + $tag_array),
-                n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
                 n.active = true,
@@ -818,8 +789,6 @@ class Neo4jClient:
                     "source_array": source_array,
                     "confidence": confidence,
                     "zone": zone,
-                    "tag_array": tag_array,
-                    "tag_value": tag_value,
                     **params_extra,
                 }
                 if misp_event_id:
@@ -893,7 +862,7 @@ class Neo4jClient:
             return False
         data = dict(data)
         data["cve_id"] = cve_id
-        key_props = {"cve_id": cve_id}
+        key_props = {"cve_id": cve_id, "tag": data.get("tag", "default")}
         return self.merge_node_with_source("Vulnerability", key_props, data, source_id)
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
@@ -937,7 +906,7 @@ class Neo4jClient:
             return False
         data = dict(data)
         data["cve_id"] = cve_id
-        key_props = {"cve_id": cve_id}
+        key_props = {"cve_id": cve_id, "tag": data.get("tag", "default")}
 
         # Promote CISA KEV fields and reference_urls to queryable node properties
         # so analysts can filter on e.g. "all CVEs on the CISA KEV list".
@@ -1009,7 +978,7 @@ class Neo4jClient:
 
     def merge_malware(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
         """MERGE a Malware node with source tracking."""
-        key_props = {"name": data.get("name")}
+        key_props = {"name": data.get("name"), "tag": data.get("tag", "default")}
         # Store malware types and aliases on the node for easier querying
         malware_types = data.get("malware_types", [])
         aliases = data.get("aliases", [])
@@ -1030,7 +999,7 @@ class Neo4jClient:
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a ThreatActor node with source tracking."""
-        key_props = {"name": data.get("name")}
+        key_props = {"name": data.get("name"), "tag": data.get("tag", "default")}
         aliases = data.get("aliases", [])
         description = data.get("description", "")
         # uses_techniques: list of MITRE technique IDs this actor explicitly uses,
@@ -1053,6 +1022,7 @@ class Neo4jClient:
         """MERGE a Technique node with source tracking."""
         key_props = {
             "mitre_id": data.get("mitre_id"),
+            "tag": data.get("tag", "default"),
         }
         extra_props: Dict[str, Any] = {"tactic_phases": data.get("tactic_phases", [])}
         extra_props["detection"] = data.get("detection", "")
@@ -1063,6 +1033,7 @@ class Neo4jClient:
         """MERGE a Tactic node with source tracking."""
         key_props = {
             "mitre_id": data.get("mitre_id"),
+            "tag": data.get("tag", "default"),
         }
         shortname = data.get("shortname", "")
         return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props={"shortname": shortname})
@@ -1071,6 +1042,7 @@ class Neo4jClient:
         """MERGE a Tool node with source tracking."""
         key_props = {
             "mitre_id": data.get("mitre_id"),
+            "tag": data.get("tag", "default"),
         }
         extra_props: Dict[str, Any] = {}
         if data.get("uses_techniques"):
@@ -1360,7 +1332,7 @@ class Neo4jClient:
 
                 query = """
                 UNWIND $batch as item
-                MERGE (n:Vulnerability {cve_id: item.cve_id})
+                MERGE (n:Vulnerability {cve_id: item.cve_id, tag: item.tag})
                 ON CREATE SET n.first_imported_at = datetime(),
                     n.status = item.status
                 SET n.confidence_score = CASE
@@ -1369,8 +1341,6 @@ class Neo4jClient:
                         ELSE n.confidence_score END,
                     n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
                     n.zone = apoc.coll.toSet(coalesce(n.zone, []) + item.zone),
-                    n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
-                    n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
                     n.active = true,

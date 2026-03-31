@@ -1443,7 +1443,7 @@ def run_build_relationships(**context):
         ["python3", os.path.join(BASE_DIR, "src", "build_relationships.py")],
         capture_output=True,
         text=True,
-        timeout=3600,
+        timeout=1800,
     )
     if result.returncode != 0:
         logger.error(f"build_relationships failed:\n{result.stderr}")
@@ -1471,7 +1471,7 @@ def run_enrichment_jobs(**context):
 build_relationships_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
-    execution_timeout=timedelta(minutes=60),
+    execution_timeout=timedelta(minutes=30),
     dag=neo4j_sync_dag,
 )
 
