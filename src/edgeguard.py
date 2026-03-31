@@ -282,7 +282,7 @@ def cmd_doctor(args):
 
     # Test Airflow (retry once after 5s if first attempt fails — handles restarts)
     info("Testing Airflow webserver...")
-    airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://localhost:8082")
+    airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://edgeguard_airflow:8082")
     airflow_ok = False
     for _attempt in range(2):
         try:

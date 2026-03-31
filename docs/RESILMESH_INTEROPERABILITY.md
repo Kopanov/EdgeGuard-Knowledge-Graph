@@ -102,7 +102,7 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence (`misp_event_id` match) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85) |
 | `USES` | `Tool` → `Technique` | MITRE STIX explicit **`uses`** → `uses_techniques` on tool (`build_relationships.py`, conf 0.95) |
-| `IS_SAME_AS` | `Malware` → `Malware` | Cross-source malware dedup by name/alias exact match (`build_relationships.py`, conf 0.9) |
+| ~~`IS_SAME_AS`~~ | — | Removed: entities deduplicate via single-key MERGE (name/cve_id) |
 | `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`) |
 | `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`) |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |

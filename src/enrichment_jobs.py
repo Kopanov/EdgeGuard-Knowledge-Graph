@@ -323,9 +323,9 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     results: Dict = {"linked": 0, "errors": 0}
 
     query = """
-    MATCH (v:Vulnerability), (c:CVE)
+    MATCH (v:Vulnerability)
     WHERE v.cve_id IS NOT NULL
-      AND v.cve_id = c.cve_id
+    MATCH (c:CVE {cve_id: v.cve_id})
     MERGE (v)-[:REFERS_TO]->(c)
     MERGE (c)-[:REFERS_TO]->(v)
     RETURN count(v) AS linked

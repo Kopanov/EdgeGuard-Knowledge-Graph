@@ -6,7 +6,7 @@ querying and run management.  Used by the ``edgeguard`` CLI and could
 be reused by monitoring scripts.
 
 Requires:
-    AIRFLOW_WEBSERVER_URL  (default http://localhost:8082)
+    AIRFLOW_WEBSERVER_URL  (default http://edgeguard_airflow:8082 — Docker Compose DNS)
     AIRFLOW_API_USER       (optional — basic-auth username)
     AIRFLOW_API_PASSWORD   (optional — basic-auth password)
 """
@@ -73,7 +73,7 @@ EDGEGUARD_DAG_IDS = _KNOWN_DAG_IDS  # used by existing callers; prefer get_edgeg
 
 
 def _base_url() -> str:
-    return os.getenv("AIRFLOW_WEBSERVER_URL", "http://localhost:8082").rstrip("/")
+    return os.getenv("AIRFLOW_WEBSERVER_URL", "http://edgeguard_airflow:8082").rstrip("/")
 
 
 def _auth() -> Optional[Tuple[str, str]]:

@@ -411,10 +411,10 @@ def status_after_misp_push(
     """
     if num_items == 0:
         return make_status(source, True, count=0, failed=0)
-    ok = push_success_count > 0
+    # All items deduplicated (0 pushed, 0 failed) = success, not failure.
+    # This is the normal case on re-runs where MISP already has all items.
+    ok = push_success_count > 0 or (push_success_count == 0 and push_failed_count == 0)
     err: Optional[str] = None
     if not ok and push_failed_count:
         err = f"MISP push failed for all or part of batch ({push_failed_count} failures, 0 successes)"
-    elif not ok:
-        err = "MISP push returned no successes"
     return make_status(source, ok, count=num_items, failed=push_failed_count, error=err)

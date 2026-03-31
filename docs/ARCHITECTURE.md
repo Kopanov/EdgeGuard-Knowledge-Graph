@@ -58,7 +58,7 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │     OTX attack_ids → Technique (USES_TECHNIQUE),            │
 │     malware_family name match → Malware (INDICATES, 0.8),   │
 │     Tool → Technique (USES, MITRE explicit),                │
-│     cross-source malware dedup (IS_SAME_AS),                │
+│     (IS_SAME_AS removed — entities dedup via MERGE keys),   │
 │     co-occurrence INDICATES, sector edges                   │
 │  2. enrichment_jobs — campaigns (RUNS/PART_OF),            │
 │     confidence calibration, IOC decay (order inside module) │
