@@ -785,7 +785,7 @@ class Neo4jClient:
             # Array properties that should ACCUMULATE (deduplicated) across sources,
             # not overwrite. Scalar properties are set with last-write-wins.
             _ARRAY_ACCUMULATE_PROPS = frozenset({
-                "aliases", "malware_types", "uses_techniques",
+                "aliases", "malware_types", "uses_techniques", "tactic_phases",
             })
             extra_props = extra_props or {}
             params_extra = {}
@@ -1264,9 +1264,9 @@ class Neo4jClient:
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
                     n.url_status = coalesce(item.url_status, n.url_status),
                     n.last_online = coalesce(item.last_online, n.last_online),
-                    n.abuse_categories = coalesce(item.abuse_categories, n.abuse_categories),
-                    n.yara_rules = coalesce(item.yara_rules, n.yara_rules),
-                    n.sigma_rules = coalesce(item.sigma_rules, n.sigma_rules),
+                    n.abuse_categories = apoc.coll.toSet(coalesce(n.abuse_categories, []) + coalesce(item.abuse_categories, [])),
+                    n.yara_rules = apoc.coll.toSet(coalesce(n.yara_rules, []) + coalesce(item.yara_rules, [])),
+                    n.sigma_rules = apoc.coll.toSet(coalesce(n.sigma_rules, []) + coalesce(item.sigma_rules, [])),
                     n.threat_label = coalesce(item.threat_label, n.threat_label)
                 WITH n, item
                 MATCH (s:Source {source_id: item.source_id})
@@ -1386,7 +1386,7 @@ class Neo4jClient:
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
                     n.version_constraints = coalesce(item.version_constraints, n.version_constraints),
-                    n.cisa_cwes = coalesce(item.cisa_cwes, n.cisa_cwes),
+                    n.cisa_cwes = apoc.coll.toSet(coalesce(n.cisa_cwes, []) + coalesce(item.cisa_cwes, [])),
                     n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes)
                 WITH n, item
                 MATCH (s:Source {source_id: item.source_id})
@@ -3697,10 +3697,10 @@ class Neo4jClient:
         MERGE (i:Indicator {indicator_type: $indicator_type, value: $value, tag: $tag})
         SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
             i.last_updated = datetime(),
-            i.source = CASE WHEN i.source IS NULL THEN $source ELSE apoc.coll.union(i.source, $source) END,
+            i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
             i.confidence_score = $confidence_score,
             i.original_source = $original_source,
-            i.zone = $zone,
+            i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
             i.edgeguard_managed = true,
             i.active = true
         """
@@ -3717,7 +3717,7 @@ class Neo4jClient:
                 i.last_updated = $last_updated,
                 i.confidence_score = $confidence_score,
                 i.original_source = $original_source,
-                i.zone = $zone
+                i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone)
             """
             try:
                 with self.driver.session() as session:
