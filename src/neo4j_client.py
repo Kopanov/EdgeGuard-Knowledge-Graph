@@ -2618,10 +2618,11 @@ class Neo4jClient:
         This is the ResilMesh-native path used when data arrives from the
         ResilMesh platform directly (e.g., via ISIM GraphQL or NATS).
         The MISP pipeline uses ``merge_vulnerabilities_batch()`` instead,
-        which keys on ``(cve_id, tag)`` — both produce compatible nodes.
+        which keys on ``cve_id`` — both produce compatible nodes.
         """
         query = """
-        MERGE (v:Vulnerability {name: $name, cve_id: $cve_id})
+        MERGE (v:Vulnerability {cve_id: $cve_id})
+        SET v.name = coalesce(v.name, $name)
         SET v.status = $status,
             v.description = $description,
             v.edgeguard_managed = true,

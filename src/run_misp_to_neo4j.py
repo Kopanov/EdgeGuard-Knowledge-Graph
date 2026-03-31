@@ -1674,7 +1674,7 @@ class MISPToNeo4jSync:
                         "from_key": {"name": actor["name"]},
                         "to_type": "Technique",
                         "to_key": {"mitre_id": technique["mitre_id"]},
-                        "confidence": 0.7,
+                        "confidence": 0.5,
                     }
                 )
 
@@ -1738,7 +1738,7 @@ class MISPToNeo4jSync:
                             },
                             "to_type": "Vulnerability",
                             "to_key": {"cve_id": cve_id},
-                            "confidence": 0.7,
+                            "confidence": 0.5,
                         }
                     )
 
@@ -2122,7 +2122,7 @@ class MISPToNeo4jSync:
                         "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
                         "to_type": "Vulnerability",
                         "to_key": {"cve_id": exp_cve},
-                        "confidence": 1.0,  # explicit CVE match = highest confidence
+                        "confidence": max(confidence, 0.9),  # explicit CVE match floors at 0.9, respects tag confidence
                     }
                 )
 
