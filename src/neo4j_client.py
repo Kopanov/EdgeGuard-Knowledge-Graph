@@ -2605,10 +2605,10 @@ class Neo4jClient:
         This is the ResilMesh-native path. The MISP pipeline uses
         ``merge_cve()`` which sets the same properties plus EdgeGuard
         extensions (CISA KEV, reference_urls). Both produce compatible
-        CVE nodes keyed on ``(cve_id, tag)``.
+        CVE nodes keyed on ``cve_id``.
         """
         query = """
-        MERGE (c:CVE {cve_id: $cve_id, tag: $tag})
+        MERGE (c:CVE {cve_id: $cve_id})
         SET c.description = $description,
             c.published = $published,
             c.last_modified = $last_modified,
@@ -2617,11 +2617,12 @@ class Neo4jClient:
             c.ref_tags = $ref_tags,
             c.cwe = $cwe,
             c.edgeguard_managed = true,
+            c.tags = apoc.coll.toSet(coalesce(c.tags, []) + [$tag]),
+            c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
             c.last_updated = datetime()
         """
         try:
-            # Provide default tag if not present
             tag = data.get("tag", "default")
             with self.driver.session() as session:
                 session.run(

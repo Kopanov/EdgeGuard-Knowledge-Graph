@@ -50,7 +50,7 @@ def build_relationships():
 
     try:
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
-        logger.info("[LINK] 1/13 Technique → Tactic (kill-chain phase match)...")
+        logger.info("[LINK] 1/11 Technique → Tactic (kill-chain phase match)...")
         if not _safe_run(
             client,
             "Technique → Tactic",
@@ -69,7 +69,7 @@ def build_relationships():
             failures += 1
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
-        logger.info("[LINK] 2/13 Malware → ThreatActor (exact name match)...")
+        logger.info("[LINK] 2/11 Malware → ThreatActor (exact name match)...")
         if not _safe_run(
             client,
             "Malware → ThreatActor",
@@ -88,7 +88,7 @@ def build_relationships():
             failures += 1
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
-        logger.info("[LINK] 3a/14 Indicator → Vulnerability (exact CVE match)...")
+        logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
         if not _safe_run(
             client,
             "Indicator → Vulnerability (EXPLOITS)",
@@ -109,7 +109,7 @@ def build_relationships():
             failures += 1
 
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
-        logger.info("[LINK] 3b/14 Indicator → CVE (exact CVE match)...")
+        logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
         if not _safe_run(
             client,
             "Indicator → CVE (EXPLOITS)",
@@ -130,7 +130,7 @@ def build_relationships():
             failures += 1
 
         # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence
-        logger.info("[LINK] 4/13 Indicator → Malware (MISP event co-occurrence)...")
+        logger.info("[LINK] 4/11 Indicator → Malware (MISP event co-occurrence)...")
         if not _safe_run(
             client,
             "Indicator → Malware (co-occurrence)",
@@ -152,7 +152,7 @@ def build_relationships():
             failures += 1
 
         # 5. ThreatActor → Technique (USES) — explicit ATT&CK uses_techniques list
-        logger.info("[LINK] 5/13 ThreatActor → Technique (ATT&CK explicit)...")
+        logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
         if not _safe_run(
             client,
             "ThreatActor → Technique (ATT&CK explicit)",
@@ -173,7 +173,7 @@ def build_relationships():
             failures += 1
 
         # 6. Malware → Technique (USES) — MITRE STIX uses relationships
-        logger.info("[LINK] 6/13 Malware → Technique (MITRE explicit)...")
+        logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
         if not _safe_run(
             client,
             "Malware → Technique (MITRE explicit)",
@@ -194,7 +194,7 @@ def build_relationships():
             failures += 1
 
         # 7a. Indicator → Sector (TARGETS)
-        logger.info("[LINK] 7a/13 Indicator → Sector (TARGETS)...")
+        logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
         if not _safe_run(
             client,
             "Indicator → Sector (TARGETS)",
@@ -216,7 +216,7 @@ def build_relationships():
             failures += 1
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
-        logger.info("[LINK] 7b/13 Vulnerability/CVE → Sector (AFFECTS)...")
+        logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
         if not _safe_run(
             client,
             "Vulnerability/CVE → Sector (AFFECTS)",
@@ -238,7 +238,7 @@ def build_relationships():
             failures += 1
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
-        logger.info("[LINK] 8/13 Indicator → Technique (OTX attack_ids)...")
+        logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
         if not _safe_run(
             client,
             "Indicator → Technique (attack_ids)",
@@ -259,7 +259,7 @@ def build_relationships():
             failures += 1
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
-        logger.info("[LINK] 9/13 Indicator → Malware (malware_family match)...")
+        logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
         if not _safe_run(
             client,
             "Indicator → Malware (family match)",
@@ -282,7 +282,7 @@ def build_relationships():
             failures += 1
 
         # 10. Tool → Technique (USES) — MITRE uses_techniques
-        logger.info("[LINK] 10/13 Tool → Technique (MITRE explicit)...")
+        logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
         if not _safe_run(
             client,
             "Tool → Technique (MITRE explicit)",
@@ -332,7 +332,7 @@ def build_relationships():
         total_rels = sum(v for k, v in stats.items() if k != "multi_zone_indicators")
         logger.info(f"\nTotal relationships created: {total_rels}")
         if failures:
-            logger.warning(f"Relationship types failed: {failures}/13 — partial success")
+            logger.warning(f"Relationship types failed: {failures}/11 — partial success")
 
         return failures == 0
 
