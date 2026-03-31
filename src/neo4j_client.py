@@ -1740,21 +1740,22 @@ class Neo4jClient:
             rt = rel.get("rel_type")
             fk = rel.get("from_key") or {}
             tk = rel.get("to_key") or {}
+            conf = rel.get("confidence", 0.5)
             if rt == "USES":
                 an = nonempty_graph_string(fk.get("name"))
                 mid = nonempty_graph_string(tk.get("mitre_id"))
                 if an and mid:
-                    uses_rows.append({"actor": an, "mitre_id": mid, "source_id": source_id})
+                    uses_rows.append({"actor": an, "mitre_id": mid, "source_id": source_id, "confidence": conf})
             elif rt == "ATTRIBUTED_TO":
                 mn = nonempty_graph_string(fk.get("name"))
                 an = nonempty_graph_string(tk.get("name"))
                 if mn and an:
-                    attr_rows.append({"malware": mn, "actor": an, "source_id": source_id})
+                    attr_rows.append({"malware": mn, "actor": an, "source_id": source_id, "confidence": conf})
             elif rt == "INDICATES" and rel.get("to_type") == "Malware":
                 iv = nonempty_graph_string(fk.get("value"))
                 mn = nonempty_graph_string(tk.get("name"))
                 if iv and mn:
-                    ind_mal_rows.append({"value": iv, "malware": mn, "source_id": source_id})
+                    ind_mal_rows.append({"value": iv, "malware": mn, "source_id": source_id, "confidence": conf})
             elif rt == "TARGETS":
                 sec = nonempty_graph_string(tk.get("name"))
                 if not sec:
@@ -1763,16 +1764,16 @@ class Neo4jClient:
                 if ft == "Indicator":
                     iv = nonempty_graph_string(fk.get("value"))
                     if iv:
-                        tgt_ind_rows.append({"value": iv, "sector": sec, "source_id": source_id})
+                        tgt_ind_rows.append({"value": iv, "sector": sec, "source_id": source_id, "confidence": conf})
                 elif ft == "Vulnerability":
                     cid = normalize_cve_id_for_graph(fk.get("cve_id"))
                     if cid:
-                        tgt_vuln_rows.append({"cve_id": cid, "sector": sec, "source_id": source_id})
+                        tgt_vuln_rows.append({"cve_id": cid, "sector": sec, "source_id": source_id, "confidence": conf})
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
                 if iv and cid:
-                    expl_rows.append({"value": iv, "cve_id": cid, "source_id": source_id})
+                    expl_rows.append({"value": iv, "cve_id": cid, "source_id": source_id, "confidence": conf})
 
         total = 0
 
@@ -1783,7 +1784,7 @@ class Neo4jClient:
         MATCH (t:Technique {mitre_id: row.mitre_id})
         MERGE (a)-[r:USES]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 0.7,
+            r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -1795,7 +1796,7 @@ class Neo4jClient:
         WHERE (a.name = row.actor OR row.actor IN coalesce(a.aliases, []))
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 0.7,
+            r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -1806,7 +1807,7 @@ class Neo4jClient:
         WHERE (m.name = row.malware OR row.malware IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 0.6,
+            r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -1819,7 +1820,7 @@ class Neo4jClient:
         MATCH (i:Indicator {value: row.value})
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 0.5,
+            r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -1832,7 +1833,7 @@ class Neo4jClient:
         MATCH (v:Vulnerability {cve_id: row.cve_id})
         MERGE (v)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 0.5,
+            r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -1845,7 +1846,7 @@ class Neo4jClient:
         MATCH (v:CVE {cve_id: row.cve_id})
         MERGE (v)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 0.5,
+            r.confidence_score = row.confidence,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -1855,7 +1856,7 @@ class Neo4jClient:
         MATCH (v:Vulnerability {cve_id: row.cve_id})
         MERGE (i)-[r:EXPLOITS]->(v)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 1.0,
+            r.confidence_score = row.confidence,
             r.match_type = 'cve_tag',
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1866,7 +1867,7 @@ class Neo4jClient:
         MATCH (v:CVE {cve_id: row.cve_id})
         MERGE (i)-[r:EXPLOITS]->(v)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.confidence_score = 1.0,
+            r.confidence_score = row.confidence,
             r.match_type = 'cve_tag',
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
