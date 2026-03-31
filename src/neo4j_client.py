@@ -1753,6 +1753,7 @@ class Neo4jClient:
         tgt_vuln_rows: List[Dict[str, Any]] = []
         expl_rows: List[Dict[str, Any]] = []
 
+        _dropped_rels = 0
         for rel in relationships:
             rt = rel.get("rel_type")
             fk = rel.get("from_key") or {}
@@ -1763,34 +1764,50 @@ class Neo4jClient:
                 mid = nonempty_graph_string(tk.get("mitre_id"))
                 if an and mid:
                     uses_rows.append({"actor": an, "mitre_id": mid, "source_id": source_id, "confidence": conf})
+                else:
+                    _dropped_rels += 1
             elif rt == "ATTRIBUTED_TO":
                 mn = nonempty_graph_string(fk.get("name"))
                 an = nonempty_graph_string(tk.get("name"))
                 if mn and an:
                     attr_rows.append({"malware": mn, "actor": an, "source_id": source_id, "confidence": conf})
+                else:
+                    _dropped_rels += 1
             elif rt == "INDICATES" and rel.get("to_type") == "Malware":
                 iv = nonempty_graph_string(fk.get("value"))
                 mn = nonempty_graph_string(tk.get("name"))
                 if iv and mn:
                     ind_mal_rows.append({"value": iv, "malware": mn, "source_id": source_id, "confidence": conf})
+                else:
+                    _dropped_rels += 1
             elif rt == "TARGETS":
                 sec = nonempty_graph_string(tk.get("name"))
                 if not sec:
+                    _dropped_rels += 1
                     continue
                 ft = rel.get("from_type")
                 if ft == "Indicator":
                     iv = nonempty_graph_string(fk.get("value"))
                     if iv:
                         tgt_ind_rows.append({"value": iv, "sector": sec, "source_id": source_id, "confidence": conf})
+                    else:
+                        _dropped_rels += 1
                 elif ft == "Vulnerability":
                     cid = normalize_cve_id_for_graph(fk.get("cve_id"))
                     if cid:
                         tgt_vuln_rows.append({"cve_id": cid, "sector": sec, "source_id": source_id, "confidence": conf})
+                    else:
+                        _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
                 if iv and cid:
                     expl_rows.append({"value": iv, "cve_id": cid, "source_id": source_id, "confidence": conf})
+                else:
+                    _dropped_rels += 1
+
+        if _dropped_rels:
+            logger.warning("Relationship batch: %s/%s definitions dropped (blank/missing endpoints)", _dropped_rels, len(relationships))
 
         total = 0
 

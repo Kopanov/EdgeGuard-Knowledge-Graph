@@ -331,6 +331,7 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     """
     seen = set()
     unique_items: List[Dict] = []
+    _dropped = 0
     for item in items:
         tag = item.get("tag", "default")
         if _item_is_vulnerability_sync_bucket(item):
@@ -338,6 +339,8 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
             if cid:
                 key = f"cve:{cid}:{tag}"
             else:
+                logger.debug("Dedup: dropping vulnerability with unresolvable CVE ID (tag=%s)", tag)
+                _dropped += 1
                 continue
         elif item.get("value"):
             key = f"{item.get('indicator_type', 'unknown')}:{item['value']}:{tag}"
@@ -346,11 +349,16 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
         elif item.get("mitre_id"):
             key = f"technique:{item['mitre_id']}:{tag}"
         else:
+            logger.debug("Dedup: dropping item with no identifiable key (type=%s, tag=%s)", item.get("type"), tag)
+            _dropped += 1
             continue
 
         if key not in seen:
             seen.add(key)
             unique_items.append(item)
+    _dupes = len(items) - len(unique_items) - _dropped
+    if _dropped or _dupes:
+        logger.info("Dedup: %s items → %s unique (%s duplicates removed, %s dropped for missing keys)", len(items), len(unique_items), _dupes, _dropped)
     return unique_items
 
 
@@ -2106,6 +2114,7 @@ class MISPToNeo4jSync:
             for raw_cve in exploits_cves:
                 exp_cve = normalize_cve_id_for_graph(raw_cve)
                 if not exp_cve:
+                    logger.debug("Skipping malformed CVE reference in EXPLOITS: %s", raw_cve[:50] if raw_cve else "None")
                     continue
                 relationships.append(
                     {

@@ -1432,6 +1432,9 @@ def cmd_clear_misp(args) -> int:
             return 1
         if total_found == 0:
             info("No EdgeGuard events found in MISP.")
+        elif deleted < total_found:
+            err(f"Partial clear: deleted {deleted}/{total_found} EdgeGuard events ({total_found - deleted} failed)")
+            return 1
         else:
             ok(f"Deleted {deleted}/{total_found} EdgeGuard events from MISP")
     except Exception as e:

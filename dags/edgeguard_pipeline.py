@@ -991,8 +991,8 @@ def run_neo4j_sync():
                 skip = _Var.get("SKIP_NEXT_NEO4J_SYNC", default_var="false").lower() == "true"
                 if skip:
                     _Var.set("SKIP_NEXT_NEO4J_SYNC", "false")
-                    logger.info("SKIP_NEXT_NEO4J_SYNC was set — skipping this incremental sync")
-                    return
+                    logger.info("SKIP_NEXT_NEO4J_SYNC was set — skipping this incremental sync (not a failure)")
+                    return  # Task completes as "success" — skip is intentional (post-baseline cooldown)
             except Exception as e:
                 logger.debug("Could not check SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
