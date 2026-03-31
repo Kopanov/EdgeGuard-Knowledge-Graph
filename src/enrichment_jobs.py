@@ -252,11 +252,14 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
     results = {}
 
     # Map: (min_size, max_size, new_confidence)
+    # Co-occurrence confidence tiers — capped at 0.50 per co-occurrence ceiling.
+    # Tight events (few indicators) get higher confidence within the range;
+    # bulk dumps get lower confidence.
     tiers = [
-        (0, 10, 0.90),
-        (11, 20, 0.80),
-        (21, 100, 0.70),
-        (101, 500, 0.50),
+        (0, 10, 0.50),
+        (11, 20, 0.45),
+        (21, 100, 0.40),
+        (101, 500, 0.35),
         (501, None, 0.30),
     ]
 
