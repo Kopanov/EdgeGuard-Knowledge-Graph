@@ -3,6 +3,8 @@
 > Graph-Augmented xAI for Threat Intelligence on Edge Infrastructure
 > (IICT-BAS + Ratio1, funded by ResilMesh)
 
+**Design philosophy:** Neo4j is the **linked intelligence layer** for fast graph queries and cross-source correlation. MISP holds the **ground truth** with full provenance, raw data, and audit trails. Every node in Neo4j traces back to its MISP source events via `misp_event_ids` and `SOURCED_FROM` relationships.
+
 All diagrams are written in [Mermaid](https://mermaid.js.org/) and render natively on GitHub.
 To export for papers: paste into [mermaid.live](https://mermaid.live) and download as PNG/SVG/PDF.
 

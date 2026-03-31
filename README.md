@@ -30,7 +30,9 @@
 
 ## 🤔 What is EdgeGuard?
 
-Imagine your company's computer network is a city. EdgeGuard is like having a **smart security system** that:
+EdgeGuard is a **Knowledge Graph framework** that merges threat intelligence from 11+ collectors into **MISP as the single source of truth**, then links the most important data from **Energy, Healthcare, and Finance** sectors — enriched with global intelligence — into a **Neo4j knowledge graph**. The architecture goes both ways: **Neo4j is the linked intelligence layer** for fast graph queries and cross-source correlation, while **MISP holds the ground truth** with full provenance, raw data, and audit trails. Every node in Neo4j traces back to its MISP source events, so analysts can always verify the raw evidence behind any graph insight.
+
+### What it does
 
 1. **Collects** threat intelligence from multiple external feeds (11 active collector types + 2 sector placeholders — see `docs/DATA_SOURCES.md`)
 2. **Stages** everything in MISP — the single source of truth — with full provenance and timestamps
