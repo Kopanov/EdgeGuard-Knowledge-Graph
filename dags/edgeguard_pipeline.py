@@ -1038,7 +1038,11 @@ def run_neo4j_sync():
                     json.dump({"last_sync": datetime.now(timezone.utc).isoformat()}, f)
                 logger.info("Neo4j sync state persisted to %s", state_file)
             except OSError as e:
-                logger.error("Failed to write sync state file %s: %s — sync succeeded but 'last sync' will show stale", state_file, e)
+                logger.error(
+                    "Failed to write sync state file %s: %s — sync succeeded but 'last sync' will show stale",
+                    state_file,
+                    e,
+                )
             logger.info("Neo4j sync completed successfully")
             record_dag_run("edgeguard_pipeline", "success")
         else:

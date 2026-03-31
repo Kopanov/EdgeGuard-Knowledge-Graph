@@ -789,9 +789,14 @@ class Neo4jClient:
             # Validate every property name before interpolating into Cypher.
             # Array properties that should ACCUMULATE (deduplicated) across sources,
             # not overwrite. Scalar properties are set with last-write-wins.
-            _ARRAY_ACCUMULATE_PROPS = frozenset({
-                "aliases", "malware_types", "uses_techniques", "tactic_phases",
-            })
+            _ARRAY_ACCUMULATE_PROPS = frozenset(
+                {
+                    "aliases",
+                    "malware_types",
+                    "uses_techniques",
+                    "tactic_phases",
+                }
+            )
             extra_props = extra_props or {}
             params_extra = {}
             for prop_name, prop_value in extra_props.items():
@@ -1807,7 +1812,11 @@ class Neo4jClient:
                     _dropped_rels += 1
 
         if _dropped_rels:
-            logger.warning("Relationship batch: %s/%s definitions dropped (blank/missing endpoints)", _dropped_rels, len(relationships))
+            logger.warning(
+                "Relationship batch: %s/%s definitions dropped (blank/missing endpoints)",
+                _dropped_rels,
+                len(relationships),
+            )
 
         total = 0
 

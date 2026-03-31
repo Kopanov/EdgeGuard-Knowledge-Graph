@@ -358,7 +358,13 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
             unique_items.append(item)
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
-        logger.info("Dedup: %s items → %s unique (%s duplicates removed, %s dropped for missing keys)", len(items), len(unique_items), _dupes, _dropped)
+        logger.info(
+            "Dedup: %s items → %s unique (%s duplicates removed, %s dropped for missing keys)",
+            len(items),
+            len(unique_items),
+            _dupes,
+            _dropped,
+        )
     return unique_items
 
 
@@ -1778,7 +1784,11 @@ class MISPToNeo4jSync:
                                 {
                                     "rel_type": "TARGETS",
                                     "from_type": "Indicator",
-                                    "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
+                                    "from_key": {
+                                        "value": value,
+                                        "indicator_type": indicator_type,
+                                        "tag": item.get("tag", "misp"),
+                                    },
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
@@ -2113,7 +2123,9 @@ class MISPToNeo4jSync:
             for raw_cve in exploits_cves:
                 exp_cve = normalize_cve_id_for_graph(raw_cve)
                 if not exp_cve:
-                    logger.debug("Skipping malformed CVE reference in EXPLOITS: %s", raw_cve[:50] if raw_cve else "None")
+                    logger.debug(
+                        "Skipping malformed CVE reference in EXPLOITS: %s", raw_cve[:50] if raw_cve else "None"
+                    )
                     continue
                 relationships.append(
                     {
@@ -2734,7 +2746,6 @@ class MISPToNeo4jSync:
         )
 
         return total_parsed, total_cross_rels, total_errors
-
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """

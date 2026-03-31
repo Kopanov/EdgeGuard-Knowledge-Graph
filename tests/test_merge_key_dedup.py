@@ -80,44 +80,32 @@ class TestMergeKeyProps:
     def test_merge_actor_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {"name": "APT28", "tag": "mitre_attck", "zone": ["global"]}
-        self._assert_merge_called_without_tag_in_key(
-            client, session, client.merge_actor, data, "ThreatActor"
-        )
+        self._assert_merge_called_without_tag_in_key(client, session, client.merge_actor, data, "ThreatActor")
 
     def test_merge_malware_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {"name": "Emotet", "tag": "alienvault_otx", "zone": ["global"]}
-        self._assert_merge_called_without_tag_in_key(
-            client, session, client.merge_malware, data, "Malware"
-        )
+        self._assert_merge_called_without_tag_in_key(client, session, client.merge_malware, data, "Malware")
 
     def test_merge_technique_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {"mitre_id": "T1059", "name": "Command-Line Interface", "tag": "mitre_attck", "zone": ["global"]}
-        self._assert_merge_called_without_tag_in_key(
-            client, session, client.merge_technique, data, "Technique"
-        )
+        self._assert_merge_called_without_tag_in_key(client, session, client.merge_technique, data, "Technique")
 
     def test_merge_tactic_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {"mitre_id": "TA0001", "name": "Initial Access", "tag": "mitre_attck", "zone": ["global"]}
-        self._assert_merge_called_without_tag_in_key(
-            client, session, client.merge_tactic, data, "Tactic"
-        )
+        self._assert_merge_called_without_tag_in_key(client, session, client.merge_tactic, data, "Tactic")
 
     def test_merge_tool_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {"mitre_id": "S0154", "name": "Cobalt Strike", "tag": "mitre_attck", "zone": ["global"]}
-        self._assert_merge_called_without_tag_in_key(
-            client, session, client.merge_tool, data, "Tool"
-        )
+        self._assert_merge_called_without_tag_in_key(client, session, client.merge_tool, data, "Tool")
 
     def test_merge_vulnerability_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {"cve_id": "CVE-2021-44228", "tag": "nvd", "zone": ["global"]}
-        self._assert_merge_called_without_tag_in_key(
-            client, session, client.merge_vulnerability, data, "Vulnerability"
-        )
+        self._assert_merge_called_without_tag_in_key(client, session, client.merge_vulnerability, data, "Vulnerability")
 
     def test_merge_cve_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
@@ -287,8 +275,13 @@ class TestCrossItemRelKeys:
 
     def test_vulnerability_sector_targets_no_tag(self):
         items = [
-            {"type": "vulnerability", "cve_id": "CVE-2021-44228", "value": "CVE-2021-44228",
-             "tag": "nvd", "zone": ["energy"]},
+            {
+                "type": "vulnerability",
+                "cve_id": "CVE-2021-44228",
+                "value": "CVE-2021-44228",
+                "tag": "nvd",
+                "zone": ["energy"],
+            },
         ]
         rels = self._build_rels(items)
         tgt = [r for r in rels if r["rel_type"] == "TARGETS" and r["from_type"] == "Vulnerability"]
@@ -345,14 +338,17 @@ class TestSourceIdRouting:
         syncer.neo4j.merge_indicators_batch.return_value = (2, 0)
         syncer.neo4j.merge_vulnerabilities_batch.return_value = (0, 0)
         syncer.stats = {
-            "events_processed": 0, "events_failed": 0,
-            "indicators_synced": 0, "vulnerabilities_synced": 0,
-            "relationships_created": 0, "errors": 0,
+            "events_processed": 0,
+            "events_failed": 0,
+            "indicators_synced": 0,
+            "vulnerabilities_synced": 0,
+            "relationships_created": 0,
+            "errors": 0,
         }
 
         # Mock _create_relationships to capture source_id
         source_ids_used = []
-        original_create = syncer._create_relationships if hasattr(syncer, '_create_relationships') else None
+        original_create = syncer._create_relationships if hasattr(syncer, "_create_relationships") else None
 
         def _mock_create_rels(rels, source_id):
             source_ids_used.append((source_id, len(rels)))
@@ -360,9 +356,9 @@ class TestSourceIdRouting:
 
         syncer._create_relationships = _mock_create_rels
         syncer.sync_to_neo4j = MagicMock(return_value=(2, 0, []))
-        syncer._build_cross_item_relationships = MagicMock(return_value=[
-            {"rel_type": "INDICATES", "from_type": "Indicator", "to_type": "Malware"}
-        ])
+        syncer._build_cross_item_relationships = MagicMock(
+            return_value=[{"rel_type": "INDICATES", "from_type": "Indicator", "to_type": "Malware"}]
+        )
 
         # Simulate parse_attribute returning items + embedded rels
         def _mock_parse(attr, event):
@@ -406,7 +402,7 @@ class TestTypeSamplingCaps:
     def test_large_indicator_list_sampled(self):
         """3000 indicators should be sampled to 2000."""
         items = [
-            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.{i//256}.{i%256}", "tag": "misp"}
+            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.{i // 256}.{i % 256}", "tag": "misp"}
             for i in range(3000)
         ]
         items.append({"type": "malware", "name": "TestMalware", "tag": "misp"})
@@ -418,13 +414,9 @@ class TestTypeSamplingCaps:
     def test_small_event_not_sampled(self):
         """50 indicators + 5 malware should NOT be sampled."""
         items = [
-            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.0.{i}", "tag": "misp"}
-            for i in range(50)
+            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.0.{i}", "tag": "misp"} for i in range(50)
         ]
-        items.extend([
-            {"type": "malware", "name": f"Malware{i}", "tag": "misp"}
-            for i in range(5)
-        ])
+        items.extend([{"type": "malware", "name": f"Malware{i}", "tag": "misp"} for i in range(5)])
         rels = self._build_rels(items)
         indicates = [r for r in rels if r["rel_type"] == "INDICATES"]
         assert len(indicates) == 250, f"Expected 50*5=250 INDICATES, got {len(indicates)}"
@@ -445,6 +437,7 @@ class TestConstraintDefinitions:
 
         # Extract constraint strings from create_constraints source
         import inspect
+
         source = inspect.getsource(client.create_constraints)
 
         # These should be single-key (no tag)
@@ -455,6 +448,7 @@ class TestConstraintDefinitions:
     def test_indicator_constraint_keeps_tag(self):
         """Indicator constraint should include tag."""
         import inspect
+
         client = Neo4jClient.__new__(Neo4jClient)
         client.driver = MagicMock()
         source = inspect.getsource(client.create_constraints)
@@ -463,6 +457,7 @@ class TestConstraintDefinitions:
     def test_cvss_constraints_keep_tag(self):
         """CVSS sub-node constraints should include tag (different scores per source)."""
         import inspect
+
         client = Neo4jClient.__new__(Neo4jClient)
         client.driver = MagicMock()
         source = inspect.getsource(client.create_constraints)
