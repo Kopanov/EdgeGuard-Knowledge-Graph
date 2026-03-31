@@ -2082,7 +2082,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "INDICATES",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
+                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
                         "to_type": "Malware",
                         "to_key": {"name": malware_name},
                         "confidence": confidence,
@@ -2095,7 +2095,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "TARGETS",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
+                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
@@ -2111,7 +2111,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "EXPLOITS",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
+                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
                         "to_type": "Vulnerability",
                         "to_key": {"cve_id": exp_cve},
                         "confidence": confidence,

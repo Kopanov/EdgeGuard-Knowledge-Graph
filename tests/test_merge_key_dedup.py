@@ -131,7 +131,7 @@ class TestMergeKeyProps:
         calls = session.run.call_args_list
         assert len(calls) >= 2
         merge_cypher = calls[1][0][0]
-        merge_line = [l for l in merge_cypher.split("\n") if "MERGE" in l][0]
+        merge_line = [ln for ln in merge_cypher.split("\n") if "MERGE" in ln][0]
         assert "tag:" not in merge_line, f"CVE MERGE key has tag: {merge_line}"
 
 
@@ -155,7 +155,7 @@ class TestIndicatorKeepsTag:
         calls = session.run.call_args_list
         assert len(calls) >= 2
         merge_cypher = calls[1][0][0]
-        merge_line = [l for l in merge_cypher.split("\n") if "MERGE" in l][0]
+        merge_line = [ln for ln in merge_cypher.split("\n") if "MERGE" in ln][0]
         assert "tag:" in merge_line, f"Indicator MERGE key should have tag: {merge_line}"
 
 
@@ -205,7 +205,7 @@ class TestBatchMergeKeys:
         calls = session.run.call_args_list
         assert len(calls) >= 1
         cypher = calls[0][0][0]
-        merge_line = [l for l in cypher.split("\n") if "MERGE" in l][0]
+        merge_line = [ln for ln in cypher.split("\n") if "MERGE" in ln][0]
         assert "tag" not in merge_line, f"Vulnerability batch MERGE has tag: {merge_line}"
         # Same CVE from different tags should produce ONE batch item key
         assert "item.cve_id" in merge_line
@@ -224,7 +224,7 @@ class TestBatchMergeKeys:
         ]
         client.merge_indicators_batch(items, source_id="misp")
         cypher = session.run.call_args_list[0][0][0]
-        merge_line = [l for l in cypher.split("\n") if "MERGE" in l][0]
+        merge_line = [ln for ln in cypher.split("\n") if "MERGE" in ln][0]
         assert "tag: item.tag" in merge_line, f"Indicator batch should keep tag: {merge_line}"
 
 
