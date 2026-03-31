@@ -2294,8 +2294,12 @@ class MISPToNeo4jSync:
             for tactic in tactics:
                 try:
                     source_id = tactic.get("tag", "misp")
-                    self.neo4j.merge_tactic(tactic, source_id=source_id)
-                    success += 1
+                    if self.neo4j.merge_tactic(tactic, source_id=source_id):
+                        self.stats.setdefault("tactics_synced", 0)
+                        self.stats["tactics_synced"] += 1
+                        success += 1
+                    else:
+                        errors += 1
                 except Exception as e:
                     logger.warning(f"Error syncing tactic: {e}")
                     errors += 1
@@ -2306,9 +2310,11 @@ class MISPToNeo4jSync:
             for technique in techniques:
                 try:
                     source_id = technique.get("tag", "misp")
-                    self.neo4j.merge_technique(technique, source_id=source_id)
-                    self.stats["techniques_synced"] += 1
-                    success += 1
+                    if self.neo4j.merge_technique(technique, source_id=source_id):
+                        self.stats["techniques_synced"] += 1
+                        success += 1
+                    else:
+                        errors += 1
                 except Exception as e:
                     logger.warning(f"Error syncing technique: {e}")
                     errors += 1
@@ -2319,9 +2325,11 @@ class MISPToNeo4jSync:
             for malware in malware_items:
                 try:
                     source_id = malware.get("tag", "misp")
-                    self.neo4j.merge_malware(malware, source_id=source_id)
-                    self.stats["malware_synced"] += 1
-                    success += 1
+                    if self.neo4j.merge_malware(malware, source_id=source_id):
+                        self.stats["malware_synced"] += 1
+                        success += 1
+                    else:
+                        errors += 1
                 except Exception as e:
                     logger.warning(f"Error syncing malware: {e}")
                     errors += 1
@@ -2332,9 +2340,11 @@ class MISPToNeo4jSync:
             for actor in actors:
                 try:
                     source_id = actor.get("tag", "misp")
-                    self.neo4j.merge_actor(actor, source_id=source_id)
-                    self.stats["actors_synced"] += 1
-                    success += 1
+                    if self.neo4j.merge_actor(actor, source_id=source_id):
+                        self.stats["actors_synced"] += 1
+                        success += 1
+                    else:
+                        errors += 1
                 except Exception as e:
                     actor_name = actor.get("name", "unknown")[:30]
                     logger.warning(f"[WARN] Error syncing actor ({actor_name}): {type(e).__name__}: {e}")
@@ -2346,10 +2356,12 @@ class MISPToNeo4jSync:
             for tool in tools:
                 try:
                     source_id = tool.get("tag", "misp")
-                    self.neo4j.merge_tool(tool, source_id=source_id)
-                    self.stats.setdefault("tools_synced", 0)
-                    self.stats["tools_synced"] += 1
-                    success += 1
+                    if self.neo4j.merge_tool(tool, source_id=source_id):
+                        self.stats.setdefault("tools_synced", 0)
+                        self.stats["tools_synced"] += 1
+                        success += 1
+                    else:
+                        errors += 1
                 except Exception as e:
                     tool_name = tool.get("name", "unknown")[:30]
                     logger.warning(f"[WARN] Error syncing tool ({tool_name}): {type(e).__name__}: {e}")
