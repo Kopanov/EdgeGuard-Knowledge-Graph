@@ -2715,8 +2715,6 @@ class MISPToNeo4jSync:
 
         return total_parsed, total_cross_rels, total_errors
 
-    # Maximum items to feed into co-occurrence builder from paged events (O(n²) guard)
-    _MAX_COOCCURRENCE_PAGED_ITEMS = 5000
 
     def run(self, incremental: bool = True, since: datetime = None, sector: str = None) -> bool:
         """
