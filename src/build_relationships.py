@@ -136,8 +136,10 @@ def build_relationships():
             "Indicator → Malware (co-occurrence)",
             """
             MATCH (i:Indicator)
-            WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-            MATCH (m:Malware {misp_event_id: i.misp_event_id})
+            WHERE size(coalesce(i.misp_event_ids, [])) > 0
+            UNWIND i.misp_event_ids AS eid
+            WITH i, eid
+            MATCH (m:Malware {misp_event_id: eid})
             MERGE (i)-[r:INDICATES]->(m)
             SET r.confidence_score = 0.5,
                 r.match_type = 'misp_cooccurrence',
