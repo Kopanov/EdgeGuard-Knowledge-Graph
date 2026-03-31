@@ -1626,6 +1626,35 @@ class MISPToNeo4jSync:
         malware_items = [i for i in items if i.get("type") == "malware"]
         indicators = [i for i in items if i.get("indicator_type") or i.get("type") == "indicator"]
 
+        # Type-based sampling caps to prevent O(n²) blowup on large events.
+        # Each cross-product is capped independently; smaller entity types (actors,
+        # techniques, malware) keep all items, only indicators are sampled.
+        _MAX_ACTORS = 500
+        _MAX_TECHNIQUES = 500
+        _MAX_MALWARE = 500
+        _MAX_INDICATORS = 2000
+        _MAX_VULNS = 1000
+
+        sampled = False
+        if len(actors) > _MAX_ACTORS:
+            logger.info("Sampling actors: %s → %s", len(actors), _MAX_ACTORS)
+            actors = actors[:_MAX_ACTORS]
+            sampled = True
+        if len(techniques) > _MAX_TECHNIQUES:
+            logger.info("Sampling techniques: %s → %s", len(techniques), _MAX_TECHNIQUES)
+            techniques = techniques[:_MAX_TECHNIQUES]
+            sampled = True
+        if len(malware_items) > _MAX_MALWARE:
+            logger.info("Sampling malware: %s → %s", len(malware_items), _MAX_MALWARE)
+            malware_items = malware_items[:_MAX_MALWARE]
+            sampled = True
+        if len(indicators) > _MAX_INDICATORS:
+            logger.info("Sampling indicators: %s → %s", len(indicators), _MAX_INDICATORS)
+            indicators = indicators[:_MAX_INDICATORS]
+            sampled = True
+        if sampled:
+            logger.info("Type-based sampling applied to keep cross-products manageable")
+
         # Build actor -> technique relationships (USES)
         # When an event has both actors and techniques, assume the actors use those techniques
         for actor in actors:
@@ -1634,9 +1663,9 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "USES",
                         "from_type": "ThreatActor",
-                        "from_key": {"name": actor["name"], "tag": actor.get("tag", "misp")},
+                        "from_key": {"name": actor["name"]},
                         "to_type": "Technique",
-                        "to_key": {"mitre_id": technique["mitre_id"], "tag": technique.get("tag", "misp")},
+                        "to_key": {"mitre_id": technique["mitre_id"]},
                         "confidence": 0.7,
                     }
                 )
@@ -1649,9 +1678,9 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "ATTRIBUTED_TO",
                         "from_type": "Malware",
-                        "from_key": {"name": malware["name"], "tag": malware.get("tag", "misp")},
+                        "from_key": {"name": malware["name"]},
                         "to_type": "ThreatActor",
-                        "to_key": {"name": actor["name"], "tag": actor.get("tag", "misp")},
+                        "to_key": {"name": actor["name"]},
                         "confidence": 0.6,
                     }
                 )
@@ -1673,7 +1702,7 @@ class MISPToNeo4jSync:
                                 "tag": indicator.get("tag", "misp"),
                             },
                             "to_type": "Malware",
-                            "to_key": {"name": malware["name"], "tag": malware.get("tag", "misp")},
+                            "to_key": {"name": malware["name"]},
                             "confidence": 0.6,
                         }
                     )
@@ -1682,6 +1711,9 @@ class MISPToNeo4jSync:
         # Indicators in the same MISP event as a CVE are likely exploiting it.
         # Only items we can key by CVE (value-only MISP vulnerability attributes included).
         vulnerabilities = [i for i in items if resolve_vulnerability_cve_id(i) is not None]
+        if len(vulnerabilities) > _MAX_VULNS:
+            logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
+            vulnerabilities = vulnerabilities[:_MAX_VULNS]
         for indicator in indicators:
             for vuln in vulnerabilities:
                 indicator_value = indicator.get("value")
@@ -1697,7 +1729,7 @@ class MISPToNeo4jSync:
                                 "tag": indicator.get("tag", "misp"),
                             },
                             "to_type": "Vulnerability",
-                            "to_key": {"cve_id": cve_id, "tag": vuln.get("tag", "misp")},
+                            "to_key": {"cve_id": cve_id},
                             "confidence": 0.7,
                         }
                     )
@@ -1724,7 +1756,7 @@ class MISPToNeo4jSync:
                                 {
                                     "rel_type": "TARGETS",
                                     "from_type": "Vulnerability",
-                                    "from_key": {"cve_id": cve_id, "tag": source_id},
+                                    "from_key": {"cve_id": cve_id},
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
@@ -1739,7 +1771,7 @@ class MISPToNeo4jSync:
                                 {
                                     "rel_type": "TARGETS",
                                     "from_type": "Indicator",
-                                    "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                                    "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
@@ -2050,7 +2082,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "INDICATES",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
                         "to_type": "Malware",
                         "to_key": {"name": malware_name, "tag": source_id},
                         "confidence": confidence,
@@ -2063,7 +2095,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "TARGETS",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
@@ -2079,7 +2111,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "EXPLOITS",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": item.get("tag", "misp")},
                         "to_type": "Vulnerability",
                         "to_key": {"cve_id": exp_cve, "tag": source_id},
                         "confidence": confidence,
@@ -2553,17 +2585,8 @@ class MISPToNeo4jSync:
 
         unique_event_items = _dedupe_parsed_items(event_items)
 
-        # Guard against O(n²) blowup on dense events (same cap as paged path).
-        if len(unique_event_items) > self._MAX_COOCCURRENCE_PAGED_ITEMS:
-            logger.warning(
-                "Event %s: %s unique items exceeds co-occurrence cap (%s) — skipping cross-item relationships to avoid O(n²) blowup",
-                event_id,
-                len(unique_event_items),
-                self._MAX_COOCCURRENCE_PAGED_ITEMS,
-            )
-            cross_rels = []
-        else:
-            cross_rels = self._build_cross_item_relationships(unique_event_items)
+        # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
+        cross_rels = self._build_cross_item_relationships(unique_event_items)
 
         logger.info(
             "Event %s: %s parsed -> %s unique items; %s embedded rel defs; %s cross-item rel defs",
@@ -2576,10 +2599,13 @@ class MISPToNeo4jSync:
 
         _s, ev_errors, _u = self.sync_to_neo4j(unique_event_items)
 
-        rel_batch = event_embedded_rels + cross_rels
-        if rel_batch:
-            logger.info("Event %s: creating %s relationships...", event_id, len(rel_batch))
-            rels_created = self._create_relationships(rel_batch, "misp")
+        if event_embedded_rels:
+            rels_created = self._create_relationships(event_embedded_rels, "misp")
+            self.stats["relationships_created"] += rels_created
+        if cross_rels:
+            # Cross-item (co-occurrence) rels use distinct source_id so calibration
+            # job can find and rescore them by MISP event size.
+            rels_created = self._create_relationships(cross_rels, "misp_cooccurrence")
             self.stats["relationships_created"] += rels_created
 
         return len(event_items), len(cross_rels), ev_errors
@@ -2664,23 +2690,15 @@ class MISPToNeo4jSync:
 
         # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
         # Uses the lightweight accumulator, not the full parsed items.
-        # Guard against O(n²) blowup on very large events.
+        # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
         cross_rels = []
-        if _rel_items and len(_rel_items) > self._MAX_COOCCURRENCE_PAGED_ITEMS:
-            logger.warning(
-                "Event %s: %s items exceeds co-occurrence cap (%s) — skipping cross-item relationships to avoid O(n²) blowup",
-                event_id,
-                len(_rel_items),
-                self._MAX_COOCCURRENCE_PAGED_ITEMS,
-            )
-            _rel_items = []
         if _rel_items:
             cross_rels = self._build_cross_item_relationships(_rel_items)
             if cross_rels:
                 logger.info(
                     "Event %s: building %s cross-item relationships from all pages...", event_id, len(cross_rels)
                 )
-                rels_created = self._create_relationships(cross_rels, "misp")
+                rels_created = self._create_relationships(cross_rels, "misp_cooccurrence")
                 self.stats["relationships_created"] += rels_created
                 total_cross_rels += rels_created
             del _rel_items
