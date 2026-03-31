@@ -1481,7 +1481,7 @@ def run_enrichment_jobs(**context):
 build_relationships_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
-    execution_timeout=timedelta(minutes=60),
+    execution_timeout=timedelta(hours=3),
     dag=neo4j_sync_dag,
 )
 

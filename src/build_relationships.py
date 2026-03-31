@@ -135,14 +135,9 @@ def build_relationships():
             client,
             "Indicator → Malware (co-occurrence)",
             """
-            MATCH (i:Indicator), (m:Malware)
+            MATCH (i:Indicator)
             WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-              AND (
-                  i.misp_event_id = m.misp_event_id
-                  OR i.misp_event_id IN coalesce(m.misp_event_ids, [])
-                  OR m.misp_event_id IN coalesce(i.misp_event_ids, [])
-                  OR size(apoc.coll.intersection(coalesce(i.misp_event_ids, []), coalesce(m.misp_event_ids, []))) > 0
-              )
+            MATCH (m:Malware {misp_event_id: i.misp_event_id})
             MERGE (i)-[r:INDICATES]->(m)
             SET r.confidence_score = 0.5,
                 r.match_type = 'misp_cooccurrence',
