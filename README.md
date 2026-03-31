@@ -30,7 +30,7 @@
 
 ## 🤔 What is EdgeGuard?
 
-EdgeGuard is a **Knowledge Graph framework** that merges threat intelligence from 11+ collectors into **MISP as the single source of truth**, then links the most important data from **Energy, Healthcare, and Finance** sectors — enriched with global intelligence — into a **Neo4j knowledge graph**. The architecture goes both ways: **Neo4j is the linked intelligence layer** for fast graph queries and cross-source correlation, while **MISP holds the ground truth** with full provenance, raw data, and audit trails. Every node in Neo4j traces back to its MISP source events, so analysts can always verify the raw evidence behind any graph insight.
+As part of the **EdgeGuard framework** for Graph-Augmented xAI on edge infrastructure, **EdgeGuard-Knowledge-Graph** is the first module — responsible for collecting, linking, and enriching threat intelligence. It merges data from 11+ collectors into **MISP as the single source of truth**, then links the most important data from **Energy, Healthcare, and Finance** sectors — enriched with global intelligence — into a **Neo4j knowledge graph**. The architecture goes both ways: **Neo4j is the linked intelligence layer** for fast graph queries and cross-source correlation, while **MISP holds the ground truth** with full provenance, raw data, and audit trails. Every node in Neo4j traces back to its MISP source events, so analysts can always verify the raw evidence behind any graph insight. In later stages, a fine-tuned LLM/SLM layer will add explainable AI (xAI) capabilities on top of this knowledge graph.
 
 ### What it does
 
