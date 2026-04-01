@@ -348,7 +348,7 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
         elif item.get("name"):
             key = f"{item['type']}:{item['name']}"  # no tag — entity merges on name only
         elif item.get("mitre_id"):
-            key = f"technique:{item['mitre_id']}"  # no tag — technique merges on mitre_id only
+            key = f"{item.get('type', 'technique')}:{item['mitre_id']}"  # no tag — merges on mitre_id only
         else:
             logger.debug("Dedup: dropping item with no identifiable key (type=%s, tag=%s)", item.get("type"), tag)
             _dropped += 1
