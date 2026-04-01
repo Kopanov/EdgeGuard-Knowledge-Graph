@@ -2061,64 +2061,64 @@ class MISPToNeo4jSync:
             return item, relationships
 
         # Handle MITRE technique (text format "T1234: Name") — exclude "TA" (tactics, handled below)
-        elif attr_type == "text" and value.startswith("T") and not value.startswith("TA"):
+        elif attr_type == "text" and len(value) >= 5 and value[0] == "T" and value[1:5].isdigit():
+            # MITRE technique format: T followed by 4 digits (T1059, T1059.001)
             parts = value.split(": ", 1)
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
 
-            if mitre_id.startswith("T") and len(mitre_id) >= 5:
-                platforms = []
-                for tag in tags:
-                    tag_name = tag.get("name", "")
-                    if tag_name.startswith("platform:"):
-                        platforms.append(tag_name.replace("platform:", ""))
+            platforms = []
+            for tag in tags:
+                tag_name = tag.get("name", "")
+                if tag_name.startswith("platform:"):
+                    platforms.append(tag_name.replace("platform:", ""))
 
-                item = {
-                    "type": "technique",
-                    "mitre_id": mitre_id,
-                    "name": name,
-                    "description": attr.get("comment", ""),
-                    "zone": zones,  # zone is now an array
-                    "tag": source_id,
-                    "source": [source_id],
-                    "platforms": platforms,
-                    "first_seen": _coerce_to_iso(event_info.get("date")),
-                    "last_updated": _coerce_to_iso(attr.get("timestamp")),
-                    "confidence_score": 0.8,  # MITRE is authoritative
-                    "misp_event_id": str(event_info.get("id", "")),
-                    "relationships": relationships,
-                }
-                return item, relationships
+            item = {
+                "type": "technique",
+                "mitre_id": mitre_id,
+                "name": name,
+                "description": attr.get("comment", ""),
+                "zone": zones,
+                "tag": source_id,
+                "source": [source_id],
+                "platforms": platforms,
+                "first_seen": _coerce_to_iso(event_info.get("date")),
+                "last_updated": _coerce_to_iso(attr.get("timestamp")),
+                "confidence_score": 0.8,
+                "misp_event_id": str(event_info.get("id", "")),
+                "relationships": relationships,
+            }
+            return item, relationships
 
         # Handle MITRE tactic (text format "TA0001: Name")
-        elif attr_type == "text" and value.startswith("TA"):
+        elif attr_type == "text" and len(value) >= 5 and value.startswith("TA") and value[2:5].isdigit():
+            # MITRE tactic format: "TA0001: Initial Access" (TA + 4 digits + ": Name")
             parts = value.split(": ", 1)
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
 
-            if mitre_id.startswith("TA") and len(mitre_id) >= 5:
-                shortname = ""
-                for tag in tags:
-                    tag_name = tag.get("name", "")
-                    if tag_name.startswith("mitre-tactic:"):
-                        shortname = tag_name.replace("mitre-tactic:", "")
-                        break
+            shortname = ""
+            for tag in tags:
+                tag_name = tag.get("name", "")
+                if tag_name.startswith("mitre-tactic:"):
+                    shortname = tag_name.replace("mitre-tactic:", "")
+                    break
 
-                item = {
-                    "type": "tactic",
-                    "mitre_id": mitre_id,
-                    "name": name,
-                    "shortname": shortname,
-                    "description": attr.get("comment", ""),
-                    "zone": zones,
-                    "tag": source_id,
-                    "source": [source_id],
-                    "first_seen": _coerce_to_iso(event_info.get("date")),
-                    "last_updated": _coerce_to_iso(attr.get("timestamp")),
-                    "confidence_score": 0.95,  # MITRE ATT&CK range
-                    "misp_event_id": str(event_info.get("id", "")),
-                }
-                return item, []
+            item = {
+                "type": "tactic",
+                "mitre_id": mitre_id,
+                "name": name,
+                "shortname": shortname,
+                "description": attr.get("comment", ""),
+                "zone": zones,
+                "tag": source_id,
+                "source": [source_id],
+                "first_seen": _coerce_to_iso(event_info.get("date")),
+                "last_updated": _coerce_to_iso(attr.get("timestamp")),
+                "confidence_score": 0.95,  # MITRE ATT&CK range
+                "misp_event_id": str(event_info.get("id", "")),
+            }
+            return item, []
 
         # Handle MITRE tool (text format "S0001: Name")
         elif attr_type == "text" and len(value) >= 5 and value[0] == "S" and value[1:5].isdigit():
