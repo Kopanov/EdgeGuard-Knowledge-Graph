@@ -337,17 +337,18 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
         if _item_is_vulnerability_sync_bucket(item):
             cid = resolve_vulnerability_cve_id(item)
             if cid:
-                key = f"cve:{cid}:{tag}"
+                key = f"cve:{cid}"  # no tag — CVE merges on cve_id only
             else:
                 logger.debug("Dedup: dropping vulnerability with unresolvable CVE ID (tag=%s)", tag)
                 _dropped += 1
                 continue
         elif item.get("value"):
+            # Indicators keep tag in key (Indicator MERGE key includes tag)
             key = f"{item.get('indicator_type', 'unknown')}:{item['value']}:{tag}"
         elif item.get("name"):
-            key = f"{item['type']}:{item['name']}:{tag}"
+            key = f"{item['type']}:{item['name']}"  # no tag — entity merges on name only
         elif item.get("mitre_id"):
-            key = f"technique:{item['mitre_id']}:{tag}"
+            key = f"technique:{item['mitre_id']}"  # no tag — technique merges on mitre_id only
         else:
             logger.debug("Dedup: dropping item with no identifiable key (type=%s, tag=%s)", item.get("type"), tag)
             _dropped += 1
@@ -2089,6 +2090,76 @@ class MISPToNeo4jSync:
                 }
                 return item, relationships
 
+        # Handle MITRE tactic (text format "TA0001: Name")
+        elif attr_type == "text" and value.startswith("TA"):
+            parts = value.split(": ", 1)
+            mitre_id = parts[0]
+            name = parts[1] if len(parts) > 1 else ""
+
+            if mitre_id.startswith("TA") and len(mitre_id) >= 5:
+                shortname = ""
+                for tag in tags:
+                    tag_name = tag.get("name", "")
+                    if tag_name.startswith("mitre-tactic:"):
+                        shortname = tag_name.replace("mitre-tactic:", "")
+                        break
+
+                item = {
+                    "type": "tactic",
+                    "mitre_id": mitre_id,
+                    "name": name,
+                    "shortname": shortname,
+                    "description": attr.get("comment", ""),
+                    "zone": zones,
+                    "tag": source_id,
+                    "source": [source_id],
+                    "first_seen": _coerce_to_iso(event_info.get("date")),
+                    "last_updated": _coerce_to_iso(attr.get("timestamp")),
+                    "confidence_score": 1.0,
+                    "misp_event_id": str(event_info.get("id", "")),
+                }
+                return item, []
+
+        # Handle MITRE tool (text format "S0001: Name")
+        elif attr_type == "text" and value.startswith("S"):
+            parts = value.split(": ", 1)
+            mitre_id = parts[0]
+            name = parts[1] if len(parts) > 1 else ""
+
+            if mitre_id.startswith("S") and len(mitre_id) >= 5:
+                # Extract uses_techniques from MITRE_USES_TECHNIQUES comment
+                uses_techniques = []
+                raw_comment = attr.get("comment", "")
+                if "MITRE_USES_TECHNIQUES:" in raw_comment:
+                    try:
+                        uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
+                        uses_techniques = json.loads(uses_json)
+                    except (ValueError, IndexError):
+                        pass
+
+                tool_types = []
+                for tag in tags:
+                    tag_name = tag.get("name", "")
+                    if tag_name.startswith("tool-type:"):
+                        tool_types.append(tag_name.replace("tool-type:", ""))
+
+                item = {
+                    "type": "tool",
+                    "mitre_id": mitre_id,
+                    "name": name,
+                    "description": attr.get("comment", ""),
+                    "zone": zones,
+                    "tag": source_id,
+                    "source": [source_id],
+                    "tool_types": tool_types,
+                    "uses_techniques": uses_techniques,
+                    "first_seen": _coerce_to_iso(event_info.get("date")),
+                    "last_updated": _coerce_to_iso(attr.get("timestamp")),
+                    "confidence_score": 0.9,
+                    "misp_event_id": str(event_info.get("id", "")),
+                }
+                return item, []
+
         # Handle indicators (IP, domain, hash, etc.)
         else:
             indicator_type = self.TYPE_MAPPING.get(attr_type, "unknown")
@@ -2290,26 +2361,22 @@ class MISPToNeo4jSync:
                         errors += 1
 
             if plain_vulns:
-                by_source: dict = {}
+                # Plain CVEs (no CVSS sub-nodes) also use merge_cve() to ensure :CVE label
+                # consistency. Previously used merge_vulnerabilities_batch() which created
+                # :Vulnerability nodes — wrong label for CVEs.
+                logger.info(f"  Processing {len(plain_vulns)} plain CVEs (no CVSS sub-nodes)...")
                 for vuln in plain_vulns:
                     src = vuln.get("tag", "misp")
-                    if src not in by_source:
-                        by_source[src] = []
-                    by_source[src].append(vuln)
-
-                for source_id, source_vulns in by_source.items():
                     try:
-                        batch_success, batch_errors = self.neo4j.merge_vulnerabilities_batch(
-                            source_vulns, source_id=source_id
-                        )
-                        success += batch_success
-                        errors += batch_errors
-                        self.stats["vulnerabilities_synced"] += batch_success
-                        logger.info(f"  ✓ {source_id}: {batch_success} vulnerabilities")
+                        if self.neo4j.merge_cve(vuln, source_id=src):
+                            self.stats["vulnerabilities_synced"] += 1
+                            success += 1
+                        else:
+                            errors += 1
                     except Exception as e:
-                        logger.error(f"Batch vulnerability sync error for {source_id}: {e}")
-                        self.neo4j_circuit.record_failure()
-                        errors += len(source_vulns)
+                        cve_id = vuln.get("cve_id", "?")[:20]
+                        logger.warning(f"[WARN] Error syncing plain CVE ({cve_id}): {type(e).__name__}: {e}")
+                        errors += 1
 
         if tactics:
             logger.info(f"Processing {len(tactics)} tactics...")
