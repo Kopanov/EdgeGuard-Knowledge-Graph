@@ -2060,8 +2060,8 @@ class MISPToNeo4jSync:
             }
             return item, relationships
 
-        # Handle MITRE technique (text format "T1234: Name")
-        elif attr_type == "text" and value.startswith("T"):
+        # Handle MITRE technique (text format "T1234: Name") — exclude "TA" (tactics, handled below)
+        elif attr_type == "text" and value.startswith("T") and not value.startswith("TA"):
             parts = value.split(": ", 1)
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
@@ -2115,7 +2115,7 @@ class MISPToNeo4jSync:
                     "source": [source_id],
                     "first_seen": _coerce_to_iso(event_info.get("date")),
                     "last_updated": _coerce_to_iso(attr.get("timestamp")),
-                    "confidence_score": 1.0,
+                    "confidence_score": 0.95,  # MITRE ATT&CK range
                     "misp_event_id": str(event_info.get("id", "")),
                 }
                 return item, []
@@ -2128,12 +2128,21 @@ class MISPToNeo4jSync:
 
             if mitre_id.startswith("S") and len(mitre_id) >= 5:
                 # Extract uses_techniques from MITRE_USES_TECHNIQUES comment
+                # Format: "MITRE_USES_TECHNIQUES:{"t":["T1059","T1071"]}\nDescription..."
                 uses_techniques = []
                 raw_comment = attr.get("comment", "")
                 if "MITRE_USES_TECHNIQUES:" in raw_comment:
                     try:
                         uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
-                        uses_techniques = json.loads(uses_json)
+                        # Strip trailing description after newline before JSON parse
+                        if "\n" in uses_json:
+                            uses_json = uses_json.split("\n", 1)[0].strip()
+                        parsed = json.loads(uses_json)
+                        # Extract "t" key from metadata dict (same pattern as malware handler)
+                        if isinstance(parsed, dict):
+                            uses_techniques = parsed.get("t", [])
+                        elif isinstance(parsed, list):
+                            uses_techniques = parsed
                     except (ValueError, IndexError):
                         pass
 
