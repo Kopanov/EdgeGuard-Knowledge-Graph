@@ -884,6 +884,7 @@ class Neo4jClient:
         ON CREATE SET r.imported_at = datetime()
         SET r.raw_data = $raw_data,
             r.confidence = $confidence,
+            r.source = $source_id,
             r.updated_at = datetime(),
             r.edgeguard_managed = true
         """
@@ -1290,6 +1291,7 @@ class Neo4jClient:
                 ON CREATE SET r.imported_at = datetime()
                 SET r.raw_data = item.raw_data,
                     r.confidence = item.confidence,
+                    r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true
                 """
@@ -1412,6 +1414,7 @@ class Neo4jClient:
                 ON CREATE SET r.imported_at = datetime()
                 SET r.raw_data = item.raw_data,
                     r.confidence = item.confidence,
+                    r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true
                 """

@@ -1531,7 +1531,7 @@ baseline_dag = DAG(
 )
 
 
-def get_baseline_config() -> tuple:
+def get_baseline_config(context=None) -> tuple:
     """
     Read baseline collection settings from Airflow Variables, then apply optional
     environment overrides (handy for Docker Compose / .env smoke tests).
@@ -1591,32 +1591,51 @@ def get_baseline_config() -> tuple:
         except ValueError:
             logger.warning(f"[BASELINE] Ignoring invalid EDGEGUARD_BASELINE_DAYS={env_days!r}")
 
+    # DAG trigger conf override (highest priority — from Airflow UI or API)
+    if context:
+        dag_run = context.get("dag_run")
+        dag_conf = getattr(dag_run, "conf", None) or {} if dag_run else {}
+        if "baseline_days" in dag_conf:
+            try:
+                baseline_days = int(dag_conf["baseline_days"])
+                logger.info(f"[BASELINE] dag_run.conf override → baseline_days={baseline_days}")
+            except (ValueError, TypeError):
+                logger.warning(f"[BASELINE] Invalid dag_run.conf baseline_days={dag_conf['baseline_days']!r}")
+        if "baseline_collection_limit" in dag_conf:
+            try:
+                limit = int(dag_conf["baseline_collection_limit"])
+                logger.info(f"[BASELINE] dag_run.conf override → limit={limit}")
+            except (ValueError, TypeError):
+                logger.warning(
+                    f"[BASELINE] Invalid dag_run.conf baseline_collection_limit={dag_conf['baseline_collection_limit']!r}"
+                )
+
     # 0 or negative → no cap (pass None to collectors)
     effective_limit = None if limit <= 0 else limit
     logger.info(f"[BASELINE] Config — limit={effective_limit or 'unlimited'}, baseline_days={baseline_days}")
     return effective_limit, baseline_days
 
 
-def run_baseline_collector(collector_name: str, collector_class, **kwargs):
+def run_baseline_collector(collector_name: str, collector_class, context=None, **kwargs):
     """
     Run a single collector in baseline mode.
 
-    Reads BASELINE_COLLECTION_LIMIT and BASELINE_DAYS from Airflow Variables
-    at runtime so the values can be changed without re-deploying the DAG.
-
-    Requests baseline collection: passes ``baseline`` / ``baseline_days`` into ``collect()``
-    only when that method accepts them; otherwise ``run_collector_with_metrics`` resolves
-    ``limit`` so ``limit=None`` still means unlimited baseline (not the incremental default).
+    Reads BASELINE_COLLECTION_LIMIT and BASELINE_DAYS from (in priority order):
+    1. dag_run.conf (from Airflow UI trigger or API)
+    2. Environment variables (EDGEGUARD_BASELINE_DAYS, etc.)
+    3. Airflow Variables (BASELINE_DAYS, etc.)
+    4. Defaults (730 days, unlimited items)
 
     Parameters
     ----------
     collector_name  : label for logging / metrics
     collector_class : the collector class to instantiate
+    context         : Airflow task context (for dag_run.conf overrides)
     **kwargs        : passed through to the collector constructor
     """
     from collectors.misp_writer import MISPWriter
 
-    limit, baseline_days = get_baseline_config()
+    limit, baseline_days = get_baseline_config(context=context)
     writer = MISPWriter()
     logger.info(f"[BASELINE] Starting {collector_name} — limit={limit or 'unlimited'}, baseline_days={baseline_days}")
 
@@ -1634,61 +1653,61 @@ def run_baseline_collector(collector_name: str, collector_class, **kwargs):
 def run_baseline_otx(**context):
     from collectors.otx_collector import OTXCollector
 
-    return run_baseline_collector("otx", OTXCollector)
+    return run_baseline_collector("otx", OTXCollector, context=context)
 
 
 def run_baseline_nvd(**context):
     from collectors.nvd_collector import NVDCollector
 
-    return run_baseline_collector("nvd", NVDCollector)
+    return run_baseline_collector("nvd", NVDCollector, context=context)
 
 
 def run_baseline_cisa(**context):
     from collectors.cisa_collector import CISACollector
 
-    return run_baseline_collector("cisa", CISACollector)
+    return run_baseline_collector("cisa", CISACollector, context=context)
 
 
 def run_baseline_mitre(**context):
     from collectors.mitre_collector import MITRECollector
 
-    return run_baseline_collector("mitre", MITRECollector)
+    return run_baseline_collector("mitre", MITRECollector, context=context)
 
 
 def run_baseline_abuseipdb(**context):
     from collectors.abuseipdb_collector import AbuseIPDBCollector
 
-    return run_baseline_collector("abuseipdb", AbuseIPDBCollector)
+    return run_baseline_collector("abuseipdb", AbuseIPDBCollector, context=context)
 
 
 def run_baseline_threatfox(**context):
     from collectors.global_feed_collector import ThreatFoxCollector
 
-    return run_baseline_collector("threatfox", ThreatFoxCollector)
+    return run_baseline_collector("threatfox", ThreatFoxCollector, context=context)
 
 
 def run_baseline_urlhaus(**context):
     from collectors.global_feed_collector import URLhausCollector
 
-    return run_baseline_collector("urlhaus", URLhausCollector)
+    return run_baseline_collector("urlhaus", URLhausCollector, context=context)
 
 
 def run_baseline_cybercure(**context):
     from collectors.global_feed_collector import CyberCureCollector
 
-    return run_baseline_collector("cybercure", CyberCureCollector)
+    return run_baseline_collector("cybercure", CyberCureCollector, context=context)
 
 
 def run_baseline_feodo(**context):
     from collectors.finance_feed_collector import FeodoCollector
 
-    return run_baseline_collector("feodo", FeodoCollector)
+    return run_baseline_collector("feodo", FeodoCollector, context=context)
 
 
 def run_baseline_sslblacklist(**context):
     from collectors.finance_feed_collector import SSLBlacklistCollector
 
-    return run_baseline_collector("sslbl", SSLBlacklistCollector)
+    return run_baseline_collector("sslbl", SSLBlacklistCollector, context=context)
 
 
 def run_baseline_full_sync(**context):
