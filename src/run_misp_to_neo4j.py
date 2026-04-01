@@ -2121,53 +2121,56 @@ class MISPToNeo4jSync:
                 return item, []
 
         # Handle MITRE tool (text format "S0001: Name")
-        elif attr_type == "text" and value.startswith("S"):
+        elif attr_type == "text" and value.startswith("S") and len(value.split(": ", 1)[0]) >= 5:
             parts = value.split(": ", 1)
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
 
-            if mitre_id.startswith("S") and len(mitre_id) >= 5:
-                # Extract uses_techniques from MITRE_USES_TECHNIQUES comment
-                # Format: "MITRE_USES_TECHNIQUES:{"t":["T1059","T1071"]}\nDescription..."
-                uses_techniques = []
-                raw_comment = attr.get("comment", "")
-                if "MITRE_USES_TECHNIQUES:" in raw_comment:
-                    try:
-                        uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
-                        # Strip trailing description after newline before JSON parse
-                        if "\n" in uses_json:
-                            uses_json = uses_json.split("\n", 1)[0].strip()
-                        parsed = json.loads(uses_json)
-                        # Extract "t" key from metadata dict (same pattern as malware handler)
-                        if isinstance(parsed, dict):
-                            uses_techniques = parsed.get("t", [])
-                        elif isinstance(parsed, list):
-                            uses_techniques = parsed
-                    except (ValueError, IndexError):
-                        pass
+            # Extract uses_techniques from MITRE_USES_TECHNIQUES comment
+            # Format: "MITRE_USES_TECHNIQUES:{"t":["T1059","T1071"]}\nDescription..."
+            uses_techniques = []
+            description = ""
+            raw_comment = attr.get("comment", "")
+            if "MITRE_USES_TECHNIQUES:" in raw_comment:
+                try:
+                    uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
+                    if "\n" in uses_json:
+                        json_part, description = uses_json.split("\n", 1)
+                        description = description.strip()
+                    else:
+                        json_part = uses_json
+                    parsed = json.loads(json_part)
+                    if isinstance(parsed, dict):
+                        uses_techniques = parsed.get("t", [])
+                    elif isinstance(parsed, list):
+                        uses_techniques = parsed
+                except (ValueError, IndexError):
+                    description = raw_comment
+            else:
+                description = raw_comment
 
-                tool_types = []
-                for tag in tags:
-                    tag_name = tag.get("name", "")
-                    if tag_name.startswith("tool-type:"):
-                        tool_types.append(tag_name.replace("tool-type:", ""))
+            tool_types = []
+            for tag in tags:
+                tag_name = tag.get("name", "")
+                if tag_name.startswith("tool-type:"):
+                    tool_types.append(tag_name.replace("tool-type:", ""))
 
-                item = {
-                    "type": "tool",
-                    "mitre_id": mitre_id,
-                    "name": name,
-                    "description": attr.get("comment", ""),
-                    "zone": zones,
-                    "tag": source_id,
-                    "source": [source_id],
-                    "tool_types": tool_types,
-                    "uses_techniques": uses_techniques,
-                    "first_seen": _coerce_to_iso(event_info.get("date")),
-                    "last_updated": _coerce_to_iso(attr.get("timestamp")),
-                    "confidence_score": 0.9,
-                    "misp_event_id": str(event_info.get("id", "")),
-                }
-                return item, []
+            item = {
+                "type": "tool",
+                "mitre_id": mitre_id,
+                "name": name,
+                "description": description,
+                "zone": zones,
+                "tag": source_id,
+                "source": [source_id],
+                "tool_types": tool_types,
+                "uses_techniques": uses_techniques,
+                "first_seen": _coerce_to_iso(event_info.get("date")),
+                "last_updated": _coerce_to_iso(attr.get("timestamp")),
+                "confidence_score": 0.9,
+                "misp_event_id": str(event_info.get("id", "")),
+            }
+            return item, []
 
         # Handle indicators (IP, domain, hash, etc.)
         else:
@@ -2299,14 +2302,14 @@ class MISPToNeo4jSync:
                 vulnerabilities.append(item)
             elif item_type == "tactic":
                 tactics.append(item)
+            elif item_type == "tool":
+                tools.append(item)
             elif item_type == "technique" or item.get("mitre_id"):
                 techniques.append(item)
             elif item_type == "malware":
                 malware_items.append(item)
             elif item_type == "actor":
                 actors.append(item)
-            elif item_type == "tool":
-                tools.append(item)
             elif item.get("indicator_type") and item.get("value"):
                 indicators.append(item)
             else:
