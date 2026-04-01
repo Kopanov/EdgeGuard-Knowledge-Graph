@@ -2121,7 +2121,8 @@ class MISPToNeo4jSync:
                 return item, []
 
         # Handle MITRE tool (text format "S0001: Name")
-        elif attr_type == "text" and value.startswith("S") and len(value.split(": ", 1)[0]) >= 5:
+        elif attr_type == "text" and len(value) >= 5 and value[0] == "S" and value[1:5].isdigit():
+            # MITRE tool format: "S0154: Cobalt Strike" (S + 4 digits + ": Name")
             parts = value.split(": ", 1)
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
