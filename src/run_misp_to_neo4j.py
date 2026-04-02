@@ -345,10 +345,12 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
         elif item.get("value"):
             # Indicators keep tag in key (Indicator MERGE key includes tag)
             key = f"{item.get('indicator_type', 'unknown')}:{item['value']}:{tag}"
-        elif item.get("name"):
-            key = f"{item['type']}:{item['name']}"  # no tag — entity merges on name only
         elif item.get("mitre_id"):
-            key = f"{item.get('type', 'technique')}:{item['mitre_id']}"  # no tag — merges on mitre_id only
+            # Techniques, tactics, tools merge on mitre_id — check BEFORE name
+            key = f"{item.get('type', 'technique')}:{item['mitre_id']}"
+        elif item.get("name"):
+            # Actors, malware merge on name only
+            key = f"{item['type']}:{item['name']}"
         else:
             logger.debug("Dedup: dropping item with no identifiable key (type=%s, tag=%s)", item.get("type"), tag)
             _dropped += 1
