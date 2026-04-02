@@ -1484,6 +1484,7 @@ class Neo4jClient:
         MATCH (t:Technique {mitre_id: $technique_mitre_id})
         MERGE (a)-[r:USES]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1531,6 +1532,7 @@ class Neo4jClient:
         WHERE (a.name = $actor_name OR $actor_name IN coalesce(a.aliases, []))
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1575,6 +1577,7 @@ class Neo4jClient:
         MATCH (v:Vulnerability {cve_id: $cve_id})
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1585,6 +1588,7 @@ class Neo4jClient:
         MATCH (v:CVE {cve_id: $cve_id})
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1623,6 +1627,7 @@ class Neo4jClient:
         WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.6,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1668,6 +1673,7 @@ class Neo4jClient:
         MATCH (s:Sector {name: $sector_name})
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
@@ -1712,6 +1718,7 @@ class Neo4jClient:
 
         rel_props = """
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+            r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
