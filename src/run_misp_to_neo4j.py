@@ -1889,7 +1889,7 @@ class MISPToNeo4jSync:
             # Parse NVD_META JSON from comment (written by MISPWriter for NVD-sourced CVEs).
             # This restores the full CVSS/CWE/ref_tags payload so merge_cve() can create
             # CVSSv4/v3.1/v3.0/v2 sub-nodes without calling NVD again.
-            raw_comment = attr.get("comment", "")
+            raw_comment = attr.get("comment", "") or ""
             nvd_meta: dict = {}
             if raw_comment.startswith("NVD_META:"):
                 try:
@@ -2133,7 +2133,7 @@ class MISPToNeo4jSync:
             # Format: "MITRE_USES_TECHNIQUES:{"t":["T1059","T1071"]}\nDescription..."
             uses_techniques = []
             description = ""
-            raw_comment = attr.get("comment", "")
+            raw_comment = attr.get("comment", "") or ""
             if "MITRE_USES_TECHNIQUES:" in raw_comment:
                 try:
                     uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
@@ -2228,7 +2228,7 @@ class MISPToNeo4jSync:
 
             # Parse OTX_META or TF_META JSON from comment (written by MISPWriter).
             # Mirrors the NVD_META pattern for vulnerability attributes.
-            raw_comment = attr.get("comment", "")
+            raw_comment = attr.get("comment", "") or ""
             otx_meta: dict = {}
             tf_meta: dict = {}
             if raw_comment.startswith("OTX_META:"):
