@@ -2091,7 +2091,7 @@ class MISPToNeo4jSync:
             return item, relationships
 
         # Handle MITRE tactic (text format "TA0001: Name")
-        elif attr_type == "text" and len(value) >= 5 and value.startswith("TA") and value[2:5].isdigit():
+        elif attr_type == "text" and len(value) >= 6 and value.startswith("TA") and value[2:6].isdigit():
             # MITRE tactic format: "TA0001: Initial Access" (TA + 4 digits + ": Name")
             parts = value.split(": ", 1)
             mitre_id = parts[0]
