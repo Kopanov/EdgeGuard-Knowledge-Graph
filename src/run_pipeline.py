@@ -275,13 +275,16 @@ class EdgeGuardPipeline:
             # are linked with INDICATES.  Works cross-source because misp_event_id
             # is stored on every node that came through the MISP pipeline.
             cooccurrence_query = """
-            MATCH (i:Indicator), (m:Malware)
-            WHERE i.misp_event_id IS NOT NULL
-              AND i.misp_event_id = m.misp_event_id
+            MATCH (i:Indicator)
+            WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
+            WITH i, coalesce(i.misp_event_ids, [i.misp_event_id]) AS eids
+            UNWIND eids AS eid
+            WITH i, eid
+            MATCH (m:Malware {misp_event_id: eid})
             MERGE (i)-[r:INDICATES]->(m)
             ON CREATE SET r.created_at = datetime(),
                           r.source_id  = 'misp_cooccurrence',
-                          r.confidence_score = 0.6
+                          r.confidence_score = 0.5
             SET r.updated_at = datetime()
             RETURN count(r) AS created
             """

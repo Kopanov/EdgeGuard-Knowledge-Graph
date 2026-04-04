@@ -343,8 +343,8 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                 _dropped += 1
                 continue
         elif item.get("value"):
-            # Indicators keep tag in key (Indicator MERGE key includes tag)
-            key = f"{item.get('indicator_type', 'unknown')}:{item['value']}:{tag}"
+            # Indicators merge on (indicator_type, value) — no tag
+            key = f"{item.get('indicator_type', 'unknown')}:{item['value']}"
         elif item.get("mitre_id"):
             # Techniques, tactics, tools merge on mitre_id — check BEFORE name
             key = f"{item.get('type', 'technique')}:{item['mitre_id']}"
@@ -1716,7 +1716,6 @@ class MISPToNeo4jSync:
                             "from_key": {
                                 "value": indicator_value,
                                 "indicator_type": indicator_type,
-                                "tag": indicator.get("tag", "misp"),
                             },
                             "to_type": "Malware",
                             "to_key": {"name": malware["name"]},
@@ -1743,7 +1742,6 @@ class MISPToNeo4jSync:
                             "from_key": {
                                 "value": indicator_value,
                                 "indicator_type": indicator.get("indicator_type", "unknown"),
-                                "tag": indicator.get("tag", "misp"),
                             },
                             "to_type": "Vulnerability",
                             "to_key": {"cve_id": cve_id},
@@ -1790,7 +1788,6 @@ class MISPToNeo4jSync:
                                     "from_key": {
                                         "value": value,
                                         "indicator_type": indicator_type,
-                                        "tag": item.get("tag", "misp"),
                                     },
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
@@ -2185,7 +2182,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "INDICATES",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                        "from_key": {"value": value, "indicator_type": indicator_type},
                         "to_type": "Malware",
                         "to_key": {"name": malware_name},
                         "confidence": confidence,
@@ -2198,7 +2195,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "TARGETS",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                        "from_key": {"value": value, "indicator_type": indicator_type},
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
@@ -2217,7 +2214,7 @@ class MISPToNeo4jSync:
                     {
                         "rel_type": "EXPLOITS",
                         "from_type": "Indicator",
-                        "from_key": {"value": value, "indicator_type": indicator_type, "tag": source_id},
+                        "from_key": {"value": value, "indicator_type": indicator_type},
                         "to_type": "Vulnerability",
                         "to_key": {"cve_id": exp_cve},
                         "confidence": max(
@@ -2576,7 +2573,9 @@ class MISPToNeo4jSync:
                     self.stats["techniques_synced"] += 1
 
             elif item_type == "tactic":
-                self.neo4j.merge_tactic(item, source_id=source_id)
+                if self.neo4j.merge_tactic(item, source_id=source_id):
+                    self.stats.setdefault("tactics_synced", 0)
+                    self.stats["tactics_synced"] += 1
             else:
                 return False
 

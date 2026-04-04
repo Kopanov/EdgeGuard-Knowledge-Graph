@@ -128,11 +128,11 @@ RETURN i.value, i.zone
 ```cypher
 // UNIQUE on (cve_id, tag) - zone is metadata, not part of deduplication key
 CREATE CONSTRAINT vulnerability_key IF NOT EXISTS 
-FOR (v:Vulnerability) REQUIRE (v.cve_id, v.tag) IS UNIQUE;
+FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE;
 
-// UNIQUE on (indicator_type, value, tag) - tag scopes the dedup key per source tag
-CREATE CONSTRAINT indicator_key IF NOT EXISTS 
-FOR (i:Indicator) REQUIRE (i.indicator_type, i.value, i.tag) IS UNIQUE;
+// UNIQUE on (indicator_type, value) — tag removed; same IOC merges across sources
+CREATE CONSTRAINT indicator_key IF NOT EXISTS
+FOR (i:Indicator) REQUIRE (i.indicator_type, i.value) IS UNIQUE;
 
 // UNIQUE on (hostname, tag) - zone is metadata
 CREATE CONSTRAINT host_key IF NOT EXISTS 

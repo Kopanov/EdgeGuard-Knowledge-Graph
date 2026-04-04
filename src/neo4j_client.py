@@ -475,8 +475,8 @@ class Neo4jClient:
             "CREATE CONSTRAINT cve_key IF NOT EXISTS FOR (c:CVE) REQUIRE (c.cve_id) IS UNIQUE",
             # Vulnerability: match the 2-field MERGE key used in merge_vulnerabilities_batch
             "CREATE CONSTRAINT vulnerability_key IF NOT EXISTS FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE",
-            # Indicator: match the 3-field MERGE key used in merge_indicators_batch
-            "CREATE CONSTRAINT indicator_key IF NOT EXISTS FOR (i:Indicator) REQUIRE (i.indicator_type, i.value, i.tag) IS UNIQUE",
+            # Indicator: match the 2-field MERGE key used in merge_indicators_batch
+            "CREATE CONSTRAINT indicator_key IF NOT EXISTS FOR (i:Indicator) REQUIRE (i.indicator_type, i.value) IS UNIQUE",
             # Threat-graph node types
             "CREATE CONSTRAINT malware_key IF NOT EXISTS FOR (m:Malware) REQUIRE (m.name) IS UNIQUE",
             "CREATE CONSTRAINT actor_key IF NOT EXISTS FOR (a:ThreatActor) REQUIRE (a.name) IS UNIQUE",
@@ -923,7 +923,6 @@ class Neo4jClient:
         key_props = {
             "indicator_type": data.get("indicator_type"),
             "value": data.get("value"),
-            "tag": data.get("tag", "default"),
         }
         # Promote enrichment fields to queryable node properties
         extra_props: Dict = {}
@@ -1261,7 +1260,7 @@ class Neo4jClient:
 
                 query = """
                 UNWIND $batch as item
-                MERGE (n:Indicator {indicator_type: item.indicator_type, value: item.value, tag: item.tag})
+                MERGE (n:Indicator {indicator_type: item.indicator_type, value: item.value})
                 ON CREATE SET n.first_imported_at = datetime()
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
@@ -3752,13 +3751,17 @@ class Neo4jClient:
         }
 
         query = """
-        MERGE (i:Indicator {indicator_type: $indicator_type, value: $value, tag: $tag})
+        MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
         SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
             i.last_updated = datetime(),
             i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
-            i.confidence_score = $confidence_score,
-            i.original_source = $original_source,
+            i.confidence_score = CASE
+                WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
+                THEN $confidence_score
+                ELSE i.confidence_score END,
+            i.original_source = coalesce(i.original_source, $original_source),
             i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
+            i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
             i.active = true
         """
@@ -3770,11 +3773,14 @@ class Neo4jClient:
                 return True
         except Exception:
             fallback_query = """
-            MERGE (i:Indicator {indicator_type: $indicator_type, value: $value, tag: $tag})
+            MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
             SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
                 i.last_updated = $last_updated,
-                i.confidence_score = $confidence_score,
-                i.original_source = $original_source,
+                i.confidence_score = CASE
+                    WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
+                    THEN $confidence_score
+                    ELSE i.confidence_score END,
+                i.original_source = coalesce(i.original_source, $original_source),
                 i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone)
             """
             try:
