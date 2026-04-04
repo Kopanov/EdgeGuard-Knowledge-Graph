@@ -506,11 +506,11 @@ Auth:    Configured via environment variables
 ### UNIQUE Constraints (24 total)
 
 ```cypher
-// EdgeGuard constraints
-CREATE CONSTRAINT vulnerability_key FOR (v:Vulnerability) REQUIRE (v.cve_id, v.tag, v.zone) IS UNIQUE;
-CREATE CONSTRAINT indicator_key FOR (i:Indicator) REQUIRE (i.indicator_type, i.value, i.tag, i.zone) IS UNIQUE;
-CREATE CONSTRAINT malware_key FOR (m:Malware) REQUIRE (m.name, m.tag) IS UNIQUE;
-CREATE CONSTRAINT actor_key FOR (a:ThreatActor) REQUIRE (a.name, a.tag) IS UNIQUE;
+// EdgeGuard constraints (tag removed — entities merge across sources)
+CREATE CONSTRAINT vulnerability_key FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE;
+CREATE CONSTRAINT indicator_key FOR (i:Indicator) REQUIRE (i.indicator_type, i.value) IS UNIQUE;
+CREATE CONSTRAINT malware_key FOR (m:Malware) REQUIRE (m.name) IS UNIQUE;
+CREATE CONSTRAINT actor_key FOR (a:ThreatActor) REQUIRE (a.name) IS UNIQUE;
 CREATE CONSTRAINT technique_key FOR (t:Technique) REQUIRE (t.mitre_id, t.tag) IS UNIQUE;
 
 // ResilMesh constraints

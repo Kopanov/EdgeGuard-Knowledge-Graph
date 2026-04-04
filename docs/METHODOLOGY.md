@@ -210,16 +210,19 @@ def classify_llm(text: str) -> str:
 
 ### 4.1 Deduplication Strategy
 
-We use composite UNIQUE constraints as deduplication keys:
+We use UNIQUE constraints as deduplication keys — `tag` removed from all entity keys so the same entity merges across sources:
 
 | Node Type | UNIQUE Constraint Key |
 |-----------|----------------------|
-| Vulnerability | `(cve_id, tag)` |
-| Indicator | `(indicator_type, value, tag)` |
-| Technique | `(mitre_id, tag)` |
-| ThreatActor | `(name, tag)` |
-| Malware | `(name, tag)` |
-| Tactic | `(mitre_id, tag)` |
+| CVE | `(cve_id)` |
+| Vulnerability | `(cve_id)` |
+| Indicator | `(indicator_type, value)` |
+| Technique | `(mitre_id)` |
+| ThreatActor | `(name)` |
+| Malware | `(name)` |
+| Tactic | `(mitre_id)` |
+| Tool | `(mitre_id)` |
+| Campaign | `(name)` |
 | Sector | `(name)` |
 
 `tag` is the source-collection label (e.g., `'nvd'`, `'otx'`, `'mitre_attck'`) and scopes

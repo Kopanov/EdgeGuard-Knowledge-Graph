@@ -24,7 +24,7 @@ SET n.source = CASE
 ```
 
 ### Unique Key
-**Unique key is `(indicator_type, value, tag)`** where `tag` is the originating source ID. This allows the same IOC to exist as separate nodes per source while still deduplicating within a single source across pipeline runs.
+**Unique key is `(indicator_type, value)`** — same IOC from different sources merges into a single node. Source provenance is tracked via the `source` array, `tags` array, and `SOURCED_FROM` relationships.
 
 ## Exact Matching Rules (March 2026)
 
