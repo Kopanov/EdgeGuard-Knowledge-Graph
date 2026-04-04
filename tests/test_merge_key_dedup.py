@@ -124,10 +124,10 @@ class TestMergeKeyProps:
 # ===========================================================================
 
 
-class TestIndicatorKeepsTag:
-    """Indicator is intentionally keyed by (indicator_type, value, tag)."""
+class TestIndicatorNoTag:
+    """Indicator is keyed by (indicator_type, value) — no tag, like all other entities."""
 
-    def test_merge_indicator_has_tag_in_key(self):
+    def test_merge_indicator_no_tag_in_key(self):
         client, session = _make_neo4j_mock()
         data = {
             "indicator_type": "ipv4",
@@ -140,7 +140,7 @@ class TestIndicatorKeepsTag:
         assert len(calls) >= 2
         merge_cypher = calls[1][0][0]
         merge_line = [ln for ln in merge_cypher.split("\n") if "MERGE" in ln][0]
-        assert "tag:" in merge_line, f"Indicator MERGE key should have tag: {merge_line}"
+        assert "tag:" not in merge_line, f"Indicator MERGE key should NOT have tag: {merge_line}"
 
 
 # ===========================================================================
@@ -201,7 +201,7 @@ class TestBatchMergeKeys:
         cypher = session.run.call_args_list[0][0][0]
         assert "n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag])" in cypher
 
-    def test_indicator_batch_keeps_tag_in_merge(self):
+    def test_indicator_batch_no_tag_in_merge(self):
         client, session = _make_neo4j_mock()
         items = [
             {"indicator_type": "ipv4", "value": "1.2.3.4", "tag": "otx", "zone": ["global"]},
@@ -209,7 +209,7 @@ class TestBatchMergeKeys:
         client.merge_indicators_batch(items, source_id="misp")
         cypher = session.run.call_args_list[0][0][0]
         merge_line = [ln for ln in cypher.split("\n") if "MERGE" in ln][0]
-        assert "tag: item.tag" in merge_line, f"Indicator batch should keep tag: {merge_line}"
+        assert "tag" not in merge_line, f"Indicator batch should NOT have tag: {merge_line}"
 
 
 # ===========================================================================
@@ -248,7 +248,7 @@ class TestCrossItemRelKeys:
         assert "tag" not in attr[0]["from_key"]
         assert "tag" not in attr[0]["to_key"]
 
-    def test_indicator_malware_indicates_indicator_has_tag(self):
+    def test_indicator_malware_indicates_no_tag(self):
         items = [
             {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp"},
             {"type": "malware", "name": "Emotet", "tag": "misp"},
@@ -256,12 +256,11 @@ class TestCrossItemRelKeys:
         rels = self._build_rels(items)
         ind = [r for r in rels if r["rel_type"] == "INDICATES"]
         assert len(ind) == 1
-        # Indicator from_key SHOULD have tag (indicator keeps tag in merge key)
-        assert "tag" in ind[0]["from_key"], "INDICATES from_key (Indicator) should have tag"
-        # Malware to_key should NOT have tag
-        assert "tag" not in ind[0]["to_key"], f"INDICATES to_key (Malware) has tag: {ind[0]['to_key']}"
+        # Indicator from_key should NOT have tag (tag removed from all MERGE keys)
+        assert "tag" not in ind[0]["from_key"], f"INDICATES from_key should not have tag: {ind[0]['from_key']}"
+        assert "tag" not in ind[0]["to_key"], f"INDICATES to_key should not have tag: {ind[0]['to_key']}"
 
-    def test_indicator_vulnerability_exploits_no_tag_on_vuln(self):
+    def test_indicator_vulnerability_exploits_no_tag(self):
         items = [
             {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp"},
             {"type": "vulnerability", "cve_id": "CVE-2021-44228", "value": "CVE-2021-44228", "tag": "nvd"},
@@ -269,8 +268,8 @@ class TestCrossItemRelKeys:
         rels = self._build_rels(items)
         expl = [r for r in rels if r["rel_type"] == "EXPLOITS"]
         assert len(expl) == 1
-        assert "tag" in expl[0]["from_key"], "EXPLOITS from_key (Indicator) should have tag"
-        assert "tag" not in expl[0]["to_key"], f"EXPLOITS to_key (Vulnerability) has tag: {expl[0]['to_key']}"
+        assert "tag" not in expl[0]["from_key"], f"EXPLOITS from_key should not have tag: {expl[0]['from_key']}"
+        assert "tag" not in expl[0]["to_key"], f"EXPLOITS to_key should not have tag: {expl[0]['to_key']}"
         assert expl[0]["to_key"] == {"cve_id": "CVE-2021-44228"}
 
     def test_vulnerability_sector_targets_no_tag(self):
@@ -316,11 +315,11 @@ class TestDedupHypothesis:
             key_props = {"cve_id": "CVE-2021-44228"}
             assert "tag" not in key_props
 
-    def test_same_indicator_different_tags_different_keys(self):
-        """Same IP from different sources SHOULD be different nodes (tag in key)."""
-        key_otx = {"indicator_type": "ipv4", "value": "1.2.3.4", "tag": "alienvault_otx"}
-        key_misp = {"indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp"}
-        assert key_otx != key_misp, "Indicator keys should differ by tag"
+    def test_same_indicator_different_tags_same_key(self):
+        """Same IP from different sources SHOULD merge into one node (no tag in key)."""
+        key_otx = {"indicator_type": "ipv4", "value": "1.2.3.4"}
+        key_misp = {"indicator_type": "ipv4", "value": "1.2.3.4"}
+        assert key_otx == key_misp, "Indicator keys should be the same regardless of tag"
 
 
 # ===========================================================================
@@ -445,14 +444,14 @@ class TestConstraintDefinitions:
         assert "REQUIRE (a.name) IS UNIQUE" in source, "ThreatActor constraint should be single-key"
         assert "REQUIRE (c.cve_id) IS UNIQUE" in source, "CVE constraint should be single-key"
 
-    def test_indicator_constraint_keeps_tag(self):
-        """Indicator constraint should include tag."""
+    def test_indicator_constraint_no_tag(self):
+        """Indicator constraint should NOT include tag."""
         import inspect
 
         client = Neo4jClient.__new__(Neo4jClient)
         client.driver = MagicMock()
         source = inspect.getsource(client.create_constraints)
-        assert "REQUIRE (i.indicator_type, i.value, i.tag) IS UNIQUE" in source
+        assert "REQUIRE (i.indicator_type, i.value) IS UNIQUE" in source
 
     def test_cvss_constraints_keep_tag(self):
         """CVSS sub-node constraints should include tag (different scores per source)."""
