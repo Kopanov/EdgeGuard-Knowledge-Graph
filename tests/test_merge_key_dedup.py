@@ -6,8 +6,7 @@ caused ThreatActor/Malware/Technique nodes to fragment: APT28 had 7 separate nod
 (one per source tag) instead of 1. These tests verify:
 
 1. MERGE key_props for each entity type do NOT include ``tag``
-2. Indicator MERGE key STILL includes ``tag`` (intentional — different sources have
-   different IOC metadata)
+2. Indicator MERGE key also does NOT include ``tag`` (same as all entities)
 3. CVSS sub-nodes STILL include ``tag`` (different CVSS scores per source)
 4. Neo4j constraints match the MERGE keys
 5. Batch MERGE queries use the correct keys
