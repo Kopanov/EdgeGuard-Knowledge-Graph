@@ -3755,9 +3755,13 @@ class Neo4jClient:
         SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
             i.last_updated = datetime(),
             i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
-            i.confidence_score = $confidence_score,
-            i.original_source = $original_source,
+            i.confidence_score = CASE
+                WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
+                THEN $confidence_score
+                ELSE i.confidence_score END,
+            i.original_source = coalesce(i.original_source, $original_source),
             i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
+            i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
             i.active = true
         """
@@ -3772,8 +3776,11 @@ class Neo4jClient:
             MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
             SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
                 i.last_updated = $last_updated,
-                i.confidence_score = $confidence_score,
-                i.original_source = $original_source,
+                i.confidence_score = CASE
+                    WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
+                    THEN $confidence_score
+                    ELSE i.confidence_score END,
+                i.original_source = coalesce(i.original_source, $original_source),
                 i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone)
             """
             try:
