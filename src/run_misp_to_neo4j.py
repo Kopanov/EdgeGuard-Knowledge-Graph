@@ -2573,8 +2573,9 @@ class MISPToNeo4jSync:
                     self.stats["techniques_synced"] += 1
 
             elif item_type == "tactic":
-                if not self.neo4j.merge_tactic(item, source_id=source_id):
-                    return False
+                if self.neo4j.merge_tactic(item, source_id=source_id):
+                    self.stats.setdefault("tactics_synced", 0)
+                    self.stats["tactics_synced"] += 1
             else:
                 return False
 
