@@ -794,7 +794,9 @@ class Neo4jClient:
             last_seen_val = data.get("last_updated") or data.get("last_seen")
             if last_seen_val:
                 query += """,
-                n.original_modified_date = $last_seen_val"""
+                n.original_modified_date = CASE
+                    WHEN n.original_modified_date IS NULL OR $last_seen_val > n.original_modified_date
+                    THEN $last_seen_val ELSE n.original_modified_date END"""
 
             # Add original_source if present in data
             if original_source:
