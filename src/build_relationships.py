@@ -137,7 +137,9 @@ def build_relationships():
             """
             MATCH (i:Indicator)
             WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-            WITH i, coalesce(i.misp_event_ids, [i.misp_event_id]) AS eids
+            WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id])
+                      WHERE eid IS NOT NULL AND eid <> ''] AS eids
+            WHERE size(eids) > 0 AND size(eids) <= 200
             UNWIND eids AS eid
             WITH i, eid
             MATCH (m:Malware {misp_event_id: eid})
