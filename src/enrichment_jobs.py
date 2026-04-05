@@ -72,7 +72,7 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
                     MATCH (n:{label})
                     WHERE n.last_updated IS NOT NULL
                       AND n.active = true
-                      AND duration.between(coalesce(n.first_imported_at, n.last_updated), datetime()).days > $min_days
+                      AND duration.between(n.last_updated, datetime()).days > $min_days
                     SET n.active = false,
                         n.retired_at = datetime()
                     RETURN count(n) AS affected
@@ -83,8 +83,8 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
                     MATCH (n:{label})
                     WHERE n.last_updated IS NOT NULL
                       AND n.confidence_score IS NOT NULL
-                      AND duration.between(coalesce(n.first_imported_at, n.last_updated), datetime()).days >= $min_days
-                      AND duration.between(coalesce(n.first_imported_at, n.last_updated), datetime()).days < $max_days
+                      AND duration.between(n.last_updated, datetime()).days >= $min_days
+                      AND duration.between(n.last_updated, datetime()).days < $max_days
                     SET n.confidence_score = CASE
                             WHEN n.confidence_score * $mult < 0.10 THEN 0.10
                             ELSE round(n.confidence_score * $mult * 100) / 100
