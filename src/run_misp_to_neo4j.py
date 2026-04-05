@@ -2859,9 +2859,14 @@ class MISPToNeo4jSync:
             logger.info(f"Sector '{sector}' sync: fetching events since {since_str}")
             since = datetime.strptime(since_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         elif incremental:
-            # Default to last 3 days for incremental
-            since = datetime.now(timezone.utc) - timedelta(days=3)
-            logger.info("Incremental sync: events from last 3 days")
+            # Fetch window matches sync interval (default 3 days) + 1 day overlap for safety.
+            # Overlap is safe: MERGE is idempotent, only new data is added.
+            _sync_interval_days = int(os.environ.get("EDGEGUARD_SYNC_INTERVAL_DAYS", "3"))
+            _fetch_window_days = _sync_interval_days + 1  # +1 day overlap
+            since = datetime.now(timezone.utc) - timedelta(days=_fetch_window_days)
+            logger.info(
+                f"Incremental sync: events from last {_fetch_window_days} days (interval={_sync_interval_days}d + 1d overlap)"
+            )
         else:
             since = None
             logger.info("Full sync: all events")
