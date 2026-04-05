@@ -97,7 +97,7 @@ flowchart LR
     end
 
     subgraph Step 4-5: Enrich
-        NEO4J_MERGE --> REL[Build Relationships<br/>2000/batch UNWIND]
+        NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>1000/batch]
         REL --> DECAY[IOC Decay]
         DECAY --> CAMP[Campaign Builder]
         CAMP --> CALIB[Co-occurrence Calibration]
@@ -227,16 +227,12 @@ flowchart TD
     CHECK -->|No: Normal event| NORMAL[Process all in memory]
 
     PAGED --> PAGE_LOOP[For each page:<br/>parse + dedup + sync<br/>then gc.collect + sleep 2s]
-    PAGE_LOOP --> COOC_CHECK_P{Accumulated items<br/>> 5000?}
-    COOC_CHECK_P -->|Yes| SKIP_REL[Skip cross-item rels<br/>avoid O n-squared blowup]
-    COOC_CHECK_P -->|No| BUILD_REL_P[Build cross-item rels]
+    PAGE_LOOP --> BUILD_REL_P[Build cross-item rels<br/>type-based sampling:<br/>actors 500, techniques 500,<br/>malware 500, indicators 2000]
 
     NORMAL --> DEDUP_N[Deduplicate items]
-    DEDUP_N --> COOC_CHECK_N{Unique items > 5000?}
-    COOC_CHECK_N -->|Yes| SKIP_REL
-    COOC_CHECK_N -->|No| BUILD_REL_N[Build cross-item rels]
+    DEDUP_N --> BUILD_REL_N[Build cross-item rels<br/>type-based sampling]
 
-    BUILD_REL_P & BUILD_REL_N & SKIP_REL --> CHUNK[Chunk sync: 500 items/chunk<br/>UNWIND batch: 1000/batch<br/>Rel batch: 2000/batch]
+    BUILD_REL_P & BUILD_REL_N --> CHUNK[Chunk sync: 500 items/chunk<br/>UNWIND batch: 1000/batch<br/>Rel batch: apoc.periodic.iterate 1000/batch]
     CHUNK --> NEO4J[(Neo4j)]
 
     style PAGED fill:#3b82f6,stroke:#2563eb,color:#fff
@@ -263,11 +259,13 @@ flowchart LR
         CB3 --> CB4[Link: RUNS + PART_OF]
     end
 
-    subgraph "Job 3: Calibration"
-        CAL1[INDICATES / EXPLOITS<br/>edges] --> CAL2{MISP event size}
-        CAL2 -->|1-10| CAL3[conf = 0.90]
-        CAL2 -->|11-100| CAL4[conf = 0.70]
-        CAL2 -->|101-500| CAL5[conf = 0.50]
+    subgraph "Job 3: Calibration (pre-computed event sizes)"
+        CAL0[Pre-compute: one COUNT<br/>per MISP event] --> CAL1[Group events by tier]
+        CAL1 --> CAL2{Event size tier}
+        CAL2 -->|1-10| CAL3[conf = 0.50]
+        CAL2 -->|11-20| CAL3b[conf = 0.45]
+        CAL2 -->|21-100| CAL4[conf = 0.40]
+        CAL2 -->|101-500| CAL5[conf = 0.35]
         CAL2 -->|> 500| CAL6[conf = 0.30]
     end
 
