@@ -1488,7 +1488,7 @@ build_relationships_task = PythonOperator(
 enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_enrichment_jobs,
-    execution_timeout=timedelta(hours=1),
+    execution_timeout=timedelta(hours=3),
     dag=neo4j_sync_dag,
 )
 
@@ -1868,7 +1868,7 @@ baseline_build_rels_task = PythonOperator(
 baseline_enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_baseline_enrichment,
-    execution_timeout=timedelta(hours=1),
+    execution_timeout=timedelta(hours=3),
     dag=baseline_dag,
 )
 
