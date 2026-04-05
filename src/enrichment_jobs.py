@@ -172,7 +172,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.last_updated     = datetime(),
                 c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
-                c.first_seen       = first_seen,
+                c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
+                                       THEN first_seen ELSE c.first_seen END,
                 c.last_seen        = last_seen,
                 c.zone             = all_zones
             MERGE (a)-[:RUNS]->(c)
