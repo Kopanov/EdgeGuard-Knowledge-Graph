@@ -790,7 +790,9 @@ class Neo4jClient:
             first_seen = data.get("first_seen")
             if first_seen:
                 query += """,
-                n.original_published_date = coalesce(n.original_published_date, $first_seen)"""
+                n.original_published_date = CASE
+                    WHEN n.original_published_date IS NULL OR $first_seen < n.original_published_date
+                    THEN $first_seen ELSE n.original_published_date END"""
             last_seen_val = data.get("last_updated") or data.get("last_seen")
             if last_seen_val:
                 query += """,
