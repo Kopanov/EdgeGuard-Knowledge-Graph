@@ -784,6 +784,18 @@ class Neo4jClient:
                 n.misp_attribute_id = coalesce(n.misp_attribute_id, $misp_attribute_id),
                 n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
 
+            # Add original publication/modification dates from source feed.
+            # Preserved with coalesce (first-seen value wins) — distinct from
+            # first_imported_at (EdgeGuard import time) and last_updated (last sync).
+            first_seen = data.get("first_seen")
+            if first_seen:
+                query += """,
+                n.original_published_date = coalesce(n.original_published_date, $first_seen)"""
+            last_seen_val = data.get("last_updated") or data.get("last_seen")
+            if last_seen_val:
+                query += """,
+                n.original_modified_date = $last_seen_val"""
+
             # Add original_source if present in data
             if original_source:
                 query += ", n.original_source = $original_source"
@@ -849,6 +861,10 @@ class Neo4jClient:
                     params["misp_attribute_id"] = misp_attribute_id
                 if original_source:
                     params["original_source"] = original_source
+                if first_seen:
+                    params["first_seen"] = first_seen
+                if last_seen_val:
+                    params["last_seen_val"] = last_seen_val
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
 
             # Now create/update the SOURCED_FROM relationship with raw data
