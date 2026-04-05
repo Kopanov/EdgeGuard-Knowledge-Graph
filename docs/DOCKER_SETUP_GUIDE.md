@@ -32,6 +32,7 @@ MISP_API_KEY=your-misp-api-key-here
 NEO4J_HEAP_INITIAL=4g
 NEO4J_HEAP_MAX=12g
 NEO4J_PAGECACHE=8g
+NEO4J_TX_MEMORY_MAX=2g              # Per-transaction cap (prevents OOM from large UNWIND queries)
 NEO4J_CONTAINER_MEMORY_LIMIT=22g
 
 # Baseline DAG (optional env overrides — see BASELINE_SMOKE_TEST.md)
