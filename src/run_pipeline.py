@@ -277,13 +277,13 @@ class EdgeGuardPipeline:
             # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators)
             cooccurrence_query = """
             CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> \\"\\" RETURN i',
+                'MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> "" RETURN i',
                 'WITH $i AS i
-                 WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) WHERE eid IS NOT NULL AND eid <> \\"\\"  ][0..200] AS eids
+                 WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) WHERE eid IS NOT NULL AND eid <> ""  ][0..200] AS eids
                  UNWIND eids AS eid WITH i, eid
                  MATCH (m:Malware {misp_event_id: eid})
                  MERGE (i)-[r:INDICATES]->(m)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = \\"misp_cooccurrence\\", r.confidence_score = 0.5',
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5',
                 {batchSize: 1000, parallel: false}
             )
             YIELD total
@@ -299,11 +299,11 @@ class EdgeGuardPipeline:
             # EXPLOITS: batched via apoc.periodic.iterate
             exploits_query = """
             CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> \\"\\" RETURN i',
+                'MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> "" RETURN i',
                 'WITH $i AS i
                  MATCH (c:CVE {cve_id: i.cve_id})
                  MERGE (i)-[r:EXPLOITS]->(c)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = \\"cve_tag_match\\", r.confidence_score = 0.9',
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9',
                 {batchSize: 1000, parallel: false}
             )
             YIELD total

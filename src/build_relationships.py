@@ -337,3 +337,4 @@ if __name__ == "__main__":
         print("\n✅ Relationships built successfully!")
     else:
         print("\n❌ Failed to build relationships")
+        sys.exit(1)

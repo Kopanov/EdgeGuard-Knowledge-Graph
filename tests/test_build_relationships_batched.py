@@ -10,7 +10,7 @@ import inspect
 import logging
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
@@ -23,7 +23,6 @@ for _mod in ("build_relationships", "neo4j_client"):
 
 import build_relationships  # noqa: E402
 from build_relationships import _safe_run_batched  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -72,9 +71,7 @@ class TestBatchedCypherConstruction:
         client = _mock_client()
         client.run.return_value = [{"count": 10, "batches": 1, "errorMessages": []}]
         stats = {}
-        _safe_run_batched(
-            client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "test_key", batch_size=500
-        )
+        _safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "test_key", batch_size=500)
         query = client.run.call_args[0][0]
         assert "batchSize: 500" in query
 
@@ -195,9 +192,7 @@ class TestAllQueriesUseBatched:
         import re
 
         batched_calls = re.findall(r"_safe_run_batched\s*\(", source)
-        assert len(batched_calls) >= 10, (
-            f"Expected at least 10 _safe_run_batched() calls, found {len(batched_calls)}"
-        )
+        assert len(batched_calls) >= 10, f"Expected at least 10 _safe_run_batched() calls, found {len(batched_calls)}"
 
 
 # ===========================================================================

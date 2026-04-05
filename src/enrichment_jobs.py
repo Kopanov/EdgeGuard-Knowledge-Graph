@@ -266,29 +266,33 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
     try:
         with neo4j_client.driver.session() as session:
             for min_s, max_s, conf in tiers:
-                # Count indicators sharing the same MISP event as the source indicator
-                where_size = (
-                    f"event_size >= {min_s}" if max_s is None else f"event_size >= {min_s} AND event_size <= {max_s}"
-                )
-                # Batched via apoc.periodic.iterate to prevent OOM on millions of edges
-                outer = "MATCH (i:Indicator)-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ['misp_cooccurrence', 'misp_correlation'] AND i.misp_event_id IS NOT NULL RETURN r, i"
-                inner = f"WITH $r AS r, $i AS i WITH r, i.misp_event_id AS eid MATCH (peer:Indicator {{misp_event_id: eid}}) WITH r, count(DISTINCT peer) AS event_size WHERE {where_size} SET r.confidence_score = {conf}, r.calibrated_at = datetime()"
-                batch_cypher = f"""
-                CALL apoc.periodic.iterate(
-                    '{outer}',
-                    '{inner}',
-                    {{batchSize: 500, parallel: false}}
-                )
-                YIELD total
-                RETURN total AS updated
-                """
-                result = session.run(batch_cypher, timeout=NEO4J_READ_TIMEOUT)
-                record = result.single()
-                count = record["updated"] if record else 0
-                label = f"size {min_s}–{max_s if max_s else '∞'} → conf={conf}"
-                results[label] = count
-                if count:
-                    logger.info(f"  [CALIBRATE] {label}: {count} edges")
+                tier_label = f"size {min_s}–{max_s if max_s else '∞'} → conf={conf}"
+                try:
+                    where_size = (
+                        f"event_size >= {min_s}"
+                        if max_s is None
+                        else f"event_size >= {min_s} AND event_size <= {max_s}"
+                    )
+                    outer = 'MATCH (i:Indicator)-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] AND i.misp_event_id IS NOT NULL RETURN r, i'
+                    inner = f"WITH $r AS r, $i AS i WITH r, i.misp_event_id AS eid MATCH (peer:Indicator {{misp_event_id: eid}}) WITH r, count(DISTINCT peer) AS event_size WHERE {where_size} SET r.confidence_score = {conf}, r.calibrated_at = datetime()"
+                    batch_cypher = f"""
+                    CALL apoc.periodic.iterate(
+                        '{outer}',
+                        '{inner}',
+                        {{batchSize: 500, parallel: false}}
+                    )
+                    YIELD total
+                    RETURN total AS updated
+                    """
+                    result = session.run(batch_cypher, timeout=NEO4J_READ_TIMEOUT)
+                    record = result.single()
+                    count = record["updated"] if record else 0
+                    results[tier_label] = count
+                    if count:
+                        logger.info(f"  [CALIBRATE] {tier_label}: {count} edges")
+                except Exception as tier_err:
+                    logger.error(f"  [CALIBRATE] {tier_label} FAILED: {tier_err}")
+                    results[tier_label] = 0
 
     except Exception as e:
         logger.error(f"calibrate_cooccurrence_confidence error: {e}")
