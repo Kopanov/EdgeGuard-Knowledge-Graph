@@ -148,24 +148,32 @@ def build_campaign_nodes(neo4j_client) -> Dict:
         with neo4j_client.driver.session() as session:
             # Step 1: Materialise Campaign nodes (one per ThreatActor with evidence)
             create_cypher = """
-            MATCH (a:ThreatActor)<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
-            WITH a,
-                 collect(DISTINCT m)    AS malware_list,
-                 collect(DISTINCT i)    AS indicators,
+            MATCH (a:ThreatActor)
+            WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+            WITH a
+            OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(m:Malware)
+            WITH a, collect(DISTINCT m) AS malware_list
+            OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
+            WITH a, malware_list,
+                 count(DISTINCT i) AS indicator_total,
+                 collect(DISTINCT i)[0..100] AS indicator_sample,
                  min(i.first_imported_at) AS first_seen,
-                 max(i.last_updated)      AS last_seen,
+                 max(i.last_updated)      AS last_seen
+            WHERE size(malware_list) > 0 AND indicator_total > 0
+            WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(
-                     reduce(z=[], ind IN collect(DISTINCT i) | z + coalesce(ind.zone, []))
+                     reduce(z=[], ind IN indicator_sample | z + coalesce(ind.zone, []))
                  ) AS all_zones
-            WHERE size(malware_list) > 0 AND size(indicators) > 0
             MERGE (c:Campaign {name: a.name + ' Campaign'})
             ON CREATE SET c.created_at = datetime(),
                           c.actor_name = a.name
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
+                c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.last_updated     = datetime(),
-                c.indicator_count  = size(indicators),
+                c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
-                c.first_seen       = first_seen,
+                c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
+                                       THEN first_seen ELSE c.first_seen END,
                 c.last_seen        = last_seen,
                 c.zone             = all_zones
             MERGE (a)-[:RUNS]->(c)
@@ -244,7 +252,8 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
       > 500 → 0.30  (bulk dump — weak signal)
 
     Only edges with source_id IN ('misp_cooccurrence', 'misp_correlation')
-    are modified.  Manually curated edges (different source_id) are untouched.
+    are modified. Explicit matches (malware_family_match, cve_tag_match,
+    mitre_explicit) and manually curated edges are untouched.
     """
     if not neo4j_client.driver:
         logger.error("calibrate_cooccurrence_confidence: no Neo4j connection")

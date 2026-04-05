@@ -784,6 +784,22 @@ class Neo4jClient:
                 n.misp_attribute_id = coalesce(n.misp_attribute_id, $misp_attribute_id),
                 n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
 
+            # Add original publication/modification dates from source feed.
+            # Preserved with coalesce (first-seen value wins) — distinct from
+            # first_imported_at (EdgeGuard import time) and last_updated (last sync).
+            first_seen = data.get("first_seen")
+            if first_seen:
+                query += """,
+                n.original_published_date = CASE
+                    WHEN n.original_published_date IS NULL OR $first_seen < n.original_published_date
+                    THEN $first_seen ELSE n.original_published_date END"""
+            last_seen_val = data.get("last_updated") or data.get("last_seen")
+            if last_seen_val:
+                query += """,
+                n.original_modified_date = CASE
+                    WHEN n.original_modified_date IS NULL OR $last_seen_val > n.original_modified_date
+                    THEN $last_seen_val ELSE n.original_modified_date END"""
+
             # Add original_source if present in data
             if original_source:
                 query += ", n.original_source = $original_source"
@@ -849,6 +865,10 @@ class Neo4jClient:
                     params["misp_attribute_id"] = misp_attribute_id
                 if original_source:
                     params["original_source"] = original_source
+                if first_seen:
+                    params["first_seen"] = first_seen
+                if last_seen_val:
+                    params["last_seen_val"] = last_seen_val
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
 
             # Now create/update the SOURCED_FROM relationship with raw data
@@ -2047,6 +2067,21 @@ class Neo4jClient:
                     stats["by_zone"] = {row["zone"]: row["count"] for row in result}
                 except Exception:
                     stats["by_zone"] = {}
+
+                # Count multi-zone nodes (appear in 2+ zones)
+                try:
+                    result = session.run(
+                        """
+                        MATCH (n)
+                        WHERE n.zone IS NOT NULL AND size(n.zone) > 1
+                        RETURN count(n) AS multi_zone_count
+                    """,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    record = result.single()
+                    stats["multi_zone_count"] = record["multi_zone_count"] if record else 0
+                except Exception:
+                    stats["multi_zone_count"] = 0
 
                 # Count active/inactive for Indicators and Vulnerabilities
                 try:

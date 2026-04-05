@@ -1568,12 +1568,15 @@ def cmd_stats(args) -> int:
                 total_nodes = sum(combo_counts.values())
                 _c2.close()
 
+                multi_zone_total = sum(combos.values())
                 zone_data = {
                     "single_zone": single_zone,
                     "combos": combos,
+                    "multi_zone_count": multi_zone_total,
                     "total": total_nodes,
                 }
             result["by_zone"] = zone_data
+            result["multi_zone_count"] = zone_data.get("multi_zone_count", 0)
 
             if zone_data and not use_json:
                 print(f"\n  {'Zone':<30} {'Nodes':>10}")
@@ -1588,16 +1591,24 @@ def cmd_stats(args) -> int:
                         print(f"  {combo:<30} {count:>10,}  (multi-zone)")
                 print(f"  {'—' * 30} {'—' * 10}")
                 print(f"  {'TOTAL':<30} {total_nodes:>10,}")
+                if multi_zone_total:
+                    print(f"  Multi-zone indicators: {multi_zone_total:,}")
 
         except Exception as e:
             # Fallback to the basic by_zone from get_stats
             by_zone = neo4j_stats.get("by_zone", {})
+            multi_zone_count = neo4j_stats.get("multi_zone_count", 0)
             result["by_zone"] = by_zone
+            result["multi_zone_count"] = multi_zone_count
             if by_zone and not use_json:
                 print(f"\n  {'Zone':<30} {'Nodes':>10}")
                 print(f"  {'—' * 30} {'—' * 10}")
                 for zone, count in sorted(by_zone.items(), key=lambda x: -x[1]):
                     print(f"  {zone:<30} {count:>10,}")
+                if multi_zone_count:
+                    print(f"  {'—' * 30} {'—' * 10}")
+                    print(f"  {'Multi-zone indicators':<30} {multi_zone_count:>10,}")
+                    print("  (nodes may appear in multiple zones above)")
 
     # 3. By source
     if show_source and neo4j_stats:
