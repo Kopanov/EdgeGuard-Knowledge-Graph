@@ -265,31 +265,50 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
+            # Step 1: Pre-compute event sizes ONCE (instead of per-edge).
+            # Previously each edge re-counted all indicators in its event — millions
+            # of redundant COUNT queries. Now: one COUNT per event, then join.
+            logger.info("  [CALIBRATE] Pre-computing MISP event sizes...")
+            event_sizes_query = """
+            MATCH (i:Indicator)
+            WHERE i.misp_event_id IS NOT NULL
+            WITH i.misp_event_id AS eid, count(i) AS sz
+            RETURN eid, sz
+            """
+            event_size_result = session.run(event_sizes_query, timeout=NEO4J_READ_TIMEOUT)
+            event_sizes = {r["eid"]: r["sz"] for r in event_size_result}
+            logger.info(f"  [CALIBRATE] Pre-computed sizes for {len(event_sizes)} events")
+
+            # Step 2: For each tier, collect matching event IDs and update edges in chunks.
             for min_s, max_s, conf in tiers:
-                tier_label = f"size {min_s}–{max_s if max_s else '∞'} → conf={conf}"
+                tier_label = f"size {min_s}\u2013{max_s if max_s else '\u221e'} \u2192 conf={conf}"
                 try:
-                    where_size = (
-                        f"event_size >= {min_s}"
-                        if max_s is None
-                        else f"event_size >= {min_s} AND event_size <= {max_s}"
-                    )
-                    outer = 'MATCH (i:Indicator)-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] AND i.misp_event_id IS NOT NULL RETURN r, i'
-                    inner = f"WITH $r AS r, $i AS i WITH r, i.misp_event_id AS eid MATCH (peer:Indicator {{misp_event_id: eid}}) WITH r, count(DISTINCT peer) AS event_size WHERE {where_size} SET r.confidence_score = {conf}, r.calibrated_at = datetime()"
-                    batch_cypher = f"""
-                    CALL apoc.periodic.iterate(
-                        '{outer}',
-                        '{inner}',
-                        {{batchSize: 5000, parallel: false}}
-                    )
-                    YIELD total
-                    RETURN total AS updated
+                    tier_eids = [
+                        eid for eid, sz in event_sizes.items() if sz >= min_s and (max_s is None or sz <= max_s)
+                    ]
+                    if not tier_eids:
+                        results[tier_label] = 0
+                        continue
+
+                    update_cypher = """
+                    UNWIND $eids AS eid
+                    MATCH (i:Indicator {misp_event_id: eid})-[r:INDICATES|EXPLOITS]->(target)
+                    WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"]
+                    SET r.confidence_score = $conf,
+                        r.calibrated_at = datetime()
+                    RETURN count(r) AS updated
                     """
-                    result = session.run(batch_cypher, timeout=NEO4J_READ_TIMEOUT)
-                    record = result.single()
-                    count = record["updated"] if record else 0
-                    results[tier_label] = count
-                    if count:
-                        logger.info(f"  [CALIBRATE] {tier_label}: {count} edges")
+                    total_updated = 0
+                    chunk_size = 500  # event IDs per chunk (not edges)
+                    for ci in range(0, len(tier_eids), chunk_size):
+                        chunk = tier_eids[ci : ci + chunk_size]
+                        result = session.run(update_cypher, eids=chunk, conf=conf, timeout=NEO4J_READ_TIMEOUT)
+                        record = result.single()
+                        total_updated += record["updated"] if record else 0
+
+                    results[tier_label] = total_updated
+                    if total_updated:
+                        logger.info(f"  [CALIBRATE] {tier_label}: {total_updated} edges ({len(tier_eids)} events)")
                 except Exception as tier_err:
                     logger.error(f"  [CALIBRATE] {tier_label} FAILED: {tier_err}")
                     results[tier_label] = 0
