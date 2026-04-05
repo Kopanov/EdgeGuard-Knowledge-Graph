@@ -96,41 +96,17 @@ def build_relationships():
     try:
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
         logger.info("[LINK] 1/11 Technique → Tactic (kill-chain phase match)...")
-        if not _safe_run(
-            client,
-            "Technique → Tactic",
-            """
-            MATCH (t:Technique), (tc:Tactic)
-            WHERE tc.shortname IS NOT NULL
-              AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL]
-                      WHERE toLower(phase) = toLower(tc.shortname))
-            MERGE (t)-[r:IN_TACTIC]->(tc)
-            ON CREATE SET r.confidence_score = 1.0, r.match_type = 'kill_chain_phase', r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "in_tactic",
-        ):
+        _outer = "MATCH (t:Technique) WHERE size(coalesce(t.tactic_phases, [])) > 0 RETURN t"
+        _inner = "WITH $t AS t MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'kill_chain_phase', r.created_at = datetime()"
+        if not _safe_run_batched(client, "Technique → Tactic", _outer, _inner, stats, "in_tactic"):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
         logger.info("[LINK] 2/11 Malware → ThreatActor (exact name match)...")
-        if not _safe_run(
-            client,
-            "Malware → ThreatActor",
-            """
-            MATCH (m:Malware), (a:ThreatActor)
-            WHERE (m.attributed_to IS NOT NULL AND m.attributed_to <> ''
-                   AND (m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, [])))
-               OR a.name IN coalesce(m.aliases, [])
-            MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-            ON CREATE SET r.confidence_score = 1.0, r.match_type = 'exact', r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "attributed_to",
-        ):
+        _outer = "MATCH (m:Malware) WHERE m.attributed_to IS NOT NULL AND m.attributed_to <> '' RETURN m"
+        _inner = "WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'exact', r.created_at = datetime()"
+        if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
@@ -183,44 +159,20 @@ def build_relationships():
 
         # 5. ThreatActor → Technique (USES) — explicit ATT&CK uses_techniques list
         logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
-        if not _safe_run(
-            client,
-            "ThreatActor → Technique (ATT&CK explicit)",
-            """
-            MATCH (a:ThreatActor), (t:Technique)
-            WHERE t.mitre_id IS NOT NULL
-              AND t.mitre_id <> ''
-              AND t.mitre_id IN coalesce(a.uses_techniques, [])
-            MERGE (a)-[r:USES]->(t)
-            SET r.confidence_score = 0.95,
-                r.match_type = 'mitre_explicit',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "uses_explicit",
+        _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
+        _inner = "WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime()"
+        if not _safe_run_batched(
+            client, "ThreatActor → Technique (ATT&CK explicit)", _outer, _inner, stats, "uses_explicit"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 6. Malware → Technique (USES) — MITRE STIX uses relationships
         logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
-        if not _safe_run(
-            client,
-            "Malware → Technique (MITRE explicit)",
-            """
-            MATCH (m:Malware), (t:Technique)
-            WHERE t.mitre_id IS NOT NULL
-              AND t.mitre_id <> ''
-              AND t.mitre_id IN coalesce(m.uses_techniques, [])
-            MERGE (m)-[r:USES]->(t)
-            SET r.confidence_score = 0.95,
-                r.match_type = 'mitre_explicit',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "malware_uses_technique",
+        _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
+        _inner = "WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime()"
+        if not _safe_run_batched(
+            client, "Malware → Technique (MITRE explicit)", _outer, _inner, stats, "malware_uses_technique"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -279,22 +231,10 @@ def build_relationships():
 
         # 10. Tool → Technique (USES) — MITRE uses_techniques
         logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
-        if not _safe_run(
-            client,
-            "Tool → Technique (MITRE explicit)",
-            """
-            MATCH (tool:Tool), (t:Technique)
-            WHERE t.mitre_id IS NOT NULL
-              AND t.mitre_id <> ''
-              AND t.mitre_id IN coalesce(tool.uses_techniques, [])
-            MERGE (tool)-[r:USES]->(t)
-            ON CREATE SET r.confidence_score = 0.95,
-                r.match_type = 'mitre_explicit',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "tool_uses_technique",
+        _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
+        _inner = "WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime()"
+        if not _safe_run_batched(
+            client, "Tool → Technique (MITRE explicit)", _outer, _inner, stats, "tool_uses_technique"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
