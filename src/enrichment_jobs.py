@@ -167,6 +167,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             ON CREATE SET c.created_at = datetime(),
                           c.actor_name = a.name
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
+                c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.last_updated     = datetime(),
                 c.indicator_count  = size(indicators),
                 c.malware_count    = size(malware_list),
