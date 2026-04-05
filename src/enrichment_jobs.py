@@ -159,7 +159,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                  collect(DISTINCT i)[0..100] AS indicator_sample,
                  min(i.first_imported_at) AS first_seen,
                  max(i.last_updated)      AS last_seen
-            WHERE size(malware_list) > 0
+            WHERE size(malware_list) > 0 AND indicator_total > 0
             WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(
                      reduce(z=[], ind IN indicator_sample | z + coalesce(ind.zone, []))
