@@ -235,11 +235,12 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
     tag) create co-occurrence relationships with artificially high confidence.
     The larger the MISP event, the weaker the actual co-occurrence signal.
 
-    Confidence tiers by event size (number of indicators in same event):
-      ≤ 10  → 0.90  (tight incident report — very strong signal)
-      ≤ 20  → 0.80  (small report)
-      ≤ 100 → 0.70  (medium feed)
-      ≤ 500 → 0.50  (large feed)
+    Confidence tiers by event size (number of indicators in same event),
+    capped at 0.50 (co-occurrence ceiling):
+      ≤ 10  → 0.50  (tight incident report)
+      ≤ 20  → 0.45  (small report)
+      ≤ 100 → 0.40  (medium feed)
+      ≤ 500 → 0.35  (large feed)
       > 500 → 0.30  (bulk dump — weak signal)
 
     Only edges with source_id IN ('misp_cooccurrence', 'misp_correlation')
@@ -265,31 +266,72 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
+            # Step 1: Pre-compute event sizes ONCE (instead of per-edge).
+            # Previously each edge re-counted all indicators in its event — millions
+            # of redundant COUNT queries. Now: one COUNT per event, then join.
+            logger.info("  [CALIBRATE] Pre-computing MISP event sizes...")
+            event_sizes_query = """
+            MATCH (i:Indicator)
+            WHERE i.misp_event_id IS NOT NULL
+            WITH i.misp_event_id AS eid, count(i) AS sz
+            RETURN eid, sz
+            """
+            event_size_result = session.run(event_sizes_query, timeout=NEO4J_READ_TIMEOUT)
+            event_sizes = {r["eid"]: r["sz"] for r in event_size_result}
+            if event_sizes:
+                min_sz = min(event_sizes.values())
+                max_sz = max(event_sizes.values())
+                avg_sz = sum(event_sizes.values()) / len(event_sizes)
+                logger.info(
+                    f"  [CALIBRATE] Pre-computed sizes for {len(event_sizes)} events "
+                    f"(min={min_sz}, max={max_sz}, avg={avg_sz:.0f})"
+                )
+            else:
+                logger.info("  [CALIBRATE] No events with indicators found — skipping calibration")
+                return results
+
+            # Step 2: For each tier, collect matching event IDs and update edges in chunks.
             for min_s, max_s, conf in tiers:
-                tier_label = f"size {min_s}–{max_s if max_s else '∞'} → conf={conf}"
+                tier_label = f"size {min_s}\u2013{max_s if max_s else '\u221e'} \u2192 conf={conf}"
                 try:
-                    where_size = (
-                        f"event_size >= {min_s}"
-                        if max_s is None
-                        else f"event_size >= {min_s} AND event_size <= {max_s}"
-                    )
-                    outer = 'MATCH (i:Indicator)-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] AND i.misp_event_id IS NOT NULL RETURN r, i'
-                    inner = f"WITH $r AS r, $i AS i WITH r, i.misp_event_id AS eid MATCH (peer:Indicator {{misp_event_id: eid}}) WITH r, count(DISTINCT peer) AS event_size WHERE {where_size} SET r.confidence_score = {conf}, r.calibrated_at = datetime()"
-                    batch_cypher = f"""
-                    CALL apoc.periodic.iterate(
-                        '{outer}',
-                        '{inner}',
-                        {{batchSize: 5000, parallel: false}}
-                    )
-                    YIELD total
-                    RETURN total AS updated
+                    tier_eids = [
+                        eid for eid, sz in event_sizes.items() if sz >= min_s and (max_s is None or sz <= max_s)
+                    ]
+                    if not tier_eids:
+                        logger.info(f"  [CALIBRATE] {tier_label}: 0 events in range — skipped")
+                        results[tier_label] = 0
+                        continue
+
+                    update_cypher = """
+                    UNWIND $eids AS eid
+                    MATCH (i:Indicator {misp_event_id: eid})-[r:INDICATES|EXPLOITS]->(target)
+                    WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"]
+                    SET r.confidence_score = $conf,
+                        r.calibrated_at = datetime()
+                    RETURN count(r) AS updated
                     """
-                    result = session.run(batch_cypher, timeout=NEO4J_READ_TIMEOUT)
-                    record = result.single()
-                    count = record["updated"] if record else 0
-                    results[tier_label] = count
-                    if count:
-                        logger.info(f"  [CALIBRATE] {tier_label}: {count} edges")
+                    total_updated = 0
+                    # Split large events (>1000 indicators) into individual chunks
+                    # to avoid transaction memory issues from millions of edges
+                    large_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) > 1000]
+                    small_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) <= 1000]
+
+                    # Small events: batch 500 at a time (safe — bounded edge count)
+                    for ci in range(0, len(small_eids), 500):
+                        chunk = small_eids[ci : ci + 500]
+                        result = session.run(update_cypher, eids=chunk, conf=conf, timeout=NEO4J_READ_TIMEOUT)
+                        record = result.single()
+                        total_updated += record["updated"] if record else 0
+
+                    # Large events: one at a time (could have 100K+ edges each)
+                    for eid in large_eids:
+                        result = session.run(update_cypher, eids=[eid], conf=conf, timeout=NEO4J_READ_TIMEOUT)
+                        record = result.single()
+                        total_updated += record["updated"] if record else 0
+
+                    results[tier_label] = total_updated
+                    if total_updated:
+                        logger.info(f"  [CALIBRATE] {tier_label}: {total_updated} edges ({len(tier_eids)} events)")
                 except Exception as tier_err:
                     logger.error(f"  [CALIBRATE] {tier_label} FAILED: {tier_err}")
                     results[tier_label] = 0
@@ -298,7 +340,10 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
         logger.error(f"calibrate_cooccurrence_confidence error: {e}")
 
     total = sum(results.values())
+    tier_summary = ", ".join(f"{k}: {v}" for k, v in results.items() if v > 0)
     logger.info(f"[CALIBRATE] Confidence calibration complete — {total} edges updated")
+    if tier_summary:
+        logger.info(f"[CALIBRATE] Tier breakdown: {tier_summary}")
     return results
 
 
