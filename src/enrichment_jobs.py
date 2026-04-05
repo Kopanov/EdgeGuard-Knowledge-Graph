@@ -279,7 +279,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     CALL apoc.periodic.iterate(
                         '{outer}',
                         '{inner}',
-                        {{batchSize: 500, parallel: false}}
+                        {{batchSize: 5000, parallel: false}}
                     )
                     YIELD total
                     RETURN total AS updated
