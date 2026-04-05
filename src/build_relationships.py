@@ -97,15 +97,15 @@ def build_relationships():
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
         logger.info("[LINK] 1/11 Technique → Tactic (kill-chain phase match)...")
         _outer = "MATCH (t:Technique) WHERE size(coalesce(t.tactic_phases, [])) > 0 RETURN t"
-        _inner = "WITH $t AS t MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'kill_chain_phase', r.created_at = datetime()"
+        _inner = "WITH $t AS t MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'kill_chain_phase', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(client, "Technique → Tactic", _outer, _inner, stats, "in_tactic"):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
         logger.info("[LINK] 2/11 Malware → ThreatActor (exact name match)...")
-        _outer = "MATCH (m:Malware) WHERE m.attributed_to IS NOT NULL AND m.attributed_to <> '' RETURN m"
-        _inner = "WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'exact', r.created_at = datetime()"
+        _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND m.attributed_to <> '') OR size(coalesce(m.aliases, [])) > 0 RETURN m"
+        _inner = "WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'exact', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -113,7 +113,7 @@ def build_relationships():
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
         _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
-        _q3a_inner = "WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'cve_tag', r.source_id = 'cve_tag_match', r.created_at = datetime()"
+        _q3a_inner = "WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'cve_tag', r.source_id = 'cve_tag_match', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(
             client, "Indicator → Vulnerability (EXPLOITS)", _q3a_outer, _q3a_inner, stats, "exploits_vuln"
         ):
@@ -123,7 +123,7 @@ def build_relationships():
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
         _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
-        _q3b_inner = "WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'cve_tag', r.source_id = 'cve_tag_match', r.created_at = datetime()"
+        _q3b_inner = "WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'cve_tag', r.source_id = 'cve_tag_match', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(client, "Indicator → CVE (EXPLOITS)", _q3b_outer, _q3b_inner, stats, "exploits_cve"):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -160,7 +160,7 @@ def build_relationships():
         # 5. ThreatActor → Technique (USES) — explicit ATT&CK uses_techniques list
         logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
-        _inner = "WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime()"
+        _inner = "WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(
             client, "ThreatActor → Technique (ATT&CK explicit)", _outer, _inner, stats, "uses_explicit"
         ):
@@ -170,7 +170,7 @@ def build_relationships():
         # 6. Malware → Technique (USES) — MITRE STIX uses relationships
         logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
-        _inner = "WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime()"
+        _inner = "WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(
             client, "Malware → Technique (MITRE explicit)", _outer, _inner, stats, "malware_uses_technique"
         ):
@@ -185,7 +185,7 @@ def build_relationships():
             "WHERE zone_name IS NOT NULL AND zone_name <> '' "
             "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
             "MERGE (sec:Sector {name: zone_name}) MERGE (i)-[r:TARGETS]->(sec) "
-            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime()"
+            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() SET r.updated_at = datetime()"
         )
         if not _safe_run_batched(
             client, "Indicator -> Sector (TARGETS)", _q7a_outer, _q7a_inner, stats, "indicator_targets_sector"
@@ -201,7 +201,7 @@ def build_relationships():
             "WHERE zone_name IS NOT NULL AND zone_name <> '' "
             "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
             "MERGE (sec:Sector {name: zone_name}) MERGE (v)-[r:AFFECTS]->(sec) "
-            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime()"
+            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() SET r.updated_at = datetime()"
         )
         if not _safe_run_batched(
             client, "Vulnerability/CVE -> Sector (AFFECTS)", _q7b_outer, _q7b_inner, stats, "vuln_affects_sector"
@@ -212,7 +212,7 @@ def build_relationships():
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
         logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
         _q8_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 RETURN i"
-        _q8_inner = "WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = 'otx_attack_ids', r.created_at = datetime()"
+        _q8_inner = "WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = 'otx_attack_ids', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(
             client, "Indicator → Technique (attack_ids)", _q8_outer, _q8_inner, stats, "indicator_uses_technique"
         ):
@@ -222,7 +222,7 @@ def build_relationships():
         # 9. Indicator → Malware (INDICATES) — malware_family name match
         logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
         _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
-        _q9_inner = "WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.confidence_score = 0.8, r.match_type = 'malware_family', r.created_at = datetime()"
+        _q9_inner = "WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.confidence_score = 0.8, r.match_type = 'malware_family', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(
             client, "Indicator → Malware (family match)", _q9_outer, _q9_inner, stats, "indicates_family"
         ):
@@ -232,7 +232,7 @@ def build_relationships():
         # 10. Tool → Technique (USES) — MITRE uses_techniques
         logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
-        _inner = "WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime()"
+        _inner = "WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit', r.created_at = datetime() SET r.updated_at = datetime()"
         if not _safe_run_batched(
             client, "Tool → Technique (MITRE explicit)", _outer, _inner, stats, "tool_uses_technique"
         ):
