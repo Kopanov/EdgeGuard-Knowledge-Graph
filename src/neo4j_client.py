@@ -2048,6 +2048,21 @@ class Neo4jClient:
                 except Exception:
                     stats["by_zone"] = {}
 
+                # Count multi-zone nodes (appear in 2+ zones)
+                try:
+                    result = session.run(
+                        """
+                        MATCH (n)
+                        WHERE n.zone IS NOT NULL AND size(n.zone) > 1
+                        RETURN count(n) AS multi_zone_count
+                    """,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    record = result.single()
+                    stats["multi_zone_count"] = record["multi_zone_count"] if record else 0
+                except Exception:
+                    stats["multi_zone_count"] = 0
+
                 # Count active/inactive for Indicators and Vulnerabilities
                 try:
                     result = session.run(
