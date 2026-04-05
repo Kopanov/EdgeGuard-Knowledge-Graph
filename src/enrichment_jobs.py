@@ -277,7 +277,17 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
             """
             event_size_result = session.run(event_sizes_query, timeout=NEO4J_READ_TIMEOUT)
             event_sizes = {r["eid"]: r["sz"] for r in event_size_result}
-            logger.info(f"  [CALIBRATE] Pre-computed sizes for {len(event_sizes)} events")
+            if event_sizes:
+                min_sz = min(event_sizes.values())
+                max_sz = max(event_sizes.values())
+                avg_sz = sum(event_sizes.values()) / len(event_sizes)
+                logger.info(
+                    f"  [CALIBRATE] Pre-computed sizes for {len(event_sizes)} events "
+                    f"(min={min_sz}, max={max_sz}, avg={avg_sz:.0f})"
+                )
+            else:
+                logger.info("  [CALIBRATE] No events with indicators found — skipping calibration")
+                return results
 
             # Step 2: For each tier, collect matching event IDs and update edges in chunks.
             for min_s, max_s, conf in tiers:
@@ -287,6 +297,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         eid for eid, sz in event_sizes.items() if sz >= min_s and (max_s is None or sz <= max_s)
                     ]
                     if not tier_eids:
+                        logger.info(f"  [CALIBRATE] {tier_label}: 0 events in range — skipped")
                         results[tier_label] = 0
                         continue
 
@@ -317,7 +328,10 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
         logger.error(f"calibrate_cooccurrence_confidence error: {e}")
 
     total = sum(results.values())
+    tier_summary = ", ".join(f"{k}: {v}" for k, v in results.items() if v > 0)
     logger.info(f"[CALIBRATE] Confidence calibration complete — {total} edges updated")
+    if tier_summary:
+        logger.info(f"[CALIBRATE] Tier breakdown: {tier_summary}")
     return results
 
 
