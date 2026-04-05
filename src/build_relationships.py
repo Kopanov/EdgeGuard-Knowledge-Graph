@@ -45,45 +45,6 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         return False
 
 
-def _safe_run_batched(
-    client, label: str, outer_query: str, inner_query: str, stats: dict, stat_key: str, batch_size: int = 1000
-) -> bool:
-    """Run a relationship query in batches using apoc.periodic.iterate.
-
-    Splits the work into mini-transactions of batch_size to prevent OOM.
-    Returns True on success, False on failure (logged, not raised).
-    """
-    query = f"""
-    CALL apoc.periodic.iterate(
-        '{outer_query}',
-        '{inner_query}',
-        {{batchSize: {batch_size}, parallel: false}}
-    )
-    YIELD batches, total, errorMessages
-    RETURN total AS count, batches, errorMessages
-    """
-    try:
-        result = client.run(query)
-        if result:
-            row = result[0]
-            count = row.get("count", 0)
-            batches = row.get("batches", 0)
-            errors = row.get("errorMessages", [])
-            stats[stat_key] = count
-            if errors:
-                logger.warning(f"  [PARTIAL] {label}: {count} in {batches} batches, errors: {errors[:3]}")
-            else:
-                logger.info(f"  [OK] {label}: {count} in {batches} batches")
-        else:
-            stats[stat_key] = 0
-            logger.info(f"  [OK] {label}: 0 (no matches)")
-        return True
-    except Exception as e:
-        logger.error(f"  [FAIL] {label}: {type(e).__name__}: {e}", exc_info=True)
-        stats[stat_key] = 0
-        return False
-
-
 def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=1000):
     """Run a relationship query in batches using apoc.periodic.iterate.
 
@@ -175,45 +136,19 @@ def build_relationships():
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
-        if not _safe_run(
-            client,
-            "Indicator → Vulnerability (EXPLOITS)",
-            """
-            MATCH (i:Indicator)
-            WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
-            MATCH (v:Vulnerability {cve_id: i.cve_id})
-            MERGE (i)-[r:EXPLOITS]->(v)
-            SET r.confidence_score = 1.0,
-                r.match_type = 'cve_tag',
-                r.source_id = 'cve_tag_match',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "exploits_vuln",
+        _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
+        _q3a_inner = "WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'cve_tag', r.source_id = 'cve_tag_match', r.created_at = datetime()"
+        if not _safe_run_batched(
+            client, "Indicator → Vulnerability (EXPLOITS)", _q3a_outer, _q3a_inner, stats, "exploits_vuln"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
-        if not _safe_run(
-            client,
-            "Indicator → CVE (EXPLOITS)",
-            """
-            MATCH (i:Indicator)
-            WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
-            MATCH (c:CVE {cve_id: i.cve_id})
-            MERGE (i)-[r:EXPLOITS]->(c)
-            SET r.confidence_score = 1.0,
-                r.match_type = 'cve_tag',
-                r.source_id = 'cve_tag_match',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "exploits_cve",
-        ):
+        _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
+        _q3b_inner = "WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = 'cve_tag', r.source_id = 'cve_tag_match', r.created_at = datetime()"
+        if not _safe_run_batched(client, "Indicator → CVE (EXPLOITS)", _q3b_outer, _q3b_inner, stats, "exploits_cve"):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
@@ -292,92 +227,52 @@ def build_relationships():
 
         # 7a. Indicator → Sector (TARGETS)
         logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
-        if not _safe_run(
-            client,
-            "Indicator → Sector (TARGETS)",
-            """
-            MATCH (i:Indicator)
-            WHERE size(coalesce(i.zone, [])) > 0
-            UNWIND i.zone AS zone_name
-            WITH i, zone_name
-            WHERE zone_name IS NOT NULL AND zone_name <> ''
-              AND zone_name IN ['healthcare', 'energy', 'finance', 'global']
-            MERGE (sec:Sector {name: zone_name})
-            MERGE (i)-[r:TARGETS]->(sec)
-            ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime()
-            RETURN count(DISTINCT i) as count
-        """,
-            stats,
-            "indicator_targets_sector",
+        _q7a_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.zone, [])) > 0 RETURN i"
+        _q7a_inner = (
+            "WITH $i AS i UNWIND i.zone AS zone_name WITH i, zone_name "
+            "WHERE zone_name IS NOT NULL AND zone_name <> '' "
+            "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
+            "MERGE (sec:Sector {name: zone_name}) MERGE (i)-[r:TARGETS]->(sec) "
+            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime()"
+        )
+        if not _safe_run_batched(
+            client, "Indicator -> Sector (TARGETS)", _q7a_outer, _q7a_inner, stats, "indicator_targets_sector"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
         logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
-        if not _safe_run(
-            client,
-            "Vulnerability/CVE → Sector (AFFECTS)",
-            """
-            MATCH (v)
-            WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0
-            UNWIND v.zone AS zone_name
-            WITH v, zone_name
-            WHERE zone_name IS NOT NULL AND zone_name <> ''
-              AND zone_name IN ['healthcare', 'energy', 'finance', 'global']
-            MERGE (sec:Sector {name: zone_name})
-            MERGE (v)-[r:AFFECTS]->(sec)
-            ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime()
-            RETURN count(DISTINCT v) as count
-        """,
-            stats,
-            "vuln_affects_sector",
+        _q7b_outer = "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0 RETURN v"
+        _q7b_inner = (
+            "WITH $v AS v UNWIND v.zone AS zone_name WITH v, zone_name "
+            "WHERE zone_name IS NOT NULL AND zone_name <> '' "
+            "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
+            "MERGE (sec:Sector {name: zone_name}) MERGE (v)-[r:AFFECTS]->(sec) "
+            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime()"
+        )
+        if not _safe_run_batched(
+            client, "Vulnerability/CVE -> Sector (AFFECTS)", _q7b_outer, _q7b_inner, stats, "vuln_affects_sector"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
         logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
-        if not _safe_run(
-            client,
-            "Indicator → Technique (attack_ids)",
-            """
-            MATCH (i:Indicator)
-            WHERE size(coalesce(i.attack_ids, [])) > 0
-            UNWIND i.attack_ids AS tech_id
-            MATCH (t:Technique {mitre_id: tech_id})
-            MERGE (i)-[r:USES_TECHNIQUE]->(t)
-            ON CREATE SET r.confidence_score = 0.85,
-                r.match_type = 'otx_attack_ids',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "indicator_uses_technique",
+        _q8_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 RETURN i"
+        _q8_inner = "WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = 'otx_attack_ids', r.created_at = datetime()"
+        if not _safe_run_batched(
+            client, "Indicator → Technique (attack_ids)", _q8_outer, _q8_inner, stats, "indicator_uses_technique"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
         logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
-        if not _safe_run(
-            client,
-            "Indicator → Malware (family match)",
-            """
-            MATCH (i:Indicator)
-            WHERE i.malware_family IS NOT NULL AND i.malware_family <> ''
-            MATCH (m:Malware)
-            WHERE toLower(m.name) = toLower(i.malware_family)
-               OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)]
-               OR toLower(m.family) = toLower(i.malware_family)
-            MERGE (i)-[r:INDICATES]->(m)
-            ON CREATE SET r.confidence_score = 0.8,
-                r.match_type = 'malware_family',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
-            stats,
-            "indicates_family",
+        _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
+        _q9_inner = "WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.confidence_score = 0.8, r.match_type = 'malware_family', r.created_at = datetime()"
+        if not _safe_run_batched(
+            client, "Indicator → Malware (family match)", _q9_outer, _q9_inner, stats, "indicates_family"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
