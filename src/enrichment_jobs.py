@@ -155,13 +155,14 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
             WITH a, malware_list,
-                 collect(DISTINCT i)[0..100] AS indicators,
-                 min(i.first_imported_at) AS first_seen,
+            WITH a, malware_list,
+                 count(DISTINCT i) AS indicator_total,
+                 collect(DISTINCT i)[0..100] AS indicator_sample,
                  max(i.last_updated)      AS last_seen
             WHERE size(malware_list) > 0
-            WITH a, malware_list, indicators, first_seen, last_seen,
+            WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(
-                     reduce(z=[], ind IN indicators | z + coalesce(ind.zone, []))
+                     reduce(z=[], ind IN indicator_sample | z + coalesce(ind.zone, []))
                  ) AS all_zones
             MERGE (c:Campaign {name: a.name + ' Campaign'})
             ON CREATE SET c.created_at = datetime(),
@@ -169,7 +170,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.last_updated     = datetime(),
-                c.indicator_count  = size(indicators),
+                c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
                 c.first_seen       = first_seen,
                 c.last_seen        = last_seen,
@@ -249,9 +250,9 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
       ≤ 500 → 0.35  (large feed)
       > 500 → 0.30  (bulk dump — weak signal)
 
-    Only edges with source_id IN ('misp_cooccurrence', 'misp_correlation',
-    'malware_family_match') are modified. Manually curated edges and explicit
-    MITRE/CVE-tag matches (different source_id) are untouched.
+    Only edges with source_id IN ('misp_cooccurrence', 'misp_correlation')
+    are modified. Explicit matches (malware_family_match, cve_tag_match,
+    mitre_explicit) and manually curated edges are untouched.
     """
     if not neo4j_client.driver:
         logger.error("calibrate_cooccurrence_confidence: no Neo4j connection")
@@ -312,7 +313,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     update_cypher = """
                     UNWIND $eids AS eid
                     MATCH (i:Indicator {misp_event_id: eid})-[r:INDICATES|EXPLOITS]->(target)
-                    WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation", "malware_family_match"]
+                    WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"]
                     SET r.confidence_score = $conf,
                         r.calibrated_at = datetime()
                     RETURN count(r) AS updated

@@ -222,7 +222,7 @@ def build_relationships():
         # 9. Indicator → Malware (INDICATES) — malware_family name match
         logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
         _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
-        _q9_inner = 'WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.confidence_score = 0.8, r.match_type = "malware_family", r.source_id = "malware_family_match", r.created_at = datetime() SET r.updated_at = datetime()'
+        _q9_inner = 'WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.confidence_score = 0.8, r.match_type = "malware_family", r.created_at = datetime() SET r.source_id = "malware_family_match", r.updated_at = datetime()'
         if not _safe_run_batched(
             client, "Indicator → Malware (family match)", _q9_outer, _q9_inner, stats, "indicates_family"
         ):
