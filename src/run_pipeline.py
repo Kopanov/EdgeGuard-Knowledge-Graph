@@ -274,40 +274,40 @@ class EdgeGuardPipeline:
             # Co-occurrence query: Indicators and Malware that share a MISP event
             # are linked with INDICATES.  Works cross-source because misp_event_id
             # is stored on every node that came through the MISP pipeline.
+            # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators)
             cooccurrence_query = """
-            MATCH (i:Indicator)
-            WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-            WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id])
-                      WHERE eid IS NOT NULL AND eid <> ''] AS eids
-            WHERE size(eids) > 0 AND size(eids) <= 200
-            UNWIND eids AS eid
-            WITH i, eid
-            MATCH (m:Malware {misp_event_id: eid})
-            MERGE (i)-[r:INDICATES]->(m)
-            ON CREATE SET r.created_at = datetime(),
-                          r.source_id  = 'misp_cooccurrence',
-                          r.confidence_score = 0.5
-            SET r.updated_at = datetime()
-            RETURN count(r) AS created
+            CALL apoc.periodic.iterate(
+                'MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> "" RETURN i',
+                'WITH $i AS i
+                 WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) WHERE eid IS NOT NULL AND eid <> ""  ][0..200] AS eids
+                 UNWIND eids AS eid WITH i, eid
+                 MATCH (m:Malware {misp_event_id: eid})
+                 MERGE (i)-[r:INDICATES]->(m)
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5 SET r.updated_at = datetime()',
+                {batchSize: 1000, parallel: false}
+            )
+            YIELD total
+            RETURN total AS created
             """
             results = self.neo4j.run(cooccurrence_query)
             record = results[0] if results else None
             indicates_count = record.get("created", 0) if record else 0
-            logger.info(f"   ℹ️ INDICATES (co-occurrence): {indicates_count} relationships")
+            logger.info(f"   INDICATES (co-occurrence, batched): {indicates_count} relationships")
 
             # Second pass: Indicators that explicitly mention a CVE are linked to
             # that CVE/Vulnerability via EXPLOITS (more specific than INDICATES).
+            # EXPLOITS: batched via apoc.periodic.iterate
             exploits_query = """
-            MATCH (i:Indicator)
-            WHERE i.cve_id IS NOT NULL AND i.cve_id <> ''
-            MATCH (v)
-            WHERE (v:Vulnerability OR v:CVE) AND v.cve_id = i.cve_id
-            MERGE (i)-[r:EXPLOITS]->(v)
-            ON CREATE SET r.created_at = datetime(),
-                          r.source_id  = 'cve_tag_match',
-                          r.confidence_score = 0.9
-            SET r.updated_at = datetime()
-            RETURN count(r) AS created
+            CALL apoc.periodic.iterate(
+                'MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> "" RETURN i',
+                'WITH $i AS i
+                 MATCH (c:CVE {cve_id: i.cve_id})
+                 MERGE (i)-[r:EXPLOITS]->(c)
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9 SET r.updated_at = datetime()',
+                {batchSize: 1000, parallel: false}
+            )
+            YIELD total
+            RETURN total AS created
             """
             results = self.neo4j.run(exploits_query)
             record = results[0] if results else None

@@ -256,7 +256,7 @@ class NVDCollector:
         return detect_zones_from_item(item)
 
     @retry_with_backoff(max_retries=MAX_RETRIES)
-    def _fetch_cves(self, limit: Optional[int]) -> List[Dict]:
+    def _fetch_cves(self, limit: Optional[int], baseline: bool = False) -> List[Dict]:
         """
         Fetch CVEs from NVD API with retry logic.
 
@@ -278,26 +278,35 @@ class NVDCollector:
         if self.api_key:
             headers["apiKey"] = self.api_key
 
-        # NVD requires pubStartDate + pubEndDate together; **every** request span ≤ 120 days (NIST).
-        # Sector lookback (months) is policy only: incremental mode still sends one clamped window
-        # (newest ≤120d). Full multi-month history uses baseline + iter_nvd_published_windows.
+        # NVD requires date pairs together; **every** request span ≤ 120 days (NIST).
+        # Incremental mode: use lastModStartDate/lastModEndDate to catch updated CVSS scores.
+        # Baseline mode: use pubStartDate/pubEndDate for historical data.
         pub_end = _utc_now()
-        # Widest sector window — min() wrongly used global (12m) and truncated fetches vs sector (24m).
-        months_range = max(SECTOR_TIME_RANGES.values())
-        desired_start = pub_end - timedelta(days=months_range * 30)
+        _use_mod_dates = not baseline  # incremental uses modification dates
+        if _use_mod_dates:
+            # Incremental: fetch CVEs modified in the last N days (catches CVSS updates)
+            _inc_days = int(os.environ.get("EDGEGUARD_NVD_INCREMENTAL_DAYS", "7"))
+            desired_start = pub_end - timedelta(days=_inc_days)
+            logger.info(f"NVD incremental: fetching CVEs modified in last {_inc_days} days")
+        else:
+            # Widest sector window for baseline
+            months_range = max(SECTOR_TIME_RANGES.values())
+            desired_start = pub_end - timedelta(days=months_range * 30)
         pub_start, pub_end = clamp_nvd_published_range(desired_start, pub_end)
         pub_start_iso = _to_nvd_pub_iso(pub_start)
         pub_end_iso = _to_nvd_pub_iso(pub_end)
+        _date_key_start = "lastModStartDate" if _use_mod_dates else "pubStartDate"
+        _date_key_end = "lastModEndDate" if _use_mod_dates else "pubEndDate"
         logger.info(
-            f"NVD: Fetching CVEs published {pub_start.strftime('%Y-%m-%d')} .. "
+            f"NVD: Fetching CVEs ({_date_key_start}) {pub_start.strftime('%Y-%m-%d')} .. "
             f"{pub_end.strftime('%Y-%m-%d')} (≤{NVD_MAX_PUBLISHED_DATE_RANGE_DAYS}d API window)"
         )
 
         # Probe total count (NVD returns oldest-first; newest are at highest indices).
         params_count = {
             "resultsPerPage": 1,
-            "pubStartDate": pub_start_iso,
-            "pubEndDate": pub_end_iso,
+            _date_key_start: pub_start_iso,
+            _date_key_end: pub_end_iso,
         }
         total_results = 0
         try:
@@ -352,8 +361,8 @@ class NVDCollector:
             params = {
                 "resultsPerPage": results_per_page,
                 "startIndex": idx,
-                "pubStartDate": pub_start_iso,
-                "pubEndDate": pub_end_iso,
+                _date_key_start: pub_start_iso,
+                _date_key_end: pub_end_iso,
             }
             if pages == 0:
                 logger.info(
@@ -577,7 +586,7 @@ class NVDCollector:
                 )
             else:
                 # Normal mode: fetch recent only
-                vulnerabilities = self._fetch_cves(limit)
+                vulnerabilities = self._fetch_cves(limit, baseline=False)
 
             # Record success in circuit breaker
             self.circuit_breaker.record_success()
