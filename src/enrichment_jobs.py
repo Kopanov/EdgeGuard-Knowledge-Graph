@@ -235,11 +235,12 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
     tag) create co-occurrence relationships with artificially high confidence.
     The larger the MISP event, the weaker the actual co-occurrence signal.
 
-    Confidence tiers by event size (number of indicators in same event):
-      ≤ 10  → 0.90  (tight incident report — very strong signal)
-      ≤ 20  → 0.80  (small report)
-      ≤ 100 → 0.70  (medium feed)
-      ≤ 500 → 0.50  (large feed)
+    Confidence tiers by event size (number of indicators in same event),
+    capped at 0.50 (co-occurrence ceiling):
+      ≤ 10  → 0.50  (tight incident report)
+      ≤ 20  → 0.45  (small report)
+      ≤ 100 → 0.40  (medium feed)
+      ≤ 500 → 0.35  (large feed)
       > 500 → 0.30  (bulk dump — weak signal)
 
     Only edges with source_id IN ('misp_cooccurrence', 'misp_correlation')
@@ -310,10 +311,21 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     RETURN count(r) AS updated
                     """
                     total_updated = 0
-                    chunk_size = 500  # event IDs per chunk (not edges)
-                    for ci in range(0, len(tier_eids), chunk_size):
-                        chunk = tier_eids[ci : ci + chunk_size]
+                    # Split large events (>1000 indicators) into individual chunks
+                    # to avoid transaction memory issues from millions of edges
+                    large_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) > 1000]
+                    small_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) <= 1000]
+
+                    # Small events: batch 500 at a time (safe — bounded edge count)
+                    for ci in range(0, len(small_eids), 500):
+                        chunk = small_eids[ci : ci + 500]
                         result = session.run(update_cypher, eids=chunk, conf=conf, timeout=NEO4J_READ_TIMEOUT)
+                        record = result.single()
+                        total_updated += record["updated"] if record else 0
+
+                    # Large events: one at a time (could have 100K+ edges each)
+                    for eid in large_eids:
+                        result = session.run(update_cypher, eids=[eid], conf=conf, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
                         total_updated += record["updated"] if record else 0
 
