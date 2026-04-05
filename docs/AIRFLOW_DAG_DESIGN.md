@@ -80,7 +80,7 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Baseline collectors (all sources, unlimited) | 2–3 hours each |
 | Neo4j sync (incremental) | 4 hours |
 | Neo4j full sync (baseline) | 6 hours |
-| build_relationships | 30–45 minutes |
+| build_relationships | 3 hours |
 | run_enrichment_jobs | 1 hour |
 | Neo4j quality check | 15 minutes |
 | Log/summary tasks | 2–5 minutes |

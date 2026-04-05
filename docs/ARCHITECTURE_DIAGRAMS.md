@@ -292,4 +292,4 @@ flowchart LR
 | Monitoring | Prometheus + Grafana | latest |
 | Data Format | STIX 2.1 | standard |
 | Language | Python | 3.12+ |
-| Versioning | CalVer | 2026.3.x |
+| Versioning | CalVer | 2026.4.x |

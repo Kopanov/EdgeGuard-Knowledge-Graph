@@ -417,7 +417,7 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Campaign`
-- Relationships: `INDICATES`, `EXPLOITS`, `USES`, `USES_TECHNIQUE`, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `IN_TACTIC`, `IS_SAME_AS`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
+- Relationships: `INDICATES`, `EXPLOITS`, `USES`, `USES_TECHNIQUE`, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
 - All edges carry `confidence_score`, `sources[]`, `imported_at`, `match_type`
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 
@@ -837,7 +837,7 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 - **11 active source collectors** with enriched fields (+ optional VirusTotal enrichment module, + sector feed placeholders): OTX, NVD (CVSSv2/v31/v40 + CISA KEV + version constraints), CISA, MITRE ATT&CK (Techniques + Actors + Malware + **Tools**), VirusTotal (YARA rules, Sigma rules, sandbox verdicts), AbuseIPDB (abuse categories), ThreatFox, URLhaus (url_status, reporter), CyberCure, Feodo (last_online), SSL Blacklist
 - **MISP as Single Source of Truth**: All collectors write to MISP first with full provenance tagging; OTX_META/TF_META/NVD_META comment prefixes for metadata round-trip
-- **Neo4j Knowledge Graph**: Production-ready graph with MERGE deduplication, 13 deterministic relationship types, cross-source IS_SAME_AS dedup for CVE and Malware nodes
+- **Neo4j Knowledge Graph**: Production-ready graph with MERGE deduplication, 11 deterministic relationship types with single-key MERGE deduplication across sources
 - **ResilMesh schema alignment**: `CVE`, `Vulnerability` (with `status: LIST`), `CVSSv2/v30/v31/v40` (bidirectional), `Tool`, `REFERS_TO` bridge, `edgeguard_managed` on all node types (including 13 ResilMesh asset-layer methods), IP.tag as LIST — all matching the official ResilMesh data model
 - **STIX 2.1 Pipeline**: Primary conversion path with direct MISP fallback
 - **Baseline + Incremental Modes**: One-time deep historical load and scheduled 2-3 day incremental updates; checkpoint file locking for concurrent Airflow workers
@@ -864,5 +864,5 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-04_
+_Last updated: 2026-04-05_
 
