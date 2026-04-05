@@ -155,9 +155,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
             WITH a, malware_list,
-            WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
+                 min(i.first_imported_at) AS first_seen,
                  max(i.last_updated)      AS last_seen
             WHERE size(malware_list) > 0
             WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
