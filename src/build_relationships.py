@@ -14,11 +14,19 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import logging
+import time
 
 from neo4j_client import Neo4jClient
 
+# Pause between queries to let Neo4j flush transactions and reclaim memory
+_INTER_QUERY_PAUSE = 3  # seconds
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# Pause between queries to let Neo4j flush transactions and reclaim memory
+_INTER_QUERY_PAUSE = 3  # seconds
 
 
 def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> bool:
@@ -30,6 +38,82 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         result = client.run(query)
         stats[stat_key] = result[0].get("count", 0) if result else 0
         logger.info(f"  [OK] {label}: {stats[stat_key]}")
+        return True
+    except Exception as e:
+        logger.error(f"  [FAIL] {label}: {type(e).__name__}: {e}", exc_info=True)
+        stats[stat_key] = 0
+        return False
+
+
+def _safe_run_batched(
+    client, label: str, outer_query: str, inner_query: str, stats: dict, stat_key: str, batch_size: int = 1000
+) -> bool:
+    """Run a relationship query in batches using apoc.periodic.iterate.
+
+    Splits the work into mini-transactions of batch_size to prevent OOM.
+    Returns True on success, False on failure (logged, not raised).
+    """
+    query = f"""
+    CALL apoc.periodic.iterate(
+        '{outer_query}',
+        '{inner_query}',
+        {{batchSize: {batch_size}, parallel: false}}
+    )
+    YIELD batches, total, errorMessages
+    RETURN total AS count, batches, errorMessages
+    """
+    try:
+        result = client.run(query)
+        if result:
+            row = result[0]
+            count = row.get("count", 0)
+            batches = row.get("batches", 0)
+            errors = row.get("errorMessages", [])
+            stats[stat_key] = count
+            if errors:
+                logger.warning(f"  [PARTIAL] {label}: {count} in {batches} batches, errors: {errors[:3]}")
+            else:
+                logger.info(f"  [OK] {label}: {count} in {batches} batches")
+        else:
+            stats[stat_key] = 0
+            logger.info(f"  [OK] {label}: 0 (no matches)")
+        return True
+    except Exception as e:
+        logger.error(f"  [FAIL] {label}: {type(e).__name__}: {e}", exc_info=True)
+        stats[stat_key] = 0
+        return False
+
+
+def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=1000):
+    """Run a relationship query in batches using apoc.periodic.iterate.
+
+    Splits the work into mini-transactions of batch_size to prevent OOM.
+    Returns True on success, False on failure (logged, not raised).
+    """
+    query = f"""
+    CALL apoc.periodic.iterate(
+        '{outer_query}',
+        '{inner_query}',
+        {{batchSize: {batch_size}, parallel: false}}
+    )
+    YIELD batches, total, errorMessages
+    RETURN total AS count, batches, errorMessages
+    """
+    try:
+        result = client.run(query)
+        if result:
+            row = result[0]
+            count = row.get("count", 0)
+            batches_n = row.get("batches", 0)
+            errors = row.get("errorMessages", [])
+            stats[stat_key] = count
+            if errors:
+                logger.warning(f"  [PARTIAL] {label}: {count} in {batches_n} batches, errors: {errors[:3]}")
+            else:
+                logger.info(f"  [OK] {label}: {count} in {batches_n} batches")
+        else:
+            stats[stat_key] = 0
+            logger.info(f"  [OK] {label}: 0 (no matches)")
         return True
     except Exception as e:
         logger.error(f"  [FAIL] {label}: {type(e).__name__}: {e}", exc_info=True)
@@ -60,13 +144,14 @@ def build_relationships():
               AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL]
                       WHERE toLower(phase) = toLower(tc.shortname))
             MERGE (t)-[r:IN_TACTIC]->(tc)
-            SET r.confidence_score = 1.0, r.match_type = 'kill_chain_phase', r.created_at = datetime()
+            ON CREATE SET r.confidence_score = 1.0, r.match_type = 'kill_chain_phase', r.created_at = datetime()
             RETURN count(*) as count
         """,
             stats,
             "in_tactic",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
         logger.info("[LINK] 2/11 Malware → ThreatActor (exact name match)...")
@@ -79,13 +164,14 @@ def build_relationships():
                    AND (m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, [])))
                OR a.name IN coalesce(m.aliases, [])
             MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-            SET r.confidence_score = 1.0, r.match_type = 'exact', r.created_at = datetime()
+            ON CREATE SET r.confidence_score = 1.0, r.match_type = 'exact', r.created_at = datetime()
             RETURN count(*) as count
         """,
             stats,
             "attributed_to",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
@@ -107,6 +193,7 @@ def build_relationships():
             "exploits_vuln",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
@@ -128,32 +215,36 @@ def build_relationships():
             "exploits_cve",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
-        # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence
-        logger.info("[LINK] 4/11 Indicator → Malware (MISP event co-occurrence)...")
-        if not _safe_run(
+        # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence (BATCHED)
+        # This query caused OOM on 170K+ indicators. Uses apoc.periodic.iterate
+        # to process in 1000-node mini-transactions instead of one giant transaction.
+        logger.info("[LINK] 4/11 Indicator → Malware (co-occurrence, batched)...")
+        _q4_outer = "MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> '' RETURN i"
+        _q4_inner = (
+            "WITH $i AS i "
+            "WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) "
+            "  WHERE eid IS NOT NULL AND eid <> ''][0..200] AS eids "
+            "UNWIND eids AS eid "
+            "WITH i, eid "
+            "MATCH (m:Malware {misp_event_id: eid}) "
+            "MERGE (i)-[r:INDICATES]->(m) "
+            "ON CREATE SET r.confidence_score = 0.5, "
+            "  r.match_type = 'misp_cooccurrence', "
+            "  r.source_id = 'misp_cooccurrence', "
+            "  r.created_at = datetime()"
+        )
+        if not _safe_run_batched(
             client,
             "Indicator → Malware (co-occurrence)",
-            """
-            MATCH (i:Indicator)
-            WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-            WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id])
-                      WHERE eid IS NOT NULL AND eid <> ''] AS eids
-            WHERE size(eids) > 0 AND size(eids) <= 200
-            UNWIND eids AS eid
-            WITH i, eid
-            MATCH (m:Malware {misp_event_id: eid})
-            MERGE (i)-[r:INDICATES]->(m)
-            SET r.confidence_score = 0.5,
-                r.match_type = 'misp_cooccurrence',
-                r.source_id = 'misp_cooccurrence',
-                r.created_at = datetime()
-            RETURN count(*) as count
-        """,
+            _q4_outer,
+            _q4_inner,
             stats,
             "indicates_cooccurrence",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 5. ThreatActor → Technique (USES) — explicit ATT&CK uses_techniques list
         logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
@@ -175,6 +266,7 @@ def build_relationships():
             "uses_explicit",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 6. Malware → Technique (USES) — MITRE STIX uses relationships
         logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
@@ -196,6 +288,7 @@ def build_relationships():
             "malware_uses_technique",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 7a. Indicator → Sector (TARGETS)
         logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
@@ -218,6 +311,7 @@ def build_relationships():
             "indicator_targets_sector",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
         logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
@@ -240,6 +334,7 @@ def build_relationships():
             "vuln_affects_sector",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
         logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
@@ -261,6 +356,7 @@ def build_relationships():
             "indicator_uses_technique",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
         logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
@@ -284,6 +380,7 @@ def build_relationships():
             "indicates_family",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 10. Tool → Technique (USES) — MITRE uses_techniques
         logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
@@ -305,6 +402,7 @@ def build_relationships():
             "tool_uses_technique",
         ):
             failures += 1
+        time.sleep(_INTER_QUERY_PAUSE)
 
         # 11-13. IS_SAME_AS cross-source correlation
         # With tag removed from MERGE keys, same-name entities and same-cve_id

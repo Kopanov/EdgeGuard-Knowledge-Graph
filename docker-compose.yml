@@ -89,7 +89,7 @@ services:
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2g}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-1g}
       # Per-transaction memory cap — prevents one bad UNWIND query from exhausting the heap
-      NEO4J_dbms_memory_transaction_total_max: ${NEO4J_TX_MEMORY_MAX:-2g}
+      NEO4J_dbms_memory_transaction_total_max: ${NEO4J_TX_MEMORY_MAX:-4g}
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
