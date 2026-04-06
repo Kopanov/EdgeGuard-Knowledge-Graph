@@ -2620,9 +2620,13 @@ class MISPToNeo4jSync:
         )
 
         created_count = 0
-        for start in range(0, len(relationships), chunk_sz):
+        total_chunks = (len(relationships) + chunk_sz - 1) // chunk_sz
+        for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
             created_count += self.neo4j.create_misp_relationships_batch(chunk, source_id=source_id)
+            # Pause between chunks to let Neo4j flush transactions (skip after last chunk)
+            if idx < total_chunks - 1:
+                time.sleep(3)
 
         return created_count
 

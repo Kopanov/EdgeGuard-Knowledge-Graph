@@ -25,10 +25,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Pause between queries to let Neo4j flush transactions and reclaim memory
-_INTER_QUERY_PAUSE = 3  # seconds
-
-
 def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> bool:
     """Run a single relationship query with fault tolerance.
 

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import argparse
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -293,8 +294,6 @@ class EdgeGuardPipeline:
             record = results[0] if results else None
             indicates_count = record.get("created", 0) if record else 0
             logger.info(f"   INDICATES (co-occurrence, batched): {indicates_count} relationships")
-
-            import time
 
             time.sleep(3)  # Let Neo4j flush between relationship queries
 
@@ -769,8 +768,6 @@ class EdgeGuardPipeline:
                 # Failed — sleep and try to reconnect
                 logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3)")
                 if _retry < 2:
-                    import time
-
                     time.sleep(10)
                     try:
                         if self.neo4j.connect():
