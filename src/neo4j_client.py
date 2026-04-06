@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
+_REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
 MAX_RETRIES = 5
 RETRY_DELAY_BASE = 2  # seconds (exponential backoff base)
 BATCH_SIZE = 1000  # Maximum items per batch
@@ -1982,7 +1983,7 @@ class Neo4jClient:
             if not rows:
                 return
             try:
-                session.run(query, rows=rows, timeout=NEO4J_READ_TIMEOUT)
+                session.run(query, rows=rows, timeout=_REL_QUERY_TIMEOUT)
                 total += len(rows)
             except Exception as e:
                 # Each UNWIND is auto-committed; do not zero the whole batch on one failure.
@@ -1990,14 +1991,21 @@ class Neo4jClient:
 
         with self.driver.session() as session:
             _run_rows(session, "USES", q_uses, uses_rows)
+            time.sleep(1)
             _run_rows(session, "ATTRIBUTED_TO", q_attr, attr_rows)
+            time.sleep(1)
             _run_rows(session, "INDICATES_malware", q_ind_mal, ind_mal_rows)
+            time.sleep(1)
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
+                time.sleep(1)
                 _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_rows)
+                time.sleep(1)
                 _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_rows)
             if expl_rows:
+                time.sleep(1)
                 _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
+                time.sleep(1)
                 _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
 
         return total

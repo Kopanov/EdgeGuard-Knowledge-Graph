@@ -92,7 +92,7 @@ NEO4J_CIRCUIT_BREAKER = get_circuit_breaker("neo4j", failure_threshold=3, recove
 
 # Chunk size for sync_to_neo4j(): avoids holding huge per-type lists and peaks in driver/heap (OOM).
 # Neo4jClient.merge_*_batch still uses its own BATCH_SIZE (default 1000) per Cypher UNWIND.
-NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 1000  # Standardized to 1000 (matches batch sizes across all workflows)
+NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # 500 keeps lock hold time manageable during relationship MERGE — 1000 caused lock contention death spiral on 100K+ attribute events.
 # Log a warning when single-pass sync is used with more than this many items (OOM risk).
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
@@ -372,7 +372,8 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
 
 
 # Max relationship definitions per Neo4j UNWIND batch (see ``Neo4jClient.create_misp_relationships_batch``).
-_RELATIONSHIP_BATCH_DEFAULT = 2000
+# 500 rows per UNWIND batch — smaller batches reduce lock contention on shared nodes.
+_RELATIONSHIP_BATCH_DEFAULT = 500
 
 
 def _neo4j_sync_item_sort_rank(item: Dict) -> int:
@@ -1730,6 +1731,42 @@ class MISPToNeo4jSync:
         if len(vulnerabilities) > _MAX_VULNS:
             logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
             vulnerabilities = vulnerabilities[:_MAX_VULNS]
+
+        # Dynamic sampling: estimate cross-product size and reduce caps if needed
+        _SAFE_REL_LIMIT = 50000
+        estimated_rels = (
+            len(actors) * len(techniques) +
+            len(malware_items) * len(actors) +
+            len(indicators) * len(malware_items) +
+            len(indicators) * len(vulnerabilities)
+        )
+        if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
+            factor = _SAFE_REL_LIMIT / estimated_rels
+            _MAX_INDICATORS = max(100, int(_MAX_INDICATORS * factor))
+            _MAX_MALWARE = max(50, int(_MAX_MALWARE * factor))
+            _MAX_VULNS = max(50, int(_MAX_VULNS * factor))
+            _MAX_ACTORS = max(50, int(_MAX_ACTORS * factor))
+            _MAX_TECHNIQUES = max(50, int(_MAX_TECHNIQUES * factor))
+            # Re-sample with reduced caps
+            indicators = indicators[:_MAX_INDICATORS]
+            malware_items = malware_items[:_MAX_MALWARE]
+            vulnerabilities = vulnerabilities[:_MAX_VULNS]
+            actors = actors[:_MAX_ACTORS]
+            techniques = techniques[:_MAX_TECHNIQUES]
+            new_estimated = (
+                len(actors) * len(techniques) +
+                len(malware_items) * len(actors) +
+                len(indicators) * len(malware_items) +
+                len(indicators) * len(vulnerabilities)
+            )
+            logger.warning(
+                "CROSS-ITEM: Estimated %s relationships exceeds %s limit — "
+                "dynamically reduced caps (indicators=%s, malware=%s, vulns=%s, actors=%s, techniques=%s) → ~%s rels",
+                estimated_rels, _SAFE_REL_LIMIT,
+                len(indicators), len(malware_items), len(vulnerabilities), len(actors), len(techniques),
+                new_estimated,
+            )
+
         for indicator in indicators:
             for vuln in vulnerabilities:
                 indicator_value = indicator.get("value")
@@ -2624,6 +2661,11 @@ class MISPToNeo4jSync:
         for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
             created_count += self.neo4j.create_misp_relationships_batch(chunk, source_id=source_id)
+            if total_chunks > 1 and (idx + 1) % 10 == 0:
+                logger.info(
+                    "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
+                    idx + 1, total_chunks, int((idx + 1) / total_chunks * 100), created_count,
+                )
             # Pause between chunks to let Neo4j flush transactions (skip after last chunk)
             if idx < total_chunks - 1:
                 time.sleep(3)
