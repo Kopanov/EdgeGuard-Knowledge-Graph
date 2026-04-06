@@ -124,7 +124,7 @@ graph TB
     I -->|TARGETS| S[Sector]
     I -->|USES_TECHNIQUE| T
     I -->|PART_OF| CAMP
-    V -->|TARGETS| S
+    V -->|AFFECTS| S
     V -->|REFERS_TO| CVE
     CVE -->|REFERS_TO| V
     CVE -->|HAS_CVSS| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
@@ -232,7 +232,7 @@ flowchart TD
     NORMAL --> DEDUP_N[Deduplicate items]
     DEDUP_N --> BUILD_REL_N[Build cross-item rels<br/>type-based sampling]
 
-    BUILD_REL_P & BUILD_REL_N --> CHUNK[Chunk sync: 500 items/chunk<br/>UNWIND batch: 1000/batch<br/>Rel batch: apoc.periodic.iterate 1000/batch]
+    BUILD_REL_P & BUILD_REL_N --> CHUNK[Chunk sync: 1000 items/chunk<br/>UNWIND batch: 1000/batch<br/>Rel batch: apoc.periodic.iterate 1000/batch]
     CHUNK --> NEO4J[(Neo4j)]
 
     style PAGED fill:#3b82f6,stroke:#2563eb,color:#fff
@@ -291,3 +291,7 @@ flowchart LR
 | Data Format | STIX 2.1 | standard |
 | Language | Python | 3.12+ |
 | Versioning | CalVer | 2026.4.x |
+
+---
+
+*Last updated: 2026-04-06*

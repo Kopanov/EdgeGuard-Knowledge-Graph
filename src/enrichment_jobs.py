@@ -16,6 +16,7 @@ Jobs
 import logging
 import os
 import sys
+import time
 from typing import Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -154,6 +155,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(m:Malware)
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
+            WHERE i.active = true
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
@@ -169,6 +171,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                           c.actor_name = a.name
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
+                c.active           = CASE WHEN indicator_total > 0 THEN true ELSE c.active END,
                 c.last_updated     = datetime(),
                 c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
@@ -182,6 +185,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(create_cypher, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
+            time.sleep(3)
 
             # Step 2: Link malware to their campaigns
             link_malware = """
@@ -193,12 +197,14 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
+            time.sleep(3)
 
-            # Step 3: Link indicators to their campaigns (sample: up to 100 per campaign)
+            # Step 3: Link active indicators to their campaigns (sample: up to 100 per campaign)
             # Using LIMIT inside WITH to avoid huge relationship fans
             link_indicators = """
             MATCH (c:Campaign)
             MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
+            WHERE i.active = true
             WITH c, collect(i)[0..100] AS indicators
             UNWIND indicators AS i
             MERGE (i)-[:PART_OF]->(c)
@@ -207,6 +213,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
+            time.sleep(3)
 
             # Step 4: Deactivate campaigns whose indicators are all retired
             logger.info("[DECAY] Deactivating campaigns with no active indicators...")
@@ -222,6 +229,19 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             cleanup_count = record["count"] if record else 0
             logger.info(f"  [OK] Deactivated {cleanup_count} campaigns with no active indicators")
             results["campaigns_deactivated"] = cleanup_count
+
+            # Step 5: Count re-activated campaigns (updated in this run, now active)
+            reactivated_query = """
+                MATCH (c:Campaign)
+                WHERE c.active = true
+                  AND duration.between(c.last_updated, datetime()).minutes < 5
+                RETURN count(c) as count
+            """
+            result = session.run(reactivated_query, timeout=NEO4J_READ_TIMEOUT)
+            record = result.single()
+            reactivated = record["count"] if record else 0
+            if reactivated > 0:
+                logger.info(f"  [OK] {reactivated} campaigns active (updated in this run)")
 
     except Exception as e:
         logger.error(f"build_campaign_nodes error: {e}")
@@ -325,16 +345,24 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     large_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) > 1000]
                     small_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) <= 1000]
 
-                    # Small events: batch 500 at a time (safe — bounded edge count)
-                    for ci in range(0, len(small_eids), 500):
-                        chunk = small_eids[ci : ci + 500]
+                    # Small events: batch 1000 event IDs at a time with 3s pause
+                    for ci in range(0, len(small_eids), 1000):
+                        chunk = small_eids[ci : ci + 1000]
                         result = session.run(update_cypher, eids=chunk, conf=conf, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
                         total_updated += record["updated"] if record else 0
+                        if ci + 1000 < len(small_eids):
+                            time.sleep(3)
 
                     # Large events: use apoc.periodic.iterate to batch at edge level.
                     # A 96K-indicator event can have millions of edges — too many for one tx.
+                    if large_eids:
+                        logger.info(
+                            f"  [CALIBRATE] {tier_label}: processing {len(large_eids)} large events "
+                            f"(>{1000} indicators each) via apoc.periodic.iterate"
+                        )
                     for eid in large_eids:
+                        evt_size = event_sizes.get(eid, 0)
                         batch_query = f"""
                         CALL apoc.periodic.iterate(
                             'MATCH (i:Indicator {{misp_event_id: "{eid}"}})-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] RETURN r',
@@ -346,7 +374,12 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         """
                         result = session.run(batch_query, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
-                        total_updated += record["updated"] if record else 0
+                        evt_updated = record["updated"] if record else 0
+                        total_updated += evt_updated
+                        logger.info(
+                            f"  [CALIBRATE]   event {eid} ({evt_size} indicators): {evt_updated} edges calibrated"
+                        )
+                        time.sleep(3)  # Let Neo4j flush between large event batches
 
                     results[tier_label] = total_updated
                     if total_updated:
@@ -394,7 +427,7 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
         'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[:REFERS_TO]->(c) MERGE (c)-[:REFERS_TO]->(v)',
-        {batchSize: 1000, parallel: false}
+        {batchSize: 5000, parallel: false}
     )
     YIELD total
     RETURN total AS linked
@@ -429,8 +462,8 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("Running post-sync enrichment jobs")
     logger.info("=" * 55)
 
-    logger.info("\n[1/4] IOC Confidence Decay...")
-    summary["decay"] = decay_ioc_confidence(neo4j_client)
+    logger.info("\n[1/4] Vulnerability↔CVE REFERS_TO Bridge...")
+    summary["bridge"] = bridge_vulnerability_cve(neo4j_client)
 
     logger.info("\n[2/4] Campaign Node Builder...")
     summary["campaigns"] = build_campaign_nodes(neo4j_client)
@@ -438,8 +471,8 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("\n[3/4] Co-occurrence Confidence Calibration...")
     summary["calibration"] = calibrate_cooccurrence_confidence(neo4j_client)
 
-    logger.info("\n[4/4] Vulnerability↔CVE REFERS_TO Bridge...")
-    summary["bridge"] = bridge_vulnerability_cve(neo4j_client)
+    logger.info("\n[4/4] IOC Confidence Decay...")
+    summary["decay"] = decay_ioc_confidence(neo4j_client)
 
     logger.info("\n[DONE] All enrichment jobs complete")
     return summary

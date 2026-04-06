@@ -185,10 +185,10 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 Runs `src/enrichment_jobs.py` — **four** jobs in sequence (`run_all_enrichment_jobs`):
 
-1. **IOC confidence decay** (`decay_ioc_confidence`)
+1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
 2. **Campaign nodes** (`build_campaign_nodes`)
 3. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`)
-4. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
+4. **IOC confidence decay** (`decay_ioc_confidence` — idempotent last step)
 
 #### IOC Confidence Decay
 

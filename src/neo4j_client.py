@@ -559,7 +559,7 @@ class Neo4jClient:
             # Decay / active tracking
             "CREATE INDEX indicator_last_updated IF NOT EXISTS FOR (i:Indicator) ON (i.last_updated)",
             "CREATE INDEX vulnerability_last_updated IF NOT EXISTS FOR (v:Vulnerability) ON (v.last_updated)",
-            # build_relationships performance: CVE.cve_id needed for EXPLOITS query + IS_SAME_AS
+            # build_relationships performance: CVE.cve_id needed for EXPLOITS query
             "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
             # Co-occurrence join: Malware/ThreatActor by misp_event_id
             "CREATE INDEX malware_misp_event_id IF NOT EXISTS FOR (m:Malware) ON (m.misp_event_id)",
@@ -765,7 +765,7 @@ class Neo4jClient:
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
-                n.active = true,
+                n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                 n.edgeguard_managed = true
             """
 
@@ -830,7 +830,7 @@ class Neo4jClient:
             # Check existing confidence before update for audit logging
             check_query = f"""
             MATCH (n:{label} {{{key_set}}})
-            RETURN n.confidence_score as existing_confidence, n.source as existing_source
+            RETURN n.confidence_score as existing_confidence, n.source as existing_source, n.retired_at as retired_at
             """
 
             with self.driver.session() as session:
@@ -841,11 +841,18 @@ class Neo4jClient:
                 if existing_record:
                     existing_conf = existing_record.get("existing_confidence")
                     existing_src = existing_record.get("existing_source")
+                    key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
                     if existing_conf is not None and confidence < existing_conf:
-                        key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
                         logger.info(
                             f"AUDIT: Skipping lower-confidence update for {label}({key_str}): "
                             f"existing={existing_conf} (source={existing_src}), new={confidence} (source={source_id})"
+                        )
+                    # Log when a retired node is re-imported but kept inactive
+                    existing_retired = existing_record.get("retired_at")
+                    if existing_retired is not None:
+                        logger.warning(
+                            f"AUDIT: Re-imported retired node {label}({key_str}): "
+                            f"active flag preserved (retired_at={existing_retired}), source={source_id}"
                         )
 
                 # Execute the merge
@@ -901,9 +908,9 @@ class Neo4jClient:
         WHERE {key_conditions}
         MATCH (s:Source {{source_id: $source_id}})
         MERGE (n)-[r:SOURCED_FROM]->(s)
-        ON CREATE SET r.imported_at = datetime()
-        SET r.raw_data = $raw_data,
-            r.confidence = $confidence,
+        ON CREATE SET r.imported_at = datetime(),
+            r.raw_data = $raw_data
+        SET r.confidence = $confidence,
             r.source = $source_id,
             r.updated_at = datetime(),
             r.edgeguard_managed = true
@@ -1035,7 +1042,8 @@ class Neo4jClient:
             MATCH (cve:CVE {{cve_id: $cve_id}})
             MERGE (n:{label} {{cve_id: $cve_id, tag: $tag}})
             SET {set_clause},
-                n.last_updated = datetime()
+                n.last_updated = datetime(),
+                n.edgeguard_managed = true
             MERGE (cve)-[:{rel_type}]->(n)
             MERGE (n)-[:{rel_type}]->(cve)
             """
@@ -1151,7 +1159,7 @@ class Neo4jClient:
             MATCH (n:Indicator)
             WHERE n.misp_event_id IS NOT NULL 
               AND n.misp_event_id IN $active_ids
-            SET n.active = true
+            SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             query_indicators_inactive = """
@@ -1254,6 +1262,12 @@ class Neo4jClient:
                         "raw_data": json.dumps(raw_data, default=str),
                     }
 
+                    # Add original date fields for cross-source min/max tracking
+                    if item.get("first_seen"):
+                        batch_item["first_seen"] = item["first_seen"]
+                    if item.get("last_seen"):
+                        batch_item["last_seen"] = item["last_seen"]
+
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
                         batch_item["misp_event_id"] = item.get("misp_event_id")
@@ -1291,8 +1305,14 @@ class Neo4jClient:
                     n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = true,
+                    n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
+                    n.original_published_date = CASE
+                        WHEN n.original_published_date IS NULL OR item.first_seen < n.original_published_date
+                        THEN item.first_seen ELSE n.original_published_date END,
+                    n.original_modified_date = CASE
+                        WHEN n.original_modified_date IS NULL OR item.last_seen > n.original_modified_date
+                        THEN item.last_seen ELSE n.original_modified_date END,
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
@@ -1307,9 +1327,9 @@ class Neo4jClient:
                 WITH n, item
                 MATCH (s:Source {source_id: item.source_id})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
-                ON CREATE SET r.imported_at = datetime()
-                SET r.raw_data = item.raw_data,
-                    r.confidence = item.confidence,
+                ON CREATE SET r.imported_at = datetime(),
+                    r.raw_data = item.raw_data
+                SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true
@@ -1418,7 +1438,7 @@ class Neo4jClient:
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = true,
+                    n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
@@ -1430,9 +1450,9 @@ class Neo4jClient:
                 WITH n, item
                 MATCH (s:Source {source_id: item.source_id})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
-                ON CREATE SET r.imported_at = datetime()
-                SET r.raw_data = item.raw_data,
-                    r.confidence = item.confidence,
+                ON CREATE SET r.imported_at = datetime(),
+                    r.raw_data = item.raw_data
+                SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true
@@ -3798,7 +3818,7 @@ class Neo4jClient:
             i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
             i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
-            i.active = true
+            i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
         """
 
         try:

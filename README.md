@@ -480,7 +480,7 @@ EdgeGuard/
 ├── dags/
 │   ├── edgeguard_pipeline.py       # 6 DAGs: baseline, high/med/low/daily collectors, Neo4j sync
 │   └── edgeguard_metrics_server.py # Optional Prometheus metrics DAG(s)
-├── tests/                      # Pytest test suite (8+ tests, CI-gated at 30% coverage)
+├── tests/                      # Pytest test suite (35 tests, CI-gated at 30% coverage)
 ├── docs/                       # Full documentation set (architecture, collectors, Airflow, …)
 ├── docker-compose.yml          # Full stack: Neo4j + airflow_postgres + Airflow + REST + GraphQL
 ├── docker-compose.monitoring.yml  # Prometheus + Grafana overlay
@@ -647,7 +647,7 @@ Use this when **`1000`** or **`2000`** in docs/code look contradictory.
 | `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC` | Subtract from stored OTX cursor when querying **`modified_since`** (clock skew / missed edge pulses). | `300` |
 | `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` | Max OTX API pages per incremental run (each page then **2s** delay). | `25` |
 | `EDGEGUARD_MITRE_CONDITIONAL_GET` | MITRE STIX bundle: send **`If-None-Match`** on scheduled runs; **HTTP 304** skips re-parse/re-push. Baseline always full download. | `true` |
-| `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | **MISP→Neo4j sync** (`run_misp_to_neo4j`): max **parsed graph items** merged **per Python chunk** (limits Airflow worker **RAM** during Neo4j writes). **Not** the MISP **event index** page size (**500** per page in code) or **`restSearch` `limit: 1000`** fallback — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md). Default **`500`**. Lower (e.g. `250`) if **OOM** / **SIGKILL** after parse. **`0`** or **`all`** = **single pass** (high OOM risk). | `500` |
+| `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | **MISP→Neo4j sync** (`run_misp_to_neo4j`): max **parsed graph items** merged **per Python chunk** (limits Airflow worker **RAM** during Neo4j writes). **Not** the MISP **event index** page size (**500** per page in code) or **`restSearch` `limit: 1000`** fallback — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md). Default **`1000`**. Lower (e.g. `250`) if **OOM** / **SIGKILL** after parse. **`0`** or **`all`** = **single pass** (high OOM risk). | `1000` |
 | `EDGEGUARD_REL_BATCH_SIZE` | Max **relationship definitions** per **`create_misp_relationships_batch`** UNWIND round-trip (embedded + cross-item edges). Lower if Neo4j **transaction timeouts** on huge events. | `2000` |
 | `EDGEGUARD_DEBUG_GC` | If set to a **truthy** value, run **`gc.collect()`** after each Neo4j **node** merge chunk (diagnostics only; can **increase** peak RSS on tight workers — leave unset in production unless profiling). | *(unset)* |
 | `EDGEGUARD_INCREMENTAL_LIMIT` | Max items **per source** for regular cron runs. `0` = unlimited. | `200` |
@@ -843,14 +843,14 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 - **Baseline + Incremental Modes**: One-time deep historical load and scheduled 2-3 day incremental updates; checkpoint file locking for concurrent Airflow workers
 - **6 primary Airflow DAGs** in `edgeguard_pipeline.py` (+ optional metrics DAGs); UI on port **8082** (intentional vs Temporal); sync conflict guard between baseline and incremental
 - **Post-Sync Enrichment**: IOC confidence decay, Campaign node materialisation (with cleanup for retired indicators), Vulnerability↔CVE bridge, co-occurrence confidence calibration
-- **Multi-Zone Sector Filtering**: Healthcare, Energy, Finance, Global — 151 weighted keywords with negative exclusions, zone validation whitelist in Sector node creation
+- **Multi-Zone Sector Filtering**: Healthcare, Energy, Finance, Global — 143 weighted keywords with negative exclusions, zone validation whitelist in Sector node creation
 - **GraphQL API** (port 4001): Strawberry/FastAPI with CORS; all node types queryable including Tool; 14 enrichment fields resolved; GraphiQL opt-in via `EDGEGUARD_GRAPHQL_PLAYGROUND=true`
 - **FastAPI REST API** (port 8000): Sector-filtered, rate-limited, authenticated endpoints; `/graph/explore` with 4 views (Malware, Actors, Indicators, CVEs)
 - **Interactive Graph Explorer**: Browser-based Cytoscape.js visualization with live Neo4j data, CISA KEV highlighting, search, zone filtering ([docs/GRAPH_EXPLORER.md](docs/GRAPH_EXPLORER.md))
 - **Full-stack Docker Compose**: Neo4j + Airflow + REST API + GraphQL in one `docker compose up -d`; also supports conda/venv/bare-metal with external MISP+Neo4j
 - **CI/CD**: Lint (ruff), type-check (mypy), pytest (161 tests, 30% coverage gate), Docker build, pip-audit, BugBot — all green
 - **Health Checks + Metrics**: MISP (with PyMISP version compatibility detection), Neo4j (with 30s timeout), Airflow, NATS; Prometheus/Grafana monitoring stack
-- **Production CLI** (16 commands): `preflight` (8-category readiness check), `stats --full` (node counts by zone/source + MISP breakdown), `dag status/kill` (Airflow run monitoring + stuck-run recovery), `checkpoint status/clear` (baseline progress + incremental cursors), `doctor`, `heal`, `validate`, `monitor`, `version`
+- **Production CLI** (16 commands): `preflight` (7-category readiness check), `stats --full` (node counts by zone/source + MISP breakdown), `dag status/kill` (Airflow run monitoring + stuck-run recovery), `checkpoint status/clear` (baseline progress + incremental cursors), `doctor`, `heal`, `validate`, `monitor`, `version`
 - **Circuit Breakers + Retry**: Fixed HALF_OPEN deadlock, monotonic time, resilience patterns for all external service calls
 - **UTC-aware timestamps**: All 70+ datetime instances across 24 files use `timezone.utc` (Python 3.12 compatible)
 

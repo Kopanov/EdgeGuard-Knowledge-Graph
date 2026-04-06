@@ -92,7 +92,7 @@ NEO4J_CIRCUIT_BREAKER = get_circuit_breaker("neo4j", failure_threshold=3, recove
 
 # Chunk size for sync_to_neo4j(): avoids holding huge per-type lists and peaks in driver/heap (OOM).
 # Neo4jClient.merge_*_batch still uses its own BATCH_SIZE (default 1000) per Cypher UNWIND.
-NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # Reduced from 1000 to lower peak memory on large syncs
+NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 1000  # Standardized to 1000 (matches batch sizes across all workflows)
 # Log a warning when single-pass sync is used with more than this many items (OOM risk).
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
@@ -259,7 +259,7 @@ def _parse_neo4j_sync_chunk_size(raw: Optional[str], n_items: int) -> Tuple[int,
 
     Semantics (documented in README / AIRFLOW_DAGS.md):
 
-    - **Unset / empty:** ``500`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
+    - **Unset / empty:** ``1000`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
     - **``0`` or ``all``** (case-insensitive, stripped): one Python chunk for the entire sorted
       list — same memory profile as pre-chunking sync (**OOM risk** on large attribute counts).
       For experts, large-RAM workers, or A/B debugging only.
@@ -2526,7 +2526,7 @@ class MISPToNeo4jSync:
                 it.pop("relationships", None)
             # Pause between chunks to let Neo4j flush transactions
             if ci < n_chunks - 1:  # Skip delay after the last chunk
-                time.sleep(2)
+                time.sleep(3)
             # Forced full GC on huge graphs can spike RAM in small workers (OOM/SIGKILL).
             # Opt-in only: EDGEGUARD_DEBUG_GC=1
             if os.environ.get("EDGEGUARD_DEBUG_GC", "").strip().lower() in ("1", "true", "yes"):
@@ -2620,9 +2620,13 @@ class MISPToNeo4jSync:
         )
 
         created_count = 0
-        for start in range(0, len(relationships), chunk_sz):
+        total_chunks = (len(relationships) + chunk_sz - 1) // chunk_sz
+        for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
             created_count += self.neo4j.create_misp_relationships_batch(chunk, source_id=source_id)
+            # Pause between chunks to let Neo4j flush transactions (skip after last chunk)
+            if idx < total_chunks - 1:
+                time.sleep(3)
 
         return created_count
 
@@ -2789,7 +2793,7 @@ class MISPToNeo4jSync:
                 # Release page memory and pause before next page
                 del page_items, unique_items, page_rels
                 gc.collect()
-                time.sleep(2)  # Let Neo4j flush transactions between pages
+                time.sleep(3)  # Let Neo4j flush transactions between pages
 
             logger.info(
                 "Event %s: page %s/%s done — %s items synced so far",

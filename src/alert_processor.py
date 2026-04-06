@@ -170,7 +170,7 @@ class AlertProcessor:
       - (Alert)-[:AFFECTS]->(Zone)
       - (Asset)-[:LOCATED_IN]->(Zone)
       - (Asset)-[:HAS_IP]->(Indicator)
-      - (Indicator)-[:ATTRIBUTED_TO]->(Malware)
+      - (Indicator)-[:INDICATES]->(Malware)
       - (Malware)-[:ATTRIBUTED_TO]->(ThreatActor)
       - (ThreatActor)-[:USES]->(Technique)
       - (Indicator)-[:INDICATES]->(Vulnerability)
@@ -321,7 +321,7 @@ class AlertProcessor:
                 malware_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
-                    OPTIONAL MATCH (i)-[:ATTRIBUTED_TO]->(m:Malware)
+                    OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
                     RETURN collect(DISTINCT m {
                         .name, .family, .malware_types, .description
                     }) as malware_list
@@ -351,7 +351,7 @@ class AlertProcessor:
                 actors_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
-                    OPTIONAL MATCH (i)-[:ATTRIBUTED_TO]->(m:Malware)
+                    OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
                     OPTIONAL MATCH (m)-[:ATTRIBUTED_TO]->(a:ThreatActor)
                     OPTIONAL MATCH (a)-[:USES]->(t:Technique)
                     RETURN collect(DISTINCT a {

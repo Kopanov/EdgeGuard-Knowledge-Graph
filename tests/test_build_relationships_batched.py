@@ -51,13 +51,13 @@ class TestBatchedCypherConstruction:
         query = client.run.call_args[0][0]
         assert "CALL apoc.periodic.iterate" in query
 
-    def test_contains_batch_size_1000(self):
+    def test_contains_batch_size_5000(self):
         client = _mock_client()
         client.run.return_value = [{"count": 10, "batches": 1, "errorMessages": []}]
         stats = {}
         _safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "test_key")
         query = client.run.call_args[0][0]
-        assert "batchSize: 1000" in query
+        assert "batchSize: 5000" in query
 
     def test_contains_parallel_false(self):
         client = _mock_client()

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import argparse
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -284,7 +285,7 @@ class EdgeGuardPipeline:
                  MATCH (m:Malware {misp_event_id: eid})
                  MERGE (i)-[r:INDICATES]->(m)
                  ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5 SET r.updated_at = datetime()',
-                {batchSize: 1000, parallel: false}
+                {batchSize: 5000, parallel: false}
             )
             YIELD total
             RETURN total AS created
@@ -293,6 +294,8 @@ class EdgeGuardPipeline:
             record = results[0] if results else None
             indicates_count = record.get("created", 0) if record else 0
             logger.info(f"   INDICATES (co-occurrence, batched): {indicates_count} relationships")
+
+            time.sleep(3)  # Let Neo4j flush between relationship queries
 
             # Second pass: Indicators that explicitly mention a CVE are linked to
             # that CVE/Vulnerability via EXPLOITS (more specific than INDICATES).
@@ -304,7 +307,7 @@ class EdgeGuardPipeline:
                  MATCH (c:CVE {cve_id: i.cve_id})
                  MERGE (i)-[r:EXPLOITS]->(c)
                  ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9 SET r.updated_at = datetime()',
-                {batchSize: 1000, parallel: false}
+                {batchSize: 5000, parallel: false}
             )
             YIELD total
             RETURN total AS created
@@ -765,8 +768,6 @@ class EdgeGuardPipeline:
                 # Failed — sleep and try to reconnect
                 logger.warning(f"   Neo4j not reachable (attempt {_retry + 1}/3)")
                 if _retry < 2:
-                    import time
-
                     time.sleep(10)
                     try:
                         if self.neo4j.connect():

@@ -25,10 +25,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Pause between queries to let Neo4j flush transactions and reclaim memory
-_INTER_QUERY_PAUSE = 3  # seconds
-
-
 def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> bool:
     """Run a single relationship query with fault tolerance.
 
@@ -45,7 +41,7 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         return False
 
 
-def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=1000):
+def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=5000):
     """Run a relationship query in batches using apoc.periodic.iterate.
 
     Splits the work into mini-transactions of batch_size to prevent OOM.
@@ -130,7 +126,7 @@ def build_relationships():
 
         # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence (BATCHED)
         # This query caused OOM on 170K+ indicators. Uses apoc.periodic.iterate
-        # to process in 1000-node mini-transactions instead of one giant transaction.
+        # to process in 5000-node mini-transactions instead of one giant transaction.
         logger.info("[LINK] 4/11 Indicator → Malware (co-occurrence, batched)...")
         _q4_outer = "MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> '' RETURN i"
         _q4_inner = (
@@ -239,12 +235,9 @@ def build_relationships():
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
-        # 11-13. IS_SAME_AS cross-source correlation
-        # With tag removed from MERGE keys, same-name entities and same-cve_id
-        # nodes already merge into a single node. IS_SAME_AS is no longer needed
-        # for Malware (name-keyed), CVE (cve_id-keyed), or Vulnerability (cve_id-keyed).
-        # Source provenance is tracked via the accumulated `source` and `tags` arrays.
-        logger.info("[LINK] 11/11 Cross-source dedup — skipped (entities merge on name/cve_id, no IS_SAME_AS needed)")
+        # Cross-source dedup is handled at ingest time via single-key MERGE
+        # (name for Malware/ThreatActor, cve_id for CVE/Vulnerability, mitre_id
+        # for Technique/Tactic/Tool). Source provenance tracked via `source`/`tags` arrays.
 
         # Get final stats
         try:
@@ -284,53 +277,11 @@ def build_relationships():
         client.close()
 
 
-def build_relationships_with_fuzzy_matching():
-    """Optional: Build relationships with fuzzy matching (opt-in, more prone to false positives).
-
-    WARNING: This function uses CONTAINS matching which can create false positives.
-    Use build_relationships() for production - this is for research/analysis only.
-    """
-    client = Neo4jClient()
-
-    if not client.connect():
-        logger.error("Failed to connect to Neo4j")
-        return False
-
-    logger.warning("[WARN]  Using fuzzy matching - this may create false positive relationships!")
-
-    try:
-        # Fuzzy match with LOWER confidence scores
-        logger.info("[LINK] Creating fuzzy relationships (LOW confidence)...")
-
-        # Only do fuzzy matching for specific known cases with low confidence
-        result = client.run("""
-            MATCH (m:Malware), (a:ThreatActor)
-            WHERE m.attributed_to CONTAINS a.name OR a.name CONTAINS m.attributed_to
-            AND m.attributed_to <> a.name  -- Exclude exact matches (already done above)
-            MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-            SET r.confidence_score = 0.5, r.match_type = 'fuzzy', r.created_at = datetime()
-            RETURN count(*) as count
-        """)
-        fuzzy_count = result[0].get("count", 0) if result else 0
-        logger.info(f"  [OK] Fuzzy ATTRIBUTED_TO: {fuzzy_count} (confidence: 0.5)")
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Error in fuzzy matching: {e}")
-        return False
-
-    finally:
-        client.close()
-
-
 if __name__ == "__main__":
     print("=" * 50)
-    print("🔗 EdgeGuard - Building Graph Relationships")
+    print("EdgeGuard - Building Graph Relationships")
     print("=" * 50)
     print("\nUsing EXACT matching with confidence scoring...")
-    print("To enable fuzzy matching (not recommended), call:")
-    print("  build_relationships_with_fuzzy_matching()")
     print()
 
     if build_relationships():
