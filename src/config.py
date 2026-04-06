@@ -524,7 +524,7 @@ def baseline_collection_limit_from_env() -> Optional[int]:
 # Malware families will be linked via relationships, not keywords
 SECTOR_KEYWORDS = {
     "healthcare": [
-        # Strong healthcare-specific terms ONLY
+        # Strong healthcare-specific terms ONLY — no bare short acronyms or generic English words
         "hospital",
         "hospitals",
         "healthcare",
@@ -532,7 +532,7 @@ SECTOR_KEYWORDS = {
         "medical device",
         "medical devices",
         "medical imaging",
-        "mri",
+        "mri scan",
         "ct-scan",
         "xray",
         "x-ray",
@@ -542,15 +542,17 @@ SECTOR_KEYWORDS = {
         "insulin pump",
         "defibrillator",
         "dialysis",
-        "pacs",
-        "emr",
-        "ehr",
+        "pacs server",
+        # "emr" removed — collides with AWS EMR (Elastic MapReduce)
+        "ehr system",
+        "electronic health record",
         "electronic medical records",
         "patient data",
         "medical records",
         "hipaa",
-        "pharma",
+        # "pharma" removed — collides with SEO pharma spam on non-healthcare sites
         "pharmaceutical",
+        "pharma company",
         "pharmacy",
         "drug manufacturer",
         "biomedical",
@@ -560,37 +562,44 @@ SECTOR_KEYWORDS = {
         "lab corporation",
         "diagnostic lab",
         "health clinic",
-        "clinic",
+        # "clinic" removed — generic English word ("phishing clinic", "crime clinic")
         "medical center",
-        "patient",
-        "patients",
+        # "patient"/"patients" removed — adjective usage ("patient attacker", "patient zero")
+        "patient monitoring",
+        "patient record",
+        "patient portal",
         "dicom",
         "hl7",
         "fhir",
-        "medical",
+        # "medical" removed — too generic standalone; multi-word forms above are sufficient
         "health it",
         "healthcare software",
         "clinical software",
         "telehealth",
-        "ehr system",
     ],
     "energy": [
-        # Strong energy/ICS-specific terms ONLY
+        # Strong energy/ICS-specific terms ONLY — no bare short acronyms or generic English words
         "scada",
         "scada system",
-        "ics",
+        # "ics" removed — collides with ICS calendar files, Incident Command System
         "industrial control",
-        "dcs",
-        "distributed control",
-        "plc",
-        "hmi",
+        "industrial control system",
+        # "dcs" removed — collides with Data Center Services, generic acronym
+        "distributed control system",
+        # "plc" removed — collides with "Company PLC" (UK corporate naming)
+        "plc controller",
+        "programmable logic controller",
+        # "hmi" removed — short acronym; "scada hmi" below is specific enough
         "scada hmi",
         "electric grid",
         "power grid",
         "electrical grid",
         "substation",
-        "transformer",
-        "transmission",
+        # "transformer" removed — collides with AI/ML transformer architecture
+        "power transformer",
+        "electrical transformer",
+        # "transmission" removed — collides with "data transmission", "network transmission"
+        "power transmission",
         "distribution grid",
         "smart grid",
         "grid infrastructure",
@@ -609,7 +618,7 @@ SECTOR_KEYWORDS = {
         "wind farm",
         "hydro plant",
         "critical infrastructure",
-        "cni",
+        # "cni" removed — generic 3-letter acronym; "critical infrastructure" above is precise
         "energy sector",
         "ot security",
         "ot network",
@@ -620,12 +629,13 @@ SECTOR_KEYWORDS = {
         "ethernet ip",
         "profinet",
         "substation automation",
-        "load management",
+        # "load management" removed — collides with server/database load management
+        "grid load management",
         "grid operations",
         "energy management system",
     ],
     "finance": [
-        # Strong finance-specific terms ONLY (avoid generic "bank")
+        # Strong finance-specific terms ONLY — no bare short acronyms or generic English words
         "banking trojan",
         "financial trojan",
         "payment card",
@@ -636,10 +646,12 @@ SECTOR_KEYWORDS = {
         "atm malware",
         "pos malware",
         "point of sale",
-        "banking",
+        # "banking" removed — too generic standalone ("banking on", "banking credentials")
         "banking sector",
         "financial sector",
-        "investment",
+        # "investment" removed — generic English ("investment in security", "return on investment")
+        "investment firm",
+        "investment bank",
         "trading platform",
         "stock exchange",
         "brokerage",
@@ -647,8 +659,13 @@ SECTOR_KEYWORDS = {
         "cryptocurrency exchange",
         "crypto exchange",
         "bitcoin exchange",
-        "swift",
-        "ach",
+        # "swift" removed — adjective collision ("swift response", "swift attack") + Apple Swift
+        "swift payment",
+        "swift network",
+        "swift transfer",
+        # "ach" removed — 3-letter acronym collision risk
+        "ach payment",
+        "ach transfer",
         "wire transfer fraud",
         "fintech",
         "digital banking",
@@ -661,8 +678,8 @@ SECTOR_KEYWORDS = {
         "sap system",
         "oracle financial",
         "accounting software",
-        "kyc",
-        "aml",
+        # "kyc" removed — 3-letter acronym; "know your customer" below is precise
+        # "aml" removed — 3-letter acronym; collides with AML (Acute Myeloid Leukemia)
         "know your customer",
         "anti money laundering",
         "fraud detection",
