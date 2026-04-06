@@ -53,6 +53,7 @@ from resilience import check_service_health, get_circuit_breaker, record_collect
 
 try:
     from metrics_server import record_pipeline_duration
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
@@ -1688,15 +1689,16 @@ class MISPToNeo4jSync:
         # Dynamic sampling: estimate cross-product size and reduce caps if needed
         _SAFE_REL_LIMIT = 50000
         estimated_rels = (
-            len(actors) * len(techniques) +
-            len(malware_items) * len(actors) +
-            len(indicators) * len(malware_items) +
-            len(indicators) * len(vulnerabilities)
+            len(actors) * len(techniques)
+            + len(malware_items) * len(actors)
+            + len(indicators) * len(malware_items)
+            + len(indicators) * len(vulnerabilities)
         )
         if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
             # Use sqrt(factor) because relationships are pairwise products:
             # reducing both sides by sqrt(f) reduces each product by f.
             import math
+
             factor = math.sqrt(_SAFE_REL_LIMIT / estimated_rels)
             _MAX_INDICATORS = max(100, int(len(indicators) * factor))
             _MAX_MALWARE = max(50, int(len(malware_items) * factor))
@@ -1710,23 +1712,29 @@ class MISPToNeo4jSync:
             actors = actors[:_MAX_ACTORS]
             techniques = techniques[:_MAX_TECHNIQUES]
             new_estimated = (
-                len(actors) * len(techniques) +
-                len(malware_items) * len(actors) +
-                len(indicators) * len(malware_items) +
-                len(indicators) * len(vulnerabilities)
+                len(actors) * len(techniques)
+                + len(malware_items) * len(actors)
+                + len(indicators) * len(malware_items)
+                + len(indicators) * len(vulnerabilities)
             )
             logger.warning(
                 "CROSS-ITEM: Estimated %s relationships exceeds %s limit — "
                 "dynamically reduced caps (indicators=%s, malware=%s, vulns=%s, actors=%s, techniques=%s) → ~%s rels",
-                estimated_rels, _SAFE_REL_LIMIT,
-                len(indicators), len(malware_items), len(vulnerabilities), len(actors), len(techniques),
+                estimated_rels,
+                _SAFE_REL_LIMIT,
+                len(indicators),
+                len(malware_items),
+                len(vulnerabilities),
+                len(actors),
+                len(techniques),
                 new_estimated,
             )
             try:
                 from metrics_server import PIPELINE_ERRORS
+
                 PIPELINE_ERRORS.labels(task="cross_item_rels", error_type="dynamic_sampling_triggered", source="").inc()
             except Exception:
-                pass
+                logger.debug("Metrics recording failed", exc_info=True)
 
         # Build actor -> technique relationships (USES)
         # When an event has both actors and techniques, assume the actors use those techniques
@@ -2678,7 +2686,10 @@ class MISPToNeo4jSync:
             if total_chunks > 1 and (idx + 1) % 10 == 0:
                 logger.info(
                     "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
-                    idx + 1, total_chunks, int((idx + 1) / total_chunks * 100), created_count,
+                    idx + 1,
+                    total_chunks,
+                    int((idx + 1) / total_chunks * 100),
+                    created_count,
                 )
             # Pause between chunks to let Neo4j flush transactions (skip after last chunk)
             if idx < total_chunks - 1:
@@ -3127,7 +3138,7 @@ class MISPToNeo4jSync:
                 try:
                     record_pipeline_duration("misp_to_neo4j", duration)
                 except Exception:
-                    pass
+                    logger.debug("Metrics recording failed", exc_info=True)
 
             # Update circuit breaker states in stats
             self.stats["circuit_breaker_states"] = {

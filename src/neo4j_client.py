@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 # Prometheus metrics (optional – gracefully degrade when metrics_server is not importable)
 try:
     from metrics_server import NEO4J_QUERIES, NEO4J_QUERY_DURATION
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False

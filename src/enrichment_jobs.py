@@ -25,6 +25,7 @@ from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
 
 try:
     from metrics_server import record_enrichment_duration
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
@@ -475,7 +476,7 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
             try:
                 record_enrichment_duration(label, time.monotonic() - _t0)
             except Exception:
-                pass
+                logger.debug("Metrics recording failed", exc_info=True)
         return result
 
     logger.info("\n[1/4] Vulnerability↔CVE REFERS_TO Bridge...")

@@ -20,6 +20,7 @@ from neo4j_client import Neo4jClient
 
 try:
     from metrics_server import record_neo4j_relationships
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False

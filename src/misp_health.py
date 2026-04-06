@@ -23,6 +23,7 @@ from config import MISP_API_KEY, MISP_URL, SSL_VERIFY, apply_misp_http_host_head
 
 try:
     from metrics_server import set_misp_health
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
@@ -172,7 +173,7 @@ class MISPHealthCheck:
                     workers_healthy=worker_ok,
                 )
             except Exception:
-                pass
+                logger.debug("Metrics recording failed", exc_info=True)
 
         return MISPHealthCheckResult(
             healthy=healthy,
