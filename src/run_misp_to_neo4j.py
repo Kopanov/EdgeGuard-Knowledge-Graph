@@ -1673,6 +1673,47 @@ class MISPToNeo4jSync:
         if sampled:
             logger.info("Type-based sampling applied to keep cross-products manageable")
 
+        # Collect vulnerabilities for cross-product estimation
+        vulnerabilities = [i for i in items if resolve_vulnerability_cve_id(i) is not None]
+        if len(vulnerabilities) > _MAX_VULNS:
+            logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
+            vulnerabilities = vulnerabilities[:_MAX_VULNS]
+
+        # Dynamic sampling: estimate cross-product size and reduce caps if needed
+        _SAFE_REL_LIMIT = 50000
+        estimated_rels = (
+            len(actors) * len(techniques) +
+            len(malware_items) * len(actors) +
+            len(indicators) * len(malware_items) +
+            len(indicators) * len(vulnerabilities)
+        )
+        if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
+            factor = _SAFE_REL_LIMIT / estimated_rels
+            _MAX_INDICATORS = max(100, int(len(indicators) * factor))
+            _MAX_MALWARE = max(50, int(len(malware_items) * factor))
+            _MAX_VULNS = max(50, int(len(vulnerabilities) * factor))
+            _MAX_ACTORS = max(50, int(len(actors) * factor))
+            _MAX_TECHNIQUES = max(50, int(len(techniques) * factor))
+            # Re-sample with reduced caps
+            indicators = indicators[:_MAX_INDICATORS]
+            malware_items = malware_items[:_MAX_MALWARE]
+            vulnerabilities = vulnerabilities[:_MAX_VULNS]
+            actors = actors[:_MAX_ACTORS]
+            techniques = techniques[:_MAX_TECHNIQUES]
+            new_estimated = (
+                len(actors) * len(techniques) +
+                len(malware_items) * len(actors) +
+                len(indicators) * len(malware_items) +
+                len(indicators) * len(vulnerabilities)
+            )
+            logger.warning(
+                "CROSS-ITEM: Estimated %s relationships exceeds %s limit — "
+                "dynamically reduced caps (indicators=%s, malware=%s, vulns=%s, actors=%s, techniques=%s) → ~%s rels",
+                estimated_rels, _SAFE_REL_LIMIT,
+                len(indicators), len(malware_items), len(vulnerabilities), len(actors), len(techniques),
+                new_estimated,
+            )
+
         # Build actor -> technique relationships (USES)
         # When an event has both actors and techniques, assume the actors use those techniques
         for actor in actors:
@@ -1726,47 +1767,6 @@ class MISPToNeo4jSync:
 
         # Build indicator -> vulnerability/CVE relationships (EXPLOITS)
         # Indicators in the same MISP event as a CVE are likely exploiting it.
-        # Only items we can key by CVE (value-only MISP vulnerability attributes included).
-        vulnerabilities = [i for i in items if resolve_vulnerability_cve_id(i) is not None]
-        if len(vulnerabilities) > _MAX_VULNS:
-            logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
-            vulnerabilities = vulnerabilities[:_MAX_VULNS]
-
-        # Dynamic sampling: estimate cross-product size and reduce caps if needed
-        _SAFE_REL_LIMIT = 50000
-        estimated_rels = (
-            len(actors) * len(techniques) +
-            len(malware_items) * len(actors) +
-            len(indicators) * len(malware_items) +
-            len(indicators) * len(vulnerabilities)
-        )
-        if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
-            factor = _SAFE_REL_LIMIT / estimated_rels
-            _MAX_INDICATORS = max(100, int(_MAX_INDICATORS * factor))
-            _MAX_MALWARE = max(50, int(_MAX_MALWARE * factor))
-            _MAX_VULNS = max(50, int(_MAX_VULNS * factor))
-            _MAX_ACTORS = max(50, int(_MAX_ACTORS * factor))
-            _MAX_TECHNIQUES = max(50, int(_MAX_TECHNIQUES * factor))
-            # Re-sample with reduced caps
-            indicators = indicators[:_MAX_INDICATORS]
-            malware_items = malware_items[:_MAX_MALWARE]
-            vulnerabilities = vulnerabilities[:_MAX_VULNS]
-            actors = actors[:_MAX_ACTORS]
-            techniques = techniques[:_MAX_TECHNIQUES]
-            new_estimated = (
-                len(actors) * len(techniques) +
-                len(malware_items) * len(actors) +
-                len(indicators) * len(malware_items) +
-                len(indicators) * len(vulnerabilities)
-            )
-            logger.warning(
-                "CROSS-ITEM: Estimated %s relationships exceeds %s limit — "
-                "dynamically reduced caps (indicators=%s, malware=%s, vulns=%s, actors=%s, techniques=%s) → ~%s rels",
-                estimated_rels, _SAFE_REL_LIMIT,
-                len(indicators), len(malware_items), len(vulnerabilities), len(actors), len(techniques),
-                new_estimated,
-            )
-
         for indicator in indicators:
             for vuln in vulnerabilities:
                 indicator_value = indicator.get("value")
