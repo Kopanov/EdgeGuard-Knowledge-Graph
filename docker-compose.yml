@@ -185,7 +185,7 @@ services:
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW_CONN_NEO4J_DEFAULT: ${AIRFLOW_CONN_NEO4J_DEFAULT:-}
       # Prometheus metrics (optional — disabled when metrics server is not started)
-      ENABLE_PROMETHEUS_METRICS: ${ENABLE_PROMETHEUS_METRICS:-false}
+      EDGEGUARD_ENABLE_METRICS: ${EDGEGUARD_ENABLE_METRICS:-false}
       EDGEGUARD_METRICS_HOST: "127.0.0.1"
       EDGEGUARD_METRICS_PORT: "8001"
     volumes:

@@ -87,7 +87,7 @@ docker-compose -f docker-compose.monitoring.yml --profile alerts up -d
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `EDGEGUARD_METRICS_PORT` | Metrics server port | `8001` |
-| `EDGEGUARD_METRICS_HOST` | Metrics server bind host | `0.0.0.0` |
+| `EDGEGUARD_METRICS_HOST` | Metrics server bind host | `127.0.0.1` |
 | `EDGEGUARD_ENABLE_METRICS` | Enable Prometheus metrics in DAG | `false` |
 | `EDGEGUARD_VERSION` | App version label | `1.0.0` |
 | `EDGEGUARD_ENV` | Environment label | `development` |
