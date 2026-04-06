@@ -27,6 +27,7 @@ Commands:
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -34,6 +35,8 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Add src to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

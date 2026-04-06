@@ -850,7 +850,7 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 - **Full-stack Docker Compose**: Neo4j + Airflow + REST API + GraphQL in one `docker compose up -d`; also supports conda/venv/bare-metal with external MISP+Neo4j
 - **CI/CD**: Lint (ruff), type-check (mypy), pytest (161 tests, 30% coverage gate), Docker build, pip-audit, BugBot — all green
 - **Health Checks + Metrics**: MISP (with PyMISP version compatibility detection), Neo4j (with 30s timeout), Airflow, NATS; Prometheus/Grafana monitoring stack
-- **Production CLI** (16 commands): `preflight` (7-category readiness check), `stats --full` (node counts by zone/source + MISP breakdown), `dag status/kill` (Airflow run monitoring + stuck-run recovery), `checkpoint status/clear` (baseline progress + incremental cursors), `doctor`, `heal`, `validate`, `monitor`, `version`
+- **Production CLI** (19 commands): `preflight` (7-category readiness check), `stats --full` (node counts by zone/source + MISP breakdown), `dag status/kill` (Airflow run monitoring + stuck-run recovery), `checkpoint status/clear` (baseline progress + incremental cursors), `clear neo4j/misp/all`, `source list/add/remove`, `doctor`, `heal`, `validate`, `monitor`, `setup`, `update`, `version`
 - **Circuit Breakers + Retry**: Fixed HALF_OPEN deadlock, monotonic time, resilience patterns for all external service calls
 - **UTC-aware timestamps**: All 70+ datetime instances across 24 files use `timezone.utc` (Python 3.12 compatible)
 
