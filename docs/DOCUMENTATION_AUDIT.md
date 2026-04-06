@@ -106,3 +106,7 @@
 ## How to cite code in a paper
 
 Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules), `src/config.py` (`get_effective_limit`, `SECTOR_TIME_RANGES`), `src/collectors/nvd_collector.py` (NVD 120-day published-date windows).
+
+---
+
+_Last updated: 2026-04-06_

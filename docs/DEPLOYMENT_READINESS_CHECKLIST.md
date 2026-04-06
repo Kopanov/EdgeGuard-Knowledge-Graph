@@ -117,3 +117,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 | [scripts/deployment_wiring_check.sh](../scripts/deployment_wiring_check.sh) | Layer 1 + optional live checks |
 | [scripts/preflight_ci.sh](../scripts/preflight_ci.sh) | CI-style static + DagBag |
 | [scripts/runtime_smoke_checklist.sh](../scripts/runtime_smoke_checklist.sh) | Manual smoke reminders + optional Docker probe |
+
+---
+
+_Last updated: 2026-04-06_

@@ -286,4 +286,4 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-03-24 — Compose **`x-common-env`** / **`AIRFLOW_MEMORY_LIMIT`** / scheduler tuning; MISP preflight + index-based sync discovery; troubleshooting (zombie, SIGKILL, PermissionError)._
+_Last updated: 2026-04-06 — Compose **`x-common-env`** / **`AIRFLOW_MEMORY_LIMIT`** / scheduler tuning; MISP preflight + index-based sync discovery; troubleshooting (zombie, SIGKILL, PermissionError)._

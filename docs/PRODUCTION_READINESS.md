@@ -237,4 +237,4 @@ All 5 CI checks pass cleanly. The codebase has been through 6 rounds of systemat
 
 ---
 
-*Last updated: 2026-03-24 — aligned with collector dedup env vars, Python 3.12 / `Dockerfile.airflow` docs; prior: 2026-03-17 CI/checklist.*
+*Last updated: 2026-04-06 — aligned with collector dedup env vars, Python 3.12 / `Dockerfile.airflow` docs; prior: 2026-03-17 CI/checklist.*

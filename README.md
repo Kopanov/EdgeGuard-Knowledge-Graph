@@ -501,7 +501,7 @@ Use this path **after** you clone the repo — it matches how the product is run
 | **2** | **[docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md)** | Run and debug DAGs (CLI, restart after `.env`, troubleshooting) |
 | **3** | **[docs/BASELINE_SMOKE_TEST.md](docs/BASELINE_SMOKE_TEST.md)** | First **`edgeguard_baseline`** safely (short window / limits) |
 
-Then open **[docs/COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md)** when numbers like **200** vs **1000** confuse you, and **[docs/MISP_SOURCES.md](docs/MISP_SOURCES.md)** for MISP networking / sync discovery. If sync **succeeds in Neo4j** but the Airflow task is **red** or **zombie-killed**, read **[docs/HEARTBEAT.md](docs/HEARTBEAT.md)**.
+Then open **[docs/COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md)** when numbers like **200** vs **500** confuse you, and **[docs/MISP_SOURCES.md](docs/MISP_SOURCES.md)** for MISP networking / sync discovery. If sync **succeeds in Neo4j** but the Airflow task is **red** or **zombie-killed**, read **[docs/HEARTBEAT.md](docs/HEARTBEAT.md)**.
 
 **Full index + “what to skip”:** [docs/DOCUMENTATION_AUDIT.md](docs/DOCUMENTATION_AUDIT.md).
 

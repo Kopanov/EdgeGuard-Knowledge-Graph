@@ -530,3 +530,7 @@ EdgeGuard-Knowledge-Graph/
 | Sync to Neo4j | `airflow dags trigger edgeguard_neo4j_sync` |
 | Check status | `airflow dags list-runs -d edgeguard_pipeline` |
 | View logs | `airflow logs <task_id> <run_id>` |
+
+---
+
+_Last updated: 2026-04-06_

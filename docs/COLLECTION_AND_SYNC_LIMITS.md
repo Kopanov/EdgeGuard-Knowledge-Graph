@@ -65,4 +65,4 @@ Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They c
 
 ---
 
-_Last updated: 2026-03-28 — Added MISP batch throttle and event fetch throttle env vars for memory-constrained hosts._
+_Last updated: 2026-04-06 — Added MISP batch throttle and event fetch throttle env vars for memory-constrained hosts._

@@ -40,3 +40,7 @@ Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies
 
 - [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — operator guide and MISP → Neo4j troubleshooting.
 - Airflow docs: **LocalExecutor**, **LocalTaskJob**, **scheduler configuration**.
+
+---
+
+_Last updated: 2026-04-06_
