@@ -126,7 +126,7 @@ def build_relationships():
 
         # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence (BATCHED)
         # This query caused OOM on 170K+ indicators. Uses apoc.periodic.iterate
-        # to process in 1000-node mini-transactions instead of one giant transaction.
+        # to process in 5000-node mini-transactions instead of one giant transaction.
         logger.info("[LINK] 4/11 Indicator → Malware (co-occurrence, batched)...")
         _q4_outer = "MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> '' RETURN i"
         _q4_inner = (

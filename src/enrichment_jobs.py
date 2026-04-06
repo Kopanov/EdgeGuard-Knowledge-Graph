@@ -230,17 +230,18 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             logger.info(f"  [OK] Deactivated {cleanup_count} campaigns with no active indicators")
             results["campaigns_deactivated"] = cleanup_count
 
-            # Step 5: Count re-activated campaigns (were inactive, now have active indicators)
+            # Step 5: Count re-activated campaigns (updated in this run, now active)
             reactivated_query = """
                 MATCH (c:Campaign)
-                WHERE c.active = true AND c.last_updated = datetime()
+                WHERE c.active = true
+                  AND duration.between(c.last_updated, datetime()).minutes < 5
                 RETURN count(c) as count
             """
             result = session.run(reactivated_query, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             reactivated = record["count"] if record else 0
             if reactivated > 0:
-                logger.info(f"  [OK] Re-activated {reactivated} campaigns with new active indicators")
+                logger.info(f"  [OK] {reactivated} campaigns active (updated in this run)")
 
     except Exception as e:
         logger.error(f"build_campaign_nodes error: {e}")

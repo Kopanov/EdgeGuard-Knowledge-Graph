@@ -1261,6 +1261,12 @@ class Neo4jClient:
                         "raw_data": json.dumps(raw_data, default=str),
                     }
 
+                    # Add original date fields for cross-source min/max tracking
+                    if item.get("first_seen"):
+                        batch_item["first_seen"] = item["first_seen"]
+                    if item.get("last_seen"):
+                        batch_item["last_seen"] = item["last_seen"]
+
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
                         batch_item["misp_event_id"] = item.get("misp_event_id")
