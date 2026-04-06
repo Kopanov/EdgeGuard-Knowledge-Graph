@@ -355,9 +355,20 @@ class MISPHealthCheck:
                     data = response.json()
                 except (ValueError, TypeError):
                     return False, {"error": "Malformed JSON from getWorkers"}
-                # MISP getWorkers returns queues at top level, not nested under "workers"
-                # Response format: {"default": {...}, "cache": {...}, "email": {...}}
+                # MISP getWorkers response varies by deployment:
+                #   Docker/Supervisor: {"default": {"workers": [...], ...}, "cache": {...}}
+                #   Bare-metal/CakeResque: {"worker": [...]} or flat queue dicts
+                #   Newer CakePHP: {"default": [...], "cache": [...]}
+                # Handle all known formats gracefully.
                 workers = data.get("workers", data)  # fallback to top-level if no "workers" key
+
+                # If response is a list (CakeResque style), convert to dict keyed by queue
+                if isinstance(workers, list):
+                    workers_by_queue = {}
+                    for w in workers:
+                        q = w.get("queue", "unknown") if isinstance(w, dict) else "unknown"
+                        workers_by_queue.setdefault(q, []).append(w)
+                    workers = workers_by_queue
 
                 # Check if critical workers are running
                 critical_workers = ["default", "email", "cache"]
@@ -366,18 +377,30 @@ class MISPHealthCheck:
                 for worker_type in critical_workers:
                     if worker_type in workers:
                         worker_info = workers[worker_type]
-                        # Worker info can be a dict with "workers" list or direct list
+                        # Dict with nested "workers" list (Docker/Supervisor)
                         if isinstance(worker_info, dict):
                             worker_list = worker_info.get("workers", [])
-                            if worker_list or worker_info.get("alive", False):
+                            alive = worker_info.get("alive", False)
+                            if worker_list or alive:
                                 running += 1
+                        # Direct list of worker dicts (CakePHP/bare-metal)
                         elif isinstance(worker_info, list) and len(worker_info) > 0:
                             running += 1
+                        # Scalar/bool (some MISP versions return just alive status)
+                        elif worker_info:
+                            running += 1
+
+                logger.debug(
+                    "MISP workers check: %s/%s critical running, raw keys: %s",
+                    running,
+                    len(critical_workers),
+                    list(workers.keys()) if isinstance(workers, dict) else type(workers),
+                )
 
                 if running >= 2:  # At least 2 of 3 critical workers
                     return True, {"running_workers": running}
                 else:
-                    return False, {"error": f"Only {running} critical workers running"}
+                    return False, {"error": f"Only {running}/{len(critical_workers)} critical workers running"}
 
             # Workers endpoint may not be available, don't fail health check
             return True, {"status": "unknown", "note": "Worker status endpoint not available"}
