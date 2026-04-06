@@ -23,6 +23,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
 
+try:
+    from metrics_server import record_enrichment_duration
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -462,17 +468,27 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("Running post-sync enrichment jobs")
     logger.info("=" * 55)
 
+    def _timed(label, fn, *args):
+        _t0 = time.monotonic()
+        result = fn(*args)
+        if _METRICS_AVAILABLE:
+            try:
+                record_enrichment_duration(label, time.monotonic() - _t0)
+            except Exception:
+                pass
+        return result
+
     logger.info("\n[1/4] Vulnerability↔CVE REFERS_TO Bridge...")
-    summary["bridge"] = bridge_vulnerability_cve(neo4j_client)
+    summary["bridge"] = _timed("bridge", bridge_vulnerability_cve, neo4j_client)
 
     logger.info("\n[2/4] Campaign Node Builder...")
-    summary["campaigns"] = build_campaign_nodes(neo4j_client)
+    summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
 
     logger.info("\n[3/4] Co-occurrence Confidence Calibration...")
-    summary["calibration"] = calibrate_cooccurrence_confidence(neo4j_client)
+    summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
 
     logger.info("\n[4/4] IOC Confidence Decay...")
-    summary["decay"] = decay_ioc_confidence(neo4j_client)
+    summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
     logger.info("\n[DONE] All enrichment jobs complete")
     return summary

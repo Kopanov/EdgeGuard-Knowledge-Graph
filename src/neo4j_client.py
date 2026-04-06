@@ -33,6 +33,13 @@ except ImportError:
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Prometheus metrics (optional – gracefully degrade when metrics_server is not importable)
+try:
+    from metrics_server import NEO4J_QUERIES, NEO4J_QUERY_DURATION
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
@@ -369,11 +376,18 @@ class Neo4jClient:
         timeout = timeout or NEO4J_READ_TIMEOUT
         parameters = parameters or {}
 
+        _t0 = time.monotonic()
         try:
             with self.driver.session() as session:
                 result = session.run(query, parameters, timeout=timeout)
-                return [dict(record) for record in result]
+                records = [dict(record) for record in result]
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="success").inc()
+                NEO4J_QUERY_DURATION.labels(query_type="cypher").observe(time.monotonic() - _t0)
+            return records
         except neo4j_exceptions.CypherSyntaxError as e:
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             logger.error(f"Cypher syntax error: {e}")
             return []
         except (
@@ -382,8 +396,12 @@ class Neo4jClient:
             ConnectionError,
             TimeoutError,
         ):
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             raise  # let @retry_with_backoff handle transient errors
         except neo4j_exceptions.DatabaseError as e:
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             logger.error(f"Neo4j database error: {type(e).__name__}: {e}")
             return []
 

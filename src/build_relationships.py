@@ -18,6 +18,12 @@ import time
 
 from neo4j_client import Neo4jClient
 
+try:
+    from metrics_server import record_neo4j_relationships
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 # Pause between queries to let Neo4j flush transactions and reclaim memory
 _INTER_QUERY_PAUSE = 3  # seconds
 
@@ -263,6 +269,12 @@ def build_relationships():
         logger.info(f"\nTotal relationships created: {total_rels}")
         if failures:
             logger.warning(f"Relationship types failed: {failures}/11 — partial success")
+
+        if _METRICS_AVAILABLE:
+            try:
+                record_neo4j_relationships(stats)
+            except Exception:
+                logger.debug("Metrics recording failed", exc_info=True)
 
         return failures == 0
 

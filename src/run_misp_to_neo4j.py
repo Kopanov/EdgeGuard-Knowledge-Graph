@@ -51,6 +51,12 @@ from neo4j_client import (
 # Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
 
+try:
+    from metrics_server import record_pipeline_duration
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 # Suppress InsecureRequestWarning only when SSL verification is explicitly
 # disabled in config — never globally for the whole process.
 if not SSL_VERIFY:
@@ -1713,6 +1719,11 @@ class MISPToNeo4jSync:
                 len(indicators), len(malware_items), len(vulnerabilities), len(actors), len(techniques),
                 new_estimated,
             )
+            try:
+                from metrics_server import PIPELINE_ERRORS
+                PIPELINE_ERRORS.labels(task="cross_item_rels", error_type="dynamic_sampling_triggered", source="").inc()
+            except Exception:
+                pass
 
         # Build actor -> technique relationships (USES)
         # When an event has both actors and techniques, assume the actors use those techniques
@@ -3108,6 +3119,12 @@ class MISPToNeo4jSync:
             # Print summary
             duration = (datetime.now(timezone.utc) - datetime.fromisoformat(self.stats["start_time"])).total_seconds()
             self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
+
+            if _METRICS_AVAILABLE:
+                try:
+                    record_pipeline_duration("misp_to_neo4j", duration)
+                except Exception:
+                    pass
 
             # Update circuit breaker states in stats
             self.stats["circuit_breaker_states"] = {
