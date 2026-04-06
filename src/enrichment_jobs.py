@@ -16,6 +16,7 @@ Jobs
 import logging
 import os
 import sys
+import time
 from typing import Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -334,7 +335,13 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
 
                     # Large events: use apoc.periodic.iterate to batch at edge level.
                     # A 96K-indicator event can have millions of edges — too many for one tx.
+                    if large_eids:
+                        logger.info(
+                            f"  [CALIBRATE] {tier_label}: processing {len(large_eids)} large events "
+                            f"(>{1000} indicators each) via apoc.periodic.iterate"
+                        )
                     for eid in large_eids:
+                        evt_size = event_sizes.get(eid, 0)
                         batch_query = f"""
                         CALL apoc.periodic.iterate(
                             'MATCH (i:Indicator {{misp_event_id: "{eid}"}})-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] RETURN r',
@@ -346,7 +353,12 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         """
                         result = session.run(batch_query, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
-                        total_updated += record["updated"] if record else 0
+                        evt_updated = record["updated"] if record else 0
+                        total_updated += evt_updated
+                        logger.info(
+                            f"  [CALIBRATE]   event {eid} ({evt_size} indicators): {evt_updated} edges calibrated"
+                        )
+                        time.sleep(3)  # Let Neo4j flush between large event batches
 
                     results[tier_label] = total_updated
                     if total_updated:
