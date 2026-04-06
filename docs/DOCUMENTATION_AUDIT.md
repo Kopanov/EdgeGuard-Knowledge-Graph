@@ -20,7 +20,7 @@
 | **Platform / NATS diagram** (how alerts flow) | [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md) | Keep one diagram authoritative |
 | **CSV / Malware→Technique `USES`** vs ResilMesh files | [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) | Cross-link only |
 | **MISP feeds + discovery + troubleshooting** | [MISP_SOURCES.md](MISP_SOURCES.md) | AIRFLOW_DAGS — keep only task-level troubleshooting |
-| **Which limit is which (1000 vs 2000)** | [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) | README duplicates the short table only |
+| **Which limit is which (500 vs baseline caps)** | [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) | README duplicates the short table only |
 
 ---
 

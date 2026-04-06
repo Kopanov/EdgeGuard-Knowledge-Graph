@@ -93,11 +93,11 @@ flowchart LR
         NORMAL --> DEDUP[Deduplicate]
         PAGED --> DEDUP
         DEDUP --> CHUNK[Chunk at 500 items]
-        CHUNK -->|UNWIND batch<br/>1000/batch| NEO4J_MERGE[Neo4j MERGE<br/>Indicators + Vulnerabilities]
+        CHUNK -->|UNWIND batch<br/>500/batch| NEO4J_MERGE[Neo4j MERGE<br/>Indicators + Vulnerabilities]
     end
 
     subgraph Step 4-5: Enrich
-        NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>1000/batch]
+        NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>500/batch]
         REL --> DECAY[IOC Decay]
         DECAY --> CAMP[Campaign Builder]
         CAMP --> CALIB[Co-occurrence Calibration]
@@ -227,12 +227,12 @@ flowchart TD
     CHECK -->|No: Normal event| NORMAL[Process all in memory]
 
     PAGED --> PAGE_LOOP[For each page:<br/>parse + dedup + sync<br/>then gc.collect + sleep 2s]
-    PAGE_LOOP --> BUILD_REL_P[Build cross-item rels<br/>type-based sampling:<br/>actors 500, techniques 500,<br/>malware 500, indicators 2000]
+    PAGE_LOOP --> BUILD_REL_P[Build cross-item rels<br/>type-based sampling:<br/>actors 500, techniques 500,<br/>malware 500, indicators 500]
 
     NORMAL --> DEDUP_N[Deduplicate items]
     DEDUP_N --> BUILD_REL_N[Build cross-item rels<br/>type-based sampling]
 
-    BUILD_REL_P & BUILD_REL_N --> CHUNK[Chunk sync: 1000 items/chunk<br/>UNWIND batch: 1000/batch<br/>Rel batch: apoc.periodic.iterate 1000/batch]
+    BUILD_REL_P & BUILD_REL_N --> CHUNK[Chunk sync: 500 items/chunk<br/>UNWIND batch: 500/batch<br/>Rel batch: apoc.periodic.iterate 500/batch]
     CHUNK --> NEO4J[(Neo4j)]
 
     style PAGED fill:#3b82f6,stroke:#2563eb,color:#fff

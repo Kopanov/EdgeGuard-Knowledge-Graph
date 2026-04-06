@@ -33,7 +33,7 @@ Distinguish these in logs: OOM often appears in **Docker / k8s** events; zombies
 ## MISP → Neo4j–specific notes
 
 - **`EDGEGUARD_DEBUG_GC`:** Forced full **`gc.collect()`** after each Neo4j sync chunk is **opt-in** only. In **memory-constrained** workers it can **increase peak RSS** and contribute to OOM.
-- **`EDGEGUARD_REL_BATCH_SIZE`:** Relationship writes use batched **UNWIND** (default **2000** definitions per round-trip). Lower this if Neo4j transactions time out.
+- **`EDGEGUARD_REL_BATCH_SIZE`:** Relationship writes use batched **UNWIND** (default **500** definitions per round-trip). Lower this if Neo4j transactions time out.
 - **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`:** Python-side node merge chunking (separate from relationship batching).
 
 ## Further reading

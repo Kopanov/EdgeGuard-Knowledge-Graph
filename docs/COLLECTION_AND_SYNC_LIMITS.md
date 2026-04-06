@@ -1,6 +1,6 @@
 # Collection & sync limits — what applies when
 
-Several numbers (**200**, **1000**, **2000**) appear across EdgeGuard docs and code. They control **different stages** of the pipeline and are **not interchangeable**. Use this page to avoid mixing up “baseline cap per source” with “Neo4j merge chunk size” or “MISP event search page size”.
+Several numbers (**200**, **500**) appear across EdgeGuard docs and code. They control **different stages** of the pipeline and are **not interchangeable**. Use this page to avoid mixing up “baseline cap per source” with “Neo4j merge chunk size” or “MISP event search page size”.
 
 ---
 

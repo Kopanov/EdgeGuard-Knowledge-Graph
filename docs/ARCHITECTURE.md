@@ -73,7 +73,7 @@ Collectors → MISP → [per MISP event] parse_attribute() → dedupe → cross-
               → sync_to_neo4j() (Python chunks) → create_misp_relationships_batch() (UNWIND batches) → Neo4j
 ```
 
-No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Cross-item** relationships (e.g. co-occurrence-style edges produced during sync) are built from **one event’s item list only** — do not pass a global multi-event list into `_build_cross_item_relationships` (see `run_misp_to_neo4j.py` docstring). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **2000** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
+No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Cross-item** relationships (e.g. co-occurrence-style edges produced during sync) are built from **one event’s item list only** — do not pass a global multi-event list into `_build_cross_item_relationships` (see `run_misp_to_neo4j.py` docstring). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
 
 **CLI / `run_pipeline.py` (optional)** — with `use_stix_flow=True` (default for **`python src/run_pipeline.py`** step 3 when STIX is available):
 
