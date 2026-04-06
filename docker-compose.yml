@@ -73,7 +73,7 @@ services:
   # Neo4j — graph database
   # ─────────────────────────────────────────────────────────────────────────────
   neo4j:
-    image: neo4j:5.27-community
+    image: neo4j:5.26.23-community
     container_name: edgeguard_neo4j
     restart: unless-stopped
     ports:
