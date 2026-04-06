@@ -294,6 +294,10 @@ class EdgeGuardPipeline:
             indicates_count = record.get("created", 0) if record else 0
             logger.info(f"   INDICATES (co-occurrence, batched): {indicates_count} relationships")
 
+            import time
+
+            time.sleep(3)  # Let Neo4j flush between relationship queries
+
             # Second pass: Indicators that explicitly mention a CVE are linked to
             # that CVE/Vulnerability via EXPLOITS (more specific than INDICATES).
             # EXPLOITS: batched via apoc.periodic.iterate

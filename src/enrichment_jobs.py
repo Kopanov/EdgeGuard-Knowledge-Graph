@@ -183,6 +183,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(create_cypher, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
+            time.sleep(3)
 
             # Step 2: Link malware to their campaigns
             link_malware = """
@@ -194,6 +195,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
+            time.sleep(3)
 
             # Step 3: Link indicators to their campaigns (sample: up to 100 per campaign)
             # Using LIMIT inside WITH to avoid huge relationship fans
@@ -208,6 +210,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
+            time.sleep(3)
 
             # Step 4: Deactivate campaigns whose indicators are all retired
             logger.info("[DECAY] Deactivating campaigns with no active indicators...")
@@ -326,12 +329,14 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     large_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) > 1000]
                     small_eids = [eid for eid in tier_eids if event_sizes.get(eid, 0) <= 1000]
 
-                    # Small events: batch 500 at a time (safe — bounded edge count)
-                    for ci in range(0, len(small_eids), 500):
-                        chunk = small_eids[ci : ci + 500]
+                    # Small events: batch 1000 event IDs at a time with 3s pause
+                    for ci in range(0, len(small_eids), 1000):
+                        chunk = small_eids[ci : ci + 1000]
                         result = session.run(update_cypher, eids=chunk, conf=conf, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
                         total_updated += record["updated"] if record else 0
+                        if ci + 1000 < len(small_eids):
+                            time.sleep(3)
 
                     # Large events: use apoc.periodic.iterate to batch at edge level.
                     # A 96K-indicator event can have millions of edges — too many for one tx.
@@ -406,7 +411,7 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
         'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[:REFERS_TO]->(c) MERGE (c)-[:REFERS_TO]->(v)',
-        {batchSize: 1000, parallel: false}
+        {batchSize: 5000, parallel: false}
     )
     YIELD total
     RETURN total AS linked
