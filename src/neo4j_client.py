@@ -1042,7 +1042,8 @@ class Neo4jClient:
             MATCH (cve:CVE {{cve_id: $cve_id}})
             MERGE (n:{label} {{cve_id: $cve_id, tag: $tag}})
             SET {set_clause},
-                n.last_updated = datetime()
+                n.last_updated = datetime(),
+                n.edgeguard_managed = true
             MERGE (cve)-[:{rel_type}]->(n)
             MERGE (n)-[:{rel_type}]->(cve)
             """

@@ -277,53 +277,11 @@ def build_relationships():
         client.close()
 
 
-def build_relationships_with_fuzzy_matching():
-    """Optional: Build relationships with fuzzy matching (opt-in, more prone to false positives).
-
-    WARNING: This function uses CONTAINS matching which can create false positives.
-    Use build_relationships() for production - this is for research/analysis only.
-    """
-    client = Neo4jClient()
-
-    if not client.connect():
-        logger.error("Failed to connect to Neo4j")
-        return False
-
-    logger.warning("[WARN]  Using fuzzy matching - this may create false positive relationships!")
-
-    try:
-        # Fuzzy match with LOWER confidence scores
-        logger.info("[LINK] Creating fuzzy relationships (LOW confidence)...")
-
-        # Only do fuzzy matching for specific known cases with low confidence
-        result = client.run("""
-            MATCH (m:Malware), (a:ThreatActor)
-            WHERE m.attributed_to CONTAINS a.name OR a.name CONTAINS m.attributed_to
-            AND m.attributed_to <> a.name  -- Exclude exact matches (already done above)
-            MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-            SET r.confidence_score = 0.5, r.match_type = 'fuzzy', r.created_at = datetime()
-            RETURN count(*) as count
-        """)
-        fuzzy_count = result[0].get("count", 0) if result else 0
-        logger.info(f"  [OK] Fuzzy ATTRIBUTED_TO: {fuzzy_count} (confidence: 0.5)")
-
-        return True
-
-    except Exception as e:
-        logger.error(f"Error in fuzzy matching: {e}")
-        return False
-
-    finally:
-        client.close()
-
-
 if __name__ == "__main__":
     print("=" * 50)
-    print("🔗 EdgeGuard - Building Graph Relationships")
+    print("EdgeGuard - Building Graph Relationships")
     print("=" * 50)
     print("\nUsing EXACT matching with confidence scoring...")
-    print("To enable fuzzy matching (not recommended), call:")
-    print("  build_relationships_with_fuzzy_matching()")
     print()
 
     if build_relationships():

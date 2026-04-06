@@ -33,6 +33,9 @@ from package_meta import package_version
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Neo4j query timeout (seconds) — prevents hung queries from blocking API workers
+_NEO4J_QUERY_TIMEOUT = 300
+
 # Initialize OpenTelemetry
 trace.set_tracer_provider(TracerProvider())
 tracer = trace.get_tracer(__name__)
@@ -320,7 +323,7 @@ async def query_threats(request: Request, q: ThreatQuery):
                 if q.zone:
                     params["zone"] = q.zone.value
                 with neo4j_client.driver.session() as session:
-                    result = session.run(cypher_query, **params)
+                    result = session.run(cypher_query, **params, timeout=_NEO4J_QUERY_TIMEOUT)
                     records = [dict(record["n"]) for record in result]
                 neo4j_span.set_attribute("records.count", len(records))
 
@@ -360,9 +363,10 @@ async def search_indicator(request: Request, s: IndicatorSearch):
             # Find the indicator
             query = """
                 MATCH (n:Indicator {value: $value})
+                WHERE n.edgeguard_managed = true
                 RETURN n LIMIT 1
             """
-            result = session.run(query, value=s.value)
+            result = session.run(query, value=s.value, timeout=_NEO4J_QUERY_TIMEOUT)
             record = result.single()
 
             if not record:
@@ -373,9 +377,10 @@ async def search_indicator(request: Request, s: IndicatorSearch):
             # Find related entities
             related_query = """
                 MATCH (n:Indicator {value: $value})--(related)
+                WHERE n.edgeguard_managed = true
                 RETURN related LIMIT 10
             """
-            related_result = session.run(related_query, value=s.value)
+            related_result = session.run(related_query, value=s.value, timeout=_NEO4J_QUERY_TIMEOUT)
             related = [dict(r["related"]) for r in related_result]
 
             return IndicatorResponse(
@@ -406,7 +411,7 @@ async def get_zone_threats(
     try:
         with neo4j_client.driver.session() as session:
             # Build query with optional severity filter
-            where_clause = "$zone IN n.zone"
+            where_clause = "$zone IN n.zone AND n.edgeguard_managed = true"
             if severity:
                 where_clause += " AND n.severity = $severity"
 
@@ -423,22 +428,22 @@ async def get_zone_threats(
             if severity:
                 params["severity"] = severity.value.upper()
 
-            result = session.run(query, **params)
+            result = session.run(query, **params, timeout=_NEO4J_QUERY_TIMEOUT)
             threats = [dict(r["n"]) for r in result]
 
             # Get summary stats
             summary_query = """
                 MATCH (n)
                 WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Campaign)
-                  AND $zone IN n.zone
-                RETURN 
+                  AND $zone IN n.zone AND n.edgeguard_managed = true
+                RETURN
                     count(n) as total,
                     count(CASE WHEN n.severity = 'CRITICAL' THEN 1 END) as critical,
                     count(CASE WHEN n.severity = 'HIGH' THEN 1 END) as high,
                     count(CASE WHEN n.severity = 'MEDIUM' THEN 1 END) as medium,
                     count(CASE WHEN n.severity = 'LOW' THEN 1 END) as low
             """
-            summary_result = session.run(summary_query, zone=zone.value)
+            summary_result = session.run(summary_query, zone=zone.value, timeout=_NEO4J_QUERY_TIMEOUT)
             summary_record = summary_result.single()
             summary = {
                 "total": summary_record["total"],
@@ -491,6 +496,7 @@ async def list_indicators(
                 conditions.append("$source IN n.source")
                 params["source"] = source
 
+            conditions.append("n.edgeguard_managed = true")
             where_clause = " AND ".join(conditions) if conditions else "1=1"
 
             query = f"""
@@ -502,7 +508,7 @@ async def list_indicators(
                 LIMIT $limit
             """
 
-            result = session.run(query, **params)
+            result = session.run(query, **params, timeout=_NEO4J_QUERY_TIMEOUT)
             indicators = [dict(r["n"]) for r in result]
 
             # Get total count
@@ -512,7 +518,7 @@ async def list_indicators(
                 RETURN count(n) as total
             """
             count_params = {k: v for k, v in params.items() if k not in ["limit", "offset"]}
-            count_result = session.run(count_query, **count_params)
+            count_result = session.run(count_query, **count_params, timeout=_NEO4J_QUERY_TIMEOUT)
             total = count_result.single()["total"]
 
             return {"indicators": indicators, "total": total, "limit": limit, "offset": offset}
@@ -540,7 +546,7 @@ async def list_vulnerabilities(
 
     try:
         with neo4j_client.driver.session() as session:
-            conditions = ["(n:Vulnerability OR n:CVE OR n.type = 'vulnerability')"]
+            conditions = ["(n:Vulnerability OR n:CVE OR n.type = 'vulnerability')", "n.edgeguard_managed = true"]
             params = {"limit": limit}
 
             if severity:
@@ -560,7 +566,7 @@ async def list_vulnerabilities(
                 LIMIT $limit
             """
 
-            result = session.run(query, **params)
+            result = session.run(query, **params, timeout=_NEO4J_QUERY_TIMEOUT)
             vulnerabilities = [dict(r["n"]) for r in result]
 
             return {"vulnerabilities": vulnerabilities, "total": len(vulnerabilities)}
@@ -629,7 +635,7 @@ async def graph_explore(
 
                 cypher = f"""
                     MATCH (m:Malware)-[r]->(i:Indicator)
-                    WHERE type(r) IN ['INDICATES', 'USES', 'DROPS']
+                    WHERE type(r) IN ['INDICATES', 'USES', 'DROPS'] AND m.edgeguard_managed = true
                     {zone_ind}
                     WITH m, i
                     LIMIT $limit
@@ -640,7 +646,7 @@ async def graph_explore(
                            i.indicator_role AS ind_role,
                            i.threat_label AS ind_threat_label
                 """
-                result = session.run(cypher, limit=limit, **zone_param)
+                result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 for r in result:
                     mid = f"malware:{r['malware_name']}"
                     iid = f"indicator:{r['ind_value']}"
@@ -671,7 +677,7 @@ async def graph_explore(
 
                 cypher = f"""
                     MATCH (a:ThreatActor)-[:USES]->(t:Technique)
-                    WHERE t.mitre_id IS NOT NULL
+                    WHERE t.mitre_id IS NOT NULL AND a.edgeguard_managed = true
                     {zone_act}
                     WITH a, t
                     LIMIT $limit
@@ -681,7 +687,7 @@ async def graph_explore(
                            t.mitre_id AS technique_id, t.name AS technique_name,
                            collect(DISTINCT tac.name) AS tactics
                 """
-                result = session.run(cypher, limit=limit, **zone_param)
+                result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 for r in result:
                     aid = f"actor:{r['actor_name']}"
                     tid = f"technique:{r['technique_id']}"
@@ -711,7 +717,7 @@ async def graph_explore(
 
                 cypher = f"""
                     MATCH (n:Indicator)
-                    WHERE n.value IS NOT NULL
+                    WHERE n.value IS NOT NULL AND n.edgeguard_managed = true
                     {zone_ind}
                     RETURN n.value AS value, n.indicator_type AS ind_type,
                            coalesce(n.zone, ['global']) AS zones,
@@ -726,7 +732,7 @@ async def graph_explore(
                     ORDER BY n.confidence_score DESC
                     LIMIT $limit
                 """
-                result = session.run(cypher, limit=limit, **zone_param)
+                result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 for r in result:
                     iid = f"indicator:{r['value']}"
                     _add_node(
@@ -761,7 +767,7 @@ async def graph_explore(
 
                 cypher = f"""
                     MATCH (n)
-                    WHERE (n:Vulnerability OR n:CVE) AND n.cve_id IS NOT NULL
+                    WHERE (n:Vulnerability OR n:CVE) AND n.cve_id IS NOT NULL AND n.edgeguard_managed = true
                     {zone_vuln}
                     WITH n.cve_id AS cve_id,
                          max(n.cvss_score) AS cvss_score,
@@ -784,7 +790,7 @@ async def graph_explore(
                            cisa_exploit_add, cisa_action_due, cisa_notes,
                            cisa_cwes, version_constraints, description
                 """
-                result = session.run(cypher, limit=limit, **zone_param)
+                result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 vuln_ids = []
                 for r in result:
                     vid = f"vuln:{r['cve_id']}"
@@ -873,7 +879,7 @@ async def admin_query(
         # Use a read-only session so Neo4j itself rejects any write attempt that
         # slips through the keyword check.
         with neo4j_client.driver.session(default_access_mode="READ") as session:
-            result = session.run(query.cypher, **query.parameters)
+            result = session.run(query.cypher, **query.parameters, timeout=_NEO4J_QUERY_TIMEOUT)
             records = [dict(r) for r in result]
             return {"results": records, "count": len(records)}
 
@@ -898,7 +904,7 @@ def _parse_natural_language(query: str, zone: Optional[str] = None) -> str:
 
     # CVE/Vulnerability queries
     if any(kw in query_lower for kw in ["cve", "vulnerability", "cvss"]):
-        base_query = "MATCH (n) WHERE (n:Vulnerability OR n:CVE)"
+        base_query = "MATCH (n) WHERE (n:Vulnerability OR n:CVE) AND n.edgeguard_managed = true"
 
         if "high" in query_lower or "critical" in query_lower:
             base_query += " AND (n.severity IN ['HIGH', 'CRITICAL'] OR n.cvss_score >= 7.0)"
@@ -914,7 +920,7 @@ def _parse_natural_language(query: str, zone: Optional[str] = None) -> str:
 
     # Actor queries
     if any(kw in query_lower for kw in ["actor", "apt", "threat group", "actor"]):
-        base_query = "MATCH (n:ThreatActor) WHERE 1=1"
+        base_query = "MATCH (n:ThreatActor) WHERE n.edgeguard_managed = true"
         if zone:
             base_query += " AND $zone IN n.zone"
         return base_query + " RETURN n LIMIT $limit"
@@ -924,13 +930,13 @@ def _parse_natural_language(query: str, zone: Optional[str] = None) -> str:
         base_query = "MATCH (n:Indicator)"
 
         if "ip" in query_lower:
-            base_query += " WHERE n.indicator_type = 'ipv4'"
+            base_query += " WHERE n.indicator_type = 'ipv4' AND n.edgeguard_managed = true"
         elif "domain" in query_lower:
-            base_query += " WHERE n.indicator_type = 'domain'"
+            base_query += " WHERE n.indicator_type = 'domain' AND n.edgeguard_managed = true"
         elif "hash" in query_lower:
-            base_query += " WHERE n.indicator_type = 'hash'"
+            base_query += " WHERE n.indicator_type = 'hash' AND n.edgeguard_managed = true"
         else:
-            base_query += " WHERE 1=1"
+            base_query += " WHERE n.edgeguard_managed = true"
 
         if zone:
             base_query += " AND $zone IN n.zone"
@@ -940,7 +946,7 @@ def _parse_natural_language(query: str, zone: Optional[str] = None) -> str:
     # Default: search across labeled threat-intel nodes (avoid full-graph scan)
     base_query = (
         "MATCH (n) WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR "
-        "n:ThreatActor OR n:Technique OR n:Campaign)"
+        "n:ThreatActor OR n:Technique OR n:Campaign) AND n.edgeguard_managed = true"
     )
     if zone:
         base_query += " AND $zone IN n.zone"
