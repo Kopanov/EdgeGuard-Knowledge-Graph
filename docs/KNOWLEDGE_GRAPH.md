@@ -126,17 +126,18 @@ RETURN i.value, i.zone
 ### UNIQUE Constraints (Composite Keys)
 
 ```cypher
-// UNIQUE on (cve_id, tag) - zone is metadata, not part of deduplication key
-CREATE CONSTRAINT vulnerability_key IF NOT EXISTS 
+// Single-key UNIQUE — zone is metadata, not part of deduplication key
+CREATE CONSTRAINT vulnerability_key IF NOT EXISTS
 FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE;
 
-// UNIQUE on (indicator_type, value) — tag removed; same IOC merges across sources
+// Composite UNIQUE on (indicator_type, value) — same IOC merges across sources
 CREATE CONSTRAINT indicator_key IF NOT EXISTS
 FOR (i:Indicator) REQUIRE (i.indicator_type, i.value) IS UNIQUE;
 
-// UNIQUE on (hostname, tag) - zone is metadata
-CREATE CONSTRAINT host_key IF NOT EXISTS 
-FOR (h:Host) REQUIRE (h.hostname, h.tag) IS UNIQUE;
+// Note: no Host constraint exists in the current codebase.
+// The example below is a ResilMesh-shaped illustration for a full CRUSOE graph:
+// CREATE CONSTRAINT host_key IF NOT EXISTS
+// FOR (h:Host) REQUIRE (h.hostname) IS UNIQUE;
 ```
 
 **Note:** Zone is treated as metadata/metadata, not as part of the deduplication key. This allows the same indicator/vulnerability to exist in multiple zones while being stored as a single node in Neo4j.
@@ -144,15 +145,39 @@ FOR (h:Host) REQUIRE (h.hostname, h.tag) IS UNIQUE;
 ### Indexes
 
 ```cypher
-// Sector filtering
-CREATE INDEX zone_healthcare IF NOT EXISTS FOR (n) ON (n.zone) WHERE n:Healthcare;
-CREATE INDEX zone_energy IF NOT EXISTS FOR (n) ON (n.zone) WHERE n:Energy;
-CREATE INDEX zone_finance IF NOT EXISTS FOR (n) ON (n.zone) WHERE n:Finance;
-
-// Performance
-CREATE INDEX vulnerability_cve_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.cve_id);
+// Core lookups
+CREATE INDEX vulnerability_cve IF NOT EXISTS FOR (v:Vulnerability) ON (v.cve_id);
 CREATE INDEX indicator_value IF NOT EXISTS FOR (i:Indicator) ON (i.value);
-CREATE INDEX host_hostname IF NOT EXISTS FOR (h:Host) ON (h.hostname);
+CREATE INDEX indicator_type IF NOT EXISTS FOR (i:Indicator) ON (i.indicator_type);
+CREATE INDEX indicator_source IF NOT EXISTS FOR (i:Indicator) ON (i.source);
+CREATE INDEX indicator_zone IF NOT EXISTS FOR (i:Indicator) ON (i.zone);
+CREATE INDEX malware_name IF NOT EXISTS FOR (m:Malware) ON (m.name);
+CREATE INDEX actor_name IF NOT EXISTS FOR (a:ThreatActor) ON (a.name);
+CREATE INDEX technique_mitre IF NOT EXISTS FOR (t:Technique) ON (t.mitre_id);
+
+// Original source tracking
+CREATE INDEX indicator_original_source IF NOT EXISTS FOR (i:Indicator) ON (i.original_source);
+CREATE INDEX vulnerability_original_source IF NOT EXISTS FOR (v:Vulnerability) ON (v.original_source);
+
+// Active/inactive & MISP event tracking
+CREATE INDEX indicator_active IF NOT EXISTS FOR (i:Indicator) ON (i.active);
+CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active);
+CREATE INDEX indicator_misp_event_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_event_id);
+CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.misp_event_id);
+
+// Tactic / technique navigation
+CREATE INDEX tactic_shortname IF NOT EXISTS FOR (t:Tactic) ON (t.shortname);
+CREATE INDEX technique_tactic_phases IF NOT EXISTS FOR (t:Technique) ON (t.tactic_phases);
+
+// CVSS sub-node lookups
+CREATE INDEX cvssv31_cve_id IF NOT EXISTS FOR (n:CVSSv31) ON (n.cve_id);
+CREATE INDEX cvssv30_cve_id IF NOT EXISTS FOR (n:CVSSv30) ON (n.cve_id);
+CREATE INDEX cvssv2_cve_id IF NOT EXISTS FOR (n:CVSSv2) ON (n.cve_id);
+CREATE INDEX cvssv40_cve_id IF NOT EXISTS FOR (n:CVSSv40) ON (n.cve_id);
+
+// Campaign enrichment
+CREATE INDEX campaign_actor_name IF NOT EXISTS FOR (c:Campaign) ON (c.actor_name);
+CREATE INDEX campaign_zone IF NOT EXISTS FOR (c:Campaign) ON (c.zone);
 ```
 
 ---
@@ -172,7 +197,7 @@ To get full history from MISP for an indicator:
 ```cypher
 -- Get MISP event ID from Neo4j
 MATCH (i:Indicator {value: '1.2.3.4'})
-RETURN i.value, i.misp_event_id, i.sources
+RETURN i.value, i.misp_event_id, i.source
 
 -- Then query MISP API for full event history:
 -- GET /api/attributes/restSearch/json?value=1.2.3.4
@@ -323,4 +348,4 @@ ORDER BY i.last_updated DESC
 
 ---
 
-_Last updated: 2026-03-28_
+_Last updated: 2026-04-06_

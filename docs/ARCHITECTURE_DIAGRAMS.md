@@ -124,7 +124,7 @@ graph TB
     I -->|TARGETS| S[Sector]
     I -->|USES_TECHNIQUE| T
     I -->|PART_OF| CAMP
-    V -->|TARGETS| S
+    V -->|AFFECTS| S
     V -->|REFERS_TO| CVE
     CVE -->|REFERS_TO| V
     CVE -->|HAS_CVSS| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
@@ -291,3 +291,7 @@ flowchart LR
 | Data Format | STIX 2.1 | standard |
 | Language | Python | 3.12+ |
 | Versioning | CalVer | 2026.4.x |
+
+---
+
+*Last updated: 2026-04-06*
