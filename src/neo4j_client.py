@@ -559,7 +559,7 @@ class Neo4jClient:
             # Decay / active tracking
             "CREATE INDEX indicator_last_updated IF NOT EXISTS FOR (i:Indicator) ON (i.last_updated)",
             "CREATE INDEX vulnerability_last_updated IF NOT EXISTS FOR (v:Vulnerability) ON (v.last_updated)",
-            # build_relationships performance: CVE.cve_id needed for EXPLOITS query + IS_SAME_AS
+            # build_relationships performance: CVE.cve_id needed for EXPLOITS query
             "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
             # Co-occurrence join: Malware/ThreatActor by misp_event_id
             "CREATE INDEX malware_misp_event_id IF NOT EXISTS FOR (m:Malware) ON (m.misp_event_id)",

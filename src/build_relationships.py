@@ -235,12 +235,9 @@ def build_relationships():
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
-        # 11-13. IS_SAME_AS cross-source correlation
-        # With tag removed from MERGE keys, same-name entities and same-cve_id
-        # nodes already merge into a single node. IS_SAME_AS is no longer needed
-        # for Malware (name-keyed), CVE (cve_id-keyed), or Vulnerability (cve_id-keyed).
-        # Source provenance is tracked via the accumulated `source` and `tags` arrays.
-        logger.info("[LINK] 11/11 Cross-source dedup — skipped (entities merge on name/cve_id, no IS_SAME_AS needed)")
+        # Cross-source dedup is handled at ingest time via single-key MERGE
+        # (name for Malware/ThreatActor, cve_id for CVE/Vulnerability, mitre_id
+        # for Technique/Tactic/Tool). Source provenance tracked via `source`/`tags` arrays.
 
         # Get final stats
         try:

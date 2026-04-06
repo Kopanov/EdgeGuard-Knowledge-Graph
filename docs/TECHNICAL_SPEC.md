@@ -451,7 +451,6 @@ Auth:    Configured via environment variables
 | `INDICATES` | Indicator | Malware | Initial `confidence_score` 0.5, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; **also** `malware_family` name match from ThreatFox/VT (`confidence_score` 0.8); calibrated by `enrichment_jobs.calibrate_cooccurrence_confidence` |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'`, `source_id='cve_tag_match'` |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |
-| ~~`IS_SAME_AS`~~ | — | — | Removed: entities deduplicate via single-key MERGE (name/cve_id) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
 | `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()` |
 | `PART_OF` | Malware, Indicator | Campaign | `build_campaign_nodes()` |
