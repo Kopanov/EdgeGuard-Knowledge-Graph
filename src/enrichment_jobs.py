@@ -155,6 +155,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(m:Malware)
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
+            WHERE i.active = true
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
@@ -170,6 +171,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                           c.actor_name = a.name
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
+                c.active           = CASE WHEN indicator_total > 0 THEN true ELSE c.active END,
                 c.last_updated     = datetime(),
                 c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
@@ -446,8 +448,8 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("Running post-sync enrichment jobs")
     logger.info("=" * 55)
 
-    logger.info("\n[1/4] IOC Confidence Decay...")
-    summary["decay"] = decay_ioc_confidence(neo4j_client)
+    logger.info("\n[1/4] Vulnerability↔CVE REFERS_TO Bridge...")
+    summary["bridge"] = bridge_vulnerability_cve(neo4j_client)
 
     logger.info("\n[2/4] Campaign Node Builder...")
     summary["campaigns"] = build_campaign_nodes(neo4j_client)
@@ -455,8 +457,8 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("\n[3/4] Co-occurrence Confidence Calibration...")
     summary["calibration"] = calibrate_cooccurrence_confidence(neo4j_client)
 
-    logger.info("\n[4/4] Vulnerability↔CVE REFERS_TO Bridge...")
-    summary["bridge"] = bridge_vulnerability_cve(neo4j_client)
+    logger.info("\n[4/4] IOC Confidence Decay...")
+    summary["decay"] = decay_ioc_confidence(neo4j_client)
 
     logger.info("\n[DONE] All enrichment jobs complete")
     return summary

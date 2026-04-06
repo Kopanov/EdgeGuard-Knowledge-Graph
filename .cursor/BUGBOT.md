@@ -757,9 +757,10 @@ SET n.confidence_score = CASE
     ELSE n.confidence_score END
 ```
 
-### `SOURCED_FROM` edge `raw_data` not updated on re-import
-When a node already exists and is re-imported from the same source, `r.raw_data` on the `SOURCED_FROM` edge must be refreshed to reflect the latest collector payload.
-Flag any `MERGE … ON CREATE SET r.raw_data` pattern that never updates `raw_data` on subsequent imports (`ON MATCH SET r.raw_data = …` is required).
+### `SOURCED_FROM` edge `raw_data` preserves original provenance
+`r.raw_data` on the `SOURCED_FROM` edge captures the **original** collector payload at first import.
+It is set via `ON CREATE SET r.raw_data = …` and intentionally NOT overwritten on re-import.
+`r.confidence`, `r.source`, and `r.updated_at` are updated on every import; `r.raw_data` and `r.imported_at` are immutable after creation.
 
 ---
 

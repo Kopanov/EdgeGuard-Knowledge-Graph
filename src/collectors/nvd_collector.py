@@ -285,7 +285,7 @@ class NVDCollector:
         _use_mod_dates = not baseline  # incremental uses modification dates
         if _use_mod_dates:
             # Incremental: fetch CVEs modified in the last N days (catches CVSS updates)
-            _inc_days = int(os.environ.get("EDGEGUARD_NVD_INCREMENTAL_DAYS", "7"))
+            _inc_days = int(os.environ.get("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"))
             desired_start = pub_end - timedelta(days=_inc_days)
             logger.info(f"NVD incremental: fetching CVEs modified in last {_inc_days} days")
         else:

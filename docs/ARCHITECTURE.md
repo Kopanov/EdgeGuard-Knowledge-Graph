@@ -83,7 +83,7 @@ MISP → convert_to_stix21() / PyMISP to_stix2 → load_stix21_to_neo4j() → Ne
 
 STIX is also used for **export** (`--stix`, `export_to_stix21`) and lives in **`MISPToNeo4jSync.convert_to_stix21`** / **`fetch_stix21_from_misp`** for tooling — those helpers are **not** invoked by **`MISPToNeo4jSync.run()`** used from Airflow.
 
-**After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (campaigns, calibration, decay). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
+**After sync** — DAG **`edgeguard_neo4j_sync`** runs **`build_relationships.py`**, then **`enrichment_jobs.run_all_enrichment_jobs`** (bridge, campaigns, calibration, decay). Baseline DAG runs the same pattern after **`full_neo4j_sync`**.
 
 ---
 
@@ -295,7 +295,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/misp_collector.py` | Fetch/normalize events from MISP API (ingest) — **not** used in default baseline collector tier |
 | `src/run_misp_to_neo4j.py` | **Airflow MISP→Neo4j**: `fetch_edgeguard_events`, `parse_attribute`, `sync_to_neo4j`, optional STIX helpers for CLI/export |
 | `src/run_pipeline.py` | CLI orchestration; optional **STIX flow** to Neo4j; collector steps to MISP |
-| `src/enrichment_jobs.py` | Post-sync enrichment: decay, campaigns, co-occurrence calibration, Vulnerability↔CVE `REFERS_TO` bridge |
+| `src/enrichment_jobs.py` | Post-sync enrichment: Vulnerability↔CVE `REFERS_TO` bridge, campaigns, co-occurrence calibration, IOC decay |
 | `src/build_relationships.py` | Graph relationship builder (exact / MITRE-ID / scoped co-occurrence — **no `CONTAINS`**) |
 | `dags/edgeguard_pipeline.py` | Six primary DAGs (collection + baseline + sync + enrichment tasks) |
 | `dags/edgeguard_metrics_server.py` | Optional long-running Prometheus metrics DAG(s) |

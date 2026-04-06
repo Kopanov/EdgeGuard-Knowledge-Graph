@@ -765,7 +765,7 @@ class Neo4jClient:
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
-                n.active = true,
+                n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                 n.edgeguard_managed = true
             """
 
@@ -901,9 +901,9 @@ class Neo4jClient:
         WHERE {key_conditions}
         MATCH (s:Source {{source_id: $source_id}})
         MERGE (n)-[r:SOURCED_FROM]->(s)
-        ON CREATE SET r.imported_at = datetime()
-        SET r.raw_data = $raw_data,
-            r.confidence = $confidence,
+        ON CREATE SET r.imported_at = datetime(),
+            r.raw_data = $raw_data
+        SET r.confidence = $confidence,
             r.source = $source_id,
             r.updated_at = datetime(),
             r.edgeguard_managed = true
@@ -1151,7 +1151,7 @@ class Neo4jClient:
             MATCH (n:Indicator)
             WHERE n.misp_event_id IS NOT NULL 
               AND n.misp_event_id IN $active_ids
-            SET n.active = true
+            SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             query_indicators_inactive = """
@@ -1291,8 +1291,14 @@ class Neo4jClient:
                     n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = true,
+                    n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
+                    n.original_published_date = CASE
+                        WHEN n.original_published_date IS NULL OR item.first_seen < n.original_published_date
+                        THEN item.first_seen ELSE n.original_published_date END,
+                    n.original_modified_date = CASE
+                        WHEN n.original_modified_date IS NULL OR item.last_seen > n.original_modified_date
+                        THEN item.last_seen ELSE n.original_modified_date END,
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
@@ -1307,9 +1313,9 @@ class Neo4jClient:
                 WITH n, item
                 MATCH (s:Source {source_id: item.source_id})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
-                ON CREATE SET r.imported_at = datetime()
-                SET r.raw_data = item.raw_data,
-                    r.confidence = item.confidence,
+                ON CREATE SET r.imported_at = datetime(),
+                    r.raw_data = item.raw_data
+                SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true
@@ -1418,7 +1424,7 @@ class Neo4jClient:
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = true,
+                    n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
@@ -1430,9 +1436,9 @@ class Neo4jClient:
                 WITH n, item
                 MATCH (s:Source {source_id: item.source_id})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
-                ON CREATE SET r.imported_at = datetime()
-                SET r.raw_data = item.raw_data,
-                    r.confidence = item.confidence,
+                ON CREATE SET r.imported_at = datetime(),
+                    r.raw_data = item.raw_data
+                SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true
@@ -3798,7 +3804,7 @@ class Neo4jClient:
             i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
             i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
-            i.active = true
+            i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
         """
 
         try:

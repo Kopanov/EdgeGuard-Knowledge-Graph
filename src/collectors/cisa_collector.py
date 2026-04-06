@@ -15,7 +15,7 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -37,6 +37,10 @@ from collectors.collector_utils import (
 from collectors.misp_writer import MISPWriter
 from config import SOURCE_TAGS, SSL_VERIFY, detect_zones_from_text, resolve_collection_limit
 from resilience import get_circuit_breaker
+
+# Incremental window: only process entries added within the last N days (non-baseline runs).
+# CISA adds ~2-5 entries per week, so 30 days gives good coverage.
+CISA_INCREMENTAL_DAYS = int(os.environ.get("EDGEGUARD_CISA_INCREMENTAL_DAYS", "30"))
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +162,18 @@ class CISACollector:
             raise
 
         data = response.json()
+
+        # Log catalog-level metadata for operator visibility
+        catalog_version = data.get("catalogVersion", "unknown")
+        date_released = data.get("dateReleased", "unknown")
+        logger.info(f"CISA KEV catalog: version={catalog_version}, dateReleased={date_released}")
+
         vulnerabilities = data.get("vulnerabilities", [])
 
-        logger.info(f"[FETCH] CISA KEV: Fetched {len(vulnerabilities)} vulnerabilities")
+        # Sort newest-first by dateAdded so limit/slicing takes the most recent entries
+        vulnerabilities.sort(key=lambda v: v.get("dateAdded", ""), reverse=True)
+
+        logger.info(f"[FETCH] CISA KEV: Fetched {len(vulnerabilities)} vulnerabilities (sorted newest-first)")
         return vulnerabilities
 
     def collect(
@@ -189,6 +202,27 @@ class CISACollector:
                 # Normal mode: fetch with limit
                 vulnerabilities = self._fetch_kev(limit)
 
+            # Time-window filtering
+            total_count = len(vulnerabilities)
+            if baseline:
+                # Baseline mode: optionally filter by baseline_days
+                if baseline_days:
+                    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=baseline_days)).strftime("%Y-%m-%d")
+                    vulnerabilities = [v for v in vulnerabilities if v.get("dateAdded", "") >= cutoff_date]
+                    logger.info(
+                        f"CISA KEV: {total_count} total, {len(vulnerabilities)} within "
+                        f"{baseline_days}-day baseline window, processing {len(vulnerabilities)}"
+                    )
+            else:
+                # Incremental mode: only entries within the last N days
+                cutoff_date = (datetime.now(timezone.utc) - timedelta(days=CISA_INCREMENTAL_DAYS)).strftime("%Y-%m-%d")
+                vulnerabilities = [v for v in vulnerabilities if v.get("dateAdded", "") >= cutoff_date]
+                logger.info(
+                    f"CISA KEV: {total_count} total, {len(vulnerabilities)} within "
+                    f"{CISA_INCREMENTAL_DAYS}-day window, processing {len(vulnerabilities)}"
+                )
+
+            # Apply limit AFTER time-window filtering (caps newest entries within window)
             # Process KEV
             processed = []
             to_process = vulnerabilities if limit is None else vulnerabilities[:limit]
