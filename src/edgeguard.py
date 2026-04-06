@@ -285,7 +285,7 @@ def cmd_doctor(args):
 
     # Test Airflow (retry once after 5s if first attempt fails — handles restarts)
     info("Testing Airflow webserver...")
-    airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://edgeguard_airflow:8082")
+    airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://localhost:8082")
     airflow_ok = False
     for _attempt in range(2):
         try:
@@ -496,24 +496,28 @@ def cmd_heal(args):
     """Auto-repair EdgeGuard."""
     section("EdgeGuard Heal - Auto-Repair")
 
-    healed_something = False
+    healed_items: list[str] = []
 
     # Reset circuit breakers
     info("Resetting circuit breakers...")
     ok_flag, msg = reset_circuit_breakers()
     ok(msg)
+    if ok_flag and "Reset" in msg:
+        healed_items.append("circuit breakers reset")
 
     # Clear lock files
     info("Clearing lock files...")
     ok_flag, msg = clear_lock_files()
     ok(msg)
     if "Cleared" in msg:
-        healed_something = True
+        healed_items.append("lock files cleared")
 
     # Retry pending collections
     info("Checking for pending collections...")
     ok_flag, msg = retry_pending_collections()
     ok(msg)
+    if ok_flag and "Retried" in msg:
+        healed_items.append("pending collections retried")
 
     # Clear circuit breaker state file if exists
     cb_file = get_circuit_breaker_state_file()
@@ -521,13 +525,16 @@ def cmd_heal(args):
         try:
             os.remove(cb_file)
             ok("Cleared circuit breaker state file")
-            healed_something = True
+            healed_items.append("circuit breaker state file removed")
         except Exception:
             pass
 
     section("Heal Complete")
-    ok("EdgeGuard has been healed")
-    info("Note: Some changes may require restarting the pipeline")
+    if healed_items:
+        ok(f"EdgeGuard healed: {', '.join(healed_items)}")
+        info("Note: Some changes may require restarting the pipeline")
+    else:
+        ok("No issues found — EdgeGuard is healthy")
     return 0
 
 
@@ -853,6 +860,46 @@ def cmd_validate(args):
                 ok(f"{constraint_count} Neo4j constraints configured")
             else:
                 warn(f"Only {constraint_count} constraints (run ensure_constraints() or first sync)")
+
+            # Check edgeguard_managed tag coverage
+            info("Checking edgeguard_managed tag coverage...")
+            try:
+                unmanaged = client.run(
+                    "MATCH (n) "
+                    "WHERE (n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware "
+                    "OR n:ThreatActor OR n:Technique OR n:Tactic OR n:Tool OR n:Campaign) "
+                    "AND (n.edgeguard_managed IS NULL OR n.edgeguard_managed <> true) "
+                    "RETURN labels(n)[0] as label, count(n) as count"
+                )
+                if unmanaged:
+                    for row in unmanaged:
+                        label = row.get("label", "Unknown")
+                        count = row.get("count", 0)
+                        if count > 0:
+                            warn(f"{count} {label} node(s) missing edgeguard_managed=true")
+                else:
+                    ok("All graph nodes have edgeguard_managed=true")
+            except Exception as e:
+                warn(f"edgeguard_managed check failed: {e}")
+
+            # Check orphan indicators
+            info("Checking for orphan indicators...")
+            try:
+                orphan_result = client.run(
+                    "MATCH (n:Indicator) "
+                    "WHERE n.edgeguard_managed = true AND NOT EXISTS((n)--()) "
+                    "RETURN count(n) as orphan_count"
+                )
+                if orphan_result:
+                    orphan_count = orphan_result[0].get("orphan_count", 0)
+                    if orphan_count > 0:
+                        info(f"{orphan_count} orphan indicator(s) with no relationships (normal for fresh imports)")
+                    else:
+                        ok("No orphan indicators found")
+                else:
+                    ok("No orphan indicators found")
+            except Exception as e:
+                warn(f"Orphan indicator check failed: {e}")
 
             client.close()
         else:
