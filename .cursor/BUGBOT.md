@@ -24,7 +24,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
 - **MISP/PyMISP version compatibility**: `src/misp_health.py` performs a version detection check; flag any code that assumes a specific PyMISP API without guarding against version differences
 - **Historical windows**: all sectors (global/healthcare/energy/finance)=24 months — never exceed these
 - **Resilience**: circuit breakers and retry logic protect all external calls
-- **Provenance invariant**: every Neo4j node carries `misp_event_id`, `first_imported_at`, `source[]`, `edgeguard_managed=true` and a `SOURCED_FROM` edge to its source node
+- **Provenance invariant**: every Neo4j node carries `first_imported_at`, `source[]`, `edgeguard_managed=true` and a `SOURCED_FROM` edge to its source node. MISP-originated nodes (Indicator, Vulnerability, CVE, Malware, ThreatActor) additionally carry `misp_event_id`
 - **ResilMesh deployment**: EdgeGuard runs on the same server as ResilMesh — port isolation and `edgeguard_managed` tagging are mandatory
 
 Review every change against these principles. Flag anything that violates them.
@@ -212,7 +212,7 @@ Flag new embedded JSON sentinels added on one side without the other, or truncat
 
 ### `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (`sync_to_neo4j`)
 
-Default **`500`** (Python-side chunk size). **`0`** or **`all`** (case-insensitive) = **single pass** over the sorted item list — same peak-memory shape as unchunked sync (**OOM risk** on large backfills). Flag changes to **`_parse_neo4j_sync_chunk_size`** / **`sync_to_neo4j`** without updates to **`.env.example`**, **`README.md`**, **`docs/AIRFLOW_DAGS.md`**, and related ops docs.
+Default **`1000`** (Python-side chunk size). **`0`** or **`all`** (case-insensitive) = **single pass** over the sorted item list — same peak-memory shape as unchunked sync (**OOM risk** on large backfills). Flag changes to **`_parse_neo4j_sync_chunk_size`** / **`sync_to_neo4j`** without updates to **`.env.example`**, **`README.md`**, **`docs/AIRFLOW_DAGS.md`**, and related ops docs.
 
 ### STIX 2.1: never put `labels` on Cyber-observable Objects (SCOs)
 
@@ -401,7 +401,7 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 
 ```
 (Indicator)   -[:INDICATES]->   (Malware)
-(Indicator)   -[:ATTRIBUTED_TO]-> (Malware)        # OTX / MISP paths (not Malware→Indicator)
+(Indicator)   -[:INDICATES]->    (Malware)          # co-occurrence or malware_family match
 (Indicator)   -[:EXPLOITS]->   (Vulnerability | CVE)
 (Malware)     -[:ATTRIBUTED_TO]-> (ThreatActor)   # malware attributed to actor
 (ThreatActor) -[:USES]->       (Technique)        # explicit MITRE STIX uses_techniques
@@ -415,8 +415,6 @@ Incorrect edge direction silently produces wrong graph traversals. The canonical
 (Malware | Indicator)-[:PART_OF]-> (Campaign)
 (Indicator)   -[:TARGETS]->    (Sector)
 (Vulnerability | CVE)-[:AFFECTS]-> (Sector)      # sector from zone list (build_relationships)
-(Malware)     -[:IS_SAME_AS]-> (Malware)          # alias / synonym linking
-(ThreatActor) -[:IS_SAME_AS]-> (ThreatActor)      # alias / synonym linking
 ```
 
 Flag **`(ThreatActor)-[:ATTRIBUTED_TO]->(Malware)`** (reversed). Flag any relationship creation that reverses the rows above. Wrong `ATTRIBUTED_TO` direction makes traversals return empty results silently.
@@ -484,6 +482,13 @@ Flag any path where the key property could be empty before the `MERGE` is execut
 ### `MATCH (n)` full-graph scan
 `MATCH (n)` without a label scans every node in the database. In a large graph this is catastrophically slow.
 Flag any Cypher query that uses `MATCH (n)` without a label constraint.
+
+### `n.active = true` must respect decay retirement
+Merge paths must not blindly set `n.active = true`. If a node has been retired by the decay job (`retired_at IS NOT NULL`), its `active` flag must be preserved. The correct pattern is:
+```cypher
+n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
+```
+Flag any `SET n.active = true` in merge paths (`merge_node_with_source`, `merge_indicators_batch`, `merge_vulnerabilities_batch`, `mark_inactive_nodes`, ResilMesh `merge_indicator`) that does not check `retired_at`. An unconditional `SET n.active = true` silently un-retires indicators that the decay job correctly retired, creating zombie nodes with `confidence_score=0.10, active=true`.
 
 ---
 
@@ -840,7 +845,7 @@ Flag any `Counter(...)`, `Gauge(...)`, or `Histogram(...)` whose name does not s
 Registering a Prometheus metric at module level without checking `METRICS_SERVER_AVAILABLE` will raise a `ValueError: Duplicated timeseries` when Airflow re-parses the DAG or when the module is imported twice.
 ```python
 # CORRECT pattern
-if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE:
+if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS_AVAILABLE:
     MY_COUNTER = Counter("edgeguard_...", "...")
 ```
 Flag any `Counter(...)` / `Gauge(...)` / `Histogram(...)` at module level that is not inside this guard.
@@ -861,7 +866,7 @@ Leaving a source out means its nodes get no `SOURCED_FROM` edges and no reliabil
 
 ---
 
-## 6. AIRFLOW DAG CONCURRENCY, TIMEOUTS & RETRIES — Blocking
+## 18. AIRFLOW DAG CONCURRENCY, TIMEOUTS & RETRIES — Blocking
 
 These rules protect against stuck/hung pipelines and concurrent run races. Violations can cause silent data loss or indefinite hangs in production.
 
@@ -929,7 +934,7 @@ The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometh
 
 ---
 
-## 7. CROSS-FILE CONTRACTS — Blocking
+## 19. CROSS-FILE CONTRACTS — Blocking
 
 These rules catch inconsistencies between Python files that interact through shared data, metrics, or conventions.
 
