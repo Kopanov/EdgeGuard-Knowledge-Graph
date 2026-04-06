@@ -93,18 +93,18 @@ flowchart LR
         NORMAL --> DEDUP[Deduplicate]
         PAGED --> DEDUP
         DEDUP --> CHUNK[Chunk at 500 items]
-        CHUNK -->|UNWIND batch<br/>500/batch| NEO4J_MERGE[Neo4j MERGE<br/>Indicators + Vulnerabilities]
+        CHUNK -->|UNWIND node merge<br/>1000/batch| NEO4J_MERGE[Neo4j MERGE<br/>Indicators + Vulnerabilities]
     end
 
     subgraph Step 4-5: Enrich
-        NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>500/batch]
-        REL --> DECAY[IOC Decay]
-        DECAY --> CAMP[Campaign Builder]
+        NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>batchSize 5000]
+        REL --> BRIDGE[CVE Bridge]
+        BRIDGE --> CAMP[Campaign Builder]
         CAMP --> CALIB[Co-occurrence Calibration]
-        CALIB --> BRIDGE[CVE Bridge]
+        CALIB --> DECAY[IOC Decay]
     end
 
-    BRIDGE --> GRAPH[(Knowledge Graph)]
+    DECAY --> GRAPH[(Knowledge Graph)]
 ```
 
 ---
@@ -227,12 +227,15 @@ flowchart TD
     CHECK -->|No: Normal event| NORMAL[Process all in memory]
 
     PAGED --> PAGE_LOOP[For each page:<br/>parse + dedup + sync<br/>then gc.collect + sleep 2s]
-    PAGE_LOOP --> BUILD_REL_P[Build cross-item rels<br/>type-based sampling:<br/>actors 500, techniques 500,<br/>malware 500, indicators 500]
+    PAGE_LOOP --> BUILD_REL_P[Build cross-item rels<br/>static caps: actors 500,<br/>techniques 500, malware 500,<br/>indicators 2000, vulns 1000]
 
     NORMAL --> DEDUP_N[Deduplicate items]
-    DEDUP_N --> BUILD_REL_N[Build cross-item rels<br/>type-based sampling]
+    DEDUP_N --> BUILD_REL_N[Build cross-item rels<br/>same static caps]
 
-    BUILD_REL_P & BUILD_REL_N --> CHUNK[Chunk sync: 500 items/chunk<br/>UNWIND batch: 500/batch<br/>Rel batch: apoc.periodic.iterate 500/batch]
+    BUILD_REL_P & BUILD_REL_N --> DYN{Cross-product<br/>> 50K rels?}
+    DYN -->|Yes| REDUCE[Dynamic sampling:<br/>proportional cap reduction<br/>all types scaled down]
+    DYN -->|No| CHUNK
+    REDUCE --> CHUNK[Node sync: 500 items/chunk<br/>UNWIND node merge: 1000/batch<br/>Rel UNWIND: 500/batch, 60s timeout<br/>Post-sync: apoc.periodic.iterate 5000/batch]
     CHUNK --> NEO4J[(Neo4j)]
 
     style PAGED fill:#3b82f6,stroke:#2563eb,color:#fff
@@ -246,20 +249,18 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    subgraph "Job 1: IOC Decay"
-        D1[Indicators +<br/>Vulnerabilities] --> D2{Days since<br/>last_updated}
-        D2 -->|90-180d| D3[confidence x 0.85]
-        D2 -->|180-365d| D4[confidence x 0.70]
-        D2 -->|> 365d| D5[active = false<br/>retired]
+    subgraph "Job 1/4: CVE Bridge"
+        BR1[Vulnerability] -->|matching cve_id| BR2[CVE]
+        BR2 -->|REFERS_TO| BR1
     end
 
-    subgraph "Job 2: Campaign Builder"
-        CB1[ThreatActor] --> CB2{Has ATTRIBUTED_TO<br/>Malware with<br/>INDICATES Indicator?}
-        CB2 -->|Yes| CB3[Create Campaign node]
-        CB3 --> CB4[Link: RUNS + PART_OF]
+    subgraph "Job 2/4: Campaign Builder"
+        CB1[ThreatActor] --> CB2{Has ATTRIBUTED_TO<br/>Malware with active<br/>INDICATES Indicator?}
+        CB2 -->|Yes| CB3[Create/reactivate Campaign]
+        CB3 --> CB4[Link: RUNS + PART_OF<br/>Deactivate empty campaigns]
     end
 
-    subgraph "Job 3: Calibration (pre-computed event sizes)"
+    subgraph "Job 3/4: Calibration (pre-computed event sizes)"
         CAL0[Pre-compute: one COUNT<br/>per MISP event] --> CAL1[Group events by tier]
         CAL1 --> CAL2{Event size tier}
         CAL2 -->|1-10| CAL3[conf = 0.50]
@@ -269,9 +270,11 @@ flowchart LR
         CAL2 -->|> 500| CAL6[conf = 0.30]
     end
 
-    subgraph "Job 4: CVE Bridge"
-        BR1[Vulnerability] -->|matching cve_id| BR2[CVE]
-        BR2 -->|REFERS_TO| BR1
+    subgraph "Job 4/4: IOC Decay (last — idempotent)"
+        D1[Indicators +<br/>Vulnerabilities] --> D2{Days since<br/>last_updated}
+        D2 -->|90-180d| D3[confidence x 0.85]
+        D2 -->|180-365d| D4[confidence x 0.70]
+        D2 -->|> 365d| D5[active = false<br/>retired_at = now]
     end
 ```
 
