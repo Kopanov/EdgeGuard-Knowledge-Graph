@@ -2010,11 +2010,14 @@ class Neo4jClient:
 
         with self.driver.session() as session:
             _run_rows(session, "USES", q_uses, uses_rows)
-            time.sleep(1)
+            if uses_rows:
+                time.sleep(1)
             _run_rows(session, "ATTRIBUTED_TO", q_attr, attr_rows)
-            time.sleep(1)
+            if attr_rows:
+                time.sleep(1)
             _run_rows(session, "INDICATES_malware", q_ind_mal, ind_mal_rows)
-            time.sleep(1)
+            if ind_mal_rows:
+                time.sleep(1)
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
                 time.sleep(1)
