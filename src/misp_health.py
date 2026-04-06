@@ -355,7 +355,9 @@ class MISPHealthCheck:
                     data = response.json()
                 except (ValueError, TypeError):
                     return False, {"error": "Malformed JSON from getWorkers"}
-                workers = data.get("workers", {})
+                # MISP getWorkers returns queues at top level, not nested under "workers"
+                # Response format: {"default": {...}, "cache": {...}, "email": {...}}
+                workers = data.get("workers", data)  # fallback to top-level if no "workers" key
 
                 # Check if critical workers are running
                 critical_workers = ["default", "email", "cache"]
@@ -364,7 +366,12 @@ class MISPHealthCheck:
                 for worker_type in critical_workers:
                     if worker_type in workers:
                         worker_info = workers[worker_type]
-                        if isinstance(worker_info, list) and len(worker_info) > 0:
+                        # Worker info can be a dict with "workers" list or direct list
+                        if isinstance(worker_info, dict):
+                            worker_list = worker_info.get("workers", [])
+                            if worker_list or worker_info.get("alive", False):
+                                running += 1
+                        elif isinstance(worker_info, list) and len(worker_info) > 0:
                             running += 1
 
                 if running >= 2:  # At least 2 of 3 critical workers
