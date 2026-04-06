@@ -332,9 +332,19 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         record = result.single()
                         total_updated += record["updated"] if record else 0
 
-                    # Large events: one at a time (could have 100K+ edges each)
+                    # Large events: use apoc.periodic.iterate to batch at edge level.
+                    # A 96K-indicator event can have millions of edges — too many for one tx.
                     for eid in large_eids:
-                        result = session.run(update_cypher, eids=[eid], conf=conf, timeout=NEO4J_READ_TIMEOUT)
+                        batch_query = f"""
+                        CALL apoc.periodic.iterate(
+                            'MATCH (i:Indicator {{misp_event_id: "{eid}"}})-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] RETURN r',
+                            'SET r.confidence_score = {conf}, r.calibrated_at = datetime()',
+                            {{batchSize: 5000, parallel: false}}
+                        )
+                        YIELD total
+                        RETURN total AS updated
+                        """
+                        result = session.run(batch_query, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
                         total_updated += record["updated"] if record else 0
 
