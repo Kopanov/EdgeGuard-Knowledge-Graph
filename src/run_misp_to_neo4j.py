@@ -265,7 +265,7 @@ def _parse_neo4j_sync_chunk_size(raw: Optional[str], n_items: int) -> Tuple[int,
 
     Semantics (documented in README / AIRFLOW_DAGS.md):
 
-    - **Unset / empty:** ``1000`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
+    - **Unset / empty:** ``500`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
     - **``0`` or ``all``** (case-insensitive, stripped): one Python chunk for the entire sorted
       list — same memory profile as pre-chunking sync (**OOM risk** on large attribute counts).
       For experts, large-RAM workers, or A/B debugging only.
@@ -1694,7 +1694,10 @@ class MISPToNeo4jSync:
             len(indicators) * len(vulnerabilities)
         )
         if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
-            factor = _SAFE_REL_LIMIT / estimated_rels
+            # Use sqrt(factor) because relationships are pairwise products:
+            # reducing both sides by sqrt(f) reduces each product by f.
+            import math
+            factor = math.sqrt(_SAFE_REL_LIMIT / estimated_rels)
             _MAX_INDICATORS = max(100, int(len(indicators) * factor))
             _MAX_MALWARE = max(50, int(len(malware_items) * factor))
             _MAX_VULNS = max(50, int(len(vulnerabilities) * factor))

@@ -608,7 +608,7 @@ MIT License - See LICENSE file for details.
 
 ## ⚖️ Collection & sync limits
 
-Use this when **`1000`** or **`2000`** in docs/code look contradictory.
+Use this when **`200`** or **`500`** in docs/code look contradictory.
 
 | Stage | Typical caps | Notes |
 |-------|----------------|-------|
