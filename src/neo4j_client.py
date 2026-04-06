@@ -830,7 +830,7 @@ class Neo4jClient:
             # Check existing confidence before update for audit logging
             check_query = f"""
             MATCH (n:{label} {{{key_set}}})
-            RETURN n.confidence_score as existing_confidence, n.source as existing_source
+            RETURN n.confidence_score as existing_confidence, n.source as existing_source, n.retired_at as retired_at
             """
 
             with self.driver.session() as session:
@@ -841,11 +841,18 @@ class Neo4jClient:
                 if existing_record:
                     existing_conf = existing_record.get("existing_confidence")
                     existing_src = existing_record.get("existing_source")
+                    key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
                     if existing_conf is not None and confidence < existing_conf:
-                        key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
                         logger.info(
                             f"AUDIT: Skipping lower-confidence update for {label}({key_str}): "
                             f"existing={existing_conf} (source={existing_src}), new={confidence} (source={source_id})"
+                        )
+                    # Log when a retired node is re-imported but kept inactive
+                    existing_retired = existing_record.get("retired_at")
+                    if existing_retired is not None:
+                        logger.warning(
+                            f"AUDIT: Re-imported retired node {label}({key_str}): "
+                            f"active flag preserved (retired_at={existing_retired}), source={source_id}"
                         )
 
                 # Execute the merge

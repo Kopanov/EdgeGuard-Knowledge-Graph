@@ -199,11 +199,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_created"] += record["links"] if record else 0
             time.sleep(3)
 
-            # Step 3: Link indicators to their campaigns (sample: up to 100 per campaign)
+            # Step 3: Link active indicators to their campaigns (sample: up to 100 per campaign)
             # Using LIMIT inside WITH to avoid huge relationship fans
             link_indicators = """
             MATCH (c:Campaign)
             MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
+            WHERE i.active = true
             WITH c, collect(i)[0..100] AS indicators
             UNWIND indicators AS i
             MERGE (i)-[:PART_OF]->(c)
@@ -228,6 +229,18 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             cleanup_count = record["count"] if record else 0
             logger.info(f"  [OK] Deactivated {cleanup_count} campaigns with no active indicators")
             results["campaigns_deactivated"] = cleanup_count
+
+            # Step 5: Count re-activated campaigns (were inactive, now have active indicators)
+            reactivated_query = """
+                MATCH (c:Campaign)
+                WHERE c.active = true AND c.last_updated = datetime()
+                RETURN count(c) as count
+            """
+            result = session.run(reactivated_query, timeout=NEO4J_READ_TIMEOUT)
+            record = result.single()
+            reactivated = record["count"] if record else 0
+            if reactivated > 0:
+                logger.info(f"  [OK] Re-activated {reactivated} campaigns with new active indicators")
 
     except Exception as e:
         logger.error(f"build_campaign_nodes error: {e}")
