@@ -284,7 +284,7 @@ class EdgeGuardPipeline:
                  MATCH (m:Malware {misp_event_id: eid})
                  MERGE (i)-[r:INDICATES]->(m)
                  ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5 SET r.updated_at = datetime()',
-                {batchSize: 1000, parallel: false}
+                {batchSize: 5000, parallel: false}
             )
             YIELD total
             RETURN total AS created
@@ -304,7 +304,7 @@ class EdgeGuardPipeline:
                  MATCH (c:CVE {cve_id: i.cve_id})
                  MERGE (i)-[r:EXPLOITS]->(c)
                  ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9 SET r.updated_at = datetime()',
-                {batchSize: 1000, parallel: false}
+                {batchSize: 5000, parallel: false}
             )
             YIELD total
             RETURN total AS created

@@ -45,7 +45,7 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         return False
 
 
-def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=1000):
+def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=5000):
     """Run a relationship query in batches using apoc.periodic.iterate.
 
     Splits the work into mini-transactions of batch_size to prevent OOM.
