@@ -33,9 +33,18 @@ except ImportError:
 # Configure logging
 logger = logging.getLogger(__name__)
 
+# Prometheus metrics (optional – gracefully degrade when metrics_server is not importable)
+try:
+    from metrics_server import NEO4J_QUERIES, NEO4J_QUERY_DURATION
+
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
+_REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
 MAX_RETRIES = 5
 RETRY_DELAY_BASE = 2  # seconds (exponential backoff base)
 BATCH_SIZE = 1000  # Maximum items per batch
@@ -368,11 +377,18 @@ class Neo4jClient:
         timeout = timeout or NEO4J_READ_TIMEOUT
         parameters = parameters or {}
 
+        _t0 = time.monotonic()
         try:
             with self.driver.session() as session:
                 result = session.run(query, parameters, timeout=timeout)
-                return [dict(record) for record in result]
+                records = [dict(record) for record in result]
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="success").inc()
+                NEO4J_QUERY_DURATION.labels(query_type="cypher").observe(time.monotonic() - _t0)
+            return records
         except neo4j_exceptions.CypherSyntaxError as e:
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             logger.error(f"Cypher syntax error: {e}")
             return []
         except (
@@ -381,8 +397,12 @@ class Neo4jClient:
             ConnectionError,
             TimeoutError,
         ):
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             raise  # let @retry_with_backoff handle transient errors
         except neo4j_exceptions.DatabaseError as e:
+            if _METRICS_AVAILABLE:
+                NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             logger.error(f"Neo4j database error: {type(e).__name__}: {e}")
             return []
 
@@ -1982,7 +2002,7 @@ class Neo4jClient:
             if not rows:
                 return
             try:
-                session.run(query, rows=rows, timeout=NEO4J_READ_TIMEOUT)
+                session.run(query, rows=rows, timeout=_REL_QUERY_TIMEOUT)
                 total += len(rows)
             except Exception as e:
                 # Each UNWIND is auto-committed; do not zero the whole batch on one failure.
@@ -1990,14 +2010,24 @@ class Neo4jClient:
 
         with self.driver.session() as session:
             _run_rows(session, "USES", q_uses, uses_rows)
+            if uses_rows:
+                time.sleep(1)
             _run_rows(session, "ATTRIBUTED_TO", q_attr, attr_rows)
+            if attr_rows:
+                time.sleep(1)
             _run_rows(session, "INDICATES_malware", q_ind_mal, ind_mal_rows)
+            if ind_mal_rows:
+                time.sleep(1)
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
+                time.sleep(1)
                 _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_rows)
+                time.sleep(1)
                 _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_rows)
             if expl_rows:
+                time.sleep(1)
                 _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
+                time.sleep(1)
                 _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
 
         return total

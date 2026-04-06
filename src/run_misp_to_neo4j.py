@@ -51,6 +51,13 @@ from neo4j_client import (
 # Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
 
+try:
+    from metrics_server import record_pipeline_duration
+
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 # Suppress InsecureRequestWarning only when SSL verification is explicitly
 # disabled in config — never globally for the whole process.
 if not SSL_VERIFY:
@@ -92,7 +99,7 @@ NEO4J_CIRCUIT_BREAKER = get_circuit_breaker("neo4j", failure_threshold=3, recove
 
 # Chunk size for sync_to_neo4j(): avoids holding huge per-type lists and peaks in driver/heap (OOM).
 # Neo4jClient.merge_*_batch still uses its own BATCH_SIZE (default 1000) per Cypher UNWIND.
-NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 1000  # Standardized to 1000 (matches batch sizes across all workflows)
+NEO4J_SYNC_CHUNK_SIZE_DEFAULT = 500  # 500 keeps lock hold time manageable during relationship MERGE — 1000 caused lock contention death spiral on 100K+ attribute events.
 # Log a warning when single-pass sync is used with more than this many items (OOM risk).
 NEO4J_SYNC_SINGLE_PASS_WARN_THRESHOLD = 2000
 NEO4J_SYNC_SINGLE_PASS_STRONG_WARN_THRESHOLD = 5000
@@ -259,7 +266,7 @@ def _parse_neo4j_sync_chunk_size(raw: Optional[str], n_items: int) -> Tuple[int,
 
     Semantics (documented in README / AIRFLOW_DAGS.md):
 
-    - **Unset / empty:** ``1000`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
+    - **Unset / empty:** ``500`` (``NEO4J_SYNC_CHUNK_SIZE_DEFAULT``).
     - **``0`` or ``all``** (case-insensitive, stripped): one Python chunk for the entire sorted
       list — same memory profile as pre-chunking sync (**OOM risk** on large attribute counts).
       For experts, large-RAM workers, or A/B debugging only.
@@ -372,7 +379,8 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
 
 
 # Max relationship definitions per Neo4j UNWIND batch (see ``Neo4jClient.create_misp_relationships_batch``).
-_RELATIONSHIP_BATCH_DEFAULT = 2000
+# 500 rows per UNWIND batch — smaller batches reduce lock contention on shared nodes.
+_RELATIONSHIP_BATCH_DEFAULT = 500
 
 
 def _neo4j_sync_item_sort_rank(item: Dict) -> int:
@@ -1672,6 +1680,62 @@ class MISPToNeo4jSync:
         if sampled:
             logger.info("Type-based sampling applied to keep cross-products manageable")
 
+        # Collect vulnerabilities for cross-product estimation
+        vulnerabilities = [i for i in items if resolve_vulnerability_cve_id(i) is not None]
+        if len(vulnerabilities) > _MAX_VULNS:
+            logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
+            vulnerabilities = vulnerabilities[:_MAX_VULNS]
+
+        # Dynamic sampling: estimate cross-product size and reduce caps if needed
+        _SAFE_REL_LIMIT = 50000
+        estimated_rels = (
+            len(actors) * len(techniques)
+            + len(malware_items) * len(actors)
+            + len(indicators) * len(malware_items)
+            + len(indicators) * len(vulnerabilities)
+        )
+        if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
+            # Use sqrt(factor) because relationships are pairwise products:
+            # reducing both sides by sqrt(f) reduces each product by f.
+            import math
+
+            factor = math.sqrt(_SAFE_REL_LIMIT / estimated_rels)
+            _MAX_INDICATORS = max(100, int(len(indicators) * factor))
+            _MAX_MALWARE = max(50, int(len(malware_items) * factor))
+            _MAX_VULNS = max(50, int(len(vulnerabilities) * factor))
+            _MAX_ACTORS = max(50, int(len(actors) * factor))
+            _MAX_TECHNIQUES = max(50, int(len(techniques) * factor))
+            # Re-sample with reduced caps
+            indicators = indicators[:_MAX_INDICATORS]
+            malware_items = malware_items[:_MAX_MALWARE]
+            vulnerabilities = vulnerabilities[:_MAX_VULNS]
+            actors = actors[:_MAX_ACTORS]
+            techniques = techniques[:_MAX_TECHNIQUES]
+            new_estimated = (
+                len(actors) * len(techniques)
+                + len(malware_items) * len(actors)
+                + len(indicators) * len(malware_items)
+                + len(indicators) * len(vulnerabilities)
+            )
+            logger.warning(
+                "CROSS-ITEM: Estimated %s relationships exceeds %s limit — "
+                "dynamically reduced caps (indicators=%s, malware=%s, vulns=%s, actors=%s, techniques=%s) → ~%s rels",
+                estimated_rels,
+                _SAFE_REL_LIMIT,
+                len(indicators),
+                len(malware_items),
+                len(vulnerabilities),
+                len(actors),
+                len(techniques),
+                new_estimated,
+            )
+            try:
+                from metrics_server import PIPELINE_ERRORS
+
+                PIPELINE_ERRORS.labels(task="cross_item_rels", error_type="dynamic_sampling_triggered", source="").inc()
+            except Exception:
+                logger.debug("Metrics recording failed", exc_info=True)
+
         # Build actor -> technique relationships (USES)
         # When an event has both actors and techniques, assume the actors use those techniques
         for actor in actors:
@@ -1725,11 +1789,6 @@ class MISPToNeo4jSync:
 
         # Build indicator -> vulnerability/CVE relationships (EXPLOITS)
         # Indicators in the same MISP event as a CVE are likely exploiting it.
-        # Only items we can key by CVE (value-only MISP vulnerability attributes included).
-        vulnerabilities = [i for i in items if resolve_vulnerability_cve_id(i) is not None]
-        if len(vulnerabilities) > _MAX_VULNS:
-            logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
-            vulnerabilities = vulnerabilities[:_MAX_VULNS]
         for indicator in indicators:
             for vuln in vulnerabilities:
                 indicator_value = indicator.get("value")
@@ -2624,6 +2683,14 @@ class MISPToNeo4jSync:
         for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
             created_count += self.neo4j.create_misp_relationships_batch(chunk, source_id=source_id)
+            if total_chunks > 1 and (idx + 1) % 10 == 0:
+                logger.info(
+                    "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
+                    idx + 1,
+                    total_chunks,
+                    int((idx + 1) / total_chunks * 100),
+                    created_count,
+                )
             # Pause between chunks to let Neo4j flush transactions (skip after last chunk)
             if idx < total_chunks - 1:
                 time.sleep(3)
@@ -3066,6 +3133,12 @@ class MISPToNeo4jSync:
             # Print summary
             duration = (datetime.now(timezone.utc) - datetime.fromisoformat(self.stats["start_time"])).total_seconds()
             self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
+
+            if _METRICS_AVAILABLE:
+                try:
+                    record_pipeline_duration("misp_to_neo4j", duration)
+                except Exception:
+                    logger.debug("Metrics recording failed", exc_info=True)
 
             # Update circuit breaker states in stats
             self.stats["circuit_breaker_states"] = {

@@ -130,7 +130,7 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 2. **Neo4j custom CA / mTLS**: The client uses `GraphDatabase.driver(self.uri, auth=…)` without extra SSL config. Standard `neo4j+s://` with a **public** CA works; **private CAs** may require JVM/Python trust store configuration on the host or future support for explicit trust material (not yet first-class env flags).
 3. **NATS**: The `NATSClient` helper exists for ResilMesh-style messaging; callers today pass server URLs in code. There is no single **`NATS_SERVERS`** env var wired through all entrypoints yet — treat NATS as integration-specific until standardized.
 4. **Airflow**: DAG tasks use the same env as the Airflow worker/scheduler container; ensure **`MISP_URL` / `NEO4J_*`** are set there, not only on your laptop shell. With **EdgeGuard `docker-compose.yml`**, Airflow’s metadata DB is **PostgreSQL** (`airflow_postgres`); override defaults via **`AIRFLOW_POSTGRES_*`** in `.env` if needed. **`EDGEGUARD_SSL_VERIFY`** is passed via **`x-common-env`** so Airflow, API, and GraphQL all see the same value; if it were missing from the Airflow service, `config.SSL_VERIFY` would default to **`true`** even when `.env` had `false` for other tooling.
-5. **MISP→Neo4j sync RAM**: The sync uses **Python-side chunked merges** (default **1000** items per chunk via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, 3s pause between chunks). Large events (>5000 attributes) are automatically **streamed in pages** of 5000 with `gc.collect()` between pages. With Docker Compose, the **airflow** service has a **memory limit** (**`AIRFLOW_MEMORY_LIMIT`**, default **12g** in `docker-compose.yml`). Events with 100K+ attributes require **8-12GB** due to PyMISP loading the full event JSON. Lower to 4g only for small test deployments. **`0`** or **`all`** for chunk size forces a **single pass** (OOM risk).
+5. **MISP→Neo4j sync RAM**: The sync uses **Python-side chunked merges** (default **500** items per chunk via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, 3s pause between chunks). Large events (>5000 attributes) are automatically **streamed in pages** of 5000 with `gc.collect()` between pages. With Docker Compose, the **airflow** service has a **memory limit** (**`AIRFLOW_MEMORY_LIMIT`**, default **12g** in `docker-compose.yml`). Events with 100K+ attributes require **8-12GB** due to PyMISP loading the full event JSON. Lower to 4g only for small test deployments. **`0`** or **`all`** for chunk size forces a **single pass** (OOM risk).
 
 ---
 
@@ -144,4 +144,4 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 
 ---
 
-_Last updated: 2026-03-24 — Airflow container **`AIRFLOW_MEMORY_LIMIT`** note for sync OOM/SIGKILL._
+_Last updated: 2026-04-06 — Airflow container **`AIRFLOW_MEMORY_LIMIT`** note for sync OOM/SIGKILL._

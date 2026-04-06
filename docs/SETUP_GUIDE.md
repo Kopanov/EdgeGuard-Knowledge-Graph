@@ -18,7 +18,7 @@ This document is for people **setting up EdgeGuard for the first time** without 
 
 | Need | Read |
 |------|------|
-| “What do **200 / 1000 / 2000** mean?” | [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) |
+| “What do **200 / 500** mean?” | [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) |
 | **Large-RAM workstation**, Neo4j heap/pagecache via `.env`, clean slate volumes, MISP `docker run` caveats | [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) |
 | MISP Docker networking, **`EDGEGUARD_MISP_HTTP_HOST`**, sync discovery | [MISP_SOURCES.md](MISP_SOURCES.md) |
 | Full pipeline / file map | [ARCHITECTURE.md](ARCHITECTURE.md) |
@@ -286,4 +286,4 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-03-24 — Compose **`x-common-env`** / **`AIRFLOW_MEMORY_LIMIT`** / scheduler tuning; MISP preflight + index-based sync discovery; troubleshooting (zombie, SIGKILL, PermissionError)._
+_Last updated: 2026-04-06 — Compose **`x-common-env`** / **`AIRFLOW_MEMORY_LIMIT`** / scheduler tuning; MISP preflight + index-based sync discovery; troubleshooting (zombie, SIGKILL, PermissionError)._

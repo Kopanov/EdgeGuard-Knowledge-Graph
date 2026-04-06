@@ -21,6 +21,13 @@ import urllib3
 
 from config import MISP_API_KEY, MISP_URL, SSL_VERIFY, apply_misp_http_host_header
 
+try:
+    from metrics_server import set_misp_health
+
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -157,6 +164,16 @@ class MISPHealthCheck:
         # Permissive ``healthy``: same as API+DB so CLI/metrics don't flag red when only workers fail.
         # For strict worker requirement, use ``checks["worker_status"]`` (see DAG + EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS).
         healthy = healthy_for_collection
+
+        if _METRICS_AVAILABLE:
+            try:
+                set_misp_health(
+                    api_healthy=api_ok,
+                    db_healthy=db_ok,
+                    workers_healthy=worker_ok,
+                )
+            except Exception:
+                logger.debug("Metrics recording failed", exc_info=True)
 
         return MISPHealthCheckResult(
             healthy=healthy,

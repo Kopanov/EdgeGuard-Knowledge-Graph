@@ -177,7 +177,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 
 1. **`check_sync_needed`** (`ShortCircuitOperator`) — if the last successful sync (state file under `EDGEGUARD_STATE_DIR` / `dags/`) is newer than **`NEO4J_SYNC_INTERVAL`** hours (Airflow Variable, default 72), it **short-circuits** and **skips** `run_neo4j_sync` and **all downstream tasks** (`build_relationships`, `run_enrichment_jobs`, …). So a “green” DAG run can mean **sync did not run** (skipped).
 2. **`run_neo4j_sync`** — imports **`MISPToNeo4jSync`**, chooses **full** vs **incremental** sync (first-ever run or Airflow Variable **`NEO4J_FULL_SYNC=true`** → full; otherwise incremental, default window last 3 days), calls **`sync.run()`**, then on success updates the state file and metrics.
-   - **OOM on very large attribute sets:** `sync_to_neo4j()` merges in **Python-side chunks** (default **1000** items per chunk, 3s pause between chunks). Events with **>5000 attributes** are automatically **streamed in pages** of 5000 with `gc.collect()` between pages. Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** lower on the Airflow worker if the process is still killed. Default **`AIRFLOW_MEMORY_LIMIT`** is **12g** (100K+ attribute events need 8-12GB for PyMISP JSON parsing).
+   - **OOM on very large attribute sets:** `sync_to_neo4j()` merges in **Python-side chunks** (default **500** items per chunk, 3s pause between chunks). Events with **>5000 attributes** are automatically **streamed in pages** of 5000 with `gc.collect()` between pages. Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** lower on the Airflow worker if the process is still killed. Default **`AIRFLOW_MEMORY_LIMIT`** is **12g** (100K+ attribute events need 8-12GB for PyMISP JSON parsing).
 3. **Downstream** — `build_relationships` materializes cross-node edges (e.g. **`USES`** ThreatActor→Technique and **Malware→Technique** from MITRE **`uses_techniques`**, **`INDICATES`** from MISP co-occurrence, …); `run_enrichment_jobs` runs decay/campaign/bridge jobs. Both can succeed with little effect if the sync wrote no nodes.
 
 MISP search/index responses are normalized in code (see **`normalize_misp_event_index_payload`** in [`run_misp_to_neo4j.py`](../src/run_misp_to_neo4j.py)): each row must become a **flat** event dict with **`id`**, not only `{'Event': {...}}`.
@@ -475,7 +475,7 @@ Add keys when you want those feeds. Values that are **empty**, **whitespace-only
 
 ### MISP → Neo4j Sync Issues
 
-**Limits (don’t confuse these):** Baseline **`BASELINE_COLLECTION_LIMIT`** caps **external collectors** (OTX, NVD, …), **not** how many MISP events the sync reads. The sync discovers events via **paginated `/events/index`**. **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **1000**) controls **Neo4j merge RAM** (parsed items per Python chunk, 3s pause between chunks), **not** MISP fetch size. See **[COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)**.
+**Limits (don’t confuse these):** Baseline **`BASELINE_COLLECTION_LIMIT`** caps **external collectors** (OTX, NVD, …), **not** how many MISP events the sync reads. The sync discovers events via **paginated `/events/index`**. **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**) controls **Neo4j merge RAM** (parsed items per Python chunk, 3s pause between chunks), **not** MISP fetch size. See **[COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md)**.
 
 0. **Sync fails almost immediately (baseline `full_neo4j_sync` or `run_neo4j_sync`):** The script does **not** call EdgeGuard REST/GraphQL — look at **MISP + Neo4j only**. Open the task log and search for **`Cannot start sync`**, **`MISP health check failed`**, **`Neo4j health check failed`**, **`No driver initialized`**, **`APOC`**, or **`circuit breaker`**. Typical fixes: **`NEO4J_URI` / `NEO4J_PASSWORD`** correct **from inside the Airflow worker** (e.g. `bolt://neo4j:7687`, not host-only `localhost` if Neo4j is another container), **APOC** installed and allowed (see `docker-compose` / Neo4j docs), **`MISP_URL`** reachable from the worker, and **`EDGEGUARD_MISP_HTTP_HOST`** if Apache vhost name ≠ URL hostname. Failed tasks now raise **`AirflowException`** with a short **reason** suffix when available.
 1. Verify Neo4j is running: `neo4j status`
@@ -487,9 +487,9 @@ Add keys when you want those feeds. Values that are **empty**, **whitespace-only
 5. **PyMISP vs REST:** If PyMISP errors and the code falls back to **`/events/index`**, the JSON shape may be a **`response`** / **`events`** wrapper; that is handled when building the normalized list.
 6. **Event view shape:** `get_event` / `/events/view` may return a **PyMISP object** or **`{'Event': ...}`**; the sync normalizes to a flat dict before reading **`Attribute`**. REST is always tried if PyMISP returns an unparsed type.
 7. **MISP Objects vs flat attributes:** Ingestion uses the event’s top-level **`Attribute`** list. Events that store IOCs only inside **`Object`** (object templates) may log a warning and sync **zero** attributes until object expansion is implemented.
-8. **OOM / worker killed during Neo4j insert:** The sync merges in **Python-side chunks** (default **1000** items, 3s pause). Events with **>5000 attributes** are streamed in pages of 5000. Default **`AIRFLOW_MEMORY_LIMIT`** is **12g** (100K+ attr events need 8-12GB). Lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** if still OOM.
+8. **OOM / worker killed during Neo4j insert:** The sync merges in **Python-side chunks** (default **500** items, 3s pause). Events with **>5000 attributes** are streamed in pages of 5000. Default **`AIRFLOW_MEMORY_LIMIT`** is **12g** (100K+ attr events need 8-12GB). Lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** if still OOM.
 9. **Cross-item relationships are per MISP event:** The sync builds co-occurrence edges (actor↔technique, indicator↔malware, etc.) **within each event** only, then writes nodes and edges for that event before moving on. This avoids false links and runaway **O(n²)** work across the whole run.
-10. **Relationship batching:** **`EDGEGUARD_REL_BATCH_SIZE`** (default **2000**) controls how many relationship definitions are sent per **`create_misp_relationships_batch`** UNWIND round-trip.
+10. **Relationship batching:** **`EDGEGUARD_REL_BATCH_SIZE`** (default **500**) controls how many relationship definitions are sent per **`create_misp_relationships_batch`** UNWIND round-trip.
 11. **Task success vs Airflow “failed” / SIGKILL:** If the graph is updated but the task is red, read **[HEARTBEAT.md](HEARTBEAT.md)** — **`local_task_job_heartbeat_sec`**, **`scheduler_zombie_task_threshold`**, **`zombie_detection_interval`**, and **OOM (-9)** are common causes separate from application exceptions. Compose defaults are documented there.
 
 ---
@@ -530,3 +530,7 @@ EdgeGuard-Knowledge-Graph/
 | Sync to Neo4j | `airflow dags trigger edgeguard_neo4j_sync` |
 | Check status | `airflow dags list-runs -d edgeguard_pipeline` |
 | View logs | `airflow logs <task_id> <run_id>` |
+
+---
+
+_Last updated: 2026-04-06_
