@@ -45,7 +45,7 @@ References: [preflight_ci.sh](../scripts/preflight_ci.sh), [.github/workflows/ci
 | [ ] | Optional API keys | [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) — optional keys / `skip_reason_class` | Missing keys → **skipped** tasks (success), not hard failure — unless you require that feed |
 | [ ] | Collector allowlist | `EDGEGUARD_COLLECT_SOURCES` — [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), [.env.example](../.env.example) | If set: only listed sources run; others skip (`collector_disabled_by_config`); `none`/`-` disables all external collectors |
 | [ ] | Baseline limits (before first baseline) | [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) | `BASELINE_DAYS` / `BASELINE_COLLECTION_LIMIT` or env overrides understood |
-| [ ] | MISP→Neo4j sync memory (huge attribute counts) | `.env` / worker env: **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**; **`0`** / **`all`** = single pass, expert-only); [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | Lower if worker OOMs during Neo4j merge after parse |
+| [ ] | MISP→Neo4j sync memory (huge attribute counts) | `.env` / worker env: **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **1000**; **`0`** / **`all`** = single pass, expert-only); [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | Lower if worker OOMs during Neo4j merge after parse |
 
 Optional: `python src/edgeguard.py validate` — [SETUP_GUIDE.md](SETUP_GUIDE.md).
 

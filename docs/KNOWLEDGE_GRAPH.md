@@ -163,7 +163,7 @@ CREATE INDEX host_hostname IF NOT EXISTS FOR (h:Host) ON (h.hostname);
 
 ### Sync throughput (Airflow worker memory)
 
-MISP→Neo4j ingestion (`run_misp_to_neo4j.py`) processes **one MISP event at a time**: parse attributes → dedupe within the event → build **cross-item** edges **for that event only** (no cross-event co-occurrence on this path) → merge nodes in **Python-side chunks** (**`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, default **`500`**) → flush relationships in **UNWIND batches** (**`EDGEGUARD_REL_BATCH_SIZE`**, default **`2000`**). **`0`** or **`all`** on chunk size disables Python node chunking (**OOM risk** on huge attribute counts). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
+MISP→Neo4j ingestion (`run_misp_to_neo4j.py`) processes **one MISP event at a time**: parse attributes → dedupe within the event → build **cross-item** edges **for that event only** (no cross-event co-occurrence on this path) → merge nodes in **Python-side chunks** (**`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, default **`1000`**) → flush relationships in **UNWIND batches** (**`EDGEGUARD_REL_BATCH_SIZE`**, default **`2000`**). **`0`** or **`all`** on chunk size disables Python node chunking (**OOM risk** on huge attribute counts). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
 ### Querying Full History
 

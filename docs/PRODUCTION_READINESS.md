@@ -180,7 +180,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Copy `credentials/config.example.yaml` → `credentials/config.yaml` | `cp credentials/config.example.yaml credentials/config.yaml` | Required |
 | Set `ssl_verify: true` in `config.yaml` | Edit file | Required for production |
 | Fill optional API keys | `OTX_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, … in `.env` | Optional |
-| Large MISP→Neo4j backfill / OOM on sync | Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default `500`; try `250` if still OOM). **`0`** / **`all`** = single pass (OOM risk — not recommended for huge backfills); see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | If needed |
+| Large MISP→Neo4j backfill / OOM on sync | Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default `1000`; try `250` if still OOM). **`0`** / **`all`** = single pass (OOM risk — not recommended for huge backfills); see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | If needed |
 | Start Neo4j | `docker-compose -f src/neo4j/docker-compose.yml up -d` | Required |
 | Run baseline | `python3 src/edgeguard.py --baseline` | First run |
 | Start monitoring stack | `docker-compose -f docker-compose.monitoring.yml up -d` | Recommended |
