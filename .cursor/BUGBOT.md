@@ -490,6 +490,32 @@ n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
 ```
 Flag any `SET n.active = true` in merge paths (`merge_node_with_source`, `merge_indicators_batch`, `merge_vulnerabilities_batch`, `mark_inactive_nodes`, ResilMesh `merge_indicator`) that does not check `retired_at`. An unconditional `SET n.active = true` silently un-retires indicators that the decay job correctly retired, creating zombie nodes with `confidence_score=0.10, active=true`.
 
+### Merge functions must promote queryable properties to `extra_props`
+Every merge function (`merge_cve`, `merge_vulnerability`, `merge_malware`, `merge_actor`, `merge_technique`, `merge_tactic`, `merge_tool`) must promote analyst-relevant fields to `extra_props` so they become queryable Neo4j node properties. Fields NOT in `key_props` or `extra_props` go to `raw_data` on the SOURCED_FROM edge (a JSON blob invisible to Cypher queries).
+
+Required promotions by node type:
+- **CVE / Vulnerability**: `description`, `cvss_score`, `severity`, `attack_vector`
+- **Technique / Tactic**: `name`, `description`
+- **Tool**: `name`, `description`, `aliases`
+- **Malware**: `description`, `malware_types`, `aliases`, `uses_techniques`
+- **ThreatActor**: `description`, `aliases`, `uses_techniques`, `sophistication`, `primary_motivation`, `resource_level`
+
+Flag any new merge function that leaves `name` or `description` in raw_data only. Flag any change to a merge function that removes a field from `extra_props`.
+
+### CVSS sub-nodes must filter None/empty values before SET
+`_merge_cvss_node()` dynamically builds SET clauses from a dict. If the dict contains `None` or `""` values, they get SET as NULL on the Neo4j node, hiding valid data. The correct pattern is:
+```python
+filtered = {k: v for k, v in cvss_data.items() if v is not None and v != ""}
+```
+Flag any dynamic SET clause builder (CVSS or otherwise) that does NOT filter None/empty values before constructing the Cypher query.
+
+### Numeric truthiness — never use `if score:` for floats
+`if v.get("base_score"):` drops `0.0` (falsy in Python but a valid CVSS score). The correct pattern is:
+```python
+if v.get("base_score") is not None:  # keeps 0.0
+```
+Flag any `if data.get("score")`, `if data.get("confidence")`, `if data.get("base_score")`, or similar truthiness check on a numeric property. These silently drop zero values.
+
 ---
 
 ## 7. PYTHON CODE QUALITY — Non-blocking

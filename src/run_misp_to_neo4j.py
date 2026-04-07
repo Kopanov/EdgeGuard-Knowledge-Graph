@@ -1921,7 +1921,7 @@ class MISPToNeo4jSync:
         # Handle CVE/vulnerability
         if attr_type == "vulnerability":
             severity = "UNKNOWN"
-            cvss_score = 0.0
+            cvss_score = None  # None = unscored; 0.0 is a valid CVSS score
 
             for tag in tags:
                 tag_name = tag.get("name", "")
@@ -1963,12 +1963,15 @@ class MISPToNeo4jSync:
                 # Exact CVSS score from v3.1 or v2 metadata takes priority over tag category
                 v31 = nvd_meta.get("cvss_v31_data") or {}
                 v2 = nvd_meta.get("cvss_v2_data") or {}
-                if v31.get("base_score"):
-                    cvss_score = float(v31["base_score"])
-                    severity = (v31.get("base_severity") or severity or "UNKNOWN").upper()
-                elif v2.get("base_score"):
-                    cvss_score = float(v2["base_score"])
-                    severity = (v2.get("base_severity") or severity or "UNKNOWN").upper()
+                try:
+                    if v31.get("base_score") is not None and v31["base_score"] != "":
+                        cvss_score = float(v31["base_score"])
+                        severity = (v31.get("base_severity") or severity or "UNKNOWN").upper()
+                    elif v2.get("base_score") is not None and v2["base_score"] != "":
+                        cvss_score = float(v2["base_score"])
+                        severity = (v2.get("base_severity") or severity or "UNKNOWN").upper()
+                except (ValueError, TypeError):
+                    logger.debug("Non-numeric base_score in NVD_META for %s, using tag-derived score", value)
             else:
                 description = raw_comment
                 attack_vector = "NETWORK"
