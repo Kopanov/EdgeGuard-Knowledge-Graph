@@ -966,8 +966,7 @@ class Neo4jClient:
         extra_props: Dict[str, Any] = {}
         if data.get("description"):
             extra_props["description"] = data["description"]
-        # Only promote cvss_score when it's a real value (not default 0.0 from parse_attribute)
-        if data.get("cvss_score") and data["cvss_score"] > 0:
+        if data.get("cvss_score") is not None:
             extra_props["cvss_score"] = data["cvss_score"]
         if data.get("severity"):
             extra_props["severity"] = data["severity"]
@@ -1032,8 +1031,7 @@ class Neo4jClient:
             extra_props["reference_urls"] = data["reference_urls"]
         if data.get("description"):
             extra_props["description"] = data["description"]
-        # Only promote cvss_score when it's a real value (not default 0.0 from parse_attribute)
-        if data.get("cvss_score") and data["cvss_score"] > 0:
+        if data.get("cvss_score") is not None:
             extra_props["cvss_score"] = data["cvss_score"]
         if data.get("severity"):
             extra_props["severity"] = data["severity"]

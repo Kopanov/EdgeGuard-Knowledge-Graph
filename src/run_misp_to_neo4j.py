@@ -1921,7 +1921,7 @@ class MISPToNeo4jSync:
         # Handle CVE/vulnerability
         if attr_type == "vulnerability":
             severity = "UNKNOWN"
-            cvss_score = 0.0
+            cvss_score = None  # None = unscored; 0.0 is a valid CVSS score
 
             for tag in tags:
                 tag_name = tag.get("name", "")
