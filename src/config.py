@@ -545,12 +545,13 @@ SECTOR_KEYWORDS = {
         "pacs server",
         # "emr" removed — collides with AWS EMR (Elastic MapReduce)
         "ehr system",
+        "medical",
         "electronic health record",
         "electronic medical records",
         "patient data",
         "medical records",
         "hipaa",
-        # "pharma" removed — collides with SEO pharma spam on non-healthcare sites
+        "pharma",
         "pharmaceutical",
         "pharma company",
         "pharmacy",
@@ -562,7 +563,7 @@ SECTOR_KEYWORDS = {
         "lab corporation",
         "diagnostic lab",
         "health clinic",
-        # "clinic" removed — generic English word ("phishing clinic", "crime clinic")
+        "clinic",
         "medical center",
         # "patient"/"patients" removed — adjective usage ("patient attacker", "patient zero")
         "patient monitoring",
@@ -646,7 +647,7 @@ SECTOR_KEYWORDS = {
         "atm malware",
         "pos malware",
         "point of sale",
-        # "banking" removed — too generic standalone ("banking on", "banking credentials")
+        "banking",
         "banking sector",
         "financial sector",
         # "investment" removed — generic English ("investment in security", "return on investment")
