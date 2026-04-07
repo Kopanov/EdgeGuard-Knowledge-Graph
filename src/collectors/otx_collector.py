@@ -27,11 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 
-# Import baseline checkpoint
+# Import baseline checkpoint (incremental cursor only — no page-based checkpointing)
 from baseline_checkpoint import (
-    get_source_checkpoint,
     get_source_incremental,
-    update_source_checkpoint,
     update_source_incremental,
 )
 
@@ -279,36 +277,19 @@ class OTXCollector:
 
         try:
             if baseline:
-                # Baseline mode: collect all historical data with pagination
-                logger.info(f"📜 Baseline mode: Collecting last {baseline_days} days of OTX data...")
-
-                # Check for existing checkpoint
-                checkpoint = get_source_checkpoint("otx")
-                start_page = checkpoint.get("current_page", 1)
+                # Baseline mode: collect all historical data with pagination.
+                # No page-based checkpoint — OTX pagination is unstable across
+                # different time windows (baseline_days can be 120, 365, 730).
+                # A saved page number from a previous window is meaningless.
+                # The incremental cursor (modified_since in "incremental" sub-dict)
+                # is separate and unaffected.
+                logger.info(f"Baseline mode: Collecting last {baseline_days} days of OTX data...")
 
                 all_pulses = []
                 modified_since = (datetime.now(timezone.utc) - timedelta(days=baseline_days)).isoformat()
-                page = start_page
-                max_pages = 200  # Increased safety limit
+                page = 1
+                max_pages = 200
                 consecutive_empty = 0
-
-                # Stale checkpoint detection: if resuming from page > 1,
-                # probe page 1 to verify the API has data. If page 1 has
-                # data but the resume page is empty, the checkpoint is stale.
-                if start_page > 1:
-                    logger.info(f"   Resuming from page {start_page} (checkpoint found)")
-                    probe = self._fetch_pulses(limit=limit, modified_since=modified_since, page=1)
-                    if probe:
-                        resume_probe = self._fetch_pulses(limit=limit, modified_since=modified_since, page=start_page)
-                        if not resume_probe:
-                            logger.warning(
-                                "   STALE CHECKPOINT: page 1 has %s pulses but page %s is empty — resetting to page 1",
-                                len(probe),
-                                start_page,
-                            )
-                            page = 1
-                            start_page = 1
-                        time.sleep(2)
 
                 while page <= max_pages and consecutive_empty < 3:
                     pulses = self._fetch_pulses(limit=limit, modified_since=modified_since, page=page)
@@ -322,23 +303,16 @@ class OTXCollector:
                     consecutive_empty = 0
                     all_pulses.extend(pulses)
                     logger.info(f"   Page {page}: {len(pulses)} pulses (total: {len(all_pulses)})")
-                    update_source_checkpoint(
-                        "otx",
-                        page=page,
-                        items_collected=len(all_pulses),
-                        last_timestamp=pulses[-1].get("modified") if pulses else None,
-                    )
                     page += 1
                     time.sleep(2)  # OTX free tier: 30 req/min → 2 s between page fetches
 
                 pulses = all_pulses
                 if not pulses:
                     logger.warning(
-                        "   OTX baseline returned 0 pulses for %s-day window — verify API key and OTX connectivity",
+                        "OTX baseline returned 0 pulses for %s-day window — verify API key and OTX connectivity",
                         baseline_days,
                     )
                 logger.info(f"   Baseline complete: {len(pulses)} total pulses collected")
-                update_source_checkpoint("otx", page=page, items_collected=len(all_pulses), completed=True)
             else:
                 # Incremental: only pulses modified since last successful run (checkpoint + overlap).
                 inc = get_source_incremental("otx")
