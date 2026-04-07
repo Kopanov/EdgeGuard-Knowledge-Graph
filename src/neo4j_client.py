@@ -1104,17 +1104,14 @@ class Neo4jClient:
         # MITRE ATT&CK STIX ``uses`` edges (technique IDs), via collector + MISP MITRE_USES_TECHNIQUES comment
         uses_techniques = data.get("uses_techniques", [])
 
-        return self.merge_node_with_source(
-            "Malware",
-            key_props,
-            data,
-            source_id,
-            extra_props={
-                "malware_types": malware_types,
-                "aliases": aliases,
-                "uses_techniques": uses_techniques,
-            },
-        )
+        extra_props: Dict[str, Any] = {
+            "malware_types": malware_types,
+            "aliases": aliases,
+            "uses_techniques": uses_techniques,
+        }
+        if data.get("description"):
+            extra_props["description"] = data["description"]
+        return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a ThreatActor node with source tracking."""
@@ -1125,17 +1122,18 @@ class Neo4jClient:
         # extracted from the ATT&CK STIX relationships bundle by the MITRE collector.
         uses_techniques = data.get("uses_techniques", [])
 
-        return self.merge_node_with_source(
-            "ThreatActor",
-            key_props,
-            data,
-            source_id,
-            extra_props={
-                "aliases": aliases,
-                "description": description,
-                "uses_techniques": uses_techniques,
-            },
-        )
+        extra_props: Dict[str, Any] = {
+            "aliases": aliases,
+            "description": description,
+            "uses_techniques": uses_techniques,
+        }
+        if data.get("sophistication"):
+            extra_props["sophistication"] = data["sophistication"]
+        if data.get("primary_motivation"):
+            extra_props["primary_motivation"] = data["primary_motivation"]
+        if data.get("resource_level"):
+            extra_props["resource_level"] = data["resource_level"]
+        return self.merge_node_with_source("ThreatActor", key_props, data, source_id, extra_props=extra_props)
 
     def merge_technique(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Technique node with source tracking."""
@@ -1173,6 +1171,12 @@ class Neo4jClient:
             extra_props["uses_techniques"] = data["uses_techniques"]
         if data.get("tool_types"):
             extra_props["tool_types"] = data["tool_types"]
+        if data.get("name"):
+            extra_props["name"] = data["name"]
+        if data.get("description"):
+            extra_props["description"] = data["description"]
+        if data.get("aliases"):
+            extra_props["aliases"] = data["aliases"]
         return self.merge_node_with_source("Tool", key_props, data, source_id, extra_props=extra_props)
 
     @retry_with_backoff(max_retries=3)

@@ -1963,10 +1963,10 @@ class MISPToNeo4jSync:
                 # Exact CVSS score from v3.1 or v2 metadata takes priority over tag category
                 v31 = nvd_meta.get("cvss_v31_data") or {}
                 v2 = nvd_meta.get("cvss_v2_data") or {}
-                if v31.get("base_score"):
+                if v31.get("base_score") is not None:
                     cvss_score = float(v31["base_score"])
                     severity = (v31.get("base_severity") or severity or "UNKNOWN").upper()
-                elif v2.get("base_score"):
+                elif v2.get("base_score") is not None:
                     cvss_score = float(v2["base_score"])
                     severity = (v2.get("base_severity") or severity or "UNKNOWN").upper()
             else:
