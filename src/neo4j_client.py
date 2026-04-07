@@ -1087,9 +1087,13 @@ class Neo4jClient:
             MERGE (n)-[:{rel_type}]->(cve)
             """
             params = {"cve_id": cve_id, "tag": tag, **filtered_cvss}
+            dropped = len(cvss_data) - len(filtered_cvss)
             with self.driver.session() as session:
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
-            logger.debug(f"{label} node merged for CVE {cve_id}")
+            logger.debug(
+                "%s node merged for CVE %s (%s properties set, %s null/empty filtered)",
+                label, cve_id, len(filtered_cvss), dropped,
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to merge {label} for CVE {cve_id}: {e}")
