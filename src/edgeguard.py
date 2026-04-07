@@ -235,6 +235,32 @@ def cmd_doctor(args):
         err(msg)
         all_ok = False
 
+    # Check MISP event count — useful to confirm clean/populated state
+    if ok_flag:
+        try:
+            import requests as _req
+
+            misp_url = os.getenv("MISP_URL", "https://localhost:8443")
+            misp_key = os.getenv("MISP_API_KEY", "")
+            resp = _req.get(
+                f"{misp_url}/events/index",
+                headers={"Authorization": misp_key, "Accept": "application/json"},
+                verify=False,
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                events = resp.json()
+                event_list = events if isinstance(events, list) else []
+                eg_events = [
+                    e for e in event_list if "EdgeGuard" in str(e.get("info", "") or e.get("Event", {}).get("info", ""))
+                ]
+                if len(event_list) == 0:
+                    info("MISP has 0 events — ready for baseline")
+                else:
+                    ok(f"MISP has {len(event_list)} events ({len(eg_events)} EdgeGuard)")
+        except Exception:
+            pass  # Non-critical diagnostic
+
     # Check MISP version compatibility
     if ok_flag:
         info("Checking MISP/PyMISP version compatibility...")
@@ -279,6 +305,22 @@ def cmd_doctor(args):
                     ok(f"Neo4j has {constraint_count} constraints configured")
                 else:
                     warn(f"Neo4j has only {constraint_count} constraints (expected 5+). Run ensure_constraints().")
+
+                # Check Neo4j data state — useful before baseline to confirm clean/populated
+                try:
+                    counts = client.run(
+                        "MATCH (n) WHERE n.edgeguard_managed = true "
+                        "RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY cnt DESC LIMIT 10"
+                    )
+                    total = sum(r.get("cnt", 0) for r in counts) if counts else 0
+                    if total == 0:
+                        info("Neo4j graph is empty (0 EdgeGuard nodes) — ready for baseline")
+                    else:
+                        top = ", ".join(f"{r['label']}={r['cnt']}" for r in counts[:5]) if counts else ""
+                        ok(f"Neo4j has {total} EdgeGuard nodes ({top})")
+                except Exception:
+                    pass
+
                 client.close()
         except Exception as e:
             warn(f"Could not verify Neo4j constraints: {e}")
@@ -310,7 +352,32 @@ def cmd_doctor(args):
                 time.sleep(10)
     if not airflow_ok:
         err(f"Airflow webserver not reachable at {airflow_url} after retry — scheduled DAGs will not run")
+        info("  Common causes:")
+        info("  - Stale PID file: rm /opt/airflow/airflow-webserver.pid && restart container")
+        info("  - Port not exposed: check docker-compose.yml ports mapping for 8082")
+        info("  - Out of memory: check AIRFLOW_MEMORY_LIMIT (default 12g)")
+        info("  - Scheduler may still be running (check 'docker logs edgeguard_airflow')")
         all_ok = False
+
+    # Check Airflow DAG state if webserver is reachable
+    if airflow_ok:
+        try:
+            resp = requests.get(
+                f"{airflow_url}/api/v1/dags", timeout=10, auth=("airflow", os.getenv("AIRFLOW_API_PASSWORD", "airflow"))
+            )
+            if resp.status_code == 200:
+                dags = resp.json().get("dags", [])
+                eg_dags = [d for d in dags if d.get("dag_id", "").startswith("edgeguard")]
+                paused = [d["dag_id"] for d in eg_dags if d.get("is_paused")]
+                active = [d["dag_id"] for d in eg_dags if not d.get("is_paused")]
+                if paused:
+                    warn(f"Paused DAGs: {', '.join(paused)}")
+                if active:
+                    ok(f"Active DAGs: {', '.join(active)}")
+                if not eg_dags:
+                    warn("No EdgeGuard DAGs found in Airflow — check dags/ folder mount")
+        except Exception:
+            pass  # Non-critical — webserver may not support API auth
 
     # Test NATS (optional)
     nats_url = os.getenv("NATS_URL", "")
