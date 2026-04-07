@@ -23,7 +23,7 @@
 #   containers. Set MISP_URL in .env to your MISP container/service URL (shared Docker network).
 # Optional (Airflow metadata DB — defaults shown):
 #   AIRFLOW_POSTGRES_USER, AIRFLOW_POSTGRES_PASSWORD, AIRFLOW_POSTGRES_DB
-# Optional: AIRFLOW_MEMORY_LIMIT (default 4g) — raise if full_neo4j_sync gets SIGKILL (-9) under Docker cgroup limits
+# Optional: AIRFLOW_MEMORY_LIMIT (default 12g) — raise if full_neo4j_sync gets SIGKILL (-9) under Docker cgroup limits
 # Optional Neo4j JVM / cgroup (defaults in neo4j service): NEO4J_HEAP_INITIAL, NEO4J_HEAP_MAX, NEO4J_PAGECACHE,
 #   NEO4J_CONTAINER_MEMORY_LIMIT — see docs/DOCKER_SETUP_GUIDE.md
 # Optional MISP→Neo4j tuning (passed via x-common-env to airflow/api/graphql — set in .env):
