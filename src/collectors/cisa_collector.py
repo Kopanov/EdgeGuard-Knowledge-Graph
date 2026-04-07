@@ -223,6 +223,9 @@ class CISACollector:
                 )
 
             # Apply limit AFTER time-window filtering (caps newest entries within window)
+            if baseline and not vulnerabilities:
+                logger.warning("CISA baseline returned 0 KEV entries for %s-day window", baseline_days)
+
             # Process KEV
             processed = []
             to_process = vulnerabilities if limit is None else vulnerabilities[:limit]

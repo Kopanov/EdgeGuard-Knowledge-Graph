@@ -649,6 +649,10 @@ class VTCollector:
                     unique.append(item)
 
             logger.info(f"[OK] VirusTotal: Processed {len(unique)} unique indicators")
+            if not unique and optional_api_key_effective(self.api_key, VIRUSTOTAL_API_KEY_PLACEHOLDERS):
+                logger.warning(
+                    "VirusTotal returned 0 indicators despite valid API key — verify API key and connectivity"
+                )
 
             # Push to MISP if requested
             if push_to_misp:

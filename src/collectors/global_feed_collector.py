@@ -222,6 +222,8 @@ class ThreatFoxCollector:
                     )
 
             logger.info(f"[OK] ThreatFox: Processed {len(results)} indicators")
+            if not results and optional_api_key_effective(self.api_key, THREATFOX_API_KEY_PLACEHOLDERS):
+                logger.warning("ThreatFox returned 0 IOCs despite valid API key — check feed status")
 
             THREATFOX_CIRCUIT_BREAKER.record_success()
             if push_to_misp:
@@ -470,6 +472,8 @@ class URLhausCollector:
                 unique.append(r)
 
         logger.info(f"[OK] URLhaus: {len(unique)} unique URLs")
+        if not unique:
+            logger.warning("URLhaus returned 0 URLs — check feed availability")
 
         out = unique if limit is None else unique[:limit]
         if push_to_misp:
@@ -631,6 +635,8 @@ class CyberCureCollector:
                 continue
 
         logger.info(f"[OK] CyberCure: Collected {len(results)} indicators")
+        if not results:
+            logger.warning("CyberCure returned 0 indicators — check feed availability")
 
         if push_to_misp:
             if not results:

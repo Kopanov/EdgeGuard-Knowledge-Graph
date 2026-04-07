@@ -577,6 +577,11 @@ class NVDCollector:
                     )
 
                 vulnerabilities = all_cves if limit is None else all_cves[:limit]
+                if not vulnerabilities:
+                    logger.warning(
+                        "NVD baseline returned 0 CVEs for %s-day window — verify API key and connectivity",
+                        baseline_days,
+                    )
                 logger.info(f"  Baseline complete: {len(vulnerabilities)} CVEs collected")
                 update_source_checkpoint(
                     "nvd",

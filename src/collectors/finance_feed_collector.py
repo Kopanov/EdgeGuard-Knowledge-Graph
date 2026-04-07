@@ -132,6 +132,8 @@ class FeodoCollector:
                 )
 
             logger.info(f"[OK] Feodo: Collected {len(results)} C&C servers")
+            if not results:
+                logger.warning("Feodo returned 0 C&C servers — check feed availability")
 
             FEODO_CIRCUIT_BREAKER.record_success()
             if push_to_misp:
@@ -241,6 +243,8 @@ class SSLBlacklistCollector:
                 )
 
             logger.info(f"[OK] SSL Blacklist: Collected {len(results)} SSL certs")
+            if not results:
+                logger.warning("SSL Blacklist returned 0 certs — check feed availability")
 
             SSLBL_CIRCUIT_BREAKER.record_success()
             if push_to_misp:

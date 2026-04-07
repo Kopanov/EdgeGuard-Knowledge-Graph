@@ -435,6 +435,9 @@ class AbuseIPDBCollector:
         # Fetch blacklist
         results = self.get_blacklist(confidence_minimum=confidence_minimum, limit=limit, baseline=baseline)
 
+        if baseline and not results:
+            logger.warning("AbuseIPDB baseline returned 0 items — verify API key")
+
         logger.info(f"[OK] AbuseIPDB: Collection complete - {len(results)} indicators")
 
         if push_to_misp:

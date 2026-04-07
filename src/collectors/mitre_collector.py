@@ -431,6 +431,9 @@ class MITRECollector:
                 + tools[: int(effective_limit * 0.15)]
             )
 
+            if baseline and len(all_items) == 0:
+                logger.warning("MITRE baseline returned 0 items — verify STIX bundle URL")
+
             logger.info(f"[OK] MITRE ATT&CK: Processed {len(all_items)} items")
             logger.info(f"   - Tactics:    {len(tactics)}")
             logger.info(f"   - Techniques: {len(techniques[: int(effective_limit * 0.50)])}")
