@@ -292,8 +292,23 @@ class OTXCollector:
                 max_pages = 200  # Increased safety limit
                 consecutive_empty = 0
 
+                # Stale checkpoint detection: if resuming from page > 1,
+                # probe page 1 to verify the API has data. If page 1 has
+                # data but the resume page is empty, the checkpoint is stale.
                 if start_page > 1:
-                    logger.info(f"   🔄 Resuming from page {start_page} (checkpoint found)")
+                    logger.info(f"   Resuming from page {start_page} (checkpoint found)")
+                    probe = self._fetch_pulses(limit=limit, modified_since=modified_since, page=1)
+                    if probe:
+                        resume_probe = self._fetch_pulses(limit=limit, modified_since=modified_since, page=start_page)
+                        if not resume_probe:
+                            logger.warning(
+                                "   STALE CHECKPOINT: page 1 has %s pulses but page %s is empty — resetting to page 1",
+                                len(probe),
+                                start_page,
+                            )
+                            page = 1
+                            start_page = 1
+                        time.sleep(2)
 
                 while page <= max_pages and consecutive_empty < 3:
                     pulses = self._fetch_pulses(limit=limit, modified_since=modified_since, page=page)
@@ -317,6 +332,11 @@ class OTXCollector:
                     time.sleep(2)  # OTX free tier: 30 req/min → 2 s between page fetches
 
                 pulses = all_pulses
+                if not pulses:
+                    logger.warning(
+                        "   OTX baseline returned 0 pulses for %s-day window — verify API key and OTX connectivity",
+                        baseline_days,
+                    )
                 logger.info(f"   Baseline complete: {len(pulses)} total pulses collected")
                 update_source_checkpoint("otx", page=page, items_collected=len(all_pulses), completed=True)
             else:

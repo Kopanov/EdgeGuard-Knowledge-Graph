@@ -1754,8 +1754,26 @@ baseline_misp_health = PythonOperator(
 
 
 def _baseline_start_summary(**context):
-    """Print baseline config at run-time so it shows clearly in the Airflow log."""
-    limit, baseline_days = get_baseline_config()
+    """Print baseline config at run-time so it shows clearly in the Airflow log.
+
+    Always clears baseline checkpoints (page counters) so collectors start
+    from page 1. Incremental state (OTX modified_since cursor, MITRE ETag)
+    is preserved by default — pass ``clear_checkpoints: "all"`` in
+    dag_run.conf to wipe those too.
+    """
+    limit, baseline_days = get_baseline_config(context)
+
+    # Clear baseline checkpoints so collectors start fresh (page 1, not stale page 80)
+    from baseline_checkpoint import clear_checkpoint
+
+    conf = context.get("dag_run").conf if context.get("dag_run") else {}
+    include_incremental = str(conf.get("clear_checkpoints", "")).lower() == "all"
+    clear_checkpoint(include_incremental=include_incremental)
+    if include_incremental:
+        logger.info("[BASELINE] Cleared ALL checkpoints (baseline + incremental state)")
+    else:
+        logger.info("[BASELINE] Cleared baseline checkpoints (incremental cursors preserved)")
+
     logger.info("=" * 55)
     logger.info("EdgeGuard BASELINE Collection Started")
     logger.info(f"  Started at    : {datetime.now(timezone.utc).isoformat()} UTC")
@@ -1768,6 +1786,7 @@ def _baseline_start_summary(**context):
     logger.info("  BASELINE_DAYS             = 730 (2 years, recommended)")
     logger.info("  Or set env on Airflow container (overrides Variables):")
     logger.info("  EDGEGUARD_BASELINE_DAYS=7  EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000")
+    logger.info('  To wipe incremental cursors too: {"clear_checkpoints": "all"}')
     logger.info("=" * 55)
 
 
