@@ -847,6 +847,15 @@ class Neo4jClient:
                         query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
 
+            if params_extra:
+                key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
+                logger.debug(
+                    "MERGE %s(%s): promoting %s to node properties",
+                    label,
+                    key_str,
+                    list(params_extra.keys()),
+                )
+
             # Check existing confidence before update for audit logging
             check_query = f"""
             MATCH (n:{label} {{{key_set}}})

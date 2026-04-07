@@ -442,7 +442,7 @@ class EdgeGuardPipeline:
                             {
                                 "cve_id": vuln_name.upper(),
                                 "description": obj.get("description", ""),
-                                "cvss_score": 0.0,
+                                "cvss_score": None,  # None = unscored; 0.0 is a valid CVSS score
                                 "severity": "UNKNOWN",
                                 "attack_vector": "UNKNOWN",
                                 "zone": self._extract_zones_from_stix_labels(obj),

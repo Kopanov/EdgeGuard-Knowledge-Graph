@@ -233,3 +233,81 @@ class TestBaseScoreTruthiness:
         """Verify that truly missing base_score is correctly detected."""
         v31 = {"base_severity": "NONE"}  # no base_score key
         assert v31.get("base_score") is None, "Missing base_score must be None"
+
+
+class TestNegativeCases:
+    """Negative cases: None/missing values must NOT appear in Cypher SET."""
+
+    def test_cve_none_cvss_score_not_promoted(self, mock_neo4j_client):
+        """cvss_score=None must not appear in extra_props."""
+        client, session = mock_neo4j_client
+        data = {
+            "cve_id": "CVE-2024-9999",
+            "description": "Some vuln",
+            "cvss_score": None,
+            "source": ["nvd"],
+            "zone": ["global"],
+            "confidence_score": 0.5,
+        }
+        client.merge_cve(data, source_id="nvd")
+        cypher_call = session.run.call_args_list[1]
+        cypher_text = cypher_call[0][0]
+        assert "cvss_score" not in cypher_text, "None cvss_score must NOT be promoted"
+
+    def test_cve_zero_cvss_score_is_promoted(self, mock_neo4j_client):
+        """cvss_score=0.0 is valid and must appear in Cypher SET."""
+        client, session = mock_neo4j_client
+        data = {
+            "cve_id": "CVE-2024-0000",
+            "cvss_score": 0.0,
+            "source": ["nvd"],
+            "zone": ["global"],
+            "confidence_score": 0.5,
+        }
+        client.merge_cve(data, source_id="nvd")
+        cypher_call = session.run.call_args_list[1]
+        cypher_text = cypher_call[0][0]
+        assert "n.cvss_score = $cvss_score" in cypher_text, "0.0 is a valid CVSS score and must be promoted"
+
+    def test_cve_no_description_not_promoted(self, mock_neo4j_client):
+        """CVE without description must not have description in SET."""
+        client, session = mock_neo4j_client
+        data = {
+            "cve_id": "CVE-2024-1111",
+            "source": ["nvd"],
+            "zone": ["global"],
+            "confidence_score": 0.5,
+        }
+        client.merge_cve(data, source_id="nvd")
+        cypher_call = session.run.call_args_list[1]
+        cypher_text = cypher_call[0][0]
+        assert "n.description" not in cypher_text, "Missing description must NOT be promoted"
+
+    def test_tool_no_name_not_promoted(self, mock_neo4j_client):
+        """Tool without name must not have name in SET."""
+        client, session = mock_neo4j_client
+        data = {
+            "mitre_id": "S9999",
+            "source": ["mitre_attck"],
+            "zone": ["global"],
+            "confidence_score": 0.5,
+        }
+        client.merge_tool(data, source_id="mitre_attck")
+        cypher_call = session.run.call_args_list[1]
+        cypher_text = cypher_call[0][0]
+        assert "n.name" not in cypher_text, "Missing name must NOT be promoted"
+
+    def test_technique_no_name_not_promoted(self, mock_neo4j_client):
+        """Technique without name must not have name in SET."""
+        client, session = mock_neo4j_client
+        data = {
+            "mitre_id": "T9999",
+            "tactic_phases": [],
+            "source": ["mitre_attck"],
+            "zone": ["global"],
+            "confidence_score": 0.5,
+        }
+        client.merge_technique(data, source_id="mitre_attck")
+        cypher_call = session.run.call_args_list[1]
+        cypher_text = cypher_call[0][0]
+        assert "n.name" not in cypher_text, "Missing name must NOT be promoted"
