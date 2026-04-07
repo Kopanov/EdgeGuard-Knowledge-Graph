@@ -524,7 +524,7 @@ def baseline_collection_limit_from_env() -> Optional[int]:
 # Malware families will be linked via relationships, not keywords
 SECTOR_KEYWORDS = {
     "healthcare": [
-        # Strong healthcare-specific terms ONLY — no bare short acronyms or generic English words
+        # Sector-specific terms with word-boundary matching
         "hospital",
         "hospitals",
         "healthcare",
@@ -543,7 +543,6 @@ SECTOR_KEYWORDS = {
         "defibrillator",
         "dialysis",
         "pacs server",
-        # "emr" removed — collides with AWS EMR (Elastic MapReduce)
         "ehr system",
         "medical",
         "electronic health record",
@@ -565,41 +564,33 @@ SECTOR_KEYWORDS = {
         "health clinic",
         "clinic",
         "medical center",
-        # "patient"/"patients" removed — adjective usage ("patient attacker", "patient zero")
         "patient monitoring",
         "patient record",
         "patient portal",
         "dicom",
         "hl7",
         "fhir",
-        # "medical" removed — too generic standalone; multi-word forms above are sufficient
         "health it",
         "healthcare software",
         "clinical software",
         "telehealth",
     ],
     "energy": [
-        # Strong energy/ICS-specific terms ONLY — no bare short acronyms or generic English words
+        # Sector-specific terms with word-boundary matching
         "scada",
         "scada system",
-        # "ics" removed — collides with ICS calendar files, Incident Command System
         "industrial control",
         "industrial control system",
-        # "dcs" removed — collides with Data Center Services, generic acronym
         "distributed control system",
-        # "plc" removed — collides with "Company PLC" (UK corporate naming)
         "plc controller",
         "programmable logic controller",
-        # "hmi" removed — short acronym; "scada hmi" below is specific enough
         "scada hmi",
         "electric grid",
         "power grid",
         "electrical grid",
         "substation",
-        # "transformer" removed — collides with AI/ML transformer architecture
         "power transformer",
         "electrical transformer",
-        # "transmission" removed — collides with "data transmission", "network transmission"
         "power transmission",
         "distribution grid",
         "smart grid",
@@ -619,7 +610,6 @@ SECTOR_KEYWORDS = {
         "wind farm",
         "hydro plant",
         "critical infrastructure",
-        # "cni" removed — generic 3-letter acronym; "critical infrastructure" above is precise
         "energy sector",
         "ot security",
         "ot network",
@@ -630,13 +620,12 @@ SECTOR_KEYWORDS = {
         "ethernet ip",
         "profinet",
         "substation automation",
-        # "load management" removed — collides with server/database load management
         "grid load management",
         "grid operations",
         "energy management system",
     ],
     "finance": [
-        # Strong finance-specific terms ONLY — no bare short acronyms or generic English words
+        # Sector-specific terms with word-boundary matching
         "banking trojan",
         "financial trojan",
         "payment card",
@@ -650,7 +639,6 @@ SECTOR_KEYWORDS = {
         "banking",
         "banking sector",
         "financial sector",
-        # "investment" removed — generic English ("investment in security", "return on investment")
         "investment firm",
         "investment bank",
         "trading platform",
@@ -660,11 +648,9 @@ SECTOR_KEYWORDS = {
         "cryptocurrency exchange",
         "crypto exchange",
         "bitcoin exchange",
-        # "swift" removed — adjective collision ("swift response", "swift attack") + Apple Swift
         "swift payment",
         "swift network",
         "swift transfer",
-        # "ach" removed — 3-letter acronym collision risk
         "ach payment",
         "ach transfer",
         "wire transfer fraud",
@@ -679,8 +665,6 @@ SECTOR_KEYWORDS = {
         "sap system",
         "oracle financial",
         "accounting software",
-        # "kyc" removed — 3-letter acronym; "know your customer" below is precise
-        # "aml" removed — 3-letter acronym; collides with AML (Acute Myeloid Leukemia)
         "know your customer",
         "anti money laundering",
         "fraud detection",
