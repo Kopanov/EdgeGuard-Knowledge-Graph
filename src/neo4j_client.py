@@ -963,7 +963,16 @@ class Neo4jClient:
         data = dict(data)
         data["cve_id"] = cve_id
         key_props = {"cve_id": cve_id}
-        return self.merge_node_with_source("Vulnerability", key_props, data, source_id)
+        extra_props: Dict[str, Any] = {}
+        if data.get("description"):
+            extra_props["description"] = data["description"]
+        if data.get("cvss_score") is not None:
+            extra_props["cvss_score"] = data["cvss_score"]
+        if data.get("severity"):
+            extra_props["severity"] = data["severity"]
+        if data.get("attack_vector"):
+            extra_props["attack_vector"] = data["attack_vector"]
+        return self.merge_node_with_source("Vulnerability", key_props, data, source_id, extra_props=extra_props or None)
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
         """MERGE an Indicator node with source tracking."""
@@ -1020,6 +1029,14 @@ class Neo4jClient:
             extra_props["cisa_vulnerability_name"] = data["cisa_vulnerability_name"]
         if data.get("reference_urls"):
             extra_props["reference_urls"] = data["reference_urls"]
+        if data.get("description"):
+            extra_props["description"] = data["description"]
+        if data.get("cvss_score") is not None:
+            extra_props["cvss_score"] = data["cvss_score"]
+        if data.get("severity"):
+            extra_props["severity"] = data["severity"]
+        if data.get("attack_vector"):
+            extra_props["attack_vector"] = data["attack_vector"]
 
         ok = self.merge_node_with_source("CVE", key_props, data, source_id, extra_props=extra_props or None)
         if not ok:
@@ -1051,9 +1068,11 @@ class Neo4jClient:
             _validate_label(label)
             _validate_rel_type(rel_type)
 
-            # Build SET clause dynamically from the cvss_data dict
+            # Build SET clause dynamically from the cvss_data dict.
+            # Filter out None/empty values to avoid setting properties to NULL.
+            filtered_cvss = {k: v for k, v in cvss_data.items() if v is not None and v != ""}
             prop_assignments = []
-            for k in cvss_data:
+            for k in filtered_cvss:
                 _validate_prop_name(k)
                 prop_assignments.append(f"n.{k} = ${k}")
             set_clause = ", ".join(prop_assignments) if prop_assignments else "n.created = true"
@@ -1067,7 +1086,7 @@ class Neo4jClient:
             MERGE (cve)-[:{rel_type}]->(n)
             MERGE (n)-[:{rel_type}]->(cve)
             """
-            params = {"cve_id": cve_id, "tag": tag, **cvss_data}
+            params = {"cve_id": cve_id, "tag": tag, **filtered_cvss}
             with self.driver.session() as session:
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             logger.debug(f"{label} node merged for CVE {cve_id}")
@@ -1126,6 +1145,10 @@ class Neo4jClient:
         extra_props: Dict[str, Any] = {"tactic_phases": data.get("tactic_phases", [])}
         extra_props["detection"] = data.get("detection", "")
         extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
+        if data.get("name"):
+            extra_props["name"] = data["name"]
+        if data.get("description"):
+            extra_props["description"] = data["description"]
         return self.merge_node_with_source("Technique", key_props, data, source_id, extra_props=extra_props)
 
     def merge_tactic(self, data: Dict, source_id: str = "mitre_attck") -> bool:
@@ -1133,8 +1156,12 @@ class Neo4jClient:
         key_props = {
             "mitre_id": data.get("mitre_id"),
         }
-        shortname = data.get("shortname", "")
-        return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props={"shortname": shortname})
+        extra_props: Dict[str, Any] = {"shortname": data.get("shortname", "")}
+        if data.get("name"):
+            extra_props["name"] = data["name"]
+        if data.get("description"):
+            extra_props["description"] = data["description"]
+        return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props=extra_props)
 
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tool node with source tracking."""
