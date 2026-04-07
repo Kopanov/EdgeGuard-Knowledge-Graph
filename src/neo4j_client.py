@@ -1092,7 +1092,10 @@ class Neo4jClient:
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             logger.debug(
                 "%s node merged for CVE %s (%s properties set, %s null/empty filtered)",
-                label, cve_id, len(filtered_cvss), dropped,
+                label,
+                cve_id,
+                len(filtered_cvss),
+                dropped,
             )
             return True
         except Exception as e:
