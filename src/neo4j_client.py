@@ -480,6 +480,11 @@ class Neo4jClient:
             "DROP CONSTRAINT campaign_key IF EXISTS",
             "DROP CONSTRAINT tool_key IF EXISTS",
             "DROP CONSTRAINT indicator_key IF EXISTS",
+            # Drop old compound CVSS constraints (cve_id, tag) → single-key (cve_id)
+            "DROP CONSTRAINT cvssv31_key IF EXISTS",
+            "DROP CONSTRAINT cvssv2_key IF EXISTS",
+            "DROP CONSTRAINT cvssv30_key IF EXISTS",
+            "DROP CONSTRAINT cvssv40_key IF EXISTS",
         ]
         with self.driver.session() as session:
             for stmt in old_constraints:
@@ -507,11 +512,11 @@ class Neo4jClient:
             "CREATE CONSTRAINT tool_key IF NOT EXISTS FOR (t:Tool) REQUIRE (t.mitre_id) IS UNIQUE",
             # Sector nodes — created dynamically; must stay unique by name
             "CREATE CONSTRAINT sector_key IF NOT EXISTS FOR (s:Sector) REQUIRE (s.name) IS UNIQUE",
-            # ResilMesh-compatible CVSS sub-nodes — keyed by (cve_id, tag)
-            "CREATE CONSTRAINT cvssv31_key IF NOT EXISTS FOR (n:CVSSv31) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
-            "CREATE CONSTRAINT cvssv2_key IF NOT EXISTS FOR (n:CVSSv2) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
-            "CREATE CONSTRAINT cvssv30_key IF NOT EXISTS FOR (n:CVSSv30) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
-            "CREATE CONSTRAINT cvssv40_key IF NOT EXISTS FOR (n:CVSSv40) REQUIRE (n.cve_id, n.tag) IS UNIQUE",
+            # CVSS sub-nodes — one per CVE (CVSS scores are properties of the vuln, not the source)
+            "CREATE CONSTRAINT cvssv31_key IF NOT EXISTS FOR (n:CVSSv31) REQUIRE (n.cve_id) IS UNIQUE",
+            "CREATE CONSTRAINT cvssv2_key IF NOT EXISTS FOR (n:CVSSv2) REQUIRE (n.cve_id) IS UNIQUE",
+            "CREATE CONSTRAINT cvssv30_key IF NOT EXISTS FOR (n:CVSSv30) REQUIRE (n.cve_id) IS UNIQUE",
+            "CREATE CONSTRAINT cvssv40_key IF NOT EXISTS FOR (n:CVSSv40) REQUIRE (n.cve_id) IS UNIQUE",
             # Campaign nodes — one per actor, keyed by name only
             "CREATE CONSTRAINT campaign_key IF NOT EXISTS FOR (c:Campaign) REQUIRE (c.name) IS UNIQUE",
         ]
@@ -1088,8 +1093,9 @@ class Neo4jClient:
 
             query = f"""
             MATCH (cve:CVE {{cve_id: $cve_id}})
-            MERGE (n:{label} {{cve_id: $cve_id, tag: $tag}})
+            MERGE (n:{label} {{cve_id: $cve_id}})
             SET {set_clause},
+                n.tag = $tag,
                 n.last_updated = datetime(),
                 n.edgeguard_managed = true
             MERGE (cve)-[:{rel_type}]->(n)

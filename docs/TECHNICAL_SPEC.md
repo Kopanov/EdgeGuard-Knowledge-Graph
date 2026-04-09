@@ -517,11 +517,11 @@ CREATE CONSTRAINT tactic_key FOR (t:Tactic) REQUIRE (t.mitre_id) IS UNIQUE;
 CREATE CONSTRAINT tool_key FOR (t:Tool) REQUIRE (t.mitre_id) IS UNIQUE;
 CREATE CONSTRAINT sector_key FOR (s:Sector) REQUIRE (s.name) IS UNIQUE;
 CREATE CONSTRAINT campaign_key FOR (c:Campaign) REQUIRE (c.name) IS UNIQUE;
-// CVSS sub-nodes — keyed by (cve_id, tag) for ResilMesh compatibility
-CREATE CONSTRAINT cvssv2_key FOR (n:CVSSv2) REQUIRE (n.cve_id, n.tag) IS UNIQUE;
-CREATE CONSTRAINT cvssv30_key FOR (n:CVSSv30) REQUIRE (n.cve_id, n.tag) IS UNIQUE;
-CREATE CONSTRAINT cvssv31_key FOR (n:CVSSv31) REQUIRE (n.cve_id, n.tag) IS UNIQUE;
-CREATE CONSTRAINT cvssv40_key FOR (n:CVSSv40) REQUIRE (n.cve_id, n.tag) IS UNIQUE;
+// CVSS sub-nodes — one per CVE (scores are properties of the vuln, not the source)
+CREATE CONSTRAINT cvssv2_key FOR (n:CVSSv2) REQUIRE (n.cve_id) IS UNIQUE;
+CREATE CONSTRAINT cvssv30_key FOR (n:CVSSv30) REQUIRE (n.cve_id) IS UNIQUE;
+CREATE CONSTRAINT cvssv31_key FOR (n:CVSSv31) REQUIRE (n.cve_id) IS UNIQUE;
+CREATE CONSTRAINT cvssv40_key FOR (n:CVSSv40) REQUIRE (n.cve_id) IS UNIQUE;
 
 // ResilMesh topology constraints (15)
 CREATE CONSTRAINT ip_key FOR (ip:IP) REQUIRE (ip.address, ip.tag) IS UNIQUE;
