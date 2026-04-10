@@ -201,7 +201,13 @@ class MITRECollector:
                     id_map[stix_id] = {"type": "malware", "name": obj.get("name", "")}
 
                 elif obj_type == "tool":
-                    id_map[stix_id] = {"type": "tool", "name": obj.get("name", "")}
+                    external_ids = obj.get("external_references", [])
+                    mitre_id = ""
+                    for ext in external_ids:
+                        if ext.get("source_name") == "mitre-attack":
+                            mitre_id = ext.get("external_id", "")
+                            break
+                    id_map[stix_id] = {"type": "tool", "mitre_id": mitre_id, "name": obj.get("name", "")}
 
             # Second pass: extract relationships
             relationships = []
@@ -401,14 +407,27 @@ class MITRECollector:
                     )
 
                 elif obj_type == "tool":
-                    # Tool (e.g. Cobalt Strike, Mimikatz) — distinct from malware
+                    # Tool (e.g. Cobalt Strike S0154, Mimikatz S0002) — distinct from malware
                     description = obj.get("description", "")
                     sectors = self.detect_sectors(description)
                     tool_name = obj.get("name", "")
 
+                    # Extract MITRE ID (S####) from external_references
+                    external_ids = obj.get("external_references", [])
+                    mitre_id = ""
+                    for ext in external_ids:
+                        if ext.get("source_name") == "mitre-attack":
+                            mitre_id = ext.get("external_id", "")
+                            break
+
+                    if not mitre_id:
+                        logger.debug("Tool %s has no MITRE ID — skipping", tool_name)
+                        continue
+
                     tools.append(
                         {
                             "type": "tool",
+                            "mitre_id": mitre_id,
                             "name": tool_name,
                             "description": description[:500],
                             "tool_types": obj.get("labels", []),
