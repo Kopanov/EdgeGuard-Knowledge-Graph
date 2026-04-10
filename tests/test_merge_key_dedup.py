@@ -452,11 +452,14 @@ class TestConstraintDefinitions:
         source = inspect.getsource(client.create_constraints)
         assert "REQUIRE (i.indicator_type, i.value) IS UNIQUE" in source
 
-    def test_cvss_constraints_keep_tag(self):
-        """CVSS sub-node constraints should include tag (different scores per source)."""
+    def test_cvss_constraints_single_key(self):
+        """CVSS sub-node constraints use cve_id alone — one CVSS node per CVE, not per source."""
         import inspect
 
         client = Neo4jClient.__new__(Neo4jClient)
         client.driver = MagicMock()
         source = inspect.getsource(client.create_constraints)
-        assert "REQUIRE (n.cve_id, n.tag) IS UNIQUE" in source
+        # Single-key: CVSS scores are properties of the vuln, not the source
+        assert "FOR (n:CVSSv31) REQUIRE (n.cve_id) IS UNIQUE" in source
+        # Old compound key must NOT be present
+        assert "(n.cve_id, n.tag) IS UNIQUE" not in source
