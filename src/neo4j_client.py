@@ -493,6 +493,34 @@ class Neo4jClient:
                 except Exception:
                     pass  # constraint didn't exist — fine
 
+            # Deduplicate CVSS nodes before creating single-key constraints.
+            # Old compound key (cve_id, tag) may have created multiple nodes per CVE.
+            # Keep the first node (by elementId), move relationships, delete duplicates.
+            for cvss_label in ("CVSSv31", "CVSSv30", "CVSSv2", "CVSSv40"):
+                try:
+                    dedup_result = session.run(
+                        f"""
+                        MATCH (n:{cvss_label})
+                        WITH n.cve_id AS cid, collect(n) AS nodes
+                        WHERE size(nodes) > 1
+                        WITH nodes[0] AS keep, nodes[1..] AS dups
+                        UNWIND dups AS dup
+                        // Move any relationships from duplicate to keeper
+                        WITH keep, dup
+                        OPTIONAL MATCH (dup)-[r]-()
+                        DELETE r
+                        DETACH DELETE dup
+                        RETURN count(dup) AS removed
+                        """,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    row = dedup_result.single()
+                    removed = row["removed"] if row else 0
+                    if removed > 0:
+                        logger.info("CVSS dedup: removed %s duplicate %s nodes", removed, cvss_label)
+                except Exception as e:
+                    logger.debug("CVSS dedup for %s skipped: %s", cvss_label, e)
+
         constraints = [
             # Source nodes
             "CREATE CONSTRAINT source_key IF NOT EXISTS FOR (s:Source) REQUIRE (s.source_id) IS UNIQUE",
