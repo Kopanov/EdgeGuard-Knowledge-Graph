@@ -1779,6 +1779,13 @@ def _baseline_start_summary(**context):
     logger.info(f"  Started at    : {datetime.now(timezone.utc).isoformat()} UTC")
     logger.info(f"  Item limit    : {limit or 'UNLIMITED (collecting everything)'}")
     logger.info(f"  History window: {baseline_days} days")
+    if baseline_days < 365:
+        logger.warning(
+            "  WARNING: baseline_days=%s is below recommended 730. "
+            "This will collect significantly fewer items. "
+            "Check EDGEGUARD_BASELINE_DAYS env var and BASELINE_DAYS Airflow Variable.",
+            baseline_days,
+        )
     logger.info("")
     logger.info("To change before triggering:")
     logger.info("  Airflow UI → Admin → Variables")

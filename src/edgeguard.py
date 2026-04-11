@@ -379,6 +379,21 @@ def cmd_doctor(args):
         except Exception:
             pass  # Non-critical — webserver may not support API auth
 
+    # Check baseline configuration
+    info("Checking baseline configuration...")
+    env_baseline_days = os.getenv("EDGEGUARD_BASELINE_DAYS", "").strip()
+    if env_baseline_days:
+        try:
+            bd = int(env_baseline_days)
+            if bd < 365:
+                warn(f"EDGEGUARD_BASELINE_DAYS={bd} — below recommended 730. Baseline will collect limited data.")
+            else:
+                ok(f"EDGEGUARD_BASELINE_DAYS={bd}")
+        except ValueError:
+            warn(f"EDGEGUARD_BASELINE_DAYS={env_baseline_days!r} — invalid (not a number)")
+    else:
+        ok("EDGEGUARD_BASELINE_DAYS not set — will use default 730")
+
     # Test NATS (optional)
     nats_url = os.getenv("NATS_URL", "")
     if nats_url:
