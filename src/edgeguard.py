@@ -411,6 +411,40 @@ def cmd_doctor(args):
     else:
         info("NATS: skipped (NATS_URL not set)")
 
+    # Check Docker memory settings (if env vars are set)
+    info("Checking memory configuration...")
+    _mem_checks = {
+        "AIRFLOW_MEMORY_LIMIT": ("12g", 12),
+        "NEO4J_HEAP_MAX": ("12g", 12),
+        "NEO4J_PAGECACHE": ("8g", 8),
+        "NEO4J_CONTAINER_MEMORY_LIMIT": ("24g", 24),
+    }
+    _mem_ok = True
+    for var_name, (recommended, min_gb) in _mem_checks.items():
+        val = os.getenv(var_name, "").strip()
+        if not val:
+            info(f"  {var_name}: not set (Docker Compose default applies)")
+            continue
+        else:
+            try:
+                # Parse value like "12g", "12gb", "12G", "12" → integer GB
+                import re as _re
+
+                match = _re.match(r"^(\d+)\s*[gG]?[bB]?$", val.strip())
+                if not match:
+                    warn(f"{var_name}={val} — could not parse (expected format: 12g)")
+                    _mem_ok = False
+                    continue
+                num = int(match.group(1))
+                if num < min_gb:
+                    warn(f"{var_name}={val} — below recommended {recommended} for 730-day baseline")
+                    _mem_ok = False
+                else:
+                    ok(f"{var_name}={val}")
+            except (ValueError, TypeError):
+                warn(f"{var_name}={val} — could not parse")
+    # (each var is now individually reported above)
+
     # Validate API keys
     info("Validating API keys...")
     ok_flag, msg = validate_api_keys()
