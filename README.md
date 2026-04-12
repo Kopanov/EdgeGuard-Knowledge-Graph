@@ -666,9 +666,23 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | MISP→Neo4j sync: events exceeding this attribute count are **deferred** to the end of the sync run (smaller events process first). Prevents large events from OOM-killing the worker before critical data lands. Set to `0` to disable. | `50000` |
 | `EDGEGUARD_DEV_MODE` | Enable console trace output (dev only) | *(unset)* |
 
-**MISP→Neo4j memory:** Large first-time syncs need enough RAM for parsed items; **per-event** processing + Python-side node chunking + `merge_*_batch` UNWINDs keep peak usage bounded. If sync **dies during Neo4j writes** with exit **-9**, check **Docker cgroup** limits: Compose defaults **`AIRFLOW_MEMORY_LIMIT=4g`** for **`airflow`** — raise in **`.env`** or reduce **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. See [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md), [docs/HEARTBEAT.md](docs/HEARTBEAT.md), [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md). Do **not** set **`0`** / **`all`** for chunk size unless you understand the OOM tradeoff.
+### Recommended Memory Settings (730-day baseline)
 
-**MISP Apache tuning (large baselines):** MISP's default Apache `MaxRequestWorkers 150` can cause memory exhaustion when the pipeline pushes large events (e.g. ~95K NVD attributes). **Lower to 25** inside the MISP container (`/etc/apache2/mods-enabled/mpm_prefork.conf`). The pipeline also throttles writes automatically — see **`EDGEGUARD_MISP_BATCH_THROTTLE_SEC`** (default 5s between batches) and **`EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC`** (default 2s between event fetches). Full details in [docs/DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md) § *MISP performance tuning*.
+A full 730-day baseline processes ~99K CVEs + ~115K indicators + CVSS sub-nodes. These settings are tested on a 32 GB Mac Mini and Ratio1 infrastructure:
+
+| Setting | Recommended | Where to set | Notes |
+|---------|-------------|-------------|-------|
+| **MISP PHP `memory_limit`** | `4096M` | MISP container PHP config | Large events (95K+ attributes) need 2–4 GB per request |
+| **MISP `MaxRequestWorkers`** | `25` | `/etc/apache2/mods-enabled/mpm_prefork.conf` | Default 150 causes OOM — each worker can use 1–2 GB on large events |
+| **MISP `MaxConnectionsPerChild`** | `500` | Same Apache config file | Recycles workers to free leaked memory |
+| **`AIRFLOW_MEMORY_LIMIT`** | `12g` | `.env` or `docker-compose.yml` | MISP→Neo4j sync needs 8–12 GB for 100K+ attribute events |
+| **`NEO4J_HEAP_MAX`** | `12g` | `.env` | Neo4j JVM heap — handles 245K+ nodes and relationship building |
+| **`NEO4J_PAGECACHE`** | `8g` | `.env` | Graph data caching for fast queries |
+| **`NEO4J_CONTAINER_MEMORY_LIMIT`** | `24g` | `.env` or `docker-compose.yml` | Must exceed heap + pagecache + OS overhead |
+
+Run `python src/edgeguard.py doctor` to verify settings before triggering a baseline. Full tuning guide: [docs/DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md).
+
+**MISP→Neo4j memory:** If sync **dies during Neo4j writes** with exit **-9**, check **Docker cgroup** limits. Raise **`AIRFLOW_MEMORY_LIMIT`** in **`.env`** or reduce **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. See [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md), [docs/HEARTBEAT.md](docs/HEARTBEAT.md), [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md). Do **not** set **`0`** / **`all`** for chunk size unless you understand the OOM tradeoff.
 
 **Baseline collection** is controlled by Airflow Variables (not env vars). These caps apply to **each external collector** in the baseline DAG (OTX, NVD, …) — **not** to the MISP→Neo4j sync’s MISP event search (see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md)).
 
