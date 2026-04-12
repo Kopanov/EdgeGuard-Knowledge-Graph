@@ -424,14 +424,22 @@ def cmd_doctor(args):
         val = os.getenv(var_name, "").strip()
         if val:
             try:
-                num = int(val.lower().replace("g", "").replace("gb", ""))
+                # Parse value like "12g", "12gb", "12G", "12" → integer GB
+                import re as _re
+
+                match = _re.match(r"^(\d+)\s*[gG]?[bB]?$", val.strip())
+                if not match:
+                    warn(f"{var_name}={val} — could not parse (expected format: 12g)")
+                    _mem_ok = False
+                    continue
+                num = int(match.group(1))
                 if num < min_gb:
                     warn(f"{var_name}={val} — below recommended {recommended} for 730-day baseline")
                     _mem_ok = False
                 else:
                     ok(f"{var_name}={val}")
-            except ValueError:
-                ok(f"{var_name}={val}")
+            except (ValueError, TypeError):
+                warn(f"{var_name}={val} — could not parse")
     if _mem_ok and not any(os.getenv(v) for v in _mem_checks):
         info("Memory env vars not set — Docker Compose defaults will apply (see docs/DOCKER_SETUP_GUIDE.md)")
 
