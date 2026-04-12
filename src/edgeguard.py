@@ -422,7 +422,10 @@ def cmd_doctor(args):
     _mem_ok = True
     for var_name, (recommended, min_gb) in _mem_checks.items():
         val = os.getenv(var_name, "").strip()
-        if val:
+        if not val:
+            info(f"  {var_name}: not set (Docker Compose default applies)")
+            continue
+        else:
             try:
                 # Parse value like "12g", "12gb", "12G", "12" → integer GB
                 import re as _re
@@ -440,8 +443,7 @@ def cmd_doctor(args):
                     ok(f"{var_name}={val}")
             except (ValueError, TypeError):
                 warn(f"{var_name}={val} — could not parse")
-    if _mem_ok and not any(os.getenv(v) for v in _mem_checks):
-        info("Memory env vars not set — Docker Compose defaults will apply (see docs/DOCKER_SETUP_GUIDE.md)")
+    # (each var is now individually reported above)
 
     # Validate API keys
     info("Validating API keys...")
