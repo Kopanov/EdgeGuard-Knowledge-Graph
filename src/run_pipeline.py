@@ -438,7 +438,7 @@ class EdgeGuardPipeline:
                     import re
 
                     if re.match(r"^CVE-\d{4}-\d{4,}$", vuln_name, re.IGNORECASE):
-                        ok = self.neo4j.merge_vulnerability(
+                        ok = self.neo4j.merge_cve(
                             {
                                 "cve_id": vuln_name.upper(),
                                 "description": obj.get("description", ""),

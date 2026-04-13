@@ -2179,7 +2179,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.95,  # MITRE ATT&CK range
                 "misp_event_id": str(event_info.get("id", "")),
             }
-            return item, []
+            return item, relationships
 
         # Handle MITRE tool (text format "S0001: Name")
         elif attr_type == "text" and len(value) >= 5 and value[0] == "S" and value[1:5].isdigit():
@@ -2232,7 +2232,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.9,
                 "misp_event_id": str(event_info.get("id", "")),
             }
-            return item, []
+            return item, relationships
 
         # Handle indicators (IP, domain, hash, etc.)
         else:
