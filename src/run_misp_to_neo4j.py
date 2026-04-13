@@ -2032,6 +2032,27 @@ class MISPToNeo4jSync:
         elif attr_type == "threat-actor":
             actor_name = value
 
+            # Parse uses_techniques from MITRE_USES_TECHNIQUES: comment prefix (same as malware/tool)
+            raw_comment = attr.get("comment", "") or ""
+            uses_techniques = []
+            actor_description = raw_comment
+            if "MITRE_USES_TECHNIQUES:" in raw_comment:
+                try:
+                    uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
+                    if "\n" in uses_json:
+                        json_part, actor_description = uses_json.split("\n", 1)
+                        actor_description = actor_description.strip()
+                    else:
+                        json_part = uses_json
+                        actor_description = ""
+                    parsed = json.loads(json_part)
+                    if isinstance(parsed, dict):
+                        uses_techniques = parsed.get("t", [])
+                    elif isinstance(parsed, list):
+                        uses_techniques = parsed
+                except (ValueError, IndexError):
+                    actor_description = raw_comment
+
             # Build USES relationships to techniques
             for technique in techniques:
                 relationships.append(
@@ -2050,8 +2071,9 @@ class MISPToNeo4jSync:
                 "type": "actor",
                 "name": actor_name,
                 "aliases": [],
-                "description": attr.get("comment", ""),
-                "zone": zones,  # zone is now an array
+                "description": actor_description,
+                "uses_techniques": uses_techniques,
+                "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
                 "first_seen": _coerce_to_iso(event_info.get("date")),
@@ -2134,11 +2156,33 @@ class MISPToNeo4jSync:
                 if tag_name.startswith("platform:"):
                     platforms.append(tag_name.replace("platform:", ""))
 
+            # Parse tactic_phases from MITRE_TACTIC_PHASES: comment prefix
+            raw_comment = attr.get("comment", "") or ""
+            tactic_phases = []
+            technique_description = raw_comment
+            if "MITRE_TACTIC_PHASES:" in raw_comment:
+                try:
+                    phases_json = raw_comment.split("MITRE_TACTIC_PHASES:", 1)[1].strip()
+                    if "\n" in phases_json:
+                        json_part, technique_description = phases_json.split("\n", 1)
+                        technique_description = technique_description.strip()
+                    else:
+                        json_part = phases_json
+                        technique_description = ""
+                    parsed = json.loads(json_part)
+                    if isinstance(parsed, dict):
+                        tactic_phases = parsed.get("p", [])
+                    elif isinstance(parsed, list):
+                        tactic_phases = parsed
+                except (ValueError, IndexError):
+                    technique_description = raw_comment
+
             item = {
                 "type": "technique",
                 "mitre_id": mitre_id,
                 "name": name,
-                "description": attr.get("comment", ""),
+                "description": technique_description,
+                "tactic_phases": tactic_phases,
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
