@@ -903,11 +903,24 @@ class MISPWriter:
         tags.append(f'misp-galaxy:threat-actor="{name}"')
 
         description = sanitize_value(actor.get("description", ""), max_length=255)
+        uses_techniques = actor.get("uses_techniques") or []
+
+        # Preserve actor→technique IDs through MISP (same pattern as malware/tool).
+        # ``run_misp_to_neo4j.parse_attribute`` reads this prefix into ``uses_techniques``.
+        if uses_techniques:
+            import json as _json
+
+            meta = {"t": list(uses_techniques)[:400]}
+            comment = "MITRE_USES_TECHNIQUES:" + _json.dumps(meta, separators=(",", ":"))
+            if description:
+                comment = comment + "\n" + description
+        else:
+            comment = description if description else f"Threat actor from {source}"
 
         attribute = {
             "type": "threat-actor",
             "value": name,
-            "comment": description if description else f"Threat actor from {source}",
+            "comment": comment,
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
         }
@@ -966,11 +979,24 @@ class MISPWriter:
         tags.append(f'mitre-attack:technique="{mitre_id}"')
 
         description = sanitize_value(technique.get("description", ""), max_length=255)
+        tactic_phases = technique.get("tactic_phases") or []
+
+        # Preserve technique→tactic phase mapping through MISP.
+        # ``run_misp_to_neo4j.parse_attribute`` reads this prefix into ``tactic_phases``.
+        if tactic_phases:
+            import json as _json
+
+            meta = {"p": list(tactic_phases)[:20]}
+            comment = "MITRE_TACTIC_PHASES:" + _json.dumps(meta, separators=(",", ":"))
+            if description:
+                comment = comment + "\n" + description
+        else:
+            comment = description if description else f"MITRE ATT&CK technique from {source}"
 
         attribute = {
             "type": "text",
             "value": f"{mitre_id}: {name}",
-            "comment": description if description else f"MITRE ATT&CK technique from {source}",
+            "comment": comment,
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
         }
