@@ -2217,6 +2217,19 @@ class MISPToNeo4jSync:
                 if tag_name.startswith("tool-type:"):
                     tool_types.append(tag_name.replace("tool-type:", ""))
 
+            # Build sector-targeting relationship from tag-extracted sector
+            if target_sector:
+                relationships.append(
+                    {
+                        "rel_type": "TARGETS",
+                        "from_type": "Tool",
+                        "from_key": {"mitre_id": mitre_id},
+                        "to_type": "Sector",
+                        "to_key": {"name": target_sector},
+                        "confidence": confidence,
+                    }
+                )
+
             item = {
                 "type": "tool",
                 "mitre_id": mitre_id,
