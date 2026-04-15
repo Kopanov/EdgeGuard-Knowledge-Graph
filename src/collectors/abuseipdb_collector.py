@@ -28,6 +28,7 @@ from collectors.collector_utils import (
     make_status,
     optional_api_key_effective,
     request_with_rate_limit_retries,
+    retry_with_backoff,
     status_after_misp_push,
 )
 from collectors.misp_writer import MISPWriter
@@ -121,59 +122,63 @@ class AbuseIPDBCollector:
 
         return True
 
+    @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _make_request(self, endpoint: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Make a rate-limited request to AbuseIPDB API.
 
-        Args:
-            endpoint: API endpoint URL
-            params: Query parameters
+        Transient network errors (ConnectionError/Timeout/ReadTimeout/
+        ChunkedEncodingError) are retried with exponential backoff via the
+        decorator — up to 4 total attempts (first + 3 retries) with 5s / 10s /
+        20s delays. Before this fix a single connection hiccup (e.g. DNS
+        glitch or 60s ISP outage) caused ``collect()`` to return
+        ``status=True count=0`` and the day's blacklist was silently lost.
+
+        After all retries are exhausted, the underlying exception propagates
+        to ``collect()`` which catches it and returns ``success=False``, so
+        Airflow retries the task and Prometheus records the failure.
 
         Returns:
-            Response JSON dict or None on error
+            Response JSON dict on success, or None for auth/rate-limit
+            failures (401/403/429) where retrying won't help.
         """
         if not self._check_rate_limit():
             return None
 
-        try:
-            response = request_with_rate_limit_retries(
-                "GET",
-                endpoint,
-                session=self.session,
-                params=params,
-                timeout=30,
-                verify=SSL_VERIFY,
-                max_rate_limit_retries=3,
-                fallback_delay_sec=60.0,
-                retry_on_403=False,
-                context="AbuseIPDB",
-            )
+        # Do NOT wrap in a broad try/except — transient exceptions must
+        # propagate to @retry_with_backoff. Only the shape-of-response
+        # error branches return None (permanent failures: auth, parse).
+        response = request_with_rate_limit_retries(
+            "GET",
+            endpoint,
+            session=self.session,
+            params=params,
+            timeout=(15, 30),  # tuple: connect=15s, read=30s; prevents hangs on DNS/connect glitches
+            verify=SSL_VERIFY,
+            max_rate_limit_retries=3,
+            fallback_delay_sec=60.0,
+            retry_on_403=False,
+            context="AbuseIPDB",
+        )
 
-            self.last_request_time = time.time()
-            self.requests_today += 1
-            self._last_http_status = response.status_code
+        self.last_request_time = time.time()
+        self.requests_today += 1
+        self._last_http_status = response.status_code
 
-            if response.status_code == 200:
-                try:
-                    return response.json()
-                except (ValueError, TypeError):
-                    logger.error("AbuseIPDB: Malformed JSON in 200 response")
-                    return None
-            elif response.status_code == 429:
-                logger.warning("AbuseIPDB: Rate limit exceeded (429) after retries")
+        if response.status_code == 200:
+            try:
+                return response.json()
+            except (ValueError, TypeError):
+                logger.error("AbuseIPDB: Malformed JSON in 200 response")
                 return None
-            elif response.status_code == 401:
-                logger.error("AbuseIPDB: Authentication failed - check API key")
-                return None
-            else:
-                logger.warning(f"AbuseIPDB API error: {response.status_code} - {response.text[:200]}")
-                return None
-
-        except requests.exceptions.Timeout:
-            logger.error("AbuseIPDB request timed out")
+        elif response.status_code == 429:
+            logger.warning("AbuseIPDB: Rate limit exceeded (429) after retries")
             return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"AbuseIPDB request error: {e}")
+        elif response.status_code == 401:
+            logger.error("AbuseIPDB: Authentication failed - check API key")
+            return None
+        else:
+            logger.warning(f"AbuseIPDB API error: {response.status_code} - {response.text[:200]}")
             return None
 
     def check_ip(self, ip_address: str, max_age_days: int = 90) -> Optional[Dict[str, Any]]:
@@ -185,7 +190,14 @@ class AbuseIPDBCollector:
             max_age_days: Maximum age of reports to include (default 90)
 
         Returns:
-            IP reputation data dict or None on error
+            IP reputation data dict or None on error / network failure.
+
+        ``_make_request`` is now decorated with ``@retry_with_backoff`` and
+        propagates ``RequestException`` after retries are exhausted.
+        Per-IP enrichment callers still expect ``None`` on error, so we
+        catch here and keep the interface backward-compatible. The
+        collect() → get_blacklist() path does NOT catch — it wants
+        the real failure status so the DAG task fails loudly.
         """
         if not self.api_key:
             logger.warning("AbuseIPDB: No API key configured")
@@ -197,7 +209,11 @@ class AbuseIPDBCollector:
             "verbose": "true",  # Must be lowercase string; Python True → "True" which the API ignores
         }
 
-        data = self._make_request(self.CHECK_ENDPOINT, params)
+        try:
+            data = self._make_request(self.CHECK_ENDPOINT, params)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("AbuseIPDB check_ip(%s) network failure after retries: %s", ip_address, exc)
+            return None
 
         if data and "data" in data:
             return self._format_ip_result(data["data"])
@@ -215,7 +231,9 @@ class AbuseIPDBCollector:
             max_age_days: Maximum age of reports to include
 
         Returns:
-            List of IP reputation data dicts
+            List of IP reputation data dicts. Returns ``[]`` on network
+            failure after retries are exhausted (same backward-compat
+            reason as ``check_ip`` above).
         """
         if not self.api_key:
             logger.warning("AbuseIPDB: No API key configured")
@@ -223,7 +241,11 @@ class AbuseIPDBCollector:
 
         params = {"network": cidr, "maxAgeInDays": max_age_days}
 
-        data = self._make_request(self.CHECK_BLOCK_ENDPOINT, params)
+        try:
+            data = self._make_request(self.CHECK_BLOCK_ENDPOINT, params)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("AbuseIPDB check_cidr_block(%s) network failure after retries: %s", cidr, exc)
+            return []
 
         results = []
         if data and "data" in data:
@@ -432,8 +454,24 @@ class AbuseIPDBCollector:
                 )
             return []
 
-        # Fetch blacklist
-        results = self.get_blacklist(confidence_minimum=confidence_minimum, limit=limit, baseline=baseline)
+        # Fetch blacklist. Network exceptions (after @retry_with_backoff in
+        # _make_request has exhausted its retries) propagate here — catch
+        # them so the collector returns a PROPER failure status instead of
+        # silent success. Before this fix, a connection error returned
+        # success=True count=0 and Airflow never retried the task.
+        try:
+            results = self.get_blacklist(confidence_minimum=confidence_minimum, limit=limit, baseline=baseline)
+        except requests.exceptions.RequestException as exc:
+            logger.error(
+                "AbuseIPDB: network failure after retries (%s: %s) — reporting as collector failure",
+                type(exc).__name__,
+                exc,
+            )
+            if push_to_misp:
+                return self._return_status(False, 0, error=f"{type(exc).__name__}: {exc}", failed=0)
+            # Non-MISP caller expects a list; returning an empty list would
+            # be indistinguishable from "no data today" so raise instead.
+            raise
 
         if baseline and not results:
             logger.warning("AbuseIPDB baseline returned 0 items — verify API key")

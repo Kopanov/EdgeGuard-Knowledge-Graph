@@ -30,6 +30,7 @@ from collectors.collector_utils import (
     make_status,
     optional_api_key_effective,
     request_with_rate_limit_retries,
+    retry_with_backoff,
     status_after_misp_push,
 )
 from config import (
@@ -105,6 +106,8 @@ class VirusTotalCollector:
         try:
             indicators = self._collect_from_files(limit)
         except requests.HTTPError as e:
+            # Auth/access denied → optional-source skip (the source is
+            # wired but the key is expired or low-tier).
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal enrich: auth/access denied — skipping (optional): {e}")
                 return make_skipped_optional_source(
@@ -112,9 +115,53 @@ class VirusTotalCollector:
                     skip_reason=str(e),
                     skip_reason_class="virustotal_auth_denied",
                 )
-            logger.error(f"VirusTotal collection error: {e}")
-            indicators = self._collect_demo_data(limit)
+            # Any other HTTPError (5xx after retry exhaustion, 4xx that
+            # isn't auth) → report as collector failure. Do NOT fall back
+            # to demo data — the pre-round-1 behaviour pushed fake hashes
+            # to MISP tagged as real VT enrichment on any error.
+            logger.error(f"VirusTotal HTTP error: {e}")
+            if push_to_misp:
+                return make_status(
+                    "virustotal_enrich",
+                    False,
+                    count=0,
+                    failed=0,
+                    error=f"{type(e).__name__}: {e}",
+                )
+            raise
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as net_exc:
+            # Network outage after @retry_with_backoff exhausted. Do NOT
+            # silently fall back to demo data — return a proper failure
+            # status so Airflow retries the task and Prometheus records
+            # the failure.
+            logger.error(
+                "VirusTotal: network failure after retries (%s: %s) — reporting as collector failure",
+                type(net_exc).__name__,
+                net_exc,
+            )
+            if push_to_misp:
+                return make_status(
+                    "virustotal_enrich",
+                    False,
+                    count=0,
+                    failed=0,
+                    error=f"{type(net_exc).__name__}: {net_exc}",
+                )
+            raise
         except Exception as e:
+            # Any remaining exception (JSONDecodeError on a malformed VT
+            # 200 response, KeyError / TypeError on unexpected schema,
+            # etc.) — report as a hard collector failure, NOT a fall-back
+            # to demo data. Round 1 removed the internal try/except from
+            # _collect_from_files without fixing this handler, so parse
+            # errors were silently pushing fake hashes to MISP — bugbot
+            # caught it on round 3. Auth/access-denied exceptions still
+            # route through the optional-source skip path.
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal enrich: auth/access denied — skipping (optional): {e}")
                 return make_skipped_optional_source(
@@ -122,8 +169,20 @@ class VirusTotalCollector:
                     skip_reason=str(e),
                     skip_reason_class="virustotal_auth_denied",
                 )
-            logger.error(f"VirusTotal collection error: {e}")
-            indicators = self._collect_demo_data(limit)
+            logger.error(
+                "VirusTotal collection error (parse/schema/other): %s: %s",
+                type(e).__name__,
+                e,
+            )
+            if push_to_misp:
+                return make_status(
+                    "virustotal_enrich",
+                    False,
+                    count=0,
+                    failed=0,
+                    error=f"{type(e).__name__}: {e}",
+                )
+            raise
 
         if push_to_misp:
             if not self.misp_writer:
@@ -136,56 +195,107 @@ class VirusTotalCollector:
         return indicators
 
     def _collect_from_files(self, limit):
-        """Collect recent malware files from VT"""
+        """Collect recent malware files from VT.
+
+        Previously this method caught ``Exception`` broadly and returned
+        an empty list, which meant the outer ``collect()`` silently fell
+        back to DEMO DATA on any network error and pushed fake hashes to
+        MISP tagged as real VT intelligence. Now transient network errors
+        propagate to ``@retry_with_backoff`` (applied on the inner
+        ``_fetch_recent_files_raw`` helper, not this method) and, on
+        final exhaustion, bubble up to ``collect()`` which routes them
+        to a proper failure status instead of the demo fallback.
+
+        Rate limiting is handled HERE, not inside the retried helper,
+        because the VT rate limiter is a 4 req/min sliding window —
+        retrying inside the rate-limited scope would burn the full
+        per-minute quota on a single failing call. Matches the
+        URLhaus/CyberCure pattern (rate limiter outside, retry inside).
+        """
         indicators = []
 
-        # Rate limit check
+        # Rate limit check — outside the retried helper so a single failing
+        # call doesn't exhaust the VT 4/minute sliding window on its retries.
         self.rate_limiter.wait_if_needed()
 
-        try:
-            # Get recent files analyzed by VT
-            response = request_with_rate_limit_retries(
-                "GET",
-                f"{self.base_url}/files",
-                session=self.session,
-                params={"limit": min(limit, 10)},  # API has strict limits
-                timeout=30,
-                max_rate_limit_retries=3,
-                fallback_delay_sec=60.0,
-                retry_on_403=False,
-                context="VirusTotal",
+        response = self._fetch_recent_files_raw(limit)
+
+        if response.status_code == 200:
+            data = response.json()
+            for item in data.get("data", []):
+                attrs = item.get("attributes", {})
+                hashes = attrs.get("last_analysis_stats", {})
+
+                # Get the hash with most info
+                if attrs.get("sha256"):
+                    mal_count = hashes.get("malicious", 0)
+                    conf = min(0.5 + (mal_count / 70), 0.95)  # Scale 0.5-0.95
+
+                    zones = self._detect_zones_from_names(attrs)
+
+                    indicators.append(
+                        {
+                            "indicator_type": "hash",
+                            "value": attrs["sha256"],
+                            "zone": zones,  # zone is now an array
+                            "tag": self.tag,
+                            "source": [self.tag],
+                            "first_seen": attrs.get("first_submission_date", ""),
+                            "last_updated": datetime.now(timezone.utc).isoformat(),
+                            "confidence_score": conf,
+                        }
+                    )
+        else:
+            # Any non-200 that reaches this branch is either a 4xx
+            # client error (already surfaced as HTTPError in
+            # _fetch_recent_files_raw below) or an unexpected status.
+            # Treat it as empty and move on; real 5xx failures are
+            # caught by raise_for_status() inside the retried helper
+            # so they never reach here.
+            logger.warning(
+                "VT files query returned unexpected status %s — treating as empty",
+                response.status_code,
             )
 
-            if response.status_code == 200:
-                data = response.json()
-                for item in data.get("data", []):
-                    attrs = item.get("attributes", {})
-                    hashes = attrs.get("last_analysis_stats", {})
-
-                    # Get the hash with most info
-                    if attrs.get("sha256"):
-                        mal_count = hashes.get("malicious", 0)
-                        conf = min(0.5 + (mal_count / 70), 0.95)  # Scale 0.5-0.95
-
-                        zones = self._detect_zones_from_names(attrs)
-
-                        indicators.append(
-                            {
-                                "indicator_type": "hash",
-                                "value": attrs["sha256"],
-                                "zone": zones,  # zone is now an array
-                                "tag": self.tag,
-                                "source": [self.tag],
-                                "first_seen": attrs.get("first_submission_date", ""),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
-                                "confidence_score": conf,
-                            }
-                        )
-
-        except Exception as e:
-            logger.warning(f"VT files query: {e}")
-
         return indicators[:limit]
+
+    @retry_with_backoff(max_retries=3, base_delay=5.0)
+    def _fetch_recent_files_raw(self, limit):
+        """HTTP fetch for ``/files`` with retry but NO rate limiting.
+
+        Split out of ``_collect_from_files`` so each retry attempt does
+        not re-enter ``self.rate_limiter.wait_if_needed()`` — the VT
+        free-tier limiter is a 4 req/min sliding window, and a single
+        failing call inside the retried scope would have burned the
+        whole per-minute quota on its 4 attempts.
+
+        The caller (``_collect_from_files``) handles rate limiting
+        once, before this helper runs. Matches the URLhaus/CyberCure
+        split in ``global_feed_collector.py``, which includes
+        ``response.raise_for_status()`` at the end to surface HTTP
+        5xx as exceptions that hit the retry decorator (and, on
+        exhaustion, propagate to collect() for proper failure
+        reporting — bugbot round 4 caught that this VT helper was
+        the only one missing that step and 5xx slipped through
+        silently as empty indicators).
+        """
+        response = request_with_rate_limit_retries(
+            "GET",
+            f"{self.base_url}/files",
+            session=self.session,
+            params={"limit": min(limit, 10)},  # API has strict limits
+            timeout=(15, 30),  # tuple: connect=15s, read=30s
+            max_rate_limit_retries=3,
+            fallback_delay_sec=60.0,
+            retry_on_403=False,
+            context="VirusTotal",
+        )
+        # Raise HTTPError on 4xx/5xx so the retry decorator above gets a
+        # shot at transient 5xx, and terminal failures propagate to
+        # collect() — matches URLhaus/CyberCure. 200 responses pass
+        # through unchanged to the caller for normal parsing.
+        response.raise_for_status()
+        return response
 
     def _detect_zones_from_names(self, attrs):
         """Detect ALL sectors from file names/paths using common zone detection.
@@ -240,7 +350,7 @@ class VirusTotalCollector:
                 "GET",
                 f"{self.base_url}/domains/{domain}",
                 session=self.session,
-                timeout=10,
+                timeout=(15, 30),  # tuple: connect=15s, read=30s — single-value 10s was too tight for DNS glitches
                 max_rate_limit_retries=3,
                 fallback_delay_sec=60.0,
                 retry_on_403=False,
@@ -292,7 +402,7 @@ class VirusTotalCollector:
                 "GET",
                 f"{self.base_url}/files/{hash_value}",
                 session=self.session,
-                timeout=10,
+                timeout=(15, 30),  # tuple: connect=15s, read=30s — single-value 10s was too tight for DNS glitches
                 max_rate_limit_retries=3,
                 fallback_delay_sec=60.0,
                 retry_on_403=False,
@@ -337,7 +447,7 @@ class VirusTotalCollector:
                 "GET",
                 f"{self.base_url}/ip_addresses/{ip}",
                 session=self.session,
-                timeout=10,
+                timeout=(15, 30),  # tuple: connect=15s, read=30s — single-value 10s was too tight for DNS glitches
                 max_rate_limit_retries=3,
                 fallback_delay_sec=60.0,
                 retry_on_403=False,

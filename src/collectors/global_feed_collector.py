@@ -353,12 +353,14 @@ class URLhausCollector:
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_feed(self, url: str) -> str:
-        """Download a URLhaus feed CSV with retry."""
+        """Download a URLhaus feed CSV with retry. Matches the CyberCure
+        pattern — transient network errors retry 4x with backoff before the
+        exception propagates."""
         response = request_with_rate_limit_retries(
             "GET",
             url,
             session=None,
-            timeout=30,
+            timeout=(15, 30),  # tuple: connect=15s, read=30s
             verify=SSL_VERIFY,
             max_rate_limit_retries=3,
             fallback_delay_sec=30.0,
@@ -398,6 +400,13 @@ class URLhausCollector:
 
         limit = resolve_collection_limit(limit, "urlhaus", baseline=baseline)
         results = []
+        # Track per-URL failures so we can distinguish "all mirrors failed"
+        # (real outage — report FAILURE to Airflow/Prometheus) from "first
+        # mirror succeeded, others skipped" (success). Before this change
+        # an all-mirrors-down run returned count=0 success=True and was
+        # invisible to monitoring.
+        mirror_failures = 0
+        mirror_success = False
 
         for url in self.urls:
             # Rate limiting
@@ -456,11 +465,13 @@ class URLhausCollector:
 
                 logger.info(f"[OK] URLhaus: Collected from {url.split('/')[-2]}")
                 URLHAUS_CIRCUIT_BREAKER.record_success()
+                mirror_success = True
                 break  # Got data, no need to try other URLs
 
             except Exception as e:
                 logger.warning(f"URLhaus {url}: {e}")
                 URLHAUS_CIRCUIT_BREAKER.record_failure()
+                mirror_failures += 1
                 continue
 
         # Deduplicate by value
@@ -474,6 +485,22 @@ class URLhausCollector:
         logger.info(f"[OK] URLhaus: {len(unique)} unique URLs")
         if not unique:
             logger.warning("URLhaus returned 0 URLs — check feed availability")
+
+        # If every mirror failed, report collector FAILURE instead of
+        # success-with-zero-count. This is the fix for the silent-data-loss
+        # pattern where an all-mirrors-down outage showed up as a successful
+        # Airflow task with zero indicators and never triggered an alert.
+        #
+        # For the non-MISP caller (push_to_misp=False), an empty list is
+        # indistinguishable from "feed had no data today" — raise instead so
+        # the failure is visible to enrichment workflows. Matches the
+        # AbuseIPDB pattern in collect().
+        if not mirror_success and mirror_failures >= len(self.urls) and self.urls:
+            err = f"URLhaus: all {mirror_failures} mirror(s) failed"
+            logger.error(err)
+            if push_to_misp:
+                return make_status("urlhaus", False, count=0, failed=0, error=err)
+            raise RuntimeError(err)
 
         out = unique if limit is None else unique[:limit]
         if push_to_misp:
@@ -517,7 +544,7 @@ class CyberCureCollector:
             "GET",
             url,
             session=None,
-            timeout=30,
+            timeout=(15, 30),  # tuple: connect=15s, read=30s
             verify=SSL_VERIFY,
             max_rate_limit_retries=3,
             fallback_delay_sec=30.0,
@@ -555,6 +582,11 @@ class CyberCureCollector:
 
         limit = resolve_collection_limit(limit, "cybercure", baseline=baseline)
         results = []
+        # Track per-feed failures so an all-feeds-down outage reports as
+        # a collector failure rather than silent-zero-success. Same
+        # rationale as URLhaus above.
+        feed_failures = 0
+        feed_success_count = 0
 
         for feed_type, url in self.feeds.items():
             # Rate limiting
@@ -628,15 +660,28 @@ class CyberCureCollector:
                         )
 
                 CYBERCURE_CIRCUIT_BREAKER.record_success()
+                feed_success_count += 1
 
             except Exception as e:
                 logger.warning(f"CyberCure {feed_type}: {e}")
                 CYBERCURE_CIRCUIT_BREAKER.record_failure()
+                feed_failures += 1
                 continue
 
         logger.info(f"[OK] CyberCure: Collected {len(results)} indicators")
         if not results:
             logger.warning("CyberCure returned 0 indicators — check feed availability")
+
+        # All feeds failed → report collector failure instead of silent
+        # zero-count success. Raise for the non-MISP caller so failures
+        # are visible to enrichment workflows (same pattern as URLhaus
+        # above and AbuseIPDB in its own collect()).
+        if feed_success_count == 0 and feed_failures >= len(self.feeds) and self.feeds:
+            err = f"CyberCure: all {feed_failures} feed(s) failed"
+            logger.error(err)
+            if push_to_misp:
+                return make_status("cybercure", False, count=0, failed=0, error=err)
+            raise RuntimeError(err)
 
         if push_to_misp:
             if not results:
