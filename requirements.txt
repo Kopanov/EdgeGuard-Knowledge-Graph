@@ -30,9 +30,20 @@ stix2~=3.0
 # ── Airflow orchestration ────────────────────────────────────────────────────
 # Apache Airflow 3.2.x (April 2026). Upgraded from 2.11 to clear a stack of
 # unpatched CVEs whose fix versions only exist in the 3.x line:
-#   - flask CVE-2026-27205         (fix: flask 3.1.3, pulled via Airflow 3.2)
 #   - flask-appbuilder CVE-2025-32962 / 58065 (fix: 4.6.2 / 4.8.1)
 #   - apache-airflow CVE-2025-66236 (fix: 3.2.0)
+#
+# Flask CVE-2026-27205 note: the upgrade does NOT clear this one in the
+# Docker deployment path. Airflow 3.2's base image bundles Flask 2.2.5 via
+# apache-airflow-providers-fab (the web-UI auth provider, which hard-pins
+# flask<2.3). Flask 2.2.5 is still vulnerable to CVE-2026-27205. The
+# pip-install path from this file does NOT pull FAB and therefore has no
+# Flask in the tree at all, so pip-audit reports clean — but the running
+# Docker container does. The CVE is accepted operationally because
+# docker-compose.yml binds the Airflow API server to 127.0.0.1 only (no
+# network exposure). Full fix requires replacing FAB with a Flask-3
+# compatible auth manager. See docs/AIRFLOW_DAGS.md § "Flask on Airflow
+# 3.2 — reality check" for the full explanation.
 #
 # Breaking changes we handled in this repo when bumping from 2.11:
 #   - BashOperator, PythonOperator, ShortCircuitOperator moved out of
@@ -40,11 +51,15 @@ stix2~=3.0
 #     in dags/edgeguard_pipeline.py and dags/edgeguard_metrics_server.py.
 #   - airflow.models.Variable     → airflow.sdk.Variable   (old path deprecated)
 #   - airflow.utils.task_group.TaskGroup → airflow.sdk.TaskGroup
+#   - Variable.get() kwarg renamed `default_var=` → `default=`; we use the
+#     positional form so the call works unchanged on both versions.
+#   - DAG schedule kwarg renamed `schedule_interval=` → `schedule=` (removed
+#     in Airflow 3.x, no fallback possible — this is a hard break).
+#   - API server config: AIRFLOW__WEBSERVER__* → AIRFLOW__API__*;
+#     FabAuthManager requires AIRFLOW__API_AUTH__JWT_SECRET.
 #   - Metadata DB schema migration required: run `airflow db migrate` on
 #     airflow_postgres AFTER deploying the new image. BACK UP THE METADATA
 #     DB FIRST — the migration is not cleanly reversible.
-#   - Scheduler + API server are separate processes in Airflow 3; see
-#     docker-compose.yml for the service topology change.
 #
 # [postgres] still pulls psycopg + the postgres provider for LocalExecutor
 # against airflow_postgres. Production metadata is PostgreSQL only.

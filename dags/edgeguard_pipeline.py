@@ -1110,7 +1110,7 @@ dag = DAG(
     "edgeguard_pipeline",
     default_args=default_args,
     description="EdgeGuard High-Frequency Pipeline — OTX only (every 30 min)",
-    schedule_interval="*/30 * * * *",
+    schedule="*/30 * * * *",
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Prevent pile-up if a run is slow
@@ -1188,7 +1188,7 @@ medium_freq_dag = DAG(
     "edgeguard_medium_freq",
     default_args=default_args,
     description="EdgeGuard Medium Frequency Collectors (CISA, VirusTotal)",
-    schedule_interval="0 */4 * * *",  # Every 4 hours
+    schedule="0 */4 * * *",  # Every 4 hours
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1236,7 +1236,7 @@ low_freq_dag = DAG(
     "edgeguard_low_freq",
     default_args=default_args,
     description="EdgeGuard Low Frequency Collectors (NVD)",
-    schedule_interval="0 */8 * * *",  # Every 8 hours
+    schedule="0 */8 * * *",  # Every 8 hours
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1276,7 +1276,7 @@ daily_dag = DAG(
     "edgeguard_daily",
     default_args=default_args,
     description="EdgeGuard Daily Collectors (MITRE, AbuseIPDB, ThreatFox, etc.)",
-    schedule_interval="0 2 * * *",  # Daily at 2 AM
+    schedule="0 2 * * *",  # Daily at 2 AM
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1380,7 +1380,7 @@ neo4j_sync_dag = DAG(
     "edgeguard_neo4j_sync",
     default_args=default_args,
     description="EdgeGuard MISP to Neo4j Synchronization",
-    schedule_interval="0 3 */3 * *",  # Every 3 days at 3 AM
+    schedule="0 3 */3 * *",  # Every 3 days at 3 AM
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1539,14 +1539,15 @@ enrichment_task = PythonOperator(
 #    2. It will collect all available history from each source
 #    3. After completion, the incremental cron DAGs take over
 #
-#  DO NOT schedule this DAG — it is intentionally schedule_interval=None.
+#  DO NOT schedule this DAG — it is intentionally schedule=None (Airflow 3.x API;
+#  the 2.x kwarg schedule_interval= was removed in 3.x).
 # ================================================================================
 
 baseline_dag = DAG(
     "edgeguard_baseline",
     default_args={**default_args, "retries": 1},  # fewer retries — slow is expected
     description="EdgeGuard Baseline — full historical collection (manual trigger only)",
-    schedule_interval=None,  # MANUAL TRIGGER ONLY
+    schedule=None,  # MANUAL TRIGGER ONLY
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Only one baseline at a time

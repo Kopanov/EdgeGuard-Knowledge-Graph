@@ -171,14 +171,14 @@ def generate_test_metrics(**context):
 # ================================================================================
 
 # Note: This DAG is designed to run the metrics server continuously.
-# Set schedule_interval=None and trigger it manually or via API.
+# Set schedule=None and trigger it manually or via API.
 # The metrics server task will run indefinitely until stopped.
 
 dag = DAG(
     "edgeguard_metrics_server",
     default_args=default_args,
     description="EdgeGuard Prometheus Metrics Server",
-    schedule_interval=None,  # Manual trigger only
+    schedule=None,  # Manual trigger only
     start_date=pendulum.datetime(2025, 1, 1, tz="UTC"),
     catchup=False,
     tags=["edgeguard", "metrics", "prometheus", "monitoring"],
@@ -206,7 +206,7 @@ dag_with_restart = DAG(
     "edgeguard_metrics_server_scheduled",
     default_args=default_args,
     description="EdgeGuard Metrics Server (Auto-Restart)",
-    schedule_interval="@once",  # Run once, restart on failure
+    schedule="@once",  # Run once, restart on failure
     start_date=pendulum.datetime(2025, 1, 1, tz="UTC"),
     catchup=False,
     tags=["edgeguard", "metrics", "prometheus", "monitoring", "scheduled"],
@@ -229,7 +229,7 @@ helpers_dag = DAG(
     "edgeguard_metrics_helpers",
     default_args=default_args,
     description="EdgeGuard metrics: test data + HTTP health probe (run manually; metrics server must be up for health_check)",
-    schedule_interval=None,
+    schedule=None,
     start_date=pendulum.datetime(2025, 1, 1, tz="UTC"),
     catchup=False,
     tags=["edgeguard", "metrics", "prometheus", "monitoring", "manual"],

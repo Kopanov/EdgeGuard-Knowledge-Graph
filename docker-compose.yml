@@ -183,6 +183,14 @@ services:
       # pulled by accident during rollback.
       AIRFLOW__API__PORT: "8082"
       AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8082"
+      # Airflow 3.x with FabAuthManager requires an explicit JWT secret
+      # for the API server — without it the API server fails to start
+      # ("jwt_secret not set"). Generate once with:
+      #   python3 -c "import secrets; print(secrets.token_urlsafe(64))"
+      # and put the value in .env as AIRFLOW_API_AUTH_JWT_SECRET. A
+      # stable secret is required across restarts so issued tokens
+      # stay valid.
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_AUTH_JWT_SECRET:-}
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       # psycopg2 driver is bundled in the official apache/airflow image

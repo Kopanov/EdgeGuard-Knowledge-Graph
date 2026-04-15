@@ -108,9 +108,23 @@ jobs:
           # Airflow was upgraded 2.11 → 3.2 in April 2026. The large GHSA
           # ignore list that used to live here (18 entries covering
           # apache-airflow, flask, flask-appbuilder, requests, pygments) was
-          # entirely obsolete after the upgrade — a local pip-audit run
-          # against the new requirements.txt reported "No known
-          # vulnerabilities found" with zero ignores.
+          # entirely obsolete after the upgrade — pip-audit against the
+          # new requirements.txt reports "No known vulnerabilities found"
+          # with zero ignores.
+          #
+          # Caveat on Flask CVE-2026-27205 (see
+          # docs/AIRFLOW_DAGS.md § "Flask on Airflow 3.2 — reality check"):
+          # the apache/airflow:3.2.0 base Docker image bundles Flask 2.2.5
+          # via the apache-airflow-providers-fab auth manager. That
+          # provider is NOT pulled by this pip-install path (requirements.txt
+          # only lists apache-airflow[postgres] + providers-standard), so
+          # Flask is not in the tree pip-audit sees. Flask 2.2.5 IS still
+          # vulnerable to CVE-2026-27205 in the Docker deployment — the
+          # CVE is accepted operationally because docker-compose.yml binds
+          # the Airflow API server to 127.0.0.1 only (no network exposure).
+          # A future fix requires replacing apache-airflow-providers-fab
+          # (which hard-pins flask<2.3) with a Flask-3 compatible auth
+          # manager. Tracked in backlog.
           #
           # New CVEs should be addressed by upgrading the affected package,
           # not by re-adding to this ignore list. Only add `--ignore-vuln`

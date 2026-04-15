@@ -33,13 +33,29 @@ All handled on the `chore/airflow-3-upgrade` branch (merged):
 | Thing | Before | After |
 |---|---|---|
 | `BashOperator` / `PythonOperator` / `ShortCircuitOperator` | `airflow.operators.bash.BashOperator`, `airflow.operators.python.PythonOperator`/`ShortCircuitOperator` | `airflow.providers.standard.operators.bash.BashOperator`, `airflow.providers.standard.operators.python.PythonOperator`/`ShortCircuitOperator` |
-| `Variable` | `airflow.models.Variable` | `airflow.sdk.Variable` |
-| `TaskGroup` | `airflow.utils.task_group.TaskGroup` | `airflow.sdk.TaskGroup` |
+| `Variable` | `airflow.models.Variable` | `airflow.sdk.Variable` with `try/except ImportError` fallback for rollback |
+| `Variable.get(...)` default kwarg | `default_var=…` | Positional default (2.x and 3.x both accept) |
+| `TaskGroup` | `airflow.utils.task_group.TaskGroup` | `airflow.sdk.TaskGroup` with `try/except ImportError` fallback |
+| DAG schedule kwarg | `DAG(schedule_interval=…)` | `DAG(schedule=…)` — `schedule_interval` was **removed** in Airflow 3.x |
 | Base image | `apache/airflow:2.11.2-python3.12` | `apache/airflow:3.2.0-python3.12` |
 | Custom image tag | `edgeguard-airflow:2.11.2-python3.12` | `edgeguard-airflow:3.2.0-python3.12` |
 | `requirements.txt` | `apache-airflow[postgres]~=2.11` | `apache-airflow[postgres]~=3.2` + `apache-airflow-providers-standard~=1.5` |
+| API server port config key | `AIRFLOW__WEBSERVER__WEB_SERVER_PORT` | `AIRFLOW__API__PORT` (port moved from `[webserver]` to `[api]` section in 3.0) |
+| API server JWT secret | — | `AIRFLOW__API_AUTH__JWT_SECRET` required in 3.x with `FabAuthManager`; read from `.env` var `AIRFLOW_API_AUTH_JWT_SECRET` |
 
 `airflow.exceptions.AirflowException`, `from airflow import DAG`, `airflow.utils.trigger_rule.TriggerRule`, and `pendulum` usage are unchanged — they work identically on 3.x.
+
+### Flask on Airflow 3.2 — reality check
+
+The `apache/airflow:3.2.0-python3.12` base image still bundles **Flask 2.2.5** via the `apache-airflow-providers-fab` provider (the default web-UI auth manager), which hard-pins `flask<2.3`. Flask 3.x is not achievable in this configuration without **replacing** the FAB provider with a Flask-3.x-compatible alternative — there is no intermediate path.
+
+Practical consequences:
+
+- `pip install -r requirements.txt` on its own does NOT pull Flask, because `requirements.txt` only lists `apache-airflow[postgres]` and `apache-airflow-providers-standard` — neither pulls FAB. A pip-audit against `requirements.txt` reports zero vulnerabilities because Flask is not in the tree it sees.
+- The **Docker image** path bundles FAB (and therefore Flask 2.2.5) because the upstream `apache/airflow` image ships the FAB auth manager for backward compatibility with 2.x deployments.
+- **Flask 2.2.5 is still vulnerable to CVE-2026-27205**, confirmed with `pip-audit`. The fix is only in Flask 3.1.3+.
+
+**Mitigation in EdgeGuard's deployment:** the Airflow API server is bound to `127.0.0.1:8082` in `docker-compose.yml`, so the Flask attack surface is loopback-only — not reachable from the network on a production host. The CVE is accepted operationally with this constraint. A future effort would replace FAB with a Flask-3-compatible auth manager (tracked in backlog — no ETA).
 
 ### Operator rollout — things YOU still have to do
 
@@ -50,23 +66,31 @@ These cannot be automated safely by the code PR; run them on your cluster in ord
    docker exec edgeguard_airflow_postgres pg_dump -U airflow airflow \
      > airflow_postgres_$(date +%Y%m%d_%H%M%S).sql
    ```
-2. **Pause all DAGs in the running 2.11 instance** via the Airflow UI or `airflow dags pause <dag_id>`. Wait for any in-flight tasks to finish — the migration must run on an idle scheduler.
-3. **Stop the 2.11 Airflow container.** For the compose stack:
+2. **Generate and persist a JWT secret for the API server.** Airflow 3.x with `FabAuthManager` fails to start with `jwt_secret not set` if this is missing:
+   ```bash
+   python3 -c "import secrets; print(secrets.token_urlsafe(64))"
+   # Add the output to .env:
+   #   AIRFLOW_API_AUTH_JWT_SECRET=<value>
+   ```
+   Keep the value stable across restarts so issued tokens stay valid. docker-compose.yml now reads this via `${AIRFLOW_API_AUTH_JWT_SECRET:-}` and sets `AIRFLOW__API_AUTH__JWT_SECRET` inside the container.
+3. **Pause all DAGs in the running 2.11 instance** via the Airflow UI or `airflow dags pause <dag_id>`. Wait for any in-flight tasks to finish — the migration must run on an idle scheduler.
+4. **Stop the 2.11 Airflow container.** For the compose stack:
    ```bash
    docker compose stop airflow
    ```
-4. **Rebuild the custom image** with the new base. From the repo root:
+5. **Rebuild the custom image** with the new base. From the repo root:
    ```bash
    docker compose build airflow
    ```
-5. **Run `airflow db migrate`** against the existing metadata DB. Using the new image:
+6. **Force-recreate the container** so the new `AIRFLOW_API_AUTH_JWT_SECRET` env var is picked up (`docker compose up -d --force-recreate airflow`). A plain `up -d` can reuse a cached container that doesn't know about the new env var — you'll see `jwt_secret not set` in the API server log.
+7. **Run `airflow db migrate`** against the existing metadata DB. Using the new image:
    ```bash
    docker compose run --rm airflow airflow db migrate
    ```
    This upgrades the schema in-place. Watch the log for errors — if it fails midway, restore from the backup and file a ticket before retrying.
-6. **Start the new Airflow container** (`docker compose up -d airflow`). The scheduler, API server, DAG processor, and triggerer all run inside a single `airflow standalone` process — same topology as 2.11, just with the internal split now handled by Airflow 3's process manager.
-7. **Unpause the DAGs** once the UI shows them as imported with zero parse errors.
-8. **Validate:** a single small collector run (e.g. `edgeguard_pipeline` → CISA KEV) confirms both the scheduler and the DAG code are healthy on 3.x before you let the full scheduled cadence resume.
+8. **Start the new Airflow container** (`docker compose up -d airflow`). The scheduler, API server, DAG processor, and triggerer all run inside a single `airflow standalone` process — same topology as 2.11, just with the internal split now handled by Airflow 3's process manager.
+9. **Unpause the DAGs** once the UI shows them as imported with zero parse errors. If you see `schedule_interval` errors at parse time, you are running an older code checkout — Airflow 3.x removed that kwarg, and the fix is already in the repo (`schedule=` instead).
+10. **Validate:** a single small collector run (e.g. `edgeguard_pipeline` → CISA KEV) confirms both the scheduler and the DAG code are healthy on 3.x before you let the full scheduled cadence resume.
 
 ### Rollback
 
