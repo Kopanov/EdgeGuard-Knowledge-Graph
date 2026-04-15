@@ -63,7 +63,16 @@ def test_run_collector_with_metrics_rejects_non_dict_return():
     # test_graphql_api.py registers MagicMock placeholders for airflow.* so GraphQL
     # tests can import without Airflow; remove them so this test loads real Airflow.
     for key in list(sys.modules):
-        if key == "edgeguard_pipeline" or key.startswith("airflow"):
+        # Airflow 3.2's `settings.py` imports `opentelemetry.sdk.resources` at
+        # load time, so we must also purge the MagicMock opentelemetry stubs
+        # that test_graphql_api.py registers — otherwise a fresh airflow import
+        # sees `opentelemetry.sdk` as a module and fails with "not a package".
+        if (
+            key == "edgeguard_pipeline"
+            or key.startswith("airflow")
+            or key == "opentelemetry"
+            or key.startswith("opentelemetry.")
+        ):
             del sys.modules[key]
 
     root = Path(__file__).resolve().parents[1]
@@ -95,7 +104,16 @@ def test_run_collector_with_metrics_rejects_non_dict_return():
 def test_run_collector_with_metrics_baseline_skips_unknown_collect_params():
     """Baseline mode must not pass baseline/baseline_days to collect() unless declared (Bugbot)."""
     for key in list(sys.modules):
-        if key == "edgeguard_pipeline" or key.startswith("airflow"):
+        # Airflow 3.2's `settings.py` imports `opentelemetry.sdk.resources` at
+        # load time, so we must also purge the MagicMock opentelemetry stubs
+        # that test_graphql_api.py registers — otherwise a fresh airflow import
+        # sees `opentelemetry.sdk` as a module and fails with "not a package".
+        if (
+            key == "edgeguard_pipeline"
+            or key.startswith("airflow")
+            or key == "opentelemetry"
+            or key.startswith("opentelemetry.")
+        ):
             del sys.modules[key]
 
     root = Path(__file__).resolve().parents[1]
@@ -138,7 +156,16 @@ def test_run_collector_with_metrics_baseline_skips_unknown_collect_params():
 
 def test_run_collector_with_metrics_baseline_forwards_when_collect_accepts():
     for key in list(sys.modules):
-        if key == "edgeguard_pipeline" or key.startswith("airflow"):
+        # Airflow 3.2's `settings.py` imports `opentelemetry.sdk.resources` at
+        # load time, so we must also purge the MagicMock opentelemetry stubs
+        # that test_graphql_api.py registers — otherwise a fresh airflow import
+        # sees `opentelemetry.sdk` as a module and fails with "not a package".
+        if (
+            key == "edgeguard_pipeline"
+            or key.startswith("airflow")
+            or key == "opentelemetry"
+            or key.startswith("opentelemetry.")
+        ):
             del sys.modules[key]
 
     root = Path(__file__).resolve().parents[1]
