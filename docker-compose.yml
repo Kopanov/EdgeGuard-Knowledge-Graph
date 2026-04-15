@@ -154,11 +154,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.airflow
-    image: edgeguard-airflow:2.11.2-python3.12
+    image: edgeguard-airflow:3.2.0-python3.12
     container_name: edgeguard_airflow
     restart: unless-stopped
     # Dockerfile.airflow CMD is `airflow standalone` (tini as PID 1). Do not set `command: standalone`
     # — that would override CMD and break the entrypoint chain.
+    # Note: in Airflow 3.x `airflow standalone` runs the scheduler + API
+    # server + DAG processor + triggerer in one process, same as 2.x.
+    # For a split-process production deployment, switch to separate
+    # `airflow scheduler` / `airflow api-server` services — out of scope
+    # for this single-node compose stack.
     init: true
     ports:
       - "127.0.0.1:8082:8082"   # Airflow UI — loopback only
@@ -166,7 +171,34 @@ services:
       <<: *common-env
       # Mounted repo src at /opt/airflow/src — ensure all PythonOperator imports resolve without relying only on DAG sys.path hacks.
       PYTHONPATH: /opt/airflow/src
+      # Airflow 3.x config key for the API server port is
+      # `AIRFLOW__API__PORT` — the port moved from the [webserver] section
+      # to the [api] section when the webserver was split into a separate
+      # API server process. There is NO `[api_server]` config section in
+      # Airflow (an earlier version of this compose file set a
+      # non-existent `AIRFLOW__API_SERVER__WEB_SERVER_PORT`, which
+      # silently did nothing — caught by bugbot on PR #26).
+      # The old AIRFLOW__WEBSERVER__WEB_SERVER_PORT is kept as well so
+      # the variable is harmless if a stale Airflow 2.x image is ever
+      # pulled by accident during rollback.
+      AIRFLOW__API__PORT: "8082"
+      # Airflow 3.x internal Execution API URL. The scheduler/executor
+      # builds the execution_api_server_url from [api] base_url; if
+      # base_url is unset, the fallback is http://localhost:8080/ — NOT
+      # derived from [api] port. That means task execution would try to
+      # reach the API server on 8080 while it actually listens on 8082
+      # (from AIRFLOW__API__PORT above), producing "connection refused"
+      # on every task. Set base_url explicitly to match the port.
+      AIRFLOW__API__BASE_URL: "http://localhost:8082"
       AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8082"
+      # Airflow 3.x with FabAuthManager requires an explicit JWT secret
+      # for the API server — without it the API server fails to start
+      # ("jwt_secret not set"). Generate once with:
+      #   python3 -c "import secrets; print(secrets.token_urlsafe(64))"
+      # and put the value in .env as AIRFLOW_API_AUTH_JWT_SECRET. A
+      # stable secret is required across restarts so issued tokens
+      # stay valid.
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_AUTH_JWT_SECRET:-}
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       # psycopg2 driver is bundled in the official apache/airflow image

@@ -117,7 +117,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Issue | Fix Applied |
 |-------|-------------|
 | `pip-audit` step had `\|\| true` (never failed CI) | Removed; now a blocking check |
-| 16 Airflow 2.11.x CVEs | Documented and explicitly ignored — no upstream patch (2.11.1 unreleased; fix is Airflow 3.x) |
+| ~~16 Airflow 2.11.x CVEs~~ | **Resolved 2026-04-15:** upgraded to Airflow 3.2.0. CVE-2026-27205 (flask), CVE-2025-32962/58065 (flask-appbuilder) and CVE-2025-66236 (airflow) all had fix versions only in the 3.x line. See [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for migration notes. |
 | Missing memory limits on monitoring containers | 1 GB Prometheus, 512 MB Grafana, 256 MB Alertmanager |
 | No healthchecks on node-exporter, cAdvisor, Alertmanager | Added to `docker-compose.monitoring.yml` |
 | `EDGEGUARD_ENABLE_PROMETHEUS` / `EDGEGUARD_ENABLE_METRICS` naming conflict | Standardised to `EDGEGUARD_ENABLE_METRICS` everywhere |
@@ -126,7 +126,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 
 | Issue | Reason | Recommendation |
 |-------|--------|----------------|
-| Airflow 2.11.x CVEs (16 known) | Fix requires Airflow 3.x (breaking upgrade) | Tracked in backlog; upgrade to 3.x when stable |
+| ~~Airflow 2.11.x CVEs (16 known)~~ | ~~Fix requires Airflow 3.x (breaking upgrade)~~ | **Done 2026-04-15:** upgraded to 3.2.0, see AIRFLOW_DAGS.md. |
 | Test coverage at 14% | Legacy codebase; integration tests complex to mock | Add unit tests per collector as they stabilise |
 
 ---

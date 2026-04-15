@@ -30,7 +30,7 @@ Sign off on the **same git commit** you will deploy.
 
 References: [preflight_ci.sh](../scripts/preflight_ci.sh), [.github/workflows/ci.yml](../.github/workflows/ci.yml), [Makefile](../Makefile).
 
-**Python:** Use **3.12+** for local `make ci` / `preflight_ci.sh` parity with CI ([`pyproject.toml`](../pyproject.toml) `requires-python`). Apache Airflow 2.11 supports **3.11+** upstream; this repository standardizes on **3.12**.
+**Python:** Use **3.12+** for local `make ci` / `preflight_ci.sh` parity with CI ([`pyproject.toml`](../pyproject.toml) `requires-python`). Apache Airflow **3.2** supports Python **3.10–3.14** upstream; this repository standardizes on **3.12**. Airflow was bumped from **2.11** to **3.2** in April 2026 — if you are upgrading an existing deployment see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) before deploying.
 
 `preflight_ci.sh` sets a dummy `NEO4J_PASSWORD` for DagBag import — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting.
 

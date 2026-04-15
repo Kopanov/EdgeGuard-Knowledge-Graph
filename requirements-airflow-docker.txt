@@ -1,9 +1,20 @@
 # EdgeGuard Python deps baked into the custom Airflow image (Dockerfile.airflow).
-# The base image already ships apache-airflow — do not list it here (avoids reinstall / pin fights).
-# Keep version pins aligned with requirements.txt (same lines, minus apache-airflow).
+# The base image already ships apache-airflow itself — do not list it here
+# (avoids reinstall / pin fights with the base image's constraints file).
+# Keep version pins aligned with requirements.txt (same lines, minus
+# apache-airflow).
 #
-# Required for DAGs: neo4j (Bolt driver), pymisp (MISP API). Add new worker deps here, then rebuild the image.
-# MISP→Neo4j behavior (per-event sync, batching) lives in src/ — no extra packages required for that logic.
+# Required for DAGs: neo4j (Bolt driver), pymisp (MISP API). Add new worker
+# deps here, then rebuild the image.
+# MISP→Neo4j behavior (per-event sync, batching) lives in src/ — no extra
+# packages required for that logic.
+#
+# apache-airflow-providers-standard is listed below because in Airflow 3.x
+# the formerly-bundled operators (BashOperator, PythonOperator,
+# ShortCircuitOperator, ...) live in that provider package. The base
+# apache/airflow:3.2.x image should already include it, but listing it here
+# makes the dependency explicit and matches requirements.txt.
+apache-airflow-providers-standard~=1.5
 
 neo4j~=5.27
 requests~=2.32

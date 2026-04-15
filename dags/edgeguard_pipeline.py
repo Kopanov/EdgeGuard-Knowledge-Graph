@@ -102,9 +102,37 @@ from typing import Optional
 import pendulum
 from airflow import DAG
 from airflow.exceptions import AirflowException
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator, ShortCircuitOperator
-from airflow.utils.task_group import TaskGroup
+
+# Airflow 3.x: BashOperator / PythonOperator / ShortCircuitOperator moved
+# from airflow-core into the ``apache-airflow-providers-standard`` package.
+# The provider package is forward-compatible — it works on Airflow 2.x too
+# when installed explicitly — so a single import path covers both versions.
+# Requires ``apache-airflow-providers-standard>=1.5`` in requirements.txt
+# and requirements-airflow-docker.txt.
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import (
+    PythonOperator,
+    ShortCircuitOperator,
+)
+
+# Airflow 3.x moved TaskGroup and Variable to the Task SDK namespace
+# (``airflow.sdk.TaskGroup`` / ``airflow.sdk.Variable``). The old paths
+# still work on 3.x as deprecated aliases, and are the ONLY paths that
+# exist on Airflow 2.x. Use try/except so DAG parsing works under both
+# versions during rollout and rollback. Importing ``Variable`` at module
+# scope is safe — only the ``Variable.get()`` / ``Variable.set()`` calls
+# hit the metadata DB, and those still happen lazily inside task
+# callables.
+try:
+    from airflow.sdk import TaskGroup  # Airflow 3.x
+except ImportError:  # pragma: no cover - 2.x fallback
+    from airflow.utils.task_group import TaskGroup  # Airflow 2.x
+
+try:
+    from airflow.sdk import Variable  # Airflow 3.x
+except ImportError:  # pragma: no cover - 2.x fallback
+    from airflow.models import Variable  # Airflow 2.x
+
 from airflow.utils.trigger_rule import TriggerRule
 
 # Fixed start date — must not be dynamic (pendulum.now()) because Airflow
@@ -478,10 +506,13 @@ default_args = {
 def get_intervals():
     """Get configurable intervals from Airflow variables or use defaults."""
     try:
-        from airflow.models import Variable
-
-        misp_refresh = int(Variable.get("MISP_REFRESH_INTERVAL", default_var=8))
-        neo4j_sync = int(Variable.get("NEO4J_SYNC_INTERVAL", default_var=72))
+        # Use positional default (second arg) so the call works on both
+        # Airflow 2.x (kwarg is `default_var`) and 3.x (kwarg is `default`).
+        # Bugbot caught that the keyword form would raise TypeError on 3.x
+        # and silently fall through to the except, disabling all Variable
+        # configuration on the upgraded runtime.
+        misp_refresh = int(Variable.get("MISP_REFRESH_INTERVAL", 8))
+        neo4j_sync = int(Variable.get("NEO4J_SYNC_INTERVAL", 72))
     except (ImportError, ValueError, TypeError) as e:
         logger.warning(f"Failed to get interval variables, using defaults: {e}")
         misp_refresh = 8
@@ -973,9 +1004,7 @@ def should_run_neo4j_sync():
     state_file = get_state_file()
 
     try:
-        from airflow.models import Variable
-
-        interval_hours = int(Variable.get("NEO4J_SYNC_INTERVAL", default_var=72))
+        interval_hours = int(Variable.get("NEO4J_SYNC_INTERVAL", 72))
     except (ImportError, ValueError, TypeError) as e:
         logger.warning(f"Failed to get NEO4J_SYNC_INTERVAL, using default: {e}")
         interval_hours = 72
@@ -1021,9 +1050,7 @@ def run_neo4j_sync():
         is_first_run = not os.path.exists(state_file)
         force_full = False
         try:
-            from airflow.models import Variable
-
-            force_full = Variable.get("NEO4J_FULL_SYNC", default_var="false").lower() == "true"
+            force_full = Variable.get("NEO4J_FULL_SYNC", "false").lower() == "true"
             if force_full:
                 Variable.set("NEO4J_FULL_SYNC", "false")
                 logger.info("NEO4J_FULL_SYNC flag consumed — running full sync")
@@ -1034,13 +1061,12 @@ def run_neo4j_sync():
 
         # Sync conflict guard: after a full/baseline sync, skip the next
         # incremental run to avoid immediately re-processing the same data.
+        # Variable is imported at module scope (with 2.x/3.x compat shim).
         if incremental:
             try:
-                from airflow.models import Variable as _Var
-
-                skip = _Var.get("SKIP_NEXT_NEO4J_SYNC", default_var="false").lower() == "true"
+                skip = Variable.get("SKIP_NEXT_NEO4J_SYNC", "false").lower() == "true"
                 if skip:
-                    _Var.set("SKIP_NEXT_NEO4J_SYNC", "false")
+                    Variable.set("SKIP_NEXT_NEO4J_SYNC", "false")
                     logger.info("SKIP_NEXT_NEO4J_SYNC was set — skipping this incremental sync (not a failure)")
                     return  # Task completes as "success" — skip is intentional (post-baseline cooldown)
             except Exception as e:
@@ -1074,11 +1100,10 @@ def run_neo4j_sync():
                 record_task_duration("run_neo4j_sync", "edgeguard_pipeline", time.time() - task_start)
 
             # After a full/baseline sync, tell the next incremental run to skip
+            # (Variable is imported at module scope).
             if not incremental:
                 try:
-                    from airflow.models import Variable as _Var
-
-                    _Var.set("SKIP_NEXT_NEO4J_SYNC", "true")
+                    Variable.set("SKIP_NEXT_NEO4J_SYNC", "true")
                     logger.info("Set SKIP_NEXT_NEO4J_SYNC=true after full sync")
                 except Exception as e:
                     logger.debug("Could not set SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
@@ -1135,7 +1160,7 @@ dag = DAG(
     "edgeguard_pipeline",
     default_args=default_args,
     description="EdgeGuard High-Frequency Pipeline — OTX only (every 30 min)",
-    schedule_interval="*/30 * * * *",
+    schedule="*/30 * * * *",
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Prevent pile-up if a run is slow
@@ -1213,7 +1238,7 @@ medium_freq_dag = DAG(
     "edgeguard_medium_freq",
     default_args=default_args,
     description="EdgeGuard Medium Frequency Collectors (CISA, VirusTotal)",
-    schedule_interval="0 */4 * * *",  # Every 4 hours
+    schedule="0 */4 * * *",  # Every 4 hours
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1261,7 +1286,7 @@ low_freq_dag = DAG(
     "edgeguard_low_freq",
     default_args=default_args,
     description="EdgeGuard Low Frequency Collectors (NVD)",
-    schedule_interval="0 */8 * * *",  # Every 8 hours
+    schedule="0 */8 * * *",  # Every 8 hours
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1301,7 +1326,7 @@ daily_dag = DAG(
     "edgeguard_daily",
     default_args=default_args,
     description="EdgeGuard Daily Collectors (MITRE, AbuseIPDB, ThreatFox, etc.)",
-    schedule_interval="0 2 * * *",  # Daily at 2 AM
+    schedule="0 2 * * *",  # Daily at 2 AM
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1405,7 +1430,7 @@ neo4j_sync_dag = DAG(
     "edgeguard_neo4j_sync",
     default_args=default_args,
     description="EdgeGuard MISP to Neo4j Synchronization",
-    schedule_interval="0 3 */3 * *",  # Every 3 days at 3 AM
+    schedule="0 3 */3 * *",  # Every 3 days at 3 AM
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
@@ -1564,14 +1589,15 @@ enrichment_task = PythonOperator(
 #    2. It will collect all available history from each source
 #    3. After completion, the incremental cron DAGs take over
 #
-#  DO NOT schedule this DAG — it is intentionally schedule_interval=None.
+#  DO NOT schedule this DAG — it is intentionally schedule=None (Airflow 3.x API;
+#  the 2.x kwarg schedule_interval= was removed in 3.x).
 # ================================================================================
 
 baseline_dag = DAG(
     "edgeguard_baseline",
     default_args={**default_args, "retries": 1},  # fewer retries — slow is expected
     description="EdgeGuard Baseline — full historical collection (manual trigger only)",
-    schedule_interval=None,  # MANUAL TRIGGER ONLY
+    schedule=None,  # MANUAL TRIGGER ONLY
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Only one baseline at a time
@@ -1609,18 +1635,14 @@ def get_baseline_config(context=None) -> tuple:
     limit = 0
     baseline_days = 730
     try:
-        from airflow.models import Variable
-
-        raw = Variable.get("BASELINE_COLLECTION_LIMIT", default_var="0")
+        raw = Variable.get("BASELINE_COLLECTION_LIMIT", "0")
         limit = int(raw)
     except Exception as e:
         logger.debug("Could not read BASELINE_COLLECTION_LIMIT Variable: %s", e)
         limit = 0
 
     try:
-        from airflow.models import Variable
-
-        baseline_days = int(Variable.get("BASELINE_DAYS", default_var="730"))
+        baseline_days = int(Variable.get("BASELINE_DAYS", "730"))
     except Exception as e:
         logger.debug("Could not read BASELINE_DAYS Variable: %s", e)
         baseline_days = 730

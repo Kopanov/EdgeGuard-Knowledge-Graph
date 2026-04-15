@@ -244,7 +244,9 @@ Create a dedicated DAG that runs the metrics server:
 ```python
 # dags/edgeguard_metrics.py
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+
+# Airflow 3.x: PythonOperator moved to apache-airflow-providers-standard.
+from airflow.providers.standard.operators.python import PythonOperator
 from datetime import datetime
 
 from metrics_server import start_metrics_server

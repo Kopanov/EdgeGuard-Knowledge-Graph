@@ -14,7 +14,8 @@ license = {text = "MIT"}
 
 # Version policy: ~= compatible-release pins — allows only patch upgrades
 # within the stated major.minor, blocking silent breaking-version upgrades
-# (e.g. neo4j 6.x, Airflow 3.x).
+# (e.g. neo4j 6.x, Airflow 4.x). Airflow was bumped 2.11→3.2 in a deliberate,
+# reviewed upgrade (see [project.optional-dependencies] → airflow block).
 dependencies = [
     # Core
     "neo4j~=5.27",
@@ -40,16 +41,33 @@ dev = [
     "ruff~=0.9",         # linter / formatter
     "mypy~=1.14",        # static type checker
 ]
-# Pinned to Airflow 2.x — Airflow 3.0 has breaking changes in DAG serialization,
-# operator interfaces, and the scheduler protocol.
-# [postgres] pulls psycopg2 + provider so pip-installed Airflow can use PostgreSQL metadata
-# (same backend family as docker-compose service `airflow_postgres`). For MySQL, add the
-# mysql extra or provider per https://airflow.apache.org/docs/apache-airflow/stable/extra-packages-ref.html
-# No sqlite extra: production uses Postgres only. CPython still includes stdlib sqlite3;
-# gitignore covers accidental local airflow.db from default AIRFLOW_HOME.
-# Runtime env (not this table): EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE — MISP→Neo4j chunking; 0 or "all" = single pass (see README).
+# Apache Airflow 3.2.x (April 2026 release). Upgraded from 2.11 to clear a
+# stack of unpatched CVEs in the 2.x line (flask CVE-2026-27205,
+# flask-appbuilder CVE-2025-58065/32962, airflow CVE-2025-66236) that have
+# fix versions only in Airflow 3.x. The ``apache-airflow-providers-standard``
+# extra ships BashOperator, PythonOperator, ShortCircuitOperator, and the
+# other formerly-bundled operators — in Airflow 3 these moved out of
+# ``airflow-core`` and live in the standard provider package.
+#
+# Breaking changes we handled in this repo:
+#   - BashOperator / PythonOperator / ShortCircuitOperator moved to
+#     apache-airflow-providers-standard (import path change, handled in DAGs)
+#   - airflow.models.Variable → airflow.sdk.Variable (old path deprecated)
+#   - airflow.utils.task_group.TaskGroup → airflow.sdk.TaskGroup
+#   - Metadata DB schema migration required: run `airflow db migrate` on
+#     airflow_postgres after upgrading. Back up the metadata DB first;
+#     the migration is not cleanly reversible.
+#   - Scheduler + API server are now separate processes; see docker-compose
+#     for the updated service topology.
+#
+# [postgres] still pulls psycopg + the postgres provider. Keep ~=3.2 for
+# patch upgrades within the stable 3.2 line; a bump to 3.3 or 4.x is a
+# separate review.
 airflow = [
-    "apache-airflow[postgres]~=2.11",
+    "apache-airflow[postgres]~=3.2",
+    # Ships BashOperator, PythonOperator, ShortCircuitOperator etc. that
+    # this repo imports from dags/. Required on Airflow 3.x.
+    "apache-airflow-providers-standard~=1.5",
 ]
 monitoring = [
     "prometheus-client~=0.21",
@@ -59,10 +77,19 @@ api = [
     "uvicorn~=0.34",
     "slowapi~=0.1",      # rate limiting
     "nats-py~=2.9",
-    "opentelemetry-api~=1.29",
-    "opentelemetry-sdk~=1.29",
-    "opentelemetry-instrumentation-fastapi~=0.50b0",
-    "opentelemetry-exporter-otlp~=1.29",
+    # OpenTelemetry pinned to 1.41.x / 0.62b0 (April 2026) to match what
+    # apache-airflow 3.2 pulls transitively. Airflow 3.x bundles its own
+    # observability module (airflow._shared.observability.traces) that
+    # imports opentelemetry.sdk.resources at import time; mixing
+    # apache-airflow 3.2 with otel ~=1.29 / 0.50b0 produces a namespace
+    # package collision ("No module named 'opentelemetry.sdk.resources';
+    # 'opentelemetry.sdk' is not a package") that breaks every test
+    # that imports dags/edgeguard_pipeline.py. Keeping the pins aligned
+    # with Airflow's own resolver is the stable fix.
+    "opentelemetry-api~=1.41",
+    "opentelemetry-sdk~=1.41",
+    "opentelemetry-instrumentation-fastapi~=0.62b0",
+    "opentelemetry-exporter-otlp~=1.41",
 ]
 graphql = [
     # ISIM-compatible GraphQL endpoint on port 4001

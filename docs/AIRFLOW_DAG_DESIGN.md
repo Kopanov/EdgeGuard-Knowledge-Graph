@@ -350,11 +350,11 @@ Where:
 
 ## Airflow Setup Requirements
 
-**Docker Compose (`docker-compose.yml`):** the **`airflow`** service is **built** from **`Dockerfile.airflow`**, which installs **`requirements-airflow-docker.txt`** (e.g. **`neo4j`**, **`pymisp`**) on top of **`apache/airflow:2.11.2-python3.12`**. After dependency changes, run **`docker compose build airflow`**. The service uses **`LocalExecutor`** with **PostgreSQL** (`airflow_postgres`) for metadata. Optional credentials: `AIRFLOW_POSTGRES_*` in `.env`. If runs stall, see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting.
+**Docker Compose (`docker-compose.yml`):** the **`airflow`** service is **built** from **`Dockerfile.airflow`**, which installs **`requirements-airflow-docker.txt`** (e.g. **`neo4j`**, **`pymisp`**, **`apache-airflow-providers-standard`**) on top of **`apache/airflow:3.2.0-python3.12`**. After dependency changes, run **`docker compose build airflow`**. The service uses **`LocalExecutor`** with **PostgreSQL** (`airflow_postgres`) for metadata. Optional credentials: `AIRFLOW_POSTGRES_*` in `.env`. If runs stall, see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting; for operators upgrading from an existing 2.11 deployment see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade).
 
 ```bash
 # Install Airflow + PostgreSQL driver (matches docker-compose metadata backend)
-pip install apache-airflow[postgres]~=2.11
+pip install "apache-airflow[postgres]~=3.2" "apache-airflow-providers-standard~=1.5"
 # or from repo root:
 # pip install ".[airflow]"
 
@@ -386,4 +386,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-03-24 — `Dockerfile.airflow` base **`apache/airflow:2.11.2-python3.12`** (Python 3.12). Prior: 2026-03-21 `requirements-airflow-docker.txt`._
+_Last updated: 2026-04-15 — `Dockerfile.airflow` base **`apache/airflow:3.2.0-python3.12`** (Python 3.12). Upgraded from 2.11.2 in the April 2026 Airflow 2→3 upgrade — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for the operational rollout._
