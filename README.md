@@ -548,6 +548,7 @@ This README stays the **short** entry (quick start, ports, env vars). Deep onboa
 | [docs/HEARTBEAT.md](docs/HEARTBEAT.md) | Airflow zombie tasks, OOM/SIGKILL, heartbeat timeout |
 | [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md) | Prometheus + Grafana monitoring stack |
 | [docs/MISP_SOURCES.md](docs/MISP_SOURCES.md) | MISP as single source of truth, event discovery, metadata prefixes |
+| [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | Neo4j schema migrations — pre-flight, backup, execute, rollback runbook for hand-applied Cypher rewrites |
 | [docs/RESILIENCE_CONFIG.md](docs/RESILIENCE_CONFIG.md) | Circuit breakers, retry logic, timeout tuning |
 | [docs/SECRETS_MANAGEMENT.md](docs/SECRETS_MANAGEMENT.md) | Credential handling, env vars, key rotation |
 
@@ -557,6 +558,8 @@ This README stays the **short** entry (quick start, ports, env vars). Deep onboa
 | [docs/RESILMESH_INTEROPERABILITY.md](docs/RESILMESH_INTEROPERABILITY.md) | Integration contract — what EdgeGuard produces, what ResilMesh consumes |
 | [docs/RESILMESH_INTEGRATION_GUIDE.md](docs/RESILMESH_INTEGRATION_GUIDE.md) | NATS messaging, Neo4j bridging, alert enrichment flow |
 | [docs/RESILMESH_INTEGRATION_TESTING.md](docs/RESILMESH_INTEGRATION_TESTING.md) | Integration verification and test procedures |
+| [docs/RESILMESH_QUICKSTART_STIX.md](docs/RESILMESH_QUICKSTART_STIX.md) | **STIX 2.1 exporter quickstart** — curl examples, `/stix/types` discovery, `scripts/resilmesh_stix_smoke.sh` |
+| [docs/STIX21_EXPORTER_PROPOSAL.md](docs/STIX21_EXPORTER_PROPOSAL.md) | Design doc for the graph → STIX 2.1 exporter (mappings, open questions, follow-ups) |
 
 ### Tooling & Visualization
 | Document | Description |

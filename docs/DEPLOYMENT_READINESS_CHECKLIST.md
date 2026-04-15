@@ -79,6 +79,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 | [ ] | Collector tasks | Logs for `collect_*` | Status dict; skips show `skipped` + reason class; real failures → task failed as designed |
 | [ ] | Neo4j sync gate | Observe `full_neo4j_sync` / short-circuit | Matches [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) |
 | [ ] | Baseline smoke (recommended) | [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) | Short window + cap; logs show effective limits |
+| [ ] | Schema migrations applied (if upgrading from a pre-2026-04 graph) | [MIGRATIONS.md](MIGRATIONS.md) | Run the hand-applied Cypher scripts in `migrations/` per the runbook — pause DAGs, backup, execute, verify post-flight counts, resume. The 2026-04 `specialize_uses_technique` migration splits `USES→Technique` into `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` and MUST run once before the first sync after the upgrade. |
 
 ---
 

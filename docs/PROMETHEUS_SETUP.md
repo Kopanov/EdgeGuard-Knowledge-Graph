@@ -165,6 +165,18 @@ To import manually:
 | `edgeguard_dag_runs_total` | Counter | `dag_id`, `status`, `run_type` | DAG run count |
 | `edgeguard_dag_run_duration_seconds` | Histogram | `dag_id` | DAG run duration |
 
+### MISP Sync Event Accounting
+
+Added in 2026-04 after the NVD silent-skip regression (see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md)).
+These gauges enforce the invariant `events_index_total == events_processed + events_failed`
+for every sync run — the `EdgeGuardSyncCoverageGap` alert fires when it breaks.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `edgeguard_sync_events_index_total` | Gauge | - | Events returned from the MISP index on the last sync |
+| `edgeguard_sync_events_processed` | Gauge | - | Events whose `sync_to_neo4j` completed successfully |
+| `edgeguard_sync_events_failed` | Gauge | - | Events that failed permanently (first pass + retry pass + cap exhaustion) |
+
 ## Using Metrics in Code
 
 ### Recording Collection
@@ -300,6 +312,25 @@ The following alerts are pre-configured in `prometheus/alerts.yml`:
 | `EdgeGuardDAGRunStuck` | DAG run running >1 hour without completing | critical |
 | `EdgeGuardDAGLastSuccessStale` | No successful DAG run in >6 hours | warning |
 | `EdgeGuardContainerRestartLoop` | >3 container restarts in 1 hour (requires cAdvisor) | critical |
+| `EdgeGuardSyncEventsFailed` | Any MISP event in the last sync landed in `events_failed` | warning |
+| `EdgeGuardSyncCoverageGap` | `events_index_total ≠ events_processed + events_failed` — silent skip detected | critical |
+| `EdgeGuardNeo4jLabelDropBig` | Per-label node count dropped >50% vs previous scrape | critical |
+
+The last three were added in 2026-04 to catch the silent-skip regression where a single MISP 5xx lost ~99K NVD CVEs from the graph. See [docs/AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) § sync-event accounting for the invariant the `EdgeGuardSyncCoverageGap` alert guards.
+
+### Reloading Prometheus after editing `alerts.yml`
+
+Prometheus loads alert rules at startup. After you edit `prometheus/alerts.yml`:
+
+```bash
+# Validate the rules first (syntax + expression).
+docker compose exec prometheus promtool check rules /etc/prometheus/alerts.yml
+
+# Hot-reload without restarting Prometheus (requires --web.enable-lifecycle).
+curl -X POST http://localhost:9090/-/reload
+```
+
+If `--web.enable-lifecycle` is not set, restart the container: `docker compose restart prometheus`.
 
 ### Custom Alerts
 
