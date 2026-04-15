@@ -2860,10 +2860,12 @@ class MISPToNeo4jSync:
                 if rels:
                     event_embedded_rels.extend(rels)
 
-        self.stats["events_processed"] += 1
-
         if not event_items:
             logger.debug("Event %s: no parsed items, skipping Neo4j writes", event_id)
+            # Count empty-but-valid events so the invariant
+            # `events_index_total == events_processed + events_failed`
+            # holds for the coverage-gap alert.
+            self.stats["events_processed"] += 1
             return 0, 0, 0
 
         unique_event_items = _dedupe_parsed_items(event_items)
@@ -2881,6 +2883,13 @@ class MISPToNeo4jSync:
         )
 
         _s, ev_errors, _u = self.sync_to_neo4j(unique_event_items)
+        # Increment events_processed only AFTER sync_to_neo4j returns. If
+        # sync_to_neo4j raises, the outer run() loop will append the event
+        # to failed_events and count it as events_failed — without this
+        # ordering we'd double-count events that fail during sync (both
+        # processed and failed), violating the coverage-gap invariant and
+        # making `EdgeGuardSyncCoverageGap` fire with a negative value.
+        self.stats["events_processed"] += 1
 
         if event_embedded_rels:
             rels_created = self._create_relationships(event_embedded_rels, "misp")
@@ -3057,6 +3066,11 @@ class MISPToNeo4jSync:
             logger.error("Failed to connect to databases")
             self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
             return False
+
+        # Initialized up-front so the accounting gauges always have a value
+        # to read in the finally block — even on early-return or crash
+        # paths that exit before sorted_events is built.
+        events_index_total = 0
 
         try:
             # Fetch events from MISP
@@ -3399,21 +3413,11 @@ class MISPToNeo4jSync:
                     record_pipeline_duration("misp_to_neo4j", duration)
                 except Exception:
                     logger.debug("Metrics recording failed", exc_info=True)
-                # Export per-run event accounting so Prometheus can alert on
-                # the "processed + failed != total" invariant and on any
-                # failed events at all. Safe fallback if the import failed.
-                try:
-                    # events_index_total is assigned inside the try block
-                    # (line ~3072) before any processing. Defensive fallback
-                    # to 0 just in case this code path is ever reached via
-                    # a different control flow.
-                    record_sync_event_accounting(
-                        events_index_total=locals().get("events_index_total", 0),
-                        events_processed=int(self.stats.get("events_processed", 0)),
-                        events_failed=int(self.stats.get("events_failed", 0)),
-                    )
-                except Exception:
-                    logger.debug("Sync event accounting export failed", exc_info=True)
+                # Per-run event accounting is exported from the `finally`
+                # block below so it fires on every exit path (happy path,
+                # no-events early return, and unhandled exception) — not
+                # only on success. Without that, the gauges retain stale
+                # values from the previous run on crashes.
 
             # Update circuit breaker states in stats
             self.stats["circuit_breaker_states"] = {
@@ -3464,6 +3468,21 @@ class MISPToNeo4jSync:
             return False
 
         finally:
+            # Reset per-run accounting gauges on every exit path (happy,
+            # no-events early return, unhandled exception). Without this,
+            # a run that crashes before the happy-path metrics block would
+            # leave the previous run's values in Prometheus, causing
+            # `EdgeGuardSyncEventsFailed` to keep firing after a clean
+            # rerun or masking a crashing sync entirely.
+            if _METRICS_AVAILABLE:
+                try:
+                    record_sync_event_accounting(
+                        events_index_total=int(locals().get("events_index_total", 0) or 0),
+                        events_processed=int(self.stats.get("events_processed", 0) or 0),
+                        events_failed=int(self.stats.get("events_failed", 0) or 0),
+                    )
+                except Exception:
+                    logger.debug("Sync event accounting export failed", exc_info=True)
             if self.neo4j:
                 self.neo4j.close()
 

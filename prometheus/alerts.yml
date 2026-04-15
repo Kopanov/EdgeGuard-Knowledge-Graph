@@ -260,14 +260,18 @@ groups:
         # normal daily fluctuation but catches catastrophic loss like
         # CVE count 99K -> 980 (the NVD regression).
         # Minimum floor of 100 nodes to avoid noise on small labels.
+        #
+        # PromQL `and` returns the LHS vector filtered by the RHS label set,
+        # so the current (today's) value must be on the left — otherwise
+        # $value in the annotation would be yesterday's count, not today's.
         expr: |
           (
-            (edgeguard_neo4j_nodes offset 1d) > 100
-            and
             edgeguard_neo4j_nodes
             <
             0.5 * (edgeguard_neo4j_nodes offset 1d)
           )
+          and
+          (edgeguard_neo4j_nodes offset 1d) > 100
         for: 15m
         labels:
           severity: critical
