@@ -169,7 +169,7 @@ Optional: **`edgeguard doctor`** / **`edgeguard validate`** after `pip install -
 
 ## 4. Path B — Python / venv (no Docker)
 
-Requires **Python 3.12+** (same as `pyproject.toml` and GitHub Actions). Apache Airflow 2.11 supports **3.11+** upstream; this repo tests on **3.12** only.
+Requires **Python 3.12+** (same as `pyproject.toml` and GitHub Actions). Apache Airflow 3.2 supports **3.10–3.14** upstream; this repo tests on **3.12** only. Airflow was bumped from 2.11 to 3.2 in April 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) if you are migrating an existing install.
 
 For developers or minimal setups:
 

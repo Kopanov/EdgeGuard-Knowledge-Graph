@@ -105,30 +105,19 @@ jobs:
 
       - name: Audit dependencies for known CVEs
         run: |
-          # Airflow 2.11.x CVEs: fix versions are 2.11.1 (unreleased) or Airflow 3.x (breaking).
-          # Tracked in backlog — upgrade to Airflow 3.x when stable.
-          # flask/werkzeug/flask-appbuilder CVEs are transitive Airflow deps, same root cause.
-          # requests GHSA-gc5v-m9x4-r6x2: fix is 2.33.0 (not yet universally available).
-          # pygments GHSA-5239-wwwm-4pmq: no fix version available yet (transitive dep).
-          pip-audit -r requirements.txt --output json -o pip-audit.json \
-            --ignore-vuln GHSA-5g2w-9f8g-g5q7 \
-            --ignore-vuln GHSA-7c2f-r6gc-h92h \
-            --ignore-vuln GHSA-gfw7-2v73-69wg \
-            --ignore-vuln GHSA-r837-hpv7-pc2f \
-            --ignore-vuln GHSA-8r55-rv5w-6pfm \
-            --ignore-vuln GHSA-68rp-wp8r-4726 \
-            --ignore-vuln GHSA-99pm-ch96-ccp2 \
-            --ignore-vuln GHSA-765j-9r45-w2q2 \
-            --ignore-vuln GHSA-9r5j-7r2x-rv4g \
-            --ignore-vuln PYSEC-2023-221 \
-            --ignore-vuln GHSA-2g68-c3qc-8985 \
-            --ignore-vuln GHSA-f9vj-2wh5-fj8j \
-            --ignore-vuln GHSA-q34m-jh98-gwm2 \
-            --ignore-vuln GHSA-hgf8-39gv-g3f2 \
-            --ignore-vuln GHSA-87hc-h4r5-73f7 \
-            --ignore-vuln GHSA-29vq-49wr-vm6x \
-            --ignore-vuln GHSA-gc5v-m9x4-r6x2 \
-            --ignore-vuln GHSA-5239-wwwm-4pmq
+          # Airflow was upgraded 2.11 → 3.2 in April 2026. The large GHSA
+          # ignore list that used to live here (18 entries covering
+          # apache-airflow, flask, flask-appbuilder, requests, pygments) was
+          # entirely obsolete after the upgrade — a local pip-audit run
+          # against the new requirements.txt reported "No known
+          # vulnerabilities found" with zero ignores.
+          #
+          # New CVEs should be addressed by upgrading the affected package,
+          # not by re-adding to this ignore list. Only add `--ignore-vuln`
+          # entries as a temporary measure when the fix version is not yet
+          # available, and always include a code comment explaining why
+          # and a tracking ticket.
+          pip-audit -r requirements.txt --output json -o pip-audit.json
 
       - name: Upload audit results
         uses: actions/upload-artifact@v4

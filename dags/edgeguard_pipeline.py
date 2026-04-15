@@ -102,9 +102,37 @@ from typing import Optional
 import pendulum
 from airflow import DAG
 from airflow.exceptions import AirflowException
-from airflow.operators.bash import BashOperator
-from airflow.operators.python import PythonOperator, ShortCircuitOperator
-from airflow.utils.task_group import TaskGroup
+
+# Airflow 3.x: BashOperator / PythonOperator / ShortCircuitOperator moved
+# from airflow-core into the ``apache-airflow-providers-standard`` package.
+# The provider package is forward-compatible — it works on Airflow 2.x too
+# when installed explicitly — so a single import path covers both versions.
+# Requires ``apache-airflow-providers-standard>=1.5`` in requirements.txt
+# and requirements-airflow-docker.txt.
+from airflow.providers.standard.operators.bash import BashOperator
+from airflow.providers.standard.operators.python import (
+    PythonOperator,
+    ShortCircuitOperator,
+)
+
+# Airflow 3.x moved TaskGroup and Variable to the Task SDK namespace
+# (``airflow.sdk.TaskGroup`` / ``airflow.sdk.Variable``). The old paths
+# still work on 3.x as deprecated aliases, and are the ONLY paths that
+# exist on Airflow 2.x. Use try/except so DAG parsing works under both
+# versions during rollout and rollback. Importing ``Variable`` at module
+# scope is safe — only the ``Variable.get()`` / ``Variable.set()`` calls
+# hit the metadata DB, and those still happen lazily inside task
+# callables.
+try:
+    from airflow.sdk import TaskGroup  # Airflow 3.x
+except ImportError:  # pragma: no cover - 2.x fallback
+    from airflow.utils.task_group import TaskGroup  # Airflow 2.x
+
+try:
+    from airflow.sdk import Variable  # Airflow 3.x
+except ImportError:  # pragma: no cover - 2.x fallback
+    from airflow.models import Variable  # Airflow 2.x
+
 from airflow.utils.trigger_rule import TriggerRule
 
 # Fixed start date — must not be dynamic (pendulum.now()) because Airflow
@@ -478,8 +506,6 @@ default_args = {
 def get_intervals():
     """Get configurable intervals from Airflow variables or use defaults."""
     try:
-        from airflow.models import Variable
-
         misp_refresh = int(Variable.get("MISP_REFRESH_INTERVAL", default_var=8))
         neo4j_sync = int(Variable.get("NEO4J_SYNC_INTERVAL", default_var=72))
     except (ImportError, ValueError, TypeError) as e:
@@ -923,8 +949,6 @@ def should_run_neo4j_sync():
     state_file = get_state_file()
 
     try:
-        from airflow.models import Variable
-
         interval_hours = int(Variable.get("NEO4J_SYNC_INTERVAL", default_var=72))
     except (ImportError, ValueError, TypeError) as e:
         logger.warning(f"Failed to get NEO4J_SYNC_INTERVAL, using default: {e}")
@@ -971,8 +995,6 @@ def run_neo4j_sync():
         is_first_run = not os.path.exists(state_file)
         force_full = False
         try:
-            from airflow.models import Variable
-
             force_full = Variable.get("NEO4J_FULL_SYNC", default_var="false").lower() == "true"
             if force_full:
                 Variable.set("NEO4J_FULL_SYNC", "false")
@@ -984,13 +1006,12 @@ def run_neo4j_sync():
 
         # Sync conflict guard: after a full/baseline sync, skip the next
         # incremental run to avoid immediately re-processing the same data.
+        # Variable is imported at module scope (with 2.x/3.x compat shim).
         if incremental:
             try:
-                from airflow.models import Variable as _Var
-
-                skip = _Var.get("SKIP_NEXT_NEO4J_SYNC", default_var="false").lower() == "true"
+                skip = Variable.get("SKIP_NEXT_NEO4J_SYNC", default_var="false").lower() == "true"
                 if skip:
-                    _Var.set("SKIP_NEXT_NEO4J_SYNC", "false")
+                    Variable.set("SKIP_NEXT_NEO4J_SYNC", "false")
                     logger.info("SKIP_NEXT_NEO4J_SYNC was set — skipping this incremental sync (not a failure)")
                     return  # Task completes as "success" — skip is intentional (post-baseline cooldown)
             except Exception as e:
@@ -1024,11 +1045,10 @@ def run_neo4j_sync():
                 record_task_duration("run_neo4j_sync", "edgeguard_pipeline", time.time() - task_start)
 
             # After a full/baseline sync, tell the next incremental run to skip
+            # (Variable is imported at module scope).
             if not incremental:
                 try:
-                    from airflow.models import Variable as _Var
-
-                    _Var.set("SKIP_NEXT_NEO4J_SYNC", "true")
+                    Variable.set("SKIP_NEXT_NEO4J_SYNC", "true")
                     logger.info("Set SKIP_NEXT_NEO4J_SYNC=true after full sync")
                 except Exception as e:
                     logger.debug("Could not set SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
@@ -1559,8 +1579,6 @@ def get_baseline_config(context=None) -> tuple:
     limit = 0
     baseline_days = 730
     try:
-        from airflow.models import Variable
-
         raw = Variable.get("BASELINE_COLLECTION_LIMIT", default_var="0")
         limit = int(raw)
     except Exception as e:
@@ -1568,8 +1586,6 @@ def get_baseline_config(context=None) -> tuple:
         limit = 0
 
     try:
-        from airflow.models import Variable
-
         baseline_days = int(Variable.get("BASELINE_DAYS", default_var="730"))
     except Exception as e:
         logger.debug("Could not read BASELINE_DAYS Variable: %s", e)

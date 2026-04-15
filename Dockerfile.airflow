@@ -1,14 +1,23 @@
 # Custom Airflow image: official image + EdgeGuard worker dependencies (neo4j, pymisp, collectors, etc.).
-# Use an explicit **-python3.12** tag: unpinned `apache/airflow:2.11.x` defaults may be 3.10/3.11; EdgeGuard
-# requires Python 3.12+ (`pyproject.toml` requires-python). Airflow 2.11 supports 3.11+ upstream.
+# Use an explicit **-python3.12** tag: unpinned `apache/airflow:3.2.x` defaults may be 3.10–3.13; EdgeGuard
+# requires Python 3.12+ (`pyproject.toml` requires-python). Airflow 3.2 supports Python 3.10–3.14.
 # Without this Dockerfile layer, `pip install` inside a running container is lost on recreate.
 # Rebuild after dependency changes: `docker compose build airflow`
+#
+# Upgraded from 2.11.2 → 3.2.0 (April 2026) to clear the flask CVE-2026-27205
+# + flask-appbuilder / airflow CVEs that only had fix versions in Airflow 3.x.
+# Breaking changes handled in dags/edgeguard_pipeline.py and related files:
+#   - Operator imports moved to airflow.providers.standard.operators.*
+#   - airflow.models.Variable → airflow.sdk.Variable
+#   - airflow.utils.task_group.TaskGroup → airflow.sdk.TaskGroup
+# Metadata DB migration required on first boot — see docs/AIRFLOW_DAGS.md
+# "Airflow 3 upgrade" section.
 #
 # tini as PID 1: improves signal forwarding and zombie reaping (helpful on Docker Desktop / constrained VMs).
 # docker-compose.yml must NOT use `command: standalone` alone — that would run `tini -- standalone` (invalid).
 # Either omit `command` (use CMD below) or set `command: ["airflow", "standalone"]`.
 #
-FROM apache/airflow:2.11.2-python3.12
+FROM apache/airflow:3.2.0-python3.12
 
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \

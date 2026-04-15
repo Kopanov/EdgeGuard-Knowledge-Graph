@@ -6,7 +6,7 @@
 
 - With **LocalExecutor**, a **LocalTaskJob** process supervises the task. The scheduler expects **periodic heartbeats** from that job.
 - If **`local_task_job_heartbeat_sec = 0`**, Airflow **2.7+** does **not** disable heartbeats: the LocalTaskJob heartbeat interval **defaults to `scheduler_zombie_task_threshold`**. With a **large** threshold (e.g. **3600**), heartbeats can be **very infrequent**, which is confusing operationally and can interact badly with startup-heavy tasks (long imports before the first heartbeat is visible). Prefer an **explicit** non-zero value (e.g. **30** seconds).
-- **`zombie_detection_interval`** (default **10** seconds in Airflow 2.11) is how often the **scheduler scans** for zombies; it is **not** the same as “kill after 10s”. Tasks are still judged against **`scheduler_zombie_task_threshold`** (time since last heartbeat). A **60** second scan interval is a common tweak to reduce scheduler churn.
+- **`zombie_detection_interval`** (default **10** seconds in Airflow 2.11 and 3.2) is how often the **scheduler scans** for zombies; it is **not** the same as “kill after 10s”. Tasks are still judged against **`scheduler_zombie_task_threshold`** (time since last heartbeat). A **60** second scan interval is a common tweak to reduce scheduler churn.
 - **Recommendation:** set **`local_task_job_heartbeat_sec`** explicitly, tune **`scheduler_zombie_task_threshold`** with your max task duration, and adjust **`zombie_detection_interval`** only if operators still see false zombie kills after heartbeats are sane.
 
 **Docker Compose (this repo):** `docker-compose.yml` on the **airflow** service sets:

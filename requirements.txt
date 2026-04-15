@@ -3,10 +3,12 @@
 # Install with: pip install -r requirements.txt
 #
 # Version policy: ~= (compatible release) pins to the current major.minor and
-# allows only patch upgrades.  This blocks Airflow 3.x, neo4j 6.x, etc. from
+# allows only patch upgrades.  This blocks neo4j 6.x, Airflow 4.x, etc. from
 # silently breaking the pipeline on a fresh install.
 #
 # To upgrade intentionally, update the minor version and re-test.
+# Airflow was bumped 2.11 → 3.2 in a deliberate upgrade (see Airflow block
+# below and docs/AIRFLOW_DAGS.md for migration notes).
 # =============================================================================
 
 # ── Core ─────────────────────────────────────────────────────────────────────
@@ -26,17 +28,31 @@ OTXv2~=1.5
 stix2~=3.0
 
 # ── Airflow orchestration ────────────────────────────────────────────────────
-# Pinned to 2.x — Airflow 3.0 has breaking API changes (DAG serialization,
-# operator interfaces, scheduler protocol).
-# [postgres] — psycopg2 + Postgres provider for LocalExecutor against PostgreSQL metadata
-# (aligns with docker-compose service airflow_postgres). For MySQL metadata, switch extra per Airflow docs.
-# Production / compose: metadata is PostgreSQL only — do not point Airflow at SQLite there.
-# There is no separate "install SQLite" step: CPython ships the sqlite3 stdlib; SQLAlchemy (Airflow dep)
-# includes a SQLite dialect for upstream defaults. Local dev may still create airflow.db if
-# SQL_ALCHEMY_CONN is unset — that file is gitignored.
-# NOTE: All known Airflow 2.11.x CVEs are tracked and ignored in CI (see .github/workflows/ci.yml).
-# Runtime (not pip): EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE — MISP→Neo4j merge chunking; 0 or "all" = single pass (see README).
-apache-airflow[postgres]~=2.11
+# Apache Airflow 3.2.x (April 2026). Upgraded from 2.11 to clear a stack of
+# unpatched CVEs whose fix versions only exist in the 3.x line:
+#   - flask CVE-2026-27205         (fix: flask 3.1.3, pulled via Airflow 3.2)
+#   - flask-appbuilder CVE-2025-32962 / 58065 (fix: 4.6.2 / 4.8.1)
+#   - apache-airflow CVE-2025-66236 (fix: 3.2.0)
+#
+# Breaking changes we handled in this repo when bumping from 2.11:
+#   - BashOperator, PythonOperator, ShortCircuitOperator moved out of
+#     airflow-core into apache-airflow-providers-standard — imports updated
+#     in dags/edgeguard_pipeline.py and dags/edgeguard_metrics_server.py.
+#   - airflow.models.Variable     → airflow.sdk.Variable   (old path deprecated)
+#   - airflow.utils.task_group.TaskGroup → airflow.sdk.TaskGroup
+#   - Metadata DB schema migration required: run `airflow db migrate` on
+#     airflow_postgres AFTER deploying the new image. BACK UP THE METADATA
+#     DB FIRST — the migration is not cleanly reversible.
+#   - Scheduler + API server are separate processes in Airflow 3; see
+#     docker-compose.yml for the service topology change.
+#
+# [postgres] still pulls psycopg + the postgres provider for LocalExecutor
+# against airflow_postgres. Production metadata is PostgreSQL only.
+apache-airflow[postgres]~=3.2
+# Ships BashOperator / PythonOperator / ShortCircuitOperator and the other
+# formerly-bundled operators. Required on Airflow 3.x — in 2.x they were
+# built into the core package.
+apache-airflow-providers-standard~=1.5
 
 # ── Monitoring & Metrics ─────────────────────────────────────────────────────
 prometheus-client~=0.21

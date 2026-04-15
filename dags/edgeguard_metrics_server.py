@@ -21,7 +21,9 @@ from datetime import timedelta
 
 import pendulum
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+
+# Airflow 3.x: PythonOperator moved to apache-airflow-providers-standard.
+from airflow.providers.standard.operators.python import PythonOperator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

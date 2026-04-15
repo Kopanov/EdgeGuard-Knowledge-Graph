@@ -1,10 +1,87 @@
 # EdgeGuard Airflow DAGs (operations guide)
 
-**Last Updated:** 2026-03-29
+**Last Updated:** 2026-04-15 (Airflow 2.11 → 3.2 upgrade)
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
+**Airflow version:** Apache Airflow 3.2.x (upgraded from 2.11 in April 2026 — see [§ Airflow 2 to 3 upgrade](#airflow-2-to-3-upgrade) if you are migrating an existing deployment).
 
 **Where you are in the docs:** Step **2** of the operator path — read after **[SETUP_GUIDE.md](SETUP_GUIDE.md)**. **Next →** **[BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)** for a safe first **`edgeguard_baseline`**. Full order: [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) § *Recommended reading order*.
+
+---
+
+## Airflow 2 to 3 upgrade
+
+**Applies only if you are upgrading an existing EdgeGuard deployment from Airflow 2.11 to 3.2.** Fresh installs from the current `main` branch already target Airflow 3.2 — nothing to do.
+
+### Why we upgraded
+
+A stack of unpatched CVEs only had fix versions in the Airflow 3.x line:
+
+| CVE | Package | Fix version |
+|---|---|---|
+| `CVE-2026-27205` | `flask` (transitive) | `flask>=3.1.3` → pulled by Airflow 3.2 |
+| `CVE-2025-32962` | `flask-appbuilder` | `4.6.2` |
+| `CVE-2025-58065` | `flask-appbuilder` | `4.8.1` |
+| `CVE-2025-66236` | `apache-airflow` | `3.2.0` |
+
+The Airflow 2.11 branch is EOL; no 2.x patch is planned. Staying on 2.11 meant accepting an ever-growing CVE ignore list in CI.
+
+### Code changes already in the repo
+
+All handled on the `chore/airflow-3-upgrade` branch (merged):
+
+| Thing | Before | After |
+|---|---|---|
+| `BashOperator` / `PythonOperator` / `ShortCircuitOperator` | `airflow.operators.bash.BashOperator`, `airflow.operators.python.PythonOperator`/`ShortCircuitOperator` | `airflow.providers.standard.operators.bash.BashOperator`, `airflow.providers.standard.operators.python.PythonOperator`/`ShortCircuitOperator` |
+| `Variable` | `airflow.models.Variable` | `airflow.sdk.Variable` |
+| `TaskGroup` | `airflow.utils.task_group.TaskGroup` | `airflow.sdk.TaskGroup` |
+| Base image | `apache/airflow:2.11.2-python3.12` | `apache/airflow:3.2.0-python3.12` |
+| Custom image tag | `edgeguard-airflow:2.11.2-python3.12` | `edgeguard-airflow:3.2.0-python3.12` |
+| `requirements.txt` | `apache-airflow[postgres]~=2.11` | `apache-airflow[postgres]~=3.2` + `apache-airflow-providers-standard~=1.5` |
+
+`airflow.exceptions.AirflowException`, `from airflow import DAG`, `airflow.utils.trigger_rule.TriggerRule`, and `pendulum` usage are unchanged — they work identically on 3.x.
+
+### Operator rollout — things YOU still have to do
+
+These cannot be automated safely by the code PR; run them on your cluster in order:
+
+1. **Back up the Airflow metadata DB first.** The schema migration is destructive and not cleanly reversible. For the compose stack:
+   ```bash
+   docker exec edgeguard_airflow_postgres pg_dump -U airflow airflow \
+     > airflow_postgres_$(date +%Y%m%d_%H%M%S).sql
+   ```
+2. **Pause all DAGs in the running 2.11 instance** via the Airflow UI or `airflow dags pause <dag_id>`. Wait for any in-flight tasks to finish — the migration must run on an idle scheduler.
+3. **Stop the 2.11 Airflow container.** For the compose stack:
+   ```bash
+   docker compose stop airflow
+   ```
+4. **Rebuild the custom image** with the new base. From the repo root:
+   ```bash
+   docker compose build airflow
+   ```
+5. **Run `airflow db migrate`** against the existing metadata DB. Using the new image:
+   ```bash
+   docker compose run --rm airflow airflow db migrate
+   ```
+   This upgrades the schema in-place. Watch the log for errors — if it fails midway, restore from the backup and file a ticket before retrying.
+6. **Start the new Airflow container** (`docker compose up -d airflow`). The scheduler, API server, DAG processor, and triggerer all run inside a single `airflow standalone` process — same topology as 2.11, just with the internal split now handled by Airflow 3's process manager.
+7. **Unpause the DAGs** once the UI shows them as imported with zero parse errors.
+8. **Validate:** a single small collector run (e.g. `edgeguard_pipeline` → CISA KEV) confirms both the scheduler and the DAG code are healthy on 3.x before you let the full scheduled cadence resume.
+
+### Rollback
+
+1. Restore `airflow_postgres` from the backup: `psql -U airflow airflow < airflow_postgres_<timestamp>.sql`
+2. `git checkout` a commit from before this upgrade, or pin the compose `image:` tag to `edgeguard-airflow:2.11.2-python3.12` and rebuild.
+3. `docker compose up -d airflow`
+
+The data in Neo4j and MISP is unaffected — only Airflow's own metadata DB touches the schema migration.
+
+### What did NOT change
+
+- DAG file names and `dag_id`s (`edgeguard_pipeline`, `edgeguard_medium_freq`, `edgeguard_low_freq`, `edgeguard_daily`, `edgeguard_neo4j_sync`, `edgeguard_baseline`)
+- Schedule intervals, `default_args`, execution timeouts
+- Task logic (same Python callables, same Neo4j/MISP writes, same Prometheus instrumentation)
+- REST API, NATS, GraphQL — all EdgeGuard-side and not coupled to Airflow version
 
 ---
 
@@ -451,7 +528,7 @@ After Tier1 succeeds, remove env overrides or restore Variables for production.
 ### DAG Not Running
 1. Check Airflow scheduler is running: `airflow scheduler`
 2. Verify DAG file is in `$AIRFLOW_HOME/dags/`
-3. **CI / local parse check:** from repo root run [`scripts/preflight_ci.sh`](../scripts/preflight_ci.sh) (`compileall`, `pytest`, Airflow `DagBag` load with `NEO4J_PASSWORD` set). Airflow 2.11+ has no `airflow dags validate` subcommand; use `airflow dags list-import-errors` after `airflow db init` if you use the full CLI.
+3. **CI / local parse check:** from repo root run [`scripts/preflight_ci.sh`](../scripts/preflight_ci.sh) (`compileall`, `pytest`, Airflow `DagBag` load with `NEO4J_PASSWORD` set). Airflow 3.x has no `airflow dags validate` subcommand; use `airflow dags list-import-errors` after `airflow db migrate` if you use the full CLI.
 
 ### Collector Failures
 1. Check API key configuration
