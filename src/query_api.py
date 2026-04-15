@@ -835,7 +835,7 @@ async def graph_explore(
         raise HTTPException(status_code=500, detail="Internal error — see server logs")
 
 
-@app.get("/stix/export/{object_type}/{identifier}", dependencies=[Depends(_verify_api_key)])
+@app.get("/stix/export/{object_type}/{identifier:path}", dependencies=[Depends(_verify_api_key)])
 @limiter.limit(_RATE_LIMIT_READ)
 async def stix_export(
     request: Request,
@@ -854,6 +854,12 @@ async def stix_export(
       Returns the technique + everything that uses it.
     - ``cve`` — ``identifier`` is a CVE ID (e.g. ``CVE-2021-44228``).
       Returns the CVE + indicators that exploit it + affected sectors.
+
+    The ``identifier`` segment uses the FastAPI ``:path`` converter so it
+    can capture values containing slashes (e.g. URL indicators like
+    ``http://evil.com/malware``). The default converter only matches a
+    single path segment and would 404 on any URL with a slash after the
+    host — not viable for the documented indicator types.
 
     Response Content-Type: ``application/stix+json;version=2.1``.
 
