@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import urllib3
 
-from collectors.collector_utils import retry_with_backoff
+from collectors.collector_utils import TransientServerError, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
@@ -55,12 +55,25 @@ def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
     return None
 
 
+class MispTransientError(TransientServerError):
+    """Raised manually for HTTP 5xx from MISP so @retry_with_backoff can catch
+    it selectively. Inheriting from ``collector_utils.TransientServerError``
+    (a subclass of ``requests.exceptions.HTTPError``) means the shared retry
+    decorator in ``collector_utils.py`` retries this class by name, without
+    having to widen its catch clause to all ``HTTPError`` values. 4xx errors
+    and any other ``HTTPError`` raised by ``response.raise_for_status()``
+    stay permanent."""
+
+
 # Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
+# MispTransientError is a TransientServerError subclass, which is also in the
+# decorator's catch tuple in collector_utils.retry_with_backoff.
 _TRANSIENT_HTTP_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ReadTimeout,
     requests.exceptions.ChunkedEncodingError,
+    MispTransientError,
 )
 
 
@@ -1109,7 +1122,11 @@ class MISPWriter:
 
         Args:
             items: List of EdgeGuard items (indicators, vulnerabilities, etc.)
-            batch_size: Number of items per batch
+            batch_size: Number of items per batch. Overridden by
+                ``EDGEGUARD_MISP_PUSH_BATCH_SIZE`` env var when set — lets ops
+                dial the batch size down without a code change if MISP is
+                choking on large pushes (e.g. the 22% HTTP 500 failure rate
+                observed on the 730-day NVD baseline).
 
         Returns:
             Tuple of (successful_count, failed_count)
@@ -1118,6 +1135,20 @@ class MISPWriter:
             return 0, 0
 
         total_items = len(items)
+
+        # Env override wins over caller default so ops can tune without redeploying.
+        _env_batch = os.environ.get("EDGEGUARD_MISP_PUSH_BATCH_SIZE")
+        if _env_batch:
+            try:
+                env_val = int(_env_batch)
+                if env_val > 0:
+                    batch_size = env_val
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Ignoring invalid EDGEGUARD_MISP_PUSH_BATCH_SIZE=%r; using %d",
+                    _env_batch,
+                    batch_size,
+                )
 
         # Guard against invalid batch_size (0 would crash range())
         batch_size = max(1, batch_size)
@@ -1238,7 +1269,25 @@ class MISPWriter:
                     f"[PUSH] Pushing batch {processed_batches}/{total_batches} ({progress_pct:.1f}%) - {elapsed:.1f}s elapsed, {eta_str}"
                 )
 
-                success, failed = self._push_batch(event_id, batch)
+                # After @retry_with_backoff exhausts its attempts on a
+                # persistent 5xx, _push_batch re-raises MispTransientError.
+                # Without this try/except the exception would crash out of
+                # push_items and skip every remaining batch and event in the
+                # push queue — strictly worse than the pre-fix behaviour
+                # where 5xx returned (0, len(attributes)) and the loop
+                # continued. Count the batch as failed and move on so one
+                # bad event doesn't destroy a whole NVD push.
+                try:
+                    success, failed = self._push_batch(event_id, batch)
+                except MispTransientError as exc:
+                    logger.error(
+                        "Batch %s for event %s failed after retries (%s) — counting batch as failed and continuing",
+                        processed_batches,
+                        event_id,
+                        exc,
+                    )
+                    success, failed = 0, len(batch)
+                    self.stats["errors"] += 1
                 total_success += success
                 total_failed += failed
 
@@ -1317,6 +1366,19 @@ class MISPWriter:
                     types_in_batch,
                     detail,
                 )
+                # 5xx is usually transient (MISP under memory pressure on large
+                # NVD events); raise so @retry_with_backoff can give it another
+                # shot with exponential delay. Do NOT increment stats["errors"]
+                # here — the decorator may succeed on a later attempt, and we
+                # don't want to inflate the counter once per retry. The
+                # terminal failure path (last raise from the decorator) is
+                # handled by the outer caller which counts failed_count.
+                if response.status_code >= 500:
+                    raise MispTransientError(
+                        f"MISP {response.status_code} pushing batch to event {event_id}",
+                        response=response,
+                    )
+                # 4xx: permanent validation failure — count once and return.
                 self.stats["errors"] += 1
                 return 0, len(attributes)
 
