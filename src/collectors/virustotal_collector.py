@@ -245,10 +245,13 @@ class VirusTotalCollector:
                             "confidence_score": conf,
                         }
                     )
-        elif response.status_code in (401, 403):
-            # Surface auth errors so the caller can mark the source skipped.
-            response.raise_for_status()
         else:
+            # Any non-200 that reaches this branch is either a 4xx
+            # client error (already surfaced as HTTPError in
+            # _fetch_recent_files_raw below) or an unexpected status.
+            # Treat it as empty and move on; real 5xx failures are
+            # caught by raise_for_status() inside the retried helper
+            # so they never reach here.
             logger.warning(
                 "VT files query returned unexpected status %s — treating as empty",
                 response.status_code,
@@ -268,9 +271,15 @@ class VirusTotalCollector:
 
         The caller (``_collect_from_files``) handles rate limiting
         once, before this helper runs. Matches the URLhaus/CyberCure
-        split in ``global_feed_collector.py``.
+        split in ``global_feed_collector.py``, which includes
+        ``response.raise_for_status()`` at the end to surface HTTP
+        5xx as exceptions that hit the retry decorator (and, on
+        exhaustion, propagate to collect() for proper failure
+        reporting — bugbot round 4 caught that this VT helper was
+        the only one missing that step and 5xx slipped through
+        silently as empty indicators).
         """
-        return request_with_rate_limit_retries(
+        response = request_with_rate_limit_retries(
             "GET",
             f"{self.base_url}/files",
             session=self.session,
@@ -281,6 +290,12 @@ class VirusTotalCollector:
             retry_on_403=False,
             context="VirusTotal",
         )
+        # Raise HTTPError on 4xx/5xx so the retry decorator above gets a
+        # shot at transient 5xx, and terminal failures propagate to
+        # collect() — matches URLhaus/CyberCure. 200 responses pass
+        # through unchanged to the caller for normal parsing.
+        response.raise_for_status()
+        return response
 
     def _detect_zones_from_names(self, attrs):
         """Detect ALL sectors from file names/paths using common zone detection.
