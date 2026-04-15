@@ -15,8 +15,12 @@ Key design decisions (see proposal doc for justification):
 - STIX IDs are **deterministic** (UUIDv5 over the node's natural key) so
   re-exports of the same graph state produce the same bundle — ResilMesh
   can diff bundles safely.
-- All Cypher queries filter on ``edgeguard_managed = true`` so we never
-  leak ResilMesh-owned asset/vulnerability nodes into an outbound bundle.
+- All Cypher queries filter on ``x.edgeguard_managed = true`` (strict
+  equality — null fails) so we never leak ResilMesh-owned
+  asset/vulnerability nodes into an outbound bundle. Originally written
+  as ``coalesce(x.edgeguard_managed, true) = true``, which defaulted
+  missing properties to ``true`` and let ResilMesh-owned nodes pass the
+  filter — fixed in the bugbot pass on PR #25.
 - Backward compatibility with the legacy ``USES`` relationship type is
   preserved alongside the new ``EMPLOYS_TECHNIQUE`` /
   ``IMPLEMENTS_TECHNIQUE`` edges introduced by PR #24.
@@ -133,16 +137,16 @@ class StixExporter:
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
-            WHERE coalesce(i.edgeguard_managed, true) = true
+            WHERE i.edgeguard_managed = true
             OPTIONAL MATCH (i)-[rim:INDICATES]->(m:Malware)
-              WHERE coalesce(m.edgeguard_managed, true) = true
+              WHERE m.edgeguard_managed = true
             OPTIONAL MATCH (i)-[rie:EXPLOITS]->(v)
               WHERE (v:CVE OR v:Vulnerability)
-                AND coalesce(v.edgeguard_managed, true) = true
+                AND v.edgeguard_managed = true
             OPTIONAL MATCH (i)-[rit:USES_TECHNIQUE|USES]->(t:Technique)
-              WHERE coalesce(t.edgeguard_managed, true) = true
+              WHERE t.edgeguard_managed = true
             OPTIONAL MATCH (i)-[ris:TARGETS]->(s:Sector)
-              WHERE coalesce(s.edgeguard_managed, true) = true
+              WHERE s.edgeguard_managed = true
             RETURN i AS seed,
                    collect(DISTINCT m) AS malware,
                    collect(DISTINCT v) AS vulns,
@@ -204,15 +208,15 @@ class StixExporter:
             """
             MATCH (a:ThreatActor)
             WHERE (a.name = $name OR $name IN coalesce(a.aliases, []))
-              AND coalesce(a.edgeguard_managed, true) = true
+              AND a.edgeguard_managed = true
             OPTIONAL MATCH (m:Malware)-[ram:ATTRIBUTED_TO]->(a)
-              WHERE coalesce(m.edgeguard_managed, true) = true
+              WHERE m.edgeguard_managed = true
             OPTIONAL MATCH (a)-[rat:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
-              WHERE coalesce(t.edgeguard_managed, true) = true
+              WHERE t.edgeguard_managed = true
             OPTIONAL MATCH (m)-[rmt:IMPLEMENTS_TECHNIQUE|USES]->(mt:Technique)
-              WHERE coalesce(mt.edgeguard_managed, true) = true
+              WHERE mt.edgeguard_managed = true
             OPTIONAL MATCH (c:Campaign)-[rca:ATTRIBUTED_TO]->(a)
-              WHERE coalesce(c.edgeguard_managed, true) = true
+              WHERE c.edgeguard_managed = true
             RETURN a AS seed,
                    collect(DISTINCT m) AS malware,
                    collect(DISTINCT t) AS actor_tech,
@@ -281,15 +285,15 @@ class StixExporter:
         rows = self._run(
             """
             MATCH (t:Technique {mitre_id: $mid})
-            WHERE coalesce(t.edgeguard_managed, true) = true
+            WHERE t.edgeguard_managed = true
             OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE|USES]->(t)
-              WHERE coalesce(a.edgeguard_managed, true) = true
+              WHERE a.edgeguard_managed = true
             OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
-              WHERE coalesce(m.edgeguard_managed, true) = true
+              WHERE m.edgeguard_managed = true
             OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
-              WHERE coalesce(tool.edgeguard_managed, true) = true
+              WHERE tool.edgeguard_managed = true
             OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE|USES]->(t)
-              WHERE coalesce(i.edgeguard_managed, true) = true
+              WHERE i.edgeguard_managed = true
             RETURN t AS seed,
                    collect(DISTINCT a) AS actors,
                    collect(DISTINCT m) AS malware,
@@ -335,11 +339,11 @@ class StixExporter:
             MATCH (v)
             WHERE (v:CVE OR v:Vulnerability)
               AND v.cve_id = $cve_id
-              AND coalesce(v.edgeguard_managed, true) = true
+              AND v.edgeguard_managed = true
             OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(v)
-              WHERE coalesce(i.edgeguard_managed, true) = true
-            OPTIONAL MATCH (v)-[:TARGETS]->(s:Sector)
-              WHERE coalesce(s.edgeguard_managed, true) = true
+              WHERE i.edgeguard_managed = true
+            OPTIONAL MATCH (v)-[:AFFECTS]->(s:Sector)
+              WHERE s.edgeguard_managed = true
             RETURN v AS seed,
                    collect(DISTINCT i) AS indicators,
                    collect(DISTINCT s) AS sectors
@@ -602,12 +606,21 @@ class StixExporter:
     # ------------------------------------------------------------------
 
     def _run(self, cypher: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Run a Cypher query, returning a list of row dicts."""
+        """Run a Cypher query, returning a list of row dicts.
+
+        Sessions are opened with ``default_access_mode="READ"`` so Neo4j
+        itself rejects any accidental write from this API surface — the
+        same defense-in-depth pattern used by the graph-explore and
+        admin-query endpoints in ``query_api.py``. The STIX exporter is a
+        strictly read-only consumer; a bug that produced a MERGE/CREATE
+        here should fail at the driver rather than silently mutate the
+        shared graph that ResilMesh also writes to.
+        """
         driver = getattr(self.client, "driver", None)
         if driver is None:
             logger.warning("StixExporter: Neo4j driver not connected")
             return []
-        with driver.session() as session:
+        with driver.session(default_access_mode="READ") as session:
             result = session.run(cypher, **params)
             return [dict(record) for record in result]
 

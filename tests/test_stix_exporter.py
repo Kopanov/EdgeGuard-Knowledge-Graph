@@ -46,8 +46,13 @@ class _FakeSession:
 class _FakeDriver:
     def __init__(self, rows: List[Dict[str, Any]]):
         self._session = _FakeSession(rows)
+        self.last_session_kwargs: Dict[str, Any] = {}
 
-    def session(self):
+    def session(self, **kwargs: Any):
+        # Mirrors neo4j.Driver.session(**kwargs). The exporter passes
+        # default_access_mode="READ" so Neo4j rejects accidental writes —
+        # we capture the kwargs here so tests can assert on them.
+        self.last_session_kwargs = kwargs
         return self._session
 
 
@@ -260,7 +265,52 @@ def test_edgeguard_managed_filter_present_in_all_queries():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_indicator("evil.com")
-    assert "edgeguard_managed" in client.driver._session.last_cypher
+    q = client.driver._session.last_cypher
+    # Bugbot regression: the original filter used
+    # `coalesce(x.edgeguard_managed, true) = true`, which defaulted missing
+    # properties to true and let ResilMesh-owned nodes leak through. Enforce
+    # strict equality — `x.edgeguard_managed = true` — so null fails the
+    # check and only EdgeGuard-owned nodes can be exported.
+    assert "edgeguard_managed = true" in q
+    assert "coalesce(" not in q or "coalesce(i.edgeguard_managed" not in q
+
+
+def test_session_opened_with_read_access_mode():
+    """Exporter must open Neo4j sessions with default_access_mode='READ'
+    so the driver rejects any accidental write — matches the defense-
+    in-depth pattern in query_api.py graph-explore and admin-query
+    endpoints. Regression test for a bugbot finding on PR #25."""
+    rows = [
+        {
+            "seed": {"value": "evil.com", "indicator_type": "domain"},
+            "malware": [],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_indicator("evil.com")
+    assert client.driver.last_session_kwargs.get("default_access_mode") == "READ"
+
+
+def test_cve_export_uses_affects_not_targets_for_sectors():
+    """Vulnerability/CVE→Sector edges are written as AFFECTS by
+    build_relationships.py, not TARGETS (TARGETS is reserved for
+    Indicator→Sector). Regression test for a bugbot finding on PR #25
+    where the Cypher silently returned zero sectors for every CVE."""
+    rows = [
+        {
+            "seed": {"cve_id": "CVE-2021-44228"},
+            "indicators": [],
+            "sectors": [],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_cve("CVE-2021-44228")
+    q = client.driver._session.last_cypher
+    assert "[:AFFECTS]->(s:Sector)" in q
+    assert "[:TARGETS]->(s:Sector)" not in q
 
 
 def test_cve_export_bundle_contains_vulnerability_and_indicator_indicates_rel():
