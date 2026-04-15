@@ -354,7 +354,7 @@ class AlertProcessor:
                     MATCH (i:Indicator {value: $indicator})
                     OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
                     OPTIONAL MATCH (m)-[:ATTRIBUTED_TO]->(a:ThreatActor)
-                    OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
+                    OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
                     RETURN collect(DISTINCT a {
                         .name, .aliases, .description
                     }) as actors,
