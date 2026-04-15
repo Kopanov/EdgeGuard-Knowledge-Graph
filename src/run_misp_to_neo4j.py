@@ -3206,6 +3206,14 @@ class MISPToNeo4jSync:
                     len(skipped_large),
                     _conn_failures,
                 )
+                # Count the abandoned events as failures so operators (and
+                # the Prometheus coverage-gap alert) see the real damage.
+                # Every other bail-out path in this function increments
+                # total_errors + events_failed; this pre-loop one was the
+                # outlier that silently dropped the events from accounting.
+                for _rem in skipped_large:
+                    total_errors += 1
+                    self.stats["events_failed"] += 1
                 skipped_large = []  # Don't retry with a dead Neo4j
 
             if skipped_large:
