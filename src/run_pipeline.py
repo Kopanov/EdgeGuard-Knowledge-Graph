@@ -877,12 +877,37 @@ class EdgeGuardPipeline:
         import atexit
         import signal
 
+        # Baseline runs also take an additional cross-process sentinel that
+        # scheduled Airflow collector DAGs check before running. This
+        # prevents a CLI baseline and a regularly-scheduled DAG task from
+        # racing on MISP/Neo4j writes. Non-baseline runs do NOT take this
+        # lock — they're expected to share the pipeline with Airflow.
+        baseline_lock_held = False
+        if baseline:
+            from baseline_lock import acquire_baseline_lock
+
+            if not acquire_baseline_lock():
+                # Another baseline is already running — refuse to start.
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+                return False
+            baseline_lock_held = True
+
         def _cleanup_lock(*_args):
             try:
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
             except OSError:
                 pass
+            if baseline_lock_held:
+                try:
+                    from baseline_lock import release_baseline_lock as _release
+
+                    _release()
+                except Exception:
+                    logger.debug("Baseline lock release failed", exc_info=True)
 
         atexit.register(_cleanup_lock)
 

@@ -630,6 +630,38 @@ def run_collector_with_metrics(
 
     task_start = time.time()
 
+    # Baseline mutex: if a CLI baseline run is holding the sentinel lock,
+    # skip this scheduled run instead of racing against it for MISP/Neo4j
+    # writes. The baseline is treated as authoritative — it's a long,
+    # expensive, operator-driven run that shouldn't be undermined by
+    # interleaved partial writes from the incremental DAGs.
+    try:
+        from baseline_lock import baseline_skip_reason
+
+        _baseline_skip = baseline_skip_reason()
+    except Exception:
+        # If the module can't load for any reason, fail-open (run as
+        # before). Import errors must not break the whole DAG.
+        logger.debug("baseline_lock import failed — proceeding without baseline mutex", exc_info=True)
+        _baseline_skip = None
+
+    if _baseline_skip is not None:
+        from collectors.collector_utils import make_skipped_optional_source
+
+        logger.warning("%s: %s", collector_name.upper(), _baseline_skip)
+        result = make_skipped_optional_source(
+            collector_name,
+            skip_reason=_baseline_skip,
+            skip_reason_class="baseline_in_progress",
+        )
+        duration = time.time() - start_time
+        record_dag_run("edgeguard_pipeline", "success")
+        if METRICS_SERVER_AVAILABLE:
+            record_collection(collector_name, "global", 0, "skipped")
+            record_collection_duration(collector_name, "global", duration)
+            record_collector_skip(collector_name, "baseline_in_progress")
+        return result
+
     if not is_collector_enabled_by_allowlist(collector_name):
         from collectors.collector_utils import make_skipped_optional_source
 
@@ -919,6 +951,21 @@ def get_state_file() -> str:
 def should_run_neo4j_sync():
     """Determine if Neo4j sync should run based on interval."""
     import json
+
+    # Baseline mutex: the scheduled Neo4j sync must never run concurrently
+    # with a CLI baseline. The baseline runs its own MISP->Neo4j sync in
+    # the same Python process and a parallel Airflow sync would read
+    # MISP mid-push, producing partial data in Neo4j. ShortCircuit skips
+    # the whole sync DAG run downstream.
+    try:
+        from baseline_lock import baseline_skip_reason
+
+        _baseline_skip = baseline_skip_reason()
+    except Exception:
+        _baseline_skip = None
+    if _baseline_skip is not None:
+        logger.warning("Neo4j sync ShortCircuit: %s", _baseline_skip)
+        return False
 
     state_file = get_state_file()
 
