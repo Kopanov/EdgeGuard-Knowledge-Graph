@@ -55,16 +55,22 @@ def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
     return None
 
 
+class MispTransientError(requests.exceptions.HTTPError):
+    """Raised manually for HTTP 5xx from MISP so @retry_with_backoff can catch
+    it selectively. Subclassing HTTPError means any future call to
+    ``response.raise_for_status()`` on a 4xx will NOT accidentally be retried
+    through this path — only code that explicitly raises MispTransientError
+    opts in to the transient-error contract."""
+
+
 # Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
-# HTTPError is included for 5xx server errors raised manually by _push_batch; 4xx
-# responses continue to be returned as (0, failed) without raising so we don't
-# spin on permanent validation errors.
+# The subclass above is the only HTTPError we retry; 4xx stays permanent.
 _TRANSIENT_HTTP_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ReadTimeout,
     requests.exceptions.ChunkedEncodingError,
-    requests.exceptions.HTTPError,
+    MispTransientError,
 )
 
 
@@ -1339,16 +1345,20 @@ class MISPWriter:
                     types_in_batch,
                     detail,
                 )
-                self.stats["errors"] += 1
                 # 5xx is usually transient (MISP under memory pressure on large
                 # NVD events); raise so @retry_with_backoff can give it another
-                # shot with exponential delay. 4xx is permanent validation
-                # failure — don't retry, just report what failed.
+                # shot with exponential delay. Do NOT increment stats["errors"]
+                # here — the decorator may succeed on a later attempt, and we
+                # don't want to inflate the counter once per retry. The
+                # terminal failure path (last raise from the decorator) is
+                # handled by the outer caller which counts failed_count.
                 if response.status_code >= 500:
-                    raise requests.exceptions.HTTPError(
+                    raise MispTransientError(
                         f"MISP {response.status_code} pushing batch to event {event_id}",
                         response=response,
                     )
+                # 4xx: permanent validation failure — count once and return.
+                self.stats["errors"] += 1
                 return 0, len(attributes)
 
         except _TRANSIENT_HTTP_ERRORS as e:

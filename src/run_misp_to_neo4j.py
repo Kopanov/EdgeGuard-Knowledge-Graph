@@ -382,6 +382,20 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
 # 500 rows per UNWIND batch — smaller batches reduce lock contention on shared nodes.
 _RELATIONSHIP_BATCH_DEFAULT = 500
 
+# Cap how many exception-failed events we retry. Beyond this, MISP is almost
+# certainly broken and retrying more events just burns wall-clock against the
+# Airflow execution_timeout (NVD sync DAG = 2h). The remaining events are
+# counted as failed immediately so operators see the real damage.
+_MAX_RETRY_FAILED_EVENTS = 20
+
+
+class MispTransientServerError(requests.exceptions.HTTPError):
+    """Raised manually for HTTP 5xx from MISP so @retry_with_backoff can catch
+    it selectively. Subclassing HTTPError means any future call to
+    ``response.raise_for_status()`` on a 4xx will NOT accidentally be retried
+    through this path — only code that explicitly raises
+    MispTransientServerError opts in to the transient-error contract."""
+
 
 def _neo4j_sync_item_sort_rank(item: Dict) -> int:
     """Order items so tactics/techniques/malware/actors land before vulns/indicators when chunking."""
@@ -416,10 +430,11 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     requests.exceptions.Timeout,
                     requests.exceptions.ReadTimeout,
                     requests.exceptions.ChunkedEncodingError,
-                    # HTTPError is only raised by our code for 5xx server errors
-                    # (see fetch_event_details). 4xx paths return None instead so
-                    # they never reach this handler.
-                    requests.exceptions.HTTPError,
+                    # Our own subclass for MISP 5xx. Subclassing HTTPError
+                    # means future raise_for_status() calls on 4xx are NOT
+                    # accidentally retried — only code that explicitly opts
+                    # in by raising MispTransientServerError is retried.
+                    MispTransientServerError,
                 ) as e:
                     last_exception = e
                     if attempt >= max_retries:
@@ -1001,7 +1016,7 @@ class MISPToNeo4jSync:
                 )
                 return None
 
-            # 5xx responses are retriable — raise HTTPError so @retry_with_backoff
+            # 5xx responses are retriable — raise so @retry_with_backoff
             # gets another shot. Silently returning None here used to cause large
             # events (e.g. NVD ~99K CVEs) to be permanently skipped after a single
             # transient MISP 500, leaving the graph missing entire feeds.
@@ -1011,7 +1026,7 @@ class MISPToNeo4jSync:
                     response.status_code,
                     event_id,
                 )
-                raise requests.exceptions.HTTPError(
+                raise MispTransientServerError(
                     f"MISP {response.status_code} fetching event {event_id}",
                     response=response,
                 )
@@ -1025,7 +1040,7 @@ class MISPToNeo4jSync:
             requests.exceptions.Timeout,
             requests.exceptions.ReadTimeout,
             requests.exceptions.ChunkedEncodingError,
-            requests.exceptions.HTTPError,
+            MispTransientServerError,
         ):
             raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
@@ -3138,6 +3153,22 @@ class MISPToNeo4jSync:
                         str(exc)[:200],
                     )
 
+                    # Queue for retry pass unconditionally. Accounting (total_errors
+                    # / events_failed) happens in the retry loop below so we don't
+                    # double-count recoveries. If the cap is exceeded, count as
+                    # failed immediately — retrying 50+ events against a broken
+                    # MISP will blow the Airflow execution_timeout.
+                    if len(failed_events) < _MAX_RETRY_FAILED_EVENTS:
+                        failed_events.append(event)
+                    else:
+                        logger.error(
+                            "failed_events cap (%s) reached — counting event %s as permanent failure",
+                            _MAX_RETRY_FAILED_EVENTS,
+                            event_id,
+                        )
+                        total_errors += 1
+                        self.stats["events_failed"] += 1
+
                     # If this looks like a connection failure, try to reconnect
                     _exc_str = str(exc).lower()
                     if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
@@ -3148,10 +3179,8 @@ class MISPToNeo4jSync:
                                 "3+ consecutive Neo4j connection failures — aborting sync. "
                                 "Check: docker compose ps neo4j / docker compose logs neo4j"
                             )
-                            # Record the already-accumulated failures; the retry
-                            # pass below will bail out because _consecutive_conn_failures >= 3.
-                            total_errors += 1
-                            self.stats["events_failed"] += 1
+                            # The retry-pass bail-out below will count everything
+                            # in failed_events once and only once. Don't count here.
                             break  # Stop burning through events with a dead Neo4j
                         logger.warning("Attempting Neo4j reconnect after connection failure...")
                         try:
@@ -3161,11 +3190,6 @@ class MISPToNeo4jSync:
                             logger.error("Neo4j reconnect failed")
                     else:
                         self._consecutive_conn_failures = 0  # Reset on non-connection errors
-
-                    # Queue for a retry pass instead of giving up permanently.
-                    # Accounting (total_errors / events_failed) happens in the
-                    # retry loop below so we don't double-count recoveries.
-                    failed_events.append(event)
 
                     # Free memory after failed event (OOM recovery)
                     import gc
@@ -3190,6 +3214,18 @@ class MISPToNeo4jSync:
                     max_event_attrs,
                 )
                 for event in skipped_large:
+                    # Mid-loop bail-out: if Neo4j died while we were processing
+                    # earlier events, stop burning through remaining ones.
+                    if getattr(self, "_consecutive_conn_failures", 0) >= 3:
+                        logger.error(
+                            "Neo4j dead mid-retry — counting remaining %s deferred event(s) as failed",
+                            len(skipped_large) - skipped_large.index(event),
+                        )
+                        remaining = skipped_large[skipped_large.index(event) :]
+                        for _rem in remaining:
+                            total_errors += 1
+                            self.stats["events_failed"] += 1
+                        break
                     event_id = event.get("id")
                     event_info = event.get("info", "")
                     if event_fetch_throttle > 0:
@@ -3199,15 +3235,36 @@ class MISPToNeo4jSync:
                         total_parsed_items += ep
                         total_cross_rels_built += ecr
                         total_errors += ee
+                        self._consecutive_conn_failures = 0
                     except Exception as exc:
-                        logger.error(
-                            "Deferred event %s still failed (%s: %s) — skipping permanently",
+                        # Defer to the failed_events retry pass below (with
+                        # cooldown) instead of burying it here. NVD lives in
+                        # skipped_large because it's the largest event — the
+                        # whole regression was its single-shot retry, so we
+                        # give it the same cooldown+retry as exception-failed
+                        # events, subject to the same cap.
+                        logger.warning(
+                            "Deferred event %s failed on first retry (%s: %s) — re-queueing with cooldown",
                             event_id,
                             type(exc).__name__,
                             str(exc)[:200],
                         )
-                        total_errors += 1
-                        self.stats["events_failed"] += 1
+                        if len(failed_events) < _MAX_RETRY_FAILED_EVENTS:
+                            failed_events.append(event)
+                        else:
+                            logger.error(
+                                "failed_events cap (%s) reached — counting deferred event %s as permanent failure",
+                                _MAX_RETRY_FAILED_EVENTS,
+                                event_id,
+                            )
+                            total_errors += 1
+                            self.stats["events_failed"] += 1
+                        # Track Neo4j connection failures across this loop too.
+                        _exc_str = str(exc).lower()
+                        if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
+                            self._consecutive_conn_failures = (
+                                getattr(self, "_consecutive_conn_failures", 0) + 1
+                            )
                         # Free memory after failed large-event fetch (OOM recovery)
                         import gc
 
@@ -3252,7 +3309,19 @@ class MISPToNeo4jSync:
                     "Retrying %s event(s) that failed on the first pass...",
                     len(failed_events),
                 )
-                for event in failed_events:
+                for retry_idx, event in enumerate(failed_events):
+                    # Mid-loop bail-out: if a prior retry just killed Neo4j,
+                    # stop and count the remaining events without thrashing.
+                    if getattr(self, "_consecutive_conn_failures", 0) >= 3:
+                        remaining = len(failed_events) - retry_idx
+                        logger.error(
+                            "Neo4j dead mid-retry — counting remaining %s event(s) as failed",
+                            remaining,
+                        )
+                        for _rem in failed_events[retry_idx:]:
+                            total_errors += 1
+                            self.stats["events_failed"] += 1
+                        break
                     event_id = event.get("id")
                     event_info = event.get("info", "")
                     if event_fetch_throttle > 0:
@@ -3262,16 +3331,22 @@ class MISPToNeo4jSync:
                         total_parsed_items += ep
                         total_cross_rels_built += ecr
                         total_errors += ee
+                        self._consecutive_conn_failures = 0
                         logger.info("Event %s recovered on retry", event_id)
                     except Exception as exc:
                         logger.error(
-                            "Event %s still failed on retry (%s: %s) — skipping permanently",
+                            "Event %s still failed on retry (%s: %s) — skipping until next sync run",
                             event_id,
                             type(exc).__name__,
                             str(exc)[:200],
                         )
                         total_errors += 1
                         self.stats["events_failed"] += 1
+                        _exc_str = str(exc).lower()
+                        if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
+                            self._consecutive_conn_failures = (
+                                getattr(self, "_consecutive_conn_failures", 0) + 1
+                            )
                         import gc
 
                         gc.collect()
