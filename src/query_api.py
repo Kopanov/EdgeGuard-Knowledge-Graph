@@ -898,7 +898,12 @@ async def stix_export(
     request: Request,
     object_type: str,
     identifier: str,
-    depth: int = Query(2, ge=1, le=2, description="1 = primary relation only (smaller bundle); 2 = full 1-hop neighborhood (default)"),
+    depth: int = Query(
+        2,
+        ge=1,
+        le=2,
+        description="1 = primary relation only (smaller bundle); 2 = full 1-hop neighborhood (default)",
+    ),
 ):
     """Export a STIX 2.1 bundle centred on a threat-intel object.
 
