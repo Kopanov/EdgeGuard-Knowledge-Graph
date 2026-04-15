@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import requests
 import urllib3
 
+# Import resilience utilities
+from collectors.collector_utils import TransientServerError
 from config import (
     MISP_API_KEY,
     MISP_URL,
@@ -47,8 +49,6 @@ from neo4j_client import (
     normalize_cve_id_for_graph,
     resolve_vulnerability_cve_id,
 )
-
-# Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
 
 try:
@@ -389,12 +389,13 @@ _RELATIONSHIP_BATCH_DEFAULT = 500
 _MAX_RETRY_FAILED_EVENTS = 20
 
 
-class MispTransientServerError(requests.exceptions.HTTPError):
+class MispTransientServerError(TransientServerError):
     """Raised manually for HTTP 5xx from MISP so @retry_with_backoff can catch
-    it selectively. Subclassing HTTPError means any future call to
-    ``response.raise_for_status()`` on a 4xx will NOT accidentally be retried
-    through this path — only code that explicitly raises
-    MispTransientServerError opts in to the transient-error contract."""
+    it selectively. Inherits from ``collector_utils.TransientServerError`` so
+    both the local ``retry_with_backoff`` in this module and the shared one
+    in ``collector_utils`` (used by ``MISPWriter._push_batch``) retry it.
+    Other ``HTTPError`` paths — e.g. 4xx raised via
+    ``response.raise_for_status()`` — remain permanent failures."""
 
 
 def _neo4j_sync_item_sort_rank(item: Dict) -> int:

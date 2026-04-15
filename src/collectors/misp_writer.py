@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import urllib3
 
-from collectors.collector_utils import retry_with_backoff
+from collectors.collector_utils import TransientServerError, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
@@ -55,16 +55,19 @@ def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
     return None
 
 
-class MispTransientError(requests.exceptions.HTTPError):
+class MispTransientError(TransientServerError):
     """Raised manually for HTTP 5xx from MISP so @retry_with_backoff can catch
-    it selectively. Subclassing HTTPError means any future call to
-    ``response.raise_for_status()`` on a 4xx will NOT accidentally be retried
-    through this path — only code that explicitly raises MispTransientError
-    opts in to the transient-error contract."""
+    it selectively. Inheriting from ``collector_utils.TransientServerError``
+    (a subclass of ``requests.exceptions.HTTPError``) means the shared retry
+    decorator in ``collector_utils.py`` retries this class by name, without
+    having to widen its catch clause to all ``HTTPError`` values. 4xx errors
+    and any other ``HTTPError`` raised by ``response.raise_for_status()``
+    stay permanent."""
 
 
 # Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
-# The subclass above is the only HTTPError we retry; 4xx stays permanent.
+# MispTransientError is a TransientServerError subclass, which is also in the
+# decorator's catch tuple in collector_utils.retry_with_backoff.
 _TRANSIENT_HTTP_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,

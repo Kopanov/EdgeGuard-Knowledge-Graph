@@ -26,6 +26,32 @@ _MAX_RATE_LIMIT_SLEEP_SEC = 600.0
 
 
 # ---------------------------------------------------------------------------
+# Shared transient-error base class
+# ---------------------------------------------------------------------------
+
+
+class TransientServerError(requests.exceptions.HTTPError):
+    """Base class for HTTP 5xx-style errors that callers opt in to retry.
+
+    Callers (e.g. ``MISPWriter._push_batch``, ``fetch_event_details``) subclass
+    this and ``raise`` it when an HTTP 5xx response comes back. The
+    ``retry_with_backoff`` decorator below catches this base class by name,
+    so opting into retry is just "define a subclass of
+    ``TransientServerError`` and raise it". Ordinary ``HTTPError`` (including
+    any 4xx that might sneak in via ``response.raise_for_status()``) is NOT
+    a subclass of this and will not be retried — that way permanent
+    validation errors don't spin on the backoff loop.
+
+    Introduced 2026-04 after a regression where ``_push_batch`` raised
+    ``requests.exceptions.HTTPError`` directly. The decorator only retried
+    connection/timeout errors, so the raised ``HTTPError`` fell through to
+    ``except Exception: raise`` and crashed the entire push — strictly worse
+    than the pre-fix behaviour where 5xx returned ``(0, len(attributes))``
+    and subsequent batches kept going.
+    """
+
+
+# ---------------------------------------------------------------------------
 # Retry decorator
 # ---------------------------------------------------------------------------
 
@@ -33,9 +59,11 @@ _MAX_RATE_LIMIT_SLEEP_SEC = 600.0
 def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
     """Decorator for retry logic with exponential backoff.
 
-    Only retries on transient network errors
-    (ConnectionError, Timeout, ReadTimeout, ChunkedEncodingError).
-    Any other exception propagates immediately without retrying.
+    Retries on transient network errors
+    (ConnectionError, Timeout, ReadTimeout, ChunkedEncodingError) and on
+    ``TransientServerError`` subclasses raised by callers that opt in to
+    server-error retry (see class docstring above). Any other exception
+    propagates immediately without retrying.
 
     Args:
         max_retries:  Number of retry attempts after the first failure.
@@ -60,6 +88,7 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
                     requests.exceptions.Timeout,
                     requests.exceptions.ReadTimeout,
                     requests.exceptions.ChunkedEncodingError,
+                    TransientServerError,
                 ) as exc:
                     last_exception = exc
                     if attempt < max_retries:
