@@ -1380,10 +1380,21 @@ class EdgeGuardPipeline:
         # Calculate total relationships
         total_indicates = loaded.get("relationships_indicates", 0)
         total_attributed_to = loaded.get("relationships_attributed_to", 0) + rel_stats.get("attributed_to", 0)
-        total_uses = rel_stats.get("uses", 0)
+        # rel_stats["uses"] only counts actor→technique edges created via
+        # create_actor_technique_relationship (EMPLOYS_TECHNIQUE). Malware
+        # and Tool → Technique edges (IMPLEMENTS_TECHNIQUE) are built by
+        # build_relationships.py after the sync and are NOT reflected in
+        # this counter — don't pretend otherwise in the log.
+        total_employs_technique = rel_stats.get("uses", 0)
 
-        logger.info("\n[STATS] Relationships created:")
-        logger.info(f"   - EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE (→ Technique): {total_uses}")
+        logger.info("\n[STATS] Relationships created (this pipeline pass):")
+        logger.info(
+            f"   - EMPLOYS_TECHNIQUE (Actor → Technique): {total_employs_technique}"
+        )
+        logger.info(
+            "   - IMPLEMENTS_TECHNIQUE (Malware/Tool → Technique): built post-sync by "
+            "build_relationships.py — see its own log line"
+        )
         logger.info(f"   - ATTRIBUTED_TO (Malware → Actor): {total_attributed_to}")
         logger.info(f"   - INDICATES (Indicator → Malware): {total_indicates}")
 
