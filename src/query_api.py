@@ -844,6 +844,136 @@ async def graph_explore(
         raise HTTPException(status_code=500, detail="Internal error — see server logs")
 
 
+@app.get("/stix/types", dependencies=[Depends(_verify_api_key)])
+@limiter.limit(_RATE_LIMIT_READ)
+async def stix_types(request: Request):
+    """Discovery endpoint — list supported STIX export object types.
+
+    ResilMesh integrators hit this first to learn which
+    ``/stix/export/{object_type}/{identifier}`` values are valid
+    without having to read the docstring on the export endpoint. Each
+    entry includes a working example identifier so a smoke test can
+    curl straight from the response.
+    """
+    return {
+        "media_type": "application/stix+json;version=2.1",
+        "default_depth": 2,
+        "supported_depths": [1, 2],
+        "object_types": [
+            {
+                "name": "indicator",
+                "identifier": "indicator value (IP, domain, hash, URL)",
+                "example": "1.2.3.4",
+                "returns": "indicator + INDICATES/EXPLOITS/USES_TECHNIQUE/TARGETS 1-hop",
+                "primary_relation": "indicates→malware",
+            },
+            {
+                "name": "actor",
+                "identifier": "ThreatActor name or alias",
+                "example": "APT28",
+                "returns": "actor + attributed malware + techniques + campaigns",
+                "primary_relation": "malware attributed-to actor",
+            },
+            {
+                "name": "technique",
+                "identifier": "MITRE ATT&CK technique ID",
+                "example": "T1059",
+                "returns": "technique + actors/malware/tools/indicators that use it",
+                "primary_relation": "actors uses technique",
+            },
+            {
+                "name": "cve",
+                "identifier": "CVE identifier",
+                "example": "CVE-2021-44228",
+                "returns": "CVE + exploiting indicators + affected sectors",
+                "primary_relation": "indicators indicate CVE",
+            },
+        ],
+    }
+
+
+@app.get("/stix/export/{object_type}/{identifier:path}", dependencies=[Depends(_verify_api_key)])
+@limiter.limit(_RATE_LIMIT_READ)
+async def stix_export(
+    request: Request,
+    object_type: str,
+    identifier: str,
+    depth: int = Query(
+        2,
+        ge=1,
+        le=2,
+        description="1 = primary relation only (smaller bundle); 2 = full 1-hop neighborhood (default)",
+    ),
+):
+    """Export a STIX 2.1 bundle centred on a threat-intel object.
+
+    Supported ``object_type`` values:
+
+    - ``indicator`` — ``identifier`` is the indicator value (IP, domain,
+      hash, URL, …). Returns the indicator + its 1-hop neighbourhood.
+    - ``actor`` — ``identifier`` is a ThreatActor name or alias. Returns
+      actor + attributed malware + employed techniques + campaigns.
+    - ``technique`` — ``identifier`` is a MITRE ATT&CK ID (e.g. ``T1055``).
+      Returns the technique + everything that uses it.
+    - ``cve`` — ``identifier`` is a CVE ID (e.g. ``CVE-2021-44228``).
+      Returns the CVE + indicators that exploit it + affected sectors.
+
+    The ``identifier`` segment uses the FastAPI ``:path`` converter so it
+    can capture values containing slashes (e.g. URL indicators like
+    ``http://evil.com/malware``). The default converter only matches a
+    single path segment and would 404 on any URL with a slash after the
+    host — not viable for the documented indicator types.
+
+    ``depth=1`` returns a minimal bundle (seed + primary relation only);
+    ``depth=2`` (default) returns the full 1-hop neighborhood. Useful
+    for ResilMesh smoke tests that want a smaller response.
+
+    Response Content-Type: ``application/stix+json;version=2.1``.
+
+    Prototype — see ``docs/STIX21_EXPORTER_PROPOSAL.md`` for auth,
+    pagination, and rate-limit notes (no custom rate-limit middleware is
+    added yet; the endpoint is subject to the default read rate limit).
+    """
+    from fastapi.responses import JSONResponse as _JSON
+
+    from stix_exporter import StixExporter
+
+    if not neo4j_client or not neo4j_client.is_connected():
+        raise HTTPException(status_code=503, detail="Neo4j not connected")
+
+    exporter = StixExporter(neo4j_client)
+    try:
+        ot = object_type.lower()
+        if ot == "indicator":
+            bundle = exporter.export_indicator(identifier, depth=depth)
+        elif ot == "actor":
+            bundle = exporter.export_threat_actor(identifier, depth=depth)
+        elif ot == "technique":
+            bundle = exporter.export_technique(identifier, depth=depth)
+        elif ot == "cve":
+            bundle = exporter.export_cve(identifier, depth=depth)
+        else:
+            # Static error string (no f-string interpolation of the URL
+            # path parameter). Every other HTTPException in this file uses
+            # a fixed generic message; bugbot caught this as the only
+            # f-string `detail` and flagged it for consistency with the
+            # project convention.
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported object_type. Use one of: indicator, actor, technique, cve.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("STIX export failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+
+    return _JSON(
+        content=bundle,
+        media_type=StixExporter.MEDIA_TYPE,
+    )
+
+
 @app.post("/admin/query", dependencies=[Depends(_verify_api_key)])
 @limiter.limit(_RATE_LIMIT_ADMIN)
 async def admin_query(
