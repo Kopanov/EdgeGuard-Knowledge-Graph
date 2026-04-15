@@ -52,7 +52,7 @@ from neo4j_client import (
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
 
 try:
-    from metrics_server import record_pipeline_duration
+    from metrics_server import record_pipeline_duration, record_sync_event_accounting
 
     _METRICS_AVAILABLE = True
 except ImportError:
@@ -3110,6 +3110,10 @@ class MISPToNeo4jSync:
                 return 0  # unknown size → process first (safe default)
 
             sorted_events = sorted(events, key=_event_sort_key)
+            # Total input size — used by the coverage-gap alert to catch
+            # silently-skipped events (the exact failure mode of the
+            # 2026-04-14 NVD regression).
+            events_index_total = len(sorted_events)
 
             for ev_idx, event in enumerate(sorted_events):
                 event_id = event.get("id")
@@ -3395,6 +3399,21 @@ class MISPToNeo4jSync:
                     record_pipeline_duration("misp_to_neo4j", duration)
                 except Exception:
                     logger.debug("Metrics recording failed", exc_info=True)
+                # Export per-run event accounting so Prometheus can alert on
+                # the "processed + failed != total" invariant and on any
+                # failed events at all. Safe fallback if the import failed.
+                try:
+                    # events_index_total is assigned inside the try block
+                    # (line ~3072) before any processing. Defensive fallback
+                    # to 0 just in case this code path is ever reached via
+                    # a different control flow.
+                    record_sync_event_accounting(
+                        events_index_total=locals().get("events_index_total", 0),
+                        events_processed=int(self.stats.get("events_processed", 0)),
+                        events_failed=int(self.stats.get("events_failed", 0)),
+                    )
+                except Exception:
+                    logger.debug("Sync event accounting export failed", exc_info=True)
 
             # Update circuit breaker states in stats
             self.stats["circuit_breaker_states"] = {
