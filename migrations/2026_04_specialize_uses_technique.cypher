@@ -58,6 +58,9 @@
 //
 // Requires APOC. If APOC is unavailable, see the non-APOC variants at the
 // bottom of this file.
+//
+// Operator runbook: docs/MIGRATIONS.md (pre-flight, backup, execute,
+// post-flight, rollback instructions).
 // ============================================================================
 
 
