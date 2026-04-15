@@ -1269,7 +1269,25 @@ class MISPWriter:
                     f"[PUSH] Pushing batch {processed_batches}/{total_batches} ({progress_pct:.1f}%) - {elapsed:.1f}s elapsed, {eta_str}"
                 )
 
-                success, failed = self._push_batch(event_id, batch)
+                # After @retry_with_backoff exhausts its attempts on a
+                # persistent 5xx, _push_batch re-raises MispTransientError.
+                # Without this try/except the exception would crash out of
+                # push_items and skip every remaining batch and event in the
+                # push queue — strictly worse than the pre-fix behaviour
+                # where 5xx returned (0, len(attributes)) and the loop
+                # continued. Count the batch as failed and move on so one
+                # bad event doesn't destroy a whole NVD push.
+                try:
+                    success, failed = self._push_batch(event_id, batch)
+                except MispTransientError as exc:
+                    logger.error(
+                        "Batch %s for event %s failed after retries (%s) — counting batch as failed and continuing",
+                        processed_batches,
+                        event_id,
+                        exc,
+                    )
+                    success, failed = 0, len(batch)
+                    self.stats["errors"] += 1
                 total_success += success
                 total_failed += failed
 

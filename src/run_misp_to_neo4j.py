@@ -3260,12 +3260,20 @@ class MISPToNeo4jSync:
                             )
                             total_errors += 1
                             self.stats["events_failed"] += 1
-                        # Track Neo4j connection failures across this loop too.
+                        # Track Neo4j connection failures across this loop
+                        # too. The main event loop above resets the counter
+                        # on non-connection errors via an `else:` branch;
+                        # mirror that here so a transient MISP 5xx followed
+                        # by an unrelated error doesn't leave the counter
+                        # stuck and prematurely trigger the 3-strike
+                        # Neo4j-dead bail-out.
                         _exc_str = str(exc).lower()
                         if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
                             self._consecutive_conn_failures = (
                                 getattr(self, "_consecutive_conn_failures", 0) + 1
                             )
+                        else:
+                            self._consecutive_conn_failures = 0
                         # Free memory after failed large-event fetch (OOM recovery)
                         import gc
 
@@ -3343,11 +3351,17 @@ class MISPToNeo4jSync:
                         )
                         total_errors += 1
                         self.stats["events_failed"] += 1
+                        # Same symmetry as the main and skipped_large loops:
+                        # increment on connection errors, reset on everything
+                        # else so non-consecutive connection errors don't
+                        # accumulate and trigger the 3-strike bail-out.
                         _exc_str = str(exc).lower()
                         if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
                             self._consecutive_conn_failures = (
                                 getattr(self, "_consecutive_conn_failures", 0) + 1
                             )
+                        else:
+                            self._consecutive_conn_failures = 0
                         import gc
 
                         gc.collect()
