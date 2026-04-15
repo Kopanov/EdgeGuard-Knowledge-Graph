@@ -490,12 +490,17 @@ class URLhausCollector:
         # success-with-zero-count. This is the fix for the silent-data-loss
         # pattern where an all-mirrors-down outage showed up as a successful
         # Airflow task with zero indicators and never triggered an alert.
+        #
+        # For the non-MISP caller (push_to_misp=False), an empty list is
+        # indistinguishable from "feed had no data today" — raise instead so
+        # the failure is visible to enrichment workflows. Matches the
+        # AbuseIPDB pattern in collect().
         if not mirror_success and mirror_failures >= len(self.urls) and self.urls:
             err = f"URLhaus: all {mirror_failures} mirror(s) failed"
             logger.error(err)
             if push_to_misp:
                 return make_status("urlhaus", False, count=0, failed=0, error=err)
-            return []
+            raise RuntimeError(err)
 
         out = unique if limit is None else unique[:limit]
         if push_to_misp:
@@ -668,13 +673,15 @@ class CyberCureCollector:
             logger.warning("CyberCure returned 0 indicators — check feed availability")
 
         # All feeds failed → report collector failure instead of silent
-        # zero-count success.
+        # zero-count success. Raise for the non-MISP caller so failures
+        # are visible to enrichment workflows (same pattern as URLhaus
+        # above and AbuseIPDB in its own collect()).
         if feed_success_count == 0 and feed_failures >= len(self.feeds) and self.feeds:
             err = f"CyberCure: all {feed_failures} feed(s) failed"
             logger.error(err)
             if push_to_misp:
                 return make_status("cybercure", False, count=0, failed=0, error=err)
-            return []
+            raise RuntimeError(err)
 
         if push_to_misp:
             if not results:
