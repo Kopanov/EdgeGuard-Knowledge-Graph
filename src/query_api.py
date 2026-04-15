@@ -880,10 +880,14 @@ async def stix_export(
         elif ot == "cve":
             bundle = exporter.export_cve(identifier)
         else:
+            # Static error string (no f-string interpolation of the URL
+            # path parameter). Every other HTTPException in this file uses
+            # a fixed generic message; bugbot caught this as the only
+            # f-string `detail` and flagged it for consistency with the
+            # project convention.
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported object_type '{object_type}'. "
-                "Use one of: indicator, actor, technique, cve.",
+                detail="Unsupported object_type. Use one of: indicator, actor, technique, cve.",
             )
     except HTTPException:
         raise
