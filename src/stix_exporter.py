@@ -39,6 +39,12 @@ import stix2
 
 logger = logging.getLogger(__name__)
 
+# Per-query timeout (seconds). Matches ``_NEO4J_QUERY_TIMEOUT`` in
+# ``query_api.py`` so a pathological export can't tie up the request
+# handler indefinitely — the driver aborts the query on timeout and the
+# caller surfaces the usual Neo4j timeout error.
+_STIX_QUERY_TIMEOUT = 300
+
 # ---------------------------------------------------------------------------
 # Deterministic IDs
 # ---------------------------------------------------------------------------
@@ -134,23 +140,34 @@ class StixExporter:
         Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability,
         USES_TECHNIQUE→Technique, TARGETS→Sector.
         """
+        # Each OPTIONAL MATCH is aggregated into a collect() before the next
+        # one starts. Without the WITH ... collect() fence pattern the four
+        # OPTIONAL MATCH clauses form a Cartesian product — every row from
+        # stage N is multiplied by every row in stage N+1, so a well-
+        # connected indicator (a C2 IP with 10 malware × 20 CVEs × 15
+        # techniques × 5 sectors = 15 000 intermediate rows) blows up long
+        # before the outer DISTINCT collapses them. Same pattern as the
+        # round-2/round-4 fixes to export_threat_actor and export_technique.
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
             WHERE i.edgeguard_managed = true
-            OPTIONAL MATCH (i)-[rim:INDICATES]->(m:Malware)
+            OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
               WHERE m.edgeguard_managed = true
-            OPTIONAL MATCH (i)-[rie:EXPLOITS]->(v)
+            WITH i, collect(DISTINCT m) AS malware
+            OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
               WHERE (v:CVE OR v:Vulnerability)
                 AND v.edgeguard_managed = true
-            OPTIONAL MATCH (i)-[rit:USES_TECHNIQUE|USES]->(t:Technique)
+            WITH i, malware, collect(DISTINCT v) AS vulns
+            OPTIONAL MATCH (i)-[:USES_TECHNIQUE|USES]->(t:Technique)
               WHERE t.edgeguard_managed = true
-            OPTIONAL MATCH (i)-[ris:TARGETS]->(s:Sector)
+            WITH i, malware, vulns, collect(DISTINCT t) AS techniques
+            OPTIONAL MATCH (i)-[:TARGETS]->(s:Sector)
               WHERE s.edgeguard_managed = true
             RETURN i AS seed,
-                   collect(DISTINCT m) AS malware,
-                   collect(DISTINCT v) AS vulns,
-                   collect(DISTINCT t) AS techniques,
+                   malware,
+                   vulns,
+                   techniques,
                    collect(DISTINCT s) AS sectors
             """,
             {"value": value},
@@ -284,6 +301,13 @@ class StixExporter:
             m_sdo_id = mal_ids.get(md.get("name", "")) or self._add(objects, self._node_to_sdo("Malware", md))
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
+            # _add returns Optional[str] (None when the sdo is None or was
+            # deduplicated away), so guard before building the SRO. This
+            # is a no-op in practice because the Malware SDO always gets
+            # an ID, but it keeps mypy honest and avoids a crash if the
+            # invariant ever drifts.
+            if m_sdo_id is None:
+                continue
             self._add(
                 objects,
                 self._edge_to_sro("uses", m_sdo_id, t_sdo["id"]),
@@ -468,7 +492,9 @@ class StixExporter:
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
         stix_id = _deterministic_id("malware", name)
-        malware_types = _listify(props.get("malware_types") or ["unknown"])
+        # _listify returns Optional[list[str]]; fall back to the default so
+        # the `any(...)` iteration below can't hit None.
+        malware_types = _listify(props.get("malware_types") or ["unknown"]) or ["unknown"]
         is_family = any("family" in (mt or "").lower() for mt in malware_types) or bool(props.get("is_family"))
         obj = stix2.Malware(
             id=stix_id,
@@ -652,7 +678,7 @@ class StixExporter:
             logger.warning("StixExporter: Neo4j driver not connected")
             return []
         with driver.session(default_access_mode="READ") as session:
-            result = session.run(cypher, **params)
+            result = session.run(cypher, **params, timeout=_STIX_QUERY_TIMEOUT)
             return [dict(record) for record in result]
 
 

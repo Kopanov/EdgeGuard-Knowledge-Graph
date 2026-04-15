@@ -160,6 +160,59 @@ def test_export_technique_uses_with_aggregation_to_avoid_cartesian():
     assert "WITH t\n" in q or "WITH t " in q
 
 
+def test_export_indicator_uses_with_aggregation_to_avoid_cartesian():
+    """Regression test for bugbot round-5 finding: the export_indicator
+    Cypher chained four OPTIONAL MATCH clauses without intermediate
+    aggregation, producing an O(malware × vulns × techniques × sectors)
+    Cartesian product for well-connected indicators. Same pattern as the
+    round-2/round-4 fixes to export_threat_actor and export_technique."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_indicator("1.2.3.4")
+    q = client.driver._session.last_cypher
+    # Each collection must be folded into a WITH before the next OPTIONAL MATCH.
+    assert "collect(DISTINCT m) AS malware" in q
+    assert "collect(DISTINCT v) AS vulns" in q
+    assert "collect(DISTINCT t) AS techniques" in q
+    # First WITH must be between the seed match and the first OPTIONAL MATCH.
+    assert "WITH i, collect(DISTINCT m) AS malware" in q
+
+
+def test_stix_exporter_passes_query_timeout():
+    """Regression test for bugbot round-5 finding: _run was calling
+    session.run without a timeout, so a pathological export query could
+    hang the request handler indefinitely. Every other session.run call
+    in query_api.py and neo4j_client.py passes a timeout — the exporter
+    now matches that pattern."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_indicator("1.2.3.4")
+    # FakeSession.run captures every keyword arg into last_params. In
+    # production, session.run(cypher, **query_params, timeout=300) puts
+    # `timeout` into that same **kwargs, so asserting on last_params is
+    # how we verify the exporter sets it.
+    last_params = client.driver._session.last_params
+    assert "timeout" in last_params, "session.run must be called with an explicit timeout"
+    assert isinstance(last_params["timeout"], (int, float))
+    assert last_params["timeout"] > 0
+
+
 def test_actor_with_attributed_malware_emits_attributed_to_sro():
     rows = [
         {
