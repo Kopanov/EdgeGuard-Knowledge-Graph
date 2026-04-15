@@ -3274,9 +3274,7 @@ class MISPToNeo4jSync:
                         # Neo4j-dead bail-out.
                         _exc_str = str(exc).lower()
                         if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
-                            self._consecutive_conn_failures = (
-                                getattr(self, "_consecutive_conn_failures", 0) + 1
-                            )
+                            self._consecutive_conn_failures = getattr(self, "_consecutive_conn_failures", 0) + 1
                         else:
                             self._consecutive_conn_failures = 0
                         # Free memory after failed large-event fetch (OOM recovery)
@@ -3362,9 +3360,7 @@ class MISPToNeo4jSync:
                         # accumulate and trigger the 3-strike bail-out.
                         _exc_str = str(exc).lower()
                         if "connection" in _exc_str or "refused" in _exc_str or "unavailable" in _exc_str:
-                            self._consecutive_conn_failures = (
-                                getattr(self, "_consecutive_conn_failures", 0) + 1
-                            )
+                            self._consecutive_conn_failures = getattr(self, "_consecutive_conn_failures", 0) + 1
                         else:
                             self._consecutive_conn_failures = 0
                         import gc
