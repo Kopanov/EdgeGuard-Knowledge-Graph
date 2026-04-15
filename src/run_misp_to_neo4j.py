@@ -3138,10 +3138,17 @@ class MISPToNeo4jSync:
                 event_info = event.get("info", "")
 
                 if event_id is None:
+                    # Count as failed so the coverage-gap invariant holds:
+                    # events_index_total == events_processed + events_failed.
+                    # Otherwise the EdgeGuardSyncCoverageGap Prometheus alert
+                    # fires false positives on every baseline run that hits
+                    # a malformed MISP index row.
                     logger.warning(
                         "Skipping MISP row with no event id (info=%r) — check index/search response shape",
                         (event_info or "")[:120],
                     )
+                    total_errors += 1
+                    self.stats["events_failed"] += 1
                     continue
 
                 # Check attribute count from index metadata before fetching
