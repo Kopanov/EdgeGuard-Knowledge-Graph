@@ -183,11 +183,12 @@ Consequences:
 3. **`intrusion-set` vs `threat-actor`.** Default to `intrusion-set`.
    Partners that expect `threat-actor` will need to map the type on
    their side.
-4. **Zone/sector metadata.** The EdgeGuard zone system uses tags
-   (`healthcare`, `energy`, `finance`, `global`). We do not currently
-   emit these as `x_edgeguard_zones` custom properties. Should we? The
-   helper `apply_edgeguard_zone_metadata_to_stix_dict` exists and could
-   be invoked per object if yes.
+4. ~~**Zone/sector metadata.**~~ **Resolved — we emit them.** Every
+   SDO built by `_node_to_sdo` now carries an `x_edgeguard_zones`
+   custom property populated from the source Neo4j node's `zone` list.
+   Objects with no zones omit the key entirely to keep bundle size
+   flat. See `_attach_zones` in `src/stix_exporter.py`. ResilMesh can
+   filter bundles by sector without traversing the graph.
 5. **CVSS bridging.** ResilMesh stores CVSSv* as separate nodes linked
    to CVE via `HAS_CVSS_v*`. STIX has no first-class CVSS SDO. For now
    we flatten nothing — CVSS stays on the ResilMesh side. Confirm this

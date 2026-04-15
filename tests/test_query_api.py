@@ -38,3 +38,26 @@ def test_health_endpoint_returns_version():
     # Version may or may not be present depending on package_meta availability
     # but status should always be there
     assert data["status"] in ("ok", "degraded")
+
+
+def test_stix_types_discovery_endpoint():
+    """/stix/types is the ResilMesh-facing discovery endpoint: it must
+    return the media type, the supported depth values, and one entry
+    per supported object type — each carrying a working example
+    identifier so a smoke test can curl straight from the response."""
+    response = client.get("/stix/types")
+    # _API_KEY is unset in the test harness (see header warning above)
+    # so the endpoint is unauthenticated here.
+    assert response.status_code == 200
+    data = response.json()
+    assert data["media_type"] == "application/stix+json;version=2.1"
+    assert data["default_depth"] == 2
+    assert data["supported_depths"] == [1, 2]
+    types = {t["name"] for t in data["object_types"]}
+    assert types == {"indicator", "actor", "technique", "cve"}
+    # Every entry must carry an example identifier — the smoke script
+    # reads these to drive the /stix/export calls.
+    for entry in data["object_types"]:
+        assert entry["example"]
+        assert entry["primary_relation"]
+        assert entry["returns"]

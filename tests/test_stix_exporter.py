@@ -445,3 +445,188 @@ def test_empty_bundle_when_seed_not_found():
     bundle = exporter.export_indicator("nothing-here")
     assert bundle["type"] == "bundle"
     assert bundle["objects"] == []
+
+
+# ---------------------------------------------------------------------------
+# ResilMesh-quickstart features: zones, depth, provenance
+# ---------------------------------------------------------------------------
+
+
+def test_zone_tags_attached_as_custom_property_on_sdo():
+    """Neo4j nodes with a `zone` list should emit `x_edgeguard_zones`
+    on the SDO so ResilMesh can filter bundles by sector without
+    traversing the graph. Resolves proposal §7 open question 4."""
+    rows = [
+        {
+            "seed": {
+                "value": "1.2.3.4",
+                "indicator_type": "ipv4",
+                "zone": ["healthcare", "global"],
+            },
+            "malware": [
+                {"name": "Emotet", "malware_types": ["trojan"], "zone": ["finance"]},
+            ],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    exporter = StixExporter(_mk_client(rows))
+    bundle = exporter.export_indicator("1.2.3.4")
+    ind = _by_type(bundle, "indicator")[0]
+    mal = _by_type(bundle, "malware")[0]
+    assert ind["x_edgeguard_zones"] == ["healthcare", "global"]
+    assert mal["x_edgeguard_zones"] == ["finance"]
+
+
+def test_sdo_has_no_zone_property_when_node_has_no_zones():
+    """Don't add an empty `x_edgeguard_zones` on every SDO — omit the
+    key entirely so unaffected bundles stay lean."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_indicator("1.2.3.4")
+    ind = _by_type(bundle, "indicator")[0]
+    assert "x_edgeguard_zones" not in ind
+
+
+def test_bundle_carries_x_edgeguard_source_provenance():
+    """Every bundle — including empty ones — must carry bundle-level
+    provenance so ResilMesh can tell which EdgeGuard build produced it."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_indicator("1.2.3.4")
+    assert "x_edgeguard_source" in bundle
+    src = bundle["x_edgeguard_source"]
+    assert src["producer"] == "EdgeGuard Knowledge Graph"
+    assert src["exporter"] == "stix_exporter"
+    assert src["spec_version"] == "2.1"
+    assert "generated_at" in src
+    # generated_at is ISO 8601 Z-suffixed UTC
+    assert src["generated_at"].endswith("Z")
+    assert "T" in src["generated_at"]
+
+
+def test_empty_bundle_also_carries_provenance():
+    bundle = StixExporter(_mk_client([])).export_indicator("nothing-here")
+    assert bundle["objects"] == []
+    assert "x_edgeguard_source" in bundle
+
+
+def test_depth_1_indicator_skips_non_primary_relations():
+    """depth=1 returns only the seed + primary relation type
+    (INDICATES→Malware for indicators). CVE/technique/sector groups
+    are omitted — the bundle is a minimal smoke-test payload."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [{"name": "Emotet", "malware_types": ["trojan"]}],
+            "vulns": [{"cve_id": "CVE-2021-44228", "name": "Log4Shell"}],
+            "techniques": [{"mitre_id": "T1059", "name": "Cmd Scripting"}],
+            "sectors": [{"name": "finance"}],
+        }
+    ]
+    exporter = StixExporter(_mk_client(rows))
+    bundle_1 = exporter.export_indicator("1.2.3.4", depth=1)
+    bundle_2 = exporter.export_indicator("1.2.3.4", depth=2)
+    # Minimal bundle: seed + malware + the INDICATES SRO. Nothing else.
+    types_1 = {o["type"] for o in bundle_1["objects"]}
+    assert "indicator" in types_1
+    assert "malware" in types_1
+    assert "vulnerability" not in types_1
+    assert "attack-pattern" not in types_1
+    assert "identity" not in types_1  # sectors map to identity SDOs
+    # Full bundle has all of them (regression guard — default behavior
+    # is unchanged by the depth knob).
+    types_2 = {o["type"] for o in bundle_2["objects"]}
+    assert {"indicator", "malware", "vulnerability", "attack-pattern", "identity"} <= types_2
+
+
+def test_depth_1_actor_skips_techniques_and_campaigns():
+    rows = [
+        {
+            "seed": {"name": "APT28"},
+            "malware": [{"name": "X-Agent", "malware_types": ["trojan"]}],
+            "actor_tech": [{"mitre_id": "T1055", "name": "Process Injection"}],
+            "mal_tech": [],
+            "campaigns": [{"name": "PawnStorm"}],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_threat_actor("APT28", depth=1)
+    types = {o["type"] for o in bundle["objects"]}
+    assert "intrusion-set" in types
+    assert "malware" in types  # primary
+    assert "attack-pattern" not in types  # actor techniques omitted
+    assert "campaign" not in types  # campaigns omitted
+
+
+def test_depth_1_technique_skips_malware_tools_indicators():
+    rows = [
+        {
+            "seed": {"mitre_id": "T1059", "name": "Cmd Scripting"},
+            "actors": [{"name": "APT28"}],
+            "malware": [{"name": "Emotet", "malware_types": ["trojan"]}],
+            "tools": [{"name": "Cobalt Strike"}],
+            "indicators": [{"value": "1.2.3.4", "indicator_type": "ipv4"}],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_technique("T1059", depth=1)
+    types = {o["type"] for o in bundle["objects"]}
+    assert "attack-pattern" in types
+    assert "intrusion-set" in types  # primary
+    assert "malware" not in types
+    assert "tool" not in types
+    assert "indicator" not in types
+
+
+def test_depth_1_cve_skips_sectors():
+    rows = [
+        {
+            "seed": {"cve_id": "CVE-2021-44228", "name": "Log4Shell"},
+            "indicators": [{"value": "evil.com", "indicator_type": "domain"}],
+            "sectors": [{"name": "finance"}],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_cve("CVE-2021-44228", depth=1)
+    types = {o["type"] for o in bundle["objects"]}
+    assert "vulnerability" in types
+    assert "indicator" in types  # primary
+    assert "identity" not in types  # sector identity omitted
+    rels = _by_type(bundle, "relationship")
+    # No targets SRO (sector-related) in a depth=1 CVE bundle.
+    assert not any(r["relationship_type"] == "targets" for r in rels)
+
+
+def test_depth_default_preserves_legacy_behavior():
+    """Calling export_indicator() with no depth kwarg must match
+    depth=2 exactly — the knob is opt-in and must not break callers
+    that were written against the pre-depth API."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [{"name": "Emotet", "malware_types": ["trojan"]}],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    exporter = StixExporter(_mk_client(rows))
+    default = exporter.export_indicator("1.2.3.4")
+    explicit = exporter.export_indicator("1.2.3.4", depth=2)
+    # Object IDs and types must match. Bundle IDs differ (random).
+    ids_default = sorted(o["id"] for o in default["objects"])
+    ids_explicit = sorted(o["id"] for o in explicit["objects"])
+    assert ids_default == ids_explicit

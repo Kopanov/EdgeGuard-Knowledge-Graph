@@ -31,7 +31,9 @@ Key design decisions (see proposal doc for justification):
 
 from __future__ import annotations
 
+import datetime as _dt
 import logging
+import os
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -44,6 +46,19 @@ logger = logging.getLogger(__name__)
 # handler indefinitely — the driver aborts the query on timeout and the
 # caller surfaces the usual Neo4j timeout error.
 _STIX_QUERY_TIMEOUT = 300
+
+# Default traversal depth for export_* methods. depth=2 matches the
+# behavior shipped before the knob existed — full 1-hop neighborhood
+# plus any documented second-level expansion (e.g. actor→malware→
+# technique). depth=1 returns only the seed plus its primary relation
+# type (the first group each exporter processes) and is intended for
+# ResilMesh smoke tests that want a minimal bundle.
+_DEFAULT_DEPTH = 2
+
+# Optional git SHA baked into bundle provenance so ResilMesh can tell
+# exactly which EdgeGuard build produced a given bundle. Populated from
+# the EDGEGUARD_GIT_SHA env var at import time; empty string if unset.
+_GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 
 # ---------------------------------------------------------------------------
 # Deterministic IDs
@@ -134,11 +149,19 @@ class StixExporter:
     # Public API
     # ------------------------------------------------------------------
 
-    def export_indicator(self, value: str) -> Dict[str, Any]:
+    def export_indicator(self, value: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
         """Bundle one indicator + its 1-hop neighbourhood.
 
         Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability,
         USES_TECHNIQUE→Technique, TARGETS→Sector.
+
+        ``depth=1`` returns a minimal bundle with only the indicator's
+        primary relation type (``INDICATES→Malware``). ``depth=2``
+        (the default) returns the full 1-hop neighborhood across all
+        four relation types. The Cypher always fetches everything —
+        ``depth`` is a Python-side filter that saves bundle size, not
+        query time. A future optimisation would push the filter into
+        the query itself.
         """
         # Each OPTIONAL MATCH is aggregated into a collect() before the next
         # one starts. Without the WITH ... collect() fence pattern the four
@@ -190,6 +213,10 @@ class StixExporter:
                 objects,
                 self._edge_to_sro("indicates", seed_sdo["id"], m_sdo["id"]),
             )
+        # depth=1 short-circuit: bundle contains only the primary
+        # relation type (INDICATES→Malware). See the docstring above.
+        if depth < 2:
+            return self._bundle(objects.values())
         for v in _nonnull(row["vulns"]):
             v_sdo = self._node_to_sdo("Vulnerability", dict(v))
             self._add(objects, v_sdo)
@@ -219,8 +246,13 @@ class StixExporter:
 
         return self._bundle(objects.values())
 
-    def export_threat_actor(self, name: str) -> Dict[str, Any]:
+    def export_threat_actor(self, name: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
         """Bundle centred on a ThreatActor + attributed malware + TTPs + campaigns.
+
+        ``depth=1`` returns only actor + attributed malware (primary
+        relation). ``depth=2`` (default) adds actor techniques, the
+        malware→technique chain, and campaigns. See ``export_indicator``
+        for the general semantics.
 
         The query uses a ``WITH ... collect(DISTINCT ...)`` step between
         every ``OPTIONAL MATCH`` to avoid the Cartesian product that
@@ -284,6 +316,10 @@ class StixExporter:
                 self._edge_to_sro("attributed-to", m_sdo["id"], seed_sdo["id"]),
             )
 
+        # depth=1: primary relation only (actor + attributed malware).
+        if depth < 2:
+            return self._bundle(objects.values())
+
         for t in _nonnull(row["actor_tech"]):
             t_sdo = self._node_to_sdo("Technique", dict(t))
             self._add(objects, t_sdo)
@@ -327,8 +363,13 @@ class StixExporter:
 
         return self._bundle(objects.values())
 
-    def export_technique(self, mitre_id: str) -> Dict[str, Any]:
+    def export_technique(self, mitre_id: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
         """Bundle centred on a Technique + everything that uses it.
+
+        ``depth=1`` returns the technique plus only the ThreatActors
+        that employ it (primary relation). ``depth=2`` (default) also
+        includes Malware, Tools, and Indicators. See ``export_indicator``
+        for the general semantics.
 
         Uses ``WITH ... collect(DISTINCT ...) AS ...`` between every
         ``OPTIONAL MATCH`` for the same reason as ``export_threat_actor``:
@@ -380,6 +421,9 @@ class StixExporter:
             a_sdo = self._node_to_sdo("ThreatActor", dict(a))
             self._add(objects, a_sdo)
             self._add(objects, self._edge_to_sro("uses", a_sdo["id"], seed_sdo["id"]))
+        # depth=1: primary relation only (technique + attributed actors).
+        if depth < 2:
+            return self._bundle(objects.values())
         for m in _nonnull(row["malware"]):
             m_sdo = self._node_to_sdo("Malware", dict(m))
             self._add(objects, m_sdo)
@@ -395,8 +439,13 @@ class StixExporter:
 
         return self._bundle(objects.values())
 
-    def export_cve(self, cve_id: str) -> Dict[str, Any]:
-        """Bundle centred on a CVE/Vulnerability + exploiting indicators + affected sectors."""
+    def export_cve(self, cve_id: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
+        """Bundle centred on a CVE/Vulnerability + exploiting indicators + affected sectors.
+
+        ``depth=1`` returns the CVE plus only the exploiting Indicators
+        (primary relation). ``depth=2`` (default) also includes affected
+        sectors. See ``export_indicator`` for the general semantics.
+        """
         rows = self._run(
             """
             MATCH (v)
@@ -428,6 +477,9 @@ class StixExporter:
             i_sdo = self._node_to_sdo("Indicator", dict(i))
             self._add(objects, i_sdo)
             self._add(objects, self._edge_to_sro("indicates", i_sdo["id"], seed_sdo["id"]))
+        # depth=1: primary relation only (CVE + exploiting indicators).
+        if depth < 2:
+            return self._bundle(objects.values())
         for s in _nonnull(row["sectors"]):
             s_sdo = self._node_to_sdo("Sector", dict(s))
             self._add(objects, s_sdo)
@@ -446,30 +498,40 @@ class StixExporter:
         schema and emits correct timestamps, then serialise back to a
         plain dict for the bundle (``stix2.parsing.dict_to_stix2`` would
         round-trip but the dict form is what FastAPI serialises anyway).
+
+        After the SDO is built, any EdgeGuard zone tags on the source
+        node (stored in Neo4j as ``n.zone`` list — ``healthcare``,
+        ``energy``, ``finance``, ``global``) are attached to the SDO as
+        an ``x_edgeguard_zones`` custom property. This resolves open
+        question §7.4 of the proposal doc: ResilMesh can filter bundles
+        by sector without traversing the graph itself.
         """
         label = label.lower()
         if label == "indicator":
-            return self._indicator_sdo(props)
-        if label == "malware":
-            return self._malware_sdo(props)
-        if label == "threatactor":
-            return self._actor_sdo(props)
-        if label == "technique":
-            return self._technique_sdo(props)
-        if label == "tool":
-            return self._tool_sdo(props)
-        if label == "campaign":
-            return self._campaign_sdo(props)
-        if label in ("cve", "vulnerability"):
-            return self._vulnerability_sdo(props)
-        if label == "sector":
-            return self._sector_sdo(props)
-        # Unknown — never happens with well-formed graph, but fail soft.
-        return {
-            "type": "x-edgeguard-unknown",
-            "id": _deterministic_id("x-edgeguard-unknown", str(props)),
-            "spec_version": "2.1",
-        }
+            sdo = self._indicator_sdo(props)
+        elif label == "malware":
+            sdo = self._malware_sdo(props)
+        elif label == "threatactor":
+            sdo = self._actor_sdo(props)
+        elif label == "technique":
+            sdo = self._technique_sdo(props)
+        elif label == "tool":
+            sdo = self._tool_sdo(props)
+        elif label == "campaign":
+            sdo = self._campaign_sdo(props)
+        elif label in ("cve", "vulnerability"):
+            sdo = self._vulnerability_sdo(props)
+        elif label == "sector":
+            sdo = self._sector_sdo(props)
+        else:
+            # Unknown — never happens with well-formed graph, but fail soft.
+            sdo = {
+                "type": "x-edgeguard-unknown",
+                "id": _deterministic_id("x-edgeguard-unknown", str(props)),
+                "spec_version": "2.1",
+            }
+        _attach_zones(sdo, props)
+        return sdo
 
     # ---- per-type constructors ----------------------------------------
 
@@ -649,10 +711,17 @@ class StixExporter:
 
     def _bundle(self, objects: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         bundle_id = "bundle--" + str(uuid.uuid4())
+        # Bundle-level provenance — lets ResilMesh verify exactly which
+        # EdgeGuard build produced a bundle and when, so they can diff
+        # bundles across versions and correlate with their own ingest
+        # timestamps. Uses custom properties prefixed ``x_edgeguard_`` so
+        # the bundle still validates against STIX 2.1 (OASIS 3.7.2 allows
+        # producer-specific custom properties).
         return {
             "type": "bundle",
             "id": bundle_id,
             "objects": list(objects),
+            "x_edgeguard_source": _bundle_provenance(),
         }
 
     def _empty_bundle(self) -> Dict[str, Any]:
@@ -699,6 +768,63 @@ def _listify(value: Any) -> Optional[List[str]]:
 def _nonnull(items: Any) -> List[Any]:
     """Drop None entries from a collect() result."""
     return [x for x in (items or []) if x is not None]
+
+
+def _extract_zones(props: Dict[str, Any]) -> List[str]:
+    """Return the EdgeGuard zone list from a Neo4j node dict.
+
+    Neo4j stores zones on ``n.zone`` (array of strings like
+    ``["healthcare", "global"]``) per ``neo4j_client.py`` merge
+    semantics. Fall back to ``zones`` (plural) if present, and accept a
+    scalar string for defensive tolerance. Empty/null → ``[]``.
+    """
+    raw = props.get("zone")
+    if raw is None:
+        raw = props.get("zones")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [raw] if raw else []
+    if isinstance(raw, (list, tuple)):
+        return [str(z) for z in raw if z]
+    return []
+
+
+def _bundle_provenance() -> Dict[str, Any]:
+    """Build the bundle-level ``x_edgeguard_source`` dict.
+
+    Kept in a module-level helper so tests can freeze the timestamp by
+    monkeypatching ``_utcnow``. ``git_sha`` is read from the module
+    constant so it is stable for a given process lifetime.
+    """
+    return {
+        "producer": "EdgeGuard Knowledge Graph",
+        "exporter": "stix_exporter",
+        "generated_at": _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "git_sha": _GIT_SHA or None,
+        "spec_version": "2.1",
+    }
+
+
+def _utcnow() -> _dt.datetime:
+    """Return the current UTC time. Overridable in tests."""
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
+def _attach_zones(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
+    """Attach ``x_edgeguard_zones`` to an SDO dict when the source node has zones.
+
+    In-place mutation. The custom property is omitted entirely when the
+    node has no zones — this keeps bundles from growing an empty field
+    on every single object. The stix2 SDK serialisation does not round-
+    trip this custom property (it is not declared on the Python class),
+    so we set it on the already-serialised dict.
+    """
+    if not isinstance(sdo, dict):
+        return
+    zones = _extract_zones(props)
+    if zones:
+        sdo["x_edgeguard_zones"] = zones
 
 
 def _to_dict(stix_obj: Any) -> Dict[str, Any]:
