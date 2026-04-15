@@ -18,7 +18,7 @@
 |--------------|------------|------------------------|
 | **Integration contract** (who owns which nodes, ISIM, `edgeguard_managed`) | [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) | Long prose in README — link instead |
 | **Platform / NATS diagram** (how alerts flow) | [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md) | Keep one diagram authoritative |
-| **CSV / Malware→Technique `USES`** vs ResilMesh files | [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) | Cross-link only |
+| **CSV / Malware→Technique `IMPLEMENTS_TECHNIQUE`** (previously generic `USES`, split in 2026-04) | [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) + [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) | Cross-link only |
 | **MISP feeds + discovery + troubleshooting** | [MISP_SOURCES.md](MISP_SOURCES.md) | AIRFLOW_DAGS — keep only task-level troubleshooting |
 | **Which limit is which (500 vs baseline caps)** | [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) | README duplicates the short table only |
 

@@ -113,9 +113,9 @@ flowchart LR
 
 ```mermaid
 graph TB
-    TA[ThreatActor] -->|USES| T[Technique]
+    TA[ThreatActor] -->|EMPLOYS_TECHNIQUE| T[Technique]
     TA -->|RUNS| CAMP[Campaign]
-    M[Malware] -->|USES| T
+    M[Malware] -->|IMPLEMENTS_TECHNIQUE| T
     M -->|ATTRIBUTED_TO| TA
     M -->|PART_OF| CAMP
     I[Indicator] -->|INDICATES| M
@@ -129,7 +129,13 @@ graph TB
     CVE -->|REFERS_TO| V
     CVE -->|HAS_CVSS| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
     T -->|IN_TACTIC| TAC[Tactic]
-    TOOL[Tool] -->|USES| T
+    TOOL[Tool] -->|IMPLEMENTS_TECHNIQUE| T
+
+    %% Edge legend:
+    %%   EMPLOYS_TECHNIQUE    = attribution  (who is doing the TTP)
+    %%   IMPLEMENTS_TECHNIQUE = capability   (what the code/tool can do)
+    %%   USES_TECHNIQUE       = observation  (indicator observed tied to a TTP)
+    %% Split from a generic USES edge in the 2026-04 refactor.
 
     classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff
     classDef vuln fill:#dc2626,stroke:#b91c1c,color:#fff

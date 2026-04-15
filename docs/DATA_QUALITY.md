@@ -62,7 +62,7 @@ WHERE m.attributed_to = a.name OR a.name = m.attributed_to
 | Partial | 0.6 | One field contains another |
 | Fuzzy | 0.3 | Loose matching (deprecated) |
 
-**Malware ↔ Technique:** A previous **`CAN_USE`** / description-based approach was **not** used — it risked the same class of false links. **`(Malware)-[:USES]->(Technique)`** is created only from **MITRE STIX `uses`** relationships, stored as **`uses_techniques`** (with MISP **`MITRE_USES_TECHNIQUES:`** round-trip), matching **`Technique.mitre_id`** exactly in `build_relationships.py`.
+**Malware ↔ Technique:** A previous **`CAN_USE`** / description-based approach was **not** used — it risked the same class of false links. **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** is created only from **MITRE STIX `uses`** relationships, stored as **`uses_techniques`** (with MISP **`MITRE_USES_TECHNIQUES:`** round-trip), matching **`Technique.mitre_id`** exactly in `build_relationships.py`. *(Prior to 2026-04 this edge was a generic `USES`; it was renamed to `IMPLEMENTS_TECHNIQUE` to distinguish malware/tool capability from actor attribution — see [`KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation).)*
 
 ### Fix 3: Audit Logging for Confidence Skips
 **Problem**: When lower-confidence source data was ignored, no audit trail existed.
@@ -78,7 +78,8 @@ Now reports average confidence per relationship type:
 ```python
 # Output:
 # ATTRIBUTED_TO: 15 (avg confidence: 1.00)
-# USES: 42 (avg confidence: 1.00)
+# EMPLOYS_TECHNIQUE: 27 (avg confidence: 0.95)
+# IMPLEMENTS_TECHNIQUE: 15 (avg confidence: 0.95)
 ```
 
 ---

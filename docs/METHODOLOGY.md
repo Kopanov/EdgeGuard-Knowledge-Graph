@@ -278,7 +278,9 @@ final_confidence = source_confidence * data_quality_factor
 
 | Relationship | Source | Logic |
 |-------------|--------|-------|
-| `USES` | MITRE | ThreatActor uses Technique (from STIX) |
+| `EMPLOYS_TECHNIQUE` | MITRE | ThreatActor employs Technique (attribution — from STIX `uses`). *Split from generic `USES` in 2026-04.* |
+| `IMPLEMENTS_TECHNIQUE` | MITRE | Malware / Tool implements Technique (capability — from STIX `uses`). *Split from generic `USES` in 2026-04.* |
+| `USES_TECHNIQUE` | OTX | Indicator observed tied to Technique (from `attack_ids`) |
 | `ATTRIBUTED_TO` | OTX | Indicator associated with Malware (from pulse) |
 | `RESOLVES_TO` | DNS | Domain resolves to IP (needs DNS data) |
 | `EXPLOITS` | CVEs | Indicator exploits Vulnerability (exact CVE ID match) |
@@ -286,7 +288,7 @@ final_confidence = source_confidence * data_quality_factor
 
 ### 5.2 Relationship Quality
 
-- **USES**: High quality - direct from MITRE STIX
+- **EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE**: High quality - direct from MITRE STIX `uses` relationships. The split into attribution (actor→technique) and capability (malware/tool→technique) was made in 2026-04 to disambiguate the two semantics for Cypher queries and LLM/GraphRAG retrieval; both collapse back to STIX `uses` on export.
 - **ATTRIBUTED_TO**: Medium quality - inferred from OTX pulse
 - **EXPLOITS**: High quality - deterministic CVE ID match (confidence 1.0)
 - **INDICATES**: Medium quality - MISP co-occurrence (0.5) or malware_family name match (0.8)
@@ -343,7 +345,7 @@ Each node can have a text summary for LLM consumption:
 ```cypher
 // Generate summary for threat actor
 MATCH (a:ThreatActor {name: 'APT29'})
-OPTIONAL MATCH (a)-[:USES]->(t:Technique)
+OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
 RETURN a.name AS actor,
        a.aliases AS aliases,
        collect(t.name) AS techniques
@@ -427,7 +429,7 @@ CREATE INDEX actor_name IF NOT EXISTS FOR (a:ThreatActor) ON (a.name)
 
 EdgeGuard uses a **keyword-based sector classification** with word boundary matching to prevent false positives. Data is normalized to a standard schema, deduplicated by composite keys, and assigned confidence scores based on source reliability.
 
-The architecture supports multiple data sources, with MITRE providing the highest quality relationships (USES), and community sources (OTX, MISP) providing broad IOC coverage.
+The architecture supports multiple data sources, with MITRE providing the highest quality TTP relationships (`EMPLOYS_TECHNIQUE` for actors, `IMPLEMENTS_TECHNIQUE` for malware/tools — previously a single `USES` edge, split in 2026-04), and community sources (OTX, MISP) providing broad IOC coverage.
 
 Future enhancements include embedding-based classification for better context understanding and GraphRAG integration for natural language threat queries.
 

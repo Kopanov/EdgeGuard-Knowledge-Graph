@@ -54,10 +54,12 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              POST-SYNC (edgeguard_neo4j_sync + baseline)   │
-│  1. build_relationships.py — IOC↔malware/CVE, MITRE USES,  │
-│     OTX attack_ids → Technique (USES_TECHNIQUE),            │
+│  1. build_relationships.py —                                │
+│     Actor → Technique (EMPLOYS_TECHNIQUE, MITRE explicit),  │
+│     Malware/Tool → Technique (IMPLEMENTS_TECHNIQUE, MITRE), │
+│     Indicator → Technique (USES_TECHNIQUE, OTX attack_ids), │
+│     IOC↔malware/CVE,                                        │
 │     malware_family name match → Malware (INDICATES, 0.8),   │
-│     Tool → Technique (USES, MITRE explicit),                │
 │     co-occurrence INDICATES, sector edges                   │
 │  2. enrichment_jobs — campaigns (RUNS/PART_OF),            │
 │     confidence calibration, IOC decay (order inside module) │
@@ -131,9 +133,13 @@ All zone values are validated against `VALID_ZONES` in `config.py` before any wr
 
 `sync_to_neo4j()` merges parsed items in **Python-side chunks** to limit RAM on huge attribute counts. Env **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**: default **`500`**; **`0`** or **`all`** (case-insensitive) forces a **single pass** (legacy memory profile, **OOM risk** on tens of thousands of items — expert/debug only). `Neo4jClient.merge_*_batch` still UNWINDs in sub-batches. Relationship creation uses **`EDGEGUARD_REL_BATCH_SIZE`** and **`Neo4jClient.create_misp_relationships_batch`** (per-query error handling; partial success possible — see module docstring). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [HEARTBEAT.md](HEARTBEAT.md) for worker OOM vs Airflow “task failed” symptoms.
 
-### ThreatActor → Technique (USES) Relationship Source
+### ThreatActor / Malware / Tool → Technique Relationship Sources
 
-`(ThreatActor)-[:USES]->(Technique)` and **`(Malware)-[:USES]->(Technique)`** are built from the **explicit STIX `uses` relationship objects** in the MITRE ATT&CK bundle — **not** from substring / `CONTAINS` matching and **not** from cross-event co-occurrence (which yields 0 for actor/technique pairs). The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor** and **Malware** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` for both labels. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
+**`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`**, **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`**, and **`(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** are built from the **explicit STIX `uses` relationship objects** in the MITRE ATT&CK bundle — **not** from substring / `CONTAINS` matching and **not** from cross-event co-occurrence (which yields 0 for actor/technique pairs).
+
+> **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. See [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) for the rewrite path. The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
+
+The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
 
 ---
 
@@ -234,8 +240,9 @@ When data is pushed to MISP, it gets tagged with:
 | Relationship | From → To | How it is created |
 |---|---|---|
 | `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at` |
-| `USES` | ThreatActor → Technique | MITRE STIX **`uses`** → `uses_techniques` on actor → `build_relationships.py` |
-| `USES` | Malware → Technique | MITRE STIX **`uses`** → `uses_techniques` on malware (MISP **`MITRE_USES_TECHNIQUES:`**) → `build_relationships.py` |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` on malware/tool (MISP **`MITRE_USES_TECHNIQUES:`** round-trip for malware) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
+| `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
 | `ATTRIBUTED_TO` | Malware → ThreatActor | MITRE / MISP event data |
 | `INDICATES` | Indicator → Malware | MISP event co-occurrence (`misp_event_id` match) |
 | `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` |

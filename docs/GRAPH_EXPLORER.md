@@ -56,7 +56,11 @@ The explorer offers four pre-built views, each running a different Cypher query 
 **Cypher pattern:**
 ```cypher
 MATCH (m:Malware)-[r]->(i:Indicator)
-WHERE type(r) IN ['INDICATES', 'USES', 'DROPS']
+WHERE type(r) IN ['INDICATES', 'DROPS']
+-- Note: the legacy filter included 'USES', but USES never connected
+-- Malware→Indicator in our schema; it only ever went X→Technique.
+-- That generic USES was split into EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE
+-- in 2026-04; neither points to Indicator.
 ```
 
 ### Actors
@@ -69,8 +73,11 @@ WHERE type(r) IN ['INDICATES', 'USES', 'DROPS']
 
 **Cypher pattern:**
 ```cypher
-MATCH (a:ThreatActor)-[:USES]->(t:Technique)
+MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
 OPTIONAL MATCH (t)-[:IN_TACTIC]->(tac:Tactic)
+-- EMPLOYS_TECHNIQUE is the actor→technique edge since the 2026-04 split
+-- of the generic USES relationship. For malware/tool capability instead,
+-- use IMPLEMENTS_TECHNIQUE.
 ```
 
 ### Indicators
@@ -142,7 +149,7 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
     {"data": {"id": "malware:Emotet", "label": "Emotet", "type": "malware", "family": "Emotet"}}
   ],
   "edges": [
-    {"data": {"source": "malware:Emotet", "target": "indicator:192.168.1.1", "type": "USES"}}
+    {"data": {"source": "malware:Emotet", "target": "indicator:192.168.1.1", "type": "INDICATES"}}
   ],
   "stats": {"nodes": 42, "edges": 67}
 }
@@ -166,7 +173,7 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
 
 | Edge Type | Style | Color |
 |-----------|-------|-------|
-| `USES` | Solid, thick | Red |
+| `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` / `USES_TECHNIQUE` | Solid, thick | Red |
 | `BELONGS_TO` / `IN_ZONE` | Dashed | Teal |
 | `IN_TACTIC` | Dotted | Orange |
 

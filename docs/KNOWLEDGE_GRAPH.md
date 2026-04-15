@@ -50,9 +50,9 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 
 | Relationship | From → To | Source / Confidence |
 |---|---|---|
-| `USES` | ThreatActor → Technique | MITRE STIX explicit `uses` relationship (confidence 0.95) |
-| `USES` | Malware → Technique | MITRE STIX explicit `uses` relationship via `uses_techniques` (confidence 0.95) |
-| `USES` | Tool → Technique | MITRE STIX explicit `uses` relationship (confidence 0.95) |
+| `EMPLOYS_TECHNIQUE` | ThreatActor → Technique | **Attribution.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
+| `IMPLEMENTS_TECHNIQUE` | Malware → Technique | **Capability.** MITRE STIX explicit `uses` relationship via `uses_techniques` (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
+| `IMPLEMENTS_TECHNIQUE` | Tool → Technique | **Capability.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
 | `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` name matching |
 | `INDICATES` | Indicator → Malware | MISP event co-occurrence (confidence 0.5) **and** malware_family name match from ThreatFox/VT (confidence 0.8) |
 | `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag exact match (confidence 1.0) |
@@ -65,6 +65,18 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `IN_TACTIC` | Technique → Tactic | Kill-chain phase exact match (confidence 1.0) |
 | `HAS_CVSS_v2/v30/v31/v40` | CVE ↔ CVSS sub-nodes | Bidirectional (ResilMesh schema) |
 | `REFERS_TO` | CVE ↔ Vulnerability | Bidirectional bridge by cve_id (`enrichment_jobs.bridge_vulnerability_cve`) |
+
+### Technique edges: attribution vs capability vs observation
+
+Prior to 2026-04 the three X→Technique edges were a single generic `USES` relationship. They have since been split into specialized types so Cypher queries and LLM/GraphRAG retrieval can distinguish **who does it** from **what the code can do** from **what an indicator observes**:
+
+| Specialized type | Source | Semantic |
+|---|---|---|
+| `EMPLOYS_TECHNIQUE` | `ThreatActor` (or `Campaign`) | Attribution — e.g. *"APT28 employs T1059"* |
+| `IMPLEMENTS_TECHNIQUE` | `Malware` or `Tool` | Capability — e.g. *"Mimikatz implements T1059"* |
+| `USES_TECHNIQUE` | `Indicator` | Observation — e.g. *"this IOC was observed executing T1059"* (from OTX `attack_ids`) |
+
+When emitting STIX 2.1, all three collapse back to the standard `relationship_type: "uses"` predicate with the source/target types providing the same disambiguation — see `docs/STIX21_EXPORTER_PROPOSAL.md` (planned). The migration for existing graphs lives at [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher).
 
 ---
 
@@ -311,7 +323,7 @@ ORDER BY v.cvss_score DESC
 ```cypher
 MATCH (ind:Indicator {indicator_type: 'ipv4', value: '192.168.1.100'})-[:INDICATES]->(m:Malware)
 MATCH (m)-[:ATTRIBUTED_TO]->(ta:ThreatActor)
-MATCH (ta)-[:USES]->(tech:Technique)
+MATCH (ta)-[:EMPLOYS_TECHNIQUE]->(tech:Technique)
 OPTIONAL MATCH (tech)-[:IN_TACTIC]->(tactic:Tactic)
 RETURN ind.value, m.name, ta.name, collect(DISTINCT tech.name) AS techniques, collect(DISTINCT tactic.name) AS tactics
 ```

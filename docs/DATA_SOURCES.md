@@ -134,7 +134,7 @@
 - Techniques (300)
 - Threat Actors (100)
 - Malware (100)
-- **Relationships** (1,459 USES links)
+- **Relationships** — 1,459 TTP edges split into `EMPLOYS_TECHNIQUE` (Actor→Technique, attribution) and `IMPLEMENTS_TECHNIQUE` (Malware/Tool→Technique, capability). Prior to 2026-04 these were a single generic `USES` edge.
 
 **How classified:**
 - N/A - these are TTP entities, not sector-specific
