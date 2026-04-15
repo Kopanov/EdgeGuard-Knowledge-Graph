@@ -30,6 +30,7 @@ from collectors.collector_utils import (
     make_status,
     optional_api_key_effective,
     request_with_rate_limit_retries,
+    retry_with_backoff,
     status_after_misp_push,
 )
 from config import (
@@ -114,6 +115,31 @@ class VirusTotalCollector:
                 )
             logger.error(f"VirusTotal collection error: {e}")
             indicators = self._collect_demo_data(limit)
+        except (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ) as net_exc:
+            # Network outage after @retry_with_backoff exhausted. Do NOT
+            # silently fall back to demo data — return a proper failure
+            # status so Airflow retries the task and Prometheus records
+            # the failure. (Pre-fix behaviour pushed demo data to MISP
+            # tagged as real VT enrichment during any outage.)
+            logger.error(
+                "VirusTotal: network failure after retries (%s: %s) — reporting as collector failure",
+                type(net_exc).__name__,
+                net_exc,
+            )
+            if push_to_misp:
+                return make_status(
+                    "virustotal_enrich",
+                    False,
+                    count=0,
+                    failed=0,
+                    error=f"{type(net_exc).__name__}: {net_exc}",
+                )
+            raise
         except Exception as e:
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal enrich: auth/access denied — skipping (optional): {e}")
@@ -135,55 +161,71 @@ class VirusTotalCollector:
 
         return indicators
 
+    @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _collect_from_files(self, limit):
-        """Collect recent malware files from VT"""
+        """Collect recent malware files from VT.
+
+        Previously this method caught ``Exception`` broadly and returned
+        an empty list, which meant the outer ``collect()`` silently fell
+        back to DEMO DATA on any network error and pushed fake hashes to
+        MISP tagged as real VT intelligence. Now transient network errors
+        propagate to ``@retry_with_backoff`` (4 total attempts at 5/10/20s)
+        and, on final exhaustion, bubble up to ``collect()`` which routes
+        them to a proper failure status instead of the demo fallback.
+        """
         indicators = []
 
         # Rate limit check
         self.rate_limiter.wait_if_needed()
 
-        try:
-            # Get recent files analyzed by VT
-            response = request_with_rate_limit_retries(
-                "GET",
-                f"{self.base_url}/files",
-                session=self.session,
-                params={"limit": min(limit, 10)},  # API has strict limits
-                timeout=30,
-                max_rate_limit_retries=3,
-                fallback_delay_sec=60.0,
-                retry_on_403=False,
-                context="VirusTotal",
+        # Get recent files analyzed by VT. Do NOT catch generic Exception
+        # here — let transient network errors reach the retry decorator,
+        # and let terminal errors reach collect() for failure reporting.
+        response = request_with_rate_limit_retries(
+            "GET",
+            f"{self.base_url}/files",
+            session=self.session,
+            params={"limit": min(limit, 10)},  # API has strict limits
+            timeout=(15, 30),  # tuple: connect=15s, read=30s
+            max_rate_limit_retries=3,
+            fallback_delay_sec=60.0,
+            retry_on_403=False,
+            context="VirusTotal",
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            for item in data.get("data", []):
+                attrs = item.get("attributes", {})
+                hashes = attrs.get("last_analysis_stats", {})
+
+                # Get the hash with most info
+                if attrs.get("sha256"):
+                    mal_count = hashes.get("malicious", 0)
+                    conf = min(0.5 + (mal_count / 70), 0.95)  # Scale 0.5-0.95
+
+                    zones = self._detect_zones_from_names(attrs)
+
+                    indicators.append(
+                        {
+                            "indicator_type": "hash",
+                            "value": attrs["sha256"],
+                            "zone": zones,  # zone is now an array
+                            "tag": self.tag,
+                            "source": [self.tag],
+                            "first_seen": attrs.get("first_submission_date", ""),
+                            "last_updated": datetime.now(timezone.utc).isoformat(),
+                            "confidence_score": conf,
+                        }
+                    )
+        elif response.status_code in (401, 403):
+            # Surface auth errors so the caller can mark the source skipped.
+            response.raise_for_status()
+        else:
+            logger.warning(
+                "VT files query returned unexpected status %s — treating as empty",
+                response.status_code,
             )
-
-            if response.status_code == 200:
-                data = response.json()
-                for item in data.get("data", []):
-                    attrs = item.get("attributes", {})
-                    hashes = attrs.get("last_analysis_stats", {})
-
-                    # Get the hash with most info
-                    if attrs.get("sha256"):
-                        mal_count = hashes.get("malicious", 0)
-                        conf = min(0.5 + (mal_count / 70), 0.95)  # Scale 0.5-0.95
-
-                        zones = self._detect_zones_from_names(attrs)
-
-                        indicators.append(
-                            {
-                                "indicator_type": "hash",
-                                "value": attrs["sha256"],
-                                "zone": zones,  # zone is now an array
-                                "tag": self.tag,
-                                "source": [self.tag],
-                                "first_seen": attrs.get("first_submission_date", ""),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
-                                "confidence_score": conf,
-                            }
-                        )
-
-        except Exception as e:
-            logger.warning(f"VT files query: {e}")
 
         return indicators[:limit]
 
@@ -240,7 +282,7 @@ class VirusTotalCollector:
                 "GET",
                 f"{self.base_url}/domains/{domain}",
                 session=self.session,
-                timeout=10,
+                timeout=(15, 30),  # tuple: connect=15s, read=30s — single-value 10s was too tight for DNS glitches
                 max_rate_limit_retries=3,
                 fallback_delay_sec=60.0,
                 retry_on_403=False,
@@ -292,7 +334,7 @@ class VirusTotalCollector:
                 "GET",
                 f"{self.base_url}/files/{hash_value}",
                 session=self.session,
-                timeout=10,
+                timeout=(15, 30),  # tuple: connect=15s, read=30s — single-value 10s was too tight for DNS glitches
                 max_rate_limit_retries=3,
                 fallback_delay_sec=60.0,
                 retry_on_403=False,
@@ -337,7 +379,7 @@ class VirusTotalCollector:
                 "GET",
                 f"{self.base_url}/ip_addresses/{ip}",
                 session=self.session,
-                timeout=10,
+                timeout=(15, 30),  # tuple: connect=15s, read=30s — single-value 10s was too tight for DNS glitches
                 max_rate_limit_retries=3,
                 fallback_delay_sec=60.0,
                 retry_on_403=False,
