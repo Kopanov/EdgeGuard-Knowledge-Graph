@@ -106,6 +106,8 @@ class VirusTotalCollector:
         try:
             indicators = self._collect_from_files(limit)
         except requests.HTTPError as e:
+            # Auth/access denied → optional-source skip (the source is
+            # wired but the key is expired or low-tier).
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal enrich: auth/access denied — skipping (optional): {e}")
                 return make_skipped_optional_source(
@@ -113,8 +115,20 @@ class VirusTotalCollector:
                     skip_reason=str(e),
                     skip_reason_class="virustotal_auth_denied",
                 )
-            logger.error(f"VirusTotal collection error: {e}")
-            indicators = self._collect_demo_data(limit)
+            # Any other HTTPError (5xx after retry exhaustion, 4xx that
+            # isn't auth) → report as collector failure. Do NOT fall back
+            # to demo data — the pre-round-1 behaviour pushed fake hashes
+            # to MISP tagged as real VT enrichment on any error.
+            logger.error(f"VirusTotal HTTP error: {e}")
+            if push_to_misp:
+                return make_status(
+                    "virustotal_enrich",
+                    False,
+                    count=0,
+                    failed=0,
+                    error=f"{type(e).__name__}: {e}",
+                )
+            raise
         except (
             requests.exceptions.ConnectionError,
             requests.exceptions.Timeout,
@@ -124,8 +138,7 @@ class VirusTotalCollector:
             # Network outage after @retry_with_backoff exhausted. Do NOT
             # silently fall back to demo data — return a proper failure
             # status so Airflow retries the task and Prometheus records
-            # the failure. (Pre-fix behaviour pushed demo data to MISP
-            # tagged as real VT enrichment during any outage.)
+            # the failure.
             logger.error(
                 "VirusTotal: network failure after retries (%s: %s) — reporting as collector failure",
                 type(net_exc).__name__,
@@ -141,6 +154,14 @@ class VirusTotalCollector:
                 )
             raise
         except Exception as e:
+            # Any remaining exception (JSONDecodeError on a malformed VT
+            # 200 response, KeyError / TypeError on unexpected schema,
+            # etc.) — report as a hard collector failure, NOT a fall-back
+            # to demo data. Round 1 removed the internal try/except from
+            # _collect_from_files without fixing this handler, so parse
+            # errors were silently pushing fake hashes to MISP — bugbot
+            # caught it on round 3. Auth/access-denied exceptions still
+            # route through the optional-source skip path.
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal enrich: auth/access denied — skipping (optional): {e}")
                 return make_skipped_optional_source(
@@ -148,8 +169,20 @@ class VirusTotalCollector:
                     skip_reason=str(e),
                     skip_reason_class="virustotal_auth_denied",
                 )
-            logger.error(f"VirusTotal collection error: {e}")
-            indicators = self._collect_demo_data(limit)
+            logger.error(
+                "VirusTotal collection error (parse/schema/other): %s: %s",
+                type(e).__name__,
+                e,
+            )
+            if push_to_misp:
+                return make_status(
+                    "virustotal_enrich",
+                    False,
+                    count=0,
+                    failed=0,
+                    error=f"{type(e).__name__}: {e}",
+                )
+            raise
 
         if push_to_misp:
             if not self.misp_writer:
