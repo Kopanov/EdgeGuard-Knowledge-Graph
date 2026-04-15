@@ -235,7 +235,7 @@ class StixExporter:
                  collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
             WITH a, malware, actor_tech,
                  [pair IN mal_tech_raw WHERE pair IS NOT NULL] AS mal_tech
-            OPTIONAL MATCH (c:Campaign)-[:ATTRIBUTED_TO]->(a)
+            OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
               WHERE c.edgeguard_managed = true
             RETURN a AS seed,
                    malware,
@@ -281,9 +281,7 @@ class StixExporter:
                 continue
             md = dict(m)
             td = dict(t)
-            m_sdo_id = mal_ids.get(md.get("name", "")) or self._add(
-                objects, self._node_to_sdo("Malware", md)
-            )
+            m_sdo_id = mal_ids.get(md.get("name", "")) or self._add(objects, self._node_to_sdo("Malware", md))
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
             self._add(
@@ -293,6 +291,11 @@ class StixExporter:
         for c in _nonnull(row["campaigns"]):
             c_sdo = self._node_to_sdo("Campaign", dict(c))
             self._add(objects, c_sdo)
+            # The graph edge is (ThreatActor)-[:RUNS]->(Campaign) — the
+            # actor owns/operates the campaign. STIX 2.1 expresses this
+            # as `relationship_type: attributed-to` with source_ref on
+            # the campaign and target_ref on the intrusion-set. See
+            # https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html#_i4tjv75ce50h
             self._add(
                 objects,
                 self._edge_to_sro("attributed-to", c_sdo["id"], seed_sdo["id"]),
@@ -301,23 +304,39 @@ class StixExporter:
         return self._bundle(objects.values())
 
     def export_technique(self, mitre_id: str) -> Dict[str, Any]:
-        """Bundle centred on a Technique + everything that uses it."""
+        """Bundle centred on a Technique + everything that uses it.
+
+        Uses ``WITH ... collect(DISTINCT ...) AS ...`` between every
+        ``OPTIONAL MATCH`` for the same reason as ``export_threat_actor``:
+        chaining four optional matches without aggregation produces a
+        Cartesian product of O(actors × malware × tools × indicators)
+        intermediate rows that a final ``DISTINCT`` collapses. A
+        well-connected technique (T1059 command-and-scripting is the
+        hotspot called out in the proposal doc) would generate thousands
+        of throwaway rows under the naive query shape. Aggregating at
+        each step bounds the row count by the size of one collection at
+        a time.
+        """
         rows = self._run(
             """
             MATCH (t:Technique {mitre_id: $mid})
             WHERE t.edgeguard_managed = true
+            WITH t
             OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE|USES]->(t)
               WHERE a.edgeguard_managed = true
+            WITH t, collect(DISTINCT a) AS actors
             OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
               WHERE m.edgeguard_managed = true
+            WITH t, actors, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
               WHERE tool.edgeguard_managed = true
+            WITH t, actors, malware, collect(DISTINCT tool) AS tools
             OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE|USES]->(t)
               WHERE i.edgeguard_managed = true
             RETURN t AS seed,
-                   collect(DISTINCT a) AS actors,
-                   collect(DISTINCT m) AS malware,
-                   collect(DISTINCT tool) AS tools,
+                   actors,
+                   malware,
+                   tools,
                    collect(DISTINCT i) AS indicators
             """,
             {"mid": mitre_id},
@@ -450,9 +469,7 @@ class StixExporter:
         name = props.get("name", "")
         stix_id = _deterministic_id("malware", name)
         malware_types = _listify(props.get("malware_types") or ["unknown"])
-        is_family = any(
-            "family" in (mt or "").lower() for mt in malware_types
-        ) or bool(props.get("is_family"))
+        is_family = any("family" in (mt or "").lower() for mt in malware_types) or bool(props.get("is_family"))
         obj = stix2.Malware(
             id=stix_id,
             name=name,
@@ -581,13 +598,9 @@ class StixExporter:
     # Edge → SRO
     # ------------------------------------------------------------------
 
-    def _edge_to_sro(
-        self, relationship_type: str, source_ref: str, target_ref: str
-    ) -> Dict[str, Any]:
+    def _edge_to_sro(self, relationship_type: str, source_ref: str, target_ref: str) -> Dict[str, Any]:
         """Build a deterministic Relationship SRO between two SDOs."""
-        stix_id = _deterministic_id(
-            "relationship", f"{source_ref}|{relationship_type}|{target_ref}"
-        )
+        stix_id = _deterministic_id("relationship", f"{source_ref}|{relationship_type}|{target_ref}")
         obj = stix2.Relationship(
             id=stix_id,
             relationship_type=relationship_type,
@@ -601,9 +614,7 @@ class StixExporter:
     # Bundle assembly
     # ------------------------------------------------------------------
 
-    def _add(
-        self, objects: Dict[str, Dict[str, Any]], sdo: Optional[Dict[str, Any]]
-    ) -> Optional[str]:
+    def _add(self, objects: Dict[str, Dict[str, Any]], sdo: Optional[Dict[str, Any]]) -> Optional[str]:
         """Insert a SDO/SRO into the bundle dict, keyed by its STIX id."""
         if not sdo:
             return None
