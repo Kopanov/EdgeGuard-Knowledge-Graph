@@ -536,7 +536,7 @@ docker compose build airflow && docker compose up -d airflow
 **NVD (`collect_nvd`) — baseline**
 
 - With **`BASELINE_DAYS`** set to **90** (or **730**), NVD walks many **120-day** API windows and **pages** (0.7 s between pages with an API key). Then it **processes** all CVEs and **pushes** to MISP in bulk — this can take **hours**.
-- **`execution_timeout`** for baseline NVD is **3 hours** in `dags/edgeguard_pipeline.py`. If you need more wall-clock time, increase that timeout (and ensure the scheduler/worker is not restarted mid-run).
+- **`execution_timeout`** for baseline NVD is **5 hours** in `dags/edgeguard_pipeline.py` (bumped from 3h in 2026-04 after baseline re-runs on the merged #20/#22/#24 scope repeatedly hit the 3h ceiling and Airflow retried — the retry was real work, not a zombie). If you need more wall-clock time, increase that timeout (and ensure the scheduler/worker is not restarted mid-run).
 - A **“zombie”** message usually means the scheduler lost the task heartbeat (scheduler/worker restart, heavy CPU blocking, OOM, or platform kill) — check **`docker compose logs airflow`**, host **memory**, and whether the task process was killed. It is **not** always the same as hitting `execution_timeout`.
 
 **Smoke test (recommended before a full baseline)**

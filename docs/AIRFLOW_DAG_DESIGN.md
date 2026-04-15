@@ -77,14 +77,19 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 |-----------|---------|
 | Fast collectors (OTX, CISA, VirusTotal) | 1 hour |
 | Slow collectors (MITRE, AbuseIPDB, ThreatFox, etc.) | 2 hours |
-| Baseline collectors (all sources, unlimited) | 2–3 hours each |
+| Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
+| Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
 | Neo4j sync (incremental) | 4 hours |
 | Neo4j full sync (baseline) | 6 hours |
-| build_relationships | 3 hours |
-| run_enrichment_jobs | 1 hour |
+| build_relationships | 5 hours |
+| run_enrichment_jobs | 5 hours |
 | Neo4j quality check | 15 minutes |
 | Log/summary tasks | 2–5 minutes |
 | Metrics server task | 24 hours (long-lived) |
+
+_Baseline OTX/NVD, `build_relationships`, and `run_enrichment_jobs` were
+bumped from 3h → 5h in 2026-04 after baseline re-runs on the merged
+#20/#22/#24 scope repeatedly hit the 3h ceiling._
 
 ---
 
