@@ -77,10 +77,19 @@ api = [
     "uvicorn~=0.34",
     "slowapi~=0.1",      # rate limiting
     "nats-py~=2.9",
-    "opentelemetry-api~=1.29",
-    "opentelemetry-sdk~=1.29",
-    "opentelemetry-instrumentation-fastapi~=0.50b0",
-    "opentelemetry-exporter-otlp~=1.29",
+    # OpenTelemetry pinned to 1.41.x / 0.62b0 (April 2026) to match what
+    # apache-airflow 3.2 pulls transitively. Airflow 3.x bundles its own
+    # observability module (airflow._shared.observability.traces) that
+    # imports opentelemetry.sdk.resources at import time; mixing
+    # apache-airflow 3.2 with otel ~=1.29 / 0.50b0 produces a namespace
+    # package collision ("No module named 'opentelemetry.sdk.resources';
+    # 'opentelemetry.sdk' is not a package") that breaks every test
+    # that imports dags/edgeguard_pipeline.py. Keeping the pins aligned
+    # with Airflow's own resolver is the stable fix.
+    "opentelemetry-api~=1.41",
+    "opentelemetry-sdk~=1.41",
+    "opentelemetry-instrumentation-fastapi~=0.62b0",
+    "opentelemetry-exporter-otlp~=1.41",
 ]
 graphql = [
     # ISIM-compatible GraphQL endpoint on port 4001

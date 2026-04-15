@@ -84,9 +84,18 @@ slowapi~=0.1
 strawberry-graphql~=0.283
 
 # ── OpenTelemetry distributed tracing ────────────────────────────────────────
-opentelemetry-api~=1.29
-opentelemetry-sdk~=1.29
-opentelemetry-instrumentation-fastapi~=0.50b0
-opentelemetry-exporter-otlp~=1.29
+# Pinned to 1.41.x / 0.62b0 (April 2026) to match what apache-airflow 3.2
+# pulls transitively. Mixing Airflow 3.x with otel ~=1.29 / 0.50b0
+# produces a namespace package collision — Airflow's internal
+# `_shared.observability.traces` module imports
+# `opentelemetry.sdk.resources` at import time and fails with
+# "No module named 'opentelemetry.sdk.resources'; 'opentelemetry.sdk'
+# is not a package" when an older sdk + newer instrumentation are
+# installed side-by-side. Bumping to the versions Airflow itself
+# resolves keeps the set consistent.
+opentelemetry-api~=1.41
+opentelemetry-sdk~=1.41
+opentelemetry-instrumentation-fastapi~=0.62b0
+opentelemetry-exporter-otlp~=1.41
 
 # ── Dev / test deps are in requirements-dev.txt ──────────────────────────────

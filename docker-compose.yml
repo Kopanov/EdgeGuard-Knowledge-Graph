@@ -182,6 +182,14 @@ services:
       # the variable is harmless if a stale Airflow 2.x image is ever
       # pulled by accident during rollback.
       AIRFLOW__API__PORT: "8082"
+      # Airflow 3.x internal Execution API URL. The scheduler/executor
+      # builds the execution_api_server_url from [api] base_url; if
+      # base_url is unset, the fallback is http://localhost:8080/ — NOT
+      # derived from [api] port. That means task execution would try to
+      # reach the API server on 8080 while it actually listens on 8082
+      # (from AIRFLOW__API__PORT above), producing "connection refused"
+      # on every task. Set base_url explicitly to match the port.
+      AIRFLOW__API__BASE_URL: "http://localhost:8082"
       AIRFLOW__WEBSERVER__WEB_SERVER_PORT: "8082"
       # Airflow 3.x with FabAuthManager requires an explicit JWT secret
       # for the API server — without it the API server fails to start
