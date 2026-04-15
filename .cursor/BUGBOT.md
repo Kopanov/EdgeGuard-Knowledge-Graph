@@ -268,19 +268,21 @@ else:
 
 Flag any version that checks only `event_info.get("info")` (event name) as fallback without also consulting `event_info.get("Tag")`. Example failure: attribute with no zone tag, event has `Tag: [{"name":"zone:healthcare"}]`, event name is `GLOBAL` → should produce `['healthcare']`, not `['global']`.
 
-### ThreatActor→Technique USES must use `uses_techniques` list, not `misp_event_id` co-occurrence
+### ThreatActor→Technique EMPLOYS_TECHNIQUE must use `uses_techniques` list, not `misp_event_id` co-occurrence
 
-In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques`:
+In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (prior to 2026-04 this was a generic `USES`; see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) and [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher)):
 
 ```cypher
 -- CORRECT
 MATCH (a:ThreatActor), (t:Technique)
 WHERE t.mitre_id IN coalesce(a.uses_techniques, [])
-MERGE (a)-[r:USES]->(t)
+MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
 SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit'
 ```
 
-Flag any version using `WHERE a.misp_event_id = t.misp_event_id` for this relationship — MITRE ATT&CK actors and techniques always come from separate MISP events, so `misp_event_id` never matches and this query always returns 0. Confirmed bug: the co-occurrence approach produced zero USES relationships in all test runs.
+Flag any version using `WHERE a.misp_event_id = t.misp_event_id` for this relationship — MITRE ATT&CK actors and techniques always come from separate MISP events, so `misp_event_id` never matches and this query always returns 0. Confirmed bug: the co-occurrence approach produced zero edges in all test runs.
+
+Also flag any new code that emits the legacy `USES` rel type for Actor→Technique. The write path in `create_misp_relationships_batch` still accepts `rel_type="USES"` when `to_type="Technique"` as a backward-compat shim, but new code should emit `EMPLOYS_TECHNIQUE` directly.
 
 ### `uses_techniques` must be populated in the MITRE collector
 
@@ -302,14 +304,14 @@ actors.append({
 
 Flag any MITRE collector that sets `self.relationships` (the parsed STIX relationships list) but does not propagate it into **both** actor **and** malware item dicts (`uses_techniques` from `_actor_uses` / `_malware_uses`). `self.relationships` as a standalone instance variable with no consumers is dead code.
 
-### Malware→Technique USES must use `uses_techniques` on Malware — never `CONTAINS`
+### Malware→Technique IMPLEMENTS_TECHNIQUE must use `uses_techniques` on Malware — never `CONTAINS`
 
-Same source as ThreatActor: explicit STIX **`uses`** (malware → attack-pattern). In `build_relationships.py`:
+Same source as ThreatActor: explicit STIX **`uses`** (malware → attack-pattern). In `build_relationships.py` the graph edge is the specialized `IMPLEMENTS_TECHNIQUE` (capability semantic, vs `EMPLOYS_TECHNIQUE` which is the attribution semantic for actors — see the note above):
 
 ```cypher
 MATCH (m:Malware), (t:Technique)
 WHERE t.mitre_id IN coalesce(m.uses_techniques, [])
-MERGE (m)-[r:USES]->(t)
+MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)
 SET r.confidence_score = 0.95, r.match_type = 'mitre_explicit'
 ```
 
@@ -400,22 +402,22 @@ Flag any new zone keyword added to `SECTOR_KEYWORDS` in `config.py` that is a si
 Incorrect edge direction silently produces wrong graph traversals. The canonical directions are:
 
 ```
-(Indicator)   -[:INDICATES]->   (Malware)
-(Indicator)   -[:INDICATES]->    (Malware)          # co-occurrence or malware_family match
-(Indicator)   -[:EXPLOITS]->   (Vulnerability | CVE)
-(Malware)     -[:ATTRIBUTED_TO]-> (ThreatActor)   # malware attributed to actor
-(ThreatActor) -[:USES]->       (Technique)        # explicit MITRE STIX uses_techniques
-(Malware)     -[:USES]->       (Technique)        # same — uses_techniques on Malware node
-(ThreatActor) -[:USES_TECHNIQUE]-> (Technique)    # alternative explicit link
-(Malware)     -[:USES_TECHNIQUE]-> (Technique)    # alternative explicit link
-(Tool)        -[:USES_TECHNIQUE]-> (Technique)    # tool → technique mapping
-(ThreatActor) -[:USES]->       (Tool)             # actor uses tool
-(Technique)   -[:IN_TACTIC]->  (Tactic)
-(ThreatActor) -[:RUNS]->       (Campaign)
-(Malware | Indicator)-[:PART_OF]-> (Campaign)
-(Indicator)   -[:TARGETS]->    (Sector)
-(Vulnerability | CVE)-[:AFFECTS]-> (Sector)      # sector from zone list (build_relationships)
+(Indicator)   -[:INDICATES]->          (Malware)            # co-occurrence or malware_family match
+(Indicator)   -[:EXPLOITS]->           (Vulnerability|CVE)
+(Malware)     -[:ATTRIBUTED_TO]->      (ThreatActor)        # malware attributed to actor
+(ThreatActor) -[:EMPLOYS_TECHNIQUE]->  (Technique)          # attribution: actor performs TTP (MITRE STIX uses)
+(Campaign)    -[:EMPLOYS_TECHNIQUE]->  (Technique)          # campaign-level attribution (future)
+(Malware)     -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: malware implements TTP
+(Tool)        -[:IMPLEMENTS_TECHNIQUE]->(Technique)         # capability: tool implements TTP
+(Indicator)   -[:USES_TECHNIQUE]->     (Technique)          # observation: IOC tied to TTP (OTX attack_ids)
+(Technique)   -[:IN_TACTIC]->          (Tactic)
+(ThreatActor) -[:RUNS]->               (Campaign)
+(Malware|Indicator)-[:PART_OF]->       (Campaign)
+(Indicator)   -[:TARGETS]->            (Sector)
+(Vulnerability|CVE)-[:AFFECTS]->       (Sector)             # sector from zone list (build_relationships)
 ```
+
+> **2026-04 rename:** `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` were previously a single generic `USES` edge. The write path in `create_misp_relationships_batch` still accepts `rel_type="USES"` when `to_type="Technique"` as a backward-compat shim — it routes to the correct specialized type based on `from_type`. Flag new code that **emits** the legacy `USES` value; reads against both are fine.
 
 Flag **`(ThreatActor)-[:ATTRIBUTED_TO]->(Malware)`** (reversed). Flag any relationship creation that reverses the rows above. Wrong `ATTRIBUTED_TO` direction makes traversals return empty results silently.
 

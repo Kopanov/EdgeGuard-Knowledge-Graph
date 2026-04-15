@@ -95,13 +95,12 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | Relationship | From → To | Description |
 |---|---|---|
 | `SOURCED_FROM` | Any node → `Source` | Provenance tracking with `raw_data`, `imported_at` (immutable), `updated_at`, `confidence` |
-| `USES` | `ThreatActor` → `Technique` | Actor uses a MITRE technique (explicit STIX **`uses`** → `uses_techniques` on actor) |
-| `USES` | `Malware` → `Technique` | Malware uses a MITRE technique (same STIX **`uses`** → `uses_techniques` on malware, MISP **`MITRE_USES_TECHNIQUES:`** round-trip) |
+| `EMPLOYS_TECHNIQUE` | `ThreatActor` / `Campaign` → `Technique` | **Attribution.** Actor employs a MITRE technique (explicit STIX **`uses`** → `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — see below.* |
+| `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability.** Malware or tool implements a MITRE technique (same STIX **`uses`** → `uses_techniques` on the source node; MISP **`MITRE_USES_TECHNIQUES:`** round-trip for Malware). *Split from a generic `USES` in 2026-04 — see below.* |
+| `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |
 | `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor (`build_relationships.py`) |
 | `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Same `cve_id` on indicator and vuln/CVE node (`build_relationships.py`) |
 | `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence (`misp_event_id` match) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
-| `USES_TECHNIQUE` | `Indicator` → `Technique` | OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85) |
-| `USES` | `Tool` → `Technique` | MITRE STIX explicit **`uses`** → `uses_techniques` on tool (`build_relationships.py`, conf 0.95) |
 | `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`) |
 | `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`) |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |
@@ -132,6 +131,45 @@ Vulnerability↔CVE bridging is already listed above (**`REFERS_TO`**, enrichmen
 > **Note on naming:** ISIM uses `(IP)-[:RESOLVES_TO]->(DomainName)` for DNS. EdgeGuard’s planned Indicator→IP bridge is **`INDICATOR_RESOLVES_TO`** to avoid colliding with that semantics.
 
 > **`Neo4jClient` helpers:** `create_indicator_vulnerability_relationship()` creates **`INDICATES`** to `Vulnerability`/`CVE` when called from custom code; the **Airflow `build_relationships`** pass uses **`EXPLOITS`** for CVE equality and **`INDICATES`** only for **Indicator→Malware**. Describe **production** output using **`build_relationships.py`**.
+
+#### 3.2.1 Specialized technique relationships (2026-04 refactor)
+
+Prior to 2026-04 every X→Technique edge was a single generic `USES`. That single type conflated three semantically distinct claims and hurt both Cypher query clarity and LLM/GraphRAG retrieval quality. It has been split into three specialized types that ResilMesh consumers should read going forward:
+
+| New rel type | From → To | Semantic | Previously |
+|---|---|---|---|
+| `EMPLOYS_TECHNIQUE` | `ThreatActor` / `Campaign` → `Technique` | **Attribution** — *who* is observed using this TTP | `USES` |
+| `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability** — *what* the code or tool can do | `USES` |
+| `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation** — artifact observed tied to a TTP | (unchanged — already specialized) |
+
+**STIX 2.1 mapping (for partners building STIX retrieval against our Neo4j):** All three graph types collapse back to the single STIX `relationship_type: "uses"` predicate. STIX disambiguates via the `source_ref` object type, exactly the pattern MITRE's own ATT&CK STIX bundles use. No information is lost on export; the graph simply makes the distinction explicit one layer earlier so graph-native consumers and GraphRAG prompts can see it directly.
+
+```text
+Graph                                                  → STIX 2.1 SRO
+(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)        → relationship { source_ref: intrusion-set, relationship_type: "uses", target_ref: attack-pattern }
+(Malware)    -[:IMPLEMENTS_TECHNIQUE]->(Technique)     → relationship { source_ref: malware,        relationship_type: "uses", target_ref: attack-pattern }
+(Tool)       -[:IMPLEMENTS_TECHNIQUE]->(Technique)     → relationship { source_ref: tool,           relationship_type: "uses", target_ref: attack-pattern }
+(Indicator)  -[:USES_TECHNIQUE]->(Technique)           → relationship { source_ref: indicator,      relationship_type: "indicates", target_ref: attack-pattern }
+```
+
+**Backward compatibility during rollout:** `create_misp_relationships_batch` in `src/neo4j_client.py` still accepts `rel_type="USES"` when `to_type="Technique"` and routes it to the correct specialized type based on `from_type`. Partners with code that emits the legacy value will keep working. The backward-compat branch will be removed in a follow-up PR once the migration has run and no callers remain.
+
+**Migration script:** [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) — idempotent APOC-batched rewrite of existing `USES→Technique` edges. Preserves all properties via `SET r2 += properties(r)`. Pre/post sanity-check queries are included inline at the top of the file.
+
+**What to update in your code:**
+
+```cypher
+// Before (still works due to backward-compat read path, but write path is deprecated):
+MATCH (a:ThreatActor)-[:USES]->(t:Technique) RETURN a, t
+
+// After (recommended — reads both attribution and capability explicitly):
+MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique) RETURN a, t
+MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t:Technique)  RETURN m, t
+
+// If you want both specialized types in one query:
+MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Technique)
+RETURN n, type(r) AS rel, t
+```
 
 ### 3.3 Sector/zone and TLP
 
@@ -499,8 +537,8 @@ type ThreatActor {
   aliases: [String]
   zone: [String!]!
   edgeguard_managed: Boolean
-  techniques: [Technique!]! @relationship(type: "USES", direction: OUT)
-  malware: [Malware!]! @relationship(type: "USES", direction: OUT)
+  techniques: [Technique!]! @relationship(type: "EMPLOYS_TECHNIQUE", direction: OUT)
+  malware: [Malware!]! @relationship(type: "ATTRIBUTED_TO", direction: IN)
 }
 
 type Technique {
@@ -589,7 +627,7 @@ OPTIONAL MATCH (ind:Indicator)-[:INDICATOR_RESOLVES_TO]->(ip)   // planned EdgeG
 OPTIONAL MATCH (ind)-[:INDICATES|EXPLOITS]->(v:Vulnerability)
 OPTIONAL MATCH (v)-[:REFERS_TO]->(cve:CVE)-[:HAS_CVSS_v31]->(cvss:CVSSv31)
 OPTIONAL MATCH (ind)-[:ATTRIBUTED_TO]->(m:Malware)<-[:ATTRIBUTED_TO]-(ta:ThreatActor)
-OPTIONAL MATCH (ta)-[:USES]->(tech:Technique)-[:IN_TACTIC]->(tactic:Tactic)
+OPTIONAL MATCH (ta)-[:EMPLOYS_TECHNIQUE]->(tech:Technique)-[:IN_TACTIC]->(tactic:Tactic)
 OPTIONAL MATCH (ip)<-[:HAS_ASSIGNED]-(n:Node)-[:IS_A]->(h:Host)
 RETURN
   ip.address                      AS ip,

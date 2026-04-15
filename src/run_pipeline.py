@@ -613,13 +613,18 @@ class EdgeGuardPipeline:
                             self.neo4j.create_malware_actor_relationship(src["name"], tgt["name"])
                             stats["relationships_attributed_to"] += 1
 
-                    # Handle USES (Actor/Malware -> Technique)
+                    # Handle STIX "uses" predicate → EMPLOYS_TECHNIQUE (Actor)
+                    # or IMPLEMENTS_TECHNIQUE (Malware/Tool). The STIX SRO
+                    # type stays "uses" on input; we route to the right
+                    # specialized edge based on the source type at write
+                    # time. See 2026-04 refactor note in neo4j_client.py.
                     elif rel_type == "uses":
                         if src["type"] in ["actor", "malware"] and tgt["type"] == "technique":
                             if src["type"] == "actor":
                                 self.neo4j.create_actor_technique_relationship(src["name"], tgt["mitre_id"])
-                            # Note: malware-technique relationship would need a separate method
-                            # For now, we skip malware->technique via STIX relationships
+                            # Malware→Technique (IMPLEMENTS_TECHNIQUE) is
+                            # created post-sync by build_relationships.py
+                            # from the uses_techniques property, not here.
 
                 # Handle STIX Report objects (containers)
                 elif obj_type == "report":
@@ -1268,7 +1273,15 @@ class EdgeGuardPipeline:
         for rel in relationships:
             try:
                 if rel["type"] == "uses":
-                    if rel["source_type"] in ["actor", "malware"] and rel["target_type"] == "technique":
+                    # After the 2026-04 USES→{EMPLOYS,IMPLEMENTS}_TECHNIQUE
+                    # split, create_actor_technique_relationship writes
+                    # EMPLOYS_TECHNIQUE matching only ThreatActor. Malware
+                    # → Technique edges (IMPLEMENTS_TECHNIQUE) are built
+                    # post-sync by build_relationships.py from the
+                    # `uses_techniques` property on Malware nodes — skip
+                    # them here rather than routing a malware source to
+                    # the actor-only method.
+                    if rel["source_type"] == "actor" and rel["target_type"] == "technique":
                         success = self.neo4j.create_actor_technique_relationship(
                             rel["source_name"], rel["target_mitre_id"], source_id="mitre_attck"
                         )
@@ -1320,7 +1333,7 @@ class EdgeGuardPipeline:
         indicates_created = self._create_indicates_relationships()
         logger.info(f"   [OK] Created {indicates_created} INDICATES relationships")
 
-        logger.info(f"   [OK] Created {rel_stats['uses']} USES relationships")
+        logger.info(f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships (Actor→Technique)")
         logger.info(f"   [OK] Created {rel_stats['attributed_to']} ATTRIBUTED_TO relationships")
 
         # Step 5: Enrich existing indicators from multiple sources
@@ -1364,10 +1377,19 @@ class EdgeGuardPipeline:
         # Calculate total relationships
         total_indicates = loaded.get("relationships_indicates", 0)
         total_attributed_to = loaded.get("relationships_attributed_to", 0) + rel_stats.get("attributed_to", 0)
-        total_uses = rel_stats.get("uses", 0)
+        # rel_stats["uses"] only counts actor→technique edges created via
+        # create_actor_technique_relationship (EMPLOYS_TECHNIQUE). Malware
+        # and Tool → Technique edges (IMPLEMENTS_TECHNIQUE) are built by
+        # build_relationships.py after the sync and are NOT reflected in
+        # this counter — don't pretend otherwise in the log.
+        total_employs_technique = rel_stats.get("uses", 0)
 
-        logger.info("\n[STATS] Relationships created:")
-        logger.info(f"   - USES (Actor/Malware → Technique): {total_uses}")
+        logger.info("\n[STATS] Relationships created (this pipeline pass):")
+        logger.info(f"   - EMPLOYS_TECHNIQUE (Actor → Technique): {total_employs_technique}")
+        logger.info(
+            "   - IMPLEMENTS_TECHNIQUE (Malware/Tool → Technique): built post-sync by "
+            "build_relationships.py — see its own log line"
+        )
         logger.info(f"   - ATTRIBUTED_TO (Malware → Actor): {total_attributed_to}")
         logger.info(f"   - INDICATES (Indicator → Malware): {total_indicates}")
 

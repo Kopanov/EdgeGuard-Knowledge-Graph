@@ -90,14 +90,23 @@ LIMIT 20
 
 ## Malware & MITRE techniques
 
-### Malware with explicit USES → Technique (MITRE STIX)
+### Malware with explicit IMPLEMENTS_TECHNIQUE → Technique (MITRE STIX)
 Requires **`uses_techniques`** on **`Malware`** (from MITRE collector + MISP **`MITRE_USES_TECHNIQUES:`** + sync) and **`build_relationships.py`**.
 
 ```cypher
-MATCH (m:Malware)-[r:USES]->(t:Technique)
+MATCH (m:Malware)-[r:IMPLEMENTS_TECHNIQUE]->(t:Technique)
 RETURN m.name, t.mitre_id, t.name, r.confidence_score
 LIMIT 25
 ```
+
+> **History:** Prior to 2026-04 this edge was a generic `USES`. It was renamed to `IMPLEMENTS_TECHNIQUE` to distinguish malware/tool capability from actor attribution (`EMPLOYS_TECHNIQUE`). Both collapse back to STIX 2.1 `relationship_type: "uses"` on export. To query all three specialized types at once:
+>
+> ```cypher
+> MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Technique)
+> RETURN labels(n)[0] AS source_label, n.name AS source_name,
+>        type(r) AS rel_type, t.mitre_id, t.name, r.confidence_score
+> LIMIT 50
+> ```
 
 ---
 

@@ -30,7 +30,7 @@ def syncer() -> MISPToNeo4jSync:
 
 
 def test_per_event_cross_item_fewer_edges_than_global_pool(syncer: MISPToNeo4jSync):
-    """Two actors and two techniques in separate events → 2 USES total, not 2×2."""
+    """Two actors and two techniques in separate events → 2 EMPLOYS_TECHNIQUE total, not 2×2."""
     actor_a = {"type": "actor", "name": "ActorA", "tag": "misp"}
     actor_b = {"type": "actor", "name": "ActorB", "tag": "misp"}
     t1 = {"type": "technique", "mitre_id": "T1059", "tag": "misp", "name": "Scripting"}
@@ -55,6 +55,7 @@ def test_dedupe_parsed_items_keeps_one_row_per_key(syncer: MISPToNeo4jSync):
     ]
     u = _dedupe_parsed_items(dup_indicators)
     assert len(u) == 1
-    # Single indicator, no malware/vuln in pool → no pairwise INDICATES / USES / ATTRIBUTED_TO
+    # Single indicator, no malware/vuln in pool → no pairwise
+    # INDICATES / EMPLOYS_TECHNIQUE / ATTRIBUTED_TO
     cross = syncer._build_cross_item_relationships(u)
-    assert not any(r.get("rel_type") in ("INDICATES", "USES", "ATTRIBUTED_TO") for r in cross)
+    assert not any(r.get("rel_type") in ("INDICATES", "EMPLOYS_TECHNIQUE", "ATTRIBUTED_TO") for r in cross)

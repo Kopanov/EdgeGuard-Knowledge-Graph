@@ -97,7 +97,7 @@ External sources (11 active feeds + 2 sector placeholders)
 
 ### Deterministic ingest & linking (not fuzzy graph matching)
 
-EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo4j **`MERGE`** on agreed keys, **exact** identifiers such as **CVE** and **MITRE `mitre_id`**, and scoped co-occurrence where documented) instead of **fuzzy** string/graph inference (e.g. substring **`CONTAINS`** for production entity linking). That trade-off favors **auditability**, **repeatable** syncs, and **fewer false-positive edges** in threat intel (wrong actor ↔ technique ↔ IOC links are high impact). Relationship logic for critical edges (e.g. **`USES`**) is spelled out in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and **[docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md)**; merge behavior, provenance, and the **exact-vs-fuzzy** history live in **[docs/DATA_QUALITY.md](docs/DATA_QUALITY.md)**.
+EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo4j **`MERGE`** on agreed keys, **exact** identifiers such as **CVE** and **MITRE `mitre_id`**, and scoped co-occurrence where documented) instead of **fuzzy** string/graph inference (e.g. substring **`CONTAINS`** for production entity linking). That trade-off favors **auditability**, **repeatable** syncs, and **fewer false-positive edges** in threat intel (wrong actor ↔ technique ↔ IOC links are high impact). Relationship logic for critical edges (e.g. **`EMPLOYS_TECHNIQUE`** for actors, **`IMPLEMENTS_TECHNIQUE`** for malware/tools — previously a single **`USES`**, split in 2026-04 for clarity and GraphRAG retrieval quality) is spelled out in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and **[docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md)**; merge behavior, provenance, and the **exact-vs-fuzzy** history live in **[docs/DATA_QUALITY.md](docs/DATA_QUALITY.md)**.
 
 ---
 
@@ -417,7 +417,7 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Campaign`
-- Relationships: `INDICATES`, `EXPLOITS`, `USES`, `USES_TECHNIQUE`, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
+- Relationships: `INDICATES`, `EXPLOITS`, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
 - All edges carry `confidence_score`, `sources[]`, `imported_at`, `match_type`
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 
@@ -458,7 +458,7 @@ EdgeGuard/
 │   ├── neo4j_client.py         # Graph MERGE logic, CVSS sub-nodes, relationship methods
 │   ├── run_misp_to_neo4j.py    # MISP → Neo4j (attribute parse; Airflow path). Optional STIX for CLI/export
 │   ├── run_pipeline.py         # CLI: run collectors → MISP; optional direct Neo4j path
-│   ├── build_relationships.py  # Graph edges: exact / MITRE-ID (USES actor+malware→technique), co-occurrence INDICATES, …
+│   ├── build_relationships.py  # Graph edges: EMPLOYS_TECHNIQUE (actor→tech), IMPLEMENTS_TECHNIQUE (malware/tool→tech), co-occurrence INDICATES, …
 │   ├── enrichment_jobs.py      # IOC decay, Campaign nodes, Vulnerability-CVE bridge
 │   ├── query_api.py            # FastAPI REST API — sector-filtered queries (port 8000)
 │   ├── graphql_api.py          # GraphQL API — ISIM-compatible endpoint (port 4001)

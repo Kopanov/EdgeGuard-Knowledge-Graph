@@ -208,7 +208,16 @@ class EdgeGuardPipelineMISPSPT:
             for rel in relationships[:500]:  # Limit to prevent timeout
                 try:
                     if rel["type"] == "uses":
-                        if rel["source_type"] in ["actor", "malware"] and rel["target_type"] == "technique":
+                        # Post-2026-04 specialization: create_actor_technique_relationship
+                        # writes EMPLOYS_TECHNIQUE matching only ThreatActor
+                        # nodes. A malware source_type here would silently
+                        # create nothing (or worse, attach to a ThreatActor
+                        # that happens to share the malware's name). Malware
+                        # → Technique edges are built post-sync by
+                        # build_relationships.py from the uses_techniques
+                        # property, so we simply skip them here instead of
+                        # writing the wrong edge.
+                        if rel["source_type"] == "actor" and rel["target_type"] == "technique":
                             neo4j.create_actor_technique_relationship(rel["source_name"], rel["target_mitre_id"])
                             rel_stats["uses"] += 1
                     elif rel["type"] == "attributed_to":
@@ -218,7 +227,7 @@ class EdgeGuardPipelineMISPSPT:
                 except Exception:
                     pass  # Skip failed relationships
 
-            logger.info(f"   [OK] Created {rel_stats['uses']} USES relationships")
+            logger.info(f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships (Actor→Technique)")
             logger.info(f"   [OK] Created {rel_stats['attributed_to']} ATTRIBUTED_TO relationships")
 
         finally:

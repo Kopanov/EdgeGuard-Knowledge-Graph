@@ -108,7 +108,7 @@ Auth:    Configured via environment variables
   aliases: LIST,            // Known aliases
   description: STRING,      // Description
   sources: LIST,            // Data sources
-  uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique (for graph USES edges)
+  uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique; drives (Actor)-[:EMPLOYS_TECHNIQUE]->(Technique) edges in build_relationships.py. Property name retained as-is (STIX-side contract).
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
   last_updated: DATETIME,   // Last update
@@ -444,10 +444,9 @@ Auth:    Configured via environment variables
 
 | Relationship | From | To | Properties |
 |--------------|------|-----|------------|
-| `USES` | ThreatActor | Technique | `confidence_score` (~0.95), `match_type='mitre_explicit'`, … (`build_relationships.py`, `uses_techniques` on actor) |
-| `USES` | Malware | Technique | Same as actor — explicit MITRE STIX **`uses`** via `m.uses_techniques` (`build_relationships.py`) |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` (~0.95), `match_type='mitre_explicit'`, … (`build_relationships.py`, `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — see [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher).* |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; same MITRE STIX **`uses`** source via `node.uses_techniques` (`build_relationships.py`). Split from a generic `USES` in 2026-04. |
 | `ATTRIBUTED_TO` | Malware | ThreatActor | `confidence_score`, `match_type`, `created_at` (`build_relationships.py`) |
-| `USES` | Tool | Technique | Same as actor — explicit MITRE STIX **`uses`** via `tool.uses_techniques` (`build_relationships.py`) |
 | `INDICATES` | Indicator | Malware | Initial `confidence_score` 0.5, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; **also** `malware_family` name match from ThreatFox/VT (`confidence_score` 0.8); calibrated by `enrichment_jobs.calibrate_cooccurrence_confidence` |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'`, `source_id='cve_tag_match'` |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |

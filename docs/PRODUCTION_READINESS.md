@@ -78,7 +78,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Sector labels never applied | `apply_sector_label()` called on every node write |
 | Source provenance overwritten on update | `COALESCE` used to append; not replace |
 | Duplicate `_create_relationships` calls | Removed double-call in `run()` |
-| Malware→Technique edges missing / bogus `CAN_USE` attempts | **Replaced** fuzzy / broken `CAN_USE` with **`(Malware)-[:USES]->(Technique)`** built only from explicit MITRE STIX **`uses`** rows: `uses_techniques` on **`Malware`** (collector → `MITRE_USES_TECHNIQUES:` in MISP → `run_misp_to_neo4j` → `merge_malware`) + `build_relationships.py` exact `mitre_id` match (same pattern as **ThreatActor**). No `CONTAINS` inference. |
+| Malware→Technique edges missing / bogus `CAN_USE` attempts | **Replaced** fuzzy / broken `CAN_USE` with **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** built only from explicit MITRE STIX **`uses`** rows: `uses_techniques` on **`Malware`** (collector → `MITRE_USES_TECHNIQUES:` in MISP → `run_misp_to_neo4j` → `merge_malware`) + `build_relationships.py` exact `mitre_id` match (same pattern as **ThreatActor**). No `CONTAINS` inference. *(Originally shipped as a generic `USES` edge; specialized into `IMPLEMENTS_TECHNIQUE` in 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation`.)* |
 
 ### ✅ Phase 4 — Airflow DAGs (2026-03-10)
 

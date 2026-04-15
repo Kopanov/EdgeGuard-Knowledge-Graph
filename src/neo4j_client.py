@@ -1601,11 +1601,16 @@ class Neo4jClient:
     def create_actor_technique_relationship(
         self, actor_name: str, technique_mitre_id: str, source_id: str = "mitre_attck"
     ) -> bool:
-        """Create USES relationship: ThreatActor -> Technique.
+        """Create EMPLOYS_TECHNIQUE relationship: ThreatActor -> Technique.
 
         Matches actors by name or alias and techniques by mitre_id, cross-source
         (no tag filter) so that enrichment links work regardless of which collector
         ingested each node.
+
+        Semantic note: ``EMPLOYS_TECHNIQUE`` is the attribution edge ("who uses
+        this TTP"), distinct from ``IMPLEMENTS_TECHNIQUE`` (the capability edge
+        on Malware/Tool). Split from a previously-generic ``USES`` in the
+        2026-04 refactor to improve GraphRAG retrieval and Cypher clarity.
         """
         if not self.driver:
             return False
@@ -1622,7 +1627,7 @@ class Neo4jClient:
         MATCH (a:ThreatActor)
         WHERE a.name = $actor_name OR $actor_name IN coalesce(a.aliases, [])
         MATCH (t:Technique {mitre_id: $technique_mitre_id})
-        MERGE (a)-[r:USES]->(t)
+        MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
             r.source_id = $source_id,
             r.confidence_score = 0.7,
@@ -1905,7 +1910,18 @@ class Neo4jClient:
         if not self.driver or not relationships:
             return 0
 
-        uses_rows: List[Dict[str, Any]] = []
+        # Split from a previously-generic "USES" bucket in the 2026-04 refactor:
+        # EMPLOYS_TECHNIQUE = attribution  (ThreatActor/Campaign → Technique)
+        # IMPLEMENTS_TECHNIQUE = capability (Malware/Tool → Technique)
+        # USES_TECHNIQUE already existed for Indicator → Technique (OTX attack_ids)
+        #
+        # EMPLOYS_TECHNIQUE rows are further split by from_type so each
+        # UNWIND MATCH can hit a single label index. Without that split,
+        # Campaign rows routed to a ThreatActor-only query silently matched
+        # zero nodes while _run_rows still counted them as success.
+        actor_employs_rows: List[Dict[str, Any]] = []
+        campaign_employs_rows: List[Dict[str, Any]] = []
+        implements_rows: List[Dict[str, Any]] = []
         attr_rows: List[Dict[str, Any]] = []
         ind_mal_rows: List[Dict[str, Any]] = []
         tgt_ind_rows: List[Dict[str, Any]] = []
@@ -1918,11 +1934,60 @@ class Neo4jClient:
             fk = rel.get("from_key") or {}
             tk = rel.get("to_key") or {}
             conf = rel.get("confidence", 0.5)
-            if rt == "USES":
-                an = nonempty_graph_string(fk.get("name"))
+            # Backward-compat: accept legacy "USES" rel_type from callers that
+            # haven't been migrated yet, and route based on from_type. New
+            # code should emit the specialized rel_type directly.
+            if rt in ("EMPLOYS_TECHNIQUE", "IMPLEMENTS_TECHNIQUE") or (
+                rt == "USES" and rel.get("to_type") == "Technique"
+            ):
+                # Require an explicit from_type. The previous default of
+                # "ThreatActor" silently misrouted any IMPLEMENTS_TECHNIQUE
+                # caller that forgot to set it — their row went to the
+                # actor bucket and never matched a Malware/Tool node,
+                # while _run_rows still counted it as success. Drop the
+                # row loudly instead, so a caller that omits from_type
+                # sees it in the dropped-rel warning and fixes the call.
+                from_type = rel.get("from_type")
+                if from_type is None:
+                    logger.warning(
+                        "Dropping %s row with no from_type — specialized technique "
+                        "rel_types must set from_type explicitly (ThreatActor, "
+                        "Campaign, Malware, or Tool)",
+                        rt,
+                    )
+                    _dropped_rels += 1
+                    continue
                 mid = nonempty_graph_string(tk.get("mitre_id"))
-                if an and mid:
-                    uses_rows.append({"actor": an, "mitre_id": mid, "source_id": source_id, "confidence": conf})
+                if from_type == "ThreatActor":
+                    an = nonempty_graph_string(fk.get("name"))
+                    if an and mid:
+                        actor_employs_rows.append(
+                            {"actor": an, "mitre_id": mid, "source_id": source_id, "confidence": conf}
+                        )
+                    else:
+                        _dropped_rels += 1
+                elif from_type == "Campaign":
+                    cn = nonempty_graph_string(fk.get("name"))
+                    if cn and mid:
+                        campaign_employs_rows.append(
+                            {"campaign": cn, "mitre_id": mid, "source_id": source_id, "confidence": conf}
+                        )
+                    else:
+                        _dropped_rels += 1
+                elif from_type in ("Malware", "Tool"):
+                    nm = nonempty_graph_string(fk.get("name"))
+                    if nm and mid:
+                        implements_rows.append(
+                            {
+                                "entity": nm,
+                                "entity_label": from_type,
+                                "mitre_id": mid,
+                                "source_id": source_id,
+                                "confidence": conf,
+                            }
+                        )
+                    else:
+                        _dropped_rels += 1
                 else:
                     _dropped_rels += 1
             elif rt == "ATTRIBUTED_TO":
@@ -1974,12 +2039,58 @@ class Neo4jClient:
 
         total = 0
 
-        q_uses = """
+        # Attribution edge: ThreatActor → Technique
+        q_actor_employs = """
         UNWIND $rows AS row
         MATCH (a:ThreatActor)
         WHERE a.name = row.actor OR row.actor IN coalesce(a.aliases, [])
         MATCH (t:Technique {mitre_id: row.mitre_id})
-        MERGE (a)-[r:USES]->(t)
+        MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
+        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
+            r.confidence_score = row.confidence,
+            r.imported_at = coalesce(r.imported_at, datetime()),
+            r.updated_at = datetime()
+        """
+        # Attribution edge: Campaign → Technique. Separate from the
+        # ThreatActor query so the planner hits a single label index.
+        # (Merging both into one query via OR or UNION fragments the plan
+        # and was the root cause of the silent 0-row bug caught by bugbot
+        # on PR #24 — Campaign rows routed to a ThreatActor-only query.)
+        q_campaign_employs = """
+        UNWIND $rows AS row
+        MATCH (c:Campaign)
+        WHERE c.name = row.campaign OR row.campaign IN coalesce(c.aliases, [])
+        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MERGE (c)-[r:EMPLOYS_TECHNIQUE]->(t)
+        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
+            r.confidence_score = row.confidence,
+            r.imported_at = coalesce(r.imported_at, datetime()),
+            r.updated_at = datetime()
+        """
+        # Capability edge: Malware or Tool → Technique. Single query handles
+        # both labels via CALL ... apoc.do.case-style branching; we run one
+        # UNWIND per from_type inside the caller so planner can use label
+        # lookups efficiently (see _run_rows calls below).
+        q_malware_implements = """
+        UNWIND $rows AS row
+        MATCH (m:Malware)
+        WHERE (m.name = row.entity OR row.entity IN coalesce(m.aliases, []))
+        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)
+        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
+            r.confidence_score = row.confidence,
+            r.imported_at = coalesce(r.imported_at, datetime()),
+            r.updated_at = datetime()
+        """
+        q_tool_implements = """
+        UNWIND $rows AS row
+        MATCH (tool:Tool)
+        WHERE (tool.name = row.entity OR row.entity IN coalesce(tool.aliases, []))
+        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
@@ -2090,8 +2201,21 @@ class Neo4jClient:
                 logger.warning("MISP relationship batch %s failed (%s rows): %s", label, len(rows), e)
 
         with self.driver.session() as session:
-            _run_rows(session, "USES", q_uses, uses_rows)
-            if uses_rows:
+            _run_rows(session, "EMPLOYS_TECHNIQUE_actor", q_actor_employs, actor_employs_rows)
+            if actor_employs_rows:
+                time.sleep(1)
+            _run_rows(session, "EMPLOYS_TECHNIQUE_campaign", q_campaign_employs, campaign_employs_rows)
+            if campaign_employs_rows:
+                time.sleep(1)
+            # Split IMPLEMENTS_TECHNIQUE rows by entity_label so each UNWIND
+            # hits a single label index instead of a union scan.
+            mal_impl_rows = [r for r in implements_rows if r.get("entity_label") == "Malware"]
+            tool_impl_rows = [r for r in implements_rows if r.get("entity_label") == "Tool"]
+            _run_rows(session, "IMPLEMENTS_TECHNIQUE_malware", q_malware_implements, mal_impl_rows)
+            if mal_impl_rows:
+                time.sleep(1)
+            _run_rows(session, "IMPLEMENTS_TECHNIQUE_tool", q_tool_implements, tool_impl_rows)
+            if tool_impl_rows:
                 time.sleep(1)
             _run_rows(session, "ATTRIBUTED_TO", q_attr, attr_rows)
             if attr_rows:
