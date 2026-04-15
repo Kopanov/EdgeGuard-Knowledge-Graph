@@ -37,7 +37,7 @@ print(EDGEGUARD_ENV)
 
 To keep dependencies clean and reproducible, use a dedicated environment per project/deployment.
 
-**Version:** EdgeGuard requires **Python 3.12+** (`requires-python` in `pyproject.toml`, CI, and `Dockerfile`). Apache Airflow **2.11** supports **Python 3.11+** upstream; this repository does not test or support 3.11.
+**Version:** EdgeGuard requires **Python 3.12+** (`requires-python` in `pyproject.toml`, CI, and `Dockerfile`). Apache Airflow **3.2** (upgraded from 2.11 in April 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)) supports Python 3.10–3.14 upstream; this repository standardizes on 3.12 for a single supported interpreter line.
 
 #### 2.1 Create a conda environment (recommended)
 
@@ -134,7 +134,25 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 
 ---
 
-### 5. Summary checklist
+### 5. MISP sync tuning + baseline mutex (added 2026-04)
+
+These four env vars were introduced with PRs #20, #23, and #28. They are
+off-by-default — the code uses sensible fallbacks — but operators tuning
+a slow MISP host or running parallel baselines should know they exist.
+All four are also in `.env.example`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | `1000` | Attributes per MISP POST. Lower on memory-constrained MISP hosts that 500 on large batches. |
+| `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | `15.0` | Seconds between failed-event retry passes. Gives MISP time to recover from transient 5xx. |
+| `EDGEGUARD_BASELINE_LOCK_PATH` | `checkpoints/baseline_in_progress.lock` | Cross-process sentinel that blocks a manual `edgeguard baseline` run from racing the scheduled incremental DAG. |
+| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `86400` (24h) | Max age before a stale lock is auto-cleared (e.g. after a crash on a different host — the PID-liveness check only works on the same host). |
+
+See [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) for the wider set of Airflow-related
+variables introduced with the 3.2 upgrade, and [MIGRATIONS.md](MIGRATIONS.md)
+for the operator runbook that references the baseline lock.
+
+### 6. Summary checklist
 
 - [ ] `EDGEGUARD_ENV` set appropriately (`dev`, `stage`, `prod`, `edge`, …).
 - [ ] Dedicated Python/conda environment created for EdgeGuard.
@@ -144,4 +162,4 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 
 ---
 
-_Last updated: 2026-04-06 — Airflow container **`AIRFLOW_MEMORY_LIMIT`** note for sync OOM/SIGKILL._
+_Last updated: 2026-04-15 — added MISP sync tuning + baseline mutex env vars; noted Airflow 3.2 upgrade._

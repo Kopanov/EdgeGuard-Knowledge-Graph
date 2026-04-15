@@ -177,6 +177,20 @@ class AbuseIPDBCollector:
         elif response.status_code == 401:
             logger.error("AbuseIPDB: Authentication failed - check API key")
             return None
+        elif response.status_code >= 500:
+            # A 5xx that survives the inner ``request_with_rate_limit_retries``
+            # budget (4 attempts with exponential backoff) is a real outage —
+            # not "no data today". Raise so ``collect()`` reports the task as
+            # failed and Airflow retries it, rather than silently returning
+            # ``count=0 success=True``. Matches the surface-failure contract
+            # of virustotal_collector.py and global_feed_collector.py, which
+            # both call ``response.raise_for_status()`` in the equivalent
+            # code path.
+            logger.warning(f"AbuseIPDB API error: {response.status_code} - {response.text[:200]}")
+            raise requests.exceptions.HTTPError(
+                f"AbuseIPDB {response.status_code} after inner retries",
+                response=response,
+            )
         else:
             logger.warning(f"AbuseIPDB API error: {response.status_code} - {response.text[:200]}")
             return None
