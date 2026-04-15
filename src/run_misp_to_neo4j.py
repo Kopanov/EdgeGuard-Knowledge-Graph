@@ -416,6 +416,10 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
                     requests.exceptions.Timeout,
                     requests.exceptions.ReadTimeout,
                     requests.exceptions.ChunkedEncodingError,
+                    # HTTPError is only raised by our code for 5xx server errors
+                    # (see fetch_event_details). 4xx paths return None instead so
+                    # they never reach this handler.
+                    requests.exceptions.HTTPError,
                 ) as e:
                     last_exception = e
                     if attempt >= max_retries:
@@ -997,6 +1001,22 @@ class MISPToNeo4jSync:
                 )
                 return None
 
+            # 5xx responses are retriable — raise HTTPError so @retry_with_backoff
+            # gets another shot. Silently returning None here used to cause large
+            # events (e.g. NVD ~99K CVEs) to be permanently skipped after a single
+            # transient MISP 500, leaving the graph missing entire feeds.
+            if response.status_code >= 500:
+                logger.warning(
+                    "MISP returned HTTP %s for event %s — will retry via backoff",
+                    response.status_code,
+                    event_id,
+                )
+                raise requests.exceptions.HTTPError(
+                    f"MISP {response.status_code} fetching event {event_id}",
+                    response=response,
+                )
+
+            # 4xx: permanent failure, don't retry
             logger.error(f"Failed to fetch event {event_id}: HTTP {response.status_code}")
             return None
 
@@ -1005,6 +1025,7 @@ class MISPToNeo4jSync:
             requests.exceptions.Timeout,
             requests.exceptions.ReadTimeout,
             requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.HTTPError,
         ):
             raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
@@ -3051,6 +3072,12 @@ class MISPToNeo4jSync:
             except (ValueError, TypeError):
                 max_event_attrs = 50000
             skipped_large: List[Dict] = []
+            # Events that raised a transient error on the first pass. They get
+            # one retry after the initial sweep finishes — gives MISP time to
+            # recover from memory pressure / transient 5xx without losing the
+            # entire feed (see event-4 regression: 99K NVD CVEs lost because a
+            # single 500 skipped the event permanently).
+            failed_events: List[Dict] = []
 
             # ── Sort events: smallest first ──────────────────────────
             # Process small events (MITRE, CISA) before large ones (NVD, OTX)
@@ -3105,13 +3132,11 @@ class MISPToNeo4jSync:
                     self._consecutive_conn_failures = 0  # Reset on successful processing
                 except Exception as exc:
                     logger.error(
-                        "Event %s failed (%s: %s) — skipping, continuing with remaining events",
+                        "Event %s failed on first pass (%s: %s) — deferring for retry",
                         event_id,
                         type(exc).__name__,
                         str(exc)[:200],
                     )
-                    total_errors += 1
-                    self.stats["events_failed"] += 1
 
                     # If this looks like a connection failure, try to reconnect
                     _exc_str = str(exc).lower()
@@ -3123,6 +3148,10 @@ class MISPToNeo4jSync:
                                 "3+ consecutive Neo4j connection failures — aborting sync. "
                                 "Check: docker compose ps neo4j / docker compose logs neo4j"
                             )
+                            # Record the already-accumulated failures; the retry
+                            # pass below will bail out because _consecutive_conn_failures >= 3.
+                            total_errors += 1
+                            self.stats["events_failed"] += 1
                             break  # Stop burning through events with a dead Neo4j
                         logger.warning("Attempting Neo4j reconnect after connection failure...")
                         try:
@@ -3132,6 +3161,11 @@ class MISPToNeo4jSync:
                             logger.error("Neo4j reconnect failed")
                     else:
                         self._consecutive_conn_failures = 0  # Reset on non-connection errors
+
+                    # Queue for a retry pass instead of giving up permanently.
+                    # Accounting (total_errors / events_failed) happens in the
+                    # retry loop below so we don't double-count recoveries.
+                    failed_events.append(event)
 
                     # Free memory after failed event (OOM recovery)
                     import gc
@@ -3175,6 +3209,69 @@ class MISPToNeo4jSync:
                         total_errors += 1
                         self.stats["events_failed"] += 1
                         # Free memory after failed large-event fetch (OOM recovery)
+                        import gc
+
+                        gc.collect()
+
+            # ── Retry events that raised on the first pass ──────────────
+            # Separate from skipped_large: those were deferred *proactively*
+            # by size; these are events that hit a transient error (MISP 5xx,
+            # timeout, OOM, …). Give each a single second chance before
+            # counting it as a permanent failure. Fixes the regression where
+            # a single MISP 500 on a large NVD event caused 99K CVEs to be
+            # silently dropped from the graph.
+            _conn_failures = getattr(self, "_consecutive_conn_failures", 0)
+            if failed_events and _conn_failures >= 3:
+                logger.error(
+                    "Skipping %s event retry(s) — Neo4j connection failed (%s consecutive errors)",
+                    len(failed_events),
+                    _conn_failures,
+                )
+                for _ev in failed_events:
+                    total_errors += 1
+                    self.stats["events_failed"] += 1
+                failed_events = []
+
+            if failed_events:
+                # Short cooldown before retrying: lets MISP memory settle and
+                # any broken connection pools recycle. Reuses the existing
+                # batch-throttle knob so ops can tune both together.
+                try:
+                    retry_cooldown = float(os.environ.get("EDGEGUARD_MISP_RETRY_COOLDOWN_SEC", "15.0"))
+                except (ValueError, TypeError):
+                    retry_cooldown = 15.0
+                if retry_cooldown > 0:
+                    logger.info(
+                        "Cooling down %.1fs before retrying %s failed event(s)...",
+                        retry_cooldown,
+                        len(failed_events),
+                    )
+                    time.sleep(retry_cooldown)
+
+                logger.info(
+                    "Retrying %s event(s) that failed on the first pass...",
+                    len(failed_events),
+                )
+                for event in failed_events:
+                    event_id = event.get("id")
+                    event_info = event.get("info", "")
+                    if event_fetch_throttle > 0:
+                        time.sleep(event_fetch_throttle)
+                    try:
+                        ep, ecr, ee = self._process_single_event(str(event_id), event_info)
+                        total_parsed_items += ep
+                        total_cross_rels_built += ecr
+                        total_errors += ee
+                        logger.info("Event %s recovered on retry", event_id)
+                    except Exception as exc:
+                        logger.error(
+                            "Event %s still failed on retry (%s: %s) — skipping permanently",
+                            event_id,
+                            type(exc).__name__,
+                            str(exc)[:200],
+                        )
+                        total_errors += 1
+                        self.stats["events_failed"] += 1
                         import gc
 
                         gc.collect()

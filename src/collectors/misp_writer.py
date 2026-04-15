@@ -56,11 +56,15 @@ def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
 
 
 # Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
+# HTTPError is included for 5xx server errors raised manually by _push_batch; 4xx
+# responses continue to be returned as (0, failed) without raising so we don't
+# spin on permanent validation errors.
 _TRANSIENT_HTTP_ERRORS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ReadTimeout,
     requests.exceptions.ChunkedEncodingError,
+    requests.exceptions.HTTPError,
 )
 
 
@@ -1109,7 +1113,11 @@ class MISPWriter:
 
         Args:
             items: List of EdgeGuard items (indicators, vulnerabilities, etc.)
-            batch_size: Number of items per batch
+            batch_size: Number of items per batch. Overridden by
+                ``EDGEGUARD_MISP_PUSH_BATCH_SIZE`` env var when set — lets ops
+                dial the batch size down without a code change if MISP is
+                choking on large pushes (e.g. the 22% HTTP 500 failure rate
+                observed on the 730-day NVD baseline).
 
         Returns:
             Tuple of (successful_count, failed_count)
@@ -1118,6 +1126,20 @@ class MISPWriter:
             return 0, 0
 
         total_items = len(items)
+
+        # Env override wins over caller default so ops can tune without redeploying.
+        _env_batch = os.environ.get("EDGEGUARD_MISP_PUSH_BATCH_SIZE")
+        if _env_batch:
+            try:
+                env_val = int(_env_batch)
+                if env_val > 0:
+                    batch_size = env_val
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Ignoring invalid EDGEGUARD_MISP_PUSH_BATCH_SIZE=%r; using %d",
+                    _env_batch,
+                    batch_size,
+                )
 
         # Guard against invalid batch_size (0 would crash range())
         batch_size = max(1, batch_size)
@@ -1318,6 +1340,15 @@ class MISPWriter:
                     detail,
                 )
                 self.stats["errors"] += 1
+                # 5xx is usually transient (MISP under memory pressure on large
+                # NVD events); raise so @retry_with_backoff can give it another
+                # shot with exponential delay. 4xx is permanent validation
+                # failure — don't retry, just report what failed.
+                if response.status_code >= 500:
+                    raise requests.exceptions.HTTPError(
+                        f"MISP {response.status_code} pushing batch to event {event_id}",
+                        response=response,
+                    )
                 return 0, len(attributes)
 
         except _TRANSIENT_HTTP_ERRORS as e:
