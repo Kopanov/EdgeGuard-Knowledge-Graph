@@ -3214,16 +3214,21 @@ class MISPToNeo4jSync:
                     len(skipped_large),
                     max_event_attrs,
                 )
-                for event in skipped_large:
+                for retry_idx, event in enumerate(skipped_large):
                     # Mid-loop bail-out: if Neo4j died while we were processing
                     # earlier events, stop burning through remaining ones.
+                    # Uses enumerate rather than list.index(event) because
+                    # list.index() returns the FIRST equal element — if two
+                    # event dicts ever shared identical content (e.g. a MISP
+                    # API quirk returning duplicate rows) the slice would
+                    # include already-processed events and double-count them.
                     if getattr(self, "_consecutive_conn_failures", 0) >= 3:
+                        remaining = len(skipped_large) - retry_idx
                         logger.error(
                             "Neo4j dead mid-retry — counting remaining %s deferred event(s) as failed",
-                            len(skipped_large) - skipped_large.index(event),
+                            remaining,
                         )
-                        remaining = skipped_large[skipped_large.index(event) :]
-                        for _rem in remaining:
+                        for _rem in skipped_large[retry_idx:]:
                             total_errors += 1
                             self.stats["events_failed"] += 1
                         break
