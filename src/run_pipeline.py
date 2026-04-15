@@ -1333,10 +1333,7 @@ class EdgeGuardPipeline:
         indicates_created = self._create_indicates_relationships()
         logger.info(f"   [OK] Created {indicates_created} INDICATES relationships")
 
-        logger.info(
-            f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships "
-            "(Actor→Technique)"
-        )
+        logger.info(f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships (Actor→Technique)")
         logger.info(f"   [OK] Created {rel_stats['attributed_to']} ATTRIBUTED_TO relationships")
 
         # Step 5: Enrich existing indicators from multiple sources
@@ -1388,9 +1385,7 @@ class EdgeGuardPipeline:
         total_employs_technique = rel_stats.get("uses", 0)
 
         logger.info("\n[STATS] Relationships created (this pipeline pass):")
-        logger.info(
-            f"   - EMPLOYS_TECHNIQUE (Actor → Technique): {total_employs_technique}"
-        )
+        logger.info(f"   - EMPLOYS_TECHNIQUE (Actor → Technique): {total_employs_technique}")
         logger.info(
             "   - IMPLEMENTS_TECHNIQUE (Malware/Tool → Technique): built post-sync by "
             "build_relationships.py — see its own log line"

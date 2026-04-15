@@ -58,6 +58,4 @@ def test_dedupe_parsed_items_keeps_one_row_per_key(syncer: MISPToNeo4jSync):
     # Single indicator, no malware/vuln in pool → no pairwise
     # INDICATES / EMPLOYS_TECHNIQUE / ATTRIBUTED_TO
     cross = syncer._build_cross_item_relationships(u)
-    assert not any(
-        r.get("rel_type") in ("INDICATES", "EMPLOYS_TECHNIQUE", "ATTRIBUTED_TO") for r in cross
-    )
+    assert not any(r.get("rel_type") in ("INDICATES", "EMPLOYS_TECHNIQUE", "ATTRIBUTED_TO") for r in cross)
