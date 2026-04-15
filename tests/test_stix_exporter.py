@@ -186,6 +186,30 @@ def test_export_indicator_uses_with_aggregation_to_avoid_cartesian():
     assert "WITH i, collect(DISTINCT m) AS malware" in q
 
 
+def test_export_cve_uses_with_aggregation_to_avoid_cartesian():
+    """Regression test for bugbot round-6 finding: export_cve chained
+    two OPTIONAL MATCH clauses (indicators, sectors) without
+    intermediate WITH aggregation. A well-linked CVE (Log4Shell has
+    ~100 exploiting indicators × ~5 sectors = ~500 pre-DISTINCT rows)
+    would materialise the product before the outer collect collapses
+    it. Same pattern as the round-2/round-4/round-5 fixes to the
+    other exporters."""
+    rows = [
+        {
+            "seed": {"cve_id": "CVE-2021-44228", "name": "Log4Shell"},
+            "indicators": [],
+            "sectors": [],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_cve("CVE-2021-44228")
+    q = client.driver._session.last_cypher
+    # Aggregation step between the two OPTIONAL MATCHes.
+    assert "WITH v, collect(DISTINCT i) AS indicators" in q
+    # Sectors still collected at RETURN time.
+    assert "collect(DISTINCT s) AS sectors" in q
+
+
 def test_stix_exporter_passes_query_timeout():
     """Regression test for bugbot round-5 finding: _run was calling
     session.run without a timeout, so a pathological export query could

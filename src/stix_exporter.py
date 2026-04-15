@@ -454,10 +454,11 @@ class StixExporter:
               AND v.edgeguard_managed = true
             OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(v)
               WHERE i.edgeguard_managed = true
+            WITH v, collect(DISTINCT i) AS indicators
             OPTIONAL MATCH (v)-[:AFFECTS]->(s:Sector)
               WHERE s.edgeguard_managed = true
             RETURN v AS seed,
-                   collect(DISTINCT i) AS indicators,
+                   indicators,
                    collect(DISTINCT s) AS sectors
             """,
             {"cve_id": cve_id},
