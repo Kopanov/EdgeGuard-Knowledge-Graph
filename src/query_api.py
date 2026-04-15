@@ -633,18 +633,24 @@ async def graph_explore(
                 if zone:
                     zone_ind = "AND $zone IN coalesce(i.zone, [])"
 
+                # Malware → Indicator edges are INDICATES (dropped/observed
+                # artifact) or DROPS (file drop). The legacy filter included
+                # "USES" which was incorrect — USES here was previously
+                # (Actor/Malware)→Technique, not Malware→Indicator, so any
+                # match was unreachable. Kept the two valid types.
                 cypher = f"""
                     MATCH (m:Malware)-[r]->(i:Indicator)
-                    WHERE type(r) IN ['INDICATES', 'USES', 'DROPS'] AND m.edgeguard_managed = true
+                    WHERE type(r) IN ['INDICATES', 'DROPS'] AND m.edgeguard_managed = true
                     {zone_ind}
-                    WITH m, i
+                    WITH m, i, type(r) AS rel_type
                     LIMIT $limit
                     RETURN m.name AS malware_name, m.family AS malware_family,
                            i.value AS ind_value, i.indicator_type AS ind_type,
                            coalesce(i.zone, ['global']) AS ind_zones,
                            i.confidence_score AS ind_confidence,
                            i.indicator_role AS ind_role,
-                           i.threat_label AS ind_threat_label
+                           i.threat_label AS ind_threat_label,
+                           rel_type
                 """
                 result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 for r in result:
@@ -663,7 +669,7 @@ async def graph_explore(
                             "threat_label": r.get("ind_threat_label", ""),
                         },
                     )
-                    _add_edge(mid, iid, "USES")
+                    _add_edge(mid, iid, r.get("rel_type", "INDICATES"))
                     for z in r.get("ind_zones", []):
                         sid = f"sector:{z}"
                         _add_node(sid, z.title(), "sector", {"sector": z})
@@ -676,7 +682,7 @@ async def graph_explore(
                     zone_act = "AND $zone IN coalesce(a.zone, [])"
 
                 cypher = f"""
-                    MATCH (a:ThreatActor)-[:USES]->(t:Technique)
+                    MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
                     WHERE t.mitre_id IS NOT NULL AND a.edgeguard_managed = true
                     {zone_act}
                     WITH a, t
@@ -703,7 +709,7 @@ async def graph_explore(
                         "technique",
                         {"name": r.get("technique_name", ""), "tactics": r.get("tactics", [])},
                     )
-                    _add_edge(aid, tid, "USES")
+                    _add_edge(aid, tid, "EMPLOYS_TECHNIQUE")
                     for tac in r.get("tactics") or []:
                         tacid = f"tactic:{tac}"
                         _add_node(tacid, tac, "tactic")

@@ -120,8 +120,10 @@ def test_create_relationships_respects_rel_batch_size(monkeypatch):
     syncer = MISPToNeo4jSync(neo4j_client=neo)
     rels = [
         {
-            "rel_type": "USES",
+            "rel_type": "EMPLOYS_TECHNIQUE",
+            "from_type": "ThreatActor",
             "from_key": {"name": f"A{i}"},
+            "to_type": "Technique",
             "to_key": {"mitre_id": f"T{i}"},
         }
         for i in range(7)

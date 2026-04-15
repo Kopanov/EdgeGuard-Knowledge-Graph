@@ -613,13 +613,18 @@ class EdgeGuardPipeline:
                             self.neo4j.create_malware_actor_relationship(src["name"], tgt["name"])
                             stats["relationships_attributed_to"] += 1
 
-                    # Handle USES (Actor/Malware -> Technique)
+                    # Handle STIX "uses" predicate → EMPLOYS_TECHNIQUE (Actor)
+                    # or IMPLEMENTS_TECHNIQUE (Malware/Tool). The STIX SRO
+                    # type stays "uses" on input; we route to the right
+                    # specialized edge based on the source type at write
+                    # time. See 2026-04 refactor note in neo4j_client.py.
                     elif rel_type == "uses":
                         if src["type"] in ["actor", "malware"] and tgt["type"] == "technique":
                             if src["type"] == "actor":
                                 self.neo4j.create_actor_technique_relationship(src["name"], tgt["mitre_id"])
-                            # Note: malware-technique relationship would need a separate method
-                            # For now, we skip malware->technique via STIX relationships
+                            # Malware→Technique (IMPLEMENTS_TECHNIQUE) is
+                            # created post-sync by build_relationships.py
+                            # from the uses_techniques property, not here.
 
                 # Handle STIX Report objects (containers)
                 elif obj_type == "report":
@@ -1320,7 +1325,10 @@ class EdgeGuardPipeline:
         indicates_created = self._create_indicates_relationships()
         logger.info(f"   [OK] Created {indicates_created} INDICATES relationships")
 
-        logger.info(f"   [OK] Created {rel_stats['uses']} USES relationships")
+        logger.info(
+            f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships "
+            "(Actor→Technique)"
+        )
         logger.info(f"   [OK] Created {rel_stats['attributed_to']} ATTRIBUTED_TO relationships")
 
         # Step 5: Enrich existing indicators from multiple sources
@@ -1367,7 +1375,7 @@ class EdgeGuardPipeline:
         total_uses = rel_stats.get("uses", 0)
 
         logger.info("\n[STATS] Relationships created:")
-        logger.info(f"   - USES (Actor/Malware → Technique): {total_uses}")
+        logger.info(f"   - EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE (→ Technique): {total_uses}")
         logger.info(f"   - ATTRIBUTED_TO (Malware → Actor): {total_attributed_to}")
         logger.info(f"   - INDICATES (Indicator → Malware): {total_indicates}")
 

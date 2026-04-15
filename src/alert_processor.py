@@ -172,7 +172,8 @@ class AlertProcessor:
       - (Asset)-[:HAS_IP]->(Indicator)
       - (Indicator)-[:INDICATES]->(Malware)
       - (Malware)-[:ATTRIBUTED_TO]->(ThreatActor)
-      - (ThreatActor)-[:USES]->(Technique)
+      - (ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)
+      - (Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)
       - (Indicator)-[:INDICATES]->(Vulnerability)
     """
 
@@ -254,9 +255,9 @@ class AlertProcessor:
 
         Query strategy:
         1. Find the Indicator node
-        2. Find related Malware (via ATTRIBUTED_TO)
-        3. Find related ThreatActors (via USES from Malware)
-        4. Find Techniques (via USES from Actor)
+        2. Find related Malware (via INDICATES)
+        3. Find related ThreatActors (via ATTRIBUTED_TO from Malware)
+        4. Find Techniques (via EMPLOYS_TECHNIQUE from Actor)
         5. Find CVEs (if mentioned in alert or linked to indicator)
         6. Find related Assets and Users from Alert context
         """
@@ -353,7 +354,7 @@ class AlertProcessor:
                     MATCH (i:Indicator {value: $indicator})
                     OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
                     OPTIONAL MATCH (m)-[:ATTRIBUTED_TO]->(a:ThreatActor)
-                    OPTIONAL MATCH (a)-[:USES]->(t:Technique)
+                    OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
                     RETURN collect(DISTINCT a {
                         .name, .aliases, .description
                     }) as actors,
