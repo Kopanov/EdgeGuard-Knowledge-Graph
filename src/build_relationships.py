@@ -160,22 +160,26 @@ def build_relationships():
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
-        # 5. ThreatActor → Technique (USES) — explicit ATT&CK uses_techniques list
+        # 5. ThreatActor → Technique (EMPLOYS_TECHNIQUE) — explicit ATT&CK
+        # uses_techniques list. Attribution semantics: "who uses this TTP".
+        # Split from a previously-generic USES in 2026-04 to improve GraphRAG
+        # retrieval — see migrations/2026_04_specialize_uses_technique.cypher.
         logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
-        _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime()'
+        _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime()'
         if not _safe_run_batched(
-            client, "ThreatActor → Technique (ATT&CK explicit)", _outer, _inner, stats, "uses_explicit"
+            client, "ThreatActor → Technique (ATT&CK explicit)", _outer, _inner, stats, "employs_technique_explicit"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
-        # 6. Malware → Technique (USES) — MITRE STIX uses relationships
+        # 6. Malware → Technique (IMPLEMENTS_TECHNIQUE) — MITRE STIX uses
+        # relationships. Capability semantics: "what the code can do".
         logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime()'
+        _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime()'
         if not _safe_run_batched(
-            client, "Malware → Technique (MITRE explicit)", _outer, _inner, stats, "malware_uses_technique"
+            client, "Malware → Technique (MITRE explicit)", _outer, _inner, stats, "malware_implements_technique"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -232,12 +236,14 @@ def build_relationships():
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
-        # 10. Tool → Technique (USES) — MITRE uses_techniques
+        # 10. Tool → Technique (IMPLEMENTS_TECHNIQUE) — MITRE uses_techniques.
+        # Same capability semantics as Malware above; both are "code/tool can
+        # execute this TTP".
         logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
-        _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:USES]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime()'
+        _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime()'
         if not _safe_run_batched(
-            client, "Tool → Technique (MITRE explicit)", _outer, _inner, stats, "tool_uses_technique"
+            client, "Tool → Technique (MITRE explicit)", _outer, _inner, stats, "tool_implements_technique"
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)

@@ -1631,7 +1631,7 @@ class MISPToNeo4jSync:
         one event's attribute set.
 
         Relationship kinds produced:
-        - ThreatActor -> USES -> Technique
+        - ThreatActor -> EMPLOYS_TECHNIQUE -> Technique
         - Malware -> ATTRIBUTED_TO -> ThreatActor
         - Indicator -> INDICATES -> Malware
         - Indicator/Vulnerability -> TARGETS -> Sector
@@ -1736,13 +1736,15 @@ class MISPToNeo4jSync:
             except Exception:
                 logger.debug("Metrics recording failed", exc_info=True)
 
-        # Build actor -> technique relationships (USES)
-        # When an event has both actors and techniques, assume the actors use those techniques
+        # Build actor -> technique relationships (EMPLOYS_TECHNIQUE).
+        # Attribution semantics: "actor uses this TTP". Split from a
+        # previously-generic USES in 2026-04 to disambiguate from
+        # IMPLEMENTS_TECHNIQUE (Malware/Tool capability).
         for actor in actors:
             for technique in techniques:
                 relationships.append(
                     {
-                        "rel_type": "USES",
+                        "rel_type": "EMPLOYS_TECHNIQUE",
                         "from_type": "ThreatActor",
                         "from_key": {"name": actor["name"]},
                         "to_type": "Technique",
@@ -2053,11 +2055,13 @@ class MISPToNeo4jSync:
                 except (ValueError, IndexError):
                     actor_description = raw_comment
 
-            # Build USES relationships to techniques
+            # Build EMPLOYS_TECHNIQUE relationships to techniques.
+            # Attribution edge (who uses the TTP). See 2026-04 refactor note
+            # in src/neo4j_client.py create_actor_technique_relationship.
             for technique in techniques:
                 relationships.append(
                     {
-                        "rel_type": "USES",
+                        "rel_type": "EMPLOYS_TECHNIQUE",
                         "from_type": "ThreatActor",
                         "from_key": {"name": actor_name},
                         "to_type": "Technique",

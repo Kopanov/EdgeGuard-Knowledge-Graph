@@ -223,18 +223,20 @@ class TestCrossItemRelKeys:
         syncer = MISPToNeo4jSync.__new__(MISPToNeo4jSync)
         return syncer._build_cross_item_relationships(items)
 
-    def test_actor_technique_uses_no_tag(self):
+    def test_actor_technique_employs_no_tag(self):
         items = [
             {"type": "actor", "name": "APT28", "tag": "mitre_attck"},
             {"type": "technique", "mitre_id": "T1059", "name": "CLI", "tag": "mitre_attck"},
         ]
         rels = self._build_rels(items)
-        uses = [r for r in rels if r["rel_type"] == "USES"]
-        assert len(uses) == 1
-        assert "tag" not in uses[0]["from_key"], f"USES from_key has tag: {uses[0]['from_key']}"
-        assert "tag" not in uses[0]["to_key"], f"USES to_key has tag: {uses[0]['to_key']}"
-        assert uses[0]["from_key"] == {"name": "APT28"}
-        assert uses[0]["to_key"] == {"mitre_id": "T1059"}
+        # Actor→Technique is EMPLOYS_TECHNIQUE (attribution) since the
+        # 2026-04 split of the generic USES bucket.
+        employs = [r for r in rels if r["rel_type"] == "EMPLOYS_TECHNIQUE"]
+        assert len(employs) == 1
+        assert "tag" not in employs[0]["from_key"], f"from_key has tag: {employs[0]['from_key']}"
+        assert "tag" not in employs[0]["to_key"], f"to_key has tag: {employs[0]['to_key']}"
+        assert employs[0]["from_key"] == {"name": "APT28"}
+        assert employs[0]["to_key"] == {"mitre_id": "T1059"}
 
     def test_malware_actor_attributed_to_no_tag(self):
         items = [

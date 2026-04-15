@@ -218,7 +218,10 @@ class EdgeGuardPipelineMISPSPT:
                 except Exception:
                     pass  # Skip failed relationships
 
-            logger.info(f"   [OK] Created {rel_stats['uses']} USES relationships")
+            logger.info(
+                f"   [OK] Created {rel_stats['uses']} EMPLOYS_TECHNIQUE relationships "
+                "(Actor→Technique)"
+            )
             logger.info(f"   [OK] Created {rel_stats['attributed_to']} ATTRIBUTED_TO relationships")
 
         finally:
