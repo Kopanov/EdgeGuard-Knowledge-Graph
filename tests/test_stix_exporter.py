@@ -106,6 +106,60 @@ def test_actor_with_two_techniques_yields_intrusion_set_and_uses_sros():
     assert all(r["source_ref"] == intrusion_sets[0]["id"] for r in uses)
 
 
+def test_actor_campaign_query_uses_runs_direction():
+    """Regression test for bugbot round-4 finding: the export_threat_actor
+    Cypher was originally ``(c:Campaign)-[:ATTRIBUTED_TO]->(a)`` but the
+    actual graph edge is ``(a:ThreatActor)-[:RUNS]->(c:Campaign)`` —
+    see enrichment_jobs.build_campaign_nodes(). The wrong pattern
+    matched zero campaigns for every actor, silently omitting them
+    from STIX bundles."""
+    rows = [
+        {
+            "seed": {"name": "APT28"},
+            "malware": [],
+            "actor_tech": [],
+            "mal_tech": [],
+            "campaigns": [{"name": "OperationPawnStorm"}],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_threat_actor("APT28")
+    q = client.driver._session.last_cypher
+    # The query must match (a:ThreatActor)-[:RUNS]->(c:Campaign), not
+    # the reverse. Match on the full pattern so a future refactor that
+    # accidentally flips direction fails loudly here.
+    assert "(a)-[:RUNS]->(c:Campaign)" in q
+    assert "(c:Campaign)-[:ATTRIBUTED_TO]->(a)" not in q
+
+
+def test_export_technique_uses_with_aggregation_to_avoid_cartesian():
+    """Regression test for bugbot round-4 finding: the export_technique
+    Cypher chained four OPTIONAL MATCH clauses without intermediate
+    aggregation, producing a Cartesian product for well-connected
+    techniques. The fix adds ``WITH t, collect(DISTINCT ...) AS ...``
+    between each clause. Assert the WITH aggregation is in the emitted
+    Cypher so a future regression is caught."""
+    rows = [
+        {
+            "seed": {"mitre_id": "T1059", "name": "Command and Scripting Interpreter"},
+            "actors": [],
+            "malware": [],
+            "tools": [],
+            "indicators": [],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_technique("T1059")
+    q = client.driver._session.last_cypher
+    # Must see the aggregation step between OPTIONAL MATCH clauses.
+    assert "collect(DISTINCT a) AS actors" in q
+    assert "collect(DISTINCT m) AS malware" in q
+    assert "collect(DISTINCT tool) AS tools" in q
+    # And the first WITH must be between the seed match and the first
+    # OPTIONAL MATCH so actors don't multiply the seed row.
+    assert "WITH t\n" in q or "WITH t " in q
+
+
 def test_actor_with_attributed_malware_emits_attributed_to_sro():
     rows = [
         {
@@ -330,11 +384,7 @@ def test_cve_export_bundle_contains_vulnerability_and_indicator_indicates_rel():
     assert vulns[0]["external_references"][0]["source_name"] == "cve"
     assert vulns[0]["external_references"][0]["external_id"] == "CVE-2021-44228"
     rels = _by_type(bundle, "relationship")
-    assert any(
-        r["relationship_type"] == "indicates"
-        and r["target_ref"] == vulns[0]["id"]
-        for r in rels
-    )
+    assert any(r["relationship_type"] == "indicates" and r["target_ref"] == vulns[0]["id"] for r in rels)
 
 
 def test_empty_bundle_when_seed_not_found():
