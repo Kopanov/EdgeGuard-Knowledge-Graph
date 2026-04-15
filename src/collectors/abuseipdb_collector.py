@@ -190,7 +190,14 @@ class AbuseIPDBCollector:
             max_age_days: Maximum age of reports to include (default 90)
 
         Returns:
-            IP reputation data dict or None on error
+            IP reputation data dict or None on error / network failure.
+
+        ``_make_request`` is now decorated with ``@retry_with_backoff`` and
+        propagates ``RequestException`` after retries are exhausted.
+        Per-IP enrichment callers still expect ``None`` on error, so we
+        catch here and keep the interface backward-compatible. The
+        collect() → get_blacklist() path does NOT catch — it wants
+        the real failure status so the DAG task fails loudly.
         """
         if not self.api_key:
             logger.warning("AbuseIPDB: No API key configured")
@@ -202,7 +209,11 @@ class AbuseIPDBCollector:
             "verbose": "true",  # Must be lowercase string; Python True → "True" which the API ignores
         }
 
-        data = self._make_request(self.CHECK_ENDPOINT, params)
+        try:
+            data = self._make_request(self.CHECK_ENDPOINT, params)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("AbuseIPDB check_ip(%s) network failure after retries: %s", ip_address, exc)
+            return None
 
         if data and "data" in data:
             return self._format_ip_result(data["data"])
@@ -220,7 +231,9 @@ class AbuseIPDBCollector:
             max_age_days: Maximum age of reports to include
 
         Returns:
-            List of IP reputation data dicts
+            List of IP reputation data dicts. Returns ``[]`` on network
+            failure after retries are exhausted (same backward-compat
+            reason as ``check_ip`` above).
         """
         if not self.api_key:
             logger.warning("AbuseIPDB: No API key configured")
@@ -228,7 +241,11 @@ class AbuseIPDBCollector:
 
         params = {"network": cidr, "maxAgeInDays": max_age_days}
 
-        data = self._make_request(self.CHECK_BLOCK_ENDPOINT, params)
+        try:
+            data = self._make_request(self.CHECK_BLOCK_ENDPOINT, params)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("AbuseIPDB check_cidr_block(%s) network failure after retries: %s", cidr, exc)
+            return []
 
         results = []
         if data and "data" in data:

@@ -352,7 +352,6 @@ class URLhausCollector:
         self.misp_writer = misp_writer or MISPWriter()
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
-    @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_feed(self, url: str) -> str:
         """Download a URLhaus feed CSV with retry. Matches the CyberCure
         pattern — transient network errors retry 4x with backoff before the
