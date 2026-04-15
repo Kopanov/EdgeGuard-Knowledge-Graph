@@ -1914,7 +1914,13 @@ class Neo4jClient:
         # EMPLOYS_TECHNIQUE = attribution  (ThreatActor/Campaign → Technique)
         # IMPLEMENTS_TECHNIQUE = capability (Malware/Tool → Technique)
         # USES_TECHNIQUE already existed for Indicator → Technique (OTX attack_ids)
-        employs_rows: List[Dict[str, Any]] = []
+        #
+        # EMPLOYS_TECHNIQUE rows are further split by from_type so each
+        # UNWIND MATCH can hit a single label index. Without that split,
+        # Campaign rows routed to a ThreatActor-only query silently matched
+        # zero nodes while _run_rows still counted them as success.
+        actor_employs_rows: List[Dict[str, Any]] = []
+        campaign_employs_rows: List[Dict[str, Any]] = []
         implements_rows: List[Dict[str, Any]] = []
         attr_rows: List[Dict[str, Any]] = []
         ind_mal_rows: List[Dict[str, Any]] = []
@@ -1936,11 +1942,19 @@ class Neo4jClient:
             ):
                 from_type = rel.get("from_type", "ThreatActor")
                 mid = nonempty_graph_string(tk.get("mitre_id"))
-                if from_type in ("ThreatActor", "Campaign"):
+                if from_type == "ThreatActor":
                     an = nonempty_graph_string(fk.get("name"))
                     if an and mid:
-                        employs_rows.append(
+                        actor_employs_rows.append(
                             {"actor": an, "mitre_id": mid, "source_id": source_id, "confidence": conf}
+                        )
+                    else:
+                        _dropped_rels += 1
+                elif from_type == "Campaign":
+                    cn = nonempty_graph_string(fk.get("name"))
+                    if cn and mid:
+                        campaign_employs_rows.append(
+                            {"campaign": cn, "mitre_id": mid, "source_id": source_id, "confidence": conf}
                         )
                     else:
                         _dropped_rels += 1
@@ -2009,13 +2023,30 @@ class Neo4jClient:
 
         total = 0
 
-        # Attribution edge: ThreatActor (or Campaign) → Technique
-        q_employs = """
+        # Attribution edge: ThreatActor → Technique
+        q_actor_employs = """
         UNWIND $rows AS row
         MATCH (a:ThreatActor)
         WHERE a.name = row.actor OR row.actor IN coalesce(a.aliases, [])
         MATCH (t:Technique {mitre_id: row.mitre_id})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
+        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
+            r.source_id = row.source_id,
+            r.confidence_score = row.confidence,
+            r.imported_at = coalesce(r.imported_at, datetime()),
+            r.updated_at = datetime()
+        """
+        # Attribution edge: Campaign → Technique. Separate from the
+        # ThreatActor query so the planner hits a single label index.
+        # (Merging both into one query via OR or UNION fragments the plan
+        # and was the root cause of the silent 0-row bug caught by bugbot
+        # on PR #24 — Campaign rows routed to a ThreatActor-only query.)
+        q_campaign_employs = """
+        UNWIND $rows AS row
+        MATCH (c:Campaign)
+        WHERE c.name = row.campaign OR row.campaign IN coalesce(c.aliases, [])
+        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MERGE (c)-[r:EMPLOYS_TECHNIQUE]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
@@ -2154,8 +2185,11 @@ class Neo4jClient:
                 logger.warning("MISP relationship batch %s failed (%s rows): %s", label, len(rows), e)
 
         with self.driver.session() as session:
-            _run_rows(session, "EMPLOYS_TECHNIQUE", q_employs, employs_rows)
-            if employs_rows:
+            _run_rows(session, "EMPLOYS_TECHNIQUE_actor", q_actor_employs, actor_employs_rows)
+            if actor_employs_rows:
+                time.sleep(1)
+            _run_rows(session, "EMPLOYS_TECHNIQUE_campaign", q_campaign_employs, campaign_employs_rows)
+            if campaign_employs_rows:
                 time.sleep(1)
             # Split IMPLEMENTS_TECHNIQUE rows by entity_label so each UNWIND
             # hits a single label index instead of a union scan.
