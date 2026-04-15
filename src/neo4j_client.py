@@ -1940,7 +1940,23 @@ class Neo4jClient:
             if rt in ("EMPLOYS_TECHNIQUE", "IMPLEMENTS_TECHNIQUE") or (
                 rt == "USES" and rel.get("to_type") == "Technique"
             ):
-                from_type = rel.get("from_type", "ThreatActor")
+                # Require an explicit from_type. The previous default of
+                # "ThreatActor" silently misrouted any IMPLEMENTS_TECHNIQUE
+                # caller that forgot to set it — their row went to the
+                # actor bucket and never matched a Malware/Tool node,
+                # while _run_rows still counted it as success. Drop the
+                # row loudly instead, so a caller that omits from_type
+                # sees it in the dropped-rel warning and fixes the call.
+                from_type = rel.get("from_type")
+                if from_type is None:
+                    logger.warning(
+                        "Dropping %s row with no from_type — specialized technique "
+                        "rel_types must set from_type explicitly (ThreatActor, "
+                        "Campaign, Malware, or Tool)",
+                        rt,
+                    )
+                    _dropped_rels += 1
+                    continue
                 mid = nonempty_graph_string(tk.get("mitre_id"))
                 if from_type == "ThreatActor":
                     an = nonempty_graph_string(fk.get("name"))

@@ -1273,7 +1273,15 @@ class EdgeGuardPipeline:
         for rel in relationships:
             try:
                 if rel["type"] == "uses":
-                    if rel["source_type"] in ["actor", "malware"] and rel["target_type"] == "technique":
+                    # After the 2026-04 USES→{EMPLOYS,IMPLEMENTS}_TECHNIQUE
+                    # split, create_actor_technique_relationship writes
+                    # EMPLOYS_TECHNIQUE matching only ThreatActor. Malware
+                    # → Technique edges (IMPLEMENTS_TECHNIQUE) are built
+                    # post-sync by build_relationships.py from the
+                    # `uses_techniques` property on Malware nodes — skip
+                    # them here rather than routing a malware source to
+                    # the actor-only method.
+                    if rel["source_type"] == "actor" and rel["target_type"] == "technique":
                         success = self.neo4j.create_actor_technique_relationship(
                             rel["source_name"], rel["target_mitre_id"], source_id="mitre_attck"
                         )
