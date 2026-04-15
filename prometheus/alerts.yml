@@ -212,6 +212,81 @@ groups:
           description: "{{ $labels.name }} has restarted {{ $value }} times in the last hour."
 
   # ================================================================================
+  # Sync integrity — catches silent event drops in MISP->Neo4j sync.
+  # Added after the 2026-04-14 NVD regression: a single MISP 500 on a
+  # corrupted event caused ~99K CVEs to vanish from Neo4j and no alert
+  # fired, because the existing rules only watch for total counts going
+  # below a global floor (sum < 100) and had no signal for per-run
+  # coverage gaps or per-label drops.
+  # ================================================================================
+  - name: edgeguard_sync_integrity
+    rules:
+      - alert: EdgeGuardSyncEventsFailed
+        expr: edgeguard_sync_events_failed > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: sync
+        annotations:
+          summary: "MISP->Neo4j sync had {{ $value }} failed event(s)"
+          description: |
+            The most recent MISP->Neo4j sync permanently failed to process
+            {{ $value }} event(s) after all retries. Check pipeline logs for
+            the event IDs and the underlying error (usually MISP 5xx on a
+            corrupted event, or Neo4j connection loss).
+
+      - alert: EdgeGuardSyncCoverageGap
+        expr: |
+          (
+            edgeguard_sync_events_index_total
+            - edgeguard_sync_events_processed
+            - edgeguard_sync_events_failed
+          ) != 0
+        for: 5m
+        labels:
+          severity: critical
+          component: sync
+        annotations:
+          summary: "MISP->Neo4j sync accounting gap: {{ $value }} unaccounted event(s)"
+          description: |
+            MISP index returned {{ with query "edgeguard_sync_events_index_total" }}{{ . | first | value }}{{ end }}
+            events, but processed + failed does not equal that total. This
+            means events were SILENTLY SKIPPED — the exact failure pattern
+            of the 2026-04-14 NVD regression. Investigate immediately.
+
+      - alert: EdgeGuardNeo4jLabelDropBig
+        # Per-label 1-day drop > 50% of yesterday's value. Uses offset so
+        # the comparison is against the same time yesterday — robust to
+        # normal daily fluctuation but catches catastrophic loss like
+        # CVE count 99K -> 980 (the NVD regression).
+        # Minimum floor of 100 nodes to avoid noise on small labels.
+        #
+        # PromQL `and` returns the LHS vector filtered by the RHS label set,
+        # so the current (today's) value must be on the left — otherwise
+        # $value in the annotation would be yesterday's count, not today's.
+        expr: |
+          (
+            edgeguard_neo4j_nodes
+            <
+            0.5 * (edgeguard_neo4j_nodes offset 1d)
+          )
+          and
+          (edgeguard_neo4j_nodes offset 1d) > 100
+        for: 15m
+        labels:
+          severity: critical
+          component: neo4j
+        annotations:
+          summary: "Neo4j {{ $labels.label }} count dropped >50% in 24h"
+          description: |
+            {{ $labels.label }} (zone={{ $labels.zone }}) went from
+            {{ with printf "edgeguard_neo4j_nodes{label=\"%s\",zone=\"%s\"} offset 1d" $labels.label $labels.zone | query }}
+            {{ . | first | value }}{{ end }} to {{ $value }} in the last 24h.
+            This usually indicates a silent skip in MISP->Neo4j sync or a
+            truncated feed push. Cross-check edgeguard_sync_events_failed
+            and MISP event health.
+
+  # ================================================================================
   # Neo4j Alerts
   # ================================================================================
   - name: edgeguard_neo4j

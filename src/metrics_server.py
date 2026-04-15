@@ -110,6 +110,28 @@ NEO4J_SYNC_DURATION = Histogram(
     buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
 )
 
+# Per-run sync accounting. Gauges (not counters) so they reset each run
+# and alerts can fire on the CURRENT run's damage, not cumulative history.
+# Added after the 2026-04-14 NVD regression where a single MISP 500 dropped
+# ~99K CVEs silently: events_failed stayed 0 because the accounting bug
+# never recorded the skipped event, so no alert fired. Exporting these
+# three invariants (processed + failed + index_total) lets a coverage-gap
+# alert catch that exact silent-skip pattern.
+SYNC_EVENTS_PROCESSED = Gauge(
+    "edgeguard_sync_events_processed",
+    "Events successfully processed in the most recent MISP->Neo4j sync run",
+)
+
+SYNC_EVENTS_FAILED = Gauge(
+    "edgeguard_sync_events_failed",
+    "Events that failed in the most recent MISP->Neo4j sync run (after all retries)",
+)
+
+SYNC_EVENTS_INDEX_TOTAL = Gauge(
+    "edgeguard_sync_events_index_total",
+    "Total events returned by MISP events index for the most recent sync run",
+)
+
 NEO4J_QUERIES = Counter("edgeguard_neo4j_queries_total", "Total Neo4j queries executed", ["query_type", "status"])
 
 NEO4J_QUERY_DURATION = Histogram(
@@ -232,6 +254,23 @@ def record_neo4j_sync(node_counts: Dict[str, int], duration: float):
         if ":" in label:
             label, zone = label.split(":", 1)
         NEO4J_NODES.labels(label=label, zone=zone).set(count)
+
+
+def record_sync_event_accounting(
+    events_index_total: int,
+    events_processed: int,
+    events_failed: int,
+) -> None:
+    """Export the per-run event accounting so alerts can catch silent skips.
+
+    The invariant ``events_index_total == events_processed + events_failed``
+    is what would have caught the 2026-04-14 NVD regression (event 4 was
+    neither processed nor failed — it was silently dropped, and the counter
+    gap stayed hidden because nothing exported the numbers).
+    """
+    SYNC_EVENTS_INDEX_TOTAL.set(max(events_index_total, 0))
+    SYNC_EVENTS_PROCESSED.set(max(events_processed, 0))
+    SYNC_EVENTS_FAILED.set(max(events_failed, 0))
 
 
 def record_neo4j_relationships(rel_counts: Dict[str, int]):
