@@ -956,12 +956,15 @@ def should_run_neo4j_sync():
     # with a CLI baseline. The baseline runs its own MISP->Neo4j sync in
     # the same Python process and a parallel Airflow sync would read
     # MISP mid-push, producing partial data in Neo4j. ShortCircuit skips
-    # the whole sync DAG run downstream.
+    # the whole sync DAG run downstream. Fail-open: if baseline_lock
+    # fails to import (e.g. module not on PYTHONPATH during a test),
+    # log the error and proceed rather than blocking the sync.
     try:
         from baseline_lock import baseline_skip_reason
 
         _baseline_skip = baseline_skip_reason()
     except Exception:
+        logger.debug("baseline_lock import failed — proceeding without baseline mutex", exc_info=True)
         _baseline_skip = None
     if _baseline_skip is not None:
         logger.warning("Neo4j sync ShortCircuit: %s", _baseline_skip)

@@ -128,7 +128,13 @@ def is_baseline_running() -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         pid_int = 0
 
-    # Same-host liveness check.
+    # Same-host liveness check: if the sentinel was written by this host
+    # we can ask the kernel directly whether the PID is still alive.
+    # A live same-host PID is authoritative — do NOT fall through to the
+    # cross-host age check, or a baseline running longer than
+    # EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC (default 24h) would have its
+    # sentinel pruned out from under a still-running process and re-open
+    # the exact race the mutex is designed to prevent.
     local_host = socket.gethostname()
     if host == local_host:
         if not _pid_alive(pid_int):
@@ -139,8 +145,11 @@ def is_baseline_running() -> Optional[Dict[str, Any]]:
             )
             _safe_remove(path)
             return None
+        return data  # live same-host PID — authoritative, skip age check
 
-    # Age check (works across hosts).
+    # Age check — ONLY for cross-host sentinels, where we can't verify the
+    # PID from here. If a baseline ran on another host and crashed without
+    # cleaning up, this reaps the sentinel after the configured max age.
     try:
         started_dt = datetime.fromisoformat(started_at)
         age_sec = (datetime.now(timezone.utc) - started_dt).total_seconds()
