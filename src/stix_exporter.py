@@ -203,24 +203,44 @@ class StixExporter:
         return self._bundle(objects.values())
 
     def export_threat_actor(self, name: str) -> Dict[str, Any]:
-        """Bundle centred on a ThreatActor + attributed malware + TTPs + campaigns."""
+        """Bundle centred on a ThreatActor + attributed malware + TTPs + campaigns.
+
+        The query uses a ``WITH ... collect(DISTINCT ...)`` step between
+        every ``OPTIONAL MATCH`` to avoid the Cartesian product that
+        would otherwise arise from chaining 5 optional matches. Without
+        the intermediate aggregation, Neo4j produces
+        O(malware × actor_tech × mal_tech × campaigns) intermediate
+        rows before the final ``DISTINCT`` collapses them — a
+        well-connected actor group (e.g. APT28) would generate
+        thousands of throwaway rows, materially impacting query
+        latency. Aggregating at each step keeps the row count bounded
+        by the size of one collection at a time.
+        """
         rows = self._run(
             """
             MATCH (a:ThreatActor)
             WHERE (a.name = $name OR $name IN coalesce(a.aliases, []))
               AND a.edgeguard_managed = true
-            OPTIONAL MATCH (m:Malware)-[ram:ATTRIBUTED_TO]->(a)
+            WITH a
+            OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
               WHERE m.edgeguard_managed = true
-            OPTIONAL MATCH (a)-[rat:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
+            WITH a, collect(DISTINCT m) AS malware
+            OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
               WHERE t.edgeguard_managed = true
-            OPTIONAL MATCH (m)-[rmt:IMPLEMENTS_TECHNIQUE|USES]->(mt:Technique)
-              WHERE mt.edgeguard_managed = true
-            OPTIONAL MATCH (c:Campaign)-[rca:ATTRIBUTED_TO]->(a)
+            WITH a, malware, collect(DISTINCT t) AS actor_tech
+            UNWIND (CASE WHEN size(malware) = 0 THEN [null] ELSE malware END) AS m_each
+            OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE|USES]->(mt:Technique)
+              WHERE m_each IS NOT NULL AND mt.edgeguard_managed = true
+            WITH a, malware, actor_tech,
+                 collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
+            WITH a, malware, actor_tech,
+                 [pair IN mal_tech_raw WHERE pair IS NOT NULL] AS mal_tech
+            OPTIONAL MATCH (c:Campaign)-[:ATTRIBUTED_TO]->(a)
               WHERE c.edgeguard_managed = true
             RETURN a AS seed,
-                   collect(DISTINCT m) AS malware,
-                   collect(DISTINCT t) AS actor_tech,
-                   collect(DISTINCT {m: m, t: mt}) AS mal_tech,
+                   malware,
+                   actor_tech,
+                   mal_tech,
                    collect(DISTINCT c) AS campaigns
             """,
             {"name": name},
