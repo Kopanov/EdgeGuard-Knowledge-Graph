@@ -3,6 +3,13 @@ services:
     image: coolacid/misp-docker:latest
     container_name: misp_misp_1
     restart: unless-stopped
+    # Memory limit bumped to 8g (from the 4g default) because a full
+    # EdgeGuard baseline pushes 95K+ attributes per event (NVD feed),
+    # and PHP loads the full event context on every POST /attributes/add.
+    # On a 4g cap the MISP container OOM-kills mid-baseline and the
+    # Airflow task has to retry. See docs/DOCKER_SETUP_GUIDE.md §
+    # "MISP memory pressure" for the symptoms.
+    mem_limit: 8g
     ports:
       - "127.0.0.1:8443:443"
       - "127.0.0.1:5000:80"
@@ -22,6 +29,10 @@ services:
     image: mysql:8.0
     container_name: misp_db_1
     restart: unless-stopped
+    # Matches the misp service bump — a 95K-row insert needs working
+    # memory for InnoDB buffer pool and query cache. 4g is the old
+    # default and was OOM-prone during baseline.
+    mem_limit: 8g
     environment:
       - MYSQL_ROOT_PASSWORD=misp
       - MYSQL_DATABASE=misp

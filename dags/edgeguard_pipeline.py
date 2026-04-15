@@ -1528,7 +1528,8 @@ def run_build_relationships(**context):
         ["python3", os.path.join(BASE_DIR, "src", "build_relationships.py")],
         capture_output=True,
         text=True,
-        timeout=10800,  # 3 hours — aligned with execution_timeout
+        timeout=18000,  # 5 hours — aligned with execution_timeout (bumped from 3h
+        # after baseline re-runs hit the ceiling on the merged #20/#22/#24 scope)
     )
     if result.returncode != 0:
         logger.error(f"build_relationships failed:\n{result.stderr}")
@@ -1556,14 +1557,14 @@ def run_enrichment_jobs(**context):
 build_relationships_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
-    execution_timeout=timedelta(hours=3),
+    execution_timeout=timedelta(hours=5),
     dag=neo4j_sync_dag,
 )
 
 enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_enrichment_jobs,
-    execution_timeout=timedelta(hours=3),
+    execution_timeout=timedelta(hours=5),
     dag=neo4j_sync_dag,
 )
 
@@ -1881,13 +1882,13 @@ with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": Tri
     bl_otx = PythonOperator(
         task_id="collect_otx",
         python_callable=run_baseline_otx,
-        execution_timeout=timedelta(hours=3),
+        execution_timeout=timedelta(hours=5),
         dag=baseline_dag,
     )
     bl_nvd = PythonOperator(
         task_id="collect_nvd",
         python_callable=run_baseline_nvd,
-        execution_timeout=timedelta(hours=3),
+        execution_timeout=timedelta(hours=5),
         dag=baseline_dag,
     )
     bl_cisa = PythonOperator(
@@ -1966,7 +1967,7 @@ baseline_build_rels_task = PythonOperator(
 baseline_enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_baseline_enrichment,
-    execution_timeout=timedelta(hours=3),
+    execution_timeout=timedelta(hours=5),
     dag=baseline_dag,
 )
 
