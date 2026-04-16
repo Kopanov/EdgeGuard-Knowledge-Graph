@@ -160,6 +160,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
         base_score=eff_score,
         base_severity=eff_severity,
         edgeguard_managed=c.get("edgeguard_managed"),
+        uuid=c.get("uuid"),
         source=_neo4j_list(c.get("source")),
         zone=_neo4j_list(c.get("zone")),
         first_imported_at=str(c["first_imported_at"]) if c.get("first_imported_at") else None,

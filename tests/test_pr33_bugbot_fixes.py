@@ -207,3 +207,81 @@ def test_uuid_unchanged_after_consolidation():
     )
     assert compute_node_uuid("Malware", {"name": "Emotet"}) == "774960af-0687-56b1-9c05-ae55cd62ed58"
     assert compute_node_uuid("Vulnerability", {"cve_id": "CVE-2024-1234"}) == "85b67b2e-bb0c-5a7a-ae6f-2b6cc1aa077b"
+
+
+# ---------------------------------------------------------------------------
+# Bugbot 2nd-round finding #4 — CVE GraphQL resolver missing uuid pass-through
+# ---------------------------------------------------------------------------
+
+
+def test_cve_graphql_resolver_passes_uuid_through():
+    """Every other node-type resolver in graphql_api.py was updated to
+    ``uuid=n.get("uuid")`` when the GraphQL schema gained the field. The CVE
+    resolver was the one miss — bugbot caught it on PR #33 round 2. Without
+    this pass-through, GraphQL CVE queries always returned ``uuid: null``
+    even when the underlying Neo4j CVE node had a populated uuid."""
+    import graphql_api
+
+    with open(graphql_api.__file__) as fh:
+        source = fh.read()
+
+    # Locate the CVE(...) constructor (near line 151 historically).
+    idx = source.find("return CVE(")
+    assert idx > 0, "CVE constructor not found in graphql_api"
+    # Look at the next ~1500 chars (the constructor's keyword args).
+    chunk = source[idx : idx + 1500]
+    assert "uuid=c.get(" in chunk, "CVE resolver must pass uuid=c.get('uuid') — bugbot finding on PR #33 round 2"
+
+
+# ---------------------------------------------------------------------------
+# Bugbot 2nd-round finding #5 — case-insensitive label lookup
+# ---------------------------------------------------------------------------
+
+
+def test_lowercase_label_input_returns_correct_stix_type():
+    """For labels whose STIX type DIFFERS from the lowercased Neo4j label
+    (ThreatActor → intrusion-set, Technique → attack-pattern, CVE/Vulnerability →
+    vulnerability, Sector → identity, Tactic → x-mitre-tactic), passing the
+    label in lowercase MUST produce the same uuid as passing it proper-cased.
+
+    Pre-fix the case-tolerance fallback had a guard
+    ``obj_type != label.strip()`` that was False when the input was already
+    lowercase — the reverse-lookup loop was skipped and the lowercased Neo4j
+    label was used as the STIX type, producing a wrong uuid."""
+    from node_identity import compute_node_uuid
+
+    # ThreatActor → intrusion-set
+    proper = compute_node_uuid("ThreatActor", {"name": "APT28"})
+    lower = compute_node_uuid("threatactor", {"name": "APT28"})
+    assert proper == lower, "ThreatActor lowercase input must yield the same uuid"
+
+    # Technique → attack-pattern
+    assert compute_node_uuid("Technique", {"mitre_id": "T1059"}) == compute_node_uuid(
+        "technique", {"mitre_id": "T1059"}
+    )
+
+    # CVE → vulnerability
+    assert compute_node_uuid("CVE", {"cve_id": "CVE-2024-1234"}) == compute_node_uuid(
+        "cve", {"cve_id": "CVE-2024-1234"}
+    )
+
+    # Sector → identity
+    assert compute_node_uuid("Sector", {"name": "healthcare"}) == compute_node_uuid("sector", {"name": "healthcare"})
+
+    # Tactic → x-mitre-tactic
+    assert compute_node_uuid("Tactic", {"mitre_id": "TA0001"}) == compute_node_uuid("tactic", {"mitre_id": "TA0001"})
+
+
+def test_lowercase_label_uuid_matches_pinned_anchor():
+    """Strongest form of the case-tolerance assertion: lowercase input must
+    produce the SAME canonical uuid that the rest of the system uses. If
+    this drifts, a delta-sync push from a producer that lowercased its labels
+    would fail to MERGE on the cloud (different uuids)."""
+    from node_identity import compute_node_uuid
+
+    # APT28 anchor — the pinned uuid is the ONE canonical value the system
+    # uses for ThreatActor(name="APT28") regardless of label case.
+    expected = compute_node_uuid("ThreatActor", {"name": "APT28"})
+    assert compute_node_uuid("threatactor", {"name": "APT28"}) == expected
+    assert compute_node_uuid(" THREATACTOR ", {"name": "APT28"}) == expected
+    assert compute_node_uuid("ThreatActor", {"name": "APT28"}) == expected

@@ -159,6 +159,18 @@ NEO4J_TO_STIX_TYPE: Dict[str, str] = {
     "Source": "x-edgeguard-source",
 }
 
+# Lowercase-keyed mirror — derived from NEO4J_TO_STIX_TYPE so the two cannot
+# drift. Used by canonical_node_key for case-insensitive label lookup. The
+# original case-tolerance pattern (try original, try stripped, then a
+# guarded reverse-lookup loop) had a bug: when the input label was already
+# lowercase the guard was False and the loop was skipped, returning the
+# lowercased Neo4j label instead of the proper STIX type for any label
+# where the two differ (ThreatActor → intrusion-set, Technique →
+# attack-pattern, CVE/Vulnerability → vulnerability, Sector → identity,
+# Tactic → x-mitre-tactic). Bugbot caught this on PR #33; the simpler
+# single-lookup form below cannot exhibit the same bug.
+_STIX_TYPE_BY_LC_LABEL: Dict[str, str] = {k.lower(): v for k, v in NEO4J_TO_STIX_TYPE.items()}
+
 
 # --------------------------------------------------------------------------- #
 # Canonicalization + uuid computation
@@ -220,16 +232,10 @@ def canonical_node_key(label: str, key_dict: Dict[str, Any]) -> str:
         → "vulnerability:cve-2024-1234"
     """
     canonical_label = (label or "").lower().strip()
-    # NEO4J_TO_STIX_TYPE keyed by the canonical (proper-case) label name —
-    # accept any case from the caller by reverse-lookup if needed.
-    obj_type = NEO4J_TO_STIX_TYPE.get(label) or NEO4J_TO_STIX_TYPE.get(label.strip()) or canonical_label
-    # Fall through one more time if the input came in lowercased (like "indicator").
-    if obj_type == canonical_label and obj_type != label.strip():
-        # Try the title-cased version — covers callers that lowercase the label.
-        for known in NEO4J_TO_STIX_TYPE:
-            if known.lower() == canonical_label:
-                obj_type = NEO4J_TO_STIX_TYPE[known]
-                break
+    # Single lookup against the lowercase-keyed mirror — case-tolerant by
+    # construction. Falls through to the lowercased label name itself for
+    # topology / unknown labels (no STIX parity, but still deterministic).
+    obj_type = _STIX_TYPE_BY_LC_LABEL.get(canonical_label, canonical_label)
     nks = _natural_key_string(canonical_label, key_dict)
     if not nks:
         # Mirror _deterministic_id's defensive fallback so the namespace stays
