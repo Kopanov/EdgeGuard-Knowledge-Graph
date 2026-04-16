@@ -22,6 +22,7 @@ from typing import Dict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
+from node_identity import compute_node_uuid  # noqa: E402
 
 try:
     from metrics_server import record_enrichment_duration
@@ -154,7 +155,26 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
-            # Step 1: Materialise Campaign nodes (one per ThreatActor with evidence)
+            # Pre-fetch the names of every qualifying ThreatActor so we can
+            # compute deterministic Campaign uuids in Python (Campaign name is
+            # ``"<actor> Campaign"``). Without this, the MERGE below would
+            # create Campaign nodes with NULL uuid — silently breaking the
+            # cross-environment traceability contract this PR exists for.
+            # Caught in the post-PR-#33 fresh-eyes audit.
+            qualifying_actors_query = """
+            MATCH (a:ThreatActor)
+            WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+            RETURN a.name AS name
+            """
+            actor_names = [
+                r["name"] for r in session.run(qualifying_actors_query, timeout=NEO4J_READ_TIMEOUT) if r["name"]
+            ]
+            campaign_uuids = {name: compute_node_uuid("Campaign", {"name": f"{name} Campaign"}) for name in actor_names}
+
+            # Step 1: Materialise Campaign nodes (one per ThreatActor with evidence).
+            # ``c.uuid`` is set from the precomputed map keyed by the actor's name;
+            # the RUNS edge stamps src_uuid / trg_uuid from a.uuid / c.uuid (both
+            # bound, both set in this query).
             create_cypher = """
             MATCH (a:ThreatActor)
             WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
@@ -175,7 +195,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                  ) AS all_zones
             MERGE (c:Campaign {name: a.name + ' Campaign'})
             ON CREATE SET c.created_at = datetime(),
-                          c.actor_name = a.name
+                          c.actor_name = a.name,
+                          c.uuid = $campaign_uuids[a.name]
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.active           = CASE WHEN indicator_total > 0 THEN true ELSE c.active END,
@@ -185,20 +206,29 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
                                        THEN first_seen ELSE c.first_seen END,
                 c.last_seen        = last_seen,
-                c.zone             = all_zones
-            MERGE (a)-[:RUNS]->(c)
+                c.zone             = all_zones,
+                c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
+            MERGE (a)-[r_runs:RUNS]->(c)
+            ON CREATE SET r_runs.src_uuid = a.uuid, r_runs.trg_uuid = c.uuid
+            SET r_runs.src_uuid = coalesce(r_runs.src_uuid, a.uuid),
+                r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid)
             RETURN count(DISTINCT c) AS campaigns
             """
-            result = session.run(create_cypher, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
             time.sleep(3)
 
-            # Step 2: Link malware to their campaigns
+            # Step 2: Link malware to their campaigns. Both endpoints have
+            # n.uuid by now (Malware via merge_node_with_source, Campaign via
+            # step 1 above) so the edge SET reads bound .uuid directly.
             link_malware = """
             MATCH (a:ThreatActor)<-[:ATTRIBUTED_TO]-(m:Malware)
             MATCH (c:Campaign {actor_name: a.name})
-            MERGE (m)-[:PART_OF]->(c)
+            MERGE (m)-[r:PART_OF]->(c)
+            ON CREATE SET r.src_uuid = m.uuid, r.trg_uuid = c.uuid
+            SET r.src_uuid = coalesce(r.src_uuid, m.uuid),
+                r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -214,7 +244,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WHERE i.active = true
             WITH c, collect(i)[0..100] AS indicators
             UNWIND indicators AS i
-            MERGE (i)-[:PART_OF]->(c)
+            MERGE (i)-[r:PART_OF]->(c)
+            ON CREATE SET r.src_uuid = i.uuid, r.trg_uuid = c.uuid
+            SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
             RETURN count(*) AS links
             """
             result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)

@@ -140,51 +140,20 @@ There are **three mechanisms**, all converging on the same property shape
 Different code paths use different mechanisms because they have different
 information available at the time of the MERGE.
 
-### Mechanism A — precompute in Python before UNWIND
+### Mechanism B (default) — read live `src.uuid` / `trg.uuid` from the MATCHed nodes
 
-Used by: `Neo4jClient.create_misp_relationships_batch` (the production
-MISP path, 11 query templates), `_upsert_sourced_relationship`,
-`_merge_cvss_node`.
+Used by every MISP-derived edge MERGE in the codebase, including:
 
-The dispatch loop in `create_misp_relationships_batch` knows the from-label
-and to-label statically per branch (e.g. ATTRIBUTED_TO is always
-`Malware → ThreatActor`). It calls
-`edge_endpoint_uuids("Malware", from_key, "ThreatActor", to_key)` to
-compute both endpoint uuids in Python, then injects them into the row:
+- All 11 query templates in `Neo4jClient.create_misp_relationships_batch`
+- All 6 standalone `Neo4jClient.create_*_relationship` helpers
+- All 12 link queries in `src/build_relationships.py`
+- The REFERS_TO bridge in `src/enrichment_jobs.py`
+- The HAS_CVSS_v* edges in `Neo4jClient._merge_cvss_node`
+- The RUNS / PART_OF edges in `enrichment_jobs.build_campaign_nodes`
 
-```python
-src_uuid, trg_uuid = edge_endpoint_uuids(
-    "Malware", {"name": mn}, "ThreatActor", {"name": an}
-)
-attr_rows.append({
-    "malware": mn, "actor": an,
-    "src_uuid": src_uuid, "trg_uuid": trg_uuid,
-    ...
-})
-```
-
-The Cypher then SETs the values on the edge:
-
-```cypher
-UNWIND $rows AS row
-MATCH (m:Malware) WHERE m.name = row.malware OR row.malware IN coalesce(m.aliases, [])
-MATCH (a:ThreatActor) WHERE a.name = row.actor OR row.actor IN coalesce(a.aliases, [])
-MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-SET r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-    r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid),
-    ...
-```
-
-This works without any prior knowledge of whether the endpoint nodes
-already have `n.uuid` populated — the precomputation is independent.
-
-### Mechanism B — read live `src.uuid` / `trg.uuid` from the MATCHed nodes
-
-Used by: the 12 link queries in `src/build_relationships.py` and the
-REFERS_TO bridge in `src/enrichment_jobs.py`.
-
-Build_relationships runs *after* the node MERGEs have stamped `n.uuid`,
-so the SET reads the live value off the bound variable:
+The pattern: every endpoint has been MERGEd (and stamped with `n.uuid`)
+upstream by the time the edge MERGE runs, so the SET reads the live value
+off the bound variable:
 
 ```cypher
 MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL
@@ -198,26 +167,47 @@ If `i.uuid` is null (e.g. ingested before this PR, backfill hasn't run yet),
 the coalesce keeps `r.src_uuid` null too — and the backfill will fix both
 in a single pass later. No silent drift.
 
-### Mechanism C — special-case dual-label routing
+PR #33 used to have a separate "Mechanism A" (Python-side precomputation
+of endpoint uuids, threaded into UNWIND row dicts) for
+`create_misp_relationships_batch`. Bugbot caught a mismatch class on PR
+#33 round 4 — a producer's incomplete from_key (e.g. an Indicator
+relationship with no `indicator_type`) would yield a precomputed uuid
+that didn't match the actual node's `n.uuid` because the node MERGE
+used the real key. The refactor switched all 11 batch templates to
+Mechanism B (deleted in commit `8465e71`); the precomputation Python is
+gone. Same applies to what used to be a "Mechanism C" dual-label
+routing helper — the bound-var form removes the per-label uuid swap
+entirely.
 
-Used by: `TARGETS Vulnerability/CVE` and `EXPLOITS Vulnerability/CVE`
-in `create_misp_relationships_batch`. The same row payload is replayed
-against two label variants (Vulnerability and CVE), so the row carries
-*both* candidate uuids and the Python pre-call substitutes the right one
-into the generic `src_uuid` / `trg_uuid` slot:
+### Mechanism A (limited) — Python precomputation for AUTO-CREATEd nodes
 
-```python
-expl_for_vuln = [{**r, "trg_uuid": r["vuln_trg_uuid"]} for r in expl_rows]
-expl_for_cve = [{**r, "trg_uuid": r["cve_trg_uuid"]} for r in expl_rows]
-_run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_for_vuln)
-_run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_for_cve)
-```
+Mechanism B requires the endpoint to be MERGEd by an upstream pass that
+stamps `n.uuid`. For nodes that are AUTO-CREATEd inside the same Cypher
+that builds an edge (where there's no upstream MERGE pass), the uuid
+must be precomputed in Python and injected as a parameter / Cypher CASE
+literal. Three places use this:
+
+- **Sector** auto-CREATE in `create_indicator_sector_relationship` and
+  `create_vulnerability_sector_relationship` — Sector uuid pre-computed
+  via `compute_node_uuid("Sector", {"name": sec})` and passed as
+  `$sector_uuid`.
+- **Sector** auto-CREATE in `build_relationships.py` 7a (TARGETS) and
+  7b (AFFECTS) — the 4 known sector uuids precomputed at module load
+  and embedded as a Cypher CASE expression.
+- **Campaign** auto-CREATE in `enrichment_jobs.build_campaign_nodes` —
+  pre-fetch qualifying actor names, compute `compute_node_uuid("Campaign",
+  {"name": f"{actor_name} Campaign"})` for each, pass as a `$campaign_uuids`
+  map keyed by actor name. The MERGE looks it up via
+  `c.uuid = $campaign_uuids[a.name]`.
+
+Same template pattern for all three: `ON CREATE SET <node>.uuid = <expr>`
+plus an idempotent `SET <node>.uuid = coalesce(<node>.uuid, <expr>)`.
 
 ### What about SOURCED_FROM?
 
-SOURCED_FROM edges are stamped via Mechanism A with the Source node's
-uuid as `trg_uuid` — the Source node uuid (`compute_node_uuid("Source",
-{"source_id": source_id})`) is computed once per batch and reused.
+SOURCED_FROM edges follow Mechanism B — the connected node is MERGEd
+upstream and the Source node is created by `ensure_sources()` at startup
+with a deterministic uuid. The SET reads `n.uuid` and `s.uuid` directly.
 
 ### Cross-mechanism guarantee
 

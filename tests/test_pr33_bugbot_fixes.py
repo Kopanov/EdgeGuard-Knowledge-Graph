@@ -597,6 +597,91 @@ def test_standalone_sector_helpers_stamp_uuid():
         assert "s.uuid = $sector_uuid" in src, f"{fn_name} must SET s.uuid = $sector_uuid on Sector creation"
 
 
+# ---------------------------------------------------------------------------
+# Post-PR-#33 fresh-eyes audit (Agent 1 finding) — Campaign uuid stamping
+# ---------------------------------------------------------------------------
+
+
+def test_build_campaign_nodes_stamps_campaign_uuid_and_edges():
+    """The post-PR audit caught that ``enrichment_jobs.build_campaign_nodes``
+    was creating Campaign nodes (and RUNS / PART_OF edges) WITHOUT stamping
+    n.uuid / r.src_uuid / r.trg_uuid. Silent gap — GraphQL ``c.uuid`` would
+    return NULL for every Campaign until the backfill ran.
+
+    Fix: pre-fetch qualifying actor names, compute Campaign uuids in Python
+    via ``compute_node_uuid("Campaign", {"name": f"{actor} Campaign"})``,
+    pass as a ``$campaign_uuids`` map, stamp on Campaign creation. The 3
+    edges (RUNS Actor→Campaign, PART_OF Malware→Campaign, PART_OF
+    Indicator→Campaign) all read bound .uuid from their MATCHed endpoints
+    (Mechanism B).
+
+    Regression test reads the source and asserts the structural changes."""
+    import enrichment_jobs
+
+    with open(enrichment_jobs.__file__) as fh:
+        source = fh.read()
+
+    # Locate build_campaign_nodes.
+    start = source.find("def build_campaign_nodes")
+    end = source.find("\ndef ", start + 1)
+    assert start > 0 and end > start, "build_campaign_nodes not found"
+    block = source[start:end]
+
+    # Pre-fetch + Python uuid computation.
+    assert "qualifying_actors_query" in block, (
+        "build_campaign_nodes must pre-fetch qualifying actor names to compute Campaign uuids in Python"
+    )
+    assert 'compute_node_uuid("Campaign"' in block, (
+        "build_campaign_nodes must compute Campaign uuids in Python (CASE "
+        "expression / map lookup pattern — same as Sector pre-compute fix)"
+    )
+    assert "campaign_uuids" in block, "campaign_uuids map must be threaded into the Cypher"
+
+    # Campaign node uuid stamp on creation + idempotent re-stamp.
+    assert "c.uuid = $campaign_uuids[a.name]" in block, (
+        "Campaign MERGE must stamp c.uuid = $campaign_uuids[a.name] on creation"
+    )
+    assert "c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])" in block or (
+        "coalesce(c.uuid, $campaign_uuids[a.name])" in block
+    ), "Campaign uuid must use idempotent coalesce on the SET path"
+
+    # Each of the 3 edges must stamp src_uuid / trg_uuid via bound .uuid.
+    # RUNS edge is in step 1 (MERGE (a)-[r_runs:RUNS]->(c)).
+    assert "r_runs.src_uuid = a.uuid" in block, "RUNS edge must stamp src_uuid from a.uuid"
+    assert "r_runs.trg_uuid = c.uuid" in block, "RUNS edge must stamp trg_uuid from c.uuid"
+
+    # PART_OF (Malware → Campaign) — step 2.
+    pof_malware_idx = block.find("MERGE (m)-[r:PART_OF]->(c)")
+    assert pof_malware_idx > 0, "Malware PART_OF edge not found"
+    pof_malware_chunk = block[pof_malware_idx : pof_malware_idx + 400]
+    assert "r.src_uuid = m.uuid" in pof_malware_chunk, "Malware PART_OF edge must stamp src_uuid from m.uuid"
+    assert "r.trg_uuid = c.uuid" in pof_malware_chunk, "Malware PART_OF edge must stamp trg_uuid from c.uuid"
+
+    # PART_OF (Indicator → Campaign) — step 3.
+    pof_indicator_idx = block.find("MERGE (i)-[r:PART_OF]->(c)")
+    assert pof_indicator_idx > 0, "Indicator PART_OF edge not found"
+    pof_indicator_chunk = block[pof_indicator_idx : pof_indicator_idx + 400]
+    assert "r.src_uuid = i.uuid" in pof_indicator_chunk, "Indicator PART_OF edge must stamp src_uuid from i.uuid"
+    assert "r.trg_uuid = c.uuid" in pof_indicator_chunk, "Indicator PART_OF edge must stamp trg_uuid from c.uuid"
+
+
+def test_campaign_uuid_matches_compute_node_uuid_contract():
+    """Behavioral check on the actual uuid value: Campaign(name='APT28 Campaign')
+    must produce the same uuid that compute_node_uuid does, so a downstream
+    consumer can resolve a Campaign uuid back to the canonical entity."""
+    from node_identity import compute_node_uuid
+
+    # Anchor pin — frozen value. If canonicalization changes, this fails loudly.
+    expected = compute_node_uuid("Campaign", {"name": "APT28 Campaign"})
+    # Same input should yield the same uuid every time.
+    assert compute_node_uuid("Campaign", {"name": "APT28 Campaign"}) == expected
+    # And the STIX exporter should produce the same uuid (Campaign → STIX campaign).
+    from stix_exporter import _deterministic_id
+
+    stix_id = _deterministic_id("campaign", "APT28 Campaign")
+    assert stix_id == f"campaign--{expected}", "Campaign Neo4j n.uuid must equal the UUID portion of the STIX SDO id"
+
+
 def test_lowercase_label_uuid_matches_pinned_anchor():
     """Strongest form of the case-tolerance assertion: lowercase input must
     produce the SAME canonical uuid that the rest of the system uses. If
