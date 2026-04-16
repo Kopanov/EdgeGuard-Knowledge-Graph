@@ -461,14 +461,17 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     # Both REFERS_TO edges carry src_uuid + trg_uuid for cross-environment
     # traceability — endpoints (Vulnerability + CVE) already have n.uuid set
     # by their respective MERGE paths (merge_vulnerabilities_batch / merge_cve).
+    #
+    # The inner apoc.periodic.iterate action MUST be a single Cypher string
+    # literal. Python implicit-concat does NOT apply inside a triple-quoted
+    # outer string — adjacent ``'...' '...'`` fragments would be sent to
+    # Neo4j as separate quoted tokens and produce a syntax error. Bugbot
+    # caught this on PR #33 round 3. Keep the inner action on a single
+    # logical line (long but unambiguous).
     query = """
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
-        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) '
-        'MERGE (v)-[r1:REFERS_TO]->(c) '
-        '  SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid) '
-        'MERGE (c)-[r2:REFERS_TO]->(v) '
-        '  SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid)',
+        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid) MERGE (c)-[r2:REFERS_TO]->(v) SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid)',
         {batchSize: 5000, parallel: false}
     )
     YIELD total

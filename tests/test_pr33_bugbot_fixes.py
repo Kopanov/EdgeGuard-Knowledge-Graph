@@ -272,6 +272,58 @@ def test_lowercase_label_input_returns_correct_stix_type():
     assert compute_node_uuid("Tactic", {"mitre_id": "TA0001"}) == compute_node_uuid("tactic", {"mitre_id": "TA0001"})
 
 
+# ---------------------------------------------------------------------------
+# Bugbot 3rd-round finding #6 — adjacent string literals inside triple-quoted
+# string break Cypher syntax in apoc.periodic.iterate
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_vulnerability_cve_inner_action_is_single_string_literal():
+    """Bugbot caught a HIGH-severity bug: the bridge_vulnerability_cve query
+    used multiple adjacent ``'...' '...'`` Cypher string fragments INSIDE a
+    triple-quoted Python string. Python doesn't implicit-concat adjacent
+    quoted strings inside ``\"\"\"...\"\"\"`` — the fragments were sent to
+    Neo4j as separate tokens, producing a Cypher syntax error.
+
+    Structural check: read the source and verify the inner apoc.periodic.iterate
+    action does NOT have the ``' '` adjacent-quote pattern (which is the
+    fingerprint of the broken form)."""
+    import enrichment_jobs
+
+    with open(enrichment_jobs.__file__) as fh:
+        source = fh.read()
+
+    # Find the bridge_vulnerability_cve function block.
+    start = source.find("def bridge_vulnerability_cve")
+    end = source.find("\ndef ", start + 1)
+    assert start > 0 and end > start, "bridge_vulnerability_cve not found"
+    block = source[start:end]
+
+    # Look for the inner apoc.periodic.iterate action argument. The broken
+    # form had a closing single-quote followed by whitespace/newline followed
+    # by an opening single-quote — the adjacent-literal smell. This pattern
+    # appears inside the broken form (`'...REFERS_TO]->(c) ' '  SET ...`)
+    # but NOT in the fixed single-line form.
+    #
+    # Catch the specific anti-pattern: closing-quote, then whitespace/newline,
+    # then opening-quote, all WITHIN the inner Cypher action argument.
+    import re
+
+    # Restrict to the inner second argument of apoc.periodic.iterate.
+    iterate_idx = block.find("apoc.periodic.iterate(")
+    assert iterate_idx > 0
+    after = block[iterate_idx : iterate_idx + 1500]
+
+    # Adjacent-quote anti-pattern: `' \n   '` or `'   \n  '` (closing then opening).
+    bad_pattern = re.search(r"'\s*\n\s+'", after)
+    assert bad_pattern is None, (
+        "bridge_vulnerability_cve inner action has adjacent quoted string "
+        "fragments inside a triple-quoted outer string — Python won't "
+        "concat them and Cypher will reject the result. Keep the inner "
+        "action as a single long line."
+    )
+
+
 def test_lowercase_label_uuid_matches_pinned_anchor():
     """Strongest form of the case-tolerance assertion: lowercase input must
     produce the SAME canonical uuid that the rest of the system uses. If
