@@ -386,20 +386,30 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                             f"  [CALIBRATE] {tier_label}: processing {len(large_eids)} large events "
                             f"(>{1000} indicators each) via apoc.periodic.iterate"
                         )
+                    # Same any-of semantics as the small-event path: indicators whose array
+                    # OR scalar carries this event id are in scope.
+                    #
+                    # Parameterized via apoc.periodic.iterate's ``params`` config so $eid and
+                    # $conf are safely bound inside both the matcher and the action (previously
+                    # f-string interpolation risked Cypher breakage if an event id ever
+                    # contained a quote or other special character).
+                    large_batch_query = (
+                        "CALL apoc.periodic.iterate("
+                        "  'MATCH (i:Indicator) WHERE i.misp_event_id = $eid OR ("
+                        "    i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids"
+                        "  ) MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
+                        "  WHERE r.source_id IN [\"misp_cooccurrence\", \"misp_correlation\"] "
+                        "  RETURN r', "
+                        "  'SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
+                        "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
+                        ") YIELD total "
+                        "RETURN total AS updated"
+                    )
                     for eid in large_eids:
                         evt_size = event_sizes.get(eid, 0)
-                        # Same any-of semantics as the small-event path: indicators
-                        # whose array OR scalar carries this event id are in scope.
-                        batch_query = f"""
-                        CALL apoc.periodic.iterate(
-                            'MATCH (i:Indicator) WHERE i.misp_event_id = "{eid}" OR (i.misp_event_ids IS NOT NULL AND "{eid}" IN i.misp_event_ids) MATCH (i)-[r:INDICATES|EXPLOITS]->(target) WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] RETURN r',
-                            'SET r.confidence_score = {conf}, r.calibrated_at = datetime()',
-                            {{batchSize: 5000, parallel: false}}
+                        result = session.run(
+                            large_batch_query, eid=eid, conf=conf, timeout=NEO4J_READ_TIMEOUT
                         )
-                        YIELD total
-                        RETURN total AS updated
-                        """
-                        result = session.run(batch_query, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
                         evt_updated = record["updated"] if record else 0
                         total_updated += evt_updated

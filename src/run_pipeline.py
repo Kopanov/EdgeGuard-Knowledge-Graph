@@ -275,14 +275,21 @@ class EdgeGuardPipeline:
             # Co-occurrence query: Indicators and Malware that share a MISP event
             # are linked with INDICATES.  Works cross-source because misp_event_id
             # is stored on every node that came through the MISP pipeline.
-            # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators)
+            # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators).
+            #
+            # Symmetric scalar+array handling on BOTH ends of the join (2026-04 fix):
+            # outer query includes Indicators with non-empty misp_event_ids[] even when
+            # the legacy scalar is null; inner Malware match accepts the event id from
+            # either the scalar or the array. Pre-fix the join missed all Malware whose
+            # contribution to the event was a re-occurrence (only the first-seen scalar
+            # was matched).
             cooccurrence_query = """
             CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> "" RETURN i',
+                'MATCH (i:Indicator) WHERE (i.misp_event_id IS NOT NULL AND i.misp_event_id <> "") OR (i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0) RETURN i',
                 'WITH $i AS i
                  WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) WHERE eid IS NOT NULL AND eid <> ""  ][0..200] AS eids
                  UNWIND eids AS eid WITH i, eid
-                 MATCH (m:Malware {misp_event_id: eid})
+                 MATCH (m:Malware) WHERE m.misp_event_id = eid OR (m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids)
                  MERGE (i)-[r:INDICATES]->(m)
                  ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5 SET r.updated_at = datetime()',
                 {batchSize: 5000, parallel: false}

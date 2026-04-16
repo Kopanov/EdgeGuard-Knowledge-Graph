@@ -198,7 +198,7 @@ CREATE INDEX campaign_zone IF NOT EXISTS FOR (c:Campaign) ON (c.zone);
 
 ## MISP Integration
 
-**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_id` (and `misp_event_ids[]` accumulated array) for tracing back to MISP events. **Indicator** nodes additionally carry `misp_attribute_id` (and `misp_attribute_ids[]`) — the MISP attribute UUID, populated from `attr.uuid` for direct attribute-level traceability (added 2026-04). Edges built from the MISP path carry `r.misp_event_ids[]` for per-edge provenance.
+**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_id` (and `misp_event_ids[]` accumulated array) for tracing back to MISP events. **Indicator** nodes additionally carry `misp_attribute_id` (and `misp_attribute_ids[]`) — the MISP **attribute UUID** (`attr.uuid`), which is the *stable cross-instance identifier*. The legacy numeric `attr.id` was deliberately not chosen because it is per-instance auto-increment and not portable across MISP instances or restores. With `misp_attribute_id` populated you can resolve a Neo4j Indicator directly back to its MISP attribute without joining via the event id (added 2026-04). Edges built from the MISP path carry `r.misp_event_ids[]` for per-edge provenance.
 
 ### Sync throughput (Airflow worker memory)
 

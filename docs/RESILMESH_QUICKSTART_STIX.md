@@ -104,6 +104,20 @@ Each SDO built from a Neo4j node with zone tags carries
 property. Filter bundles by sector on the ResilMesh side without
 re-querying the graph.
 
+**MISP traceability (2026-04):** every SDO sourced from a node with
+MISP provenance also carries:
+
+- `x_edgeguard_misp_event_ids: ["1234", "1235", ...]` — union of the
+  node's `misp_event_ids[]` array and the legacy scalar
+  `misp_event_id`. Lets ResilMesh resolve a STIX object back to the
+  originating MISP event(s) without round-tripping through Neo4j.
+- `x_edgeguard_misp_attribute_ids: ["uuid-a", ...]` — same union for
+  attribute UUIDs. Present on Indicator-derived SDOs (the only nodes
+  where the MISP attribute UUID is populated).
+
+Both fields are omitted entirely when the source node has no MISP
+references — bundles do not grow empty fields on every object.
+
 ### Provenance — `x_edgeguard_source`
 
 ```json

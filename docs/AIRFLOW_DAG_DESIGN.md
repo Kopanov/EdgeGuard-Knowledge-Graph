@@ -189,6 +189,15 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 > **2026-04 refactor note:** Prior to April 2026 all three edges were a single generic `USES`. They were split into `EMPLOYS_TECHNIQUE` (attribution — actor/campaign) and `IMPLEMENTS_TECHNIQUE` (capability — malware/tool) to improve Cypher clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1 `relationship_type: "uses"` on export. See [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) for the graph rewrite and [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) for the semantic rationale.
 
+> **2026-04 INDICATES co-occurrence symmetry fix:** prior to April 2026 the
+> Indicator → Malware co-occurrence query MATCHed Malware by the legacy scalar
+> `misp_event_id` only (`MATCH (m:Malware {misp_event_id: eid})`). For
+> Malware whose contribution to an event was a re-occurrence (event id appears
+> in `misp_event_ids[]` but not in the first-seen scalar) the join missed the
+> edge entirely. The query is now symmetric on both ends — outer Indicator
+> filter and inner Malware match both accept the scalar OR the array. Mirrored
+> in `src/run_pipeline.py` for the optional CLI path.
+
 ### 2. run_enrichment_jobs
 
 Runs `src/enrichment_jobs.py` — **four** jobs in sequence (`run_all_enrichment_jobs`):
@@ -237,6 +246,23 @@ Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.source_id IN 
 | > 500 (bulk dump, e.g. Feodo) | 0.30 |
 
 Only edges with `source_id IN ['misp_cooccurrence', 'misp_correlation']` are modified. Manually curated edges are untouched.
+
+> **2026-04 fix — multi-event sizing:** previously the event-size pre-compute
+> grouped Indicators by their first-seen scalar `misp_event_id` only, so an
+> Indicator appearing in multiple events was sized only against its first-seen
+> event. The pre-compute now UNWINDs the union of `misp_event_ids[]` ∪
+> `misp_event_id` and counts distinct Indicators per event id, so multi-event
+> Indicators contribute to the size of every event they appear in. The matcher
+> and the large-event `apoc.periodic.iterate` path follow the same union
+> semantics; the large-event path uses APOC's `params:` config so the event id
+> is bound (no f-string interpolation).
+
+> **2026-04 fix — multi-event re-activation in `mark_inactive_nodes`:**
+> previously the inactivity gate read only the first-seen scalar
+> `misp_event_id`. A node referenced by N active MISP events whose first-seen
+> event rotated out of the incremental window was incorrectly flipped inactive.
+> The gate now coalesces array + scalar with `any(...)` for re-activation and
+> `none(...)` for deactivation. Both Indicators and Vulnerabilities.
 
 ## Data Quality Targets
 

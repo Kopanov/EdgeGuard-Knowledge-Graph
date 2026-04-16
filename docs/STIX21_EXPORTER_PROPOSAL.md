@@ -189,6 +189,14 @@ Consequences:
    Objects with no zones omit the key entirely to keep bundle size
    flat. See `_attach_zones` in `src/stix_exporter.py`. ResilMesh can
    filter bundles by sector without traversing the graph.
+
+   **Update 2026-04:** the same pattern was extended to MISP traceability.
+   Every SDO additionally carries `x_edgeguard_misp_event_ids` and
+   `x_edgeguard_misp_attribute_ids` (union of the node's array + scalar
+   MISP id properties; omitted when empty). ResilMesh consumers can now
+   resolve a bundle object back to its originating MISP event(s) and
+   attribute(s) without round-tripping through Neo4j. See
+   `_attach_misp_provenance` in `src/stix_exporter.py`.
 5. **CVSS bridging.** ResilMesh stores CVSSv* as separate nodes linked
    to CVE via `HAS_CVSS_v*`. STIX has no first-class CVSS SDO. For now
    we flatten nothing — CVSS stays on the ResilMesh side. Confirm this
@@ -233,8 +241,11 @@ Tracked as separate tickets; do **not** expand this PR:
   memory footprint — needs streaming JSON.
 - **FU-3: Push updates.** Subscribe to the EdgeGuard NATS bus and emit
   delta STIX bundles over webhooks / TAXII `added_after`.
-- **FU-4: Zone metadata export.** Decide on and wire custom property
-  namespace (`x_edgeguard_*`) for zone tags, confidence, decay score.
+- ~~**FU-4: Zone metadata export.**~~ **Done (2026-04).** The
+  `x_edgeguard_*` custom-property namespace is now in use. Currently
+  emitted: `x_edgeguard_zones`, `x_edgeguard_misp_event_ids`,
+  `x_edgeguard_misp_attribute_ids`. Confidence and decay score remain
+  open if/when ResilMesh asks for them.
 - **FU-5: Per-partner API keys & audit log.** See §9.
 - **FU-6: Bundle signing / provenance.** Sign bundles with a JWS so
   ResilMesh can verify EdgeGuard as the origin.

@@ -10,6 +10,8 @@
 
 **Last full pass:** 2026-03-24 — **MISP event discovery** = **`/events/index`** pagination + client filter + **`Accept: application/json`** on sync session; **`restSearch`** fallback; **`misp_health`** **`healthy`** = API+DB (workers optional; **`EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS`** for strict); **Airflow** **`AIRFLOW_MEMORY_LIMIT`** (default **4g**), scheduler zombie/heartbeat env vars; **Prometheus** scrape **8001**; **api/graphql** **`Dockerfile`** **`chown /app/src`**. Prior **2026-03-21** pass: per-event MISP→Neo4j, **`EDGEGUARD_REL_BATCH_SIZE`**, **HEARTBEAT.md**, SSL env aliases, etc.
 
+**Targeted pass 2026-04-16 — MISP attribute UUID + edge provenance** (PR #32, branch `fix/misp-attribute-uuid-traceability`): forward fix in `src/run_misp_to_neo4j.py` (`parse_attribute` now stamps `misp_attribute_id = attr.uuid` on all 7 item types) and `src/collectors/misp_collector.py` (aligned to `attr.uuid`). New `Indicator.misp_attribute_id` index. New `r.misp_event_ids[]` on every relationship MERGEd by `create_misp_relationships_batch`. Latent scalar→array bugs fixed in `mark_inactive_nodes`, `calibrate_cooccurrence_confidence`, `build_relationships.py` INDICATES co-occurrence, and `run_pipeline.py` co-occurrence. New STIX exporter custom properties `x_edgeguard_misp_event_ids` / `x_edgeguard_misp_attribute_ids` via `_attach_misp_provenance` (mirrors `_attach_zones`). Backfill migration `migrations/2026_04_indicator_misp_attribute_id_backfill.cypher` (Pass A only — Pass B runbook in MIGRATIONS.md). Docs touched: ARCHITECTURE.md, KNOWLEDGE_GRAPH.md, TECHNICAL_SPEC.md, MIGRATIONS.md, AIRFLOW_DAG_DESIGN.md, STIX21_EXPORTER_PROPOSAL.md, RESILMESH_INTEROPERABILITY.md, RESILMESH_QUICKSTART_STIX.md, this file.
+
 ---
 
 ## Navigating overlapping topics
