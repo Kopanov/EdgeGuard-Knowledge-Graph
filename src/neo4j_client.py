@@ -2142,10 +2142,16 @@ class Neo4jClient:
             # Cypher MERGE can accumulate it on r.misp_event_ids[]. Empty/None →
             # the SET clause skips the array append (CASE expression).
             mev = str(rel.get("misp_event_id", "") or "")
-            # Endpoint uuids — same canonicalization as the actual node MERGEs,
-            # so r.src_uuid/r.trg_uuid resolve back to the connected nodes
-            # cross-environment. Computed per branch below since the labels
-            # differ (and EXPLOITS has two valid target labels).
+            # NOTE: edge src_uuid / trg_uuid are NO LONGER pre-computed in the
+            # dispatch loop. Each Cypher template SETs them directly from the
+            # MATCHed node's bound-variable .uuid (Mechanism B), e.g. for
+            # INDICATES: `r.src_uuid = coalesce(r.src_uuid, i.uuid)`. This
+            # eliminates an entire class of bugs where the precomputed uuid
+            # disagreed with the actual node uuid because the from_key dict
+            # was incomplete (e.g. Indicator from_key missing indicator_type
+            # → uuid computed from "" → wrong fallback uuid that doesn't
+            # match the node's n.uuid). Bugbot caught this on PR #33 round 4.
+            #
             # Backward-compat: accept legacy "USES" rel_type from callers that
             # haven't been migrated yet, and route based on from_type. New
             # code should emit the specialized rel_type directly.
@@ -2173,9 +2179,6 @@ class Neo4jClient:
                 if from_type == "ThreatActor":
                     an = nonempty_graph_string(fk.get("name"))
                     if an and mid:
-                        src_uuid, trg_uuid = edge_endpoint_uuids(
-                            "ThreatActor", {"name": an}, "Technique", {"mitre_id": mid}
-                        )
                         actor_employs_rows.append(
                             {
                                 "actor": an,
@@ -2183,8 +2186,6 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
-                                "src_uuid": src_uuid,
-                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
@@ -2192,9 +2193,6 @@ class Neo4jClient:
                 elif from_type == "Campaign":
                     cn = nonempty_graph_string(fk.get("name"))
                     if cn and mid:
-                        src_uuid, trg_uuid = edge_endpoint_uuids(
-                            "Campaign", {"name": cn}, "Technique", {"mitre_id": mid}
-                        )
                         campaign_employs_rows.append(
                             {
                                 "campaign": cn,
@@ -2202,20 +2200,14 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
-                                "src_uuid": src_uuid,
-                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
                         _dropped_rels += 1
                 elif from_type == "Malware":
-                    # Malware natural key is `name` — the Cypher MATCH and the uuid
-                    # computation both use it.
+                    # Malware natural key is `name` — used by the Cypher MATCH.
                     nm = nonempty_graph_string(fk.get("name"))
                     if nm and mid:
-                        src_uuid, trg_uuid = edge_endpoint_uuids(
-                            "Malware", {"name": nm}, "Technique", {"mitre_id": mid}
-                        )
                         implements_rows.append(
                             {
                                 "entity": nm,
@@ -2224,8 +2216,6 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
-                                "src_uuid": src_uuid,
-                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
@@ -2239,9 +2229,6 @@ class Neo4jClient:
                     # Cypher MATCHes on tool.mitre_id (not tool.name) to match.
                     tool_mid = nonempty_graph_string(fk.get("mitre_id"))
                     if tool_mid and mid:
-                        src_uuid, trg_uuid = edge_endpoint_uuids(
-                            "Tool", {"mitre_id": tool_mid}, "Technique", {"mitre_id": mid}
-                        )
                         implements_rows.append(
                             {
                                 "entity": tool_mid,
@@ -2250,8 +2237,6 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
-                                "src_uuid": src_uuid,
-                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
@@ -2262,7 +2247,6 @@ class Neo4jClient:
                 mn = nonempty_graph_string(fk.get("name"))
                 an = nonempty_graph_string(tk.get("name"))
                 if mn and an:
-                    src_uuid, trg_uuid = edge_endpoint_uuids("Malware", {"name": mn}, "ThreatActor", {"name": an})
                     attr_rows.append(
                         {
                             "malware": mn,
@@ -2270,23 +2254,14 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
-                            "src_uuid": src_uuid,
-                            "trg_uuid": trg_uuid,
                         }
                     )
                 else:
                     _dropped_rels += 1
             elif rt == "INDICATES" and rel.get("to_type") == "Malware":
                 iv = nonempty_graph_string(fk.get("value"))
-                ind_type = nonempty_graph_string(fk.get("indicator_type")) or ""
                 mn = nonempty_graph_string(tk.get("name"))
                 if iv and mn:
-                    src_uuid, trg_uuid = edge_endpoint_uuids(
-                        "Indicator",
-                        {"indicator_type": ind_type, "value": iv},
-                        "Malware",
-                        {"name": mn},
-                    )
                     ind_mal_rows.append(
                         {
                             "value": iv,
@@ -2294,8 +2269,6 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
-                            "src_uuid": src_uuid,
-                            "trg_uuid": trg_uuid,
                         }
                     )
                 else:
@@ -2305,15 +2278,16 @@ class Neo4jClient:
                 if not sec:
                     _dropped_rels += 1
                     continue
-                # Sector node uuid — same value for every row pointing at this sector;
-                # also stamped on the auto-created Sector node in the Cypher MERGE.
+                # Sector node uuid — kept as a row field because the Sector node
+                # is auto-CREATEd in the Cypher and we need a deterministic uuid
+                # to stamp on it. Same value for every row pointing at this
+                # sector; the connected edge's r.trg_uuid is filled from the
+                # bound s.uuid by the template (NOT from row.sector_uuid).
                 sec_uuid = compute_node_uuid("Sector", {"name": sec})
                 ft = rel.get("from_type")
                 if ft == "Indicator":
                     iv = nonempty_graph_string(fk.get("value"))
-                    ind_type = nonempty_graph_string(fk.get("indicator_type")) or ""
                     if iv:
-                        src_uuid = compute_node_uuid("Indicator", {"indicator_type": ind_type, "value": iv})
                         tgt_ind_rows.append(
                             {
                                 "value": iv,
@@ -2321,8 +2295,6 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
-                                "src_uuid": src_uuid,
-                                "trg_uuid": sec_uuid,
                                 "sector_uuid": sec_uuid,
                             }
                         )
@@ -2332,10 +2304,9 @@ class Neo4jClient:
                     cid = normalize_cve_id_for_graph(fk.get("cve_id"))
                     if cid:
                         # tgt_vuln_rows is replayed against BOTH Vulnerability and CVE
-                        # labels (q_tgt_vuln + q_tgt_cve). The two labels have
-                        # different uuids, so the row carries both.
-                        vuln_src_uuid = compute_node_uuid("Vulnerability", {"cve_id": cid})
-                        cve_src_uuid = compute_node_uuid("CVE", {"cve_id": cid})
+                        # labels (q_tgt_vuln + q_tgt_cve). With Mechanism B uuids, no
+                        # per-label precomputation is needed — each template reads its
+                        # MATCHed node's .uuid directly.
                         tgt_vuln_rows.append(
                             {
                                 "cve_id": cid,
@@ -2343,9 +2314,6 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
-                                "vuln_src_uuid": vuln_src_uuid,
-                                "cve_src_uuid": cve_src_uuid,
-                                "trg_uuid": sec_uuid,
                                 "sector_uuid": sec_uuid,
                             }
                         )
@@ -2353,13 +2321,11 @@ class Neo4jClient:
                         _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
-                ind_type = nonempty_graph_string(fk.get("indicator_type")) or ""
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
                 if iv and cid:
                     # expl_rows replays against BOTH Vulnerability and CVE labels.
-                    src_uuid = compute_node_uuid("Indicator", {"indicator_type": ind_type, "value": iv})
-                    vuln_trg_uuid = compute_node_uuid("Vulnerability", {"cve_id": cid})
-                    cve_trg_uuid = compute_node_uuid("CVE", {"cve_id": cid})
+                    # Mechanism B (template reads i.uuid / v.uuid directly) means
+                    # no per-label uuid precomputation needed.
                     expl_rows.append(
                         {
                             "value": iv,
@@ -2367,9 +2333,6 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
-                            "src_uuid": src_uuid,
-                            "vuln_trg_uuid": vuln_trg_uuid,
-                            "cve_trg_uuid": cve_trg_uuid,
                         }
                     )
                 else:
@@ -2401,8 +2364,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, a.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         # Attribution edge: Campaign → Technique. Separate from the
         # ThreatActor query so the planner hits a single label index.
@@ -2425,8 +2388,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, c.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         # Capability edge: Malware or Tool → Technique. Single query handles
         # both labels via CALL ... apoc.do.case-style branching; we run one
@@ -2448,8 +2411,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, m.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         # Tool's natural key (and UNIQUE constraint) is mitre_id, NOT name —
         # the dispatch loop above puts the Tool's mitre_id into row.entity for
@@ -2472,8 +2435,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, tool.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         q_attr = """
         UNWIND $rows AS row
@@ -2492,8 +2455,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, m.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, a.uuid)
         """
         q_ind_mal = """
         UNWIND $rows AS row
@@ -2511,8 +2474,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, m.uuid)
         """
         q_tgt_ind = """
         UNWIND $rows AS row
@@ -2534,8 +2497,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
         q_tgt_vuln = """
         UNWIND $rows AS row
@@ -2557,8 +2520,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
         q_tgt_cve = """
         UNWIND $rows AS row
@@ -2580,8 +2543,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
         q_expl_vuln = """
         UNWIND $rows AS row
@@ -2599,8 +2562,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         q_expl_cve = """
         UNWIND $rows AS row
@@ -2618,8 +2581,8 @@ class Neo4jClient:
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
@@ -2658,24 +2621,21 @@ class Neo4jClient:
                 time.sleep(1)
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
-                # Same row payload, replayed against two labels (Vulnerability + CVE).
-                # The labels have different uuids — populate r.src_uuid per label by
-                # copying the appropriate pre-computed key into the generic src_uuid slot.
-                tgt_vuln_for_vuln = [{**r, "src_uuid": r["vuln_src_uuid"]} for r in tgt_vuln_rows]
-                tgt_vuln_for_cve = [{**r, "src_uuid": r["cve_src_uuid"]} for r in tgt_vuln_rows]
+                # Same row payload replayed against two labels (Vulnerability + CVE).
+                # No per-label uuid swap is needed anymore — each template's SET
+                # reads its MATCHed node's bound .uuid directly (Mechanism B), so
+                # the same row dict works for both queries.
                 time.sleep(1)
-                _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_for_vuln)
+                _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_rows)
                 time.sleep(1)
-                _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_for_cve)
+                _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_rows)
             if expl_rows:
-                # Same as TARGETS_vuln/cve but for the EXPLOITS Indicator → Vulnerability/CVE
-                # join: trg_uuid varies by target label.
-                expl_for_vuln = [{**r, "trg_uuid": r["vuln_trg_uuid"]} for r in expl_rows]
-                expl_for_cve = [{**r, "trg_uuid": r["cve_trg_uuid"]} for r in expl_rows]
+                # Same as TARGETS_vuln/cve — Mechanism B uuids mean one row dict
+                # serves both EXPLOITS templates without any precomputed swap.
                 time.sleep(1)
-                _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_for_vuln)
+                _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
                 time.sleep(1)
-                _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_for_cve)
+                _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
 
         return total
 

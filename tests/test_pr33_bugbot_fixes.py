@@ -72,24 +72,27 @@ def test_standalone_helpers_use_bound_endpoint_vars_not_row():
     assert "coalesce(r.src_uuid, v.uuid)" in helper_block, "expected v.uuid endpoint stamp (vulnerability_sector)"
 
 
-def test_create_misp_relationships_batch_still_uses_row_vars():
-    """Sanity check on the negative side: the batch UNWIND queries SHOULD
-    still use ``row.src_uuid`` / ``row.trg_uuid`` — those are correct
-    inside ``UNWIND $rows AS row``. Catches a regression where someone
-    over-zealously removes ``row.*`` references everywhere."""
+def test_create_misp_relationships_batch_still_uses_row_vars_for_other_fields():
+    """The batch UNWIND queries still use ``row.*`` for other fields
+    (``row.source_id``, ``row.confidence``, ``row.misp_event_id``, etc.) —
+    those are correct inside ``UNWIND $rows AS row``. Only the src_uuid /
+    trg_uuid stamps switched to bound-var form (Mechanism B) in round 4.
+    Catches a regression where someone over-zealously removes ALL ``row.*``
+    references."""
     import neo4j_client
 
     with open(neo4j_client.__file__) as fh:
         source = fh.read()
 
     batch_start = source.find("def create_misp_relationships_batch")
-    batch_end = source.find("def get_stats")  # the next public function
+    batch_end = source.find("def get_stats")
     assert batch_start > 0 and batch_end > batch_start
     batch_block = source[batch_start:batch_end]
 
-    # Inside UNWIND queries, row.* IS the correct binding — must still be present.
-    assert "row.src_uuid" in batch_block, "row.src_uuid removed from UNWIND queries (regression)"
-    assert "row.trg_uuid" in batch_block, "row.trg_uuid removed from UNWIND queries (regression)"
+    # These must remain — they're needed for the UNWIND row contract.
+    assert "row.source_id" in batch_block, "row.source_id removed (regression)"
+    assert "row.confidence" in batch_block, "row.confidence removed (regression)"
+    assert "row.misp_event_id" in batch_block, "row.misp_event_id removed (regression)"
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +120,9 @@ def test_tool_branch_uses_mitre_id_not_name():
     assert 'elif from_type == "Tool":' in block, "Tool branch must be split out from Malware"
     # Must read the mitre_id from from_key.
     assert 'fk.get("mitre_id")' in block, "Tool branch must read mitre_id from from_key"
-    # The uuid must be computed with mitre_id.
-    assert '"Tool", {"mitre_id":' in block, "Tool uuid must be computed from {'mitre_id': ...}, not {'name': ...}"
+    # The Tool row must put mitre_id into row.entity (q_tool_implements MATCHes
+    # by tool.mitre_id = row.entity, not tool.name).
+    assert '"entity_label": "Tool"' in block, "Tool branch must tag rows with entity_label='Tool'"
 
 
 def test_q_tool_implements_matches_by_mitre_id():
@@ -321,6 +325,160 @@ def test_bridge_vulnerability_cve_inner_action_is_single_string_literal():
         "fragments inside a triple-quoted outer string — Python won't "
         "concat them and Cypher will reject the result. Keep the inner "
         "action as a single long line."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bugbot 4th-round finding #7 (MED) — refactor batch templates to bound-var uuids
+# ---------------------------------------------------------------------------
+
+
+def test_create_misp_relationships_batch_uses_bound_var_uuids_not_row():
+    """Pre-fix the batch templates SET ``r.src_uuid = coalesce(..., row.src_uuid)``
+    where ``row.src_uuid`` was Python-precomputed in the dispatch loop. Bugbot
+    flagged that this could disagree with the actual node's ``n.uuid`` if the
+    producer's from_key was incomplete (e.g. Indicator missing ``indicator_type``
+    → uuid computed from `""` → `__missing__` fallback that doesn't match the
+    node).
+
+    Fix: every Cypher template now reads its MATCHed node's bound-variable
+    ``.uuid`` directly (Mechanism B). Same pattern build_relationships.py uses
+    — eliminates the precomputation/MATCH mismatch class entirely.
+
+    This test asserts the structural change."""
+    import neo4j_client
+
+    with open(neo4j_client.__file__) as fh:
+        source = fh.read()
+
+    batch_start = source.find("def create_misp_relationships_batch")
+    batch_end = source.find("\n    def get_stats")
+    assert batch_start > 0 and batch_end > batch_start
+    block = source[batch_start:batch_end]
+
+    # Negative: no Cypher template should use ``row.src_uuid`` / ``row.trg_uuid``
+    # any more — all are now bound-var uuids.
+    assert "row.src_uuid" not in block, (
+        "create_misp_relationships_batch must not reference row.src_uuid — use bound-var .uuid instead (Mechanism B)"
+    )
+    assert "row.trg_uuid" not in block, (
+        "create_misp_relationships_batch must not reference row.trg_uuid — use bound-var .uuid instead (Mechanism B)"
+    )
+
+    # Positive: each of the 11 templates uses bound-var .uuid for src/trg.
+    # Spot-check a few representative ones.
+    assert "coalesce(r.src_uuid, a.uuid)" in block, "actor_employs / attr templates"
+    assert "coalesce(r.src_uuid, m.uuid)" in block, "malware_implements / attr / ind_mal templates"
+    assert "coalesce(r.src_uuid, i.uuid)" in block, "ind_mal / tgt_ind / expl templates"
+    assert "coalesce(r.trg_uuid, t.uuid)" in block, "*_employs / *_implements / use_technique templates"
+    assert "coalesce(r.trg_uuid, s.uuid)" in block, "tgt_ind / tgt_vuln / tgt_cve templates"
+
+
+def test_dispatch_loop_no_longer_precomputes_endpoint_uuids():
+    """The dispatch loop in create_misp_relationships_batch should no longer
+    call ``edge_endpoint_uuids(...)`` — that's what enabled the precomputation/
+    MATCH mismatch bug. The Sector node uuid IS still pre-computed (separate
+    field, used for the auto-CREATEd Sector node, NOT for the edge endpoint
+    uuid which the template reads off ``s.uuid`` directly)."""
+    import inspect
+
+    import neo4j_client
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_misp_relationships_batch)
+    assert "edge_endpoint_uuids(" not in src, (
+        "create_misp_relationships_batch must not pre-compute endpoint uuids — "
+        "templates use bound-var .uuid (Mechanism B). The function still imports "
+        "edge_endpoint_uuids for OTHER call sites; this test only checks the batch."
+    )
+    # But the Sector uuid stamping is still in (used for the Sector node's own uuid).
+    assert 'compute_node_uuid("Sector"' in src, (
+        "Sector node uuid pre-computation should stay — used for the auto-CREATEd "
+        "Sector node, which has no upstream MERGE pass to stamp its uuid."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bugbot 4th-round finding #8 (LOW) — falsy numeric values in natural keys
+# ---------------------------------------------------------------------------
+
+
+def test_falsy_numeric_natural_key_values_are_preserved():
+    """Pre-fix: ``str(key_dict.get(f, "") or "")`` collapsed any falsy value
+    (0, False, 0.0) to the empty string. NetworkService(port=0) produced the
+    same canonical string as missing port, generating a uuid collision.
+
+    Fix: explicit None-check via _fmt() so legitimate 0 / False / 0.0 values
+    survive."""
+    from node_identity import compute_node_uuid
+
+    u_port_0 = compute_node_uuid("NetworkService", {"port": 0, "protocol": "tcp"})
+    u_port_80 = compute_node_uuid("NetworkService", {"port": 80, "protocol": "tcp"})
+    u_port_missing = compute_node_uuid("NetworkService", {"protocol": "tcp"})
+
+    assert u_port_0 != u_port_missing, (
+        "port=0 (legitimate value) must NOT collide with missing-port — bugbot finding on PR #33 round 4"
+    )
+    assert u_port_0 != u_port_80, "different ports must yield different uuids"
+
+    # Also test False (just to pin down the contract for boolean fields, even
+    # though no current label uses one — defensive against future labels).
+    # We exercise the generic-fallback branch of _natural_key_string.
+    from node_identity import canonical_node_key
+
+    canon_false = canonical_node_key("UnknownLabel", {"flag": False})
+    canon_missing = canonical_node_key("UnknownLabel", {})
+    assert canon_false != canon_missing, "False must NOT collide with missing-key"
+
+
+# ---------------------------------------------------------------------------
+# Bugbot 4th-round finding #9 (LOW) — Sector uuid in build_relationships.py
+# ---------------------------------------------------------------------------
+
+
+def test_build_relationships_stamps_sector_uuid():
+    """The 7a (TARGETS) and 7b (AFFECTS) queries in build_relationships.py
+    auto-CREATE Sector nodes. Pre-fix they didn't stamp ``sec.uuid``, leaving
+    the auto-created Sector node with NULL uuid and the connected edge's
+    ``r.trg_uuid = coalesce(..., sec.uuid)`` inheriting NULL.
+
+    Fix: pre-compute the 4 known sector uuids in Python, embed as a Cypher
+    CASE expression in the inner query so ``sec.uuid`` is set on creation."""
+    import build_relationships
+
+    # _SECTOR_UUIDS map exists with the 4 documented sectors.
+    assert hasattr(build_relationships, "_SECTOR_UUIDS"), "_SECTOR_UUIDS map must exist at module level"
+    assert set(build_relationships._SECTOR_UUIDS.keys()) == {
+        "healthcare",
+        "energy",
+        "finance",
+        "global",
+    }, "Sector pre-compute map must cover the 4 documented zones"
+
+    # Each uuid matches what compute_node_uuid produces for Sector(name=...).
+    from node_identity import compute_node_uuid
+
+    for zone, expected_uuid in build_relationships._SECTOR_UUIDS.items():
+        assert expected_uuid == compute_node_uuid("Sector", {"name": zone}), (
+            f"Pre-computed Sector uuid for {zone!r} must match compute_node_uuid"
+        )
+
+    # _SECTOR_UUID_CASE is a non-empty Cypher CASE expression.
+    case_expr = build_relationships._SECTOR_UUID_CASE
+    assert case_expr.startswith("CASE zone_name "), "must be a CASE on zone_name"
+    assert case_expr.endswith(" END"), "must terminate with END"
+    for zone in ("healthcare", "energy", "finance", "global"):
+        assert f"WHEN '{zone}' THEN" in case_expr, f"zone {zone!r} missing from CASE"
+
+    # The 7a and 7b queries reference the CASE expression. In the source, the
+    # CASE is interpolated via f-string (`f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "`),
+    # so we can't look for the literal CASE string — instead, assert the
+    # f-string interpolation pattern appears at least twice (one per 7a / 7b).
+    with open(build_relationships.__file__) as fh:
+        source = fh.read()
+    interp_count = source.count("ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}")
+    assert interp_count >= 2, (
+        f"both 7a (TARGETS) and 7b (AFFECTS) must stamp sec.uuid via the CASE "
+        f"interpolation — found {interp_count} occurrences, expected ≥2"
     )
 
 

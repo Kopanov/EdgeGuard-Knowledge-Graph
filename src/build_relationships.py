@@ -17,6 +17,7 @@ import logging
 import time
 
 from neo4j_client import Neo4jClient
+from node_identity import compute_node_uuid
 
 try:
     from metrics_server import record_neo4j_relationships
@@ -27,6 +28,20 @@ except ImportError:
 
 # Pause between queries to let Neo4j flush transactions and reclaim memory
 _INTER_QUERY_PAUSE = 3  # seconds
+
+# Pre-computed Sector node uuids for the 4 known zones — used in the TARGETS
+# (7a) and AFFECTS (7b) queries below to stamp ``sec.uuid`` on Sector nodes
+# auto-CREATEd by those MERGEs. Bugbot caught (PR #33 round 4) that without
+# this stamp ``sec.uuid`` was NULL and downstream ``r.trg_uuid = sec.uuid``
+# inherited NULL. APOC's apoc.create.uuid is random (v4) — no use for our
+# deterministic UUIDv5 — so we precompute in Python and embed as a Cypher
+# CASE expression literal in the query string.
+_SECTOR_UUIDS: dict = {
+    z: compute_node_uuid("Sector", {"name": z}) for z in ("healthcare", "energy", "finance", "global")
+}
+_SECTOR_UUID_CASE = (
+    "CASE zone_name " + " ".join(f"WHEN '{name}' THEN '{u}'" for name, u in _SECTOR_UUIDS.items()) + " END"
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -203,13 +218,20 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 7a. Indicator → Sector (TARGETS)
+        # The Sector node is auto-CREATEd here — stamp its uuid with the
+        # deterministic Python-precomputed value embedded as a Cypher CASE
+        # expression literal (sector names are a fixed set of 4). Without this,
+        # sec.uuid would be NULL and r.trg_uuid would inherit NULL.
         logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
         _q7a_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.zone, [])) > 0 RETURN i"
         _q7a_inner = (
             "WITH $i AS i UNWIND i.zone AS zone_name WITH i, zone_name "
             "WHERE zone_name IS NOT NULL AND zone_name <> '' "
             "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
-            "MERGE (sec:Sector {name: zone_name}) MERGE (i)-[r:TARGETS]->(sec) "
+            "MERGE (sec:Sector {name: zone_name}) "
+            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
+            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
+            "MERGE (i)-[r:TARGETS]->(sec) "
             "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
             "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
@@ -220,13 +242,17 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
+        # Same Sector-uuid stamp as 7a — see comment above.
         logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
         _q7b_outer = "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0 RETURN v"
         _q7b_inner = (
             "WITH $v AS v UNWIND v.zone AS zone_name WITH v, zone_name "
             "WHERE zone_name IS NOT NULL AND zone_name <> '' "
             "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
-            "MERGE (sec:Sector {name: zone_name}) MERGE (v)-[r:AFFECTS]->(sec) "
+            "MERGE (sec:Sector {name: zone_name}) "
+            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
+            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
+            "MERGE (v)-[r:AFFECTS]->(sec) "
             "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
             "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )

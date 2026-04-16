@@ -204,12 +204,23 @@ def _natural_key_string(canonical_label: str, key_dict: Dict[str, Any]) -> str:
 
     ``canonical_label`` MUST be already lowercased + stripped — caller's job.
     """
+
+    # Helper: render a single field value to its canonical-string form.
+    # Pre-2026-04 used ``str(v) or ""`` which collapsed any falsy value
+    # (0, False, 0.0) to the empty string — for NetworkService(port=0)
+    # that produced the same canonical as missing port, generating a
+    # uuid collision with the missing-key form. Bugbot caught this on
+    # PR #33 round 4. Use an explicit None check so legitimate falsy
+    # values (port=0, etc.) survive.
+    def _fmt(v: Any) -> str:
+        return "" if v is None else str(v)
+
     fields = _LABEL_NATURAL_KEY_FIELDS.get(canonical_label)
     if fields is not None:
-        return "|".join(str(key_dict.get(f, "") or "") for f in fields)
+        return "|".join(_fmt(key_dict.get(f)) for f in fields)
     # Generic fallback — topology / unknown labels. Deterministic but no
     # STIX-side counterpart, so parity isn't relevant.
-    parts = [f"{k}={('' if v is None else str(v))}" for k, v in sorted(key_dict.items())]
+    parts = [f"{k}={_fmt(v)}" for k, v in sorted(key_dict.items())]
     return "|".join(parts)
 
 
