@@ -649,6 +649,17 @@ class Neo4jClient:
             "CREATE INDEX cvssv30_uuid IF NOT EXISTS FOR (n:CVSSv30) ON (n.uuid)",
             "CREATE INDEX cvssv31_uuid IF NOT EXISTS FOR (n:CVSSv31) ON (n.uuid)",
             "CREATE INDEX cvssv40_uuid IF NOT EXISTS FOR (n:CVSSv40) ON (n.uuid)",
+            # Topology uuid indexes — added 2026-04 round 7 to close the gap that the
+            # 8 ResilMesh topology merge_* functions weren't stamping n.uuid (audit
+            # finding after PR #33 round 6).
+            "CREATE INDEX ip_uuid IF NOT EXISTS FOR (i:IP) ON (i.uuid)",
+            "CREATE INDEX host_uuid IF NOT EXISTS FOR (h:Host) ON (h.uuid)",
+            "CREATE INDEX device_uuid IF NOT EXISTS FOR (d:Device) ON (d.uuid)",
+            "CREATE INDEX subnet_uuid IF NOT EXISTS FOR (s:Subnet) ON (s.uuid)",
+            "CREATE INDEX networkservice_uuid IF NOT EXISTS FOR (n:NetworkService) ON (n.uuid)",
+            "CREATE INDEX softwareversion_uuid IF NOT EXISTS FOR (sv:SoftwareVersion) ON (sv.uuid)",
+            "CREATE INDEX application_uuid IF NOT EXISTS FOR (a:Application) ON (a.uuid)",
+            "CREATE INDEX role_uuid IF NOT EXISTS FOR (r:Role) ON (r.uuid)",
         ]
 
         success_count = 0
@@ -2982,14 +2993,20 @@ class Neo4jClient:
         contributed data. We accumulate via apoc.coll.toSet so multiple
         sources are tracked.
         """
+        # PR #33 follow-up: stamp deterministic IP n.uuid for cross-environment
+        # traceability. Same compute_node_uuid pattern as the MISP-side mergers.
+        address = data.get("address")
+        ip_uuid = compute_node_uuid("IP", {"address": address})
         query = """
         MERGE (i:IP {address: $address})
+        ON CREATE SET i.uuid = $ip_uuid
         SET i.status = $status,
             i.tag = apoc.coll.toSet(coalesce(i.tag, []) + $tag_list),
             i.version = $version,
             i.edgeguard_managed = true,
             i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
-            i.last_updated = datetime()
+            i.last_updated = datetime(),
+            i.uuid = coalesce(i.uuid, $ip_uuid)
         """
         try:
             # Normalise tag to a list for ResilMesh compatibility
@@ -2998,12 +3015,13 @@ class Neo4jClient:
             with self.driver.session() as session:
                 session.run(
                     query,
-                    address=data.get("address"),
+                    address=address,
+                    ip_uuid=ip_uuid,
                     status=data.get("status"),
                     tag_list=tag_list,
                     version=data.get("version"),
                 )
-            logger.info(f"Created/updated IP: {data.get('address')}")
+            logger.info(f"Created/updated IP: {address}")
             return True
         except Exception as e:
             logger.error(f"Error creating IP: {e}")
@@ -3011,16 +3029,20 @@ class Neo4jClient:
 
     def merge_host(self, data: dict) -> bool:
         """MERGE a Host node. Properties: hostname"""
+        hostname = data.get("hostname")
+        host_uuid = compute_node_uuid("Host", {"hostname": hostname})
         query = """
         MERGE (h:Host {hostname: $hostname})
+        ON CREATE SET h.uuid = $host_uuid
         SET h.edgeguard_managed = true,
             h.first_seen = CASE WHEN h.first_seen IS NULL THEN datetime() ELSE h.first_seen END,
-            h.last_updated = datetime()
+            h.last_updated = datetime(),
+            h.uuid = coalesce(h.uuid, $host_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=data.get("hostname"))
-            logger.info(f"Created/updated Host: {data.get('hostname')}")
+                session.run(query, hostname=hostname, host_uuid=host_uuid)
+            logger.info(f"Created/updated Host: {hostname}")
             return True
         except Exception as e:
             logger.error(f"Error creating Host: {e}")
@@ -3028,15 +3050,19 @@ class Neo4jClient:
 
     def merge_device(self, data: dict) -> bool:
         """MERGE a Device node. (no properties)"""
+        device_id = data.get("device_id", str(id(data)))
+        device_uuid = compute_node_uuid("Device", {"device_id": device_id})
         query = """
         MERGE (d:Device {device_id: $device_id})
+        ON CREATE SET d.uuid = $device_uuid
         SET d.edgeguard_managed = true,
             d.first_seen = CASE WHEN d.first_seen IS NULL THEN datetime() ELSE d.first_seen END,
-            d.last_updated = datetime()
+            d.last_updated = datetime(),
+            d.uuid = coalesce(d.uuid, $device_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=data.get("device_id", str(id(data))))
+                session.run(query, device_id=device_id, device_uuid=device_uuid)
             logger.info("Created/updated Device")
             return True
         except Exception as e:
@@ -3045,18 +3071,28 @@ class Neo4jClient:
 
     def merge_subnet(self, data: dict) -> bool:
         """MERGE a Subnet node. Properties: range, note, version"""
+        subnet_range = data.get("range")
+        subnet_uuid = compute_node_uuid("Subnet", {"range": subnet_range})
         query = """
         MERGE (s:Subnet {range: $range})
+        ON CREATE SET s.uuid = $subnet_uuid
         SET s.edgeguard_managed = true,
             s.note = $note,
             s.version = $version,
             s.first_seen = CASE WHEN s.first_seen IS NULL THEN datetime() ELSE s.first_seen END,
-            s.last_updated = datetime()
+            s.last_updated = datetime(),
+            s.uuid = coalesce(s.uuid, $subnet_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, range=data.get("range"), note=data.get("note"), version=data.get("version"))
-            logger.info(f"Created/updated Subnet: {data.get('range')}")
+                session.run(
+                    query,
+                    range=subnet_range,
+                    subnet_uuid=subnet_uuid,
+                    note=data.get("note"),
+                    version=data.get("version"),
+                )
+            logger.info(f"Created/updated Subnet: {subnet_range}")
             return True
         except Exception as e:
             logger.error(f"Error creating Subnet: {e}")
@@ -3064,17 +3100,28 @@ class Neo4jClient:
 
     def merge_networkservice(self, data: dict) -> bool:
         """MERGE a NetworkService node. Properties: port, protocol, service"""
+        port = data.get("port")
+        protocol = data.get("protocol")
+        ns_uuid = compute_node_uuid("NetworkService", {"port": port, "protocol": protocol})
         query = """
         MERGE (ns:NetworkService {port: $port, protocol: $protocol})
+        ON CREATE SET ns.uuid = $ns_uuid
         SET ns.edgeguard_managed = true,
             ns.service = $service,
             ns.first_seen = CASE WHEN ns.first_seen IS NULL THEN datetime() ELSE ns.first_seen END,
-            ns.last_updated = datetime()
+            ns.last_updated = datetime(),
+            ns.uuid = coalesce(ns.uuid, $ns_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, port=data.get("port"), protocol=data.get("protocol"), service=data.get("service"))
-            logger.info(f"Created/updated NetworkService: {data.get('port')}/{data.get('protocol')}")
+                session.run(
+                    query,
+                    port=port,
+                    protocol=protocol,
+                    ns_uuid=ns_uuid,
+                    service=data.get("service"),
+                )
+            logger.info(f"Created/updated NetworkService: {port}/{protocol}")
             return True
         except Exception as e:
             logger.error(f"Error creating NetworkService: {e}")
@@ -3082,17 +3129,21 @@ class Neo4jClient:
 
     def merge_softwareversion(self, data: dict) -> bool:
         """MERGE a SoftwareVersion node. Properties: cve_timestamp, version"""
+        version = data.get("version")
+        sv_uuid = compute_node_uuid("SoftwareVersion", {"version": version})
         query = """
         MERGE (sv:SoftwareVersion {version: $version})
+        ON CREATE SET sv.uuid = $sv_uuid
         SET sv.edgeguard_managed = true,
             sv.cve_timestamp = $cve_timestamp,
             sv.first_seen = CASE WHEN sv.first_seen IS NULL THEN datetime() ELSE sv.first_seen END,
-            sv.last_updated = datetime()
+            sv.last_updated = datetime(),
+            sv.uuid = coalesce(sv.uuid, $sv_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=data.get("version"), cve_timestamp=data.get("cve_timestamp"))
-            logger.info(f"Created/updated SoftwareVersion: {data.get('version')}")
+                session.run(query, version=version, sv_uuid=sv_uuid, cve_timestamp=data.get("cve_timestamp"))
+            logger.info(f"Created/updated SoftwareVersion: {version}")
             return True
         except Exception as e:
             logger.error(f"Error creating SoftwareVersion: {e}")
@@ -3100,16 +3151,20 @@ class Neo4jClient:
 
     def merge_application(self, data: dict) -> bool:
         """MERGE an Application node. Properties: name"""
+        name = data.get("name")
+        app_uuid = compute_node_uuid("Application", {"name": name})
         query = """
         MERGE (a:Application {name: $name})
+        ON CREATE SET a.uuid = $app_uuid
         SET a.edgeguard_managed = true,
             a.first_seen = CASE WHEN a.first_seen IS NULL THEN datetime() ELSE a.first_seen END,
-            a.last_updated = datetime()
+            a.last_updated = datetime(),
+            a.uuid = coalesce(a.uuid, $app_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=data.get("name"))
-            logger.info(f"Created/updated Application: {data.get('name')}")
+                session.run(query, name=name, app_uuid=app_uuid)
+            logger.info(f"Created/updated Application: {name}")
             return True
         except Exception as e:
             logger.error(f"Error creating Application: {e}")
@@ -3239,16 +3294,20 @@ class Neo4jClient:
 
     def merge_role(self, data: dict) -> bool:
         """MERGE a Role node. Properties: permission"""
+        permission = data.get("permission")
+        role_uuid = compute_node_uuid("Role", {"permission": permission})
         query = """
         MERGE (r:Role {permission: $permission})
+        ON CREATE SET r.uuid = $role_uuid
         SET r.edgeguard_managed = true,
             r.first_seen = CASE WHEN r.first_seen IS NULL THEN datetime() ELSE r.first_seen END,
-            r.last_updated = datetime()
+            r.last_updated = datetime(),
+            r.uuid = coalesce(r.uuid, $role_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=data.get("permission"))
-            logger.info(f"Created/updated Role: {data.get('permission')}")
+                session.run(query, permission=permission, role_uuid=role_uuid)
+            logger.info(f"Created/updated Role: {permission}")
             return True
         except Exception as e:
             logger.error(f"Error creating Role: {e}")
@@ -3357,23 +3416,34 @@ class Neo4jClient:
         ResilMesh platform directly (e.g., via ISIM GraphQL or NATS).
         The MISP pipeline uses ``merge_vulnerabilities_batch()`` instead,
         which keys on ``cve_id`` — both produce compatible nodes.
+
+        Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
+        through either path gets the same uuid.
         """
+        # Provide default values if not present
+        name = data.get("name", "unknown")
+        cve_id = data.get("cve_id", "CVE-0000-00000")
+        vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
+        ON CREATE SET v.uuid = $vuln_uuid
         SET v.name = coalesce(v.name, $name)
         SET v.status = $status,
             v.description = $description,
             v.edgeguard_managed = true,
             v.first_seen = CASE WHEN v.first_seen IS NULL THEN datetime() ELSE v.first_seen END,
-            v.last_updated = datetime()
+            v.last_updated = datetime(),
+            v.uuid = coalesce(v.uuid, $vuln_uuid)
         """
         try:
-            # Provide default values if not present
-            name = data.get("name", "unknown")
-            cve_id = data.get("cve_id", "CVE-0000-00000")
             with self.driver.session() as session:
                 session.run(
-                    query, name=name, cve_id=cve_id, status=data.get("status"), description=data.get("description")
+                    query,
+                    name=name,
+                    cve_id=cve_id,
+                    vuln_uuid=vuln_uuid,
+                    status=data.get("status"),
+                    description=data.get("description"),
                 )
             logger.info(f"Created/updated ResilMesh Vulnerability: {name}")
             return True
@@ -3387,10 +3457,13 @@ class Neo4jClient:
         This is the ResilMesh-native path. The MISP pipeline uses
         ``merge_cve()`` which sets the same properties plus EdgeGuard
         extensions (CISA KEV, reference_urls). Both produce compatible
-        CVE nodes keyed on ``cve_id``.
+        CVE nodes keyed on ``cve_id`` with the same deterministic n.uuid.
         """
+        cve_id = data.get("cve_id")
+        cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
         query = """
         MERGE (c:CVE {cve_id: $cve_id})
+        ON CREATE SET c.uuid = $cve_uuid
         SET c.description = $description,
             c.published = $published,
             c.last_modified = $last_modified,
@@ -3402,14 +3475,16 @@ class Neo4jClient:
             c.tags = apoc.coll.toSet(coalesce(c.tags, []) + [$tag]),
             c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
-            c.last_updated = datetime()
+            c.last_updated = datetime(),
+            c.uuid = coalesce(c.uuid, $cve_uuid)
         """
         try:
             tag = data.get("tag", "default")
             with self.driver.session() as session:
                 session.run(
                     query,
-                    cve_id=data.get("cve_id"),
+                    cve_id=cve_id,
+                    cve_uuid=cve_uuid,
                     tag=tag,
                     description=data.get("description"),
                     published=data.get("published"),
@@ -3419,7 +3494,7 @@ class Neo4jClient:
                     ref_tags=data.get("ref_tags"),
                     cwe=data.get("cwe"),
                 )
-            logger.info(f"Created/updated ResilMesh CVE: {data.get('cve_id')}")
+            logger.info(f"Created/updated ResilMesh CVE: {cve_id}")
             return True
         except Exception as e:
             logger.error(f"Error creating CVE: {e}")
@@ -3461,8 +3536,11 @@ class Neo4jClient:
         MATCH (sv:SoftwareVersion {version: $version})
         MATCH (h:Host {hostname: $hostname})
         MERGE (sv)-[r:ON]->(h)
+        ON CREATE SET r.src_uuid = sv.uuid, r.trg_uuid = h.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, sv.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, h.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3480,8 +3558,11 @@ class Neo4jClient:
         MATCH (r:Role {permission: $permission})
         MATCH (d:Device {device_id: $device_id})
         MERGE (r)-[rel:TO]->(d)
+        ON CREATE SET rel.src_uuid = r.uuid, rel.trg_uuid = d.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, r.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, d.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3537,8 +3618,11 @@ class Neo4jClient:
         MATCH (d:Device {device_id: $device_id})
         MATCH (r:Role {permission: $permission})
         MERGE (d)-[rel:TO]->(r)
+        ON CREATE SET rel.src_uuid = d.uuid, rel.trg_uuid = r.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, d.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, r.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3556,8 +3640,11 @@ class Neo4jClient:
         MATCH (d:Device {device_id: $device_id})
         MATCH (h:Host {hostname: $hostname})
         MERGE (d)-[r:HAS_IDENTITY]->(h)
+        ON CREATE SET r.src_uuid = d.uuid, r.trg_uuid = h.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, d.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, h.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3670,8 +3757,11 @@ class Neo4jClient:
         MATCH (h:Host {hostname: $hostname})
         MATCH (d:Device {device_id: $device_id})
         MERGE (h)-[r:HAS_IDENTITY]->(d)
+        ON CREATE SET r.src_uuid = h.uuid, r.trg_uuid = d.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, h.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, d.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3689,8 +3779,11 @@ class Neo4jClient:
         MATCH (h:Host {hostname: $hostname})
         MATCH (sv:SoftwareVersion {version: $version})
         MERGE (h)-[r:ON]->(sv)
+        ON CREATE SET r.src_uuid = h.uuid, r.trg_uuid = sv.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, h.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, sv.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3708,8 +3801,11 @@ class Neo4jClient:
         MATCH (i:IP {address: $address})
         MATCH (s:Subnet {range: $subnet_range})
         MERGE (i)-[r:PART_OF]->(s)
+        ON CREATE SET r.src_uuid = i.uuid, r.trg_uuid = s.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3727,8 +3823,11 @@ class Neo4jClient:
         MATCH (s:Subnet {range: $subnet_range})
         MATCH (i:IP {address: $address})
         MERGE (s)-[r:PART_OF]->(i)
+        ON CREATE SET r.src_uuid = s.uuid, r.trg_uuid = i.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, s.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, i.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3898,8 +3997,11 @@ class Neo4jClient:
         MATCH (child:Subnet {range: $child_subnet})
         MATCH (parent:Subnet {range: $parent_subnet})
         MERGE (child)-[r:PART_OF]->(parent)
+        ON CREATE SET r.src_uuid = child.uuid, r.trg_uuid = parent.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, child.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, parent.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -4016,9 +4118,12 @@ class Neo4jClient:
         MATCH (ns:NetworkService {port: $port, protocol: $protocol})
         MATCH (h:Host {hostname: $hostname})
         MERGE (ns)-[r:ON]->(h)
+        ON CREATE SET r.src_uuid = ns.uuid, r.trg_uuid = h.uuid
         SET r.created_at = datetime(),
             r.updated_at = datetime(),
-            r.status = $status
+            r.status = $status,
+            r.src_uuid = coalesce(r.src_uuid, ns.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, h.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -4055,9 +4160,12 @@ class Neo4jClient:
         MATCH (h:Host {hostname: $hostname})
         MATCH (ns:NetworkService {port: $port, protocol: $protocol})
         MERGE (h)-[r:ON]->(ns)
+        ON CREATE SET r.src_uuid = h.uuid, r.trg_uuid = ns.uuid
         SET r.created_at = datetime(),
             r.updated_at = datetime(),
-            r.status = $status
+            r.status = $status,
+            r.src_uuid = coalesce(r.src_uuid, h.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, ns.uuid)
         """
         try:
             with self.driver.session() as session:

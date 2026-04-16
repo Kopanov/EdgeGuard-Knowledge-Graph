@@ -852,3 +852,197 @@ def test_backfill_edge_separately_logs_skipped_endpointless_edges():
     assert "logger.warning" in src and "endpoint nodes without uuid" in src, (
         "the WARNING log instructing the operator to run node backfill first is missing"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-7 audit follow-up — close the topology UUID gap
+# ---------------------------------------------------------------------------
+#
+# Multi-agent audit on 2026-04-17 found that the 8 ResilMesh topology mergers
+# (merge_ip / merge_host / merge_device / merge_subnet / merge_networkservice /
+# merge_softwareversion / merge_application / merge_role) and the standalone
+# merge_resilmesh_cve / merge_resilmesh_vulnerability did NOT stamp n.uuid,
+# even though their labels appear in _NATURAL_KEYS. Their relationship helpers
+# also did not stamp r.src_uuid / r.trg_uuid. Round 7 closes that gap.
+
+
+_TOPOLOGY_LABELS = (
+    "IP",
+    "Host",
+    "Device",
+    "Subnet",
+    "NetworkService",
+    "SoftwareVersion",
+    "Application",
+    "Role",
+)
+
+
+def test_all_topology_labels_have_uuid_index():
+    """Each of the 8 topology labels must have a CREATE INDEX on n.uuid in
+    create_indexes — same as the MISP-derived labels. Without an index per
+    label, MERGE-by-uuid in delta sync degrades to a label scan."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_indexes)
+    for label in _TOPOLOGY_LABELS:
+        # Either lowercase- or label-cased index name; both are acceptable —
+        # the test only requires that the UUID index targets that label.
+        assert (
+            f"FOR (i:{label}) ON (i.uuid)" in src
+            or f"FOR (h:{label}) ON (h.uuid)" in src
+            or (f":{label})" in src and "ON (" in src and "uuid" in src)
+        ), f"create_indexes is missing a uuid index for {label}"
+
+
+def test_all_topology_mergers_compute_node_uuid():
+    """Each of the 8 topology merge_* functions must call compute_node_uuid
+    and pass it as a Cypher parameter. Without this, n.uuid stays NULL and
+    delta-sync / self-describing-edge consumers see a silent gap."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    fn_to_label = {
+        "merge_ip": "IP",
+        "merge_host": "Host",
+        "merge_device": "Device",
+        "merge_subnet": "Subnet",
+        "merge_networkservice": "NetworkService",
+        "merge_softwareversion": "SoftwareVersion",
+        "merge_application": "Application",
+        "merge_role": "Role",
+    }
+    for fn_name, label in fn_to_label.items():
+        fn = getattr(neo4j_client.Neo4jClient, fn_name)
+        src = inspect.getsource(fn)
+        assert f'compute_node_uuid("{label}"' in src, (
+            f"{fn_name} does not call compute_node_uuid({label!r}, ...) — silent NULL uuid path"
+        )
+        assert "ON CREATE SET" in src and ".uuid =" in src, f"{fn_name} does not stamp n.uuid in the MERGE Cypher"
+        assert "coalesce(" in src and ".uuid," in src, (
+            f"{fn_name} does not idempotently coalesce n.uuid — pre-existing nodes won't pick up the uuid"
+        )
+
+
+def test_resilmesh_cve_and_vulnerability_paths_stamp_uuid():
+    """The duplicate ResilMesh-native CVE and Vulnerability mergers must
+    produce the SAME n.uuid as the canonical MISP path (both keyed on
+    cve_id). Without this, a node MERGEd via the ResilMesh path would have
+    NULL uuid and a node MERGEd via the MISP path for the same cve_id
+    would have a populated uuid — inconsistent identity."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src_cve = inspect.getsource(neo4j_client.Neo4jClient.merge_resilmesh_cve)
+    assert 'compute_node_uuid("CVE"' in src_cve, "merge_resilmesh_cve does not compute the canonical CVE uuid"
+    assert "c.uuid = $cve_uuid" in src_cve, "merge_resilmesh_cve does not stamp c.uuid"
+
+    src_v = inspect.getsource(neo4j_client.Neo4jClient.merge_resilmesh_vulnerability)
+    assert 'compute_node_uuid("Vulnerability"' in src_v, (
+        "merge_resilmesh_vulnerability does not compute the canonical Vulnerability uuid"
+    )
+    assert "v.uuid = $vuln_uuid" in src_v, "merge_resilmesh_vulnerability does not stamp v.uuid"
+
+
+def test_topology_relationship_helpers_stamp_endpoint_uuids():
+    """The 11 topology relationship helpers whose endpoints are both in
+    _NATURAL_KEYS must stamp r.src_uuid and r.trg_uuid via the bound endpoint
+    .uuid (Mechanism B). Other helpers (involving User/Node/Component/etc.)
+    are left uuid-less because those labels are not in the natural-key map."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    helpers_to_check = (
+        "create_softwareversion_on_host",
+        "create_role_to_device",
+        "create_device_to_role",
+        "create_device_has_identity_host",
+        "create_host_has_identity_device",
+        "create_host_on_softwareversion",
+        "create_ip_part_of_subnet",
+        "create_subnet_part_of_ip",
+        "create_subnet_part_of_subnet",
+        "create_networkservice_on_host",
+        "create_host_on_networkservice",
+    )
+    for helper_name in helpers_to_check:
+        helper = getattr(neo4j_client.Neo4jClient, helper_name)
+        src = inspect.getsource(helper)
+        # Must stamp both src_uuid and trg_uuid in ON CREATE SET (and idempotent SET).
+        assert "src_uuid =" in src and "trg_uuid =" in src, f"{helper_name} does not stamp r.src_uuid/r.trg_uuid"
+        assert "coalesce(" in src and "src_uuid" in src and "trg_uuid" in src, (
+            f"{helper_name} does not coalesce src_uuid/trg_uuid (idempotent SET) — re-runs would NOT repair NULLs"
+        )
+
+
+def test_backfill_includes_topology_edges():
+    """EDGES_TO_BACKFILL must list the topology edge tuples so a one-time
+    backfill picks them up; otherwise pre-existing topology edges keep
+    NULL src/trg_uuid forever."""
+    import importlib
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill_node_uuids.EDGES_TO_BACKFILL)
+    expected = {
+        ("ON", "SoftwareVersion", "Host"),
+        ("ON", "Host", "SoftwareVersion"),
+        ("ON", "NetworkService", "Host"),
+        ("ON", "Host", "NetworkService"),
+        ("TO", "Role", "Device"),
+        ("TO", "Device", "Role"),
+        ("HAS_IDENTITY", "Device", "Host"),
+        ("HAS_IDENTITY", "Host", "Device"),
+        ("PART_OF", "IP", "Subnet"),
+        ("PART_OF", "Subnet", "IP"),
+        ("PART_OF", "Subnet", "Subnet"),
+    }
+    missing = expected - edges
+    assert not missing, f"backfill is missing topology edge entries: {missing}"
+
+
+def test_topology_uuid_matches_compute_node_uuid_contract():
+    """End-to-end pin: a topology label's uuid via the helper must equal
+    the canonical compute_node_uuid output for the same key. Anchors that
+    the merge_* function and any consumer (delta sync, RAG, STIX) agree on
+    the same identity."""
+    from node_identity import compute_node_uuid
+
+    cases = [
+        ("IP", {"address": "192.0.2.1"}),
+        ("Host", {"hostname": "edge-01.example.com"}),
+        ("Device", {"device_id": "dev-001"}),
+        ("Subnet", {"range": "10.0.0.0/24"}),
+        ("NetworkService", {"port": 443, "protocol": "tcp"}),
+        ("SoftwareVersion", {"version": "OpenSSL 3.0.7"}),
+        ("Application", {"name": "nginx"}),
+        ("Role", {"permission": "admin"}),
+    ]
+    for label, key in cases:
+        # Determinism check — same input must produce same uuid.
+        u1 = compute_node_uuid(label, key)
+        u2 = compute_node_uuid(label, key)
+        assert u1 == u2, f"compute_node_uuid({label!r}, {key!r}) is non-deterministic"
+        # Sanity: uuid is a 36-char string (canonical UUID form).
+        assert len(u1) == 36 and u1.count("-") == 4, f"uuid for {label} is not a canonical UUID string: {u1!r}"

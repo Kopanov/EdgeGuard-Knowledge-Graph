@@ -104,6 +104,23 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     ("RUNS", "ThreatActor", "Campaign"),
     ("PART_OF", "Malware", "Campaign"),
     ("PART_OF", "Indicator", "Campaign"),
+    # ResilMesh topology — added round 7 to close the gap that the topology
+    # relationship helpers weren't stamping src_uuid/trg_uuid. Only the 11
+    # helpers whose endpoints are both in _NATURAL_KEYS are listed here;
+    # helpers involving User/Node/Component/Mission/OrganizationUnit/
+    # MissionDependency endpoints stay uuid-less until those labels are
+    # added to the natural-key map.
+    ("ON", "SoftwareVersion", "Host"),
+    ("ON", "Host", "SoftwareVersion"),
+    ("ON", "NetworkService", "Host"),
+    ("ON", "Host", "NetworkService"),
+    ("TO", "Role", "Device"),
+    ("TO", "Device", "Role"),
+    ("HAS_IDENTITY", "Device", "Host"),
+    ("HAS_IDENTITY", "Host", "Device"),
+    ("PART_OF", "IP", "Subnet"),
+    ("PART_OF", "Subnet", "IP"),
+    ("PART_OF", "Subnet", "Subnet"),
 ]
 
 
