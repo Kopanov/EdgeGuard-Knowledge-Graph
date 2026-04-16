@@ -482,6 +482,121 @@ def test_build_relationships_stamps_sector_uuid():
     )
 
 
+# ---------------------------------------------------------------------------
+# Bugbot 5th-round finding #4 (MED) — CVE/Vulnerability twin-node uuid
+# ---------------------------------------------------------------------------
+
+
+def test_cve_and_vulnerability_share_uuid_intentionally():
+    """Bugbot flagged that CVE and Vulnerability share a uuid — both labels
+    map to STIX type ``vulnerability``, so ``compute_node_uuid("CVE", …)`` ==
+    ``compute_node_uuid("Vulnerability", …)`` for the same cve_id.
+
+    This is INTENTIONAL — they're twin Neo4j-side views of the same logical
+    CVE (CVE = NVD-canonical, Vulnerability = EdgeGuard-managed) connected
+    by REFERS_TO, and STIX has only one `vulnerability` SDO per CVE so uuid
+    parity holds.
+
+    Operational consequence: cloud-sync recipes MUST use label-scoped MATCH
+    when resolving src_uuid / trg_uuid back to a node. Documented in
+    docs/CLOUD_SYNC.md "CVE/Vulnerability twin-node design".
+
+    This test pins down the design so a future refactor that "fixes" the
+    sharing (which would break STIX parity for one of the two labels)
+    fails loudly here."""
+    from node_identity import compute_node_uuid
+
+    cve_id = "CVE-2024-1234"
+    cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
+    vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
+
+    assert cve_uuid == vuln_uuid, (
+        "CVE and Vulnerability must share uuid for the same cve_id (twin-node "
+        "design — see docs/CLOUD_SYNC.md). Cloud-sync consumers must use "
+        "label-scoped MATCH to disambiguate."
+    )
+
+
+def test_node_identity_documents_twin_node_design():
+    """The intentional CVE/Vulnerability uuid sharing is documented inline in
+    NEO4J_TO_STIX_TYPE so a future maintainer doesn't accidentally 'fix' it
+    without understanding why."""
+    import node_identity
+
+    with open(node_identity.__file__) as fh:
+        source = fh.read()
+
+    # Must reference the twin-node design and the label-scoped MATCH workaround.
+    assert "twin-node" in source.lower() or "two Neo4j-side views" in source, (
+        "node_identity.py must document the intentional CVE/Vulnerability uuid sharing inline at NEO4J_TO_STIX_TYPE"
+    )
+    assert "CLOUD_SYNC.md" in source, "node_identity.py must reference docs/CLOUD_SYNC.md for the recipe"
+
+
+def test_cloud_sync_recipe_uses_label_scoped_match():
+    """The cloud-sync recipe in docs/CLOUD_SYNC.md MUST not use the bare
+    `MATCH (n {uuid: $u})` form for edge endpoint resolution — that's
+    ambiguous for CVE/Vulnerability twin nodes (round 5 bugbot finding)."""
+    import os
+
+    doc_path = os.path.join(os.path.dirname(__file__), "..", "docs", "CLOUD_SYNC.md")
+    with open(doc_path) as fh:
+        source = fh.read()
+
+    # Find the edge-delta consumer recipe and inspect.
+    idx = source.find("For each edge delta")
+    assert idx > 0, "edge-delta consumer recipe not found"
+    chunk = source[idx : idx + 1500]
+
+    # Negative: no bare unscoped MATCH-by-uuid in the edge consumer.
+    assert "MATCH (a {uuid: e.src_uuid})" not in chunk, (
+        "bare unscoped MATCH-by-uuid for edge endpoints — won't disambiguate "
+        "CVE/Vulnerability twin nodes (bugbot round 5)"
+    )
+    # Positive: must scope to the src_label / trg_label carried in the delta.
+    assert "src_label" in chunk and "trg_label" in chunk, (
+        "edge consumer recipe must use src_label / trg_label from the delta"
+    )
+
+    # The twin-node callout must be present.
+    assert "twin-node" in source.lower(), "CLOUD_SYNC.md must explain CVE/Vulnerability twin-node design"
+
+
+# ---------------------------------------------------------------------------
+# Bugbot 5th-round finding #5 (MED) — standalone Sector helpers stamp uuid
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_sector_helpers_stamp_uuid():
+    """Both ``create_indicator_sector_relationship`` and
+    ``create_vulnerability_sector_relationship`` had an ``ensure_sector_query``
+    that MERGEd a Sector node without ``s.uuid``. The subsequent rel query's
+    ``coalesce(r.trg_uuid, s.uuid)`` then read NULL.
+
+    Fix: pre-compute the deterministic Sector uuid in Python and pass as a
+    ``$sector_uuid`` param to the ensure_sector_query, which now stamps it
+    on creation."""
+    import inspect
+
+    import neo4j_client
+
+    for fn_name in (
+        "create_indicator_sector_relationship",
+        "create_vulnerability_sector_relationship",
+    ):
+        fn = getattr(neo4j_client.Neo4jClient, fn_name)
+        src = inspect.getsource(fn)
+
+        # The Sector uuid must be computed in Python.
+        assert 'compute_node_uuid("Sector"' in src, f"{fn_name} must pre-compute the Sector uuid via compute_node_uuid"
+        # The ensure_sector_query must reference $sector_uuid.
+        assert "$sector_uuid" in src, (
+            f"{fn_name}'s ensure_sector_query must accept the precomputed $sector_uuid param and stamp s.uuid from it"
+        )
+        # ON CREATE SET must include the uuid stamp.
+        assert "s.uuid = $sector_uuid" in src, f"{fn_name} must SET s.uuid = $sector_uuid on Sector creation"
+
+
 def test_lowercase_label_uuid_matches_pinned_anchor():
     """Strongest form of the case-tolerance assertion: lowercase input must
     produce the SAME canonical uuid that the rest of the system uses. If

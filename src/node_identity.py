@@ -145,6 +145,17 @@ NEO4J_TO_STIX_TYPE: Dict[str, str] = {
     "Technique": "attack-pattern",
     "Tool": "tool",
     "Tactic": "x-mitre-tactic",
+    # CVE and Vulnerability BOTH map to STIX type "vulnerability" — this is
+    # intentional. They are two Neo4j-side views of the same logical CVE
+    # (CVE = NVD-canonical / ResilMesh-shared, Vulnerability =
+    # EdgeGuard-managed / MISP-derived) connected via REFERS_TO edges. STIX
+    # only has ONE vulnerability SDO per CVE, so both nodes deterministically
+    # produce the same n.uuid. Operational consequence: any cloud-sync /
+    # delta-sync recipe MUST scope MATCH-by-uuid to the label
+    # (e.g. ``MATCH (v:Vulnerability {uuid: $u})`` not bare
+    # ``MATCH (v {uuid: $u})``) — see docs/CLOUD_SYNC.md "CVE/Vulnerability
+    # twin-node design" for the worked recipe. Bugbot caught this on PR #33
+    # round 5 as a footgun in the unscoped MATCH form.
     "CVE": "vulnerability",
     "Vulnerability": "vulnerability",
     "Sector": "identity",

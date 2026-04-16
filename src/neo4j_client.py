@@ -2004,11 +2004,18 @@ class Neo4jClient:
             logger.debug("Skipping indicator↔sector link: missing indicator value or sector name")
             return False
 
-        # First ensure the Sector node exists
+        # First ensure the Sector node exists with its deterministic uuid stamped.
+        # Pre-2026-04 the Sector creation here didn't stamp s.uuid — the
+        # subsequent rel query's ``coalesce(r.trg_uuid, s.uuid)`` then read
+        # NULL. Bugbot caught this on PR #33 round 5; same fix as 7a/7b in
+        # build_relationships.py.
+        sec_uuid = compute_node_uuid("Sector", {"name": sec})
         ensure_sector_query = """
         MERGE (s:Sector {name: $sector_name})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = $sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
         # Create the relationship
@@ -2027,7 +2034,12 @@ class Neo4jClient:
 
         try:
             with self.driver.session() as session:
-                session.run(ensure_sector_query, sector_name=sec, timeout=NEO4J_READ_TIMEOUT)
+                session.run(
+                    ensure_sector_query,
+                    sector_name=sec,
+                    sector_uuid=sec_uuid,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
                 session.run(
                     rel_query,
                     indicator_value=iv,
@@ -2056,10 +2068,17 @@ class Neo4jClient:
             logger.debug("Skipping vulnerability↔sector link: missing normalized CVE id or sector name")
             return False
 
+        # Same Sector uuid stamp as create_indicator_sector_relationship (round 5
+        # bugbot fix) — pre-compute the deterministic uuid and stamp on Sector
+        # creation so the rel query's ``coalesce(r.trg_uuid, s.uuid)`` reads a
+        # populated value rather than NULL.
+        sec_uuid = compute_node_uuid("Sector", {"name": sec})
         ensure_sector_query = """
         MERGE (s:Sector {name: $sector_name})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = $sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
         rel_props = """
@@ -2089,7 +2108,12 @@ class Neo4jClient:
 
         try:
             with self.driver.session() as session:
-                session.run(ensure_sector_query, sector_name=sec, timeout=NEO4J_READ_TIMEOUT)
+                session.run(
+                    ensure_sector_query,
+                    sector_name=sec,
+                    sector_uuid=sec_uuid,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
                 session.run(vuln_query, cve_id=cve, sector_name=sec, source_id=source_id, timeout=NEO4J_READ_TIMEOUT)
                 session.run(cve_query, cve_id=cve, sector_name=sec, source_id=source_id, timeout=NEO4J_READ_TIMEOUT)
             return True
