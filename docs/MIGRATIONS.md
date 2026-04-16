@@ -139,7 +139,52 @@ Migrations are forward-only. If you need to reverse `2026_04_specialize_uses_tec
 | File | Applied | Purpose |
 |------|---------|---------|
 | [2026_04_specialize_uses_technique.cypher](../migrations/2026_04_specialize_uses_technique.cypher) | _pending_ | Split generic `USES→Technique` into `EMPLOYS_TECHNIQUE` (attribution) and `IMPLEMENTS_TECHNIQUE` (capability). Run once after deploying the PR that merged the specialization. |
+| [2026_04_indicator_misp_attribute_id_backfill.cypher](../migrations/2026_04_indicator_misp_attribute_id_backfill.cypher) | _pending_ | Backfill `Indicator.misp_attribute_id` (and `misp_attribute_ids[]`) from `SOURCED_FROM.raw_data`. Pass A only. Indicators still NULL after Pass A need the out-of-band MISP re-fetch (Pass B) — see *Pass B runbook* below. |
 
 Update the **Applied** column with a date once a migration has been run in
 production — that's the single source of truth for whether the migration
 still needs to be applied to a new environment.
+
+---
+
+## Pass B runbook — re-fetch MISP attribute UUIDs for residual NULL Indicators
+
+**When to use:** After running
+[`2026_04_indicator_misp_attribute_id_backfill.cypher`](../migrations/2026_04_indicator_misp_attribute_id_backfill.cypher)
+the post-flight `null_after_pass_a` may still be > 0. Those Indicators were
+ingested *before* the parser started writing the field, *and* their
+`SOURCED_FROM.raw_data` blob doesn't contain `misp_attribute_id` either. Pass
+B re-fetches the MISP attribute object directly using
+`(misp_event_id, indicator_value, indicator_type)` and writes the missing
+UUID back to Neo4j.
+
+There is no automated Pass B script in this PR — operators run a one-off
+Python session against the `MISPToNeo4jSync` client:
+
+```python
+# inside the project venv
+from run_misp_to_neo4j import MISPToNeo4jSync
+from neo4j_client import Neo4jClient
+
+n4j = Neo4jClient()
+sync = MISPToNeo4jSync(n4j)
+
+# Pull batches of NULL Indicators
+with n4j.driver.session(default_access_mode="READ") as s:
+    rows = list(s.run("""
+        MATCH (i:Indicator)
+        WHERE (i.misp_attribute_id IS NULL OR i.misp_attribute_id = '')
+          AND i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
+        RETURN i.misp_event_id AS eid,
+               i.value AS value,
+               i.indicator_type AS itype
+        LIMIT 1000
+    """))
+
+# For each row, pull the full event from MISP and find the matching attribute
+# by (type, value); update the Indicator.
+# (Re-uses MISPToNeo4jSync.fetch_full_event() and Cypher SET on Indicator.)
+```
+
+This is intentionally manual: Pass B touches MISP — keep it under operator
+control with explicit batch sizes, dry-run logging, and pause-resume.

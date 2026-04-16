@@ -532,6 +532,7 @@ class StixExporter:
                 "spec_version": "2.1",
             }
         _attach_zones(sdo, props)
+        _attach_misp_provenance(sdo, props)
         return sdo
 
     # ---- per-type constructors ----------------------------------------
@@ -826,6 +827,48 @@ def _attach_zones(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
     zones = _extract_zones(props)
     if zones:
         sdo["x_edgeguard_zones"] = zones
+
+
+def _attach_misp_provenance(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
+    """Attach ``x_edgeguard_misp_event_ids`` and ``x_edgeguard_misp_attribute_ids``
+    custom properties to an SDO dict when the source node carries MISP traceability.
+
+    Mirrors the ``_attach_zones`` pattern (in-place mutation, omitted when empty,
+    set after stix2 SDK serialisation since these are non-standard fields). Closes
+    the trace loop for ResilMesh consumers: a STIX bundle object can be resolved
+    back to the originating MISP event(s) and attribute(s) without round-tripping
+    through Neo4j.
+
+    Field semantics:
+    - ``x_edgeguard_misp_event_ids``: union of node's ``misp_event_ids[]`` array
+      and the legacy scalar ``misp_event_id`` (first-seen). Falls back to scalar
+      alone on nodes ingested before the array was populated.
+    - ``x_edgeguard_misp_attribute_ids``: union of ``misp_attribute_ids[]`` and the
+      scalar ``misp_attribute_id`` (MISP attribute UUIDs). Only present on
+      Indicator-derived SDOs in practice; harmless on other SDOs (omitted).
+    """
+    if not isinstance(sdo, dict):
+        return
+
+    def _gather(scalar_key: str, array_key: str) -> List[str]:
+        out: List[str] = []
+        arr = props.get(array_key)
+        if isinstance(arr, (list, tuple)):
+            out.extend(str(v) for v in arr if v)
+        scalar = props.get(scalar_key)
+        if scalar:
+            s = str(scalar)
+            if s and s not in out:
+                out.append(s)
+        return out
+
+    events = _gather("misp_event_id", "misp_event_ids")
+    if events:
+        sdo["x_edgeguard_misp_event_ids"] = events
+
+    attrs = _gather("misp_attribute_id", "misp_attribute_ids")
+    if attrs:
+        sdo["x_edgeguard_misp_attribute_ids"] = attrs
 
 
 def _to_dict(stix_obj: Any) -> Dict[str, Any]:

@@ -563,6 +563,7 @@ CREATE INDEX indicator_active FOR (i:Indicator) ON (i.active);
 CREATE INDEX vulnerability_active FOR (v:Vulnerability) ON (v.active);
 CREATE INDEX indicator_misp_event_id FOR (i:Indicator) ON (i.misp_event_id);
 CREATE INDEX vulnerability_misp_event_id FOR (v:Vulnerability) ON (v.misp_event_id);
+CREATE INDEX indicator_misp_attribute_id FOR (i:Indicator) ON (i.misp_attribute_id);  // 2026-04: direct MISP attribute UUID lookup
 CREATE INDEX tactic_shortname FOR (t:Tactic) ON (t.shortname);
 CREATE INDEX technique_tactic_phases FOR (t:Technique) ON (t.tactic_phases);
 CREATE INDEX cvssv31_cve_id FOR (n:CVSSv31) ON (n.cve_id);

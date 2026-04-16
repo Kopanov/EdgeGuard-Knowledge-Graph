@@ -255,6 +255,31 @@ When data is pushed to MISP, it gets tagged with:
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
 `imported_at` is set once on first creation (`ON CREATE SET`) and never overwritten.
 
+**MISP traceability on edges (2026-04):** every relationship MERGEd by
+`Neo4jClient.create_misp_relationships_batch` (i.e. all `EMPLOYS_TECHNIQUE`,
+`IMPLEMENTS_TECHNIQUE`, `ATTRIBUTED_TO`, `INDICATES`, `EXPLOITS`, `TARGETS`
+edges from the MISP path) accumulates `r.misp_event_ids[]` via
+`apoc.coll.toSet` — same shape as the node-level array. Edges built before
+this PR have no array set; the `apoc.coll.toSet(coalesce + CASE)` pattern
+fills it in on next re-sync. Per-attribute IDs are deliberately **not**
+stored on edges (cardinality blowup for marginal benefit) — attribute UUIDs
+live on the Indicator node only.
+
+**MISP traceability on Indicator nodes (2026-04):** `i.misp_attribute_id`
+(and accumulated `i.misp_attribute_ids[]`) hold the originating MISP
+attribute UUID — the stable cross-instance identifier from `attr.uuid`.
+The forward fix is in [run_misp_to_neo4j.py `parse_attribute`](../src/run_misp_to_neo4j.py).
+~146K historical Indicators (pre-fix ingests) need a one-off backfill —
+see [`migrations/2026_04_indicator_misp_attribute_id_backfill.cypher`](../migrations/2026_04_indicator_misp_attribute_id_backfill.cypher)
+and the Pass B runbook in [MIGRATIONS.md](MIGRATIONS.md).
+
+**Scalar vs array semantics on consumers (2026-04):** `mark_inactive_nodes`
+and `calibrate_cooccurrence_confidence` previously read only the legacy
+scalar `misp_event_id` (first-seen event), which under-counted multi-event
+nodes and caused them to flip inactive whenever their first event rotated
+out of the incremental window. Both now coalesce
+`misp_event_ids[]` ∪ `misp_event_id` for any-of-active semantics.
+
 ---
 
 ## Data Sources (13 Total)

@@ -1682,6 +1682,17 @@ class MISPToNeo4jSync:
         """
         relationships = []
 
+        # All items in this list share the same MISP event (single-event contract above).
+        # Capture the event id once and stamp it on every constructed relationship so the
+        # edge carries provenance back to the originating MISP event. Empty/missing →
+        # the merger skips the array append.
+        _evt_id = ""
+        for _i in items:
+            _eid = _i.get("misp_event_id")
+            if _eid:
+                _evt_id = str(_eid)
+                break
+
         # Group items by type for cross-referencing
         actors = [i for i in items if i.get("type") == "actor"]
         techniques = [i for i in items if i.get("type") == "technique"]
@@ -1787,6 +1798,7 @@ class MISPToNeo4jSync:
                         "to_type": "Technique",
                         "to_key": {"mitre_id": technique["mitre_id"]},
                         "confidence": 0.5,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -1802,6 +1814,7 @@ class MISPToNeo4jSync:
                         "to_type": "ThreatActor",
                         "to_key": {"name": actor["name"]},
                         "confidence": 0.5,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -1823,6 +1836,7 @@ class MISPToNeo4jSync:
                             "to_type": "Malware",
                             "to_key": {"name": malware["name"]},
                             "confidence": 0.5,
+                            "misp_event_id": _evt_id,
                         }
                     )
 
@@ -1844,6 +1858,7 @@ class MISPToNeo4jSync:
                             "to_type": "Vulnerability",
                             "to_key": {"cve_id": cve_id},
                             "confidence": 0.5,
+                            "misp_event_id": _evt_id,
                         }
                     )
 
@@ -1872,6 +1887,7 @@ class MISPToNeo4jSync:
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
+                                    "misp_event_id": _evt_id,
                                 }
                             )
                     elif item.get("indicator_type") or item_type == "indicator":
@@ -1890,6 +1906,7 @@ class MISPToNeo4jSync:
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
+                                    "misp_event_id": _evt_id,
                                 }
                             )
 
@@ -1914,6 +1931,19 @@ class MISPToNeo4jSync:
         value = str(value).strip()
         if not value:
             return None, []
+
+        # MISP attribute UUID — stable cross-instance identifier (unlike attr.id which
+        # is a per-instance auto-increment). Captured once and threaded into every
+        # item dict so Neo4j nodes carry direct traceability back to the originating
+        # MISP attribute. Falls back to "" — merge_indicators_batch / merge_node_with_source
+        # treat empty as "absent" and skip the array append.
+        attr_misp_uuid = str(attr.get("uuid", "") or "")
+
+        # MISP event id — used to stamp provenance on relationships built by this
+        # parser so edges carry the originating event back to MISP (mirrors the
+        # node-level misp_event_id field). Captured once for use in every
+        # relationships.append below.
+        _evt_id = str(event_info.get("id", "") or "")
 
         source_id = self.extract_source_from_tags(tags)
 
@@ -2026,6 +2056,7 @@ class MISPToNeo4jSync:
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2046,6 +2077,7 @@ class MISPToNeo4jSync:
                 "cvss_score": cvss_score,
                 "attack_vector": attack_vector,
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
                 "relationships": relationships,
                 # ResilMesh-compatible fields — populated when NVD_META is present
                 "cwe": nvd_meta.get("cwe", []),
@@ -2105,6 +2137,7 @@ class MISPToNeo4jSync:
                         "to_key": {"mitre_id": technique["mitre_id"]},
                         "confidence": confidence,
                         "technique_name": technique.get("name", ""),
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2121,6 +2154,7 @@ class MISPToNeo4jSync:
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
                 "relationships": relationships,
             }
             return item, relationships
@@ -2163,6 +2197,7 @@ class MISPToNeo4jSync:
                         "to_type": "ThreatActor",
                         "to_key": {"name": threat_actor},
                         "confidence": confidence,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2179,6 +2214,7 @@ class MISPToNeo4jSync:
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
                 "uses_techniques": uses_techniques,
                 "relationships": relationships,
             }
@@ -2232,6 +2268,7 @@ class MISPToNeo4jSync:
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": 0.8,
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
                 "relationships": relationships,
             }
             return item, relationships
@@ -2263,6 +2300,7 @@ class MISPToNeo4jSync:
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": 0.95,  # MITRE ATT&CK range
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
             }
             return item, relationships
 
@@ -2312,6 +2350,7 @@ class MISPToNeo4jSync:
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2329,6 +2368,7 @@ class MISPToNeo4jSync:
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": 0.9,
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
             }
             return item, relationships
 
@@ -2346,6 +2386,7 @@ class MISPToNeo4jSync:
                         "to_type": "Malware",
                         "to_key": {"name": malware_name},
                         "confidence": confidence,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2359,6 +2400,7 @@ class MISPToNeo4jSync:
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2380,6 +2422,7 @@ class MISPToNeo4jSync:
                         "confidence": max(
                             confidence, 0.7
                         ),  # explicit CVE tag match floors at 0.7, respects tag confidence
+                        "misp_event_id": _evt_id,
                     }
                 )
 
@@ -2410,6 +2453,7 @@ class MISPToNeo4jSync:
                 "confidence_score": confidence,
                 "pulse_name": otx_meta.get("pulse_name") or tf_meta.get("malware_family") or raw_comment,
                 "misp_event_id": str(event_info.get("id", "")),
+                "misp_attribute_id": attr_misp_uuid,
                 "relationships": relationships,
             }
 

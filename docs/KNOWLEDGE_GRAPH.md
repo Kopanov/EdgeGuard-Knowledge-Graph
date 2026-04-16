@@ -175,6 +175,9 @@ CREATE INDEX indicator_active IF NOT EXISTS FOR (i:Indicator) ON (i.active);
 CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active);
 CREATE INDEX indicator_misp_event_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_event_id);
 CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.misp_event_id);
+// MISP attribute UUID lookup — direct Indicator → MISP attribute traceability
+// (added 2026-04 alongside the parse_attribute fix that started populating this field).
+CREATE INDEX indicator_misp_attribute_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_attribute_id);
 
 // Tactic / technique navigation
 CREATE INDEX tactic_shortname IF NOT EXISTS FOR (t:Tactic) ON (t.shortname);
@@ -195,7 +198,7 @@ CREATE INDEX campaign_zone IF NOT EXISTS FOR (c:Campaign) ON (c.zone);
 
 ## MISP Integration
 
-**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_id` for tracing back to MISP.
+**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_id` (and `misp_event_ids[]` accumulated array) for tracing back to MISP events. **Indicator** nodes additionally carry `misp_attribute_id` (and `misp_attribute_ids[]`) — the MISP attribute UUID, populated from `attr.uuid` for direct attribute-level traceability (added 2026-04). Edges built from the MISP path carry `r.misp_event_ids[]` for per-edge provenance.
 
 ### Sync throughput (Airflow worker memory)
 

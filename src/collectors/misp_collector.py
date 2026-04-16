@@ -304,7 +304,11 @@ class MISPCollector:
                             "confidence_score": 0.5,
                             "source_event": event.get("id"),
                             "misp_event_id": str(event_id),
-                            "misp_attribute_id": str(attr.get("id", "")),
+                            # MISP attribute UUID — stable cross-instance identifier.
+                            # Aligned 2026-04 with run_misp_to_neo4j.py (the production
+                            # path); previously used attr.id (numeric, per-instance auto-
+                            # increment) which was not portable across MISP instances.
+                            "misp_attribute_id": str(attr.get("uuid", "") or ""),
                             "misp_tags": [t.get("name", "") if isinstance(t, dict) else str(t) for t in all_tags],
                         }
                     )
