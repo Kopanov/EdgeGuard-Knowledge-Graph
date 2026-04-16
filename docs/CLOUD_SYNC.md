@@ -1,34 +1,335 @@
-# Local Neo4j → Cloud Neo4j sync
+# Cross-environment tracking, reproducibility, and graph transfer
 
-EdgeGuard runs Neo4j locally for ingest and enrichment. For production analysis,
-xAI / GraphRAG queries, or sharing with partners, the graph is replicated to a
-cloud Neo4j (e.g. Aura). This doc describes the three sync paths and which one
-to use when, with the explicit role of `n.uuid` + `r.src_uuid` / `r.trg_uuid`.
+EdgeGuard runs Neo4j locally for ingest and enrichment. The same graph
+shows up in multiple downstream contexts — production cloud Neo4j, xAI /
+GraphRAG retrieval, STIX bundles to ResilMesh, partner shares. This doc
+explains:
 
-## At a glance
+1. **The logic** — how every node and every relationship receives a
+   deterministic identifier at MERGE time.
+2. **Why it matters** — what reproducibility, AI-workflow, and transfer
+   guarantees that gives you.
+3. **The recipes** — copy-paste patterns for the common workflows.
 
-| Pattern | Cost / cadence | When to use | Requires `n.uuid` ? |
-|---|---|---|---|
-| `neo4j-admin database dump` + `database load` | Slow (full dump), one-shot | First-time copy, cold restore | No (topology preserved) |
-| APOC `apoc.export.cypher.all` → `apoc.cypher.runFiles` | Slow, one-shot | Ad-hoc copy when admin tools aren't available | No (idempotent MERGE on natural keys) |
-| **Custom incremental delta sync** | Fast, nightly/hourly | Production replication | **Yes** — this is the path the 2026-04 PR enables |
+## TL;DR — the contract
 
-## How the delta sync uses uuids
+- Every documented node carries `n.uuid` = `uuid5(EDGEGUARD_NAMESPACE, canonical(label, natural_key))`.
+- Every documented edge carries `r.src_uuid` and `r.trg_uuid` — the same
+  deterministic uuids as the connected nodes.
+- The same `(label, natural_key)` produces the **same UUID on every Neo4j
+  instance, in every Python process, on every machine, forever**. UUIDv5
+  is a pure function of its inputs.
+- The UUID portion of a STIX 2.1 SDO id (from `src/stix_exporter.py`)
+  **equals** the corresponding Neo4j `n.uuid` for the same logical
+  entity (Indicator, Malware, ThreatActor → intrusion-set, Technique →
+  attack-pattern, Vulnerability, CVE, Sector, Campaign — Tool documented
+  exception).
 
-Every node carries `n.uuid` = `uuid5(EDGEGUARD_NAMESPACE, canonical(label, natural_key))`.
-The same input produces the same UUID on every machine — so the cloud copy of
-an Indicator has the same `n.uuid` as the source local Indicator, even if the
-two Neo4j instances were never in contact.
+The implementation is in [src/node_identity.py](../src/node_identity.py).
+Wiring is in [src/neo4j_client.py](../src/neo4j_client.py),
+[src/build_relationships.py](../src/build_relationships.py), and
+[src/enrichment_jobs.py](../src/enrichment_jobs.py).
 
-Every edge carries `r.src_uuid` and `r.trg_uuid` — the deterministic uuids of
-the connected nodes. An edge document is therefore self-describing: it
-identifies its endpoints by stable, cross-environment identifiers.
+---
 
-This unlocks two operational patterns:
+## The logic — how each node receives a uuid
 
-### 1. Push deltas keyed by uuid
+### Step 1 — define the natural key
 
-Producer side (local):
+For every node label, EdgeGuard's UNIQUE constraint already nominates which
+properties identify a node uniquely. `src/node_identity.py
+_LABEL_NATURAL_KEY_FIELDS` is the single Python-side mirror of those keys:
+
+| Neo4j label | Natural key fields | STIX type used in canonical string |
+|---|---|---|
+| Indicator | `indicator_type`, `value` | `indicator` |
+| Malware | `name` | `malware` |
+| ThreatActor | `name` | `intrusion-set` (MITRE convention) |
+| Technique | `mitre_id` | `attack-pattern` |
+| Tactic | `mitre_id` | `x-mitre-tactic` |
+| Tool | `mitre_id` | `tool` (¹) |
+| CVE / Vulnerability | `cve_id` | `vulnerability` |
+| Sector | `name` | `identity` |
+| Campaign | `name` | `campaign` |
+| Source | `source_id` | `x-edgeguard-source` |
+| CVSSv2 / v30 / v31 / v40 | `cve_id` | `x-edgeguard-cvssv*` |
+
+¹ Tool is the documented STIX-parity exception — see "Caveats" below.
+
+### Step 2 — build the canonical string
+
+The serialization rule (`canonical_node_key` in `node_identity.py`) is:
+
+```
+canonical = f"{stix_type}:{natural_key_string}".lower()
+```
+
+…where `natural_key_string` joins the per-label key fields with `|` in the
+documented order. Concrete examples:
+
+| Logical entity | Canonical string |
+|---|---|
+| Indicator(indicator_type="ipv4", value="203.0.113.5") | `"indicator:ipv4\|203.0.113.5"` |
+| Malware(name="Emotet") | `"malware:emotet"` |
+| ThreatActor(name="APT28") | `"intrusion-set:apt28"` |
+| Technique(mitre_id="T1059") | `"attack-pattern:t1059"` |
+| CVE(cve_id="CVE-2024-1234") | `"vulnerability:cve-2024-1234"` |
+| Vulnerability(cve_id="CVE-2024-1234") | `"vulnerability:cve-2024-1234"` (same as CVE) |
+| Sector(name="healthcare") | `"identity:healthcare"` |
+
+The trailing `.lower()` is what gives STIX parity — `_deterministic_id` in
+the STIX exporter does exactly the same thing.
+
+### Step 3 — hash with the fixed namespace
+
+```python
+EDGEGUARD_NODE_UUID_NAMESPACE = uuid.UUID("5f2e1f9a-6a1b-5e0f-9b25-ed9ea2d574cb")
+n.uuid = str(uuid.uuid5(EDGEGUARD_NODE_UUID_NAMESPACE, canonical))
+```
+
+Worked example:
+
+```
+Indicator(indicator_type="ipv4", value="203.0.113.5")
+  canonical:  "indicator:ipv4|203.0.113.5"
+  uuid5:      "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0"
+```
+
+This same line of code, run on any Python 3.x on any operating system at
+any point in time, will produce `6ca3af4a-...-861fd0`. That's the
+reproducibility guarantee.
+
+### Step 4 — stamp the node at MERGE time
+
+Every node MERGE in `Neo4jClient` computes the uuid in Python and threads
+it into the Cypher as `$node_uuid`:
+
+```python
+# src/neo4j_client.py merge_node_with_source — applies to all 7 entity wrappers
+node_uuid = compute_node_uuid(label, key_props)
+session.run("""
+    MERGE (n:<Label> {<key_props>})
+    ON CREATE SET n.uuid = $node_uuid
+    SET n.uuid = coalesce(n.uuid, $node_uuid),
+        ...
+""", node_uuid=node_uuid, ...)
+```
+
+`coalesce(n.uuid, $node_uuid)` is defensive — the same uuid is computed
+on every call, but the coalesce ensures we never overwrite an existing
+value (also lets the backfill be idempotent for nodes that were already
+stamped).
+
+### Frozen things — never change without a graph-wide migration
+
+- `EDGEGUARD_NODE_UUID_NAMESPACE` — changing it invalidates every uuid in
+  every running Neo4j AND every STIX bundle ever shipped.
+- `_LABEL_NATURAL_KEY_FIELDS` — changing the field order or set for a
+  label changes the canonical string for every existing node of that
+  label.
+- `NEO4J_TO_STIX_TYPE` — changing a mapping breaks STIX parity.
+- The `.lower()` at the end of `canonical_node_key` — changing it breaks
+  STIX parity.
+
+---
+
+## The logic — how each relationship receives src_uuid / trg_uuid
+
+There are **three mechanisms**, all converging on the same property shape
+(`r.src_uuid` and `r.trg_uuid` strings holding the connected nodes' uuids).
+Different code paths use different mechanisms because they have different
+information available at the time of the MERGE.
+
+### Mechanism A — precompute in Python before UNWIND
+
+Used by: `Neo4jClient.create_misp_relationships_batch` (the production
+MISP path, 11 query templates), `_upsert_sourced_relationship`,
+`_merge_cvss_node`.
+
+The dispatch loop in `create_misp_relationships_batch` knows the from-label
+and to-label statically per branch (e.g. ATTRIBUTED_TO is always
+`Malware → ThreatActor`). It calls
+`edge_endpoint_uuids("Malware", from_key, "ThreatActor", to_key)` to
+compute both endpoint uuids in Python, then injects them into the row:
+
+```python
+src_uuid, trg_uuid = edge_endpoint_uuids(
+    "Malware", {"name": mn}, "ThreatActor", {"name": an}
+)
+attr_rows.append({
+    "malware": mn, "actor": an,
+    "src_uuid": src_uuid, "trg_uuid": trg_uuid,
+    ...
+})
+```
+
+The Cypher then SETs the values on the edge:
+
+```cypher
+UNWIND $rows AS row
+MATCH (m:Malware) WHERE m.name = row.malware OR row.malware IN coalesce(m.aliases, [])
+MATCH (a:ThreatActor) WHERE a.name = row.actor OR row.actor IN coalesce(a.aliases, [])
+MERGE (m)-[r:ATTRIBUTED_TO]->(a)
+SET r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+    r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid),
+    ...
+```
+
+This works without any prior knowledge of whether the endpoint nodes
+already have `n.uuid` populated — the precomputation is independent.
+
+### Mechanism B — read live `src.uuid` / `trg.uuid` from the MATCHed nodes
+
+Used by: the 12 link queries in `src/build_relationships.py` and the
+REFERS_TO bridge in `src/enrichment_jobs.py`.
+
+Build_relationships runs *after* the node MERGEs have stamped `n.uuid`,
+so the SET reads the live value off the bound variable:
+
+```cypher
+MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL
+MATCH (v:Vulnerability {cve_id: i.cve_id})
+MERGE (i)-[r:EXPLOITS]->(v)
+SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
+    r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
+```
+
+If `i.uuid` is null (e.g. ingested before this PR, backfill hasn't run yet),
+the coalesce keeps `r.src_uuid` null too — and the backfill will fix both
+in a single pass later. No silent drift.
+
+### Mechanism C — special-case dual-label routing
+
+Used by: `TARGETS Vulnerability/CVE` and `EXPLOITS Vulnerability/CVE`
+in `create_misp_relationships_batch`. The same row payload is replayed
+against two label variants (Vulnerability and CVE), so the row carries
+*both* candidate uuids and the Python pre-call substitutes the right one
+into the generic `src_uuid` / `trg_uuid` slot:
+
+```python
+expl_for_vuln = [{**r, "trg_uuid": r["vuln_trg_uuid"]} for r in expl_rows]
+expl_for_cve = [{**r, "trg_uuid": r["cve_trg_uuid"]} for r in expl_rows]
+_run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_for_vuln)
+_run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_for_cve)
+```
+
+### What about SOURCED_FROM?
+
+SOURCED_FROM edges are stamped via Mechanism A with the Source node's
+uuid as `trg_uuid` — the Source node uuid (`compute_node_uuid("Source",
+{"source_id": source_id})`) is computed once per batch and reused.
+
+### Cross-mechanism guarantee
+
+All three mechanisms produce the **same uuid** for the same logical
+endpoint, because they all delegate to `node_identity.compute_node_uuid`
+(directly in A and C, transitively via the upstream node MERGE in B).
+So an edge's `src_uuid` and `trg_uuid` always equal the connected nodes'
+`n.uuid`, regardless of which path created the edge.
+
+---
+
+## Why it matters
+
+### Reproducibility
+
+The uuid for any logical entity is a **pure function of its label +
+natural key**. Practical implications:
+
+- Two analysts running the same ingest pipeline against the same MISP
+  produce graphs with **identical uuids** — without ever coordinating.
+- If you nuke your local Neo4j and re-run the pipeline from MISP, every
+  node gets the same uuid it had before. Reports referencing
+  `Indicator(uuid=6ca3af4a-...)` keep resolving.
+- A uuid in a published paper, a Slack thread, a notebook, or a
+  Grafana panel is a **stable address** — anyone with access to a Neo4j
+  ingested from the same MISP can resolve it.
+- Audit trail: a STIX bundle dated 2026-01 referencing
+  `indicator--6ca3af4a-...` is provably the same logical entity as
+  whatever has `n.uuid = "6ca3af4a-..."` in Neo4j today, with no
+  translation table needed.
+
+This is the property that makes "EdgeGuard graphs are reproducible
+artifacts" true rather than aspirational.
+
+### AI workflow integration
+
+The two properties — node uuid + edge endpoint uuids — change what's
+possible for downstream AI consumers.
+
+**GraphRAG / retrieval over live Neo4j.** The standard pattern is
+"retrieve a seed entity, expand 1-2 hops, serialize to LLM context".
+Pre-uuid, expanded edges had no canonical identity for their endpoints
+beyond the node's natural-key fields — fine when the LLM saw both
+endpoints, brittle when context budget forced edge-only chunks. With
+`r.src_uuid` / `r.trg_uuid`, every edge in the retrieved subgraph is
+self-addressing.
+
+**Concrete RAG chunk** for a "what do we know about CVE-2024-1234"
+query:
+
+```json
+[
+  {
+    "kind": "node",
+    "uuid": "85b67b2e-bb0c-5a7a-ae6f-2b6cc1aa077b",
+    "label": "Vulnerability",
+    "props": {"cve_id": "CVE-2024-1234", "severity": "HIGH", "cvss_score": 8.1}
+  },
+  {
+    "kind": "node",
+    "uuid": "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0",
+    "label": "Indicator",
+    "props": {"indicator_type": "ipv4", "value": "203.0.113.5", "confidence_score": 0.85}
+  },
+  {
+    "kind": "edge",
+    "type": "EXPLOITS",
+    "src_uuid": "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0",
+    "trg_uuid": "85b67b2e-bb0c-5a7a-ae6f-2b6cc1aa077b",
+    "props": {"confidence_score": 1.0, "match_type": "cve_tag"}
+  }
+]
+```
+
+The LLM can be instructed: "any uuid you cite in your answer must be one
+of the chunk uuids above." Citations become trivially verifiable. The
+human (or another agent) can resolve any uuid back to Neo4j with a
+single MATCH.
+
+**Cross-bundle linkage.** Because the UUID portion of a STIX SDO id
+equals the Neo4j n.uuid, an LLM that consumes both EdgeGuard's STIX
+bundles AND its Neo4j queries can join across them with
+`stix_id.split("--")[1] == n.uuid`. No translation layer.
+
+**Embedding deduplication.** A vector store keyed on `n.uuid` won't
+re-embed the same logical entity twice, even if the entity is rebuilt
+from scratch in Neo4j between embedding runs.
+
+### Transferring data between Neo4j instances
+
+Several scenarios beyond the production cloud-sync:
+
+| Scenario | Mechanism | What uuids buy you |
+|---|---|---|
+| Local → cloud (production) | Custom delta sync | Edges re-attach by uuid; no natural-key resolution. Fast. |
+| Local → staging (dev) | `apoc.export.cypher.all` + replay | The replay's MERGEs by natural key happen to produce the **same uuids** as the source — verifiable post-import via `count(*) = count(distinct uuid)`. |
+| Backup → restore (cold) | `neo4j-admin database dump`/`load` | Topology preserved; uuids preserved as ordinary properties. No semantic change. |
+| Subgraph export → re-import | Hand-written Cypher producing JSON | Edges in the export are self-describing — the re-import doesn't need every node, just the ones referenced by `src_uuid`/`trg_uuid` it sees. |
+| Multi-tenant fan-out | Same producer pipeline → N consumer instances | Every consumer gets identical uuids for shared entities. Consumers can reconcile/dedup locally. |
+| Re-derive after pipeline change | Nuke, re-ingest from MISP | Uuids are reproducible — published references still resolve. |
+
+The common thread: uuid is the **portable identifier** that survives the
+choice of transfer mechanism. Pick the mechanism for cost/cadence
+reasons; the identifier is the same either way.
+
+---
+
+## Recipes
+
+### Recipe 1 — push deltas keyed by uuid
+
+This is the production path the 2026-04 PR is designed for. Producer side (local):
 
 ```cypher
 // Nightly: collect everything written or modified in the last 24h.
@@ -70,50 +371,82 @@ RETURN count(rel)
 No natural-key resolution required. The uuid index (`CREATE INDEX <label>_uuid`
 in `Neo4jClient.create_indexes`) makes endpoint MATCHes O(1).
 
-### 2. Self-describing edge serialization
+### Recipe 2 — extract a self-describing subgraph for an LLM / RAG store
 
-Edge documents can be serialized to JSON and consumed by xAI / RAG pipelines
-without the connected nodes:
-
-```json
-{
-  "type": "INDICATES",
-  "src_uuid": "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0",
-  "trg_uuid": "774960af-0687-56b1-9c05-ae55cd62ed58",
-  "props": {
-    "confidence_score": 0.85,
-    "source_id": "misp_cooccurrence",
-    "misp_event_ids": ["1234", "1235"],
-    "imported_at": "2026-04-12T11:23:08Z"
-  }
-}
+```cypher
+// Seed: a CVE. Pull 1 hop on each side. Output is fully self-describing —
+// every edge document carries src_uuid + trg_uuid, every node carries uuid.
+MATCH (v:Vulnerability {cve_id: $cve_id})
+OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(v)
+OPTIONAL MATCH (v)-[r2:AFFECTS]->(s:Sector)
+WITH collect(DISTINCT v) + collect(DISTINCT i) + collect(DISTINCT s) AS nodes,
+     collect(DISTINCT r1) + collect(DISTINCT r2) AS rels
+UNWIND nodes AS n WITH nodes, rels, n WHERE n IS NOT NULL
+RETURN
+  collect(DISTINCT {
+    kind: 'node',
+    uuid: n.uuid,
+    label: labels(n)[0],
+    props: properties(n)
+  }) AS node_chunks,
+  [r IN rels WHERE r IS NOT NULL | {
+    kind: 'edge',
+    type: type(r),
+    src_uuid: r.src_uuid,
+    trg_uuid: r.trg_uuid,
+    props: properties(r)
+  }] AS edge_chunks
 ```
 
-The consumer can resolve `src_uuid` and `trg_uuid` back to nodes only when it
-needs to (lazy join), keeping context windows compact.
+Each chunk in the result is independently meaningful. An LLM can be
+given a subset and still reason about the relationships because every
+`src_uuid` / `trg_uuid` resolves back to the source.
 
-## Cross-system traceability with STIX
+### Recipe 3 — re-derive after pipeline change (reproducibility check)
 
-The UUID portion of a STIX 2.1 SDO id produced by `src/stix_exporter.py`
-**equals** the corresponding Neo4j `n.uuid` for the same logical entity.
+```bash
+# 1. Snapshot current graph for comparison
+neo4j-admin database dump neo4j --to-path=/backups
+mv /backups/neo4j.dump /backups/before-rebuild.dump
 
-Example for an Indicator (`indicator_type="ipv4"`, `value="203.0.113.5"`):
+# 2. Wipe + re-ingest from MISP (simulates a from-scratch rebuild)
+python -c "from neo4j_client import Neo4jClient; Neo4jClient().run('MATCH (n) DETACH DELETE n')"
+python -m run_misp_to_neo4j --full   # re-runs the production ingest
 
+# 3. Sample uuids from before vs after — must match for any (label, natural_key)
+#    that exists in both, since uuids are pure functions of those.
 ```
-Neo4j  n.uuid                      → "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0"
-STIX   sdo.id                      → "indicator--6ca3af4a-4bf1-57c9-846d-ec8f80861fd0"
-                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-                                              identical UUID portion
+
+```cypher
+// In a separate Neo4j with the before-rebuild snapshot loaded:
+MATCH (i:Indicator) WHERE i.uuid = "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0"
+RETURN i.indicator_type, i.value;
+//        ipv4              203.0.113.5    ← same in the rebuilt graph
 ```
 
-A bundle leaving EdgeGuard for ResilMesh can be resolved back to the source
-Neo4j node by stripping the SDO id prefix (`indicator--`, `malware--`, etc.)
-and looking up `n.uuid` in Neo4j. No translation table needed.
+This isn't a unit test — it's an operational sanity check that the uuid
+contract holds in production. Useful after any change to
+`node_identity.py`, `stix_exporter._deterministic_id`, or the per-label
+natural-key constraints in `Neo4jClient.create_constraints`.
 
-This parity holds for: `Indicator`, `Malware`, `ThreatActor` (STIX
-`intrusion-set`), `Technique` (STIX `attack-pattern`), `Vulnerability`, `CVE`,
-`Sector`, `Campaign`. **Not** for `Tool` — see
-`src/node_identity.py` `_LABEL_NATURAL_KEY_FIELDS` for the rationale.
+### Recipe 4 — share a STIX bundle and resolve back to Neo4j
+
+```python
+# Consumer side, given a STIX bundle from EdgeGuard:
+import json
+bundle = json.load(open("from_edgeguard.json"))
+for sdo in bundle["objects"]:
+    if "--" not in sdo.get("id", ""):
+        continue
+    stix_type, uuid_part = sdo["id"].split("--", 1)
+    # uuid_part is the SAME string as n.uuid in EdgeGuard's Neo4j.
+    cypher = "MATCH (n) WHERE n.uuid = $u RETURN labels(n) AS labels, properties(n) AS props"
+    rows = neo4j.session().run(cypher, u=uuid_part)
+    # … now you have the live properties of the source node
+```
+
+No id-mapping table, no fuzzy joins. The STIX→Neo4j round-trip is the
+shortest possible path.
 
 ## Operator runbook
 
