@@ -466,8 +466,11 @@ def test_build_relationships_stamps_sector_uuid():
     case_expr = build_relationships._SECTOR_UUID_CASE
     assert case_expr.startswith("CASE zone_name "), "must be a CASE on zone_name"
     assert case_expr.endswith(" END"), "must terminate with END"
+    # PR #33 round 6 (bugbot HIGH): CASE uses DOUBLE quotes, not single — single
+    # quotes inside the inner Cypher would terminate the outer
+    # apoc.periodic.iterate('inner', ...) string wrapper.
     for zone in ("healthcare", "energy", "finance", "global"):
-        assert f"WHEN '{zone}' THEN" in case_expr, f"zone {zone!r} missing from CASE"
+        assert f'WHEN "{zone}" THEN' in case_expr, f"zone {zone!r} missing from CASE"
 
     # The 7a and 7b queries reference the CASE expression. In the source, the
     # CASE is interpolated via f-string (`f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "`),
@@ -695,3 +698,157 @@ def test_lowercase_label_uuid_matches_pinned_anchor():
     assert compute_node_uuid("threatactor", {"name": "APT28"}) == expected
     assert compute_node_uuid(" THREATACTOR ", {"name": "APT28"}) == expected
     assert compute_node_uuid("ThreatActor", {"name": "APT28"}) == expected
+
+
+# ---------------------------------------------------------------------------
+# Round-6 finding #6 (HIGH): CASE expression single quotes break apoc.iterate
+# ---------------------------------------------------------------------------
+
+
+def test_sector_uuid_case_uses_double_quotes_not_single():
+    """``_SECTOR_UUID_CASE`` is f-string-interpolated into ``_q7a_inner`` and
+    ``_q7b_inner``, which are then wrapped in SINGLE quotes by
+    ``_safe_run_batched`` for ``apoc.periodic.iterate('outer', 'inner', ...)``.
+    Embedded single quotes terminate the inner string early and break the
+    rendered Cypher. The CASE must use DOUBLE quotes (Cypher accepts both)."""
+    import importlib
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    case_expr = build_relationships._SECTOR_UUID_CASE
+    assert "'" not in case_expr, (
+        f"_SECTOR_UUID_CASE contains single quotes — would break apoc.periodic.iterate "
+        f"outer string wrapping. Use double quotes for WHEN labels and THEN literals. "
+        f"Got: {case_expr[:200]}"
+    )
+    # Sanity: the CASE must still be a valid Cypher CASE expression with
+    # double-quoted literals.
+    assert '"healthcare"' in case_expr
+    assert '"global"' in case_expr
+    assert "CASE zone_name " in case_expr
+    assert " END" in case_expr
+
+
+def test_q7a_inner_has_no_unescaped_single_quotes():
+    """The full inner Cypher for query 7a (TARGETS) must not contain any
+    single quotes — every string literal inside must use double quotes so
+    the outer single-quote wrapper in ``apoc.periodic.iterate('outer', 'inner')``
+    parses cleanly. Same convention as the working co-occurrence query in
+    ``run_pipeline.py``."""
+    import importlib
+    import inspect
+    import re
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    src = inspect.getsource(build_relationships.build_relationships)
+
+    # Extract the _q7a_inner assignment block (multi-line concatenated string +
+    # f-string interpolations of _SECTOR_UUID_CASE).
+    m = re.search(r"_q7a_inner = \(\s*(.*?)\s*\)\s*\n\s*if not _safe_run_batched", src, re.DOTALL)
+    assert m, "could not locate _q7a_inner assignment"
+    raw_block = m.group(1)
+
+    # Render it: pick out every quoted string fragment (both " and ' delimited)
+    # and concatenate. The fragments themselves are the Cypher chars sent to
+    # Neo4j (after f-string interpolation removes any embedded backticks etc).
+    # We reject single quotes in any "..." fragment (= Cypher with embedded ').
+    double_quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', raw_block)
+    for frag in double_quoted:
+        # Empty Cypher string literal as `""` is fine — but if a fragment
+        # contains a single quote at all, that single quote is literal Cypher
+        # that will break the outer wrapper.
+        assert "'" not in frag, f"_q7a_inner has Cypher fragment with single quote: {frag!r}"
+
+
+def test_q7b_inner_has_no_unescaped_single_quotes():
+    """Same check as 7a, for the AFFECTS query (Vulnerability/CVE → Sector)."""
+    import importlib
+    import inspect
+    import re
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    src = inspect.getsource(build_relationships.build_relationships)
+    m = re.search(r"_q7b_inner = \(\s*(.*?)\s*\)\s*\n\s*if not _safe_run_batched", src, re.DOTALL)
+    assert m, "could not locate _q7b_inner assignment"
+    raw_block = m.group(1)
+
+    double_quoted = re.findall(r'"((?:[^"\\]|\\.)*)"', raw_block)
+    for frag in double_quoted:
+        assert "'" not in frag, f"_q7b_inner has Cypher fragment with single quote: {frag!r}"
+
+
+# ---------------------------------------------------------------------------
+# Round-6 finding #7 (LOW): backfill edge count overstates updateable
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_edge_count_query_filters_uuid_endpoints():
+    """The count query in ``backfill_edge`` must include the same
+    ``a.uuid IS NOT NULL AND b.uuid IS NOT NULL`` filter the update query
+    uses. Without that, ``committed X / Y`` reports X<Y on every clean run
+    (the gap = edges with NULL endpoint uuids that we cannot update), which
+    operators may misread as a partial failure."""
+    import importlib
+    import inspect
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
+
+    src = inspect.getsource(backfill_node_uuids.backfill_edge)
+
+    # Slice the source between `count_query = (` and the matching close-paren
+    # at the assignment's terminating paren. We can't use a naive regex because
+    # the body itself contains parentheses (e.g., `(r.src_uuid IS NULL OR ...)`).
+    # Instead, walk forward and balance parens.
+    start = src.index("count_query = (")
+    open_paren_idx = src.index("(", start)
+    depth = 0
+    for i in range(open_paren_idx, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                cq = src[open_paren_idx + 1 : i]
+                break
+    else:
+        raise AssertionError("could not balance parens for count_query")
+
+    assert "a.uuid IS NOT NULL" in cq, (
+        "count_query missing `a.uuid IS NOT NULL` filter — must match update_query or X/Y log will mislead operators"
+    )
+    assert "b.uuid IS NOT NULL" in cq, "count_query missing `b.uuid IS NOT NULL` filter — must match update_query"
+
+
+def test_backfill_edge_separately_logs_skipped_endpointless_edges():
+    """The fix doesn't just hide the gap — it also logs a WARNING when edges
+    have NULL endpoint nodes (the `skipped` count) so the operator knows to
+    run node backfill for those labels. Pin the WARNING phrasing so a
+    refactor can't silently drop it."""
+    import importlib
+    import inspect
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
+
+    src = inspect.getsource(backfill_node_uuids.backfill_edge)
+    assert "skipped_query" in src, "skipped_query (counts edges with NULL endpoint uuids) is missing"
+    assert "logger.warning" in src and "endpoint nodes without uuid" in src, (
+        "the WARNING log instructing the operator to run node backfill first is missing"
+    )

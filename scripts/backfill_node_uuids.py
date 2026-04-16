@@ -193,17 +193,39 @@ def backfill_edge(
     """Stamp r.src_uuid / r.trg_uuid on every edge of the given type by
     reading the endpoint nodes' n.uuid. Pure Cypher — no Python computation
     needed once nodes carry uuid."""
+    # Bugbot (PR #33 round 6, LOW): the count query and the update query MUST
+    # share the same filter, otherwise "committed X / Y edges" reports X<Y on
+    # every clean run (Y counts edges with NULL endpoint uuids that we cannot
+    # update; X excludes them). An operator could misread that as a partial
+    # failure and re-run.
     count_query = (
         f"MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label}) "
-        f"WHERE r.src_uuid IS NULL OR r.trg_uuid IS NULL "
+        f"WHERE (r.src_uuid IS NULL OR r.trg_uuid IS NULL) "
+        f"  AND a.uuid IS NOT NULL AND b.uuid IS NOT NULL "
+        f"RETURN count(r) AS c"
+    )
+    skipped_query = (
+        f"MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label}) "
+        f"WHERE (r.src_uuid IS NULL OR r.trg_uuid IS NULL) "
+        f"  AND (a.uuid IS NULL OR b.uuid IS NULL) "
         f"RETURN count(r) AS c"
     )
     with client.driver.session(default_access_mode="READ") as s:
         rec = s.run(count_query).single()
         total = rec["c"] if rec else 0
-    if total == 0:
+        rec_skip = s.run(skipped_query).single()
+        skipped = rec_skip["c"] if rec_skip else 0
+    if total == 0 and skipped == 0:
         return 0
 
+    if skipped > 0:
+        logger.warning(
+            "(%s)-[:%s]->(%s): %d edges have endpoint nodes without uuid — run node backfill for those labels first",
+            from_label,
+            rel_type,
+            to_label,
+            skipped,
+        )
     logger.info("(%s)-[:%s]->(%s): %d edges need backfill", from_label, rel_type, to_label, total)
     if dry_run:
         return total

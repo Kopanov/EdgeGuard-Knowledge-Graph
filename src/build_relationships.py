@@ -36,11 +36,18 @@ _INTER_QUERY_PAUSE = 3  # seconds
 # inherited NULL. APOC's apoc.create.uuid is random (v4) — no use for our
 # deterministic UUIDv5 — so we precompute in Python and embed as a Cypher
 # CASE expression literal in the query string.
+#
+# IMPORTANT (PR #33 round 6, bugbot HIGH): the CASE expression uses DOUBLE
+# quotes for both the WHEN labels and the THEN literals. The 7a/7b queries
+# are run via ``_safe_run_batched`` which wraps the inner query in SINGLE
+# quotes inside ``apoc.periodic.iterate('outer', 'inner', ...)``. Single
+# quotes inside the CASE would terminate the inner string early and break
+# the rendered Cypher. Cypher accepts both ' and " as string delimiters.
 _SECTOR_UUIDS: dict = {
     z: compute_node_uuid("Sector", {"name": z}) for z in ("healthcare", "energy", "finance", "global")
 }
 _SECTOR_UUID_CASE = (
-    "CASE zone_name " + " ".join(f"WHEN '{name}' THEN '{u}'" for name, u in _SECTOR_UUIDS.items()) + " END"
+    "CASE zone_name " + " ".join(f'WHEN "{name}" THEN "{u}"' for name, u in _SECTOR_UUIDS.items()) + " END"
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -224,10 +231,15 @@ def build_relationships():
         # sec.uuid would be NULL and r.trg_uuid would inherit NULL.
         logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
         _q7a_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.zone, [])) > 0 RETURN i"
+        # NB (PR #33 round 6): all string literals inside this inner query use
+        # DOUBLE quotes. _safe_run_batched wraps the inner query in single
+        # quotes for apoc.periodic.iterate('outer', 'inner', ...), so embedded
+        # single quotes terminate the outer string early. Same convention used
+        # in run_pipeline.py's working co-occurrence query.
         _q7a_inner = (
             "WITH $i AS i UNWIND i.zone AS zone_name WITH i, zone_name "
-            "WHERE zone_name IS NOT NULL AND zone_name <> '' "
-            "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
+            'WHERE zone_name IS NOT NULL AND zone_name <> "" '
+            'AND zone_name IN ["healthcare", "energy", "finance", "global"] '
             "MERGE (sec:Sector {name: zone_name}) "
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
@@ -245,10 +257,11 @@ def build_relationships():
         # Same Sector-uuid stamp as 7a — see comment above.
         logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
         _q7b_outer = "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0 RETURN v"
+        # See 7a above: double quotes for inner string literals.
         _q7b_inner = (
             "WITH $v AS v UNWIND v.zone AS zone_name WITH v, zone_name "
-            "WHERE zone_name IS NOT NULL AND zone_name <> '' "
-            "AND zone_name IN ['healthcare', 'energy', 'finance', 'global'] "
+            'WHERE zone_name IS NOT NULL AND zone_name <> "" '
+            'AND zone_name IN ["healthcare", "energy", "finance", "global"] '
             "MERGE (sec:Sector {name: zone_name}) "
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
