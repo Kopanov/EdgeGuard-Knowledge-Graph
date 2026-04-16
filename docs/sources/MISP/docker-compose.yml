@@ -26,7 +26,16 @@ services:
       # container ceiling; this .ini raises the PHP-internal ceiling from 2g
       # to match. Without it, PHP OOM-kills on the NVD 95K-attribute event
       # even though the container has 6g of headroom.
-      - ./php-overrides.ini:/usr/local/etc/php/conf.d/99-edgeguard.ini:ro
+      #
+      # Mount path matches coolacid/misp-docker (debian:bullseye-slim base,
+      # PHP 7.4 via php-fpm). The conf.d location PHP scans is
+      # /etc/php/<version>/<sapi>/conf.d/ on Debian-based images — NOT the
+      # /usr/local/etc/php/conf.d/ used by the official php:* images. If your
+      # MISP image ships a different PHP version (e.g. coolacid future PHP
+      # 8.x), update the path. Verify it took effect:
+      #     docker exec misp_misp_1 php -i | grep memory_limit
+      #     # Should show: memory_limit => 8G => 8G
+      - ./php-overrides.ini:/etc/php/7.4/fpm/conf.d/99-edgeguard.ini:ro
     networks:
       - misp_network
 
