@@ -262,7 +262,10 @@ Only edges with `source_id IN ['misp_cooccurrence', 'misp_correlation']` are mod
 > `misp_event_id`. A node referenced by N active MISP events whose first-seen
 > event rotated out of the incremental window was incorrectly flipped inactive.
 > The gate now coalesces array + scalar with `any(...)` for re-activation and
-> `none(...)` for deactivation. Both Indicators and Vulnerabilities.
+> `none(...)` for deactivation. Symmetric for **both** Indicators **and**
+> Vulnerabilities — pre-fix only Indicators had the re-activation pass, leaving
+> Vulnerabilities permanently inactive once they were ever flipped (Bugbot finding
+> on PR #32, fixed in the same PR).
 
 ## Data Quality Targets
 

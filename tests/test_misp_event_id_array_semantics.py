@@ -79,6 +79,9 @@ def test_mark_inactive_nodes_uses_array_union_for_indicators():
 
 
 def test_mark_inactive_nodes_handles_vulnerabilities_with_same_semantics():
+    """Bugbot regression: pre-fix, Vulnerability had only the deactivation
+    (none()) path — no re-activation (any()) gate. Now both gates must exist
+    for both Indicator AND Vulnerability."""
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient.__new__(Neo4jClient)
@@ -86,11 +89,19 @@ def test_mark_inactive_nodes_handles_vulnerabilities_with_same_semantics():
     client.mark_inactive_nodes(["1"])
 
     queries = [c for c, _ in client.driver.captured]
-    # One of the queries must target Vulnerability — and use the same array union.
     vuln_queries = [q for q in queries if ":Vulnerability" in q]
-    assert vuln_queries, "expected a Vulnerability query in mark_inactive_nodes"
-    assert "misp_event_ids" in "\n".join(vuln_queries)
-    assert "none(eid IN" in "\n".join(vuln_queries)
+    # Two Vulnerability queries: re-activation (any) AND deactivation (none).
+    assert len(vuln_queries) >= 2, (
+        f"expected ≥2 Vulnerability queries (re-activation + deactivation), got {len(vuln_queries)}"
+    )
+    vuln_blob = "\n".join(vuln_queries)
+    assert "any(eid IN" in vuln_blob, (
+        "Vulnerability re-activation gate (any()) is missing — this was the bugbot finding"
+    )
+    assert "none(eid IN" in vuln_blob, "Vulnerability deactivation gate (none()) is missing"
+    assert "misp_event_ids" in vuln_blob, "Vulnerability queries must use the array union"
+    # Re-activation query must respect retired_at (manual decommission wins).
+    assert "retired_at" in vuln_blob, "Vulnerability re-activation must respect retired_at (mirror Indicator behavior)"
 
 
 # ---------------------------------------------------------------------------

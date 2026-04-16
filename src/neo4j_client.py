@@ -1238,7 +1238,8 @@ class Neo4jClient:
     @retry_with_backoff(max_retries=3)
     def mark_inactive_nodes(self, active_event_ids: List[str]) -> Dict[str, int]:
         """
-        Mark nodes as inactive if NONE of their MISP event IDs are in the active list.
+        Mark nodes as inactive if NONE of their MISP event IDs are in the active list,
+        and re-activate nodes whose events re-enter the active list.
 
         A node is considered active if ANY event in its ``misp_event_ids[]`` array is
         active. The legacy scalar ``misp_event_id`` is the *first-seen* event only and
@@ -1247,6 +1248,17 @@ class Neo4jClient:
         rotated out of the incremental window even though they were still being
         observed. We coalesce the array with the scalar so nodes ingested before
         ``misp_event_ids[]`` accumulation still resolve correctly.
+
+        Both Indicators and Vulnerabilities get the symmetric pair:
+
+        - re-activation gate (``any(eid IN ... WHERE eid IN $active_ids)``) — sets
+          ``active = true`` unless ``retired_at`` indicates manual decommission.
+        - deactivation gate (``none(eid IN ... WHERE eid IN $active_ids)``) — sets
+          ``active = false``.
+
+        The Vulnerability re-activation gate was added 2026-04 alongside the array-
+        semantics fix; pre-fix only Indicators were re-activated, leaving Vulnerabilities
+        permanently inactive once they were ever flipped (Bugbot finding on PR #32).
 
         Nodes without any MISP event reference are not affected.
 
@@ -1295,6 +1307,25 @@ class Neo4jClient:
             RETURN count(n) as count
             """
 
+            # Re-activate Vulnerabilities where ANY of their MISP event IDs is active.
+            # Mirrors query_indicators above so a Vulnerability that was marked inactive
+            # (by the legacy scalar-only logic, by a prior incremental window, or any
+            # other reason) gets re-activated when its events re-enter the active list.
+            # ``retired_at`` (manual decommission) wins over the auto-active reset.
+            # Bugbot caught this asymmetry post-merge: the docs in AIRFLOW_DAG_DESIGN.md
+            # and ARCHITECTURE.md claimed both labels got both gates, but Vulnerability
+            # had only the deactivation path (an inherited gap from the pre-2026-04 code).
+            query_vulnerabilities = """
+            MATCH (n:Vulnerability)
+            WITH n,
+                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
+                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
+                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
+            WITH n, arr_ids + scalar_id AS all_ids
+            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
+            SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
+            """
+
             # Mark inactive Vulnerabilities — same any-of / none-of semantics.
             query_vulnerabilities_inactive = """
             MATCH (n:Vulnerability)
@@ -1310,7 +1341,10 @@ class Neo4jClient:
 
             with self.driver.session() as session:
                 # First, mark all nodes with ANY active MISP event ID as active.
+                # Indicators and Vulnerabilities both get the re-activation pass so a
+                # node previously flipped inactive comes back when its events do.
                 session.run(query_indicators, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
+                session.run(query_vulnerabilities, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
 
                 # Mark inactive Indicators
                 result = session.run(
