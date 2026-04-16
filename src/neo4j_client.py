@@ -30,6 +30,11 @@ try:
 except ImportError:
     raise ImportError("neo4j package not installed. Run: pip install neo4j")
 
+# Deterministic per-node UUIDs for cross-environment traceability — see
+# src/node_identity.py for the namespace, canonicalization rules, and the
+# per-label natural-key map.
+from node_identity import compute_node_uuid, edge_endpoint_uuids  # noqa: E402
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -623,6 +628,27 @@ class Neo4jClient:
             # Co-occurrence join: Malware/ThreatActor by misp_event_id
             "CREATE INDEX malware_misp_event_id IF NOT EXISTS FOR (m:Malware) ON (m.misp_event_id)",
             "CREATE INDEX actor_misp_event_id IF NOT EXISTS FOR (a:ThreatActor) ON (a.misp_event_id)",
+            # Deterministic per-node UUID indexes — added 2026-04 for delta-sync
+            # local→cloud (cloud MERGEs by uuid) and self-describing edge serialization
+            # (xAI / RAG consumers resolve r.src_uuid / r.trg_uuid back to nodes by uuid).
+            # Index, not UNIQUE constraint — natural-key UNIQUE constraints already
+            # prevent duplicate nodes; UUIDv5 collisions are negligible; and the
+            # constraint creation can't run before the backfill populates the field.
+            "CREATE INDEX indicator_uuid IF NOT EXISTS FOR (i:Indicator) ON (i.uuid)",
+            "CREATE INDEX vulnerability_uuid IF NOT EXISTS FOR (v:Vulnerability) ON (v.uuid)",
+            "CREATE INDEX cve_uuid IF NOT EXISTS FOR (c:CVE) ON (c.uuid)",
+            "CREATE INDEX malware_uuid IF NOT EXISTS FOR (m:Malware) ON (m.uuid)",
+            "CREATE INDEX actor_uuid IF NOT EXISTS FOR (a:ThreatActor) ON (a.uuid)",
+            "CREATE INDEX technique_uuid IF NOT EXISTS FOR (t:Technique) ON (t.uuid)",
+            "CREATE INDEX tactic_uuid IF NOT EXISTS FOR (t:Tactic) ON (t.uuid)",
+            "CREATE INDEX tool_uuid IF NOT EXISTS FOR (t:Tool) ON (t.uuid)",
+            "CREATE INDEX sector_uuid IF NOT EXISTS FOR (s:Sector) ON (s.uuid)",
+            "CREATE INDEX source_uuid IF NOT EXISTS FOR (s:Source) ON (s.uuid)",
+            "CREATE INDEX campaign_uuid IF NOT EXISTS FOR (c:Campaign) ON (c.uuid)",
+            "CREATE INDEX cvssv2_uuid IF NOT EXISTS FOR (n:CVSSv2) ON (n.uuid)",
+            "CREATE INDEX cvssv30_uuid IF NOT EXISTS FOR (n:CVSSv30) ON (n.uuid)",
+            "CREATE INDEX cvssv31_uuid IF NOT EXISTS FOR (n:CVSSv31) ON (n.uuid)",
+            "CREATE INDEX cvssv40_uuid IF NOT EXISTS FOR (n:CVSSv40) ON (n.uuid)",
         ]
 
         success_count = 0
@@ -666,17 +692,23 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 for source_id, info in SOURCES.items():
+                    # Deterministic Source uuid — referenced by SOURCED_FROM edges'
+                    # trg_uuid stamping in merge_indicators_batch / merge_vulnerabilities_batch.
+                    source_uuid = compute_node_uuid("Source", {"source_id": source_id})
                     query = """
                     MERGE (s:Source {source_id: $source_id})
-                    ON CREATE SET s.created_at = datetime()
+                    ON CREATE SET s.created_at = datetime(),
+                                  s.uuid = $source_uuid
                     SET s.name = $name,
                         s.type = $type,
                         s.reliability = $reliability,
-                        s.updated_at = datetime()
+                        s.updated_at = datetime(),
+                        s.uuid = coalesce(s.uuid, $source_uuid)
                     """
                     session.run(
                         query,
                         source_id=source_id,
+                        source_uuid=source_uuid,
                         name=info["name"],
                         type=info["type"],
                         reliability=info["reliability"],
@@ -808,9 +840,19 @@ class Neo4jClient:
             tag_array = [tag_value] if tag_value else [source_id]
 
             _validate_label(label)
+
+            # Deterministic per-node UUID — uuid5(namespace, canonical(label, key_props)).
+            # Stable across machines and Neo4j instances so the cloud copy of a
+            # local Indicator has the same n.uuid; edges carry src_uuid/trg_uuid
+            # that resolve correctly cross-environment. Computed here from the
+            # actual MERGE key (not the label's documented natural key) so the
+            # uuid always matches what the Cypher MERGE binds to.
+            node_uuid = compute_node_uuid(label, key_props)
+
             query = f"""
             MERGE (n:{label} {{{key_set}}})
-            ON CREATE SET n.first_imported_at = datetime()
+            ON CREATE SET n.first_imported_at = datetime(),
+                          n.uuid = $node_uuid
 
             // Always accumulate sources and zones — provenance is never overwritten.
             // Use APOC to deduplicate the merged arrays in one step.
@@ -825,7 +867,12 @@ class Neo4jClient:
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
                 n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
-                n.edgeguard_managed = true
+                n.edgeguard_managed = true,
+                // n.uuid is deterministic — coalesce so we never overwrite it.
+                // (Defensive only; same input always produces same uuid, but if a
+                // node was created before this code was deployed it will get the
+                // uuid stamped here on next MERGE.)
+                n.uuid = coalesce(n.uuid, $node_uuid)
             """
 
             # Add misp_event_id if present — accumulated as array for multi-event provenance.
@@ -932,6 +979,7 @@ class Neo4jClient:
                     "zone": zone,
                     "tag_array": tag_array,
                     "tag_value": tag_value,
+                    "node_uuid": node_uuid,
                     **params_extra,
                 }
                 if misp_event_id:
@@ -971,22 +1019,37 @@ class Neo4jClient:
             _validate_prop_name(k)
         key_conditions = " AND ".join([f"n.{k} = ${k}" for k in key_props.keys()])
 
+        # Endpoint uuids — same canonicalization as the actual node MERGEs, so
+        # r.src_uuid/r.trg_uuid resolve back to (label, key_props) and (Source, source_id).
+        src_uuid, trg_uuid = edge_endpoint_uuids(label, key_props, "Source", {"source_id": source_id})
+
         query = f"""
         MATCH (n:{label})
         WHERE {key_conditions}
         MATCH (s:Source {{source_id: $source_id}})
         MERGE (n)-[r:SOURCED_FROM]->(s)
         ON CREATE SET r.imported_at = datetime(),
-            r.raw_data = $raw_data
+            r.raw_data = $raw_data,
+            r.src_uuid = $src_uuid,
+            r.trg_uuid = $trg_uuid
         SET r.confidence = $confidence,
             r.source = $source_id,
             r.updated_at = datetime(),
-            r.edgeguard_managed = true
+            r.edgeguard_managed = true,
+            r.src_uuid = coalesce(r.src_uuid, $src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, $trg_uuid)
         """
 
         try:
             with self.driver.session() as session:
-                params = {**key_props, "source_id": source_id, "raw_data": raw_data_json, "confidence": confidence}
+                params = {
+                    **key_props,
+                    "source_id": source_id,
+                    "raw_data": raw_data_json,
+                    "confidence": confidence,
+                    "src_uuid": src_uuid,
+                    "trg_uuid": trg_uuid,
+                }
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
         except (
@@ -1109,6 +1172,10 @@ class Neo4jClient:
           [CVE]-[:HAS_CVSS_v31]->[CVSSv31 {...}]
           [CVE]-[:HAS_CVSS_v30]->[CVSSv30 {...}]
           [CVE]-[:HAS_CVSS_v2]->[CVSSv2 {...}]
+
+        Both HAS_CVSS_v* edges are stamped with src_uuid/trg_uuid (the CVE's
+        and the CVSS sub-node's deterministic uuids) for cross-environment
+        traceability and self-describing edge serialization.
         """
         if not self.driver or not cve_id:
             return False
@@ -1125,17 +1192,34 @@ class Neo4jClient:
                 prop_assignments.append(f"n.{k} = ${k}")
             set_clause = ", ".join(prop_assignments) if prop_assignments else "n.created = true"
 
+            cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
+            cvss_uuid = compute_node_uuid(label, {"cve_id": cve_id})
+
             query = f"""
             MATCH (cve:CVE {{cve_id: $cve_id}})
             MERGE (n:{label} {{cve_id: $cve_id}})
+            ON CREATE SET n.uuid = $cvss_uuid
             SET {set_clause},
                 n.tag = coalesce(n.tag, $tag),
                 n.last_updated = datetime(),
-                n.edgeguard_managed = true
-            MERGE (cve)-[:{rel_type}]->(n)
-            MERGE (n)-[:{rel_type}]->(cve)
+                n.edgeguard_managed = true,
+                n.uuid = coalesce(n.uuid, $cvss_uuid)
+            MERGE (cve)-[r1:{rel_type}]->(n)
+                ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
+            SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
+                r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid)
+            MERGE (n)-[r2:{rel_type}]->(cve)
+                ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
+            SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
+                r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid)
             """
-            params = {"cve_id": cve_id, "tag": tag, **filtered_cvss}
+            params = {
+                "cve_id": cve_id,
+                "tag": tag,
+                "cve_uuid": cve_uuid,
+                "cvss_uuid": cvss_uuid,
+                **filtered_cvss,
+            }
             dropped = len(cvss_data) - len(filtered_cvss)
             with self.driver.session() as session:
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
@@ -1395,6 +1479,11 @@ class Neo4jClient:
         success_count = 0
         error_count = 0
 
+        # The Source node uuid is the same for every row in this batch — compute
+        # once and pass as a query-level param. Used for r.trg_uuid on the
+        # SOURCED_FROM edge created by the inner Cypher.
+        source_node_uuid = compute_node_uuid("Source", {"source_id": source_id})
+
         # Process in batches
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i : i + BATCH_SIZE]
@@ -1414,6 +1503,14 @@ class Neo4jClient:
                         source_list = [source_list]
                     tag = item.get("tag", "default")
 
+                    # Per-row Indicator uuid — same uuid will be computed by every
+                    # other process MERGEing the same (indicator_type, value), so
+                    # cloud copy / delta-sync resolves correctly.
+                    node_uuid = compute_node_uuid(
+                        "Indicator",
+                        {"indicator_type": item.get("indicator_type"), "value": item.get("value")},
+                    )
+
                     batch_item = {
                         "indicator_type": item.get("indicator_type"),
                         "value": item.get("value"),
@@ -1423,6 +1520,7 @@ class Neo4jClient:
                         "confidence": item.get("confidence_score", 0.5),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
+                        "node_uuid": node_uuid,
                     }
 
                     # Add original date fields for cross-source min/max tracking
@@ -1458,7 +1556,8 @@ class Neo4jClient:
                 query = """
                 UNWIND $batch as item
                 MERGE (n:Indicator {indicator_type: item.indicator_type, value: item.value})
-                ON CREATE SET n.first_imported_at = datetime()
+                ON CREATE SET n.first_imported_at = datetime(),
+                              n.uuid = item.node_uuid
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
@@ -1470,6 +1569,7 @@ class Neo4jClient:
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
+                    n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.original_published_date = CASE
                         WHEN n.original_published_date IS NULL OR item.first_seen < n.original_published_date
                         THEN item.first_seen ELSE n.original_published_date END,
@@ -1491,15 +1591,24 @@ class Neo4jClient:
                 MATCH (s:Source {source_id: item.source_id})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
                 ON CREATE SET r.imported_at = datetime(),
-                    r.raw_data = item.raw_data
+                    r.raw_data = item.raw_data,
+                    r.src_uuid = item.node_uuid,
+                    r.trg_uuid = $source_node_uuid
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
-                    r.edgeguard_managed = true
+                    r.edgeguard_managed = true,
+                    r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
+                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid)
                 """
 
                 with self.driver.session() as session:
-                    session.run(query, batch=batch_data, timeout=NEO4J_READ_TIMEOUT)
+                    session.run(
+                        query,
+                        batch=batch_data,
+                        source_node_uuid=source_node_uuid,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
 
                 success_count += len(batch)
                 logger.debug(f"Batch merged {len(batch)} indicators")
@@ -1526,6 +1635,9 @@ class Neo4jClient:
 
         success_count = 0
         error_count = 0
+
+        # Source node uuid is stable for the whole batch — see merge_indicators_batch.
+        source_node_uuid = compute_node_uuid("Source", {"source_id": source_id})
 
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i : i + BATCH_SIZE]
@@ -1554,6 +1666,9 @@ class Neo4jClient:
                     if isinstance(source_list, str):
                         source_list = [source_list]
 
+                    # Per-row Vulnerability uuid; same logic as Indicator batch.
+                    node_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
+
                     batch_item = {
                         "cve_id": cve_id,
                         "tag": item.get("tag", "default"),
@@ -1562,6 +1677,7 @@ class Neo4jClient:
                         "confidence": item.get("confidence_score", 0.5),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
+                        "node_uuid": node_uuid,
                     }
 
                     # Add MISP IDs if present
@@ -1590,7 +1706,8 @@ class Neo4jClient:
                 UNWIND $batch as item
                 MERGE (n:Vulnerability {cve_id: item.cve_id})
                 ON CREATE SET n.first_imported_at = datetime(),
-                    n.status = item.status
+                    n.status = item.status,
+                    n.uuid = item.node_uuid
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
@@ -1603,6 +1720,7 @@ class Neo4jClient:
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
+                    n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
@@ -1614,15 +1732,24 @@ class Neo4jClient:
                 MATCH (s:Source {source_id: item.source_id})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
                 ON CREATE SET r.imported_at = datetime(),
-                    r.raw_data = item.raw_data
+                    r.raw_data = item.raw_data,
+                    r.src_uuid = item.node_uuid,
+                    r.trg_uuid = $source_node_uuid
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
-                    r.edgeguard_managed = true
+                    r.edgeguard_managed = true,
+                    r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
+                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid)
                 """
 
                 with self.driver.session() as session:
-                    session.run(query, batch=batch_data, timeout=NEO4J_READ_TIMEOUT)
+                    session.run(
+                        query,
+                        batch=batch_data,
+                        source_node_uuid=source_node_uuid,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
 
                 success_count += len(batch_data)
                 error_count += skipped
@@ -1694,7 +1821,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1742,7 +1871,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1787,7 +1918,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         # Link to CVE nodes (NVD-sourced, ResilMesh schema)
         query_cve = """
@@ -1798,7 +1931,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1837,7 +1972,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.6,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1883,7 +2020,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
 
         try:
@@ -1928,7 +2067,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
 
         # Vulnerability label (MISP/non-NVD)
@@ -2001,6 +2142,10 @@ class Neo4jClient:
             # Cypher MERGE can accumulate it on r.misp_event_ids[]. Empty/None →
             # the SET clause skips the array append (CASE expression).
             mev = str(rel.get("misp_event_id", "") or "")
+            # Endpoint uuids — same canonicalization as the actual node MERGEs,
+            # so r.src_uuid/r.trg_uuid resolve back to the connected nodes
+            # cross-environment. Computed per branch below since the labels
+            # differ (and EXPLOITS has two valid target labels).
             # Backward-compat: accept legacy "USES" rel_type from callers that
             # haven't been migrated yet, and route based on from_type. New
             # code should emit the specialized rel_type directly.
@@ -2028,6 +2173,9 @@ class Neo4jClient:
                 if from_type == "ThreatActor":
                     an = nonempty_graph_string(fk.get("name"))
                     if an and mid:
+                        src_uuid, trg_uuid = edge_endpoint_uuids(
+                            "ThreatActor", {"name": an}, "Technique", {"mitre_id": mid}
+                        )
                         actor_employs_rows.append(
                             {
                                 "actor": an,
@@ -2035,6 +2183,8 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "src_uuid": src_uuid,
+                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
@@ -2042,6 +2192,9 @@ class Neo4jClient:
                 elif from_type == "Campaign":
                     cn = nonempty_graph_string(fk.get("name"))
                     if cn and mid:
+                        src_uuid, trg_uuid = edge_endpoint_uuids(
+                            "Campaign", {"name": cn}, "Technique", {"mitre_id": mid}
+                        )
                         campaign_employs_rows.append(
                             {
                                 "campaign": cn,
@@ -2049,6 +2202,8 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "src_uuid": src_uuid,
+                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
@@ -2056,6 +2211,9 @@ class Neo4jClient:
                 elif from_type in ("Malware", "Tool"):
                     nm = nonempty_graph_string(fk.get("name"))
                     if nm and mid:
+                        src_uuid, trg_uuid = edge_endpoint_uuids(
+                            from_type, {"name": nm}, "Technique", {"mitre_id": mid}
+                        )
                         implements_rows.append(
                             {
                                 "entity": nm,
@@ -2064,6 +2222,8 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "src_uuid": src_uuid,
+                                "trg_uuid": trg_uuid,
                             }
                         )
                     else:
@@ -2074,6 +2234,7 @@ class Neo4jClient:
                 mn = nonempty_graph_string(fk.get("name"))
                 an = nonempty_graph_string(tk.get("name"))
                 if mn and an:
+                    src_uuid, trg_uuid = edge_endpoint_uuids("Malware", {"name": mn}, "ThreatActor", {"name": an})
                     attr_rows.append(
                         {
                             "malware": mn,
@@ -2081,14 +2242,23 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            "src_uuid": src_uuid,
+                            "trg_uuid": trg_uuid,
                         }
                     )
                 else:
                     _dropped_rels += 1
             elif rt == "INDICATES" and rel.get("to_type") == "Malware":
                 iv = nonempty_graph_string(fk.get("value"))
+                ind_type = nonempty_graph_string(fk.get("indicator_type")) or ""
                 mn = nonempty_graph_string(tk.get("name"))
                 if iv and mn:
+                    src_uuid, trg_uuid = edge_endpoint_uuids(
+                        "Indicator",
+                        {"indicator_type": ind_type, "value": iv},
+                        "Malware",
+                        {"name": mn},
+                    )
                     ind_mal_rows.append(
                         {
                             "value": iv,
@@ -2096,6 +2266,8 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            "src_uuid": src_uuid,
+                            "trg_uuid": trg_uuid,
                         }
                     )
                 else:
@@ -2105,10 +2277,15 @@ class Neo4jClient:
                 if not sec:
                     _dropped_rels += 1
                     continue
+                # Sector node uuid — same value for every row pointing at this sector;
+                # also stamped on the auto-created Sector node in the Cypher MERGE.
+                sec_uuid = compute_node_uuid("Sector", {"name": sec})
                 ft = rel.get("from_type")
                 if ft == "Indicator":
                     iv = nonempty_graph_string(fk.get("value"))
+                    ind_type = nonempty_graph_string(fk.get("indicator_type")) or ""
                     if iv:
+                        src_uuid = compute_node_uuid("Indicator", {"indicator_type": ind_type, "value": iv})
                         tgt_ind_rows.append(
                             {
                                 "value": iv,
@@ -2116,6 +2293,9 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "src_uuid": src_uuid,
+                                "trg_uuid": sec_uuid,
+                                "sector_uuid": sec_uuid,
                             }
                         )
                     else:
@@ -2123,6 +2303,11 @@ class Neo4jClient:
                 elif ft == "Vulnerability":
                     cid = normalize_cve_id_for_graph(fk.get("cve_id"))
                     if cid:
+                        # tgt_vuln_rows is replayed against BOTH Vulnerability and CVE
+                        # labels (q_tgt_vuln + q_tgt_cve). The two labels have
+                        # different uuids, so the row carries both.
+                        vuln_src_uuid = compute_node_uuid("Vulnerability", {"cve_id": cid})
+                        cve_src_uuid = compute_node_uuid("CVE", {"cve_id": cid})
                         tgt_vuln_rows.append(
                             {
                                 "cve_id": cid,
@@ -2130,14 +2315,23 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "vuln_src_uuid": vuln_src_uuid,
+                                "cve_src_uuid": cve_src_uuid,
+                                "trg_uuid": sec_uuid,
+                                "sector_uuid": sec_uuid,
                             }
                         )
                     else:
                         _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
+                ind_type = nonempty_graph_string(fk.get("indicator_type")) or ""
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
                 if iv and cid:
+                    # expl_rows replays against BOTH Vulnerability and CVE labels.
+                    src_uuid = compute_node_uuid("Indicator", {"indicator_type": ind_type, "value": iv})
+                    vuln_trg_uuid = compute_node_uuid("Vulnerability", {"cve_id": cid})
+                    cve_trg_uuid = compute_node_uuid("CVE", {"cve_id": cid})
                     expl_rows.append(
                         {
                             "value": iv,
@@ -2145,6 +2339,9 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            "src_uuid": src_uuid,
+                            "vuln_trg_uuid": vuln_trg_uuid,
+                            "cve_trg_uuid": cve_trg_uuid,
                         }
                     )
                 else:
@@ -2175,7 +2372,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         # Attribution edge: Campaign → Technique. Separate from the
         # ThreatActor query so the planner hits a single label index.
@@ -2197,7 +2396,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         # Capability edge: Malware or Tool → Technique. Single query handles
         # both labels via CALL ... apoc.do.case-style branching; we run one
@@ -2218,7 +2419,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_tool_implements = """
         UNWIND $rows AS row
@@ -2235,7 +2438,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_attr = """
         UNWIND $rows AS row
@@ -2253,7 +2458,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_ind_mal = """
         UNWIND $rows AS row
@@ -2270,13 +2477,17 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_tgt_ind = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = row.sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (i:Indicator {value: row.value})
         MERGE (i)-[r:TARGETS]->(s)
@@ -2289,13 +2500,17 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_tgt_vuln = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = row.sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:Vulnerability {cve_id: row.cve_id})
         MERGE (v)-[r:TARGETS]->(s)
@@ -2308,13 +2523,17 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_tgt_cve = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = row.sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:CVE {cve_id: row.cve_id})
         MERGE (v)-[r:TARGETS]->(s)
@@ -2327,7 +2546,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_expl_vuln = """
         UNWIND $rows AS row
@@ -2344,7 +2565,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
         q_expl_cve = """
         UNWIND $rows AS row
@@ -2361,7 +2584,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
@@ -2400,15 +2625,24 @@ class Neo4jClient:
                 time.sleep(1)
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
+                # Same row payload, replayed against two labels (Vulnerability + CVE).
+                # The labels have different uuids — populate r.src_uuid per label by
+                # copying the appropriate pre-computed key into the generic src_uuid slot.
+                tgt_vuln_for_vuln = [{**r, "src_uuid": r["vuln_src_uuid"]} for r in tgt_vuln_rows]
+                tgt_vuln_for_cve = [{**r, "src_uuid": r["cve_src_uuid"]} for r in tgt_vuln_rows]
                 time.sleep(1)
-                _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_rows)
+                _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_for_vuln)
                 time.sleep(1)
-                _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_rows)
+                _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_for_cve)
             if expl_rows:
+                # Same as TARGETS_vuln/cve but for the EXPLOITS Indicator → Vulnerability/CVE
+                # join: trg_uuid varies by target label.
+                expl_for_vuln = [{**r, "trg_uuid": r["vuln_trg_uuid"]} for r in expl_rows]
+                expl_for_cve = [{**r, "trg_uuid": r["cve_trg_uuid"]} for r in expl_rows]
                 time.sleep(1)
-                _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
+                _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_for_vuln)
                 time.sleep(1)
-                _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
+                _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_for_cve)
 
         return total
 

@@ -67,7 +67,7 @@ All EdgeGuard nodes are **ResilMesh-schema compatible** where they overlap.
 
 | Node Label | Key Properties | Source |
 |------------|---------------|--------|
-| `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_seen`, `last_updated`, `misp_event_id`, `misp_event_ids[]`, `misp_attribute_id`, `misp_attribute_ids[]`, … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
+| `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_seen`, `last_updated`, `misp_event_id`, `misp_event_ids[]`, `misp_attribute_id`, `misp_attribute_ids[]`, **`uuid`** (deterministic, equal to the UUID portion of the STIX SDO id), … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
 | `Vulnerability` | `cve_id`, `severity`, `cvss_score`, `attack_vector`, `zone[]`, `published`, `last_modified` | NVD, CISA KEV, OTX |
 | `CVE` | `cve_id`, `description`, `published`, `last_modified`, `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]` | NVD |
 | `CVSSv31` | `vector_string`, `base_score`, `base_severity`, `attack_vector`, `attack_complexity`, `privileges_required`, `user_interaction`, `scope`, `confidentiality_impact`, `integrity_impact`, `availability_impact`, `impact_score`, `exploitability_score` | NVD (via CVE node) |

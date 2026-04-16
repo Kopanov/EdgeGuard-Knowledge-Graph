@@ -179,6 +179,19 @@ CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON 
 // (added 2026-04 alongside the parse_attribute fix that started populating this field).
 CREATE INDEX indicator_misp_attribute_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_attribute_id);
 
+// Per-node deterministic UUID indexes — added 2026-04 (PR #33) for cross-
+// environment delta-sync (cloud MERGEs by uuid) and self-describing edge
+// serialization (xAI / RAG consumers resolve r.src_uuid / r.trg_uuid by uuid).
+// One per documented node label — see src/node_identity.py for the canonical
+// natural-key map.
+CREATE INDEX indicator_uuid IF NOT EXISTS FOR (i:Indicator) ON (i.uuid);
+CREATE INDEX vulnerability_uuid IF NOT EXISTS FOR (v:Vulnerability) ON (v.uuid);
+CREATE INDEX cve_uuid IF NOT EXISTS FOR (c:CVE) ON (c.uuid);
+CREATE INDEX malware_uuid IF NOT EXISTS FOR (m:Malware) ON (m.uuid);
+CREATE INDEX actor_uuid IF NOT EXISTS FOR (a:ThreatActor) ON (a.uuid);
+CREATE INDEX technique_uuid IF NOT EXISTS FOR (t:Technique) ON (t.uuid);
+// (… one per documented label — see src/neo4j_client.py create_indexes for the full list.)
+
 // Tactic / technique navigation
 CREATE INDEX tactic_shortname IF NOT EXISTS FOR (t:Tactic) ON (t.shortname);
 CREATE INDEX technique_tactic_phases IF NOT EXISTS FOR (t:Technique) ON (t.tactic_phases);

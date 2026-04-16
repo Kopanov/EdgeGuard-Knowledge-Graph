@@ -266,6 +266,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                     cvss_score=n.get("cvss_score"),
                     zone=_neo4j_list(n.get("zone")),
                     edgeguard_managed=n.get("edgeguard_managed"),
+                    uuid=n.get("uuid"),
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     misp_event_id=n.get("misp_event_id"),
@@ -318,6 +319,7 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     edgeguard_managed=n.get("edgeguard_managed"),
+                    uuid=n.get("uuid"),
                     misp_event_id=misp_event_id,
                     misp_attribute_id=n.get("misp_attribute_id"),
                     misp_event_url=(f"{MISP_URL}/events/view/{misp_event_id}" if MISP_URL and misp_event_id else None),
@@ -422,6 +424,7 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -444,6 +447,7 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -468,6 +472,7 @@ class Query:
                 zone=_neo4j_list(n.get("zone")),
                 confidence_score=n.get("confidence_score"),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -487,6 +492,7 @@ class Query:
                 name=n.get("name", ""),
                 description=n.get("description"),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -509,6 +515,7 @@ class Query:
                 first_seen=str(n.get("first_seen")) if n.get("first_seen") else None,
                 last_seen=str(n.get("last_seen")) if n.get("last_seen") else None,
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -554,6 +561,7 @@ class Query:
                         sources=_neo4j_list(n.get("source")),
                         confidence_score=n.get("confidence_score"),
                         edgeguard_managed=n.get("edgeguard_managed"),
+                        uuid=n.get("uuid"),
                         first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                         last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     )

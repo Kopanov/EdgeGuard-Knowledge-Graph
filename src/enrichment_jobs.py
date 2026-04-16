@@ -458,10 +458,17 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     """
     results: Dict = {"linked": 0, "errors": 0}
 
+    # Both REFERS_TO edges carry src_uuid + trg_uuid for cross-environment
+    # traceability — endpoints (Vulnerability + CVE) already have n.uuid set
+    # by their respective MERGE paths (merge_vulnerabilities_batch / merge_cve).
     query = """
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
-        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[:REFERS_TO]->(c) MERGE (c)-[:REFERS_TO]->(v)',
+        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) '
+        'MERGE (v)-[r1:REFERS_TO]->(c) '
+        '  SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid) '
+        'MERGE (c)-[r2:REFERS_TO]->(v) '
+        '  SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid)',
         {batchSize: 5000, parallel: false}
     )
     YIELD total

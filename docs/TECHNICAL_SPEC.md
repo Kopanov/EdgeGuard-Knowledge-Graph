@@ -65,6 +65,9 @@ Auth:    Configured via environment variables
   misp_event_ids: LIST,     // Accumulated MISP event ids (set, deduped)
   misp_attribute_id: STRING,  // 2026-04: MISP attribute UUID (stable cross-instance, from attr.uuid)
   misp_attribute_ids: LIST, // 2026-04: Accumulated MISP attribute UUIDs (set, deduped)
+  uuid: STRING,             // 2026-04 (PR #33): deterministic uuid5(namespace, canonical(label, natural_key))
+                            //                   — same value on local + cloud Neo4j; equals the UUID portion of the
+                            //                   corresponding STIX SDO id. See src/node_identity.py.
   // OTX enrichment fields
   attack_ids: LIST,              // MITRE ATT&CK technique IDs from OTX pulse
   targeted_countries: LIST,      // ISO country codes from OTX pulse

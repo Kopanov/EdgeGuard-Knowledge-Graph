@@ -140,6 +140,7 @@ Migrations are forward-only. If you need to reverse `2026_04_specialize_uses_tec
 |------|---------|---------|
 | [2026_04_specialize_uses_technique.cypher](../migrations/2026_04_specialize_uses_technique.cypher) | _pending_ | Split generic `USES→Technique` into `EMPLOYS_TECHNIQUE` (attribution) and `IMPLEMENTS_TECHNIQUE` (capability). Run once after deploying the PR that merged the specialization. |
 | [2026_04_indicator_misp_attribute_id_backfill.cypher](../migrations/2026_04_indicator_misp_attribute_id_backfill.cypher) | _pending_ | Backfill `Indicator.misp_attribute_id` (and `misp_attribute_ids[]`) from `SOURCED_FROM.raw_data`. Pass A only. Indicators still NULL after Pass A need the out-of-band MISP re-fetch (Pass B) — see *Pass B runbook* below. |
+| [scripts/backfill_node_uuids.py](../scripts/backfill_node_uuids.py) | _pending_ | Stamp deterministic `n.uuid` on every existing node and `r.src_uuid` / `r.trg_uuid` on every existing edge. Python script (UUIDv5 can't be computed in Cypher). Idempotent + resumable. Required before delta-sync to cloud Neo4j; see [CLOUD_SYNC.md](CLOUD_SYNC.md). |
 
 Update the **Applied** column with a date once a migration has been run in
 production — that's the single source of truth for whether the migration
@@ -188,3 +189,78 @@ with n4j.driver.session(default_access_mode="READ") as s:
 
 This is intentionally manual: Pass B touches MISP — keep it under operator
 control with explicit batch sizes, dry-run logging, and pause-resume.
+
+---
+
+## n.uuid + edge endpoint uuids backfill (2026-04)
+
+**When to use:** After deploying the PR that adds `n.uuid` and
+`r.src_uuid`/`r.trg_uuid` SET clauses (PR #33). The forward fix only stamps
+new MERGEs — every existing node + edge needs a one-time backfill before
+delta-sync to cloud Neo4j (see [CLOUD_SYNC.md](CLOUD_SYNC.md)) becomes safe.
+
+**What it does:**
+
+1. For each documented node label (Indicator, Vulnerability, CVE, Malware,
+   ThreatActor, Technique, Tactic, Tool, Sector, Source, Campaign, CVSSv*):
+   read every node with NULL `uuid`, compute the deterministic UUIDv5 in
+   Python via `node_identity.compute_node_uuid`, write back via UNWIND.
+2. For each documented edge type (INDICATES, EXPLOITS, EMPLOYS_TECHNIQUE,
+   ATTRIBUTED_TO, TARGETS, AFFECTS, IN_TACTIC, USES_TECHNIQUE,
+   IMPLEMENTS_TECHNIQUE, REFERS_TO, RUNS, PART_OF, SOURCED_FROM, HAS_CVSS_v*):
+   stamp `r.src_uuid` and `r.trg_uuid` from the connected nodes' `n.uuid`
+   via `apoc.periodic.iterate`.
+
+**Why a Python script (not pure Cypher):** UUIDv5 cannot be computed inside
+Cypher — APOC has only random `apoc.create.uuid` (v4). Same canonicalization
+must run in every environment to produce the same uuid.
+
+**Pre-flight:**
+
+```bash
+# Activate the project venv with NEO4J_* env vars set
+python scripts/backfill_node_uuids.py --dry-run
+# Logs counts per label + per edge type. No writes.
+```
+
+**Backup before running** (per the Backup section above) — backfill is
+forward-only.
+
+**Execute:**
+
+```bash
+python scripts/backfill_node_uuids.py
+# OR per-label / smaller batches:
+python scripts/backfill_node_uuids.py --labels Indicator,Vulnerability --batch-size 500
+# OR nodes-only first to validate, then edges:
+python scripts/backfill_node_uuids.py --nodes-only
+python scripts/backfill_node_uuids.py --edges-only
+```
+
+The script is **idempotent** (skips already-stamped nodes/edges) and
+**resumable** (per-batch progress; a crash mid-run leaves a consistent partial
+state and the next run picks up).
+
+**Post-flight:**
+
+```cypher
+// Every documented label must have 100% coverage:
+MATCH (n) WHERE n.uuid IS NULL RETURN labels(n)[0] AS label, count(n) AS missing;
+// Expected: empty result for documented labels (Indicator, Malware, …).
+
+// Every documented edge type must have both endpoint uuids stamped:
+MATCH ()-[r]->() WHERE r.src_uuid IS NULL OR r.trg_uuid IS NULL
+RETURN type(r) AS rel_type, count(r) AS missing;
+// Expected: empty for documented edges.
+```
+
+**Caveats:**
+
+- Topology / ResilMesh-owned labels (`Component`, `Mission`,
+  `OrganizationUnit`, `MissionDependency`, `Node`) are NOT in
+  `node_identity._NATURAL_KEYS` yet — the script logs and skips them.
+  Documented as a deferred follow-up.
+- `Tool` is in the natural-key map but its STIX SDO id uses `name` while
+  Neo4j's UNIQUE constraint is on `mitre_id`. The Tool n.uuid is stable
+  cross-environment but does NOT have UUID parity with the corresponding
+  STIX `tool--<uuid>` SDO id.

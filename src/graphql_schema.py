@@ -111,6 +111,11 @@ class CVE:
     base_severity: Optional[str]
     # Provenance — who wrote this node and when
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
     source: Optional[List[str]]
     zone: Optional[List[str]]
     first_imported_at: Optional[str]
@@ -143,6 +148,11 @@ class Vulnerability:
     cvss_score: Optional[float]
     zone: Optional[List[str]]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
     source: Optional[List[str]]
     last_updated: Optional[str]
     # Provenance
@@ -178,6 +188,11 @@ class Indicator:
     source: Optional[List[str]]
     last_updated: Optional[str]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
     # Provenance — MISP back-references
     misp_event_id: Optional[str]
     misp_attribute_id: Optional[str]
@@ -209,6 +224,11 @@ class ThreatActor:
     confidence_score: Optional[float]
     source: Optional[List[str]]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 @strawberry.type(description="Malware family node — EdgeGuard-owned, planned ISIM extension.")
@@ -220,6 +240,11 @@ class Malware:
     confidence_score: Optional[float]
     source: Optional[List[str]]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 @strawberry.type(description="MITRE ATT&CK technique — EdgeGuard-owned, planned ISIM extension.")
@@ -231,6 +256,11 @@ class Technique:
     zone: Optional[List[str]]
     confidence_score: Optional[float]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
     # Enrichment fields
     detection: Optional[str] = None
     is_subtechnique: Optional[bool] = None
@@ -242,6 +272,11 @@ class Tactic:
     name: str
     description: Optional[str]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 @strawberry.type(description="MITRE ATT&CK Tool (Cobalt Strike, Mimikatz, etc.) — EdgeGuard-owned.")
@@ -256,6 +291,8 @@ class Tool:
     sources: Optional[List[str]] = None
     confidence_score: Optional[float] = None
     edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — see other types for details.
+    uuid: Optional[str] = None
     first_imported_at: Optional[str] = None
     last_updated: Optional[str] = None
 
@@ -274,6 +311,11 @@ class Campaign:
     first_seen: Optional[str]
     last_seen: Optional[str]
     edgeguard_managed: Optional[bool]
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -280,6 +280,28 @@ nodes and caused them to flip inactive whenever their first event rotated
 out of the incremental window. Both now coalesce
 `misp_event_ids[]` ∪ `misp_event_id` for any-of-active semantics.
 
+**Cross-environment traceability (2026-04, PR #33):** every node carries a
+deterministic `n.uuid` = `uuid5(namespace, canonical(label, natural_key))`
+and every MISP-derived edge carries `r.src_uuid` / `r.trg_uuid`. Same input
+→ same uuid on every Neo4j instance, so:
+
+- A delta-sync push to a cloud Neo4j MERGEs nodes by uuid (no natural-key
+  resolution); edges re-attach via `MATCH (a {uuid: $src_uuid})` /
+  `MATCH (b {uuid: $trg_uuid})`.
+- Edge documents are self-describing for LLM/RAG consumers — `src_uuid` /
+  `trg_uuid` resolve back to nodes lazily.
+- The UUID portion of a STIX SDO id (from `src/stix_exporter.py
+  _deterministic_id`) **equals** the corresponding Neo4j `n.uuid` for
+  Indicator, Malware, ThreatActor (→ STIX intrusion-set), Technique
+  (→ STIX attack-pattern), Vulnerability, CVE, Sector, Campaign. Tool is
+  the one documented exception — see [CLOUD_SYNC.md](CLOUD_SYNC.md).
+
+The implementation lives in [src/node_identity.py](../src/node_identity.py)
+and is wired into every node MERGE in `Neo4jClient` plus the 12 link
+queries in `build_relationships.py`. Backfill for the existing graph runs
+via [`scripts/backfill_node_uuids.py`](../scripts/backfill_node_uuids.py)
+— operator runbook in [MIGRATIONS.md](MIGRATIONS.md).
+
 ---
 
 ## Data Sources (13 Total)
