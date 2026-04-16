@@ -149,33 +149,23 @@ def test_calibrate_large_event_query_is_parameterized_not_fstring():
         enrichment_jobs.calibrate_cooccurrence_confidence(client)
 
     # Find the large-event apoc.periodic.iterate query among captured cyphers.
-    large_queries = [
-        c for c, _ in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c
-    ]
-    assert large_queries, (
-        "expected at least one parameterized apoc.periodic.iterate (large event path)"
-    )
+    large_queries = [c for c, _ in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
+    assert large_queries, "expected at least one parameterized apoc.periodic.iterate (large event path)"
 
     big = large_queries[0]
     # Must use parameter binding both inside the matcher and the action.
     assert "$eid" in big and "$conf" in big, "params must be bound, not interpolated"
     # Must declare them in the iterate config so APOC propagates them.
-    assert "params: {eid: $eid, conf: $conf}" in big, (
-        "apoc.periodic.iterate must forward params to inner queries"
-    )
+    assert "params: {eid: $eid, conf: $conf}" in big, "apoc.periodic.iterate must forward params to inner queries"
     # And the array-union semantics from the small-event path must also be here.
     assert "misp_event_ids" in big and "misp_event_id" in big
 
     # Negative assertion: no f-string interpolation residue (the legacy bug).
     # We can't grep for {eid} reliably inside a raw string, but the eid value
     # should NOT appear as a literal in the query string itself.
-    captured_with_params = [
-        (c, p) for c, p in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c
-    ]
+    captured_with_params = [(c, p) for c, p in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
     for cypher, params in captured_with_params:
-        assert "9001" not in cypher, (
-            "event id must be a parameter, not interpolated into the Cypher string"
-        )
+        assert "9001" not in cypher, "event id must be a parameter, not interpolated into the Cypher string"
         assert params.get("eid") == "9001", "eid must be passed as a session.run param"
 
 
@@ -203,9 +193,7 @@ def test_build_relationships_indicates_cooccurrence_uses_array_on_both_ends():
     # "4. Indicator → Malware (INDICATES)".
     block_start = source.find("4. Indicator → Malware (INDICATES)")
     block_end = source.find("5. ThreatActor → Technique", block_start)
-    assert block_start > 0 and block_end > block_start, (
-        "could not locate the INDICATES co-occurrence block"
-    )
+    assert block_start > 0 and block_end > block_start, "could not locate the INDICATES co-occurrence block"
     block = source[block_start:block_end]
 
     # Outer must include the array OR-clause.
@@ -219,6 +207,4 @@ def test_build_relationships_indicates_cooccurrence_uses_array_on_both_ends():
     )
 
     # Negative assertion: the legacy scalar-only Malware property match must be gone.
-    assert "MATCH (m:Malware {misp_event_id: eid})" not in block, (
-        "legacy scalar-only property match must be removed"
-    )
+    assert "MATCH (m:Malware {misp_event_id: eid})" not in block, "legacy scalar-only property match must be removed"

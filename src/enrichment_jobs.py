@@ -398,7 +398,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         "  'MATCH (i:Indicator) WHERE i.misp_event_id = $eid OR ("
                         "    i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids"
                         "  ) MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
-                        "  WHERE r.source_id IN [\"misp_cooccurrence\", \"misp_correlation\"] "
+                        '  WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
                         "  RETURN r', "
                         "  'SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
                         "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
@@ -407,9 +407,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     )
                     for eid in large_eids:
                         evt_size = event_sizes.get(eid, 0)
-                        result = session.run(
-                            large_batch_query, eid=eid, conf=conf, timeout=NEO4J_READ_TIMEOUT
-                        )
+                        result = session.run(large_batch_query, eid=eid, conf=conf, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
                         evt_updated = record["updated"] if record else 0
                         total_updated += evt_updated

@@ -187,9 +187,7 @@ def test_cross_item_rels_inherit_event_id(syncer: MISPToNeo4jSync):
     rels = syncer._build_cross_item_relationships(items)
     assert rels, "expected cross-item relationships"
     for r in rels:
-        assert r.get("misp_event_id") == "777", (
-            f"rel_type={r.get('rel_type')} missing event id stamp"
-        )
+        assert r.get("misp_event_id") == "777", f"rel_type={r.get('rel_type')} missing event id stamp"
 
 
 def test_cross_item_rels_handle_missing_event_id(syncer: MISPToNeo4jSync):
