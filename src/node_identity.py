@@ -165,34 +165,20 @@ NEO4J_TO_STIX_TYPE: Dict[str, str] = {
 # --------------------------------------------------------------------------- #
 
 
+# Lowercased-key view of ``_NATURAL_KEYS`` — DERIVED from the single source
+# of truth so the two maps cannot drift out of sync. ``canonical_node_key``
+# normalizes the label to lowercase before lookup; the lowercase keys here
+# match. Use ``_NATURAL_KEYS`` from public API helpers (``natural_key_props``,
+# ``uuid_for``); use ``_LABEL_NATURAL_KEY_FIELDS`` only in the canonicalization
+# inner loop.
+#
+# Note on Tool: the natural key is ``mitre_id`` (Neo4j's UNIQUE constraint on
+# Tool is on ``mitre_id``). The STIX exporter's ``_deterministic_id("tool", …)``
+# happens to be called with ``name`` for the SDO id, so Tool SDO IDs do NOT
+# have UUID parity with Neo4j ``n.uuid``. Documented in CLOUD_SYNC.md and
+# MIGRATIONS.md. Reconciliation deferred (would break cached STIX IDs).
 _LABEL_NATURAL_KEY_FIELDS: Dict[str, Tuple[str, ...]] = {
-    # Maps the canonical (case-corrected) label → ordered tuple of field names
-    # used to BUILD the natural-key string that's hashed into the uuid. Values
-    # are joined with "|" in the order shown so the string matches what
-    # stix_exporter passes to _deterministic_id for the same logical entity.
-    #
-    # Tool is intentionally absent: stix_exporter._deterministic_id("tool", name)
-    # uses Tool's display ``name``, but Neo4j's UNIQUE constraint on Tool is on
-    # ``mitre_id``. Reconciling the two requires either changing Neo4j's
-    # constraint (graph-wide migration) or changing the STIX exporter (breaks
-    # cached STIX IDs downstream). We use ``mitre_id`` here for Neo4j-internal
-    # determinism and accept that Tool SDO IDs do not have UUID parity with
-    # Neo4j n.uuid. Documented in MIGRATIONS.md.
-    "indicator": ("indicator_type", "value"),
-    "malware": ("name",),
-    "threatactor": ("name",),
-    "sector": ("name",),
-    "campaign": ("name",),
-    "tool": ("mitre_id",),
-    "technique": ("mitre_id",),
-    "tactic": ("mitre_id",),
-    "cve": ("cve_id",),
-    "vulnerability": ("cve_id",),
-    "cvssv2": ("cve_id",),
-    "cvssv30": ("cve_id",),
-    "cvssv31": ("cve_id",),
-    "cvssv40": ("cve_id",),
-    "source": ("source_id",),
+    label.lower(): fields for label, fields in _NATURAL_KEYS.items()
 }
 
 

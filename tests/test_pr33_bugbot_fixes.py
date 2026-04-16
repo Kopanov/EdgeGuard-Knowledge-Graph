@@ -1,0 +1,209 @@
+"""Regression tests for the 3 bugbot findings on PR #33.
+
+These tests pin down the fixes so a future refactor can't silently undo them:
+
+1. **HIGH** — 6 standalone create_*_relationship helpers had bogus
+   ``row.src_uuid`` / ``row.trg_uuid`` references in their non-UNWIND
+   Cypher. Every call would crash at runtime. Fix: use bound endpoint
+   variables (``a.uuid``, ``m.uuid``, ``i.uuid``, ``v.uuid``, ``s.uuid``,
+   ``t.uuid``) instead — same Mechanism B pattern that ``build_relationships.py``
+   uses.
+2. **MED** — Tool→Technique IMPLEMENTS_TECHNIQUE branch passed
+   ``{"name": nm}`` to ``edge_endpoint_uuids("Tool", …)``, but Tool's
+   natural key is ``mitre_id`` → wrong uuid via ``__missing__`` fallback.
+   Plus ``q_tool_implements`` Cypher MATCHed by ``tool.name = row.entity``
+   but the Tool from_key in parse_attribute is ``{"mitre_id": …}``, so
+   every Tool row was silently dropped. Fix: split the dispatch into
+   per-label branches with the right key, MATCH by ``tool.mitre_id``.
+3. **MED** — ``_NATURAL_KEYS`` and ``_LABEL_NATURAL_KEY_FIELDS`` were
+   parallel maps that had to stay manually synced. Adding a label to one
+   without the other silently produced wrong uuids. Fix: derive
+   ``_LABEL_NATURAL_KEY_FIELDS`` from ``_NATURAL_KEYS`` so they cannot
+   diverge.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+_SRC = os.path.join(os.path.dirname(__file__), "..", "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+
+# ---------------------------------------------------------------------------
+# Finding #1 — broken row.* references in 6 standalone helpers
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_helpers_use_bound_endpoint_vars_not_row():
+    """The 6 single-row create_*_relationship functions are NOT UNWIND queries
+    — referencing ``row.src_uuid`` / ``row.trg_uuid`` would crash with
+    "Variable `row` not defined". They must use the MATCHed node's bound
+    variable name (``a``, ``m``, ``i``, ``v``, ``s``, ``t``, ``tool``)."""
+    import neo4j_client
+
+    src_path = neo4j_client.__file__
+    with open(src_path) as fh:
+        source = fh.read()
+
+    # Range covering the standalone helpers (between the merge_tool function
+    # end and the start of create_misp_relationships_batch).
+    helper_start = source.find("def create_actor_technique_relationship")
+    helper_end = source.find("def create_misp_relationships_batch")
+    assert helper_start > 0 and helper_end > helper_start, "helper region not found"
+    helper_block = source[helper_start:helper_end]
+
+    # The bug was these literal references — must NOT appear in the helper region.
+    assert "row.src_uuid" not in helper_block, (
+        "broken `row.src_uuid` reference in a non-UNWIND helper — would crash at runtime"
+    )
+    assert "row.trg_uuid" not in helper_block, (
+        "broken `row.trg_uuid` reference in a non-UNWIND helper — would crash at runtime"
+    )
+
+    # Bound-variable form must be present (one of these per query).
+    assert "coalesce(r.src_uuid, a.uuid)" in helper_block, "expected a.uuid endpoint stamp (actor_technique)"
+    assert "coalesce(r.src_uuid, m.uuid)" in helper_block, (
+        "expected m.uuid endpoint stamp (malware_actor / indicator_malware)"
+    )
+    assert "coalesce(r.src_uuid, i.uuid)" in helper_block, "expected i.uuid endpoint stamp (indicator_*)"
+    assert "coalesce(r.src_uuid, v.uuid)" in helper_block, "expected v.uuid endpoint stamp (vulnerability_sector)"
+
+
+def test_create_misp_relationships_batch_still_uses_row_vars():
+    """Sanity check on the negative side: the batch UNWIND queries SHOULD
+    still use ``row.src_uuid`` / ``row.trg_uuid`` — those are correct
+    inside ``UNWIND $rows AS row``. Catches a regression where someone
+    over-zealously removes ``row.*`` references everywhere."""
+    import neo4j_client
+
+    with open(neo4j_client.__file__) as fh:
+        source = fh.read()
+
+    batch_start = source.find("def create_misp_relationships_batch")
+    batch_end = source.find("def get_stats")  # the next public function
+    assert batch_start > 0 and batch_end > batch_start
+    batch_block = source[batch_start:batch_end]
+
+    # Inside UNWIND queries, row.* IS the correct binding — must still be present.
+    assert "row.src_uuid" in batch_block, "row.src_uuid removed from UNWIND queries (regression)"
+    assert "row.trg_uuid" in batch_block, "row.trg_uuid removed from UNWIND queries (regression)"
+
+
+# ---------------------------------------------------------------------------
+# Finding #2 — Tool key in IMPLEMENTS_TECHNIQUE branch
+# ---------------------------------------------------------------------------
+
+
+def test_tool_branch_uses_mitre_id_not_name():
+    """Tool's natural key (UNIQUE constraint) is ``mitre_id``. The dispatch
+    must read it from ``fk.get("mitre_id")``, not ``fk.get("name")``, and
+    pass ``{"mitre_id": …}`` to edge_endpoint_uuids. Pre-fix: the
+    Malware/Tool branch used ``fk.get("name")`` for both, silently dropping
+    every Tool row (parse_attribute sends Tool from_key as {"mitre_id": …}).
+    """
+    import neo4j_client
+
+    with open(neo4j_client.__file__) as fh:
+        source = fh.read()
+
+    batch_start = source.find("def create_misp_relationships_batch")
+    batch_end = source.find("def get_stats")
+    block = source[batch_start:batch_end]
+
+    # Must have a Tool-specific branch using mitre_id.
+    assert 'elif from_type == "Tool":' in block, "Tool branch must be split out from Malware"
+    # Must read the mitre_id from from_key.
+    assert 'fk.get("mitre_id")' in block, "Tool branch must read mitre_id from from_key"
+    # The uuid must be computed with mitre_id.
+    assert '"Tool", {"mitre_id":' in block, "Tool uuid must be computed from {'mitre_id': ...}, not {'name': ...}"
+
+
+def test_q_tool_implements_matches_by_mitre_id():
+    """Pre-fix the q_tool_implements MATCH was ``tool.name = row.entity``.
+    Now Tool rows put mitre_id in ``row.entity``, so the MATCH must be by
+    ``mitre_id``."""
+    import neo4j_client
+
+    with open(neo4j_client.__file__) as fh:
+        source = fh.read()
+
+    # Locate the q_tool_implements TEMPLATE ASSIGNMENT (not the comment
+    # mentioning it earlier in the dispatch loop).
+    idx = source.find('q_tool_implements = """')
+    assert idx > 0, "q_tool_implements template assignment not found"
+    # Look at the next ~800 chars (the query string)
+    chunk = source[idx : idx + 800]
+
+    assert "MATCH (tool:Tool {mitre_id: row.entity})" in chunk, (
+        "q_tool_implements must MATCH by tool.mitre_id, not tool.name (Tool's natural key is mitre_id)"
+    )
+    # Negative: the legacy name-based MATCH must be gone.
+    assert "tool.name = row.entity" not in chunk, "legacy tool.name MATCH must be removed"
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 — duplicate parallel natural-key maps
+# ---------------------------------------------------------------------------
+
+
+def test_label_field_map_is_derived_from_natural_keys():
+    """The two maps used to require manual sync. They must now share a single
+    source of truth — adding a label to ``_NATURAL_KEYS`` automatically
+    populates ``_LABEL_NATURAL_KEY_FIELDS`` (lowercase view)."""
+    from node_identity import _LABEL_NATURAL_KEY_FIELDS, _NATURAL_KEYS
+
+    # Cardinality: every label in _NATURAL_KEYS appears in the lowercase map.
+    assert len(_NATURAL_KEYS) == len(_LABEL_NATURAL_KEY_FIELDS), (
+        "the two maps must have the same number of entries (one is derived from the other)"
+    )
+
+    # Per-label fields: they MUST be the same tuple under the lowercase key.
+    for label, fields in _NATURAL_KEYS.items():
+        lc = label.lower()
+        assert lc in _LABEL_NATURAL_KEY_FIELDS, (
+            f"label {label!r} in _NATURAL_KEYS but not in derived _LABEL_NATURAL_KEY_FIELDS — derivation broken"
+        )
+        assert _LABEL_NATURAL_KEY_FIELDS[lc] == fields, (
+            f"field tuple drift for {label!r}: _NATURAL_KEYS={fields} "
+            f"_LABEL_NATURAL_KEY_FIELDS[{lc!r}]={_LABEL_NATURAL_KEY_FIELDS[lc]}"
+        )
+
+
+def test_adding_a_label_to_natural_keys_propagates_to_lowercase_map():
+    """Live derivation check — even if _NATURAL_KEYS is patched at runtime
+    (e.g. monkeypatched in a test), the lowercase view should track. This
+    pins down the contract that the two maps are not independently
+    maintained.
+    """
+    # We can't actually mutate the module dict mid-test cleanly without leaking
+    # state — instead, assert on the source code that the lowercase map is
+    # built via dict comprehension from _NATURAL_KEYS, not as an independent
+    # literal. This is a structural check that catches the bugbot-flagged
+    # maintenance hazard.
+    import node_identity
+
+    with open(node_identity.__file__) as fh:
+        source = fh.read()
+
+    assert "label.lower(): fields for label, fields in _NATURAL_KEYS.items()" in source, (
+        "_LABEL_NATURAL_KEY_FIELDS must be derived from _NATURAL_KEYS via dict "
+        "comprehension — anything else risks the two maps drifting silently"
+    )
+
+
+def test_uuid_unchanged_after_consolidation():
+    """The map consolidation MUST NOT change any uuid — same canonical input,
+    same uuid out. Frozen anchor values for the threat-intel core."""
+    from node_identity import compute_node_uuid
+
+    # These uuids are pinned values from the test_node_identity.py parity
+    # tests. If consolidation changed canonicalization, these would fail.
+    assert (
+        compute_node_uuid("Indicator", {"indicator_type": "ipv4", "value": "203.0.113.5"})
+        == "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0"
+    )
+    assert compute_node_uuid("Malware", {"name": "Emotet"}) == "774960af-0687-56b1-9c05-ae55cd62ed58"
+    assert compute_node_uuid("Vulnerability", {"cve_id": "CVE-2024-1234"}) == "85b67b2e-bb0c-5a7a-ae6f-2b6cc1aa077b"

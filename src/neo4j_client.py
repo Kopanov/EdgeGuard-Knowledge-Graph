@@ -1822,8 +1822,8 @@ class Neo4jClient:
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, a.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1872,8 +1872,8 @@ class Neo4jClient:
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, m.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, a.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1919,8 +1919,8 @@ class Neo4jClient:
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         # Link to CVE nodes (NVD-sourced, ResilMesh schema)
         query_cve = """
@@ -1932,8 +1932,8 @@ class Neo4jClient:
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1973,8 +1973,8 @@ class Neo4jClient:
             r.confidence_score = 0.6,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, m.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -2021,8 +2021,8 @@ class Neo4jClient:
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
 
         try:
@@ -2068,8 +2068,8 @@ class Neo4jClient:
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
 
         # Vulnerability label (MISP/non-NVD)
@@ -2208,16 +2208,44 @@ class Neo4jClient:
                         )
                     else:
                         _dropped_rels += 1
-                elif from_type in ("Malware", "Tool"):
+                elif from_type == "Malware":
+                    # Malware natural key is `name` — the Cypher MATCH and the uuid
+                    # computation both use it.
                     nm = nonempty_graph_string(fk.get("name"))
                     if nm and mid:
                         src_uuid, trg_uuid = edge_endpoint_uuids(
-                            from_type, {"name": nm}, "Technique", {"mitre_id": mid}
+                            "Malware", {"name": nm}, "Technique", {"mitre_id": mid}
                         )
                         implements_rows.append(
                             {
                                 "entity": nm,
-                                "entity_label": from_type,
+                                "entity_label": "Malware",
+                                "mitre_id": mid,
+                                "source_id": source_id,
+                                "confidence": conf,
+                                "misp_event_id": mev,
+                                "src_uuid": src_uuid,
+                                "trg_uuid": trg_uuid,
+                            }
+                        )
+                    else:
+                        _dropped_rels += 1
+                elif from_type == "Tool":
+                    # Tool's natural key is `mitre_id` (UNIQUE constraint on Tool.mitre_id —
+                    # see Neo4jClient.create_constraints). Producers send from_key as
+                    # ``{"mitre_id": ...}`` — earlier shared-with-Malware code read
+                    # fk.get("name") and silently dropped Tool rows. Now Tool routes
+                    # through its own branch with the correct key, and the q_tool_implements
+                    # Cypher MATCHes on tool.mitre_id (not tool.name) to match.
+                    tool_mid = nonempty_graph_string(fk.get("mitre_id"))
+                    if tool_mid and mid:
+                        src_uuid, trg_uuid = edge_endpoint_uuids(
+                            "Tool", {"mitre_id": tool_mid}, "Technique", {"mitre_id": mid}
+                        )
+                        implements_rows.append(
+                            {
+                                "entity": tool_mid,
+                                "entity_label": "Tool",
                                 "mitre_id": mid,
                                 "source_id": source_id,
                                 "confidence": conf,
@@ -2423,10 +2451,15 @@ class Neo4jClient:
             r.src_uuid = coalesce(r.src_uuid, row.src_uuid),
             r.trg_uuid = coalesce(r.trg_uuid, row.trg_uuid)
         """
+        # Tool's natural key (and UNIQUE constraint) is mitre_id, NOT name —
+        # the dispatch loop above puts the Tool's mitre_id into row.entity for
+        # this query. Aliases-based matching wouldn't apply here (Tool's
+        # canonical id is the MITRE id). Pre-2026-04 this query MATCHed by
+        # tool.name, which silently dropped every Tool row sent through this
+        # path because parse_attribute correctly sends from_key={"mitre_id": …}.
         q_tool_implements = """
         UNWIND $rows AS row
-        MATCH (tool:Tool)
-        WHERE (tool.name = row.entity OR row.entity IN coalesce(tool.aliases, []))
+        MATCH (tool:Tool {mitre_id: row.entity})
         MATCH (t:Technique {mitre_id: row.mitre_id})
         MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
