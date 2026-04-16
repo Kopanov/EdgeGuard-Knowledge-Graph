@@ -161,9 +161,21 @@ EDGEGUARD_MISP_BATCH_THROTTLE_SEC=10
 EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC=5
 ```
 
-**3. Retry backoff:** MISP-facing operations use `retry_with_backoff(max_retries=4, base_delay=10.0)` — retries at **10s → 20s → 40s → 80s**. This gives MISP time to recover from memory pressure between retries. Read timeouts are set to **300s** (5 minutes) to accommodate large event processing.
+**3. PHP `memory_limit` inside the container** (critical — distinct from Docker `mem_limit`):
 
-**4. Signs of MISP memory pressure:**
+Docker's `mem_limit: 8g` sets the *container* ceiling — Docker kills the container if total RSS exceeds 8 GB. But PHP has its own `memory_limit` in `php.ini`, defaulting to **2 GB** on the `coolacid/misp-docker` image. When MISP's `JSONConverterTool.php` loads a 95K-attribute event, it can exceed 2 GB of PHP heap *before Docker notices*, and PHP kills the process internally with `Fatal Error: Allowed memory size exhausted`.
+
+Fix: the `docs/sources/MISP/docker-compose.yml` mounts `php-overrides.ini` at `/usr/local/etc/php/conf.d/99-edgeguard.ini`, which sets `memory_limit = 8G` to match the container ceiling. If your MISP image uses a different PHP config path, adjust the mount target:
+
+```bash
+# Verify the override took effect:
+docker exec misp_misp_1 php -i | grep memory_limit
+# Should show: memory_limit => 8G => 8G
+```
+
+**4. Retry backoff:** MISP-facing operations use `retry_with_backoff(max_retries=4, base_delay=10.0)` — retries at **10s → 20s → 40s → 80s**. This gives MISP time to recover from memory pressure between retries. Read timeouts are set to **300s** (5 minutes) to accommodate large event processing.
+
+**5. Signs of MISP memory pressure:**
 - `ReadTimeout` or `ConnectionError` in pipeline logs
 - Circuit breaker opening after 4 failed retries
 - MISP container OOM-killed (check `docker inspect <container> | grep OOMKilled`)

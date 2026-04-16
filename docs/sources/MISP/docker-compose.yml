@@ -22,6 +22,11 @@ services:
       - misp_data:/var/www/MISP
       - misp_redis:/var/www/MISP/App/files
       - /etc/localtime:/etc/localtime:ro
+      # PHP process memory_limit override — the Docker mem_limit (8g) is the
+      # container ceiling; this .ini raises the PHP-internal ceiling from 2g
+      # to match. Without it, PHP OOM-kills on the NVD 95K-attribute event
+      # even though the container has 6g of headroom.
+      - ./php-overrides.ini:/usr/local/etc/php/conf.d/99-edgeguard.ini:ro
     networks:
       - misp_network
 
