@@ -175,9 +175,23 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # ``c.uuid`` is set from the precomputed map keyed by the actor's name;
             # the RUNS edge stamps src_uuid / trg_uuid from a.uuid / c.uuid (both
             # bound, both set in this query).
+            #
+            # PR #34 round 21 (bugbot LOW): added the
+            # ``WHERE a.name IN keys($campaign_uuids)`` guard immediately after
+            # the outer MATCH. Bugbot caught a TOCTOU race: if a NEW
+            # ThreatActor gains an ATTRIBUTED_TO edge between the pre-fetch
+            # (line ~169) and this MERGE, the new actor enters the MERGE
+            # path but ``$campaign_uuids[a.name]`` returns NULL — the
+            # Campaign would be created with ``uuid=null``, silently
+            # breaking the cross-environment traceability contract until a
+            # subsequent rerun. Filtering ensures we only MERGE actors
+            # whose deterministic uuid was precomputed; new actors are
+            # picked up on the next run when they're included in the
+            # pre-fetch.
             create_cypher = """
             MATCH (a:ThreatActor)
             WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+              AND a.name IN keys($campaign_uuids)
             WITH a
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(m:Malware)
             WITH a, collect(DISTINCT m) AS malware_list
@@ -217,6 +231,24 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
+
+            # Defense-in-depth: if any prior race wrote a Campaign with NULL
+            # uuid (from before this guard landed), backfill it now using the
+            # same precomputed dict. Costs one cheap query — covers historical
+            # corruption + any rare leak we missed.
+            backfill_cypher = """
+            MATCH (c:Campaign)
+            WHERE c.uuid IS NULL AND c.actor_name IN keys($campaign_uuids)
+            SET c.uuid = $campaign_uuids[c.actor_name]
+            RETURN count(c) AS backfilled
+            """
+            bf = session.run(backfill_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT).single()
+            backfilled = bf["backfilled"] if bf else 0
+            if backfilled:
+                logger.info(
+                    "[CAMPAIGN] backfilled c.uuid on %d pre-existing Campaign nodes (likely from a pre-round-21 race)",
+                    backfilled,
+                )
             time.sleep(3)
 
             # Step 2: Link malware to their campaigns. Both endpoints have

@@ -2257,3 +2257,145 @@ def test_backfill_rejects_conflicting_nodes_only_and_edges_only():
     assert "not allowed" in combined or "mutually exclusive" in combined, (
         f"argparse conflict message missing from output; got stderr:\n{result.stderr}\n\nstdout:\n{result.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 21 — bugbot findings on commit f9d63c3
+# ---------------------------------------------------------------------------
+
+
+def test_vulnerability_resolver_normalizes_empty_misp_event_ids_to_none():
+    """PR #34 round 21 (bugbot LOW): the Indicator resolver normalises an
+    empty misp_event_ids[] to None via ``event_ids or None``, but the
+    Vulnerability resolver passed the raw ``_neo4j_list(...)`` result
+    through — yielding ``[]`` for the same logical empty state. Both
+    fields are typed ``Optional[List[str]]`` so both shapes are valid
+    GraphQL, but consumers (RAG / xAI) treating "absent" vs "empty"
+    differently would see the same state two different ways.
+
+    Pin source-shape: the Vulnerability resolver MUST apply the same
+    ``or None`` collapse as the Indicator resolver."""
+    import importlib
+    import inspect
+
+    if "graphql_api" in sys.modules:
+        del sys.modules["graphql_api"]
+    graphql_api = importlib.import_module("graphql_api")
+
+    src = inspect.getsource(graphql_api._resolve_vulnerabilities)
+    assert '_neo4j_list(n.get("misp_event_ids")) or None' in src or (
+        "_neo4j_list(n.get('misp_event_ids')) or None" in src
+    ), (
+        "Vulnerability resolver must normalise empty misp_event_ids to None — "
+        "match the Indicator resolver's `event_ids or None` pattern"
+    )
+
+
+def test_build_campaign_nodes_filters_actors_to_precomputed_dict():
+    """PR #34 round 21 (bugbot LOW): TOCTOU race between the pre-fetch of
+    qualifying ThreatActor names (which builds the deterministic
+    ``campaign_uuids`` dict) and the main MERGE query. If a NEW
+    ThreatActor gains an ATTRIBUTED_TO edge between the two, it enters
+    the MERGE path but ``$campaign_uuids[a.name]`` returns NULL — the
+    Campaign would be created with ``uuid=null``, silently breaking the
+    cross-environment traceability contract.
+
+    Pin source-shape: the MERGE outer MATCH must include
+    ``a.name IN keys($campaign_uuids)`` so race-window actors are
+    skipped (picked up next run when they're in the pre-fetch).
+    Also pin the defense-in-depth backfill that heals any pre-existing
+    NULL-uuid Campaign nodes from before this guard landed."""
+    import importlib
+    import inspect
+
+    if "enrichment_jobs" in sys.modules:
+        del sys.modules["enrichment_jobs"]
+    enrichment_jobs = importlib.import_module("enrichment_jobs")
+
+    src = inspect.getsource(enrichment_jobs.build_campaign_nodes)
+    # Outer MATCH must filter by precomputed-uuid actor set.
+    assert "a.name IN keys($campaign_uuids)" in src, (
+        "build_campaign_nodes' MERGE outer MATCH must filter ThreatActors to those in the "
+        "precomputed campaign_uuids dict — prevents NULL-uuid Campaigns from race-window actors"
+    )
+    # Defense-in-depth backfill must exist.
+    assert "c.uuid IS NULL AND c.actor_name IN keys($campaign_uuids)" in src, (
+        "build_campaign_nodes must include a backfill pass that heals any pre-existing "
+        "Campaign nodes with NULL c.uuid (from before round 21's race guard)"
+    )
+    # Operator-facing log when backfill actually fires.
+    assert "[CAMPAIGN] backfilled c.uuid" in src, "operator-facing log must surface the backfill count when > 0"
+
+
+def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
+    """Behavioral pin: when the backfill query reports N healed Campaigns,
+    the operator log fires with the count. Mocks the Neo4j session to
+    return non-zero from the backfill query and verifies the message."""
+    import importlib
+    import logging
+    from unittest.mock import MagicMock
+
+    if "enrichment_jobs" in sys.modules:
+        del sys.modules["enrichment_jobs"]
+    enrichment_jobs = importlib.import_module("enrichment_jobs")
+
+    captured_logs = []
+
+    class _CapHandler(logging.Handler):
+        def emit(self, record):
+            captured_logs.append(self.format(record))
+
+    handler = _CapHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    enrichment_jobs.logger.addHandler(handler)
+    enrichment_jobs.logger.setLevel(logging.INFO)
+
+    try:
+        client = MagicMock()
+        sess = MagicMock()
+        sess.__enter__ = lambda s: s
+        sess.__exit__ = lambda *a: False
+
+        # 4 session.run calls in build_campaign_nodes:
+        # (1) qualifying_actors_query — return 1 actor
+        # (2) create_cypher (main MERGE) — return campaigns count
+        # (3) backfill_cypher — return non-zero
+        # (4) link_malware
+        # (5) link_indicators
+        # We give iter for the actors query and .single() for the rest.
+        actors_iter = iter([{"name": "APT-Test"}])
+        actors_result = MagicMock()
+        actors_result.__iter__ = lambda self: actors_iter
+        create_result = MagicMock()
+        create_result.single.return_value = {"campaigns": 1}
+        backfill_result = MagicMock()
+        backfill_result.single.return_value = {"backfilled": 7}
+        link_m_result = MagicMock()
+        link_m_result.single.return_value = {"links": 0}
+        link_i_result = MagicMock()
+        link_i_result.single.return_value = {"links": 0}
+        sess.run.side_effect = [
+            actors_result,
+            create_result,
+            backfill_result,
+            link_m_result,
+            link_i_result,
+        ]
+        client.driver.session.return_value = sess
+
+        # Speed up the time.sleep(3) calls.
+        import enrichment_jobs as ej
+
+        original_sleep = ej.time.sleep
+        ej.time.sleep = lambda *_a: None
+        try:
+            enrichment_jobs.build_campaign_nodes(client)
+        finally:
+            ej.time.sleep = original_sleep
+
+        joined = "\n".join(captured_logs)
+        assert "[CAMPAIGN] backfilled c.uuid on 7" in joined, (
+            f"backfill log must include the count and phrasing; got:\n{joined}"
+        )
+    finally:
+        enrichment_jobs.logger.removeHandler(handler)

@@ -258,6 +258,15 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
     with client.driver.session() as session:
         for record in session.run(query, **params, timeout=NEO4J_READ_TIMEOUT):
             n = record["n"]
+            # PR #34 round 21 (bugbot LOW): normalize empty misp_event_ids
+            # to None for cross-resolver consistency. The Indicator resolver
+            # uses ``event_ids or None`` (line ~327) so empty lists collapse
+            # to None — Vulnerability used to return ``[]`` for the same empty
+            # state. The schema declares ``Optional[List[str]]`` so both shapes
+            # are valid GraphQL, but consumers (RAG / xAI) treating "absent"
+            # and "empty" differently would see the same logical state two
+            # different ways. Normalize at the resolver to converge.
+            vuln_event_ids = _neo4j_list(n.get("misp_event_ids")) or None
             results.append(
                 Vulnerability(
                     cve_id=n.get("cve_id", ""),
@@ -270,7 +279,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                     uuid=n.get("uuid"),
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
-                    misp_event_ids=_neo4j_list(n.get("misp_event_ids")),
+                    misp_event_ids=vuln_event_ids,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
                     version_constraints=n.get("version_constraints"),
