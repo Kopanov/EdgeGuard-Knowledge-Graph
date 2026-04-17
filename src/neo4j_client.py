@@ -3417,7 +3417,21 @@ class Neo4jClient:
             return False
 
     def merge_missiondependency(self, data: dict) -> bool:
-        """MERGE a MissionDependency node. (no properties)"""
+        """MERGE a MissionDependency node. Properties: dependency_id (required)."""
+        # PR #33 round 9: same anti-pattern audit as merge_device round 8 —
+        # the previous ``str(id(data))`` fallback used Python's memory-address
+        # id(), producing a different MERGE key every call for the same
+        # logical dependency. Each call would create a duplicate
+        # MissionDependency node. Refuse the call instead. (MissionDependency
+        # is not in _NATURAL_KEYS so there is no n.uuid to poison, but
+        # accepting an ephemeral key still violates the dedup contract.)
+        dependency_id = data.get("dependency_id")
+        if not dependency_id:
+            logger.error(
+                "merge_missiondependency: data missing required 'dependency_id' — "
+                "would create duplicate nodes per call; refusing"
+            )
+            return False
         query = """
         MERGE (md:MissionDependency {dependency_id: $dependency_id})
         SET md.edgeguard_managed = true,
@@ -3426,8 +3440,8 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=data.get("dependency_id", str(id(data))))
-            logger.info("Created/updated MissionDependency")
+                session.run(query, dependency_id=dependency_id)
+            logger.info(f"Created/updated MissionDependency: {dependency_id}")
             return True
         except Exception as e:
             logger.error(f"Error creating MissionDependency: {e}")
@@ -3699,19 +3713,33 @@ class Neo4jClient:
             return False
 
     # 7. SoftwareVersion IN Vulnerability
-    def create_softwareversion_in_vulnerability(self, version: str, vuln_name: str, cve_id: str = None) -> bool:
-        """Create IN relationship: SoftwareVersion -> Vulnerability"""
+    def create_softwareversion_in_vulnerability(self, version: str, cve_id: str, vuln_name: str = None) -> bool:
+        """Create IN relationship: SoftwareVersion -> Vulnerability.
+
+        PR #33 round 9: MATCH switched from {name: vuln_name} to {cve_id: cve_id}
+        — Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS),
+        not name. The previous form silently failed to find any Vulnerability
+        node because Vulnerability MERGEs are keyed on cve_id everywhere.
+        ``vuln_name`` is retained as an optional kwarg for log readability and
+        signature back-compat; it is no longer used in the MATCH.
+        """
         query = """
         MATCH (sv:SoftwareVersion {version: $version})
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MERGE (sv)-[r:IN]->(v)
+        ON CREATE SET r.src_uuid = sv.uuid, r.trg_uuid = v.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, sv.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=version, vuln_name=vuln_name)
-            logger.info(f"Linked SoftwareVersion {version} IN Vulnerability {vuln_name}")
+                session.run(query, version=version, cve_id=cve_id)
+            logger.info(
+                f"Linked SoftwareVersion {version} IN Vulnerability {cve_id}"
+                + (f" (name={vuln_name})" if vuln_name else "")
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to create SoftwareVersion IN Vulnerability: {e}")
@@ -4258,57 +4286,88 @@ class Neo4jClient:
             return False
 
     # 35. Vulnerability REFERS_TO CVE
-    def create_vulnerability_refers_to_cve(self, vuln_name: str, cve_id: str) -> bool:
-        """Create REFERS_TO relationship: Vulnerability -> CVE"""
+    def create_vulnerability_refers_to_cve(self, cve_id: str, vuln_name: str = None) -> bool:
+        """Create REFERS_TO relationship: Vulnerability -> CVE.
+
+        PR #33 round 9: signature reordered + MATCH switched from
+        {name: vuln_name} to {cve_id: cve_id}. Vulnerability's natural key
+        is cve_id, not name. Note: the canonical bridge_vulnerability_cve
+        query in enrichment_jobs.py creates the same REFERS_TO edge via the
+        cve_id natural key — this helper is a single-pair convenience alias.
+        """
         query = """
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MATCH (c:CVE {cve_id: $cve_id})
         MERGE (v)-[r:REFERS_TO]->(c)
+        ON CREATE SET r.src_uuid = v.uuid, r.trg_uuid = c.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, vuln_name=vuln_name, cve_id=cve_id)
-            logger.info(f"Linked Vulnerability {vuln_name} REFERS_TO CVE {cve_id}")
+                session.run(query, cve_id=cve_id)
+            logger.info(
+                f"Linked Vulnerability {cve_id} REFERS_TO CVE {cve_id}" + (f" (name={vuln_name})" if vuln_name else "")
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to create Vulnerability REFERS_TO CVE: {e}")
             return False
 
     # 36. Vulnerability IN SoftwareVersion
-    def create_vulnerability_in_softwareversion(self, vuln_name: str, version: str) -> bool:
-        """Create IN relationship: Vulnerability -> SoftwareVersion"""
+    def create_vulnerability_in_softwareversion(self, cve_id: str, version: str, vuln_name: str = None) -> bool:
+        """Create IN relationship: Vulnerability -> SoftwareVersion.
+
+        PR #33 round 9: signature reordered + MATCH switched from
+        {name: vuln_name} to {cve_id: cve_id}.
+        """
         query = """
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MATCH (sv:SoftwareVersion {version: $version})
         MERGE (v)-[r:IN]->(sv)
+        ON CREATE SET r.src_uuid = v.uuid, r.trg_uuid = sv.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, sv.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, vuln_name=vuln_name, version=version)
-            logger.info(f"Linked Vulnerability {vuln_name} IN SoftwareVersion {version}")
+                session.run(query, cve_id=cve_id, version=version)
+            logger.info(
+                f"Linked Vulnerability {cve_id} IN SoftwareVersion {version}"
+                + (f" (name={vuln_name})" if vuln_name else "")
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to create Vulnerability IN SoftwareVersion: {e}")
             return False
 
     # 37. CVE REFERS_TO Vulnerability
-    def create_cve_refers_to_vulnerability(self, cve_id: str, vuln_name: str) -> bool:
-        """Create REFERS_TO relationship: CVE -> Vulnerability"""
+    def create_cve_refers_to_vulnerability(self, cve_id: str, vuln_name: str = None) -> bool:
+        """Create REFERS_TO relationship: CVE -> Vulnerability.
+
+        PR #33 round 9: MATCH switched from {name: vuln_name} to
+        {cve_id: cve_id}. Vulnerability's natural key is cve_id.
+        """
         query = """
         MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MERGE (c)-[r:REFERS_TO]->(v)
+        ON CREATE SET r.src_uuid = c.uuid, r.trg_uuid = v.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, c.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vuln_name=vuln_name)
-            logger.info(f"Linked CVE {cve_id} REFERS_TO Vulnerability {vuln_name}")
+                session.run(query, cve_id=cve_id)
+            logger.info(
+                f"Linked CVE {cve_id} REFERS_TO Vulnerability {cve_id}" + (f" (name={vuln_name})" if vuln_name else "")
+            )
             return True
         except Exception as e:
             logger.warning(f"Failed to create CVE REFERS_TO Vulnerability: {e}")

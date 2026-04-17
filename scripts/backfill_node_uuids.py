@@ -121,6 +121,11 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     ("PART_OF", "IP", "Subnet"),
     ("PART_OF", "Subnet", "IP"),
     ("PART_OF", "Subnet", "Subnet"),
+    # PR #33 round 9: SoftwareVersion ↔ Vulnerability (Vulnerability MATCH
+    # was switched from name to cve_id in the round-9 fix; both endpoints
+    # are now uuid-stamped).
+    ("IN", "SoftwareVersion", "Vulnerability"),
+    ("IN", "Vulnerability", "SoftwareVersion"),
 ]
 
 

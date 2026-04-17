@@ -1193,3 +1193,121 @@ def test_standalone_cvss_mergers_documented_as_uuid_less():
     assert "deferred by user decision" in preceding or "Reconciling" in preceding, (
         "deferral rationale above standalone CVSS mergers is missing"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 9 — multi-agent audit follow-up: natural-key consistency + dedup
+# ---------------------------------------------------------------------------
+#
+# The 4-agent audit on 2026-04-17 surfaced two real findings:
+#  - HIGH: 4 relationship helpers MATCHed Vulnerability by ``name`` instead
+#    of canonical ``cve_id`` (silent failure to wire the edge — Vulnerability
+#    nodes are MERGEd by cve_id everywhere else)
+#  - MED:  merge_missiondependency used the same ``str(id(data))`` non-
+#    deterministic fallback that merge_device round-8 had eliminated
+
+
+_VULN_HELPERS_FIXED = (
+    "create_softwareversion_in_vulnerability",
+    "create_vulnerability_refers_to_cve",
+    "create_vulnerability_in_softwareversion",
+    "create_cve_refers_to_vulnerability",
+)
+
+
+def test_vulnerability_helpers_match_by_cve_id_not_name():
+    """The 4 ResilMesh-side relationship helpers must MATCH Vulnerability by
+    ``cve_id`` (canonical natural key) — not by ``name``. Vulnerability nodes
+    are MERGEd by cve_id everywhere (merge_vulnerabilities_batch line 1724,
+    merge_resilmesh_vulnerability line 3471), so MATCH-by-name finds nothing
+    and the helper silently fails to create the relationship."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    for fn_name in _VULN_HELPERS_FIXED:
+        fn = getattr(neo4j_client.Neo4jClient, fn_name)
+        src = inspect.getsource(fn)
+        # The bug pattern that must be gone.
+        assert "Vulnerability {name:" not in src, (
+            f"{fn_name} still MATCHes Vulnerability by name — silent failure "
+            f"because Vulnerability natural key is cve_id"
+        )
+        # The fix pattern that must be present.
+        assert "Vulnerability {cve_id:" in src, f"{fn_name} does not MATCH Vulnerability by cve_id"
+
+
+def test_vulnerability_helpers_stamp_endpoint_uuids():
+    """Now that the 4 helpers MATCH valid uuid-stamped endpoints, they must
+    also stamp r.src_uuid / r.trg_uuid via Mechanism B (bound endpoint .uuid)
+    so cross-environment delta sync covers these edges."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    for fn_name in _VULN_HELPERS_FIXED:
+        fn = getattr(neo4j_client.Neo4jClient, fn_name)
+        src = inspect.getsource(fn)
+        assert "src_uuid =" in src and "trg_uuid =" in src, (
+            f"{fn_name} does not stamp r.src_uuid / r.trg_uuid via bound endpoint .uuid"
+        )
+        assert "coalesce(" in src, f"{fn_name} missing coalesce — re-runs would NOT repair NULL src/trg_uuid"
+
+
+def test_backfill_includes_software_version_in_vulnerability_edges():
+    """The IN edge between SoftwareVersion and Vulnerability is now uuid-
+    stamped (round 9 helper fix); backfill must enumerate it so existing
+    edges get repaired on the next run."""
+    import importlib
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill_node_uuids.EDGES_TO_BACKFILL)
+    assert ("IN", "SoftwareVersion", "Vulnerability") in edges, (
+        "EDGES_TO_BACKFILL missing (IN, SoftwareVersion, Vulnerability)"
+    )
+    assert ("IN", "Vulnerability", "SoftwareVersion") in edges, (
+        "EDGES_TO_BACKFILL missing (IN, Vulnerability, SoftwareVersion)"
+    )
+
+
+def test_merge_missiondependency_refuses_missing_dependency_id():
+    """Audit (round 9, MED): merge_missiondependency previously used
+    ``str(id(data))`` as a fallback for missing dependency_id — same anti-
+    pattern eliminated from merge_device in round 8. Each call would produce
+    a different MERGE key, creating duplicate nodes per call. Refuse the
+    call instead."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.merge_missiondependency)
+    code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+    assert "str(id(data))" not in code_only, (
+        "merge_missiondependency still uses non-deterministic str(id(data)) fallback in code"
+    )
+    assert "if not dependency_id" in src or "if dependency_id is None" in src, (
+        "merge_missiondependency must guard against missing dependency_id and return False"
+    )
+
+    # Behavioural: invoke with empty data on a stub client (no driver).
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = None
+    assert client.merge_missiondependency({}) is False, "merge_missiondependency({}) must return False"
+    assert client.merge_missiondependency({"dependency_id": ""}) is False, (
+        "merge_missiondependency with empty dependency_id must return False"
+    )
