@@ -99,6 +99,15 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     ("HAS_CVSS_v31", "CVSSv31", "CVE"),
     ("HAS_CVSS_v40", "CVSSv40", "CVE"),
     # Source provenance
+    # SOURCED_FROM provenance — ONLY for the 8 "top-level" entity labels
+    # whose MERGE path goes through ``merge_node_with_source`` (which calls
+    # ``_upsert_sourced_relationship``). CVSSv2/v30/v31/v40 sub-nodes are
+    # INTENTIONALLY excluded: their MERGE path is ``_merge_cvss_node``,
+    # which does NOT create a SOURCED_FROM edge — a CVSS record is an
+    # attribute of the parent CVE, and provenance flows through the CVE's
+    # own SOURCED_FROM edge. Bugbot re-flagged this on PR #34 round 20 as
+    # "missing CVSS SOURCED_FROM" — false positive; no such edges exist in
+    # production. Pinned by test_backfill_omits_cvss_sourced_from.
     ("SOURCED_FROM", "Indicator", "Source"),
     ("SOURCED_FROM", "Vulnerability", "Source"),
     ("SOURCED_FROM", "CVE", "Source"),
@@ -330,8 +339,14 @@ def main() -> int:
     )
     ap.add_argument("--batch-size", type=int, default=1000)
     ap.add_argument("--dry-run", action="store_true", help="Count only, do not write")
-    ap.add_argument("--nodes-only", action="store_true", help="Skip edge backfill")
-    ap.add_argument("--edges-only", action="store_true", help="Skip node backfill")
+    # PR #34 round 20 (bugbot LOW): passing both ``--nodes-only`` AND
+    # ``--edges-only`` used to silently skip both passes and exit 0 — an
+    # operator could believe the backfill ran. A mutually-exclusive group
+    # makes argparse reject the conflict at CLI parse time, before the
+    # script touches Neo4j.
+    scope = ap.add_mutually_exclusive_group()
+    scope.add_argument("--nodes-only", action="store_true", help="Skip edge backfill")
+    scope.add_argument("--edges-only", action="store_true", help="Skip node backfill")
     args = ap.parse_args()
 
     labels = [s.strip() for s in args.labels.split(",") if s.strip()] if args.labels else list(supported_labels())

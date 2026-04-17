@@ -2087,3 +2087,108 @@ def test_backfill_lists_both_has_cvss_directions():
             f"backfill missing REVERSE edge ({reverse}) — _merge_cvss_node creates BOTH "
             "directions (CVE→CVSS and CVSS→CVE), so both must be backfilled"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round 20 — bugbot findings on commit 106d41a
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_omits_cvss_sourced_from_intentionally():
+    """PR #34 round 20 (bugbot LOW, false positive): bugbot suggested adding
+    SOURCED_FROM edges for CVSSv2/v30/v31/v40 to EDGES_TO_BACKFILL. This is
+    wrong — ``_merge_cvss_node`` in neo4j_client.py does NOT create a
+    SOURCED_FROM edge. CVSS records are attributes of their parent CVE;
+    provenance flows through the CVE's own SOURCED_FROM edge. No such edges
+    exist in production, so nothing to backfill.
+
+    Pin the omission so a well-intentioned "add CVSS SOURCED_FROM" refactor
+    gets caught by CI instead of running a multi-hour backfill that finds
+    zero matching edges in the graph."""
+    import importlib
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill.EDGES_TO_BACKFILL)
+    for cvss_label in ("CVSSv2", "CVSSv30", "CVSSv31", "CVSSv40"):
+        assert ("SOURCED_FROM", cvss_label, "Source") not in edges, (
+            f"SOURCED_FROM ({cvss_label}→Source) must NOT be in EDGES_TO_BACKFILL — "
+            "_merge_cvss_node doesn't create this edge type; provenance flows through parent CVE"
+        )
+
+    # Also pin the cross-check: every *other* label whose SOURCED_FROM edge
+    # IS created by the code path (via merge_node_with_source) must be present.
+    for label in ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique", "Tactic", "Tool"):
+        assert ("SOURCED_FROM", label, "Source") in edges, (
+            f"SOURCED_FROM ({label}→Source) is produced by merge_node_with_source and must be backfilled"
+        )
+
+    # Verify neo4j_client's _merge_cvss_node does NOT call _upsert_sourced_relationship
+    # (the method that would create a CVSS SOURCED_FROM). If this ever changes,
+    # this test fails and the operator MUST add the CVSS entries above.
+    import neo4j_client
+
+    src_path = neo4j_client.__file__
+    with open(src_path) as fh:
+        source = fh.read()
+    cvss_start = source.find("def _merge_cvss_node")
+    cvss_end = source.find("def merge_malware", cvss_start)
+    assert cvss_start > 0 and cvss_end > cvss_start, "could not locate _merge_cvss_node body"
+    cvss_block = source[cvss_start:cvss_end]
+    assert "_upsert_sourced_relationship" not in cvss_block, (
+        "_merge_cvss_node now calls _upsert_sourced_relationship — SOURCED_FROM edges now exist "
+        "for CVSS nodes; EDGES_TO_BACKFILL MUST be updated to include them"
+    )
+
+
+def test_backfill_rejects_conflicting_nodes_only_and_edges_only():
+    """PR #34 round 20 (bugbot LOW): passing both ``--nodes-only`` AND
+    ``--edges-only`` used to silently skip BOTH passes and exit 0 — the
+    operator could believe the backfill ran. argparse's mutually-exclusive
+    group now rejects the conflict at CLI parse time."""
+    import importlib
+    import subprocess
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill = importlib.import_module("backfill_node_uuids")
+
+    # Source-level pin: the mutually_exclusive_group must be used for the
+    # two flags. A refactor that drops the group would regress the guard.
+    src_path = backfill.__file__
+    with open(src_path) as fh:
+        source = fh.read()
+    assert "add_mutually_exclusive_group" in source, (
+        "the --nodes-only / --edges-only flags must be in a mutually-exclusive group"
+    )
+
+    # Behavioral check: invoking the script with both flags must exit non-zero
+    # and write the argparse conflict message to stderr. Use ``-h``-adjacent
+    # probing — we parse-args directly and catch SystemExit via subprocess so
+    # we don't need a live Neo4j driver.
+    env = os.environ.copy()
+    # Prevent the script from attempting an actual Neo4j connection before
+    # argparse runs (argparse runs first in main(), so this is defense-in-depth).
+    env.setdefault("NEO4J_URI", "bolt://invalid:7687")
+    result = subprocess.run(
+        [sys.executable, src_path, "--nodes-only", "--edges-only"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=10,
+    )
+    assert result.returncode != 0, (
+        "passing both --nodes-only and --edges-only must exit non-zero (argparse rejects the conflict)"
+    )
+    combined = (result.stderr + result.stdout).lower()
+    assert "not allowed" in combined or "mutually exclusive" in combined, (
+        f"argparse conflict message missing from output; got stderr:\n{result.stderr}\n\nstdout:\n{result.stdout}"
+    )
