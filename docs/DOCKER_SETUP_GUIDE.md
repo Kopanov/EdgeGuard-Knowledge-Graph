@@ -161,9 +161,28 @@ EDGEGUARD_MISP_BATCH_THROTTLE_SEC=10
 EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC=5
 ```
 
-**3. Retry backoff:** MISP-facing operations use `retry_with_backoff(max_retries=4, base_delay=10.0)` — retries at **10s → 20s → 40s → 80s**. This gives MISP time to recover from memory pressure between retries. Read timeouts are set to **300s** (5 minutes) to accommodate large event processing.
+**3. PHP `memory_limit` inside the container** (critical — distinct from Docker `mem_limit`):
 
-**4. Signs of MISP memory pressure:**
+Docker's `mem_limit: 8g` sets the *container* ceiling — Docker kills the container if total RSS exceeds 8 GB. But PHP has its own `memory_limit` in `php.ini`, defaulting to **2 GB** on the `coolacid/misp-docker` image. When MISP's `JSONConverterTool.php` loads a 95K-attribute event, it can exceed 2 GB of PHP heap *before Docker notices*, and PHP kills the process internally with `Fatal Error: Allowed memory size exhausted`.
+
+Fix: the `docs/sources/MISP/docker-compose.yml` mounts `php-overrides.ini` at `/etc/php/7.4/fpm/conf.d/99-edgeguard.ini`, which sets `memory_limit = 8G` to match the container ceiling. That path matches `coolacid/misp-docker` (debian:bullseye-slim base, PHP 7.4 + php-fpm) — the conf.d location PHP scans on Debian-based images is `/etc/php/<version>/<sapi>/conf.d/`, NOT the `/usr/local/etc/php/conf.d/` used by the official `php:*` images.
+
+If your MISP image ships a different PHP version (e.g. a future coolacid release on PHP 8.x), update the mount path in `docker-compose.yml` to match. **Always verify the override actually took effect:**
+
+```bash
+# 1. Find the PHP version your MISP image uses:
+docker exec misp_misp_1 php -v
+# 2. Verify the override loaded:
+docker exec misp_misp_1 php -i | grep memory_limit
+# Should show: memory_limit => 8G => 8G
+# 3. If it still shows 2G, find the actual conf.d path PHP scans:
+docker exec misp_misp_1 php -i | grep "Scan this dir"
+# Then update the mount target in docker-compose.yml accordingly.
+```
+
+**4. Retry backoff:** MISP-facing operations use `retry_with_backoff(max_retries=4, base_delay=10.0)` — retries at **10s → 20s → 40s → 80s**. This gives MISP time to recover from memory pressure between retries. Read timeouts are set to **300s** (5 minutes) to accommodate large event processing.
+
+**5. Signs of MISP memory pressure:**
 - `ReadTimeout` or `ConnectionError` in pipeline logs
 - Circuit breaker opening after 4 failed retries
 - MISP container OOM-killed (check `docker inspect <container> | grep OOMKilled`)
