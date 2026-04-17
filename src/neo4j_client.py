@@ -606,6 +606,28 @@ class Neo4jClient:
             "CREATE CONSTRAINT cvssv40_key IF NOT EXISTS FOR (n:CVSSv40) REQUIRE (n.cve_id) IS UNIQUE",
             # Campaign nodes — one per actor, keyed by name only
             "CREATE CONSTRAINT campaign_key IF NOT EXISTS FOR (c:Campaign) REQUIRE (c.name) IS UNIQUE",
+            # PR #34 round 26 (invariant audit): added the missing 10 UNIQUE
+            # constraints to match the labels declared in
+            # ``node_identity._NATURAL_KEYS``. Without these, two concurrent
+            # MERGEs on the same logical (label, key) could create duplicate
+            # nodes — silently violating the deterministic-uuid contract that
+            # underpins delta sync. Pinned by
+            # ``test_every_natural_key_label_has_a_unique_constraint``.
+            # ResilMesh / topology
+            "CREATE CONSTRAINT ip_key IF NOT EXISTS FOR (n:IP) REQUIRE (n.address) IS UNIQUE",
+            "CREATE CONSTRAINT host_key IF NOT EXISTS FOR (n:Host) REQUIRE (n.hostname) IS UNIQUE",
+            "CREATE CONSTRAINT device_key IF NOT EXISTS FOR (n:Device) REQUIRE (n.device_id) IS UNIQUE",
+            "CREATE CONSTRAINT subnet_key IF NOT EXISTS FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE",
+            "CREATE CONSTRAINT networkservice_key IF NOT EXISTS FOR (n:NetworkService) REQUIRE (n.port, n.protocol) IS UNIQUE",  # noqa: E501
+            "CREATE CONSTRAINT softwareversion_key IF NOT EXISTS FOR (n:SoftwareVersion) REQUIRE (n.version) IS UNIQUE",
+            "CREATE CONSTRAINT application_key IF NOT EXISTS FOR (n:Application) REQUIRE (n.name) IS UNIQUE",
+            "CREATE CONSTRAINT role_key IF NOT EXISTS FOR (n:Role) REQUIRE (n.permission) IS UNIQUE",
+            # User: composite (username, domain) — domain is normalized to
+            # 'default' for None/"" inputs (PR #34 round 25, see
+            # merge_resilmesh_user) so the constraint compares apples-to-apples.
+            "CREATE CONSTRAINT user_key IF NOT EXISTS FOR (n:User) REQUIRE (n.username, n.domain) IS UNIQUE",
+            # Alert: alert_id is the upstream-provided idempotency key.
+            "CREATE CONSTRAINT alert_key IF NOT EXISTS FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE",
         ]
 
         success_count = 0

@@ -73,7 +73,7 @@ class Neo4jClearer:
         Returns:
             Dict mapping label to count
         """
-        counts = {}
+        counts: dict = {}
         labels_to_count = EDGEGUARD_LABELS if edgeguard_only else []
 
         try:
@@ -100,7 +100,7 @@ class Neo4jClearer:
         Returns:
             Dict mapping relationship type to count
         """
-        counts = {}
+        counts: dict = {}
 
         try:
             assert self.client.driver is not None
