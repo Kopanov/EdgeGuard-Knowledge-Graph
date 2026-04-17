@@ -1046,3 +1046,150 @@ def test_topology_uuid_matches_compute_node_uuid_contract():
         assert u1 == u2, f"compute_node_uuid({label!r}, {key!r}) is non-deterministic"
         # Sanity: uuid is a 36-char string (canonical UUID form).
         assert len(u1) == 36 and u1.count("-") == 4, f"uuid for {label} is not a canonical UUID string: {u1!r}"
+
+
+# ---------------------------------------------------------------------------
+# Round 8 — bugbot findings on commit ac26dee
+# ---------------------------------------------------------------------------
+
+
+def test_merge_cvss_node_params_spread_filtered_first():
+    """Bugbot (round 8, MED): in ``_merge_cvss_node`` the params dict spreads
+    ``filtered_cvss`` AFTER explicit ``cve_uuid``/``cvss_uuid`` keys, so a
+    cvss_data entry named ``cve_uuid`` or ``cvss_uuid`` would silently
+    overwrite the deterministic uuid. Fix: spread ``**filtered_cvss`` FIRST
+    and put the explicit uuid keys last so they always win."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient._merge_cvss_node)
+    # Find the params dict literal block.
+    import re
+
+    m = re.search(r"params\s*=\s*\{(.*?)\}", src, re.DOTALL)
+    assert m, "could not locate params dict in _merge_cvss_node"
+    body = m.group(1)
+    # Position of the spread vs the explicit cve_uuid/cvss_uuid.
+    spread_pos = body.find("**filtered_cvss")
+    cve_pos = body.find('"cve_uuid"')
+    cvss_pos = body.find('"cvss_uuid"')
+    assert spread_pos >= 0 and cve_pos >= 0 and cvss_pos >= 0, (
+        "expected **filtered_cvss + cve_uuid/cvss_uuid keys all present in params dict"
+    )
+    assert spread_pos < cve_pos and spread_pos < cvss_pos, (
+        "**filtered_cvss must come BEFORE cve_uuid / cvss_uuid in the params dict so the "
+        "explicit deterministic uuids can't be overwritten by attribute data"
+    )
+
+
+def test_backfill_validates_labels_before_interpolation():
+    """Bugbot (round 8, LOW): backfill's ``--labels`` flag is user-supplied
+    and flowed unvalidated into f-string Cypher. Pin that the three backfill
+    Cypher-building functions call ``_validate_label`` and (for edges)
+    ``_validate_rel_type``."""
+    import importlib
+    import inspect
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
+
+    for fn_name in ("count_null_uuid_nodes", "backfill_label"):
+        fn = getattr(backfill_node_uuids, fn_name)
+        src = inspect.getsource(fn)
+        assert "_validate_label(" in src, f"{fn_name} does not call _validate_label before f-string interpolation"
+
+    edge_src = inspect.getsource(backfill_node_uuids.backfill_edge)
+    assert "_validate_label(from_label)" in edge_src
+    assert "_validate_label(to_label)" in edge_src
+    assert "_validate_rel_type(rel_type)" in edge_src
+
+
+def test_backfill_edge_inner_query_rebinds_apoc_variables():
+    """Bugbot (round 8, HIGH): apoc.periodic.iterate forwards outer-query
+    columns to the inner query as $-prefixed parameters. The inner Cypher
+    must rebind them via ``WITH $col AS col`` before referencing them as
+    Cypher variables — otherwise ``r``, ``a``, ``b`` in the SET clause are
+    unbound and the query fails with "Variable `r` not defined"."""
+    import importlib
+    import inspect
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
+
+    src = inspect.getsource(backfill_node_uuids.backfill_edge)
+    # The inner action string must rebind r, a, b.
+    assert "WITH $r AS r, $a AS a, $b AS b" in src, (
+        "backfill_edge inner apoc.periodic.iterate query missing the WITH $r AS r, $a AS a, $b AS b "
+        "rebinding — would error at runtime with 'Variable `r` not defined'"
+    )
+
+
+def test_merge_device_refuses_missing_device_id():
+    """Bugbot (round 8, MED): the previous fallback ``str(id(data))`` for
+    missing device_id used Python's memory-address id(), producing a
+    different uuid every call for the same logical Device. Refuse the call
+    instead of writing a poisoned, non-deterministic node."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.merge_device)
+    # The non-deterministic str(id(data)) fallback must be gone from EXECUTABLE
+    # code (the comment explaining the fix legitimately mentions it). Strip
+    # comment lines before scanning.
+    code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+    assert "str(id(data))" not in code_only, "merge_device still uses non-deterministic str(id(data)) fallback in code"
+    # And there must be an explicit "missing device_id → return False" guard.
+    assert "if not device_id" in src or "if device_id is None" in src, (
+        "merge_device must guard against missing device_id and return False — found no guard"
+    )
+
+    # Behavioural check: invoke merge_device with empty data on a stub client
+    # that has no driver. The guard must short-circuit before any DB call,
+    # returning False without raising.
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = None  # noqa — stub
+    assert client.merge_device({}) is False, "merge_device({}) must return False, not raise"
+    assert client.merge_device({"device_id": ""}) is False, "merge_device with empty device_id must return False"
+
+
+def test_standalone_cvss_mergers_documented_as_uuid_less():
+    """Bugbot (round 8, LOW): standalone merge_cvssv2/30/31/40 are intentionally
+    uuid-less per user decision (PR #33 audit on 2026-04-17). Pin that the
+    deferral is documented inline so a future contributor can see the
+    rationale before "fixing" by adding a misaligned uuid."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    # The comment block precedes merge_cvssv2 — read the source from
+    # merge_application end through merge_cvssv2 begin and assert key phrases.
+    src = inspect.getsource(neo4j_client)
+    cv2_start = src.find("def merge_cvssv2")
+    assert cv2_start > 0, "merge_cvssv2 not found"
+    # Walk back to the previous function end — read 2000 chars before.
+    preceding = src[max(0, cv2_start - 2500) : cv2_start]
+    assert "vector_string-keyed" in preceding or "vector_string`-keyed" in preceding, (
+        "deferral note above standalone CVSS mergers is missing"
+    )
+    assert "deferred by user decision" in preceding or "Reconciling" in preceding, (
+        "deferral rationale above standalone CVSS mergers is missing"
+    )

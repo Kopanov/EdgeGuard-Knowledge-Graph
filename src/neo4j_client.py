@@ -1224,12 +1224,18 @@ class Neo4jClient:
             SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
                 r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid)
             """
+            # NB (PR #33 round 8, bugbot MED): spread filtered_cvss FIRST so the
+            # explicit cve_uuid / cvss_uuid / cve_id / tag entries below always
+            # win on key collision. If cvss_data ever contained a key named
+            # ``cve_uuid`` or ``cvss_uuid`` (passes _validate_prop_name), a
+            # later spread would silently overwrite the computed deterministic
+            # uuids with attribute data.
             params = {
+                **filtered_cvss,
                 "cve_id": cve_id,
                 "tag": tag,
                 "cve_uuid": cve_uuid,
                 "cvss_uuid": cvss_uuid,
-                **filtered_cvss,
             }
             dropped = len(cvss_data) - len(filtered_cvss)
             with self.driver.session() as session:
@@ -3049,8 +3055,19 @@ class Neo4jClient:
             return False
 
     def merge_device(self, data: dict) -> bool:
-        """MERGE a Device node. (no properties)"""
-        device_id = data.get("device_id", str(id(data)))
+        """MERGE a Device node. Properties: device_id (required for deterministic uuid)."""
+        # Bugbot (PR #33 round 8, MED): the previous fallback ``str(id(data))``
+        # used Python's memory-address id() — non-deterministic across calls,
+        # processes, and machines. compute_node_uuid would then hash an
+        # ephemeral value, producing a different n.uuid every time the same
+        # logical Device was MERGEd, silently violating the uuid contract.
+        # Refuse the call instead of writing a poisoned node.
+        device_id = data.get("device_id")
+        if not device_id:
+            logger.error(
+                "merge_device: data missing required 'device_id' — cannot compute deterministic uuid; refusing"
+            )
+            return False
         device_uuid = compute_node_uuid("Device", {"device_id": device_id})
         query = """
         MERGE (d:Device {device_id: $device_id})
@@ -3063,7 +3080,7 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 session.run(query, device_id=device_id, device_uuid=device_uuid)
-            logger.info("Created/updated Device")
+            logger.info(f"Created/updated Device: {device_id}")
             return True
         except Exception as e:
             logger.error(f"Error creating Device: {e}")
@@ -3169,6 +3186,32 @@ class Neo4jClient:
         except Exception as e:
             logger.error(f"Error creating Application: {e}")
             return False
+
+    # ---------------------------------------------------------------------
+    # Standalone CVSS mergers (vector_string-keyed) — NOT uuid-stamped
+    # ---------------------------------------------------------------------
+    #
+    # Bugbot (PR #33 round 8, LOW): the four functions below MERGE CVSS nodes
+    # keyed on ``vector_string`` and intentionally do NOT stamp ``n.uuid``.
+    # They are a parallel ResilMesh-style API to the canonical
+    # ``_merge_cvss_node`` (called from ``merge_cve``) which keys on ``cve_id``
+    # and stamps the deterministic uuid.
+    #
+    # Reconciling the two CVSS paths is a SEPARATE concern, deferred by user
+    # decision (see PR #33 audit on 2026-04-17). The canonical MISP→Neo4j
+    # production path uses ``_merge_cvss_node`` exclusively, so today's data
+    # is unaffected. If a future ResilMesh integrator invokes these mergers,
+    # the resulting CVSS nodes will:
+    #   1. lack ``n.uuid`` (silent NULL — backfill cannot fix it because
+    #      ``_NATURAL_KEYS["CVSSv*"]`` declares the natural key as ``cve_id``,
+    #      which these nodes won't have populated)
+    #   2. coexist with the canonical CVSS nodes under different identity
+    #
+    # When/if these are reconciled, options include:
+    #   (a) deprecate the standalone path and have callers go through merge_cve
+    #   (b) extend the standalone path to also accept cve_id and stamp uuid
+    #       via compute_node_uuid("CVSSv*", {"cve_id": cve_id})
+    # ---------------------------------------------------------------------
 
     def merge_cvssv2(self, data: dict) -> bool:
         """MERGE a CVSSv2 node. Properties: vector_string, access_complexity, availability_impact, etc."""

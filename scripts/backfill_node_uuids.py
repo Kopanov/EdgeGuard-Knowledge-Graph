@@ -46,7 +46,7 @@ _SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from neo4j_client import Neo4jClient  # noqa: E402
+from neo4j_client import Neo4jClient, _validate_label, _validate_rel_type  # noqa: E402
 from node_identity import (  # noqa: E402
     compute_node_uuid,
     natural_key_props,
@@ -130,6 +130,10 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
 
 
 def count_null_uuid_nodes(client: Neo4jClient, label: str) -> int:
+    # Bugbot (PR #33 round 8, LOW): label is interpolated into Cypher via
+    # f-string. --labels comes from the CLI so the value is user-supplied;
+    # validate before interpolation per the project's Cypher-injection rules.
+    _validate_label(label)
     query = f"MATCH (n:{label}) WHERE n.uuid IS NULL OR n.uuid = '' RETURN count(n) AS c"
     with client.driver.session(default_access_mode="READ") as s:
         rec = s.run(query).single()
@@ -143,6 +147,8 @@ def backfill_label(client: Neo4jClient, label: str, batch_size: int, dry_run: bo
     UUIDv5 in Python via node_identity.compute_node_uuid, and writes back via
     UNWIND in batches. Skips nodes that already have a uuid set.
     """
+    # Bugbot (PR #33 round 8, LOW): validate before any f-string interpolation.
+    _validate_label(label)
     try:
         key_fields = natural_key_props(label)
     except KeyError:
@@ -210,6 +216,11 @@ def backfill_edge(
     """Stamp r.src_uuid / r.trg_uuid on every edge of the given type by
     reading the endpoint nodes' n.uuid. Pure Cypher — no Python computation
     needed once nodes carry uuid."""
+    # Bugbot (PR #33 round 8, LOW): all three values flow into f-string
+    # Cypher; validate before interpolation.
+    _validate_label(from_label)
+    _validate_label(to_label)
+    _validate_rel_type(rel_type)
     # Bugbot (PR #33 round 6, LOW): the count query and the update query MUST
     # share the same filter, otherwise "committed X / Y edges" reports X<Y on
     # every clean run (Y counts edges with NULL endpoint uuids that we cannot
@@ -247,13 +258,21 @@ def backfill_edge(
     if dry_run:
         return total
 
+    # Bugbot (PR #33 round 8, HIGH): apoc.periodic.iterate forwards the outer
+    # query's RETURN columns into the inner query as $-prefixed parameters.
+    # The inner Cypher must rebind them as variables via WITH $col AS col
+    # before referencing them — without the rebind, ``r``, ``a``, ``b`` in the
+    # SET clause are unbound and the query fails with "Variable `r` not
+    # defined". Same convention as every other apoc.periodic.iterate call in
+    # this codebase (build_relationships.py, run_pipeline.py).
     update_query = f"""
     CALL apoc.periodic.iterate(
         'MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label})
          WHERE (r.src_uuid IS NULL OR r.trg_uuid IS NULL)
            AND a.uuid IS NOT NULL AND b.uuid IS NOT NULL
          RETURN r, a, b',
-        'SET r.src_uuid = coalesce(r.src_uuid, a.uuid),
+        'WITH $r AS r, $a AS a, $b AS b
+         SET r.src_uuid = coalesce(r.src_uuid, a.uuid),
              r.trg_uuid = coalesce(r.trg_uuid, b.uuid)',
         {{batchSize: $batch, parallel: false}}
     )
