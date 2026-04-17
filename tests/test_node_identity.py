@@ -31,7 +31,6 @@ from node_identity import (  # noqa: E402
     edge_endpoint_uuids,
     natural_key_props,
     supported_labels,
-    uuid_for,
 )
 
 # ---------------------------------------------------------------------------
@@ -152,19 +151,18 @@ def test_neo4j_uuid_equals_stix_sdo_id_uuid_portion(label, key_dict, stix_type, 
 # ---------------------------------------------------------------------------
 
 
-def test_uuid_for_pulls_natural_key_props_from_full_dict():
-    """uuid_for() should ignore non-key properties when computing the uuid —
-    only the documented natural-key props matter."""
-    full = {"indicator_type": "ipv4", "value": "1.2.3.4", "confidence_score": 0.5, "tag": "otx"}
-    direct = compute_node_uuid("Indicator", {"indicator_type": "ipv4", "value": "1.2.3.4"})
-    assert uuid_for("Indicator", full) == direct
+def test_uuid_for_helper_was_removed():
+    """PR #33 round 16 (bugbot LOW): the ``uuid_for`` convenience wrapper
+    had ZERO production callers — every merger constructs the natural-key
+    dict explicitly and calls ``compute_node_uuid`` directly. The wrapper
+    only added public-API surface. This test pins the deletion so a future
+    contributor doesn't reintroduce dead code."""
+    import node_identity as _ni
 
-
-def test_uuid_for_unknown_label_raises():
-    """Unknown labels surface as KeyError so the bug is caught at the call
-    site (instead of silently producing a nonsense uuid from an empty dict)."""
-    with pytest.raises(KeyError):
-        uuid_for("BogusLabel", {"name": "x"})
+    assert not hasattr(_ni, "uuid_for"), (
+        "uuid_for was deleted in round 16 — call compute_node_uuid(label, key_dict) directly. "
+        "If this assertion fires, the dead helper has been re-added."
+    )
 
 
 def test_edge_endpoint_uuids_returns_pair():

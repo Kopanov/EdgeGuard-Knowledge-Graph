@@ -191,9 +191,8 @@ _STIX_TYPE_BY_LC_LABEL: Dict[str, str] = {k.lower(): v for k, v in NEO4J_TO_STIX
 # Lowercased-key view of ``_NATURAL_KEYS`` — DERIVED from the single source
 # of truth so the two maps cannot drift out of sync. ``canonical_node_key``
 # normalizes the label to lowercase before lookup; the lowercase keys here
-# match. Use ``_NATURAL_KEYS`` from public API helpers (``natural_key_props``,
-# ``uuid_for``); use ``_LABEL_NATURAL_KEY_FIELDS`` only in the canonicalization
-# inner loop.
+# match. Use ``_NATURAL_KEYS`` from the public ``natural_key_props`` helper;
+# use ``_LABEL_NATURAL_KEY_FIELDS`` only in the canonicalization inner loop.
 #
 # Note on Tool: the natural key is ``mitre_id`` (Neo4j's UNIQUE constraint on
 # Tool is on ``mitre_id``). The STIX exporter's ``_deterministic_id("tool", …)``
@@ -279,17 +278,11 @@ def compute_node_uuid(label: str, key_dict: Dict[str, Any]) -> str:
     return str(_uuid_mod.uuid5(EDGEGUARD_NODE_UUID_NAMESPACE, canonical))
 
 
-def uuid_for(label: str, props: Dict[str, Any]) -> str:
-    """Compute a node's uuid from its full property dict.
-
-    Convenience wrapper that pulls the configured natural-key props out of
-    ``props`` and passes them to ``compute_node_uuid``. Use this when you
-    have the full data dict at hand (e.g. inside ``merge_node_with_source``).
-
-    Raises ``KeyError`` for unknown labels — see ``natural_key_props``.
-    """
-    keys = natural_key_props(label)
-    return compute_node_uuid(label, {k: props.get(k) for k in keys})
+# PR #33 round 16: deleted ``uuid_for`` (a convenience wrapper that
+# extracted natural-key fields from a full props dict before delegating to
+# ``compute_node_uuid``). Zero production callers — every merger already
+# constructs the natural-key dict explicitly when it needs an uuid. The
+# function only added public-API surface and a maintenance burden.
 
 
 def edge_endpoint_uuids(
