@@ -100,7 +100,7 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |
 | `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor (`build_relationships.py`) |
 | `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Same `cve_id` on indicator and vuln/CVE node (`build_relationships.py`) |
-| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence (event-id match — symmetric scalar+array on both ends, see [AIRFLOW_DAG_DESIGN.md](AIRFLOW_DAG_DESIGN.md) "2026-04 INDICATES co-occurrence symmetry fix") or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
+| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence — array-only on both ends (`eid IN n.misp_event_ids` for both Indicator and Malware; legacy scalar dropped PR #33 round 10) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
 | `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`) |
 | `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`) |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |

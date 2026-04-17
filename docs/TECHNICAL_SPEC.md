@@ -36,7 +36,6 @@ Auth:    Configured via environment variables
   // NVD-enriched fields
   cwe: LIST,                // CWE identifiers (e.g., ['CWE-787'])
   ref_tags: LIST,           // Reference tags (Vendor Advisory, Patch, etc.)
-  reference_urls: LIST,     // Actual advisory/patch URLs (up to 10)
   cpe_type: LIST,           // CPE types (a=application, o=os, h=hardware)
   result_impacts: LIST,     // CIA impact strings
   affected_products: LIST,  // CPE URIs (up to 10)
@@ -115,8 +114,7 @@ Auth:    Configured via environment variables
   uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique; drives (Actor)-[:EMPLOYS_TECHNIQUE]->(Technique) edges in build_relationships.py. Property name retained as-is (STIX-side contract).
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
-  last_updated: DATETIME,   // Last update
-  original_source: STRING   // Original data source
+  last_updated: DATETIME    // Last update
 })
 ```
 
@@ -561,8 +559,8 @@ CREATE INDEX indicator_zone FOR (i:Indicator) ON (i.zone);
 CREATE INDEX malware_name FOR (m:Malware) ON (m.name);
 CREATE INDEX actor_name FOR (a:ThreatActor) ON (a.name);
 CREATE INDEX technique_mitre FOR (t:Technique) ON (t.mitre_id);
-CREATE INDEX indicator_original_source FOR (i:Indicator) ON (i.original_source);
-CREATE INDEX vulnerability_original_source FOR (v:Vulnerability) ON (v.original_source);
+// PR #34 round 18: indicator_original_source / vulnerability_original_source
+// indexes removed — the n.original_source property had zero readers.
 CREATE INDEX indicator_active FOR (i:Indicator) ON (i.active);
 CREATE INDEX vulnerability_active FOR (v:Vulnerability) ON (v.active);
 // PR #33 round 10: legacy-scalar indexes (indicator/vulnerability/malware/

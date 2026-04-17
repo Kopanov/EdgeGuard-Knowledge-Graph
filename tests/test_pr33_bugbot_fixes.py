@@ -1822,3 +1822,104 @@ def test_original_date_fields_were_deleted_from_writes():
     assert "n.last_updated = datetime()" in src_with_source, (
         "last_updated must remain — that's the canonical EdgeGuard modification time"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 18 — dead-field cleanup (CVE.reference_urls + Indicator/Vuln.original_source)
+# ---------------------------------------------------------------------------
+
+
+def test_reference_urls_dead_write_was_removed():
+    """Round 18 cleanup: ``CVE.reference_urls`` was stamped via merge_cve's
+    extra_props but had ZERO production readers (no GraphQL, no STIX, no
+    Cypher MATCH). Same dead-write pattern as round 17. Pin the deletion
+    so a future contributor doesn't reintroduce it."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.merge_cve)
+    code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+    assert 'extra_props["reference_urls"]' not in code_only, (
+        "merge_cve must NOT stamp n.reference_urls — round 18 deleted this dead-write"
+    )
+
+
+def test_original_source_neo4j_property_writes_were_removed():
+    """Round 18 cleanup: ``n.original_source`` Neo4j property writes had
+    zero production readers. The Python helper that EXTRACTS original_source
+    from MISP tags is alive (it derives the canonical `source` field), but
+    the dead Neo4j property + 2 indexes were removed."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src_merge = inspect.getsource(neo4j_client.Neo4jClient.merge_node_with_source)
+    code_only_merge = "\n".join(line for line in src_merge.splitlines() if not line.lstrip().startswith("#"))
+    assert "n.original_source = $original_source" not in code_only_merge, (
+        "merge_node_with_source must NOT write n.original_source (round 18)"
+    )
+
+    # create_indicator_from_alert (alert-side path) must also drop the SET.
+    src_alert = inspect.getsource(neo4j_client.Neo4jClient.create_indicator_from_alert)
+    code_only_alert = "\n".join(line for line in src_alert.splitlines() if not line.lstrip().startswith("#"))
+    assert "i.original_source = coalesce" not in code_only_alert, (
+        "create_indicator_from_alert must NOT write i.original_source (round 18)"
+    )
+
+    # And the 2 indexes must be gone from create_indexes.
+    src_idx = inspect.getsource(neo4j_client.Neo4jClient.create_indexes)
+    code_only_idx = "\n".join(line for line in src_idx.splitlines() if not line.lstrip().startswith("#"))
+    assert "indicator_original_source" not in code_only_idx, (
+        "indicator_original_source CREATE INDEX must be removed (round 18)"
+    )
+    assert "vulnerability_original_source" not in code_only_idx, (
+        "vulnerability_original_source CREATE INDEX must be removed (round 18)"
+    )
+
+
+def test_misp_unmapped_attribute_type_metric_exists():
+    """Round 18 observability: MISP attribute types not in the EdgeGuard
+    mapping fall through to ``"unknown"`` silently. The new metric +
+    helper surface them so an operator can see when MISP adds a new type."""
+    metrics_path = os.path.join(os.path.dirname(__file__), "..", "src", "metrics_server.py")
+    with open(metrics_path) as fh:
+        metrics_src = fh.read()
+    assert "MISP_UNMAPPED_ATTRIBUTE_TYPES" in metrics_src
+    assert "edgeguard_misp_unmapped_attribute_types_total" in metrics_src
+    assert "def record_misp_unmapped_attribute_type" in metrics_src
+
+    collector_path = os.path.join(os.path.dirname(__file__), "..", "src", "collectors", "misp_collector.py")
+    with open(collector_path) as fh:
+        collector_src = fh.read()
+    assert "record_misp_unmapped_attribute_type" in collector_src, (
+        "misp_collector.map_attribute_type must call record_misp_unmapped_attribute_type"
+        " when an unmapped type falls through to 'unknown'"
+    )
+
+
+def test_bridge_vulnerability_cve_logs_orphan_count():
+    """Round 18 observability: bridge_vulnerability_cve now runs an
+    expected_query that counts (Vulnerability, CVE) pairs whose CVE
+    EXISTS, then compares to the apoc.periodic.iterate ``total`` to
+    surface orphaned Vulnerabilities. Pin the structure so a refactor
+    can't silently drop the orphan-count log."""
+    import importlib
+    import inspect
+
+    if "enrichment_jobs" in sys.modules:
+        del sys.modules["enrichment_jobs"]
+    enrichment_jobs = importlib.import_module("enrichment_jobs")
+
+    src = inspect.getsource(enrichment_jobs.bridge_vulnerability_cve)
+    assert "expected_query" in src, "bridge_vulnerability_cve must define an expected_query"
+    assert "MATCH (c:CVE {cve_id: v.cve_id})" in src, (
+        "expected_query must MATCH the CVE that the inner action would link"
+    )
+    assert "no matching CVE" in src, "operator-facing log must mention orphan CVE count"

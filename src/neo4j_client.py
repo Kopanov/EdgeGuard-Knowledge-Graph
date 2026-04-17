@@ -602,9 +602,13 @@ class Neo4jClient:
             "CREATE INDEX malware_name IF NOT EXISTS FOR (m:Malware) ON (m.name)",
             "CREATE INDEX actor_name IF NOT EXISTS FOR (a:ThreatActor) ON (a.name)",
             "CREATE INDEX technique_mitre IF NOT EXISTS FOR (t:Technique) ON (t.mitre_id)",
-            # Original source tracking indexes
-            "CREATE INDEX indicator_original_source IF NOT EXISTS FOR (i:Indicator) ON (i.original_source)",
-            "CREATE INDEX vulnerability_original_source IF NOT EXISTS FOR (v:Vulnerability) ON (v.original_source)",
+            # PR #34 round 18: dropped indicator_original_source +
+            # vulnerability_original_source indexes — the n.original_source
+            # property they backed had ZERO production readers (no GraphQL
+            # field, no STIX export, no Cypher MATCH/WHERE). The Python
+            # helper that EXTRACTS original_source from MISP tags is alive
+            # (it derives the canonical `source` field), only the Neo4j
+            # property write + indexes were dead.
             # Active/inactive tracking indexes
             "CREATE INDEX indicator_active IF NOT EXISTS FOR (i:Indicator) ON (i.active)",
             "CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active)",
@@ -913,9 +917,14 @@ class Neo4jClient:
             # ``last_updated``. Zero readers in production: no GraphQL field,
             # no STIX export, no Cypher consumer, no doc reference.
 
-            # Add original_source if present in data
-            if original_source:
-                query += ", n.original_source = $original_source"
+            # PR #34 round 18: deleted ``n.original_source`` SET clause +
+            # the matching index. The Neo4j property had ZERO production
+            # readers (no GraphQL field, no STIX export, no Cypher
+            # MATCH/WHERE). The Python helper that EXTRACTS original_source
+            # from MISP tags is alive (line 847 above) — it's stored on the
+            # SOURCED_FROM edge's r.raw_data JSON for audit trail, and the
+            # extraction in misp_collector derives the canonical `source`
+            # field. Only the dead n.original_source write is removed.
 
             # Add extra_props (aliases, description, etc.) if provided.
             # Validate every property name before interpolating into Cypher.
@@ -1133,8 +1142,14 @@ class Neo4jClient:
         data["cve_id"] = cve_id
         key_props = {"cve_id": cve_id}
 
-        # Promote CISA KEV fields and reference_urls to queryable node properties
-        # so analysts can filter on e.g. "all CVEs on the CISA KEV list".
+        # Promote CISA KEV fields to queryable node properties so analysts
+        # can filter on e.g. "all CVEs on the CISA KEV list".
+        #
+        # PR #34 round 18: deleted ``reference_urls`` from extra_props.
+        # The NVD collector parses up to 10 advisory URLs per CVE and
+        # forwards them here, but ZERO consumers downstream
+        # (no GraphQL field, no STIX export, no Cypher query). Same
+        # dead-write pattern as round-17's ``original_*_date`` cleanup.
         extra_props: Dict = {}
         if data.get("cisa_exploit_add"):
             extra_props["cisa_exploit_add"] = data["cisa_exploit_add"]
@@ -1144,8 +1159,6 @@ class Neo4jClient:
             extra_props["cisa_required_action"] = data["cisa_required_action"]
         if data.get("cisa_vulnerability_name"):
             extra_props["cisa_vulnerability_name"] = data["cisa_vulnerability_name"]
-        if data.get("reference_urls"):
-            extra_props["reference_urls"] = data["reference_urls"]
         if data.get("description"):
             extra_props["description"] = data["description"]
         if data.get("cvss_score") is not None:
@@ -4356,9 +4369,10 @@ class Neo4jClient:
             "last_updated": now,
             "source": ["resilmesh"],
             "confidence_score": 0.8 if alert_data else 0.5,
-            "original_source": alert_data.get("source", "resilmesh") if alert_data else "unknown",
         }
 
+        # PR #34 round 18: dropped n.original_source SET — Neo4j property had
+        # zero readers (see neo4j_client.py:606 deletion comment).
         query = """
         MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
         SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
@@ -4368,7 +4382,6 @@ class Neo4jClient:
                 WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                 THEN $confidence_score
                 ELSE i.confidence_score END,
-            i.original_source = coalesce(i.original_source, $original_source),
             i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
             i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
@@ -4389,7 +4402,6 @@ class Neo4jClient:
                     WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                     THEN $confidence_score
                     ELSE i.confidence_score END,
-                i.original_source = coalesce(i.original_source, $original_source),
                 i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone)
             """
             try:

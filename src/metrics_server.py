@@ -99,6 +99,17 @@ MISP_ATTRIBUTES_DROPPED = Counter(
     ["reason"],
 )
 
+# PR #34 round 18: counter for unmapped MISP attribute types. Each MISP
+# attribute type that EdgeGuard's mapping doesn't recognize falls into the
+# "unknown" bucket; this counter surfaces the type-name distribution so an
+# operator can see when MISP adds a new type and EdgeGuard's mapping needs
+# to catch up.
+MISP_UNMAPPED_ATTRIBUTE_TYPES = Counter(
+    "edgeguard_misp_unmapped_attribute_types_total",
+    "MISP attribute types not in EdgeGuard's mapping — by type name",
+    ["attr_type"],
+)
+
 MISP_PUSH_DURATION = Histogram(
     "edgeguard_misp_push_duration_seconds",
     "Time spent pushing to MISP",
@@ -259,6 +270,16 @@ def record_misp_attribute_dropped(reason: str, count: int = 1):
     """Record an attribute dropped during dedup/parse — see MISP_ATTRIBUTES_DROPPED."""
     safe = (reason or "unknown").replace('"', "")[:80]
     MISP_ATTRIBUTES_DROPPED.labels(reason=safe).inc(count)
+
+
+def record_misp_unmapped_attribute_type(attr_type: str, count: int = 1):
+    """Record a MISP attribute type that EdgeGuard's mapping doesn't recognize.
+
+    See MISP_UNMAPPED_ATTRIBUTE_TYPES — surfaces silent fall-through to the
+    'unknown' bucket so operators see when MISP adds a new type.
+    """
+    safe = (attr_type or "<empty>").replace('"', "")[:80]
+    MISP_UNMAPPED_ATTRIBUTE_TYPES.labels(attr_type=safe).inc(count)
 
 
 def record_neo4j_sync(node_counts: Dict[str, int], duration: float):

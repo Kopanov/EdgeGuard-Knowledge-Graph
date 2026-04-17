@@ -536,3 +536,7 @@ RETURN type(r) AS rel_type, count(r) AS missing;
 - **Tool**'s natural key in Neo4j is `mitre_id`, but the STIX exporter uses
   `name`. Tool SDO IDs do NOT have UUID parity with Neo4j `n.uuid`. Worth
   reconciling in a follow-up if Tool round-trips become important.
+
+---
+
+_Last updated: 2026-04-17_

@@ -193,10 +193,12 @@ Consequences:
 
    **Update 2026-04:** the same pattern was extended to MISP traceability.
    Every SDO additionally carries `x_edgeguard_misp_event_ids` and
-   `x_edgeguard_misp_attribute_ids` (union of the node's array + scalar
-   MISP id properties; omitted when empty). ResilMesh consumers can now
-   resolve a bundle object back to its originating MISP event(s) and
-   attribute(s) without round-tripping through Neo4j. See
+   `x_edgeguard_misp_attribute_ids` from the node's `misp_event_ids[]` /
+   `misp_attribute_ids[]` arrays (deduped + stringified; omitted when
+   empty). PR #33 round 10 dropped the legacy scalar fields — array-only
+   now. ResilMesh consumers can resolve a bundle object back to every
+   originating MISP event / attribute without round-tripping through
+   Neo4j. See
    `_attach_misp_provenance` in `src/stix_exporter.py`.
 5. **CVSS bridging.** ResilMesh stores CVSSv* as separate nodes linked
    to CVE via `HAS_CVSS_v*`. STIX has no first-class CVSS SDO. For now
