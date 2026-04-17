@@ -137,6 +137,53 @@ def _validate_prop_name(name: str) -> str:
     return name
 
 
+# --------------------------------------------------------------------------- #
+# Zone accumulation — override 'global' if any specific sector exists
+# --------------------------------------------------------------------------- #
+#
+# PR #34 round 24: the per-text/per-item zone detection in ``config.py`` and
+# the MISP writer enforce the rule "if a specific sector matches, drop
+# 'global' from the zone list." But the Neo4j MERGE layer used to accumulate
+# zones with a plain APOC set union — so an Indicator first ingested from a
+# healthcare-specific feed (zone=["healthcare"]) and later seen by a generic
+# feed (zone=["global"]) would accumulate to ``n.zone = ["healthcare",
+# "global"]`` after the second MERGE. That re-introduced "global" alongside
+# the specific sector and broke filtering / RAG semantics ("WHERE 'global'
+# IN n.zone" started matching healthcare nodes).
+#
+# This helper builds the canonical "drop-global-if-specifics-exist"
+# accumulator clause — one source of truth used by every node MERGE that
+# accumulates zones. The CASE expression is small enough that re-evaluating
+# the union twice is negligible vs the readability win.
+def _zone_override_global_clause(node_var: str, source_expr: str) -> str:
+    """Return a Cypher SET-clause fragment that accumulates zones with the
+    "specifics-override-global" rule applied at write time.
+
+    Args:
+        node_var: the bound node variable in the MERGE (e.g. ``"n"`` or ``"i"``).
+        source_expr: the Cypher expression yielding the new zones to merge in
+            (e.g. ``"$zone"`` or ``"item.zone"``). Must already be a list.
+
+    Returns:
+        A string suitable for splicing into a ``SET ...`` clause, e.g.::
+
+            f"SET {node_var}.score = 1, {_zone_override_global_clause('n', '$zone')}, ..."
+
+    Result semantics (for any ingestion):
+        - if union(existing, new) contains any sector other than 'global'
+          → store only the specifics (drop 'global')
+        - else (only 'global' or empty) → store the union as-is
+    """
+    # Validate the variable name to prevent Cypher injection via caller bug.
+    # (Both inputs are constructed by EdgeGuard code, never by user input —
+    # but a typo could still produce broken Cypher; better to fail loudly.)
+    if not _PROP_NAME_RE.match(node_var):
+        raise ValueError(f"_zone_override_global_clause: invalid node_var {node_var!r}")
+    union = f"apoc.coll.toSet(coalesce({node_var}.zone, []) + {source_expr})"
+    specifics = f"[z IN {union} WHERE z <> 'global']"
+    return f"{node_var}.zone = CASE WHEN size({specifics}) > 0 THEN {specifics} ELSE {union} END"
+
+
 def nonempty_graph_string(value: Any) -> Optional[str]:
     """
     Normalize a generic string used as a graph relationship endpoint (names, ids, values).
@@ -871,6 +918,9 @@ class Neo4jClient:
             # uuid always matches what the Cypher MERGE binds to.
             node_uuid = compute_node_uuid(label, key_props)
 
+            # PR #34 round 24: apply "specifics-override-global" at accumulation
+            # time — see _zone_override_global_clause for full rationale.
+            _zone_clause = _zone_override_global_clause("n", "$zone")
             query = f"""
             MERGE (n:{label} {{{key_set}}})
             ON CREATE SET n.first_imported_at = datetime(),
@@ -883,7 +933,7 @@ class Neo4jClient:
                     THEN $confidence
                     ELSE n.confidence_score END,
                 n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array),
-                n.zone = apoc.coll.toSet(coalesce(n.zone, []) + $zone),
+                {_zone_clause},
                 n.tags = apoc.coll.toSet(coalesce(n.tags, []) + $tag_array),
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
@@ -1556,9 +1606,13 @@ class Neo4jClient:
 
                     batch_data.append(batch_item)
 
-                query = """
+                # PR #34 round 24: zone-accumulation now applies the
+                # specifics-override-global rule on write — see
+                # _zone_override_global_clause for rationale.
+                _zone_clause = _zone_override_global_clause("n", "item.zone")
+                query = f"""
                 UNWIND $batch as item
-                MERGE (n:Indicator {indicator_type: item.indicator_type, value: item.value})
+                MERGE (n:Indicator {{indicator_type: item.indicator_type, value: item.value}})
                 ON CREATE SET n.first_imported_at = datetime(),
                               n.uuid = item.node_uuid
                 SET n.confidence_score = CASE
@@ -1566,7 +1620,7 @@ class Neo4jClient:
                         THEN item.confidence
                         ELSE n.confidence_score END,
                     n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
-                    n.zone = apoc.coll.toSet(coalesce(n.zone, []) + item.zone),
+                    {_zone_clause},
                     n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
@@ -1583,7 +1637,7 @@ class Neo4jClient:
                     n.sigma_rules = apoc.coll.toSet(coalesce(n.sigma_rules, []) + coalesce(item.sigma_rules, [])),
                     n.threat_label = coalesce(item.threat_label, n.threat_label)
                 WITH n, item
-                MATCH (s:Source {source_id: item.source_id})
+                MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
                 ON CREATE SET r.imported_at = datetime(),
                     r.raw_data = item.raw_data,
@@ -1697,9 +1751,12 @@ class Neo4jClient:
                     error_count += skipped
                     continue
 
-                query = """
+                # PR #34 round 24: zone-accumulation applies the
+                # specifics-override-global rule on write.
+                _zone_clause = _zone_override_global_clause("n", "item.zone")
+                query = f"""
                 UNWIND $batch as item
-                MERGE (n:Vulnerability {cve_id: item.cve_id})
+                MERGE (n:Vulnerability {{cve_id: item.cve_id}})
                 ON CREATE SET n.first_imported_at = datetime(),
                     n.status = item.status,
                     n.uuid = item.node_uuid
@@ -1708,7 +1765,7 @@ class Neo4jClient:
                         THEN item.confidence
                         ELSE n.confidence_score END,
                     n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
-                    n.zone = apoc.coll.toSet(coalesce(n.zone, []) + item.zone),
+                    {_zone_clause},
                     n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
@@ -1722,7 +1779,7 @@ class Neo4jClient:
                     n.cisa_cwes = apoc.coll.toSet(coalesce(n.cisa_cwes, []) + coalesce(item.cisa_cwes, [])),
                     n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes)
                 WITH n, item
-                MATCH (s:Source {source_id: item.source_id})
+                MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
                 ON CREATE SET r.imported_at = datetime(),
                     r.raw_data = item.raw_data,
@@ -4423,8 +4480,11 @@ class Neo4jClient:
 
         # PR #34 round 18: dropped n.original_source SET — Neo4j property had
         # zero readers (see neo4j_client.py:606 deletion comment).
-        query = """
-        MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
+        # PR #34 round 24: zone accumulation applies specifics-override-global
+        # rule on write.
+        _zone_clause_i = _zone_override_global_clause("i", "$zone")
+        query = f"""
+        MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
         SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
             i.last_updated = datetime(),
             i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
@@ -4432,7 +4492,7 @@ class Neo4jClient:
                 WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                 THEN $confidence_score
                 ELSE i.confidence_score END,
-            i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
+            {_zone_clause_i},
             i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
             i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
@@ -4444,15 +4504,15 @@ class Neo4jClient:
                 logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
                 return True
         except Exception:
-            fallback_query = """
-            MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
+            fallback_query = f"""
+            MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
             SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
                 i.last_updated = $last_updated,
                 i.confidence_score = CASE
                     WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                     THEN $confidence_score
                     ELSE i.confidence_score END,
-                i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone)
+                {_zone_clause_i}
             """
             try:
                 with self.driver.session() as session:

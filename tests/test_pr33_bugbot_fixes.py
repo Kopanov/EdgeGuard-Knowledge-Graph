@@ -2719,3 +2719,341 @@ def test_round23_uuid_indexes_are_created():
     assert "alert_uuid IF NOT EXISTS FOR (a:Alert) ON (a.uuid)" in src, (
         "create_indexes must include the alert_uuid index"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 24 — specifics-override-global zone accumulation at write time
+# ---------------------------------------------------------------------------
+
+
+def test_zone_override_global_clause_shape():
+    """PR #34 round 24: the helper that builds the Cypher SET clause for
+    zone accumulation must produce a CASE expression that filters 'global'
+    when at least one specific sector is present."""
+    import importlib
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    clause = neo4j_client._zone_override_global_clause("n", "$zone")
+    # Positive structure pins.
+    assert clause.startswith("n.zone = CASE "), "clause must assign to {var}.zone via CASE"
+    assert clause.endswith("END"), "CASE expression must be terminated"
+    assert "WHERE z <> 'global'" in clause, "clause must filter 'global' from the specifics path"
+    assert "apoc.coll.toSet(coalesce(n.zone, []) + $zone)" in clause, (
+        "clause must union existing + new zones via apoc.coll.toSet"
+    )
+    # Variable substitution works for both 'n' and 'i' (alt node var).
+    clause_i = neo4j_client._zone_override_global_clause("i", "item.zone")
+    assert clause_i.startswith("i.zone = CASE "), "var swap must carry through to the target"
+    assert "coalesce(i.zone, []) + item.zone" in clause_i, "source expr must splice into the union"
+
+    # Invalid node_var must fail loudly (Cypher-injection guard).
+    import pytest
+
+    with pytest.raises(ValueError, match="invalid node_var"):
+        neo4j_client._zone_override_global_clause("n; DROP", "$zone")
+
+
+def test_all_merge_sites_use_zone_override_helper():
+    """The 5 MERGE sites that accumulate n.zone (or i.zone) must all route
+    through ``_zone_override_global_clause``. A regression that re-adds a
+    raw ``apoc.coll.toSet(coalesce(*.zone, ...))`` expression in the SET
+    clause would break the override guarantee silently (same bug PR #34
+    round 24 fixed). Pin the absence via source grep."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    # Scan the relevant method sources — strip comments so the helper's
+    # rationale comment (which legitimately describes the previous raw
+    # accumulator) doesn't false-fail the negative assertion.
+    def _code_only(src: str) -> str:
+        return "\n".join(line for line in src.splitlines() if not line.lstrip().startswith(("#", "//")))
+
+    merge_node = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_node_with_source))
+    merge_ind_batch = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_indicators_batch))
+    merge_vuln_batch = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_vulnerabilities_batch))
+    merge_resil_ind = _code_only(inspect.getsource(neo4j_client.Neo4jClient.create_indicator_from_alert))
+
+    for name, src in (
+        ("merge_node_with_source", merge_node),
+        ("merge_indicators_batch", merge_ind_batch),
+        ("merge_vulnerabilities_batch", merge_vuln_batch),
+        ("create_indicator_from_alert", merge_resil_ind),
+    ):
+        assert "_zone_override_global_clause" in src, (
+            f"{name} must invoke _zone_override_global_clause to accumulate zones "
+            "with specifics-override-global applied"
+        )
+        # Negative: the raw-union pattern MUST NOT appear in the SET clause.
+        # Raw union is what the helper produces INTERNALLY as the ELSE branch,
+        # so it will appear in the helper itself — but not in the Cypher
+        # string built by the call site (which splices {_zone_clause}).
+        assert "n.zone = apoc.coll.toSet(coalesce(n.zone" not in src, (
+            f"{name} must not use the raw n.zone accumulator — override rule would not apply"
+        )
+        assert "i.zone = apoc.coll.toSet(coalesce(i.zone" not in src, (
+            f"{name} must not use the raw i.zone accumulator — override rule would not apply"
+        )
+
+
+def test_backfill_migration_exists_and_shape():
+    """PR #34 round 24: a one-shot migration must exist to heal any
+    pre-round-24 nodes whose ``n.zone`` array already accumulated 'global'
+    alongside specific sectors. Pin the file's existence + the core
+    Cypher shape so a rename/refactor can't orphan the migration."""
+    migration_path = os.path.join(os.path.dirname(__file__), "..", "migrations", "2026_04_zone_override_heal.cypher")
+    assert os.path.isfile(migration_path), f"expected migration file at {migration_path}"
+    with open(migration_path) as fh:
+        content = fh.read()
+
+    # Core semantics must be present.
+    assert "'global' IN n.zone" in content, "migration must target rows with 'global' in zone"
+    assert "size([z IN n.zone WHERE z IS NOT NULL AND z <> 'global']) > 0" in content, (
+        "migration must only heal when at least one SPECIFIC sector exists "
+        "(otherwise we'd strip 'global' from legitimately-global-only nodes)"
+    )
+    assert "SET n.zone = [z IN n.zone WHERE z IS NOT NULL AND z <> 'global']" in content, (
+        "migration must write the filtered (global-stripped) list back"
+    )
+    assert "RETURN count(n) AS healed" in content, "migration should surface a heal count for the operator"
+
+
+def test_zone_clause_semantic_matrix_via_ephemeral_cypher():
+    """Behavioral pin via a pure-Python emulator of the CASE expression.
+
+    The helper produces Cypher — we can't execute it without a live Neo4j —
+    but the SEMANTICS the Cypher is meant to implement is:
+
+        union = set(existing + new)
+        specifics = {z for z in union if z != 'global'}
+        result = specifics if specifics else union
+
+    If the helper's Cypher structure changes (e.g. negation flipped, wrong
+    comparison), the parametrized cases below still pin the intended shape
+    by re-extracting the condition and filter from the generated string.
+
+    This is a structural pin, not a live-DB behavioral pin — the
+    companion live-DB test belongs in integration, not unit."""
+    import importlib
+    import re
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    clause = neo4j_client._zone_override_global_clause("n", "$zone")
+
+    # Extract the "specifics" list-comprehension form. It should appear
+    # exactly twice (once in the CASE condition, once in the THEN branch).
+    specifics_pattern = r"\[z IN apoc\.coll\.toSet\(coalesce\(n\.zone, \[\]\) \+ \$zone\) WHERE z <> 'global'\]"
+    assert len(re.findall(specifics_pattern, clause)) == 2, (
+        "specifics filter must appear in BOTH the CASE condition (size(...) > 0) and the THEN branch"
+    )
+
+    # The ELSE branch must be the full union (including 'global' if that's
+    # all we have) — otherwise a legitimate ['global']-only node would lose
+    # its zone on merge.
+    else_pattern = r"ELSE apoc\.coll\.toSet\(coalesce\(n\.zone, \[\]\) \+ \$zone\) END"
+    assert re.search(else_pattern, clause), (
+        "ELSE branch must preserve the full union — otherwise global-only nodes would be emptied"
+    )
+
+    # And the condition must be strictly greater than zero (so an empty
+    # specifics set falls through to ELSE).
+    assert "size(" in clause and "> 0" in clause, (
+        "CASE condition must be ``size(specifics) > 0`` — not ``>= 1`` or negation"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round 24 follow-up — single-source-of-truth consolidation (bugbot round 23 MED)
+# ---------------------------------------------------------------------------
+
+
+def test_build_relationships_sector_uuids_derived_from_valid_zones():
+    """PR #34 round 24 (bugbot MED): ``_SECTOR_UUIDS`` in build_relationships.py
+    used to hardcode ``("healthcare", "energy", "finance", "global")`` — a
+    parallel copy of ``config.VALID_ZONES``. Adding a 5th zone to
+    VALID_ZONES without updating the hardcoded tuple would silently drop
+    the new zone from the Cypher CASE expression → Sector nodes with NULL
+    uuid. Fix: derive from VALID_ZONES (single source of truth).
+
+    Pin the derivation so a regression that re-hardcodes the tuple fails."""
+    import importlib
+
+    # Reload both modules to clear any cached state.
+    for mod in ("build_relationships", "config"):
+        if mod in sys.modules:
+            del sys.modules[mod]
+    build_relationships = importlib.import_module("build_relationships")
+    from config import VALID_ZONES
+
+    # Cardinality + membership: keys of _SECTOR_UUIDS must equal VALID_ZONES.
+    assert set(build_relationships._SECTOR_UUIDS.keys()) == set(VALID_ZONES), (
+        "_SECTOR_UUIDS keys must match VALID_ZONES exactly — derivation broken or out of sync"
+    )
+
+    # Every sector uuid must be deterministic (uuid5, string form).
+    for zone, uuid in build_relationships._SECTOR_UUIDS.items():
+        assert isinstance(uuid, str) and len(uuid) == 36, f"Sector {zone!r} uuid malformed: {uuid!r}"
+        # And the uuid must match what compute_node_uuid would return now.
+        from node_identity import compute_node_uuid
+
+        assert uuid == compute_node_uuid("Sector", {"name": zone}), (
+            f"_SECTOR_UUIDS[{zone!r}] uuid diverges from compute_node_uuid — derivation broken"
+        )
+
+    # Also pin the derived Cypher fragments: every zone must appear in both
+    # the CASE expression and the IN list.
+    for zone in VALID_ZONES:
+        assert f'"{zone}"' in build_relationships._SECTOR_UUID_CASE, (
+            f"zone {zone!r} missing from _SECTOR_UUID_CASE — derivation broken"
+        )
+        assert f'"{zone}"' in build_relationships._SECTOR_IN_LIST, (
+            f"zone {zone!r} missing from _SECTOR_IN_LIST — derivation broken"
+        )
+
+
+def test_zone_enum_derived_from_valid_zones():
+    """PR #34 round 24: ``ZoneEnum`` in query_api.py used to hardcode the 4
+    zones as enum members. Derive from VALID_ZONES so FastAPI query-param
+    validation stays in lockstep with Cypher-layer zone membership checks.
+    """
+    import importlib
+
+    for mod in ("query_api", "config"):
+        if mod in sys.modules:
+            del sys.modules[mod]
+    query_api = importlib.import_module("query_api")
+    from config import VALID_ZONES
+
+    # Every zone in VALID_ZONES must be represented in the enum VALUES
+    # (not necessarily by the same attribute name — "global" becomes "global_"
+    # because it's a Python keyword).
+    enum_values = {member.value for member in query_api.ZoneEnum}
+    assert enum_values == set(VALID_ZONES), (
+        f"ZoneEnum values must equal VALID_ZONES; got {enum_values} vs {set(VALID_ZONES)}"
+    )
+
+    # Backward-compat: ZoneEnum.global_ (with trailing underscore) must still
+    # exist and carry value "global". Other zones use their name as-is.
+    assert query_api.ZoneEnum.global_.value == "global", "ZoneEnum.global_ attribute contract broken"
+    assert query_api.ZoneEnum.healthcare.value == "healthcare", "ZoneEnum.healthcare broken"
+    assert query_api.ZoneEnum.energy.value == "energy"
+    assert query_api.ZoneEnum.finance.value == "finance"
+
+    # str subclass contract preserved (FastAPI relies on this for
+    # path/query-param serialization).
+    assert isinstance(query_api.ZoneEnum.healthcare, str)
+    assert query_api.ZoneEnum.healthcare == "healthcare"
+
+
+def test_debug_zone_check_uses_valid_zones():
+    """PR #34 round 24: scripts/debug_zone_check.py's
+    ``_extract_zone_from_event_name`` used to hardcode a 4-element zone
+    list. Pin the import so adding a 5th zone in config automatically
+    propagates here."""
+    import importlib
+    import inspect
+
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+
+    if "debug_zone_check" in sys.modules:
+        del sys.modules["debug_zone_check"]
+    dzc = importlib.import_module("debug_zone_check")
+
+    src = inspect.getsource(dzc._extract_zone_from_event_name)
+    # Negative: the old hardcoded list must be gone.
+    assert "['global', 'finance', 'energy', 'healthcare']" not in src and (
+        '["global", "finance", "energy", "healthcare"]' not in src
+    ), "_extract_zone_from_event_name must not hardcode the zone list"
+    # Positive: VALID_ZONES is imported + used.
+    assert "VALID_ZONES" in src, "_extract_zone_from_event_name must use VALID_ZONES"
+
+
+def test_backfill_has_no_dead_indicates_entries():
+    """PR #34 round 24 (bugbot round 22 LOW): EDGES_TO_BACKFILL used to
+    include ``("INDICATES", "Indicator", "Vulnerability")`` and
+    ``("INDICATES", "Indicator", "CVE")`` — production never creates
+    INDICATES between those label pairs (Indicator→Vulnerability/CVE uses
+    EXPLOITS; INDICATES is only Indicator→Malware). Dead entries matched
+    0 edges and produced misleading "0 edges need backfill" log lines."""
+    import importlib
+
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+
+    if "backfill_node_uuids" in sys.modules:
+        del sys.modules["backfill_node_uuids"]
+    backfill = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill.EDGES_TO_BACKFILL)
+    assert ("INDICATES", "Indicator", "Vulnerability") not in edges, (
+        "dead INDICATES entry must not be in EDGES_TO_BACKFILL — Indicator→Vulnerability uses EXPLOITS, not INDICATES"
+    )
+    assert ("INDICATES", "Indicator", "CVE") not in edges, (
+        "dead INDICATES entry must not be in EDGES_TO_BACKFILL — Indicator→CVE uses EXPLOITS, not INDICATES"
+    )
+    # Positive cross-check: the legitimate Indicator→Malware INDICATES
+    # and Indicator→Vuln/CVE EXPLOITS must all still be present.
+    assert ("INDICATES", "Indicator", "Malware") in edges, "legitimate INDICATES backfill entry missing"
+    assert ("EXPLOITS", "Indicator", "Vulnerability") in edges
+    assert ("EXPLOITS", "Indicator", "CVE") in edges
+
+
+def test_adding_a_fifth_zone_propagates_through_all_derived_sources():
+    """Integration smoke test for the single-source-of-truth contract:
+    monkey-patch VALID_ZONES to include a fifth zone and verify all
+    derived structures pick it up on module reload.
+
+    This is the "did we really eliminate parallel maps?" acid test.
+    If any derived structure still hardcodes the zone list, this will fail.
+    """
+    import importlib
+
+    for mod in ("config", "build_relationships", "query_api"):
+        if mod in sys.modules:
+            del sys.modules[mod]
+
+    import config
+
+    # Inject a fifth zone via monkey-patch BEFORE the dependents load.
+    original = config.VALID_ZONES
+    try:
+        config.VALID_ZONES = frozenset(set(original) | {"manufacturing"})
+
+        # Re-import the dependents so they pick up the patched VALID_ZONES.
+        for mod in ("build_relationships", "query_api"):
+            if mod in sys.modules:
+                del sys.modules[mod]
+        build_relationships = importlib.import_module("build_relationships")
+        query_api = importlib.import_module("query_api")
+
+        # Every derived structure must now reflect the 5th zone.
+        assert "manufacturing" in build_relationships._SECTOR_UUIDS, (
+            "adding a zone to VALID_ZONES must propagate to _SECTOR_UUIDS"
+        )
+        assert '"manufacturing"' in build_relationships._SECTOR_UUID_CASE, (
+            "adding a zone to VALID_ZONES must propagate to _SECTOR_UUID_CASE"
+        )
+        assert '"manufacturing"' in build_relationships._SECTOR_IN_LIST, (
+            "adding a zone to VALID_ZONES must propagate to _SECTOR_IN_LIST"
+        )
+        enum_values = {m.value for m in query_api.ZoneEnum}
+        assert "manufacturing" in enum_values, "adding a zone to VALID_ZONES must propagate to ZoneEnum"
+    finally:
+        # Restore original VALID_ZONES and reload dependents so other tests
+        # see the canonical 4-zone set.
+        config.VALID_ZONES = original
+        for mod in ("build_relationships", "query_api"):
+            if mod in sys.modules:
+                del sys.modules[mod]

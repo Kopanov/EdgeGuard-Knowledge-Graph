@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import logging
 import time
 
+from config import VALID_ZONES
 from neo4j_client import Neo4jClient
 from node_identity import compute_node_uuid
 
@@ -29,7 +30,7 @@ except ImportError:
 # Pause between queries to let Neo4j flush transactions and reclaim memory
 _INTER_QUERY_PAUSE = 3  # seconds
 
-# Pre-computed Sector node uuids for the 4 known zones — used in the TARGETS
+# Pre-computed Sector node uuids for the known zones — used in the TARGETS
 # (7a) and AFFECTS (7b) queries below to stamp ``sec.uuid`` on Sector nodes
 # auto-CREATEd by those MERGEs. Bugbot caught (PR #33 round 4) that without
 # this stamp ``sec.uuid`` was NULL and downstream ``r.trg_uuid = sec.uuid``
@@ -43,15 +44,23 @@ _INTER_QUERY_PAUSE = 3  # seconds
 # quotes inside ``apoc.periodic.iterate('outer', 'inner', ...)``. Single
 # quotes inside the CASE would terminate the inner string early and break
 # the rendered Cypher. Cypher accepts both ' and " as string delimiters.
-_SECTOR_UUIDS: dict = {
-    z: compute_node_uuid("Sector", {"name": z}) for z in ("healthcare", "energy", "finance", "global")
-}
+#
+# PR #34 round 24 (bugbot MED): derive the zone set from ``VALID_ZONES`` in
+# ``config.py`` — the single source of truth for what counts as a valid
+# EdgeGuard zone. Previously the tuple was hardcoded here; adding a 5th
+# zone to ``VALID_ZONES`` without updating this file would silently drop
+# the new zone from both the CASE expression (Sector uuid stamping) and
+# the IN filter (zone-membership check in 7a/7b), producing Sector nodes
+# with NULL uuid. ``sorted(VALID_ZONES)`` fixes the iteration order so
+# the generated Cypher is stable across Python runs (frozenset iteration
+# order is implementation-defined).
+_SECTOR_UUIDS: dict = {z: compute_node_uuid("Sector", {"name": z}) for z in sorted(VALID_ZONES)}
 _SECTOR_UUID_CASE = (
     "CASE zone_name " + " ".join(f'WHEN "{name}" THEN "{u}"' for name, u in _SECTOR_UUIDS.items()) + " END"
 )
 # PR #33 round 12: derive the zone IN list from _SECTOR_UUIDS keys so adding
-# a 5th zone only requires updating the precompute map above (single source
-# of truth). Same double-quote convention as the CASE expression.
+# a 5th zone only requires updating VALID_ZONES (single source of truth).
+# Same double-quote convention as the CASE expression.
 _SECTOR_IN_LIST = "[" + ", ".join(f'"{name}"' for name in _SECTOR_UUIDS) + "]"
 
 logging.basicConfig(level=logging.INFO)

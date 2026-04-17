@@ -63,9 +63,14 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # is not consulted here directly.
 EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     # MISP-derived
+    # PR #34 round 24 (bugbot LOW, round 22 review): dropped the dead entries
+    # ("INDICATES", "Indicator", "Vulnerability") and ("INDICATES", "Indicator",
+    # "CVE"). INDICATES is only created for Indicator→Malware (build_relationships
+    # queries 4 + 9); Indicator→Vulnerability and Indicator→CVE use EXPLOITS
+    # (queries 3a + 3b). The dead INDICATES entries always matched 0 edges and
+    # produced misleading "0 edges need backfill" logs that could mask a real
+    # EXPLOITS regression. Pinned by test_backfill_has_no_dead_indicates_entries.
     ("INDICATES", "Indicator", "Malware"),
-    ("INDICATES", "Indicator", "Vulnerability"),
-    ("INDICATES", "Indicator", "CVE"),
     ("EXPLOITS", "Indicator", "Vulnerability"),
     ("EXPLOITS", "Indicator", "CVE"),
     ("EMPLOYS_TECHNIQUE", "ThreatActor", "Technique"),
