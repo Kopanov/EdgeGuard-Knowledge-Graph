@@ -1,10 +1,11 @@
-"""Cypher-template assertions for the 2026-04 scalar→array consumer fixes.
+"""Cypher-template assertions for MISP event-id array semantics.
 
-These tests intercept the Cypher strings sent to Neo4j (via a fake driver) and
-assert on the structure of the queries — not on a live Neo4j run. They guard
-against regressions where a future refactor accidentally drops the array union
-and reverts to the legacy scalar-only behaviour that flipped multi-event nodes
-inactive whenever their first-seen event rotated out of the incremental window.
+PR #33 round 10 dropped the legacy scalar ``misp_event_id`` (and
+``misp_attribute_id``). All MISP provenance now lives in the array fields
+``misp_event_ids[]`` / ``misp_attribute_ids[]``. These tests intercept the
+Cypher strings sent to Neo4j (via a fake driver) and pin that the readers
+use array-only predicates — guarding against regressions where a future
+refactor accidentally re-introduces the scalar.
 """
 
 from __future__ import annotations
@@ -52,11 +53,11 @@ class _CapDriver:
 
 
 # ---------------------------------------------------------------------------
-# mark_inactive_nodes — Cypher must coalesce array + scalar
+# mark_inactive_nodes — array-only Cypher (PR #33 round 10)
 # ---------------------------------------------------------------------------
 
 
-def test_mark_inactive_nodes_uses_array_union_for_indicators():
+def test_mark_inactive_nodes_uses_array_only_for_indicators():
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient.__new__(Neo4jClient)  # bypass __init__/connection
@@ -68,20 +69,24 @@ def test_mark_inactive_nodes_uses_array_union_for_indicators():
     assert queries, "expected at least one Cypher query"
     blob = "\n".join(queries)
 
-    # The array AND the scalar must both feature in every gate so a multi-event
-    # Indicator stays active whenever ANY of its events is in the active list.
+    # Array field is present; legacy scalar field name must NOT appear in any
+    # WHERE / SET / coalesce form (we still allow the substring ``misp_event_ids``,
+    # so we explicitly grep for the bare scalar pattern).
     assert "misp_event_ids" in blob, "array field missing from mark_inactive_nodes Cypher"
-    assert "misp_event_id" in blob, "scalar field missing from mark_inactive_nodes Cypher"
+    assert "n.misp_event_id " not in blob and "n.misp_event_id\n" not in blob, (
+        "legacy scalar n.misp_event_id leaked back into mark_inactive_nodes Cypher"
+    )
+    assert "n.misp_event_id IS" not in blob, "legacy scalar IS NULL/NOT NULL check leaked back in"
+    assert "n.misp_event_id <>" not in blob, "legacy scalar <> '' check leaked back in"
 
-    # The any/none semantics must be present — not the legacy scalar-only IN check.
+    # The any/none semantics must still be present.
     assert "any(eid IN" in blob, "expected any(...) re-activation gate"
     assert "none(eid IN" in blob, "expected none(...) deactivation gate"
 
 
 def test_mark_inactive_nodes_handles_vulnerabilities_with_same_semantics():
-    """Bugbot regression: pre-fix, Vulnerability had only the deactivation
-    (none()) path — no re-activation (any()) gate. Now both gates must exist
-    for both Indicator AND Vulnerability."""
+    """Both Indicator and Vulnerability must have re-activation (any) AND
+    deactivation (none) gates against the array."""
     from neo4j_client import Neo4jClient
 
     client = Neo4jClient.__new__(Neo4jClient)
@@ -90,66 +95,58 @@ def test_mark_inactive_nodes_handles_vulnerabilities_with_same_semantics():
 
     queries = [c for c, _ in client.driver.captured]
     vuln_queries = [q for q in queries if ":Vulnerability" in q]
-    # Two Vulnerability queries: re-activation (any) AND deactivation (none).
     assert len(vuln_queries) >= 2, (
         f"expected ≥2 Vulnerability queries (re-activation + deactivation), got {len(vuln_queries)}"
     )
     vuln_blob = "\n".join(vuln_queries)
-    assert "any(eid IN" in vuln_blob, (
-        "Vulnerability re-activation gate (any()) is missing — this was the bugbot finding"
-    )
+    assert "any(eid IN" in vuln_blob, "Vulnerability re-activation gate (any()) is missing"
     assert "none(eid IN" in vuln_blob, "Vulnerability deactivation gate (none()) is missing"
-    assert "misp_event_ids" in vuln_blob, "Vulnerability queries must use the array union"
-    # Re-activation query must respect retired_at (manual decommission wins).
-    assert "retired_at" in vuln_blob, "Vulnerability re-activation must respect retired_at (mirror Indicator behavior)"
+    assert "misp_event_ids" in vuln_blob, "Vulnerability queries must use the array"
+    assert "retired_at" in vuln_blob, "Vulnerability re-activation must respect retired_at"
 
 
 # ---------------------------------------------------------------------------
-# calibrate_cooccurrence_confidence — array union + parameterized large path
+# calibrate_cooccurrence_confidence — array-only event sizing
 # ---------------------------------------------------------------------------
 
 
-def test_calibrate_event_sizes_query_unions_array_and_scalar():
-    """The pre-compute query must count an Indicator against EVERY MISP event in
-    its array, not just the first-seen scalar."""
+def test_calibrate_event_sizes_query_is_array_only():
+    """The pre-compute query must count an Indicator against EVERY MISP event
+    in its misp_event_ids[] array. The legacy scalar fallback was removed in
+    PR #33 round 10."""
     import enrichment_jobs
 
     client = MagicMock()
     client.driver = _CapDriver()
 
-    # No indicators → function exits after first query; that's all we need to
-    # assert on the event_sizes_query shape.
+    # No indicators → function exits after first query; that's all we need.
     enrichment_jobs.calibrate_cooccurrence_confidence(client)
 
     queries = [c for c, _ in client.driver.captured]
     assert queries, "expected the event-sizes pre-compute query to run"
     pre = queries[0]
     assert "misp_event_ids" in pre, "event_sizes_query must include the array"
-    assert "misp_event_id" in pre, "event_sizes_query must include the scalar fallback"
-    assert "UNWIND" in pre, "event_sizes_query must UNWIND the union"
+    assert "i.misp_event_id " not in pre and "i.misp_event_id\n" not in pre, (
+        "legacy scalar i.misp_event_id leaked back into event_sizes_query"
+    )
+    assert "UNWIND" in pre, "event_sizes_query must UNWIND the array"
     assert "count(DISTINCT i)" in pre, "must count distinct indicators per event"
 
 
-def test_calibrate_large_event_query_is_parameterized_not_fstring():
-    """The 2026-04 fix replaced f-string interpolation of `eid` with apoc.periodic.iterate's
-    ``params`` config. Regression test: assert the parameterized form ($eid / $conf) and
-    that the literal-quote injection pattern (\"{eid}\" inside the inner cypher) is gone."""
+def test_calibrate_large_event_query_is_parameterized_array_only():
+    """Large-event path uses apoc.periodic.iterate with parameter binding.
+    PR #33 round 10: scalar leg dropped, only the array IN-membership."""
     import enrichment_jobs
 
     client = MagicMock()
     client.driver = _CapDriver()
 
-    # Wire up the pre-compute to return one large event so the large-event path runs.
-    # We do this by patching session.run so the FIRST call (event_sizes_query) returns
-    # one >1000-indicator event, and subsequent calls just record.
     real_session = client.driver.session
-
     call_count = {"n": 0}
 
     def _sess(**_kw):
         s = real_session()
         if call_count["n"] == 0:
-            # event_sizes_query — yield one big event
             s.next_records = [{"eid": "9001", "sz": 5000}]
         call_count["n"] += 1
         return s
@@ -159,21 +156,17 @@ def test_calibrate_large_event_query_is_parameterized_not_fstring():
     with patch.object(enrichment_jobs.time, "sleep", lambda *_: None):
         enrichment_jobs.calibrate_cooccurrence_confidence(client)
 
-    # Find the large-event apoc.periodic.iterate query among captured cyphers.
     large_queries = [c for c, _ in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
     assert large_queries, "expected at least one parameterized apoc.periodic.iterate (large event path)"
 
     big = large_queries[0]
-    # Must use parameter binding both inside the matcher and the action.
     assert "$eid" in big and "$conf" in big, "params must be bound, not interpolated"
-    # Must declare them in the iterate config so APOC propagates them.
     assert "params: {eid: $eid, conf: $conf}" in big, "apoc.periodic.iterate must forward params to inner queries"
-    # And the array-union semantics from the small-event path must also be here.
-    assert "misp_event_ids" in big and "misp_event_id" in big
+    assert "misp_event_ids" in big and "i.misp_event_id " not in big, (
+        "large-event query must be array-only (no scalar leg)"
+    )
 
-    # Negative assertion: no f-string interpolation residue (the legacy bug).
-    # We can't grep for {eid} reliably inside a raw string, but the eid value
-    # should NOT appear as a literal in the query string itself.
+    # Negative: no f-string interpolation residue.
     captured_with_params = [(c, p) for c, p in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
     for cypher, params in captured_with_params:
         assert "9001" not in cypher, "event id must be a parameter, not interpolated into the Cypher string"
@@ -181,41 +174,34 @@ def test_calibrate_large_event_query_is_parameterized_not_fstring():
 
 
 # ---------------------------------------------------------------------------
-# build_relationships.py:138 INDICATES co-occurrence — scalar+array on both ends
+# build_relationships INDICATES co-occurrence — array-only on both ends
 # ---------------------------------------------------------------------------
 
 
-def test_build_relationships_indicates_cooccurrence_uses_array_on_both_ends():
-    """The 2026-04 fix made the INDICATES co-occurrence query symmetric: both the
-    Indicator outer and the Malware inner now check scalar OR array. Pre-fix the
-    Malware match was scalar-only, dropping co-occurrence edges to Malware whose
-    contribution to the event was a re-occurrence."""
+def test_build_relationships_indicates_cooccurrence_is_array_only():
+    """PR #33 round 10: the INDICATES co-occurrence query is array-only on
+    both the Indicator outer and the Malware inner. Pre-cleanup it had a
+    scalar+array union; now only the array."""
     import build_relationships
 
-    # The query strings are constructed inline; rather than execute the function
-    # against a fake driver (which would also exercise the rest of the module),
-    # we read the source file and grep the relevant block. Cheaper and tighter
-    # against future refactors that move the strings around.
     src_path = build_relationships.__file__
     with open(src_path) as fh:
         source = fh.read()
 
-    # The INDICATES (co-occurrence) block lives in a comment block labeled
-    # "4. Indicator → Malware (INDICATES)".
     block_start = source.find("4. Indicator → Malware (INDICATES)")
     block_end = source.find("5. ThreatActor → Technique", block_start)
     assert block_start > 0 and block_end > block_start, "could not locate the INDICATES co-occurrence block"
     block = source[block_start:block_end]
 
-    # Outer must include the array OR-clause.
+    # Outer: array filter only.
     assert "i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0" in block, (
-        "outer query must include Indicators with array-only event references"
+        "outer query must filter Indicators by misp_event_ids[]"
     )
+    # No leftover scalar leg.
+    assert "i.misp_event_id IS NOT NULL" not in block, "outer scalar leg must be removed"
+    assert "i.misp_event_id <> " not in block, "outer scalar empty-check must be removed"
 
-    # Inner Malware match must accept either scalar OR array membership.
-    assert "m.misp_event_id = eid" in block and "eid IN m.misp_event_ids" in block, (
-        "inner Malware match must accept either scalar or array"
-    )
-
-    # Negative assertion: the legacy scalar-only Malware property match must be gone.
-    assert "MATCH (m:Malware {misp_event_id: eid})" not in block, "legacy scalar-only property match must be removed"
+    # Inner Malware match: array IN-membership only.
+    assert "eid IN m.misp_event_ids" in block, "inner Malware match must use array IN membership"
+    assert "m.misp_event_id = eid" not in block, "inner scalar match must be removed"
+    assert "MATCH (m:Malware {misp_event_id: eid})" not in block, "legacy scalar property match must be removed"

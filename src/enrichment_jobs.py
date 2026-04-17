@@ -339,21 +339,13 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
             # Previously each edge re-counted all indicators in its event — millions
             # of redundant COUNT queries. Now: one COUNT per event, then join.
             #
-            # Event-membership is computed across the whole MISP id surface — both the
-            # legacy scalar ``misp_event_id`` (first-seen) AND the accumulated
-            # ``misp_event_ids[]`` array. Multi-event indicators were previously
-            # counted only against their first-seen event, which under-sized later
-            # events (and therefore mis-tiered their co-occurrence confidence).
+            # PR #33 round 10: dropped legacy scalar misp_event_id; event
+            # membership comes only from misp_event_ids[].
             logger.info("  [CALIBRATE] Pre-computing MISP event sizes...")
             event_sizes_query = """
             MATCH (i:Indicator)
-            WITH i,
-                 [eid IN coalesce(i.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-                      THEN [i.misp_event_id] ELSE [] END AS scalar_id
-            WITH i, apoc.coll.toSet(arr_ids + scalar_id) AS all_ids
-            WHERE size(all_ids) > 0
-            UNWIND all_ids AS eid
+            WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0
+            UNWIND [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ''] AS eid
             RETURN eid, count(DISTINCT i) AS sz
             """
             event_size_result = session.run(event_sizes_query, timeout=NEO4J_READ_TIMEOUT)
@@ -382,15 +374,12 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         results[tier_label] = 0
                         continue
 
-                    # Match indicators where the event id appears in EITHER the legacy
-                    # scalar field OR the accumulated misp_event_ids[] array. Falls
-                    # back to the scalar-only path on graphs that haven't been
-                    # populated with arrays yet.
+                    # Match indicators that have this event id in misp_event_ids[].
+                    # PR #33 round 10: dropped legacy scalar misp_event_id leg.
                     update_cypher = """
                     UNWIND $eids AS eid
                     MATCH (i:Indicator)
-                    WHERE i.misp_event_id = eid
-                       OR (i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids)
+                    WHERE i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids
                     MATCH (i)-[r:INDICATES|EXPLOITS]->(target)
                     WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"]
                     SET r.confidence_score = $conf,
@@ -419,21 +408,17 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                             f"  [CALIBRATE] {tier_label}: processing {len(large_eids)} large events "
                             f"(>{1000} indicators each) via apoc.periodic.iterate"
                         )
-                    # Same any-of semantics as the small-event path: indicators whose array
-                    # OR scalar carries this event id are in scope.
+                    # Same array-only semantics as the small-event path.
                     #
                     # Parameterized via apoc.periodic.iterate's ``params`` config so $eid and
-                    # $conf are safely bound inside both the matcher and the action (previously
-                    # f-string interpolation risked Cypher breakage if an event id ever
-                    # contained a quote or other special character).
+                    # $conf are safely bound inside both the matcher and the action.
                     large_batch_query = (
                         "CALL apoc.periodic.iterate("
-                        "  'MATCH (i:Indicator) WHERE i.misp_event_id = $eid OR ("
-                        "    i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids"
-                        "  ) MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
+                        "  'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids "
+                        "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
                         '  WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
                         "  RETURN r', "
-                        "  'SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
+                        "  'WITH $r AS r SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
                         "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
                         ") YIELD total "
                         "RETURN total AS updated"

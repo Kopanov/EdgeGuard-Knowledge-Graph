@@ -137,7 +137,7 @@ class CVE:
         "Vulnerability instance node — shared with ISIM. "
         "status is LIST OF STRING per ResilMesh schema (e.g. ['active'], ['rejected']). "
         "Links to CVE via REFERS_TO relationship. "
-        "misp_event_id lets analysts look up the originating MISP event for raw context."
+        "misp_event_ids[] lists every MISP event that has observed this vulnerability."
     )
 )
 class Vulnerability:
@@ -155,8 +155,9 @@ class Vulnerability:
     uuid: Optional[str] = None
     source: Optional[List[str]]
     last_updated: Optional[str]
-    # Provenance
-    misp_event_id: Optional[str]
+    # Provenance — MISP back-references (PR #33 round 10: array-only,
+    # legacy scalar misp_event_id removed)
+    misp_event_ids: Optional[List[str]] = None
     first_imported_at: Optional[str]
     last_imported_from: Optional[str]
     # Enrichment fields
@@ -175,8 +176,9 @@ class Vulnerability:
         "Threat Indicator (IP, domain, hash, URL). "
         "Not yet in ISIM GraphQL schema — EdgeGuard extension. "
         "confidence_score decays over time via enrichment jobs. "
-        "misp_event_id and misp_event_url let analysts retrieve the full raw MISP event "
-        "for context not stored in Neo4j (original attributes, comments, attachments)."
+        "misp_event_ids[] / misp_attribute_ids[] / misp_event_urls[] let analysts "
+        "retrieve the full raw MISP context for every event/attribute that contributed "
+        "to this indicator (original attributes, comments, attachments)."
     )
 )
 class Indicator:
@@ -193,11 +195,12 @@ class Indicator:
     # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
     # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
     uuid: Optional[str] = None
-    # Provenance — MISP back-references
-    misp_event_id: Optional[str]
-    misp_attribute_id: Optional[str]
-    # Computed from MISP_URL env + misp_event_id; allows one-click retrieval of raw MISP context
-    misp_event_url: Optional[str]
+    # Provenance — MISP back-references (PR #33 round 10: array-only,
+    # legacy scalars misp_event_id / misp_attribute_id removed).
+    misp_event_ids: Optional[List[str]] = None
+    misp_attribute_ids: Optional[List[str]] = None
+    # Computed from MISP_URL env + each id in misp_event_ids[]; one URL per event.
+    misp_event_urls: Optional[List[str]] = None
     # Import audit trail
     first_imported_at: Optional[str]
     last_imported_from: Optional[str]

@@ -244,7 +244,7 @@ When data is pushed to MISP, it gets tagged with:
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` on malware/tool (MISP **`MITRE_USES_TECHNIQUES:`** round-trip for malware) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
 | `ATTRIBUTED_TO` | Malware → ThreatActor | MITRE / MISP event data |
-| `INDICATES` | Indicator → Malware | MISP event co-occurrence (`misp_event_id` match) |
+| `INDICATES` | Indicator → Malware | MISP event co-occurrence (`misp_event_ids[]` array IN-membership match) |
 | `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
 | `TARGETS` | Indicator → Sector | Node `zone` list → `build_relationships.py` |
@@ -265,20 +265,19 @@ fills it in on next re-sync. Per-attribute IDs are deliberately **not**
 stored on edges (cardinality blowup for marginal benefit) — attribute UUIDs
 live on the Indicator node only.
 
-**MISP traceability on Indicator nodes (2026-04):** `i.misp_attribute_id`
-(and accumulated `i.misp_attribute_ids[]`) hold the originating MISP
-attribute UUID — the stable cross-instance identifier from `attr.uuid`.
-The forward fix is in [run_misp_to_neo4j.py `parse_attribute`](../src/run_misp_to_neo4j.py).
-~146K historical Indicators (pre-fix ingests) need a one-off backfill —
-see [`migrations/2026_04_indicator_misp_attribute_id_backfill.cypher`](../migrations/2026_04_indicator_misp_attribute_id_backfill.cypher)
-and the Pass B runbook in [MIGRATIONS.md](MIGRATIONS.md).
+**MISP traceability on Indicator nodes:** `i.misp_attribute_ids[]` holds the
+originating MISP attribute UUIDs — the stable cross-instance identifiers
+from `attr.uuid`. The forward fix is in
+[run_misp_to_neo4j.py `parse_attribute`](../src/run_misp_to_neo4j.py).
 
-**Scalar vs array semantics on consumers (2026-04):** `mark_inactive_nodes`
-and `calibrate_cooccurrence_confidence` previously read only the legacy
-scalar `misp_event_id` (first-seen event), which under-counted multi-event
-nodes and caused them to flip inactive whenever their first event rotated
-out of the incremental window. Both now coalesce
-`misp_event_ids[]` ∪ `misp_event_id` for any-of-active semantics.
+**Array-only provenance (PR #33 round 10):** every MISP-derived consumer
+(`mark_inactive_nodes`, `calibrate_cooccurrence_confidence`, the INDICATES
+co-occurrence query in `build_relationships.py` and `run_pipeline.py`,
+STIX export) reads only `misp_event_ids[]` / `misp_attribute_ids[]`. The
+legacy first-seen scalars `misp_event_id` / `misp_attribute_id` were
+removed pre-release — multi-event nodes are tracked via the array's full
+list of contributing events with `any(eid IN n.misp_event_ids WHERE eid IN
+$active_ids)` semantics.
 
 **Cross-environment traceability (2026-04, PR #33):** every node carries a
 deterministic `n.uuid` = `uuid5(namespace, canonical(label, natural_key))`

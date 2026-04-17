@@ -270,7 +270,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                     uuid=n.get("uuid"),
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
-                    misp_event_id=n.get("misp_event_id"),
+                    misp_event_ids=_neo4j_list(n.get("misp_event_ids")),
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
                     version_constraints=n.get("version_constraints"),
@@ -309,7 +309,10 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
     with client.driver.session() as session:
         for record in session.run(query, **params, timeout=NEO4J_READ_TIMEOUT):
             n = record["n"]
-            misp_event_id = n.get("misp_event_id")
+            event_ids = _neo4j_list(n.get("misp_event_ids")) or []
+            event_urls: Optional[List[str]] = (
+                [f"{MISP_URL}/events/view/{eid}" for eid in event_ids if eid] if (MISP_URL and event_ids) else None
+            )
             results.append(
                 Indicator(
                     value=n.get("value", ""),
@@ -321,9 +324,9 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     edgeguard_managed=n.get("edgeguard_managed"),
                     uuid=n.get("uuid"),
-                    misp_event_id=misp_event_id,
-                    misp_attribute_id=n.get("misp_attribute_id"),
-                    misp_event_url=(f"{MISP_URL}/events/view/{misp_event_id}" if MISP_URL and misp_event_id else None),
+                    misp_event_ids=event_ids or None,
+                    misp_attribute_ids=_neo4j_list(n.get("misp_attribute_ids")),
+                    misp_event_urls=event_urls,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
                     yara_rules=n.get("yara_rules"),

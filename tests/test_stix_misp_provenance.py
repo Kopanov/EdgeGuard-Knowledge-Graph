@@ -1,13 +1,15 @@
-"""Tests for the 2026-04 STIX exporter MISP-provenance attachment.
+"""Tests for the STIX exporter MISP-provenance attachment.
 
-The exporter now adds two custom properties to every SDO that originates
+The exporter adds two custom properties to every SDO that originates
 from a Neo4j node carrying MISP traceability:
 
-  - ``x_edgeguard_misp_event_ids``   (union of array + scalar)
-  - ``x_edgeguard_misp_attribute_ids`` (union of array + scalar)
+  - ``x_edgeguard_misp_event_ids``     (from ``misp_event_ids[]`` array)
+  - ``x_edgeguard_misp_attribute_ids`` (from ``misp_attribute_ids[]`` array)
 
-These mirror the existing ``x_edgeguard_zones`` pattern: omitted entirely
-when the source node has no values; never None when present.
+PR #33 round 10 dropped the legacy scalars ``misp_event_id`` and
+``misp_attribute_id``; STIX export now reads only the array fields.
+The custom property is omitted entirely when the source node has no
+values; the resulting list is deduped and stringified.
 """
 
 from __future__ import annotations
@@ -75,31 +77,15 @@ def test_attach_misp_provenance_emits_array_when_array_present():
     assert sdo["x_edgeguard_misp_attribute_ids"] == ["uuid-a", "uuid-b"]
 
 
-def test_attach_misp_provenance_unions_array_and_scalar():
-    """Scalar should be included even when an array is present, in case the
-    scalar (first-seen) was not yet copied into the array."""
+def test_attach_misp_provenance_dedupes_within_array():
     sdo: Dict[str, Any] = {"type": "indicator", "id": "indicator--x"}
     props = {
-        "misp_event_id": "scalar-only",
-        "misp_event_ids": ["array-1"],
-        "misp_attribute_id": "scalar-attr",
-        "misp_attribute_ids": ["array-attr"],
-    }
-    _attach_misp_provenance(sdo, props)
-    assert "scalar-only" in sdo["x_edgeguard_misp_event_ids"]
-    assert "array-1" in sdo["x_edgeguard_misp_event_ids"]
-    assert "scalar-attr" in sdo["x_edgeguard_misp_attribute_ids"]
-    assert "array-attr" in sdo["x_edgeguard_misp_attribute_ids"]
-
-
-def test_attach_misp_provenance_dedupes_overlap():
-    sdo: Dict[str, Any] = {"type": "indicator", "id": "indicator--x"}
-    props = {
-        "misp_event_id": "1001",
-        "misp_event_ids": ["1001", "1002"],
+        "misp_event_ids": ["1001", "1001", "1002"],
+        "misp_attribute_ids": ["uuid-a", "uuid-a"],
     }
     _attach_misp_provenance(sdo, props)
     assert sdo["x_edgeguard_misp_event_ids"] == ["1001", "1002"]
+    assert sdo["x_edgeguard_misp_attribute_ids"] == ["uuid-a"]
 
 
 def test_attach_misp_provenance_omits_field_when_empty():
@@ -109,11 +95,44 @@ def test_attach_misp_provenance_omits_field_when_empty():
     assert "x_edgeguard_misp_attribute_ids" not in sdo
 
 
-def test_attach_misp_provenance_handles_scalar_only():
+def test_attach_misp_provenance_ignores_legacy_scalar_keys():
+    """PR #33 round 10: legacy scalar keys are no longer read. If a stale
+    consumer somehow still sets the scalar, the helper ignores it — only
+    the array contributes to the SDO custom property."""
     sdo: Dict[str, Any] = {"type": "indicator", "id": "indicator--x"}
-    props = {"misp_event_id": "777"}
+    props = {
+        # legacy scalars (should be ignored)
+        "misp_event_id": "ignored-scalar",
+        "misp_attribute_id": "ignored-scalar-attr",
+        # canonical array
+        "misp_event_ids": ["1001"],
+        "misp_attribute_ids": ["uuid-a"],
+    }
     _attach_misp_provenance(sdo, props)
-    assert sdo["x_edgeguard_misp_event_ids"] == ["777"]
+    assert sdo["x_edgeguard_misp_event_ids"] == ["1001"]
+    assert "ignored-scalar" not in sdo["x_edgeguard_misp_event_ids"]
+    assert sdo["x_edgeguard_misp_attribute_ids"] == ["uuid-a"]
+    assert "ignored-scalar-attr" not in sdo["x_edgeguard_misp_attribute_ids"]
+
+
+def test_attach_misp_provenance_omits_when_only_legacy_scalars_present():
+    """A node carrying only the dropped legacy scalars (no array) should
+    produce no x_edgeguard_misp_* custom property — the field is omitted."""
+    sdo: Dict[str, Any] = {"type": "indicator", "id": "indicator--x"}
+    props = {"misp_event_id": "777", "misp_attribute_id": "uuid-z"}
+    _attach_misp_provenance(sdo, props)
+    assert "x_edgeguard_misp_event_ids" not in sdo
+    assert "x_edgeguard_misp_attribute_ids" not in sdo
+
+
+def test_attach_misp_provenance_filters_none_and_empty_strings():
+    sdo: Dict[str, Any] = {"type": "indicator", "id": "indicator--x"}
+    props = {
+        "misp_event_ids": [None, "", "1001", None, "1002"],
+    }
+    _attach_misp_provenance(sdo, props)
+    # None and empty-string entries are dropped; remaining values dedupe + stringify.
+    assert sdo["x_edgeguard_misp_event_ids"] == ["1001", "1002"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +146,7 @@ def test_export_indicator_emits_misp_provenance_on_seed_sdo():
             "seed": {
                 "value": "203.0.113.5",
                 "indicator_type": "ipv4",
-                "misp_event_id": "5000",
                 "misp_event_ids": ["5000", "5001"],
-                "misp_attribute_id": "uuid-aaa",
                 "misp_attribute_ids": ["uuid-aaa", "uuid-bbb"],
             },
             "malware": [],
@@ -142,6 +159,5 @@ def test_export_indicator_emits_misp_provenance_on_seed_sdo():
     indicators = [o for o in bundle["objects"] if o["type"] == "indicator"]
     assert indicators, "expected an indicator SDO in the bundle"
     seed = indicators[0]
-    # Both fields must be set, deduped, and contain the union.
     assert sorted(seed["x_edgeguard_misp_event_ids"]) == ["5000", "5001"]
     assert sorted(seed["x_edgeguard_misp_attribute_ids"]) == ["uuid-aaa", "uuid-bbb"]

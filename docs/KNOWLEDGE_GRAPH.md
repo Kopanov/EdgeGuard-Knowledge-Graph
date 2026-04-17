@@ -170,14 +170,12 @@ CREATE INDEX technique_mitre IF NOT EXISTS FOR (t:Technique) ON (t.mitre_id);
 CREATE INDEX indicator_original_source IF NOT EXISTS FOR (i:Indicator) ON (i.original_source);
 CREATE INDEX vulnerability_original_source IF NOT EXISTS FOR (v:Vulnerability) ON (v.original_source);
 
-// Active/inactive & MISP event tracking
+// Active/inactive tracking
 CREATE INDEX indicator_active IF NOT EXISTS FOR (i:Indicator) ON (i.active);
 CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active);
-CREATE INDEX indicator_misp_event_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_event_id);
-CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.misp_event_id);
-// MISP attribute UUID lookup — direct Indicator → MISP attribute traceability
-// (added 2026-04 alongside the parse_attribute fix that started populating this field).
-CREATE INDEX indicator_misp_attribute_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_attribute_id);
+// PR #33 round 10: legacy-scalar misp_event_id / misp_attribute_id indexes
+// removed. All readers query the misp_event_ids[] / misp_attribute_ids[]
+// arrays via list-membership predicates.
 
 // Per-node deterministic UUID indexes — added 2026-04 (PR #33) for cross-
 // environment delta-sync (cloud MERGEs by uuid) and self-describing edge
@@ -211,7 +209,7 @@ CREATE INDEX campaign_zone IF NOT EXISTS FOR (c:Campaign) ON (c.zone);
 
 ## MISP Integration
 
-**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_id` (and `misp_event_ids[]` accumulated array) for tracing back to MISP events. **Indicator** nodes additionally carry `misp_attribute_id` (and `misp_attribute_ids[]`) — the MISP **attribute UUID** (`attr.uuid`), which is the *stable cross-instance identifier*. The legacy numeric `attr.id` was deliberately not chosen because it is per-instance auto-increment and not portable across MISP instances or restores. With `misp_attribute_id` populated you can resolve a Neo4j Indicator directly back to its MISP attribute without joining via the event id (added 2026-04). Edges built from the MISP path carry `r.misp_event_ids[]` for per-edge provenance.
+**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_ids[]` for tracing back to every MISP event that has observed them. **Indicator** nodes additionally carry `misp_attribute_ids[]` — the MISP **attribute UUIDs** (`attr.uuid`), which are the *stable cross-instance identifiers*. The legacy numeric `attr.id` was deliberately not chosen because it is per-instance auto-increment and not portable across MISP instances or restores. With `misp_attribute_ids[]` populated you can resolve a Neo4j Indicator directly back to its MISP attributes without joining via event id. Edges built from the MISP path carry `r.misp_event_ids[]` for per-edge provenance.
 
 ### Sync throughput (Airflow worker memory)
 
@@ -222,9 +220,9 @@ MISP→Neo4j ingestion (`run_misp_to_neo4j.py`) processes **one MISP event at a 
 To get full history from MISP for an indicator:
 
 ```cypher
--- Get MISP event ID from Neo4j
+-- Get MISP event IDs from Neo4j (every event that has observed this indicator)
 MATCH (i:Indicator {value: '1.2.3.4'})
-RETURN i.value, i.misp_event_id, i.source
+RETURN i.value, i.misp_event_ids, i.source
 
 -- Then query MISP API for full event history:
 -- GET /api/attributes/restSearch/json?value=1.2.3.4

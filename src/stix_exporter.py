@@ -839,34 +839,37 @@ def _attach_misp_provenance(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
     back to the originating MISP event(s) and attribute(s) without round-tripping
     through Neo4j.
 
-    Field semantics:
-    - ``x_edgeguard_misp_event_ids``: union of node's ``misp_event_ids[]`` array
-      and the legacy scalar ``misp_event_id`` (first-seen). Falls back to scalar
-      alone on nodes ingested before the array was populated.
-    - ``x_edgeguard_misp_attribute_ids``: union of ``misp_attribute_ids[]`` and the
-      scalar ``misp_attribute_id`` (MISP attribute UUIDs). Only present on
-      Indicator-derived SDOs in practice; harmless on other SDOs (omitted).
+    Field semantics (PR #33 round 10 — array-only after legacy-scalar drop):
+    - ``x_edgeguard_misp_event_ids``: ``misp_event_ids[]`` deduped and stringified.
+      Omitted from SDO when the source node has no array.
+    - ``x_edgeguard_misp_attribute_ids``: ``misp_attribute_ids[]`` deduped. Only
+      present on Indicator-derived SDOs in practice; harmless on other SDOs
+      (omitted when empty).
     """
     if not isinstance(sdo, dict):
         return
 
-    def _gather(scalar_key: str, array_key: str) -> List[str]:
-        out: List[str] = []
+    def _gather(array_key: str) -> List[str]:
         arr = props.get(array_key)
-        if isinstance(arr, (list, tuple)):
-            out.extend(str(v) for v in arr if v)
-        scalar = props.get(scalar_key)
-        if scalar:
-            s = str(scalar)
-            if s and s not in out:
-                out.append(s)
+        if not isinstance(arr, (list, tuple)):
+            return []
+        out: List[str] = []
+        seen: set = set()
+        for v in arr:
+            if v is None:
+                continue
+            s = str(v)
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
         return out
 
-    events = _gather("misp_event_id", "misp_event_ids")
+    events = _gather("misp_event_ids")
     if events:
         sdo["x_edgeguard_misp_event_ids"] = events
 
-    attrs = _gather("misp_attribute_id", "misp_attribute_ids")
+    attrs = _gather("misp_attribute_ids")
     if attrs:
         sdo["x_edgeguard_misp_attribute_ids"] = attrs
 

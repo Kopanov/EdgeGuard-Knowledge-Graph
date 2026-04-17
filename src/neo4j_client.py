@@ -602,14 +602,13 @@ class Neo4jClient:
             # Active/inactive tracking indexes
             "CREATE INDEX indicator_active IF NOT EXISTS FOR (i:Indicator) ON (i.active)",
             "CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active)",
-            "CREATE INDEX indicator_misp_event_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_event_id)",
-            "CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.misp_event_id)",
-            # MISP attribute UUID lookup — direct traceability from a Neo4j Indicator
-            # back to the originating MISP attribute. Added 2026-04 alongside the
-            # parse_attribute fix that started populating this field for new ingests.
-            # Backfill of pre-existing nodes is in
-            # migrations/2026_04_indicator_misp_attribute_id_backfill.cypher.
-            "CREATE INDEX indicator_misp_attribute_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_attribute_id)",
+            # PR #33 round 10: dropped 5 legacy-scalar indexes (indicator/
+            # vulnerability/malware/actor _misp_event_id and
+            # indicator_misp_attribute_id). All readers now match against
+            # misp_event_ids[] / misp_attribute_ids[] via list-membership
+            # predicates (`eid IN n.misp_event_ids`) — Neo4j 5 handles those
+            # without an index; an explicit array-membership index would only
+            # help at much larger scale (>10M rows).
             "CREATE INDEX tactic_shortname IF NOT EXISTS FOR (t:Tactic) ON (t.shortname)",
             "CREATE INDEX technique_tactic_phases IF NOT EXISTS FOR (t:Technique) ON (t.tactic_phases)",
             # CVSS sub-node lookup indexes
@@ -625,9 +624,6 @@ class Neo4jClient:
             "CREATE INDEX vulnerability_last_updated IF NOT EXISTS FOR (v:Vulnerability) ON (v.last_updated)",
             # build_relationships performance: CVE.cve_id needed for EXPLOITS query
             "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
-            # Co-occurrence join: Malware/ThreatActor by misp_event_id
-            "CREATE INDEX malware_misp_event_id IF NOT EXISTS FOR (m:Malware) ON (m.misp_event_id)",
-            "CREATE INDEX actor_misp_event_id IF NOT EXISTS FOR (a:ThreatActor) ON (a.misp_event_id)",
             # Deterministic per-node UUID indexes — added 2026-04 for delta-sync
             # local→cloud (cloud MERGEs by uuid) and self-describing edge serialization
             # (xAI / RAG consumers resolve r.src_uuid / r.trg_uuid back to nodes by uuid).
@@ -886,19 +882,18 @@ class Neo4jClient:
                 n.uuid = coalesce(n.uuid, $node_uuid)
             """
 
-            # Add misp_event_id if present — accumulated as array for multi-event provenance.
-            # Keeps scalar misp_event_id for backward compat (first-seen event).
+            # PR #33 round 10: dropped legacy scalars misp_event_id / misp_attribute_id
+            # (pre-release, no real data to migrate). Multi-event provenance lives only
+            # in the misp_event_ids[] / misp_attribute_ids[] arrays, accumulated
+            # via apoc.coll.toSet so duplicates within an array are de-duped.
             misp_event_id = data.get("misp_event_id")
             if misp_event_id:
                 query += """,
-                n.misp_event_id = coalesce(n.misp_event_id, $misp_event_id),
                 n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + [$misp_event_id])"""
 
-            # Add misp_attribute_id if present in data (for indicators)
             misp_attribute_id = data.get("misp_attribute_id")
             if misp_attribute_id:
                 query += """,
-                n.misp_attribute_id = coalesce(n.misp_attribute_id, $misp_attribute_id),
                 n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
 
             # Add original publication/modification dates from source feed.
@@ -1343,23 +1338,15 @@ class Neo4jClient:
         and re-activate nodes whose events re-enter the active list.
 
         A node is considered active if ANY event in its ``misp_event_ids[]`` array is
-        active. The legacy scalar ``misp_event_id`` is the *first-seen* event only and
-        does not reflect later events that re-referenced the same attribute — using it
-        alone caused multi-event nodes to be marked inactive whenever their first event
-        rotated out of the incremental window even though they were still being
-        observed. We coalesce the array with the scalar so nodes ingested before
-        ``misp_event_ids[]`` accumulation still resolve correctly.
+        currently active. PR #33 round 10 dropped the legacy ``misp_event_id`` scalar
+        — provenance lives only in the array now.
 
         Both Indicators and Vulnerabilities get the symmetric pair:
 
-        - re-activation gate (``any(eid IN ... WHERE eid IN $active_ids)``) — sets
-          ``active = true`` unless ``retired_at`` indicates manual decommission.
-        - deactivation gate (``none(eid IN ... WHERE eid IN $active_ids)``) — sets
-          ``active = false``.
-
-        The Vulnerability re-activation gate was added 2026-04 alongside the array-
-        semantics fix; pre-fix only Indicators were re-activated, leaving Vulnerabilities
-        permanently inactive once they were ever flipped (Bugbot finding on PR #32).
+        - re-activation gate (``any(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
+          — sets ``active = true`` unless ``retired_at`` indicates manual decommission.
+        - deactivation gate (``none(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
+          — sets ``active = false``.
 
         Nodes without any MISP event reference are not affected.
 
@@ -1387,55 +1374,35 @@ class Neo4jClient:
             # ``retired_at`` (manual decommission) wins over the auto-active reset.
             query_indicators = """
             MATCH (n:Indicator)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             query_indicators_inactive = """
             MATCH (n:Indicator)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND none(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = false
             RETURN count(n) as count
             """
 
             # Re-activate Vulnerabilities where ANY of their MISP event IDs is active.
             # Mirrors query_indicators above so a Vulnerability that was marked inactive
-            # (by the legacy scalar-only logic, by a prior incremental window, or any
-            # other reason) gets re-activated when its events re-enter the active list.
+            # gets re-activated when its events re-enter the active list.
             # ``retired_at`` (manual decommission) wins over the auto-active reset.
-            # Bugbot caught this asymmetry post-merge: the docs in AIRFLOW_DAG_DESIGN.md
-            # and ARCHITECTURE.md claimed both labels got both gates, but Vulnerability
-            # had only the deactivation path (an inherited gap from the pre-2026-04 code).
             query_vulnerabilities = """
             MATCH (n:Vulnerability)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             # Mark inactive Vulnerabilities — same any-of / none-of semantics.
             query_vulnerabilities_inactive = """
             MATCH (n:Vulnerability)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND none(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = false
             RETURN count(n) as count
             """
@@ -1593,9 +1560,7 @@ class Neo4jClient:
                     n.original_modified_date = CASE
                         WHEN n.original_modified_date IS NULL OR item.last_seen > n.original_modified_date
                         THEN item.last_seen ELSE n.original_modified_date END,
-                    n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
-                    n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
                     n.url_status = coalesce(item.url_status, n.url_status),
@@ -1738,9 +1703,7 @@ class Neo4jClient:
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
-                    n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
-                    n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.version_constraints = coalesce(item.version_constraints, n.version_constraints),
                     n.cisa_cwes = apoc.coll.toSet(coalesce(n.cisa_cwes, []) + coalesce(item.cisa_cwes, [])),
@@ -2781,12 +2744,13 @@ class Neo4jClient:
                 except Exception:
                     stats["multi_zone_count"] = 0
 
-                # Count active/inactive for Indicators and Vulnerabilities
+                # Count active/inactive for Indicators and Vulnerabilities (only those
+                # with at least one MISP event in misp_event_ids[]).
                 try:
                     result = session.run(
                         """
                         MATCH (n:Indicator)
-                        WHERE n.misp_event_id IS NOT NULL
+                        WHERE n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
                         RETURN n.active as active, count(n) as count
                     """,
                         timeout=NEO4J_READ_TIMEOUT,
@@ -2799,7 +2763,7 @@ class Neo4jClient:
                     result = session.run(
                         """
                         MATCH (n:Vulnerability)
-                        WHERE n.misp_event_id IS NOT NULL
+                        WHERE n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
                         RETURN n.active as active, count(n) as count
                     """,
                         timeout=NEO4J_READ_TIMEOUT,
@@ -2904,7 +2868,7 @@ class Neo4jClient:
         query = f"""
         MATCH (n:Indicator)
         WHERE (n.active = true OR n.active IS NULL)
-          AND n.misp_event_id IS NOT NULL
+          AND n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
         {type_filter}
         RETURN n
         LIMIT $limit
@@ -2940,7 +2904,7 @@ class Neo4jClient:
         query = f"""
         MATCH (n:Vulnerability)
         WHERE (n.active = true OR n.active IS NULL)
-          AND n.misp_event_id IS NOT NULL
+          AND n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
         {cvss_filter}
         RETURN n
         ORDER BY n.cvss_score DESC
