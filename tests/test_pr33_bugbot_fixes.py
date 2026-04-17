@@ -1112,12 +1112,17 @@ def test_backfill_validates_labels_before_interpolation():
     assert "_validate_rel_type(rel_type)" in edge_src
 
 
-def test_backfill_edge_inner_query_rebinds_apoc_variables():
-    """Bugbot (round 8, HIGH): apoc.periodic.iterate forwards outer-query
-    columns to the inner query as $-prefixed parameters. The inner Cypher
-    must rebind them via ``WITH $col AS col`` before referencing them as
-    Cypher variables — otherwise ``r``, ``a``, ``b`` in the SET clause are
-    unbound and the query fails with "Variable `r` not defined"."""
+def test_backfill_edge_inner_query_re_matches_relationship_by_id():
+    """Bugbot (round 11, MED): apoc.periodic.iterate runs the inner query
+    in a NEW transaction per batch. Raw entity references (r, a, b) from
+    the outer cannot safely be referenced in that new transaction — the
+    handle was bound to the outer transaction's lifetime. The safe pattern
+    is to RETURN id(r) (and the endpoint uuids as primitive strings) from
+    the outer, then re-MATCH by id in the inner.
+
+    This test was originally added in round 8 asserting the
+    ``WITH $r AS r`` rebind pattern; round 11 superseded that with the
+    safer id()-based pattern."""
     import importlib
     import inspect
 
@@ -1129,10 +1134,23 @@ def test_backfill_edge_inner_query_rebinds_apoc_variables():
     backfill_node_uuids = importlib.import_module("backfill_node_uuids")
 
     src = inspect.getsource(backfill_node_uuids.backfill_edge)
-    # The inner action string must rebind r, a, b.
-    assert "WITH $r AS r, $a AS a, $b AS b" in src, (
-        "backfill_edge inner apoc.periodic.iterate query missing the WITH $r AS r, $a AS a, $b AS b "
-        "rebinding — would error at runtime with 'Variable `r` not defined'"
+
+    # Outer must return the relationship id and endpoint uuids as primitives.
+    assert "id(r)" in src, "outer query must RETURN id(r) — primitive long, transaction-safe"
+    assert "a.uuid AS a_uuid" in src, "outer must RETURN a.uuid as a primitive string for cross-transaction safety"
+    assert "b.uuid AS b_uuid" in src, "outer must RETURN b.uuid as a primitive string for cross-transaction safety"
+
+    # Inner must re-MATCH the relationship by id and use $-bound primitive uuids.
+    assert "id(r) = $rid" in src, (
+        "inner must re-MATCH the relationship by id() in the new transaction — "
+        "raw entity refs (r, a, b) are not safe across apoc.periodic.iterate batches"
+    )
+    assert "$a_uuid" in src and "$b_uuid" in src, "inner must use bound $a_uuid / $b_uuid primitives in SET"
+
+    # Negative: the prior round-8 raw-entity rebind pattern must not return.
+    assert "WITH $r AS r, $a AS a, $b AS b" not in src, (
+        "round-8 raw-entity rebind pattern must NOT come back — entity handles "
+        "from outer query don't survive apoc.periodic.iterate's per-batch transactions"
     )
 
 
@@ -1280,6 +1298,153 @@ def test_backfill_includes_software_version_in_vulnerability_edges():
     assert ("IN", "Vulnerability", "SoftwareVersion") in edges, (
         "EDGES_TO_BACKFILL missing (IN, Vulnerability, SoftwareVersion)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 11 — bugbot findings on commit 3552369 (round 10)
+# ---------------------------------------------------------------------------
+
+
+def test_strawberry_optional_fields_have_explicit_default():
+    """Bugbot (round 11, LOW): a Strawberry @strawberry.type can mix
+    Optional fields with and without defaults only because Strawberry uses
+    ``kw_only=True`` on Python 3.10+. To not depend on framework-specific
+    handling, every Optional[...] field should carry an explicit ``= None``
+    default. Pin that the 9 production node types satisfy this."""
+    import importlib
+
+    if "graphql_schema" in sys.modules:
+        del sys.modules["graphql_schema"]
+    graphql_schema = importlib.import_module("graphql_schema")
+
+    classes_to_check = (
+        "CVE",
+        "Vulnerability",
+        "Indicator",
+        "ThreatActor",
+        "Malware",
+        "Technique",
+        "Tactic",
+        "Tool",
+        "Campaign",
+    )
+
+    import dataclasses
+
+    for cls_name in classes_to_check:
+        cls = getattr(graphql_schema, cls_name)
+        # Every dataclass field whose type starts with Optional[ must have a default.
+        for f in dataclasses.fields(cls):
+            type_str = str(f.type)
+            if "Optional" not in type_str:
+                continue
+            # MISSING sentinel means no default — that's the bug.
+            assert f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING, (
+                f"{cls_name}.{f.name}: Optional field has no explicit default — "
+                "relies on Strawberry's kw_only handling instead of standard dataclass semantics"
+            )
+
+
+def test_vulnerability_helpers_are_keyword_only():
+    """Bugbot (round 11, MED): the 4 vulnerability relationship helpers
+    were given keyword-only signatures so the round-9 positional reorder
+    cannot silently swap a stale caller's ``vuln_name`` into the ``cve_id``
+    slot. Pin the keyword-only contract via inspect.signature."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    helpers = (
+        "create_softwareversion_in_vulnerability",
+        "create_vulnerability_refers_to_cve",
+        "create_vulnerability_in_softwareversion",
+        "create_cve_refers_to_vulnerability",
+    )
+    for name in helpers:
+        fn = getattr(neo4j_client.Neo4jClient, name)
+        sig = inspect.signature(fn)
+        # Skip self; every other parameter must be KEYWORD_ONLY.
+        non_self = [p for p in sig.parameters.values() if p.name != "self"]
+        for p in non_self:
+            assert p.kind is inspect.Parameter.KEYWORD_ONLY, (
+                f"{name}({p.name}={p.kind.name}) — parameter must be KEYWORD_ONLY so "
+                "positional callers fail loudly instead of silently swapping cve_id and vuln_name"
+            )
+
+
+def test_misp_batch_uses_affects_for_vuln_cve_to_sector():
+    """Bugbot (round 11, LOW): canonical schema is
+    (Vulnerability|CVE)-[:AFFECTS]->(Sector). TARGETS is reserved for
+    (Indicator)-[:TARGETS]->(Sector). The round-10 q_tgt_vuln/q_tgt_cve
+    in create_misp_relationships_batch produced TARGETS for Vuln/CVE→Sector,
+    creating a duplicate edge type vs the AFFECTS emitted by
+    build_relationships.py 7b. Round 11 renamed both to q_aff_vuln/q_aff_cve
+    and switched to AFFECTS so the graph has one canonical edge type."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_misp_relationships_batch)
+
+    # Vuln/CVE → Sector queries must use AFFECTS.
+    assert "MERGE (v)-[r:AFFECTS]->(s)" in src, (
+        "Vuln/CVE→Sector edges must MERGE AFFECTS, not TARGETS (TARGETS is reserved for Indicator→Sector)"
+    )
+    # The legacy TARGETS path on Vulnerability/CVE must be gone.
+    # (TARGETS still appears for the Indicator-side q_tgt_ind, which is correct.)
+    assert "MATCH (v:Vulnerability {cve_id: row.cve_id})\n        MERGE (v)-[r:TARGETS]" not in src, (
+        "Vulnerability→Sector must not use TARGETS — switch to AFFECTS"
+    )
+    assert "MATCH (v:CVE {cve_id: row.cve_id})\n        MERGE (v)-[r:TARGETS]" not in src, (
+        "CVE→Sector must not use TARGETS — switch to AFFECTS"
+    )
+
+
+def test_create_vulnerability_sector_relationship_uses_affects():
+    """The standalone helper must also emit AFFECTS for Vuln/CVE→Sector
+    (mirrors the batched q_aff_vuln/q_aff_cve change above)."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_vulnerability_sector_relationship)
+    assert "MERGE (v)-[r:AFFECTS]->(s)" in src, (
+        "create_vulnerability_sector_relationship must MERGE AFFECTS for Vuln/CVE→Sector"
+    )
+    assert "MERGE (v)-[r:TARGETS]->(s)" not in src, (
+        "the helper must not emit TARGETS for Vuln/CVE→Sector — TARGETS reserved for Indicator→Sector"
+    )
+
+
+def test_backfill_no_longer_lists_targets_for_vuln_or_cve():
+    """EDGES_TO_BACKFILL must drop the (TARGETS, Vulnerability, Sector) and
+    (TARGETS, CVE, Sector) tuples now that those edges are AFFECTS."""
+    import importlib
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill.EDGES_TO_BACKFILL)
+    assert ("TARGETS", "Vulnerability", "Sector") not in edges, "stale TARGETS Vulnerability→Sector still in backfill"
+    assert ("TARGETS", "CVE", "Sector") not in edges, "stale TARGETS CVE→Sector still in backfill"
+    # And the canonical AFFECTS entries must be present.
+    assert ("AFFECTS", "Vulnerability", "Sector") in edges
+    assert ("AFFECTS", "CVE", "Sector") in edges
+    # TARGETS Indicator→Sector remains (canonical).
+    assert ("TARGETS", "Indicator", "Sector") in edges
 
 
 def test_merge_missiondependency_refuses_missing_dependency_id():

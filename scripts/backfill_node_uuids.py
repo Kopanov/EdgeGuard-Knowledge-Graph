@@ -74,9 +74,12 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     ("IMPLEMENTS_TECHNIQUE", "Tool", "Technique"),
     ("ATTRIBUTED_TO", "Malware", "ThreatActor"),
     ("USES_TECHNIQUE", "Indicator", "Technique"),
+    # PR #33 round 11 (bugbot LOW): Vuln/CVE → Sector edges are AFFECTS,
+    # not TARGETS. TARGETS is reserved for Indicator → Sector. The legacy
+    # TARGETS-Vuln/TARGETS-CVE entries were removed — the producers in
+    # neo4j_client.py (q_aff_vuln, q_aff_cve) and create_vulnerability_sector_relationship
+    # both emit AFFECTS now.
     ("TARGETS", "Indicator", "Sector"),
-    ("TARGETS", "Vulnerability", "Sector"),
-    ("TARGETS", "CVE", "Sector"),
     ("AFFECTS", "Vulnerability", "Sector"),
     ("AFFECTS", "CVE", "Sector"),
     ("IN_TACTIC", "Technique", "Tactic"),
@@ -263,22 +266,22 @@ def backfill_edge(
     if dry_run:
         return total
 
-    # Bugbot (PR #33 round 8, HIGH): apoc.periodic.iterate forwards the outer
-    # query's RETURN columns into the inner query as $-prefixed parameters.
-    # The inner Cypher must rebind them as variables via WITH $col AS col
-    # before referencing them — without the rebind, ``r``, ``a``, ``b`` in the
-    # SET clause are unbound and the query fails with "Variable `r` not
-    # defined". Same convention as every other apoc.periodic.iterate call in
-    # this codebase (build_relationships.py, run_pipeline.py).
+    # Bugbot (PR #33 round 11, MED): apoc.periodic.iterate runs the inner
+    # query in a NEW transaction per batch. Raw entity references (r, a, b)
+    # from the outer query cannot be safely accessed in that new transaction
+    # — the entity handle was bound in the outer transaction's lifetime. Per
+    # APOC docs, the safe pattern is to RETURN id(r), id(a), id(b) as
+    # primitive long values from the outer, then re-MATCH by id in the inner
+    # (which binds fresh entity handles in the inner transaction).
     update_query = f"""
     CALL apoc.periodic.iterate(
         'MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label})
          WHERE (r.src_uuid IS NULL OR r.trg_uuid IS NULL)
            AND a.uuid IS NOT NULL AND b.uuid IS NOT NULL
-         RETURN r, a, b',
-        'WITH $r AS r, $a AS a, $b AS b
-         SET r.src_uuid = coalesce(r.src_uuid, a.uuid),
-             r.trg_uuid = coalesce(r.trg_uuid, b.uuid)',
+         RETURN id(r) AS rid, a.uuid AS a_uuid, b.uuid AS b_uuid',
+        'MATCH ()-[r]-() WHERE id(r) = $rid
+         SET r.src_uuid = coalesce(r.src_uuid, $a_uuid),
+             r.trg_uuid = coalesce(r.trg_uuid, $b_uuid)',
         {{batchSize: $batch, parallel: false}}
     )
     YIELD batches, total

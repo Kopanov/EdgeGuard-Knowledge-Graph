@@ -2033,7 +2033,12 @@ class Neo4jClient:
             return False
 
     def create_vulnerability_sector_relationship(self, cve_id: str, sector_name: str, source_id: str = "misp") -> bool:
-        """Create TARGETS relationship: Vulnerability/CVE -> Sector.
+        """Create AFFECTS relationship: Vulnerability/CVE -> Sector.
+
+        PR #33 round 11 (bugbot LOW): edge type changed from TARGETS to
+        AFFECTS to match the canonical schema (TARGETS reserved for
+        Indicator → Sector; Vuln/CVE → Sector is AFFECTS — see
+        build_relationships.py 7b query and ARCHITECTURE.md).
 
         Handles both label variants:
         - Vulnerability: items from MISP/non-NVD sources
@@ -2071,18 +2076,18 @@ class Neo4jClient:
             r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
 
-        # Vulnerability label (MISP/non-NVD)
+        # Vulnerability label (MISP/non-NVD) — AFFECTS per canonical schema.
         vuln_query = f"""
         MATCH (v:Vulnerability {{cve_id: $cve_id}})
         MATCH (s:Sector {{name: $sector_name}})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         {rel_props}
         """
-        # CVE label (NVD — ResilMesh schema)
+        # CVE label (NVD — ResilMesh schema) — AFFECTS per canonical schema.
         cve_query = f"""
         MATCH (v:CVE {{cve_id: $cve_id}})
         MATCH (s:Sector {{name: $sector_name}})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         {rel_props}
         """
 
@@ -2308,9 +2313,9 @@ class Neo4jClient:
                     cid = normalize_cve_id_for_graph(fk.get("cve_id"))
                     if cid:
                         # tgt_vuln_rows is replayed against BOTH Vulnerability and CVE
-                        # labels (q_tgt_vuln + q_tgt_cve). With Mechanism B uuids, no
-                        # per-label precomputation is needed — each template reads its
-                        # MATCHed node's .uuid directly.
+                        # labels (q_aff_vuln + q_aff_cve, AFFECTS edges). With
+                        # Mechanism B uuids, no per-label precomputation is needed —
+                        # each template reads its MATCHed node's .uuid directly.
                         tgt_vuln_rows.append(
                             {
                                 "cve_id": cid,
@@ -2504,7 +2509,11 @@ class Neo4jClient:
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
             r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
-        q_tgt_vuln = """
+        # PR #33 round 11 (bugbot LOW): Vulnerability/CVE → Sector edges use
+        # AFFECTS, not TARGETS. TARGETS is reserved for Indicator → Sector
+        # (see q_tgt_ind below + build_relationships.py 7a). Vuln/CVE → Sector
+        # is AFFECTS (build_relationships.py 7b + ARCHITECTURE.md edges table).
+        q_aff_vuln = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
         ON CREATE SET s.created_at = datetime(),
@@ -2513,7 +2522,7 @@ class Neo4jClient:
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:Vulnerability {cve_id: row.cve_id})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
@@ -2527,7 +2536,7 @@ class Neo4jClient:
             r.src_uuid = coalesce(r.src_uuid, v.uuid),
             r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
-        q_tgt_cve = """
+        q_aff_cve = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
         ON CREATE SET s.created_at = datetime(),
@@ -2536,7 +2545,7 @@ class Neo4jClient:
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:CVE {cve_id: row.cve_id})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
@@ -2630,9 +2639,9 @@ class Neo4jClient:
                 # reads its MATCHed node's bound .uuid directly (Mechanism B), so
                 # the same row dict works for both queries.
                 time.sleep(1)
-                _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_rows)
+                _run_rows(session, "AFFECTS_vulnerability", q_aff_vuln, tgt_vuln_rows)
                 time.sleep(1)
-                _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_rows)
+                _run_rows(session, "AFFECTS_cve", q_aff_cve, tgt_vuln_rows)
             if expl_rows:
                 # Same as TARGETS_vuln/cve — Mechanism B uuids mean one row dict
                 # serves both EXPLOITS templates without any precomputed swap.
@@ -3677,15 +3686,19 @@ class Neo4jClient:
             return False
 
     # 7. SoftwareVersion IN Vulnerability
-    def create_softwareversion_in_vulnerability(self, version: str, cve_id: str, vuln_name: str = None) -> bool:
+    def create_softwareversion_in_vulnerability(self, *, version: str, cve_id: str, vuln_name: str = None) -> bool:
         """Create IN relationship: SoftwareVersion -> Vulnerability.
 
         PR #33 round 9: MATCH switched from {name: vuln_name} to {cve_id: cve_id}
         — Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS),
         not name. The previous form silently failed to find any Vulnerability
         node because Vulnerability MERGEs are keyed on cve_id everywhere.
-        ``vuln_name`` is retained as an optional kwarg for log readability and
-        signature back-compat; it is no longer used in the MATCH.
+        ``vuln_name`` is retained as an optional kwarg for log readability;
+        it is no longer used in the MATCH.
+
+        PR #33 round 11 (bugbot MED): keyword-only signature — the round-9
+        positional reorder would silently swap values for any caller that
+        had passed positional args. Forcing keyword-only fails loudly.
         """
         query = """
         MATCH (sv:SoftwareVersion {version: $version})
@@ -4250,14 +4263,18 @@ class Neo4jClient:
             return False
 
     # 35. Vulnerability REFERS_TO CVE
-    def create_vulnerability_refers_to_cve(self, cve_id: str, vuln_name: str = None) -> bool:
+    def create_vulnerability_refers_to_cve(self, *, cve_id: str, vuln_name: str = None) -> bool:
         """Create REFERS_TO relationship: Vulnerability -> CVE.
 
-        PR #33 round 9: signature reordered + MATCH switched from
-        {name: vuln_name} to {cve_id: cve_id}. Vulnerability's natural key
-        is cve_id, not name. Note: the canonical bridge_vulnerability_cve
-        query in enrichment_jobs.py creates the same REFERS_TO edge via the
-        cve_id natural key — this helper is a single-pair convenience alias.
+        Keyword-only (PR #33 round 11): forces callers to name the cve_id
+        argument so the round-9 positional reorder can't silently swap a
+        legacy ``vuln_name``-first call into a cve_id slot.
+
+        PR #33 round 9: MATCH switched from {name: vuln_name} to
+        {cve_id: cve_id}. Vulnerability's natural key is cve_id, not name.
+        Note: the canonical bridge_vulnerability_cve query in
+        enrichment_jobs.py creates the same REFERS_TO edge via the cve_id
+        natural key — this helper is a single-pair convenience alias.
         """
         query = """
         MATCH (v:Vulnerability {cve_id: $cve_id})
@@ -4281,11 +4298,13 @@ class Neo4jClient:
             return False
 
     # 36. Vulnerability IN SoftwareVersion
-    def create_vulnerability_in_softwareversion(self, cve_id: str, version: str, vuln_name: str = None) -> bool:
+    def create_vulnerability_in_softwareversion(self, *, cve_id: str, version: str, vuln_name: str = None) -> bool:
         """Create IN relationship: Vulnerability -> SoftwareVersion.
 
-        PR #33 round 9: signature reordered + MATCH switched from
-        {name: vuln_name} to {cve_id: cve_id}.
+        Keyword-only (PR #33 round 11) — see sibling helper docstring.
+
+        PR #33 round 9: MATCH switched from {name: vuln_name} to
+        {cve_id: cve_id}.
         """
         query = """
         MATCH (v:Vulnerability {cve_id: $cve_id})
@@ -4310,8 +4329,10 @@ class Neo4jClient:
             return False
 
     # 37. CVE REFERS_TO Vulnerability
-    def create_cve_refers_to_vulnerability(self, cve_id: str, vuln_name: str = None) -> bool:
+    def create_cve_refers_to_vulnerability(self, *, cve_id: str, vuln_name: str = None) -> bool:
         """Create REFERS_TO relationship: CVE -> Vulnerability.
+
+        Keyword-only (PR #33 round 11) — see sibling helper docstring.
 
         PR #33 round 9: MATCH switched from {name: vuln_name} to
         {cve_id: cve_id}. Vulnerability's natural key is cve_id.
