@@ -412,13 +412,22 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     #
                     # Parameterized via apoc.periodic.iterate's ``params`` config so $eid and
                     # $conf are safely bound inside both the matcher and the action.
+                    #
+                    # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
+                    # apoc.periodic.iterate runs the inner action in a NEW transaction
+                    # per batch — raw entity references from the outer query (``r``)
+                    # cannot safely be used as bound entities in the inner. Same
+                    # pattern as scripts/backfill_node_uuids.py round 11: outer
+                    # returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
+                    # ``MATCH ()-[r]->() WHERE id(r) = $rid`` to bind a fresh handle.
                     large_batch_query = (
                         "CALL apoc.periodic.iterate("
                         "  'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids "
                         "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
                         '  WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
-                        "  RETURN r', "
-                        "  'WITH $r AS r SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
+                        "  RETURN id(r) AS rid', "
+                        "  'MATCH ()-[r]->() WHERE id(r) = $rid "
+                        "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
                         "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
                         ") YIELD total "
                         "RETURN total AS updated"

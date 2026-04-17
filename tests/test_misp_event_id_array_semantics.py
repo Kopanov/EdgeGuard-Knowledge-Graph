@@ -166,6 +166,18 @@ def test_calibrate_large_event_query_is_parameterized_array_only():
         "large-event query must be array-only (no scalar leg)"
     )
 
+    # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
+    # Outer must RETURN id(r) (primitive long, transaction-safe);
+    # inner must re-MATCH the relationship by id() in the new tx.
+    assert "RETURN id(r) AS rid" in big, (
+        "outer query must RETURN id(r) — raw entity refs are unsafe across apoc.periodic.iterate per-batch transactions"
+    )
+    assert "id(r) = $rid" in big, "inner action must re-MATCH the relationship by id() in the new transaction"
+    assert "WITH $r AS r" not in big, (
+        "round-19 dropped the unsafe `WITH $r AS r` rebind — entity handles from outer "
+        "query don't survive apoc.periodic.iterate's per-batch transactions"
+    )
+
     # Negative: no f-string interpolation residue.
     captured_with_params = [(c, p) for c, p in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
     for cypher, params in captured_with_params:

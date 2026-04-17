@@ -1923,3 +1923,65 @@ def test_bridge_vulnerability_cve_logs_orphan_count():
         "expected_query must MATCH the CVE that the inner action would link"
     )
     assert "no matching CVE" in src, "operator-facing log must mention orphan CVE count"
+
+
+# ---------------------------------------------------------------------------
+# Round 19 — bugbot findings on commit 39ec502
+# ---------------------------------------------------------------------------
+
+
+def test_calibrate_large_event_uses_id_based_rebinding():
+    """Bugbot (round 19, MED): the round-13 large-event apoc.periodic.iterate
+    in calibrate_cooccurrence_confidence used ``WITH $r AS r`` to alias the
+    relationship returned from the outer query — the SAME unsafe cross-
+    transaction pattern that round 11 fixed in the backfill script.
+
+    apoc.periodic.iterate runs each batch in a NEW transaction; raw entity
+    references from the outer can't be safely accessed in the inner.
+    Round 19 applies the id()-based pattern: outer RETURNs id(r), inner
+    re-MATCHes by id."""
+    import importlib
+    import inspect
+
+    if "enrichment_jobs" in sys.modules:
+        del sys.modules["enrichment_jobs"]
+    enrichment_jobs = importlib.import_module("enrichment_jobs")
+
+    src = inspect.getsource(enrichment_jobs.calibrate_cooccurrence_confidence)
+    # Outer must return id(r) AS rid (primitive, transaction-safe).
+    assert "RETURN id(r) AS rid" in src, "outer must RETURN id(r) AS rid — raw entity refs not safe across apoc batches"
+    # Inner must re-MATCH by id.
+    assert "id(r) = $rid" in src, "inner must re-MATCH the relationship by id() in the new transaction"
+    # Negative: the round-13 unsafe `WITH $r AS r` alias must be gone.
+    assert "WITH $r AS r" not in src, (
+        "round-19 dropped the unsafe `WITH $r AS r` cross-tx rebind in calibrate_cooccurrence_confidence"
+    )
+
+
+def test_backfill_lists_both_has_cvss_directions():
+    """Bugbot has flagged HAS_CVSS_v* reverse-direction entries in
+    EDGES_TO_BACKFILL as 'redundant' (PR #34 round 18, false positive).
+    They are NOT redundant: ``_merge_cvss_node`` creates two physically-
+    separate edges per CVE↔CVSS pair (one in each direction), each with
+    its own r.src_uuid / r.trg_uuid that must be backfilled. Pin both
+    directions present so a future bugbot rerun can be quickly disproven."""
+    import importlib
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill.EDGES_TO_BACKFILL)
+    for v in ("v2", "v30", "v31", "v40"):
+        rel = f"HAS_CVSS_{v}"
+        cvss_label = f"CVSS{v}"
+        forward = (rel, "CVE", cvss_label)
+        reverse = (rel, cvss_label, "CVE")
+        assert forward in edges, f"backfill missing forward edge ({forward})"
+        assert reverse in edges, (
+            f"backfill missing REVERSE edge ({reverse}) — _merge_cvss_node creates BOTH "
+            "directions (CVE→CVSS and CVSS→CVE), so both must be backfilled"
+        )

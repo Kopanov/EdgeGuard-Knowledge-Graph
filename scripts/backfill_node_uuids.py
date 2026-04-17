@@ -83,7 +83,13 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     ("AFFECTS", "Vulnerability", "Sector"),
     ("AFFECTS", "CVE", "Sector"),
     ("IN_TACTIC", "Technique", "Tactic"),
-    # CVE / CVSS sub-nodes
+    # CVE / CVSS sub-nodes — BOTH directions are intentional. ``_merge_cvss_node``
+    # in neo4j_client.py creates two physically-separate edges per CVE↔CVSS pair:
+    # ``(cve)-[r1:HAS_CVSS_*]->(cvss)`` AND ``(cvss)-[r2:HAS_CVSS_*]->(cve)``.
+    # Each edge has its own r.src_uuid / r.trg_uuid that must be stamped, so the
+    # backfill MUST visit both directions. Bugbot has flagged the reverse entries
+    # as "redundant" twice (PR #34 round 18); they are not — pinned by
+    # test_backfill_lists_both_has_cvss_directions.
     ("HAS_CVSS_v2", "CVE", "CVSSv2"),
     ("HAS_CVSS_v30", "CVE", "CVSSv30"),
     ("HAS_CVSS_v31", "CVE", "CVSSv31"),
