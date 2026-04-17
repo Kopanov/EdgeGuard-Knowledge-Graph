@@ -1675,3 +1675,83 @@ def test_misp_attributes_dropped_metric_exists_and_is_emitted():
     assert "record_misp_attribute_dropped" in rmtn_src, (
         "run_misp_to_neo4j must call record_misp_attribute_dropped in its dedup path"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 14 — bugbot findings on commits ab48fe1 / a27bad1
+# ---------------------------------------------------------------------------
+
+
+def test_indicates_cooccurrence_query_sets_updated_at():
+    """Bugbot (round 14, MED): the round-7 SET clause for src_uuid/trg_uuid
+    on the INDICATES co-occurrence query (#4) in build_relationships.py
+    omitted ``r.updated_at = datetime()``. Every other relationship query
+    in this file sets r.updated_at; the delta-sync recipe in CLOUD_SYNC.md
+    filters edges by ``r.updated_at >= ...`` — without it, INDICATES
+    co-occurrence edges were silently excluded from cloud-sync."""
+    import importlib
+    import inspect
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    src = inspect.getsource(build_relationships.build_relationships)
+    block_start = src.find("4. Indicator → Malware (INDICATES)")
+    block_end = src.find("5. ThreatActor → Technique", block_start)
+    assert block_start > 0 and block_end > block_start, "INDICATES block not found"
+    block = src[block_start:block_end]
+    assert "r.updated_at = datetime()" in block, (
+        "INDICATES co-occurrence inner query must SET r.updated_at — "
+        "without it, delta-sync cloud filter excludes these edges"
+    )
+
+
+def test_alert_processor_zone_type_guard_present():
+    """Bugbot (round 14, LOW): the round-12 cleanup removed the
+    ``isinstance(zone, list)`` guard in alert_processor.py. ``zone`` comes
+    from Neo4j via a Cypher read; if any node has a scalar string value
+    (out-of-band write, schema drift, legacy DB), ``len(zone)`` would count
+    characters and the later ``.append(tag)`` would crash with
+    AttributeError. Round 14 re-adds the defensive guard."""
+    import importlib
+    import inspect
+
+    if "alert_processor" in sys.modules:
+        del sys.modules["alert_processor"]
+    try:
+        alert_processor = importlib.import_module("alert_processor")
+    except Exception:
+        import pytest
+
+        pytest.skip("alert_processor cannot be imported in this test environment")
+        return
+
+    src = inspect.getsource(alert_processor)
+    assert "isinstance(zone, list)" in src, (
+        "alert_processor must guard zone with isinstance check — "
+        "round-12 removed it, round-14 restores it (defensive against scalar string from Neo4j read)"
+    )
+
+
+def test_edge_endpoint_uuids_is_still_used_in_neo4j_client():
+    """Bugbot (round 14, LOW) flagged ``edge_endpoint_uuids`` as 'likely
+    unused'. Verified false: it IS called by ``_upsert_sourced_relationship``
+    in neo4j_client.py. Pin the call site so a future refactor doesn't
+    silently drop the import + helper."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client)
+    assert "edge_endpoint_uuids(" in src, (
+        "edge_endpoint_uuids must be called somewhere in neo4j_client; "
+        "if all callers are removed, also remove the import"
+    )
+    upsert_src = inspect.getsource(neo4j_client.Neo4jClient._upsert_sourced_relationship)
+    assert "edge_endpoint_uuids(" in upsert_src, (
+        "_upsert_sourced_relationship must use edge_endpoint_uuids to compute Source-edge uuids"
+    )

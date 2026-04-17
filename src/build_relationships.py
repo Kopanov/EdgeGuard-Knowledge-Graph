@@ -245,7 +245,13 @@ def build_relationships():
             '  r.match_type = "misp_cooccurrence", '
             '  r.source_id = "misp_cooccurrence", '
             "  r.created_at = datetime() "
-            "SET r.src_uuid = coalesce(r.src_uuid, i.uuid), "
+            # PR #33 round 14 (bugbot MED): add r.updated_at — every other
+            # relationship query in this file sets it, and the delta-sync recipe
+            # in CLOUD_SYNC.md filters edges by ``r.updated_at >= ...`` to
+            # extract the recent-changes window. Without it, INDICATES
+            # co-occurrence edges would be silently excluded from cloud sync.
+            "SET r.updated_at = datetime(), "
+            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
         if not _safe_run_batched(
