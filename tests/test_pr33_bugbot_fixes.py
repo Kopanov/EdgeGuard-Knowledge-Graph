@@ -3057,3 +3057,150 @@ def test_adding_a_fifth_zone_propagates_through_all_derived_sources():
         for mod in ("build_relationships", "query_api"):
             if mod in sys.modules:
                 del sys.modules[mod]
+
+
+# ---------------------------------------------------------------------------
+# Round 25 — red-team adversarial findings
+# ---------------------------------------------------------------------------
+
+
+def test_merge_resilmesh_user_normalizes_domain_none_and_empty():
+    """PR #34 round 25 (red-team, CRITICAL): ``merge_resilmesh_user`` used
+    ``data.get("domain", "default")`` which returns ``"default"`` ONLY when
+    the key is missing. If the caller passed ``domain=None`` or
+    ``domain=""`` explicitly (common from upstream parsers), those falsy
+    values flowed through to ``compute_node_uuid`` unchanged, producing
+    DIFFERENT uuids for the same logical user across different caller
+    code paths.
+
+    Fix: ``data.get("domain") or "default"`` collapses None/""/missing to
+    the single canonical ``"default"`` form. Pin by invoking the merge
+    via a fake driver and asserting the uuid is identical for all three
+    domain forms."""
+    import importlib
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+    from node_identity import compute_node_uuid
+
+    captured: list = []
+
+    class _CapSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def run(self, query, **params):
+            captured.append((query, params))
+
+            class _R:
+                def single(self):
+                    return None
+
+                def __iter__(self):
+                    return iter([])
+
+            return _R()
+
+    class _CapDriver:
+        def session(self, **_kw):
+            return _CapSession()
+
+        def close(self):
+            pass
+
+    # Invoke with three equivalent "no domain specified" forms.
+    for domain_input in ({}, {"domain": None}, {"domain": ""}):
+        captured.clear()
+        client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+        client.driver = _CapDriver()
+        ok = client.merge_resilmesh_user({"username": "alice", **domain_input})
+        assert ok, f"merge failed for {domain_input}"
+        assert captured, f"no Cypher issued for {domain_input}"
+        _, params = captured[0]
+        # All three cases must produce the same node_uuid (the "default" form).
+        expected_uuid = compute_node_uuid("User", {"username": "alice", "domain": "default"})
+        assert params["node_uuid"] == expected_uuid, (
+            f"User uuid diverged for domain_input={domain_input}: "
+            f"got {params['node_uuid']}, expected {expected_uuid} (default form)"
+        )
+        assert params["domain"] == "default", (
+            f"domain param must normalize to 'default' for {domain_input}, got {params['domain']!r}"
+        )
+
+
+def test_every_session_run_has_explicit_timeout():
+    """PR #34 round 25 (bug hunter, CRITICAL): 40+ ``session.run(...)``
+    calls in neo4j_client.py were missing the ``timeout=`` keyword argument.
+    Without a timeout, a Neo4j-side stall (unresponsive cluster, long GC,
+    blocked query) hangs the calling Python process indefinitely —
+    freezing pipeline workers, health checks, and API endpoints.
+
+    This test scans the source of ``neo4j_client.py`` and asserts every
+    ``session.run(`` call has a ``timeout`` keyword somewhere in its
+    argument list. Uses paren-balance tracking to handle multi-line calls.
+    """
+    import importlib
+    import re
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+    src_path = neo4j_client.__file__
+    with open(src_path) as fh:
+        text = fh.read()
+
+    misses = []
+    i = 0
+    while True:
+        m = re.search(r"session\.run\(", text[i:])
+        if not m:
+            break
+        open_end = i + m.end()
+        depth = 1
+        j = open_end
+        while j < len(text) and depth > 0:
+            ch = text[j]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        body = text[open_end:j]
+        if "timeout" not in body:
+            line_no = text[: i + m.start()].count("\n") + 1
+            misses.append((line_no, body[:80]))
+        i = j + 1
+
+    assert not misses, f"session.run() calls without timeout= found (production hang risk):\n" + "\n".join(
+        f"  line {ln}: {snippet!r}" for ln, snippet in misses
+    )
+
+
+def test_ci_lint_config_includes_scripts_directory():
+    """PR #34 round 25 (prod readiness, BLOCKING): the CI lint/typecheck
+    jobs previously only scanned ``src/ dags/ tests/`` — the ``scripts/``
+    directory was NOT linted. This bit us twice during this PR (once when
+    debug_zone_check.py moved from src/ to scripts/ and the E402 ignore
+    was stale; once when backfill_node_uuids.py had an un-annotated
+    list). Round 25 adds ``scripts/`` to the CI lint paths so
+    production-operator scripts get the same hygiene gates as src code.
+    """
+    import os
+
+    ci_path = os.path.join(os.path.dirname(__file__), "..", ".github", "workflows", "ci.yml")
+    with open(ci_path) as fh:
+        ci_content = fh.read()
+
+    assert "ruff check src/ dags/ tests/ scripts/" in ci_content, (
+        "CI ruff check must include scripts/ — production scripts need lint hygiene too"
+    )
+    assert "ruff format --check src/ dags/ tests/ scripts/" in ci_content, (
+        "CI ruff format --check must include scripts/"
+    )
+    assert "mypy src/ scripts/" in ci_content, "CI mypy must include scripts/"

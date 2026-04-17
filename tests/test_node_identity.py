@@ -276,3 +276,127 @@ def test_neo4j_to_stix_type_map_is_frozen_for_threat_intel_core():
     assert NEO4J_TO_STIX_TYPE["Tool"] == "tool"
     assert NEO4J_TO_STIX_TYPE["Sector"] == "identity"
     assert NEO4J_TO_STIX_TYPE["Campaign"] == "campaign"
+
+
+# ---------------------------------------------------------------------------
+# Round 25 — red-team adversarial canonicalization fixes
+# ---------------------------------------------------------------------------
+
+
+def test_pipe_separator_escape_eliminates_collision():
+    """PR #34 round 25 (red-team, HIGH): the Indicator canonical string uses
+    ``|`` as the field separator. Before round 25,
+    ``Indicator(type="ipv4|x", value="y")`` and
+    ``Indicator(type="ipv4", value="x|y")`` BOTH rendered as ``"ipv4|x|y"``
+    → identical canonical → identical uuid → silent collision of two
+    logically distinct entities.
+
+    Fix: ``canonicalize_field_value`` replaces ``|`` with ``%7C`` BEFORE
+    joining, so the joined form is unambiguous. Pin the collision
+    elimination by computing both uuids and asserting they differ."""
+    from node_identity import compute_node_uuid
+
+    u1 = compute_node_uuid("Indicator", {"indicator_type": "ipv4|x", "value": "y"})
+    u2 = compute_node_uuid("Indicator", {"indicator_type": "ipv4", "value": "x|y"})
+    assert u1 != u2, (
+        "pipe-separator collision not eliminated — Indicator canonical must escape '|' in values "
+        "so distinct (type, value) pairs produce distinct uuids"
+    )
+
+    # Common-case (no pipe) uuids must be UNCHANGED by the escape — this is
+    # a backward-compatibility contract. If this fails, every existing
+    # Indicator in production gets a new uuid at next MERGE.
+    u_common = compute_node_uuid("Indicator", {"indicator_type": "ipv4", "value": "203.0.113.5"})
+    # Frozen uuid from PR #33 round 10 era — must not change across round 25.
+    assert u_common == "6ca3af4a-4bf1-57c9-846d-ec8f80861fd0", (
+        "common-case Indicator uuid diverged — round-25 escape must be backward-compatible for values without '|'"
+    )
+
+
+def test_whitespace_is_stripped_in_canonical():
+    """PR #34 round 25 (red-team, MEDIUM): upstream feeds occasionally
+    deliver values with trailing/leading whitespace (``"APT 28 "`` vs
+    ``"APT 28"``). Before round 25 these produced DIFFERENT uuids,
+    creating duplicate-but-divergent-uuid nodes for the same logical
+    entity.
+
+    Fix: ``canonicalize_field_value`` calls ``.strip()`` before hashing."""
+    from node_identity import compute_node_uuid
+
+    u1 = compute_node_uuid("Malware", {"name": "APT 28"})
+    u2 = compute_node_uuid("Malware", {"name": "APT 28 "})
+    u3 = compute_node_uuid("Malware", {"name": "  APT 28"})
+    u4 = compute_node_uuid("Malware", {"name": "\tAPT 28\n"})
+    assert u1 == u2 == u3 == u4, (
+        "whitespace-different inputs must produce the same uuid after strip — "
+        f"got {u1[:8]} / {u2[:8]} / {u3[:8]} / {u4[:8]}"
+    )
+    # Internal whitespace must be preserved (only leading/trailing trimmed).
+    u_no_space = compute_node_uuid("Malware", {"name": "APT28"})
+    assert u1 != u_no_space, "internal whitespace is semantic — strip must only trim edges"
+
+
+def test_unicode_nfc_normalization():
+    """PR #34 round 25 (red-team, MEDIUM): Unicode has multiple visually-
+    identical byte sequences (NFC vs NFD). ``"Café"`` can be 4 codepoints
+    (NFC: C-a-f-é) or 5 (NFD: C-a-f-e-´ with combining accent). Same
+    glyphs, different bytes, different uuids under naive hashing.
+
+    Fix: ``canonicalize_field_value`` applies ``unicodedata.normalize("NFC", ...)``
+    so both forms collapse to the same uuid."""
+    import unicodedata
+
+    from node_identity import compute_node_uuid
+
+    nfc = "Café"  # single é codepoint
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd, "precondition: NFC and NFD forms must differ at the byte level"
+    u_nfc = compute_node_uuid("Malware", {"name": nfc})
+    u_nfd = compute_node_uuid("Malware", {"name": nfd})
+    assert u_nfc == u_nfd, (
+        f"NFC/NFD forms of visually-identical '{nfc}' must produce same uuid; got {u_nfc[:8]} vs {u_nfd[:8]}"
+    )
+
+
+def test_canonicalize_field_value_handles_none_preserves_falsy():
+    """Regression pin for PR #33 round 4: ``canonicalize_field_value``
+    must treat only ``None`` as "missing" — falsy values like 0, False,
+    0.0 are legitimate (port=0 is a valid NetworkService) and must NOT
+    collapse to empty string."""
+    from node_identity import canonicalize_field_value
+
+    assert canonicalize_field_value(None) == "", "None must collapse to empty string"
+    assert canonicalize_field_value(0) == "0", "port=0 (int) must NOT collapse to empty"
+    assert canonicalize_field_value(False) == "False", "False must NOT collapse to empty"
+    assert canonicalize_field_value(0.0) == "0.0", "0.0 must NOT collapse to empty"
+    assert canonicalize_field_value("") == "", "explicit empty string stays empty"
+
+
+def test_stix_parity_holds_for_edge_case_inputs():
+    """Round 25 adversarial inputs must preserve STIX↔Neo4j parity.
+    The ``_deterministic_id`` helper in stix_exporter.py applies the same
+    NFC+strip normalization as ``canonicalize_field_value`` so uuids
+    converge for edge-case inputs."""
+    from node_identity import canonicalize_field_value, compute_node_uuid
+    from stix_exporter import _deterministic_id
+
+    # Edge case 1: pipe in value
+    n1 = compute_node_uuid("Indicator", {"indicator_type": "ipv4", "value": "x|y"})
+    s1 = _deterministic_id(
+        "indicator",
+        f"{canonicalize_field_value('ipv4')}|{canonicalize_field_value('x|y')}",
+    )
+    assert n1 == s1.split("--", 1)[1], "STIX parity broken for pipe-in-value Indicator"
+
+    # Edge case 2: whitespace in malware name
+    n2 = compute_node_uuid("Malware", {"name": "APT 28 "})
+    s2 = _deterministic_id("malware", "APT 28 ")
+    assert n2 == s2.split("--", 1)[1], "STIX parity broken for whitespace malware name"
+
+    # Edge case 3: NFD unicode
+    import unicodedata
+
+    nfd = unicodedata.normalize("NFD", "Café")
+    n3 = compute_node_uuid("Malware", {"name": nfd})
+    s3 = _deterministic_id("malware", nfd)
+    assert n3 == s3.split("--", 1)[1], "STIX parity broken for NFD unicode malware name"

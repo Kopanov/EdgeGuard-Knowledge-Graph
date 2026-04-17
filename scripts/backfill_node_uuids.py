@@ -171,6 +171,7 @@ def count_null_uuid_nodes(client: Neo4jClient, label: str) -> int:
     # validate before interpolation per the project's Cypher-injection rules.
     _validate_label(label)
     query = f"MATCH (n:{label}) WHERE n.uuid IS NULL OR n.uuid = '' RETURN count(n) AS c"
+    assert client.driver is not None  # narrowed by main()'s check
     with client.driver.session(default_access_mode="READ") as s:
         rec = s.run(query).single()
         return rec["c"] if rec else 0
@@ -210,6 +211,7 @@ def backfill_label(client: Neo4jClient, label: str, batch_size: int, dry_run: bo
 
     written = 0
     while True:
+        assert client.driver is not None  # narrowed by main()'s check
         with client.driver.session(default_access_mode="READ") as s:
             rows = list(s.run(read_query, limit=batch_size))
         if not rows:
@@ -227,6 +229,7 @@ def backfill_label(client: Neo4jClient, label: str, batch_size: int, dry_run: bo
             f"  AND (n.uuid IS NULL OR n.uuid = '') "
             f"SET n.uuid = row.uuid"
         )
+        assert client.driver is not None  # narrowed by main()'s check
         with client.driver.session() as s:
             s.run(write_query, rows=payload)
         written += len(payload)
@@ -274,6 +277,7 @@ def backfill_edge(
         f"  AND (a.uuid IS NULL OR b.uuid IS NULL) "
         f"RETURN count(r) AS c"
     )
+    assert client.driver is not None  # narrowed by main()'s check
     with client.driver.session(default_access_mode="READ") as s:
         rec = s.run(count_query).single()
         total = rec["c"] if rec else 0
@@ -323,6 +327,7 @@ def backfill_edge(
     YIELD batches, total
     RETURN batches, total
     """
+    assert client.driver is not None  # narrowed by main()'s check
     with client.driver.session() as s:
         rec = s.run(update_query, batch=batch_size).single()
         committed = rec["total"] if rec else 0

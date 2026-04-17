@@ -77,6 +77,7 @@ class Neo4jClearer:
         labels_to_count = EDGEGUARD_LABELS if edgeguard_only else []
 
         try:
+            assert self.client.driver is not None
             with self.client.driver.session() as session:
                 if not labels_to_count:
                     result = session.run("CALL db.labels() YIELD label RETURN label")
@@ -102,6 +103,7 @@ class Neo4jClearer:
         counts = {}
 
         try:
+            assert self.client.driver is not None
             with self.client.driver.session() as session:
                 # Get all relationship types
                 result = session.run("CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType")
@@ -179,6 +181,7 @@ class Neo4jClearer:
         logger.info("\n[WARN]  Deleting data...")
 
         try:
+            assert self.client.driver is not None
             with self.client.driver.session() as session:
                 if full_wipe:
                     session.run("MATCH ()-[r]->() DELETE r")
@@ -223,6 +226,7 @@ class Neo4jClearer:
         logger.info(f"\n[CLEAN] Clearing {label} nodes...")
 
         try:
+            assert self.client.driver is not None
             with self.client.driver.session() as session:
                 # Get count
                 result = session.run(f"MATCH (n:{label}) RETURN count(n) as count")

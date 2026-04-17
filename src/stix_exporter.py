@@ -37,6 +37,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import unicodedata
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -78,9 +79,19 @@ def _deterministic_id(obj_type: str, natural_key: str) -> str:
 
     STIX IDs look like ``indicator--<uuid>``; we use UUIDv5 with a fixed
     namespace so the same (type, key) pair always yields the same ID.
+
+    PR #34 round 25: apply the same NFC + strip normalization that
+    ``node_identity.canonicalize_field_value`` applies on the Neo4j side,
+    so cross-system uuid parity holds even for edge-case inputs
+    (trailing whitespace, NFD-encoded strings). The ``|``-escape is NOT
+    applied here because ``natural_key`` may already be a joined
+    multi-field string (e.g. ``"ipv4|203.0.113.5"``) — callers of this
+    function at multi-field SDO types MUST pre-escape each individual
+    field via ``node_identity.canonicalize_field_value`` BEFORE joining.
     """
     if not natural_key:
         natural_key = f"__missing__:{obj_type}"
+    natural_key = unicodedata.normalize("NFC", natural_key).strip()
     name = f"{obj_type}:{natural_key}".lower()
     return f"{obj_type}--{uuid.uuid5(EDGEGUARD_STIX_NAMESPACE, name)}"
 
@@ -544,7 +555,19 @@ class StixExporter:
         value = props.get("value", "")
         ind_type = props.get("indicator_type", "")
         pattern = _build_pattern(ind_type, value)
-        stix_id = _deterministic_id("indicator", f"{ind_type}|{value}")
+        # PR #34 round 25: pre-escape individual fields via
+        # ``canonicalize_field_value`` BEFORE joining with ``|`` so the
+        # resulting natural_key string cannot be ambiguous with another
+        # (type, value) pair where ``|`` appears in a different position.
+        # E.g. Indicator(type="ipv4|x", value="y") and
+        # Indicator(type="ipv4", value="x|y") used to both render as
+        # ``"ipv4|x|y"`` → same uuid → collision. Escaping disambiguates.
+        from node_identity import canonicalize_field_value
+
+        stix_id = _deterministic_id(
+            "indicator",
+            f"{canonicalize_field_value(ind_type)}|{canonicalize_field_value(value)}",
+        )
         obj = stix2.Indicator(
             id=stix_id,
             pattern=pattern,

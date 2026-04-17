@@ -57,6 +57,7 @@ modify them without a coordinated migration of the entire graph.
 
 from __future__ import annotations
 
+import unicodedata
 import uuid as _uuid_mod
 from typing import Any, Dict, Tuple
 
@@ -221,6 +222,45 @@ _LABEL_NATURAL_KEY_FIELDS: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def canonicalize_field_value(v: Any) -> str:
+    """Render a single natural-key field value to its canonical-string form.
+
+    Applied identically on both the Neo4j side (``compute_node_uuid``) and
+    the STIX side (``stix_exporter._deterministic_id``) — exported as a
+    public helper so the two paths stay in lockstep. Every edit here MUST
+    be mirrored in the STIX exporter's call sites (enforced by
+    ``tests/test_node_identity.py::test_neo4j_uuid_equals_stix_sdo_id_uuid_portion``).
+
+    Transformations applied, in order:
+
+    1. ``None`` → empty string ``""`` (explicit check — NEVER use ``v or ""``
+       which would also collapse 0, False, 0.0 and silently produce uuid
+       collisions with missing-key form; see PR #33 round 4).
+    2. ``unicodedata.normalize("NFC", ...)`` — canonicalize Unicode composition
+       so the visually-identical NFC ``"Café"`` (1 char é) and NFD
+       ``"Café"`` (combining grave + e) produce the same uuid. (PR #34
+       round 25: red-team audit surfaced that visually-same strings with
+       different byte sequences were producing divergent uuids.)
+    3. ``.strip()`` — trim leading/trailing whitespace. ``Malware("APT 28 ")``
+       and ``Malware("APT 28")`` are treated as the same logical entity.
+       (PR #34 round 25: trailing-space in upstream feed data was
+       producing duplicate-but-divergent-uuid Malware nodes.)
+    4. Replace ``|`` with ``%7C`` — the pipe character is the natural-key
+       field SEPARATOR when joining multi-field keys (e.g. Indicator's
+       ``type|value``). If a value itself contains ``|``, the joined form
+       becomes ambiguous: ``Indicator(type="ipv4|x", value="y")`` and
+       ``Indicator(type="ipv4", value="x|y")`` would both render as
+       ``"ipv4|x|y"`` and collide on uuid. Escaping eliminates the
+       ambiguity. (PR #34 round 25: red-team audit.)
+    """
+    if v is None:
+        return ""
+    s = unicodedata.normalize("NFC", str(v)).strip()
+    # ``%7C`` is the URL-encoding for ``|`` — visually distinct, safe for
+    # Cypher (no reserved chars), preserves canonical-string printability.
+    return s.replace("|", "%7C")
+
+
 def _natural_key_string(canonical_label: str, key_dict: Dict[str, Any]) -> str:
     """Per-label natural-key string serialization.
 
@@ -230,24 +270,18 @@ def _natural_key_string(canonical_label: str, key_dict: Dict[str, Any]) -> str:
     to a sorted ``key=value|...`` form (deterministic but no STIX parity).
 
     ``canonical_label`` MUST be already lowercased + stripped — caller's job.
+
+    PR #34 round 25: individual field values are routed through
+    ``canonicalize_field_value`` for NFC-normalize + strip + pipe-escape.
+    The same helper is called on the STIX side at every multi-field call
+    site so parity holds even for edge-case inputs.
     """
-
-    # Helper: render a single field value to its canonical-string form.
-    # Pre-2026-04 used ``str(v) or ""`` which collapsed any falsy value
-    # (0, False, 0.0) to the empty string — for NetworkService(port=0)
-    # that produced the same canonical as missing port, generating a
-    # uuid collision with the missing-key form. Bugbot caught this on
-    # PR #33 round 4. Use an explicit None check so legitimate falsy
-    # values (port=0, etc.) survive.
-    def _fmt(v: Any) -> str:
-        return "" if v is None else str(v)
-
     fields = _LABEL_NATURAL_KEY_FIELDS.get(canonical_label)
     if fields is not None:
-        return "|".join(_fmt(key_dict.get(f)) for f in fields)
+        return "|".join(canonicalize_field_value(key_dict.get(f)) for f in fields)
     # Generic fallback — topology / unknown labels. Deterministic but no
     # STIX-side counterpart, so parity isn't relevant.
-    parts = [f"{k}={_fmt(v)}" for k, v in sorted(key_dict.items())]
+    parts = [f"{k}={canonicalize_field_value(v)}" for k, v in sorted(key_dict.items())]
     return "|".join(parts)
 
 

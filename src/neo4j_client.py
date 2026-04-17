@@ -372,7 +372,8 @@ class Neo4jClient:
 
                 # Get database info
                 db_info = session.run(
-                    "CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition"
+                    "CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition",
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
                 db_record = db_info.single()
 
@@ -3086,6 +3087,7 @@ class Neo4jClient:
                     status=data.get("status"),
                     tag_list=tag_list,
                     version=data.get("version"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated IP: {address}")
             return True
@@ -3107,7 +3109,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, host_uuid=host_uuid)
+                session.run(query, hostname=hostname, host_uuid=host_uuid, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated Host: {hostname}")
             return True
         except Exception as e:
@@ -3139,7 +3141,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=device_id, device_uuid=device_uuid)
+                session.run(query, device_id=device_id, device_uuid=device_uuid, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated Device: {device_id}")
             return True
         except Exception as e:
@@ -3168,6 +3170,7 @@ class Neo4jClient:
                     subnet_uuid=subnet_uuid,
                     note=data.get("note"),
                     version=data.get("version"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated Subnet: {subnet_range}")
             return True
@@ -3197,6 +3200,7 @@ class Neo4jClient:
                     protocol=protocol,
                     ns_uuid=ns_uuid,
                     service=data.get("service"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated NetworkService: {port}/{protocol}")
             return True
@@ -3219,7 +3223,13 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=version, sv_uuid=sv_uuid, cve_timestamp=data.get("cve_timestamp"))
+                session.run(
+                    query,
+                    version=version,
+                    sv_uuid=sv_uuid,
+                    cve_timestamp=data.get("cve_timestamp"),
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
             logger.info(f"Created/updated SoftwareVersion: {version}")
             return True
         except Exception as e:
@@ -3240,7 +3250,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=name, app_uuid=app_uuid)
+                session.run(query, name=name, app_uuid=app_uuid, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated Application: {name}")
             return True
         except Exception as e:
@@ -3268,7 +3278,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=permission, role_uuid=role_uuid)
+                session.run(query, permission=permission, role_uuid=role_uuid, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated Role: {permission}")
             return True
         except Exception as e:
@@ -3285,7 +3295,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=data.get("name"))
+                session.run(query, name=data.get("name"), timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated Component: {data.get('name')}")
             return True
         except Exception as e:
@@ -3311,6 +3321,7 @@ class Neo4jClient:
                     criticality=data.get("criticality"),
                     structure=data.get("structure"),
                     description=data.get("description"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated Mission: {data.get('name')}")
             return True
@@ -3328,7 +3339,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=data.get("name"))
+                session.run(query, name=data.get("name"), timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated OrganizationUnit: {data.get('name')}")
             return True
         except Exception as e:
@@ -3359,7 +3370,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=dependency_id)
+                session.run(query, dependency_id=dependency_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated MissionDependency: {dependency_id}")
             return True
         except Exception as e:
@@ -3371,13 +3382,23 @@ class Neo4jClient:
 
         PR #34 round 23: stamps deterministic ``n.uuid`` so User nodes
         participate in the cross-environment delta-sync contract.
+
+        PR #34 round 25 (red-team audit): normalize ``domain=None`` and
+        ``domain=""`` to ``"default"`` explicitly. Previously,
+        ``data.get("domain", "default")`` returned ``"default"`` ONLY when
+        the key was missing; if the caller passed ``domain=None`` or
+        ``domain=""`` explicitly, ``domain`` would be that falsy value →
+        ``compute_node_uuid`` produced a DIFFERENT uuid for the same
+        logical user. Three callers (missing key, None, empty string) all
+        represent "no domain specified" — must canonicalize to ONE form.
         """
         username = data.get("username")
         if not username:
             logger.error("merge_resilmesh_user: missing username — cannot MERGE without natural key")
             return False
-        # Provide default domain if not present (mirror existing behavior).
-        domain = data.get("domain", "default")
+        # ``data.get("domain") or "default"`` collapses None/""/missing-key
+        # to the single canonical "default" form.
+        domain = data.get("domain") or "default"
         # Deterministic uuid — MUST use the same key dict the MERGE binds to.
         node_uuid = compute_node_uuid("User", {"username": username, "domain": domain})
         query = """
@@ -3390,7 +3411,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, username=username, domain=domain, node_uuid=node_uuid)
+                session.run(query, username=username, domain=domain, node_uuid=node_uuid, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated ResilMesh User: {username}")
             return True
         except Exception as e:
@@ -3432,6 +3453,7 @@ class Neo4jClient:
                     vuln_uuid=vuln_uuid,
                     status=data.get("status"),
                     description=data.get("description"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh Vulnerability: {name}")
             return True
@@ -3481,6 +3503,7 @@ class Neo4jClient:
                     result_impacts=data.get("result_impacts"),
                     ref_tags=data.get("ref_tags"),
                     cwe=data.get("cwe"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh CVE: {cve_id}")
             return True
@@ -3505,6 +3528,7 @@ class Neo4jClient:
                     node_id=data.get("node_id"),
                     degree_centrality=data.get("degree_centrality"),
                     pagerank_centrality=data.get("pagerank_centrality"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh Node: {data.get('node_id')}")
             return True
@@ -3532,7 +3556,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=version, hostname=hostname)
+                session.run(query, version=version, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked SoftwareVersion {version} ON Host {hostname}")
             return True
         except Exception as e:
@@ -3554,7 +3578,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=permission, device_id=device_id)
+                session.run(query, permission=permission, device_id=device_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Role {permission} TO Device {device_id}")
             return True
         except Exception as e:
@@ -3580,7 +3604,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=permission, username=username, domain=domain)
+                session.run(query, permission=permission, username=username, domain=domain, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Role {permission} ASSIGNED_TO User {username}")
             return True
         except Exception as e:
@@ -3605,7 +3629,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, username=username, domain=domain, permission=permission)
+                session.run(query, username=username, domain=domain, permission=permission, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked User {username} ASSIGNED_TO Role {permission}")
             return True
         except Exception as e:
@@ -3627,7 +3651,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=device_id, permission=permission)
+                session.run(query, device_id=device_id, permission=permission, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Device {device_id} TO Role {permission}")
             return True
         except Exception as e:
@@ -3649,7 +3673,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=device_id, hostname=hostname)
+                session.run(query, device_id=device_id, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Device {device_id} HAS_IDENTITY Host {hostname}")
             return True
         except Exception as e:
@@ -3676,7 +3700,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=version, cve_id=cve_id)
+                session.run(query, version=version, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked SoftwareVersion {version} IN Vulnerability {cve_id}")
             return True
         except Exception as e:
@@ -3695,7 +3719,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, address=address, node_id=node_id)
+                session.run(query, address=address, node_id=node_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked IP {address} HAS_ASSIGNED Node {node_id}")
             return True
         except Exception as e:
@@ -3714,7 +3738,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, node_id=node_id, hostname=hostname)
+                session.run(query, node_id=node_id, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Node {node_id} IS_A Host {hostname}")
             return True
         except Exception as e:
@@ -3733,7 +3757,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, node_id=node_id, address=address)
+                session.run(query, node_id=node_id, address=address, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Node {node_id} HAS_ASSIGNED IP {address}")
             return True
         except Exception as e:
@@ -3752,7 +3776,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, node_id=node_id)
+                session.run(query, hostname=hostname, node_id=node_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} IS_A Node {node_id}")
             return True
         except Exception as e:
@@ -3774,7 +3798,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, device_id=device_id)
+                session.run(query, hostname=hostname, device_id=device_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} HAS_IDENTITY Device {device_id}")
             return True
         except Exception as e:
@@ -3796,7 +3820,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, version=version)
+                session.run(query, hostname=hostname, version=version, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} ON SoftwareVersion {version}")
             return True
         except Exception as e:
@@ -3818,7 +3842,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, address=address, subnet_range=subnet_range)
+                session.run(query, address=address, subnet_range=subnet_range, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked IP {address} PART_OF Subnet {subnet_range}")
             return True
         except Exception as e:
@@ -3840,7 +3864,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, subnet_range=subnet_range, address=address)
+                session.run(query, subnet_range=subnet_range, address=address, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Subnet {subnet_range} PART_OF IP {address}")
             return True
         except Exception as e:
@@ -3859,7 +3883,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, mission_name=mission_name, orgunit_name=orgunit_name)
+                session.run(query, mission_name=mission_name, orgunit_name=orgunit_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Mission {mission_name} FOR OrganizationUnit {orgunit_name}")
             return True
         except Exception as e:
@@ -3878,7 +3902,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, mission_name=mission_name, component_name=component_name)
+                session.run(query, mission_name=mission_name, component_name=component_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Mission {mission_name} SUPPORTS Component {component_name}")
             return True
         except Exception as e:
@@ -3897,7 +3921,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, dependency_id=dependency_id)
+                session.run(
+                    query, component_name=component_name, dependency_id=dependency_id, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Component {component_name} FROM MissionDependency {dependency_id}")
             return True
         except Exception as e:
@@ -3916,7 +3942,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, hostname=hostname)
+                session.run(query, component_name=component_name, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Component {component_name} PROVIDED_BY Host {hostname}")
             return True
         except Exception as e:
@@ -3935,7 +3961,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, mission_name=mission_name)
+                session.run(query, component_name=component_name, mission_name=mission_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Component {component_name} SUPPORTS Mission {mission_name}")
             return True
         except Exception as e:
@@ -3954,7 +3980,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, dependency_id=dependency_id)
+                session.run(
+                    query, component_name=component_name, dependency_id=dependency_id, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Component {component_name} TO MissionDependency {dependency_id}")
             return True
         except Exception as e:
@@ -3973,7 +4001,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, orgunit_name=orgunit_name, mission_name=mission_name)
+                session.run(query, orgunit_name=orgunit_name, mission_name=mission_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked OrganizationUnit {orgunit_name} FOR Mission {mission_name}")
             return True
         except Exception as e:
@@ -3992,7 +4020,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, child_orgunit=child_orgunit, parent_orgunit=parent_orgunit)
+                session.run(
+                    query, child_orgunit=child_orgunit, parent_orgunit=parent_orgunit, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked OrganizationUnit {child_orgunit} PART_OF OrganizationUnit {parent_orgunit}")
             return True
         except Exception as e:
@@ -4014,7 +4044,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, child_subnet=child_subnet, parent_subnet=parent_subnet)
+                session.run(query, child_subnet=child_subnet, parent_subnet=parent_subnet, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Subnet {child_subnet} PART_OF Subnet {parent_subnet}")
             return True
         except Exception as e:
@@ -4033,7 +4063,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, subnet_range=subnet_range, orgunit_name=orgunit_name)
+                session.run(query, subnet_range=subnet_range, orgunit_name=orgunit_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Subnet {subnet_range} PART_OF OrganizationUnit {orgunit_name}")
             return True
         except Exception as e:
@@ -4052,7 +4082,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=dependency_id, component_name=component_name)
+                session.run(
+                    query, dependency_id=dependency_id, component_name=component_name, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked MissionDependency {dependency_id} TO Component {component_name}")
             return True
         except Exception as e:
@@ -4071,7 +4103,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=dependency_id, component_name=component_name)
+                session.run(
+                    query, dependency_id=dependency_id, component_name=component_name, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked MissionDependency {dependency_id} FROM Component {component_name}")
             return True
         except Exception as e:
@@ -4090,7 +4124,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, orgunit_name=orgunit_name, subnet_range=subnet_range)
+                session.run(query, orgunit_name=orgunit_name, subnet_range=subnet_range, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked OrganizationUnit {orgunit_name} PART_OF Subnet {subnet_range}")
             return True
         except Exception as e:
@@ -4113,7 +4147,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, node1_id=node1_id, node2_id=node2_id, start=start, end=end)
+                session.run(
+                    query, node1_id=node1_id, node2_id=node2_id, start=start, end=end, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Node {node1_id} IS_CONNECTED_TO Node {node2_id}")
             return True
         except Exception as e:
@@ -4136,7 +4172,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, port=port, protocol=protocol, hostname=hostname, status=status)
+                session.run(
+                    query, port=port, protocol=protocol, hostname=hostname, status=status, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked NetworkService {port}/{protocol} ON Host {hostname}")
             return True
         except Exception as e:
@@ -4155,7 +4193,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, component_name=component_name)
+                session.run(query, hostname=hostname, component_name=component_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} PROVIDED_BY Component {component_name}")
             return True
         except Exception as e:
@@ -4178,7 +4216,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, port=port, protocol=protocol, status=status)
+                session.run(
+                    query, hostname=hostname, port=port, protocol=protocol, status=status, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Host {hostname} ON NetworkService {port}/{protocol}")
             return True
         except Exception as e:
@@ -4197,7 +4237,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, app_name=app_name, component_name=component_name)
+                session.run(query, app_name=app_name, component_name=component_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Application {app_name} HAS_IDENTITY Component {component_name}")
             return True
         except Exception as e:
@@ -4216,7 +4256,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, app_name=app_name)
+                session.run(query, component_name=component_name, app_name=app_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Component {component_name} HAS_IDENTITY Application {app_name}")
             return True
         except Exception as e:
@@ -4245,7 +4285,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, cve_id=cve_id)
+                session.run(query, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Vulnerability {cve_id} REFERS_TO CVE {cve_id}")
             return True
         except Exception as e:
@@ -4270,7 +4310,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, version=version)
+                session.run(query, cve_id=cve_id, version=version, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Vulnerability {cve_id} IN SoftwareVersion {version}")
             return True
         except Exception as e:
@@ -4295,7 +4335,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, cve_id=cve_id)
+                session.run(query, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked CVE {cve_id} REFERS_TO Vulnerability {cve_id}")
             return True
         except Exception as e:
@@ -4371,6 +4411,7 @@ class Neo4jClient:
                     malware=malware,
                     cve=cve,
                     node_uuid=node_uuid,
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
 
             logger.info(f"Created/updated Alert node: {alert_id}")
@@ -4399,7 +4440,7 @@ class Neo4jClient:
             """
 
             with self.driver.session() as session:
-                session.run(query, alert_id=alert_id, indicator_value=indicator_value)
+                session.run(query, alert_id=alert_id, indicator_value=indicator_value, timeout=NEO4J_READ_TIMEOUT)
 
             logger.info(f"Linked Alert {alert_id} to Indicator {indicator_value}")
             return True
@@ -4420,7 +4461,11 @@ class Neo4jClient:
             """
             with self.driver.session() as session:
                 session.run(
-                    query, alert_id=alert_id, enrichment_data=json.dumps(enrichment_data), latency_ms=latency_ms
+                    query,
+                    alert_id=alert_id,
+                    enrichment_data=json.dumps(enrichment_data),
+                    latency_ms=latency_ms,
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Updated Alert {alert_id} with enrichment data")
             return True
@@ -4437,7 +4482,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                result = session.run(query, alert_id=alert_id)
+                result = session.run(query, alert_id=alert_id, timeout=NEO4J_READ_TIMEOUT)
                 record = result.single()
                 if record:
                     alert = dict(record["a"]._properties)

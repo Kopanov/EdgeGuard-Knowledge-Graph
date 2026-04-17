@@ -61,7 +61,7 @@ class MISPClearer:
         Returns:
             List of event dicts with id, info, date
         """
-        events = []
+        events: list = []
 
         try:
             # Get all events
