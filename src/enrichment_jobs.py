@@ -505,37 +505,37 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     RETURN total AS linked
     """
 
-    # PR #34 round 18: surface Vulnerabilities whose cve_id has no matching
-    # CVE node — they're silently dropped from the bridge today (the inner
-    # MATCH (c:CVE {cve_id: v.cve_id}) returns 0 rows and the apoc total
-    # counts only edges actually created). The expected-vs-actual gap is a
-    # data-quality signal: too many orphans means NVD ingestion is behind.
-    expected_query = (
-        "MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL MATCH (c:CVE {cve_id: v.cve_id}) RETURN count(*) AS c"
+    # PR #34 round 20: count Vulnerability orphans directly with NOT EXISTS.
+    # Replaces the broken round-18 ``expected_query`` design — that compared
+    # ``expected > results["linked"]`` where ``expected`` was pairs-with-CVE
+    # (subset) and ``results["linked"]`` was the apoc ``total`` (count of
+    # OUTER-query rows processed, regardless of inner MATCH success — a
+    # superset). The comparison was therefore always false (subset ≤ superset)
+    # and the orphan log NEVER fired. The new ``skip_query`` counts orphans
+    # directly: Vulnerabilities with cve_id but no matching CVE node — every
+    # one is an edge silently dropped by the bridge.
+    skip_query = (
+        "MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL "
+        "AND NOT EXISTS { MATCH (c:CVE {cve_id: v.cve_id}) } "
+        "RETURN count(v) AS c"
     )
 
     try:
         with neo4j_client.driver.session() as session:
             try:
-                expected_rec = session.run(expected_query, timeout=NEO4J_READ_TIMEOUT).single()
-                expected = expected_rec["c"] if expected_rec else None
+                skip_rec = session.run(skip_query, timeout=NEO4J_READ_TIMEOUT).single()
+                skip_count = skip_rec["c"] if skip_rec else 0
             except Exception as exp_err:
-                logger.debug("bridge_vulnerability_cve expected_query failed: %s", exp_err)
-                expected = None
+                logger.debug("bridge_vulnerability_cve skip_query failed: %s", exp_err)
+                skip_count = 0
             record = session.run(query, timeout=NEO4J_READ_TIMEOUT).single()
             results["linked"] = record["linked"] if record else 0
         logger.info(f"[BRIDGE] Vulnerability↔CVE REFERS_TO: {results['linked']} pairs linked")
-        if expected is not None and expected > results["linked"]:
-            # apoc creates BOTH edges per pair (v→c and c→v); the expected
-            # query counts pairs. Compare apples-to-apples.
-            pairs_made = results["linked"] // 2
-            orphans = expected - pairs_made
-            if orphans > 0:
-                logger.info(
-                    "[BRIDGE] %d/%d Vulnerability nodes have no matching CVE — likely missing NVD ingestion",
-                    orphans,
-                    expected,
-                )
+        if skip_count > 0:
+            logger.info(
+                "[BRIDGE] %d Vulnerability nodes have no matching CVE — likely missing NVD ingestion",
+                skip_count,
+            )
     except Exception as e:
         logger.warning(f"[BRIDGE] Vulnerability↔CVE bridge failed: {e}")
         results["errors"] += 1

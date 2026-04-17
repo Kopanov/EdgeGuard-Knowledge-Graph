@@ -82,7 +82,7 @@ def _safe_run_batched(
     stats,
     stat_key,
     batch_size=5000,
-    expected_query=None,
+    skip_query=None,
 ):
     """Run a relationship query in batches using apoc.periodic.iterate.
 
@@ -91,21 +91,29 @@ def _safe_run_batched(
     full failure (PR #33 round 13: previously returned True even when
     apoc.periodic.iterate reported errorMessages — silent partial failure).
 
-    If ``expected_query`` is provided (a Cypher string returning a single
-    column ``c``), the result is logged alongside the actual count so the
-    operator can see how many input rows were silently skipped because
-    their inner-MATCH target node didn't exist (PR #33 round 13: addresses
-    the silent-skip in queries 5/6/8/9/10 where MATCH (Technique) /
-    MATCH (Malware) silently drops rows when the target is missing).
+    If ``skip_query`` is provided (a Cypher string returning a single
+    column ``c``), it is run BEFORE the apoc batch and is expected to
+    count input rows whose inner-MATCH target does NOT exist (the orphan
+    rows that the inner action will silently drop). When > 0, an INFO
+    ``[SKIP]`` log is emitted so the operator can see how many edges
+    were silently lost.
+
+    PR #34 round 20: replaces the broken ``expected_query`` semantics from
+    round 13 — that compared APOC ``total`` (count of outer-query rows
+    that ran the inner action, regardless of inner success) against
+    "rows where target exists" (a subset of outer rows). The comparison
+    ``expected > count`` was always false (subset ≤ superset), so the
+    skip-count log NEVER fired. The new ``skip_query`` semantics counts
+    orphans directly, no comparison needed.
     """
-    expected = None
-    if expected_query is not None:
+    skip_count = None
+    if skip_query is not None:
         try:
-            expected_result = client.run(expected_query)
-            if expected_result:
-                expected = expected_result[0].get("c", 0)
+            skip_result = client.run(skip_query)
+            if skip_result:
+                skip_count = skip_result[0].get("c", 0)
         except Exception as exp_err:
-            logger.debug("expected_query failed for %s — skip-count log will be omitted: %s", label, exp_err)
+            logger.debug("skip_query failed for %s — skip-count log will be omitted: %s", label, exp_err)
 
     query = f"""
     CALL apoc.periodic.iterate(
@@ -131,14 +139,14 @@ def _safe_run_batched(
                 )
             else:
                 logger.info(f"  [OK] {label}: {count} in {batches_n} batches")
-            # PR #33 round 13: skip-count log when expected_query was provided.
-            if expected is not None and expected > count:
-                skipped = expected - count
+            # PR #34 round 20: orphan-count log when skip_query was provided.
+            # No comparison needed — skip_count IS the count of input rows
+            # whose target doesn't exist.
+            if skip_count is not None and skip_count > 0:
                 logger.info(
-                    "  [SKIP] %s: %d/%d input rows had no matching target node (likely missing prerequisite ingestion)",
+                    "  [SKIP] %s: %d input rows had no matching target node (likely missing prerequisite ingestion)",
                     label,
-                    skipped,
-                    expected,
+                    skip_count,
                 )
             # PR #33 round 13: errorMessages now flips return value to False so
             # the caller's failures counter reflects partial APOC errors.
@@ -185,10 +193,11 @@ def build_relationships():
         logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
         _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
         _q3a_inner = 'WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)'
-        # PR #33 round 13: count Indicator rows whose cve_id has no Vulnerability — surfaces silent skips.
-        _q3a_expected = (
+        # PR #34 round 20: count Indicator orphans (cve_id set but no
+        # matching Vulnerability) — directly the skip count, no comparison.
+        _q3a_skip = (
             "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
-            "AND EXISTS { MATCH (v:Vulnerability {cve_id: i.cve_id}) } "
+            "AND NOT EXISTS { MATCH (v:Vulnerability {cve_id: i.cve_id}) } "
             "RETURN count(i) AS c"
         )
         if not _safe_run_batched(
@@ -198,7 +207,7 @@ def build_relationships():
             _q3a_inner,
             stats,
             "exploits_vuln",
-            expected_query=_q3a_expected,
+            skip_query=_q3a_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -207,9 +216,9 @@ def build_relationships():
         logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
         _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
         _q3b_inner = 'WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)'
-        _q3b_expected = (
+        _q3b_skip = (
             "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
-            "AND EXISTS { MATCH (c:CVE {cve_id: i.cve_id}) } "
+            "AND NOT EXISTS { MATCH (c:CVE {cve_id: i.cve_id}) } "
             "RETURN count(i) AS c"
         )
         if not _safe_run_batched(
@@ -219,7 +228,7 @@ def build_relationships():
             _q3b_inner,
             stats,
             "exploits_cve",
-            expected_query=_q3b_expected,
+            skip_query=_q3b_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -267,16 +276,17 @@ def build_relationships():
 
         # 5. ThreatActor → Technique (EMPLOYS_TECHNIQUE) — explicit ATT&CK
         # uses_techniques list. Attribution semantics: "who uses this TTP".
-        # PR #33 round 13: expected_query counts (actor, technique-id) pairs
-        # whose Technique node EXISTS — surfaces the silent skip when MITRE
-        # data hasn't been ingested yet.
+        # PR #34 round 20: skip_query counts (actor, technique-id) ORPHAN
+        # pairs — pairs whose Technique node does NOT exist. Each orphan
+        # pair is an edge that the inner action silently fails to create.
+        # Direct skip count, no comparison with APOC total needed.
         logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
         _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
-        _q5_expected = (
+        _q5_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 "
             "UNWIND a.uses_techniques AS tid "
-            "MATCH (t:Technique {mitre_id: tid}) "
+            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -286,21 +296,22 @@ def build_relationships():
             _inner,
             stats,
             "employs_technique_explicit",
-            expected_query=_q5_expected,
+            skip_query=_q5_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 6. Malware → Technique (IMPLEMENTS_TECHNIQUE) — MITRE STIX uses
         # relationships. Capability semantics: "what the code can do".
-        # PR #33 round 13: expected_query surfaces silent skips.
+        # PR #34 round 20: skip_query counts orphan (malware, technique-id)
+        # pairs whose Technique node does NOT exist — direct skip count.
         logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
         _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
-        _q6_expected = (
+        _q6_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 "
             "UNWIND m.uses_techniques AS tid "
-            "MATCH (t:Technique {mitre_id: tid}) "
+            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -310,7 +321,7 @@ def build_relationships():
             _inner,
             stats,
             "malware_implements_technique",
-            expected_query=_q6_expected,
+            skip_query=_q6_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -367,14 +378,15 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
-        # PR #33 round 13: expected_query surfaces silent skips.
+        # PR #34 round 20: skip_query counts orphan (indicator, attack_id)
+        # pairs whose Technique node does NOT exist — direct skip count.
         logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
         _q8_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 RETURN i"
         _q8_inner = 'WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
-        _q8_expected = (
+        _q8_skip = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 "
             "UNWIND i.attack_ids AS tech_id "
-            "MATCH (t:Technique {mitre_id: tech_id}) "
+            "WITH tech_id WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tech_id}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -384,24 +396,27 @@ def build_relationships():
             _q8_inner,
             stats,
             "indicator_uses_technique",
-            expected_query=_q8_expected,
+            skip_query=_q8_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
-        # PR #33 round 13: expected_query surfaces silent skips when the named
-        # malware hasn't been ingested.
+        # PR #34 round 20: skip_query counts Indicators with a non-empty
+        # malware_family that have NO matching Malware node (by name, alias,
+        # or family) — direct skip count, no comparison.
         logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
         _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
         _q9_inner = 'WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.created_at = datetime() SET r.confidence_score = CASE WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 ELSE r.confidence_score END, r.match_type = "malware_family", r.source_id = "malware_family_match", r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)'
-        _q9_expected = (
+        _q9_skip = (
             "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' "
-            "MATCH (m:Malware) "
-            "WHERE toLower(m.name) = toLower(i.malware_family) "
-            "  OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] "
-            "  OR toLower(m.family) = toLower(i.malware_family) "
-            "RETURN count(*) AS c"
+            "AND NOT EXISTS { "
+            "  MATCH (m:Malware) "
+            "  WHERE toLower(m.name) = toLower(i.malware_family) "
+            "     OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] "
+            "     OR toLower(m.family) = toLower(i.malware_family) "
+            "} "
+            "RETURN count(i) AS c"
         )
         if not _safe_run_batched(
             client,
@@ -410,21 +425,22 @@ def build_relationships():
             _q9_inner,
             stats,
             "indicates_family",
-            expected_query=_q9_expected,
+            skip_query=_q9_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 10. Tool → Technique (IMPLEMENTS_TECHNIQUE) — MITRE uses_techniques.
         # Same capability semantics as Malware above; both are "code/tool can
-        # execute this TTP". PR #33 round 13: expected_query surfaces silent skips.
+        # execute this TTP". PR #34 round 20: skip_query counts orphan
+        # (tool, technique-id) pairs whose Technique node does NOT exist.
         logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
         _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
-        _q10_expected = (
+        _q10_skip = (
             "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 "
             "UNWIND tool.uses_techniques AS tid "
-            "MATCH (t:Technique {mitre_id: tid}) "
+            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -434,7 +450,7 @@ def build_relationships():
             _inner,
             stats,
             "tool_implements_technique",
-            expected_query=_q10_expected,
+            skip_query=_q10_skip,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)

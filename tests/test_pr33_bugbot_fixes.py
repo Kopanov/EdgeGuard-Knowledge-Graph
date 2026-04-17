@@ -1537,11 +1537,19 @@ def test_safe_run_batched_returns_false_on_apoc_errors():
     )
 
 
-def test_safe_run_batched_logs_skip_count_when_expected_query_provided(caplog):
-    """When ``expected_query`` is provided and the actual count is less than
-    expected, an INFO ``[SKIP]`` log is emitted with the missing-row count.
-    This surfaces the silent skip in 5/6/8/9/10 link queries when MITRE/Malware
-    target nodes haven't been ingested."""
+def test_safe_run_batched_logs_skip_count_when_skip_query_returns_positive(caplog):
+    """PR #34 round 20: ``_safe_run_batched`` now takes ``skip_query`` (NOT
+    ``expected_query``). The skip_query directly counts ORPHAN input rows
+    (rows whose inner-MATCH target does NOT exist) — when > 0 an INFO
+    ``[SKIP]`` log fires.
+
+    Round 13's expected_query design was fundamentally broken: it compared
+    APOC ``total`` (count of outer-query rows that ran the inner action,
+    regardless of inner success) against "rows where target exists" (a
+    subset). The comparison ``expected > total`` was always false, so the
+    skip-count log NEVER fired. Round 20 inverts: count orphans directly,
+    no comparison needed.
+    """
     import importlib
     import logging
 
@@ -1552,9 +1560,9 @@ def test_safe_run_batched_logs_skip_count_when_expected_query_provided(caplog):
     from unittest.mock import MagicMock
 
     client = MagicMock()
-    # First call: expected_query → returns 100. Second call: apoc.periodic.iterate → returns 70.
+    # First call: skip_query → returns 30 orphans. Second call: apoc → returns 70 processed.
     client.run.side_effect = [
-        [{"c": 100}],  # expected
+        [{"c": 30}],  # skip count (orphans)
         [{"count": 70, "batches": 1, "errorMessages": []}],  # apoc result
     ]
     stats: dict = {}
@@ -1566,17 +1574,50 @@ def test_safe_run_batched_logs_skip_count_when_expected_query_provided(caplog):
             "SET n.x = 1",
             stats,
             "k",
-            expected_query="MATCH (a) WHERE EXISTS { ... } RETURN count(a) AS c",
+            skip_query="MATCH (a) WHERE NOT EXISTS { ... } RETURN count(a) AS c",
         )
     logs = "\n".join(rec.message for rec in caplog.records)
-    assert "[SKIP]" in logs, "expected [SKIP] log when actual < expected"
-    assert "30/100" in logs, f"expected '30/100' missing-target count in log; got: {logs}"
+    assert "[SKIP]" in logs, "expected [SKIP] log when skip_query returns > 0"
+    assert "30 input rows had no matching target" in logs, f"expected orphan-count phrasing in skip log; got: {logs}"
 
 
-def test_build_relationships_link_queries_pass_expected_query():
-    """Pin that link queries 3a, 3b, 5, 6, 8, 9, 10 in build_relationships()
-    pass the ``expected_query`` keyword argument so the silent-skip log fires.
-    Without this, the round-13 visibility improvement is dead code."""
+def test_safe_run_batched_does_not_log_skip_when_skip_query_returns_zero(caplog):
+    """When skip_query returns 0 (no orphans), the [SKIP] log MUST NOT fire.
+    This guards against false-positive noise that would dilute the signal."""
+    import importlib
+    import logging
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.run.side_effect = [
+        [{"c": 0}],  # no orphans
+        [{"count": 50, "batches": 1, "errorMessages": []}],
+    ]
+    stats: dict = {}
+    with caplog.at_level(logging.INFO, logger="build_relationships"):
+        build_relationships._safe_run_batched(
+            client,
+            "TEST",
+            "MATCH (n) RETURN n",
+            "SET n.x = 1",
+            stats,
+            "k",
+            skip_query="MATCH (a) WHERE NOT EXISTS { ... } RETURN count(a) AS c",
+        )
+    logs = "\n".join(rec.message for rec in caplog.records)
+    assert "[SKIP]" not in logs, "[SKIP] log must NOT fire when skip_query returns 0"
+
+
+def test_build_relationships_link_queries_pass_skip_query():
+    """PR #34 round 20: link queries 3a, 3b, 5, 6, 8, 9, 10 in
+    build_relationships() pass ``skip_query=`` (NOT the broken
+    ``expected_query=`` from round 13). Each skip_query must use a
+    ``NOT EXISTS`` subquery so it counts ORPHAN rows directly."""
     import importlib
     import inspect
 
@@ -1585,20 +1626,32 @@ def test_build_relationships_link_queries_pass_expected_query():
     build_relationships = importlib.import_module("build_relationships")
 
     src = inspect.getsource(build_relationships.build_relationships)
-    # All 7 expected_query labels we wired in round 13.
+    # All 7 skip_query labels — round 20 contract.
     for var in (
-        "_q3a_expected",
-        "_q3b_expected",
-        "_q5_expected",
-        "_q6_expected",
-        "_q8_expected",
-        "_q9_expected",
-        "_q10_expected",
+        "_q3a_skip",
+        "_q3b_skip",
+        "_q5_skip",
+        "_q6_skip",
+        "_q8_skip",
+        "_q9_skip",
+        "_q10_skip",
     ):
-        assert var in src, f"build_relationships() should define {var} for silent-skip surfacing"
-    # And expected_query= keyword usage must appear at least 7 times.
-    assert src.count("expected_query=") >= 7, (
-        "expected_query= kwarg must be passed to _safe_run_batched for queries 3a/3b/5/6/8/9/10"
+        assert var in src, f"build_relationships() should define {var} for orphan-count surfacing"
+    # And skip_query= keyword usage must appear at least 7 times.
+    assert src.count("skip_query=") >= 7, (
+        "skip_query= kwarg must be passed to _safe_run_batched for queries 3a/3b/5/6/8/9/10"
+    )
+    # Round-13's broken expected_query symbol must be gone.
+    assert "expected_query=" not in src, (
+        "round-13 broken expected_query= kwarg must be replaced by skip_query= (round 20)"
+    )
+    assert "_q6_expected" not in src and "_q9_expected" not in src, (
+        "round-13 _q*_expected variable names must be replaced by _q*_skip (round 20)"
+    )
+    # Each skip_query must use NOT EXISTS to count orphans (the whole point).
+    # Pin at least one canonical instance.
+    assert "NOT EXISTS { MATCH (v:Vulnerability {cve_id: i.cve_id}) }" in src, (
+        "_q3a_skip must use NOT EXISTS to count Indicators with no matching Vulnerability"
     )
 
 
@@ -1905,11 +1958,15 @@ def test_misp_unmapped_attribute_type_metric_exists():
 
 
 def test_bridge_vulnerability_cve_logs_orphan_count():
-    """Round 18 observability: bridge_vulnerability_cve now runs an
-    expected_query that counts (Vulnerability, CVE) pairs whose CVE
-    EXISTS, then compares to the apoc.periodic.iterate ``total`` to
-    surface orphaned Vulnerabilities. Pin the structure so a refactor
-    can't silently drop the orphan-count log."""
+    """PR #34 round 20: bridge_vulnerability_cve now uses ``skip_query``
+    that counts Vulnerabilities with cve_id but NO matching CVE (orphans),
+    and logs directly when skip_count > 0.
+
+    Replaces round 18's broken ``expected_query`` design — that compared
+    APOC ``total`` (count of OUTER rows processed, regardless of inner
+    MATCH success) against pairs-with-CVE (a subset). The comparison
+    ``expected > linked`` was always false (subset ≤ superset), so the
+    orphan log NEVER fired. Round 20 inverts: count orphans directly."""
     import importlib
     import inspect
 
@@ -1917,12 +1974,57 @@ def test_bridge_vulnerability_cve_logs_orphan_count():
         del sys.modules["enrichment_jobs"]
     enrichment_jobs = importlib.import_module("enrichment_jobs")
 
-    src = inspect.getsource(enrichment_jobs.bridge_vulnerability_cve)
-    assert "expected_query" in src, "bridge_vulnerability_cve must define an expected_query"
-    assert "MATCH (c:CVE {cve_id: v.cve_id})" in src, (
-        "expected_query must MATCH the CVE that the inner action would link"
+    raw_src = inspect.getsource(enrichment_jobs.bridge_vulnerability_cve)
+    # Strip comment lines so the round-20 explanatory comment (which legitimately
+    # mentions the round-18 ``expected_query`` and ``expected > linked`` it
+    # replaced) doesn't false-fail the negative assertions below.
+    code_src = "\n".join(line for line in raw_src.splitlines() if not line.lstrip().startswith("#"))
+
+    assert "skip_query" in code_src, "bridge_vulnerability_cve must define a skip_query"
+    # Skip query must use NOT EXISTS — that's the point: count orphans.
+    assert "NOT EXISTS { MATCH (c:CVE {cve_id: v.cve_id}) }" in code_src, (
+        "skip_query must NOT EXISTS-MATCH the CVE the inner action would link"
     )
-    assert "no matching CVE" in src, "operator-facing log must mention orphan CVE count"
+    assert "no matching CVE" in code_src, "operator-facing log must mention orphan CVE count"
+    # The broken round-18 design must be gone (in actual code, not docstring).
+    assert "expected_query" not in code_src, "round-18 broken expected_query must be replaced by skip_query (round 20)"
+    assert "expected > results" not in code_src and "expected_rec" not in code_src, (
+        "round-18 broken expected-vs-linked comparison must be removed"
+    )
+
+
+def test_bridge_vulnerability_cve_logs_orphan_count_runtime(caplog):
+    """Behavioral pin: when the skip_query reports orphans, the log fires.
+    Mocks the Neo4j session to return a non-zero orphan count and verifies
+    the operator-facing message is emitted."""
+    import importlib
+    import logging
+
+    if "enrichment_jobs" in sys.modules:
+        del sys.modules["enrichment_jobs"]
+    enrichment_jobs = importlib.import_module("enrichment_jobs")
+
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    sess = MagicMock()
+    sess.__enter__ = lambda s: s
+    sess.__exit__ = lambda *a: False
+
+    # First session.run = skip_query (returns orphan count); second = main apoc query.
+    skip_rec = MagicMock()
+    skip_rec.single.return_value = {"c": 42}
+    main_rec = MagicMock()
+    main_rec.single.return_value = {"linked": 100}
+    sess.run.side_effect = [skip_rec, main_rec]
+    client.driver.session.return_value = sess
+
+    with caplog.at_level(logging.INFO, logger="enrichment_jobs"):
+        enrichment_jobs.bridge_vulnerability_cve(client)
+    logs = "\n".join(rec.message for rec in caplog.records)
+    assert "42 Vulnerability nodes have no matching CVE" in logs, (
+        f"orphan-count log must include the count and phrasing; got: {logs}"
+    )
 
 
 # ---------------------------------------------------------------------------
