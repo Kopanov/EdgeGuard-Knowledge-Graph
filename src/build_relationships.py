@@ -134,15 +134,31 @@ def build_relationships():
         # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence (BATCHED)
         # This query caused OOM on 170K+ indicators. Uses apoc.periodic.iterate
         # to process in 5000-node mini-transactions instead of one giant transaction.
+        #
+        # Symmetric scalar+array handling on BOTH ends of the join (2026-04 fix):
+        #   - Outer: include Indicators that have either the scalar misp_event_id OR
+        #     a non-empty misp_event_ids[] array. Pre-fix the outer filter was
+        #     scalar-only, missing Indicators ingested with array-only event references.
+        #   - Inner: match Malware whose scalar misp_event_id = eid OR whose
+        #     misp_event_ids[] array contains eid. Pre-fix this matched Malware only
+        #     by its first-seen event scalar, dropping co-occurrence edges to Malware
+        #     that re-appeared in later events.
         logger.info("[LINK] 4/11 Indicator → Malware (co-occurrence, batched)...")
-        _q4_outer = "MATCH (i:Indicator) WHERE i.misp_event_id IS NOT NULL AND i.misp_event_id <> '' RETURN i"
+        _q4_outer = (
+            "MATCH (i:Indicator) "
+            "WHERE (i.misp_event_id IS NOT NULL AND i.misp_event_id <> '') "
+            "   OR (i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0) "
+            "RETURN i"
+        )
         _q4_inner = (
             "WITH $i AS i "
             "WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) "
             "  WHERE eid IS NOT NULL AND eid <> ''][0..200] AS eids "
             "UNWIND eids AS eid "
             "WITH i, eid "
-            "MATCH (m:Malware {misp_event_id: eid}) "
+            "MATCH (m:Malware) "
+            "WHERE m.misp_event_id = eid "
+            "   OR (m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids) "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.confidence_score = 0.5, "
             '  r.match_type = "misp_cooccurrence", '

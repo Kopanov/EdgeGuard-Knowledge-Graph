@@ -599,6 +599,12 @@ class Neo4jClient:
             "CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active)",
             "CREATE INDEX indicator_misp_event_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_event_id)",
             "CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.misp_event_id)",
+            # MISP attribute UUID lookup — direct traceability from a Neo4j Indicator
+            # back to the originating MISP attribute. Added 2026-04 alongside the
+            # parse_attribute fix that started populating this field for new ingests.
+            # Backfill of pre-existing nodes is in
+            # migrations/2026_04_indicator_misp_attribute_id_backfill.cypher.
+            "CREATE INDEX indicator_misp_attribute_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_attribute_id)",
             "CREATE INDEX tactic_shortname IF NOT EXISTS FOR (t:Tactic) ON (t.shortname)",
             "CREATE INDEX technique_tactic_phases IF NOT EXISTS FOR (t:Technique) ON (t.tactic_phases)",
             # CVSS sub-node lookup indexes
@@ -1232,8 +1238,29 @@ class Neo4jClient:
     @retry_with_backoff(max_retries=3)
     def mark_inactive_nodes(self, active_event_ids: List[str]) -> Dict[str, int]:
         """
-        Mark nodes as inactive if their misp_event_id is NOT in the active_event_ids list.
-        Nodes without misp_event_id are not affected.
+        Mark nodes as inactive if NONE of their MISP event IDs are in the active list,
+        and re-activate nodes whose events re-enter the active list.
+
+        A node is considered active if ANY event in its ``misp_event_ids[]`` array is
+        active. The legacy scalar ``misp_event_id`` is the *first-seen* event only and
+        does not reflect later events that re-referenced the same attribute — using it
+        alone caused multi-event nodes to be marked inactive whenever their first event
+        rotated out of the incremental window even though they were still being
+        observed. We coalesce the array with the scalar so nodes ingested before
+        ``misp_event_ids[]`` accumulation still resolve correctly.
+
+        Both Indicators and Vulnerabilities get the symmetric pair:
+
+        - re-activation gate (``any(eid IN ... WHERE eid IN $active_ids)``) — sets
+          ``active = true`` unless ``retired_at`` indicates manual decommission.
+        - deactivation gate (``none(eid IN ... WHERE eid IN $active_ids)``) — sets
+          ``active = false``.
+
+        The Vulnerability re-activation gate was added 2026-04 alongside the array-
+        semantics fix; pre-fix only Indicators were re-activated, leaving Vulnerabilities
+        permanently inactive once they were ever flipped (Bugbot finding on PR #32).
+
+        Nodes without any MISP event reference are not affected.
 
         Args:
             active_event_ids: List of event IDs that are currently active in MISP
@@ -1255,34 +1282,69 @@ class Neo4jClient:
             # Convert to set for efficient lookup
             active_ids_set = set(str(eid) for eid in active_event_ids)
 
-            # Mark inactive Indicators
+            # Re-activate Indicators where ANY of their MISP event IDs is currently active.
+            # ``retired_at`` (manual decommission) wins over the auto-active reset.
             query_indicators = """
             MATCH (n:Indicator)
-            WHERE n.misp_event_id IS NOT NULL 
-              AND n.misp_event_id IN $active_ids
+            WITH n,
+                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
+                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
+                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
+            WITH n, arr_ids + scalar_id AS all_ids
+            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
             SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             query_indicators_inactive = """
             MATCH (n:Indicator)
-            WHERE n.misp_event_id IS NOT NULL 
-              AND NOT n.misp_event_id IN $active_ids
+            WITH n,
+                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
+                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
+                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
+            WITH n, arr_ids + scalar_id AS all_ids
+            WHERE size(all_ids) > 0 AND none(eid IN all_ids WHERE eid IN $active_ids)
             SET n.active = false
             RETURN count(n) as count
             """
 
-            # Mark inactive Vulnerabilities
+            # Re-activate Vulnerabilities where ANY of their MISP event IDs is active.
+            # Mirrors query_indicators above so a Vulnerability that was marked inactive
+            # (by the legacy scalar-only logic, by a prior incremental window, or any
+            # other reason) gets re-activated when its events re-enter the active list.
+            # ``retired_at`` (manual decommission) wins over the auto-active reset.
+            # Bugbot caught this asymmetry post-merge: the docs in AIRFLOW_DAG_DESIGN.md
+            # and ARCHITECTURE.md claimed both labels got both gates, but Vulnerability
+            # had only the deactivation path (an inherited gap from the pre-2026-04 code).
+            query_vulnerabilities = """
+            MATCH (n:Vulnerability)
+            WITH n,
+                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
+                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
+                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
+            WITH n, arr_ids + scalar_id AS all_ids
+            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
+            SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
+            """
+
+            # Mark inactive Vulnerabilities — same any-of / none-of semantics.
             query_vulnerabilities_inactive = """
             MATCH (n:Vulnerability)
-            WHERE n.misp_event_id IS NOT NULL 
-              AND NOT n.misp_event_id IN $active_ids
+            WITH n,
+                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
+                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
+                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
+            WITH n, arr_ids + scalar_id AS all_ids
+            WHERE size(all_ids) > 0 AND none(eid IN all_ids WHERE eid IN $active_ids)
             SET n.active = false
             RETURN count(n) as count
             """
 
             with self.driver.session() as session:
-                # First, mark all nodes with misp_event_id in active list as active
+                # First, mark all nodes with ANY active MISP event ID as active.
+                # Indicators and Vulnerabilities both get the re-activation pass so a
+                # node previously flipped inactive comes back when its events do.
                 session.run(query_indicators, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
+                session.run(query_vulnerabilities, active_ids=list(active_ids_set), timeout=NEO4J_READ_TIMEOUT)
 
                 # Mark inactive Indicators
                 result = session.run(
@@ -1934,6 +1996,11 @@ class Neo4jClient:
             fk = rel.get("from_key") or {}
             tk = rel.get("to_key") or {}
             conf = rel.get("confidence", 0.5)
+            # Originating MISP event id, stamped by parse_attribute /
+            # _build_cross_item_relationships. Threaded into each row dict so the
+            # Cypher MERGE can accumulate it on r.misp_event_ids[]. Empty/None →
+            # the SET clause skips the array append (CASE expression).
+            mev = str(rel.get("misp_event_id", "") or "")
             # Backward-compat: accept legacy "USES" rel_type from callers that
             # haven't been migrated yet, and route based on from_type. New
             # code should emit the specialized rel_type directly.
@@ -1962,7 +2029,13 @@ class Neo4jClient:
                     an = nonempty_graph_string(fk.get("name"))
                     if an and mid:
                         actor_employs_rows.append(
-                            {"actor": an, "mitre_id": mid, "source_id": source_id, "confidence": conf}
+                            {
+                                "actor": an,
+                                "mitre_id": mid,
+                                "source_id": source_id,
+                                "confidence": conf,
+                                "misp_event_id": mev,
+                            }
                         )
                     else:
                         _dropped_rels += 1
@@ -1970,7 +2043,13 @@ class Neo4jClient:
                     cn = nonempty_graph_string(fk.get("name"))
                     if cn and mid:
                         campaign_employs_rows.append(
-                            {"campaign": cn, "mitre_id": mid, "source_id": source_id, "confidence": conf}
+                            {
+                                "campaign": cn,
+                                "mitre_id": mid,
+                                "source_id": source_id,
+                                "confidence": conf,
+                                "misp_event_id": mev,
+                            }
                         )
                     else:
                         _dropped_rels += 1
@@ -1984,6 +2063,7 @@ class Neo4jClient:
                                 "mitre_id": mid,
                                 "source_id": source_id,
                                 "confidence": conf,
+                                "misp_event_id": mev,
                             }
                         )
                     else:
@@ -1994,14 +2074,30 @@ class Neo4jClient:
                 mn = nonempty_graph_string(fk.get("name"))
                 an = nonempty_graph_string(tk.get("name"))
                 if mn and an:
-                    attr_rows.append({"malware": mn, "actor": an, "source_id": source_id, "confidence": conf})
+                    attr_rows.append(
+                        {
+                            "malware": mn,
+                            "actor": an,
+                            "source_id": source_id,
+                            "confidence": conf,
+                            "misp_event_id": mev,
+                        }
+                    )
                 else:
                     _dropped_rels += 1
             elif rt == "INDICATES" and rel.get("to_type") == "Malware":
                 iv = nonempty_graph_string(fk.get("value"))
                 mn = nonempty_graph_string(tk.get("name"))
                 if iv and mn:
-                    ind_mal_rows.append({"value": iv, "malware": mn, "source_id": source_id, "confidence": conf})
+                    ind_mal_rows.append(
+                        {
+                            "value": iv,
+                            "malware": mn,
+                            "source_id": source_id,
+                            "confidence": conf,
+                            "misp_event_id": mev,
+                        }
+                    )
                 else:
                     _dropped_rels += 1
             elif rt == "TARGETS":
@@ -2013,20 +2109,44 @@ class Neo4jClient:
                 if ft == "Indicator":
                     iv = nonempty_graph_string(fk.get("value"))
                     if iv:
-                        tgt_ind_rows.append({"value": iv, "sector": sec, "source_id": source_id, "confidence": conf})
+                        tgt_ind_rows.append(
+                            {
+                                "value": iv,
+                                "sector": sec,
+                                "source_id": source_id,
+                                "confidence": conf,
+                                "misp_event_id": mev,
+                            }
+                        )
                     else:
                         _dropped_rels += 1
                 elif ft == "Vulnerability":
                     cid = normalize_cve_id_for_graph(fk.get("cve_id"))
                     if cid:
-                        tgt_vuln_rows.append({"cve_id": cid, "sector": sec, "source_id": source_id, "confidence": conf})
+                        tgt_vuln_rows.append(
+                            {
+                                "cve_id": cid,
+                                "sector": sec,
+                                "source_id": source_id,
+                                "confidence": conf,
+                                "misp_event_id": mev,
+                            }
+                        )
                     else:
                         _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
                 if iv and cid:
-                    expl_rows.append({"value": iv, "cve_id": cid, "source_id": source_id, "confidence": conf})
+                    expl_rows.append(
+                        {
+                            "value": iv,
+                            "cve_id": cid,
+                            "source_id": source_id,
+                            "confidence": conf,
+                            "misp_event_id": mev,
+                        }
+                    )
                 else:
                     _dropped_rels += 1
 
@@ -2049,6 +2169,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2066,6 +2191,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2082,6 +2212,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2094,6 +2229,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2107,6 +2247,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2119,6 +2264,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2133,6 +2283,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2147,6 +2302,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2161,6 +2321,11 @@ class Neo4jClient:
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2173,6 +2338,11 @@ class Neo4jClient:
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.match_type = 'cve_tag',
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """
@@ -2185,6 +2355,11 @@ class Neo4jClient:
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
             r.match_type = 'cve_tag',
+            r.misp_event_ids = apoc.coll.toSet(
+                coalesce(r.misp_event_ids, []) +
+                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
+                     THEN [row.misp_event_id] ELSE [] END
+            ),
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime()
         """

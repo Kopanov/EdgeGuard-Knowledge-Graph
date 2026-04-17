@@ -61,7 +61,10 @@ Auth:    Configured via environment variables
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
   last_updated: DATETIME,   // Last update
-  misp_event_id: STRING,    // Link to MISP event
+  misp_event_id: STRING,    // Link to MISP event (first-seen, scalar legacy)
+  misp_event_ids: LIST,     // Accumulated MISP event ids (set, deduped)
+  misp_attribute_id: STRING,  // 2026-04: MISP attribute UUID (stable cross-instance, from attr.uuid)
+  misp_attribute_ids: LIST, // 2026-04: Accumulated MISP attribute UUIDs (set, deduped)
   // OTX enrichment fields
   attack_ids: LIST,              // MITRE ATT&CK technique IDs from OTX pulse
   targeted_countries: LIST,      // ISO country codes from OTX pulse
@@ -97,7 +100,8 @@ Auth:    Configured via environment variables
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
   last_updated: DATETIME,   // Last update
-  misp_event_id: STRING     // When ingested from a MISP event
+  misp_event_id: STRING,    // When ingested from a MISP event (first-seen, scalar legacy)
+  misp_event_ids: LIST      // Accumulated MISP event ids (set, deduped)
 })
 ```
 
@@ -563,6 +567,7 @@ CREATE INDEX indicator_active FOR (i:Indicator) ON (i.active);
 CREATE INDEX vulnerability_active FOR (v:Vulnerability) ON (v.active);
 CREATE INDEX indicator_misp_event_id FOR (i:Indicator) ON (i.misp_event_id);
 CREATE INDEX vulnerability_misp_event_id FOR (v:Vulnerability) ON (v.misp_event_id);
+CREATE INDEX indicator_misp_attribute_id FOR (i:Indicator) ON (i.misp_attribute_id);  // 2026-04: direct MISP attribute UUID lookup
 CREATE INDEX tactic_shortname FOR (t:Tactic) ON (t.shortname);
 CREATE INDEX technique_tactic_phases FOR (t:Technique) ON (t.tactic_phases);
 CREATE INDEX cvssv31_cve_id FOR (n:CVSSv31) ON (n.cve_id);
