@@ -495,8 +495,14 @@ class Neo4jClient:
             for stmt in old_constraints:
                 try:
                     session.run(stmt, timeout=NEO4J_READ_TIMEOUT)
-                except Exception:
-                    pass  # constraint didn't exist — fine
+                except Exception as drop_err:
+                    # PR #33 round 13: silent ``except: pass`` replaced with a
+                    # DEBUG log so an operator running in verbose mode can see
+                    # which old-constraint drops were no-ops vs which silently
+                    # masked a real schema error. Most invocations are no-ops
+                    # (constraint already absent on a fresh DB), so DEBUG is
+                    # the right level — INFO would spam.
+                    logger.debug("Drop legacy constraint %r: %s (likely already absent)", stmt[:60], drop_err)
 
             # Deduplicate CVSS nodes before creating single-key constraints.
             # Old compound key (cve_id, tag) may have created multiple nodes per CVE.
@@ -2356,10 +2362,18 @@ class Neo4jClient:
                 else:
                     _dropped_rels += 1
 
+        # PR #33 round 13: log the drop count UNCONDITIONALLY so the operator
+        # can distinguish "0 drops" (healthy) from "we forgot to log" (silent).
+        # WARNING when there are drops, INFO when there are none.
         if _dropped_rels:
             logger.warning(
                 "Relationship batch: %s/%s definitions dropped (blank/missing endpoints)",
                 _dropped_rels,
+                len(relationships),
+            )
+        else:
+            logger.info(
+                "Relationship batch: 0/%s dropped (all definitions had non-blank endpoints)",
                 len(relationships),
             )
 

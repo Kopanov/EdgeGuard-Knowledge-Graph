@@ -735,7 +735,10 @@ class EdgeGuardPipeline:
                     if len(parts) >= 2:
                         source_from_event = parts[1]  # e.g., "alienvault_otx"
                 except Exception as e:
-                    logger.debug(f"Could not extract source from event info '{event_info}': {e}")
+                    # PR #33 round 13: upgraded debug → warning so the
+                    # operator sees STIX export source-extraction failures
+                    # in production logs (debug is invisible by default).
+                    logger.warning(f"Could not extract source from event info '{event_info}': {e}")
 
                 try:
                     # Fetch full event details

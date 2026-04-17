@@ -74,12 +74,39 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         return False
 
 
-def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, batch_size=5000):
+def _safe_run_batched(
+    client,
+    label,
+    outer_query,
+    inner_query,
+    stats,
+    stat_key,
+    batch_size=5000,
+    expected_query=None,
+):
     """Run a relationship query in batches using apoc.periodic.iterate.
 
     Splits the work into mini-transactions of batch_size to prevent OOM.
-    Returns True on success, False on failure (logged, not raised).
+    Returns True on success (zero APOC errorMessages), False on partial or
+    full failure (PR #33 round 13: previously returned True even when
+    apoc.periodic.iterate reported errorMessages — silent partial failure).
+
+    If ``expected_query`` is provided (a Cypher string returning a single
+    column ``c``), the result is logged alongside the actual count so the
+    operator can see how many input rows were silently skipped because
+    their inner-MATCH target node didn't exist (PR #33 round 13: addresses
+    the silent-skip in queries 5/6/8/9/10 where MATCH (Technique) /
+    MATCH (Malware) silently drops rows when the target is missing).
     """
+    expected = None
+    if expected_query is not None:
+        try:
+            expected_result = client.run(expected_query)
+            if expected_result:
+                expected = expected_result[0].get("c", 0)
+        except Exception as exp_err:
+            logger.debug("expected_query failed for %s — skip-count log will be omitted: %s", label, exp_err)
+
     query = f"""
     CALL apoc.periodic.iterate(
         '{outer_query}',
@@ -95,16 +122,31 @@ def _safe_run_batched(client, label, outer_query, inner_query, stats, stat_key, 
             row = result[0]
             count = row.get("count", 0)
             batches_n = row.get("batches", 0)
-            errors = row.get("errorMessages", [])
+            errors = row.get("errorMessages", []) or []
             stats[stat_key] = count
             if errors:
-                logger.warning(f"  [PARTIAL] {label}: {count} in {batches_n} batches, errors: {errors[:3]}")
+                logger.warning(
+                    f"  [PARTIAL] {label}: {count} in {batches_n} batches, errors: {errors[:3]}"
+                    f"{' (+more)' if len(errors) > 3 else ''}"
+                )
             else:
                 logger.info(f"  [OK] {label}: {count} in {batches_n} batches")
+            # PR #33 round 13: skip-count log when expected_query was provided.
+            if expected is not None and expected > count:
+                skipped = expected - count
+                logger.info(
+                    "  [SKIP] %s: %d/%d input rows had no matching target node (likely missing prerequisite ingestion)",
+                    label,
+                    skipped,
+                    expected,
+                )
+            # PR #33 round 13: errorMessages now flips return value to False so
+            # the caller's failures counter reflects partial APOC errors.
+            return not errors
         else:
             stats[stat_key] = 0
             logger.info(f"  [OK] {label}: 0 (no matches)")
-        return True
+            return True
     except Exception as e:
         logger.error(f"  [FAIL] {label}: {type(e).__name__}: {e}", exc_info=True)
         stats[stat_key] = 0
@@ -143,8 +185,20 @@ def build_relationships():
         logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
         _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
         _q3a_inner = 'WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)'
+        # PR #33 round 13: count Indicator rows whose cve_id has no Vulnerability — surfaces silent skips.
+        _q3a_expected = (
+            "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
+            "AND EXISTS { MATCH (v:Vulnerability {cve_id: i.cve_id}) } "
+            "RETURN count(i) AS c"
+        )
         if not _safe_run_batched(
-            client, "Indicator → Vulnerability (EXPLOITS)", _q3a_outer, _q3a_inner, stats, "exploits_vuln"
+            client,
+            "Indicator → Vulnerability (EXPLOITS)",
+            _q3a_outer,
+            _q3a_inner,
+            stats,
+            "exploits_vuln",
+            expected_query=_q3a_expected,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -153,7 +207,20 @@ def build_relationships():
         logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
         _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
         _q3b_inner = 'WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)'
-        if not _safe_run_batched(client, "Indicator → CVE (EXPLOITS)", _q3b_outer, _q3b_inner, stats, "exploits_cve"):
+        _q3b_expected = (
+            "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
+            "AND EXISTS { MATCH (c:CVE {cve_id: i.cve_id}) } "
+            "RETURN count(i) AS c"
+        )
+        if not _safe_run_batched(
+            client,
+            "Indicator → CVE (EXPLOITS)",
+            _q3b_outer,
+            _q3b_inner,
+            stats,
+            "exploits_cve",
+            expected_query=_q3b_expected,
+        ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
@@ -194,24 +261,50 @@ def build_relationships():
 
         # 5. ThreatActor → Technique (EMPLOYS_TECHNIQUE) — explicit ATT&CK
         # uses_techniques list. Attribution semantics: "who uses this TTP".
-        # Split from a previously-generic USES in 2026-04 to improve GraphRAG
-        # retrieval — see migrations/2026_04_specialize_uses_technique.cypher.
+        # PR #33 round 13: expected_query counts (actor, technique-id) pairs
+        # whose Technique node EXISTS — surfaces the silent skip when MITRE
+        # data hasn't been ingested yet.
         logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
         _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _q5_expected = (
+            "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 "
+            "UNWIND a.uses_techniques AS tid "
+            "MATCH (t:Technique {mitre_id: tid}) "
+            "RETURN count(*) AS c"
+        )
         if not _safe_run_batched(
-            client, "ThreatActor → Technique (ATT&CK explicit)", _outer, _inner, stats, "employs_technique_explicit"
+            client,
+            "ThreatActor → Technique (ATT&CK explicit)",
+            _outer,
+            _inner,
+            stats,
+            "employs_technique_explicit",
+            expected_query=_q5_expected,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 6. Malware → Technique (IMPLEMENTS_TECHNIQUE) — MITRE STIX uses
         # relationships. Capability semantics: "what the code can do".
+        # PR #33 round 13: expected_query surfaces silent skips.
         logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
         _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _q6_expected = (
+            "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 "
+            "UNWIND m.uses_techniques AS tid "
+            "MATCH (t:Technique {mitre_id: tid}) "
+            "RETURN count(*) AS c"
+        )
         if not _safe_run_batched(
-            client, "Malware → Technique (MITRE explicit)", _outer, _inner, stats, "malware_implements_technique"
+            client,
+            "Malware → Technique (MITRE explicit)",
+            _outer,
+            _inner,
+            stats,
+            "malware_implements_technique",
+            expected_query=_q6_expected,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -268,33 +361,74 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
+        # PR #33 round 13: expected_query surfaces silent skips.
         logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
         _q8_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 RETURN i"
         _q8_inner = 'WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _q8_expected = (
+            "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 "
+            "UNWIND i.attack_ids AS tech_id "
+            "MATCH (t:Technique {mitre_id: tech_id}) "
+            "RETURN count(*) AS c"
+        )
         if not _safe_run_batched(
-            client, "Indicator → Technique (attack_ids)", _q8_outer, _q8_inner, stats, "indicator_uses_technique"
+            client,
+            "Indicator → Technique (attack_ids)",
+            _q8_outer,
+            _q8_inner,
+            stats,
+            "indicator_uses_technique",
+            expected_query=_q8_expected,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
+        # PR #33 round 13: expected_query surfaces silent skips when the named
+        # malware hasn't been ingested.
         logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
         _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
         _q9_inner = 'WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.created_at = datetime() SET r.confidence_score = CASE WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 ELSE r.confidence_score END, r.match_type = "malware_family", r.source_id = "malware_family_match", r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)'
+        _q9_expected = (
+            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' "
+            "MATCH (m:Malware) "
+            "WHERE toLower(m.name) = toLower(i.malware_family) "
+            "  OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] "
+            "  OR toLower(m.family) = toLower(i.malware_family) "
+            "RETURN count(*) AS c"
+        )
         if not _safe_run_batched(
-            client, "Indicator → Malware (family match)", _q9_outer, _q9_inner, stats, "indicates_family"
+            client,
+            "Indicator → Malware (family match)",
+            _q9_outer,
+            _q9_inner,
+            stats,
+            "indicates_family",
+            expected_query=_q9_expected,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 10. Tool → Technique (IMPLEMENTS_TECHNIQUE) — MITRE uses_techniques.
         # Same capability semantics as Malware above; both are "code/tool can
-        # execute this TTP".
+        # execute this TTP". PR #33 round 13: expected_query surfaces silent skips.
         logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
         _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _q10_expected = (
+            "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 "
+            "UNWIND tool.uses_techniques AS tid "
+            "MATCH (t:Technique {mitre_id: tid}) "
+            "RETURN count(*) AS c"
+        )
         if not _safe_run_batched(
-            client, "Tool → Technique (MITRE explicit)", _outer, _inner, stats, "tool_implements_technique"
+            client,
+            "Tool → Technique (MITRE explicit)",
+            _outer,
+            _inner,
+            stats,
+            "tool_implements_technique",
+            expected_query=_q10_expected,
         ):
             failures += 1
         time.sleep(_INTER_QUERY_PAUSE)
@@ -322,11 +456,20 @@ def build_relationships():
         except Exception as e:
             logger.error(f"Failed to fetch final stats: {e}")
 
-        # Log summary
+        # PR #33 round 13: explicit summary line that an operator can grep.
+        # Always emitted (even on full success) so absence in logs is a clear
+        # "build_relationships didn't reach the end" signal rather than just
+        # "no failures, must have worked."
         total_rels = sum(v for k, v in stats.items() if k != "multi_zone_indicators")
-        logger.info(f"\nTotal relationships created: {total_rels}")
+        per_query = ", ".join(f"{k}={v}" for k, v in sorted(stats.items()) if k != "multi_zone_indicators")
+        logger.info(
+            "[BUILD_RELATIONSHIPS SUMMARY] total_edges=%d failures=%d/11 per_query=[%s]",
+            total_rels,
+            failures,
+            per_query,
+        )
         if failures:
-            logger.warning(f"Relationship types failed: {failures}/11 — partial success")
+            logger.warning("Relationship types failed: %d/11 — partial success", failures)
 
         if _METRICS_AVAILABLE:
             try:

@@ -115,12 +115,17 @@ class TestBatchedSuccess:
 class TestBatchedPartialFailure:
     """Verify behaviour when apoc.periodic.iterate reports errorMessages."""
 
-    def test_returns_true_on_partial(self):
+    def test_returns_false_on_partial(self):
+        """PR #33 round 13: errorMessages > 0 now flips the return value to
+        False so the caller's failures counter reflects partial APOC errors.
+        Prior to round 13 this returned True (silent partial-failure)."""
         client = _mock_client()
         client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": ["some error"]}]
         stats = {}
         result = _safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "partial_key")
-        assert result is True
+        assert result is False, (
+            "round 13: partial APOC errorMessages must flip return value to False — previously returned True silently"
+        )
 
     def test_stats_updated_on_partial(self):
         client = _mock_client()

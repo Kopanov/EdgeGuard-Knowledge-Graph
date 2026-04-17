@@ -1491,3 +1491,187 @@ def test_merge_missiondependency_refuses_missing_dependency_id():
     assert client.merge_missiondependency({"dependency_id": ""}) is False, (
         "merge_missiondependency with empty dependency_id must return False"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 13 — silent-skip / empty-data improvements
+# ---------------------------------------------------------------------------
+
+
+def test_safe_run_batched_returns_false_on_apoc_errors():
+    """PR #33 round 13: ``_safe_run_batched`` previously returned True even
+    when apoc.periodic.iterate reported errorMessages — silent partial
+    failure. Now: returns False so the caller's failures counter reflects
+    the partial APOC error."""
+    import importlib
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    client.run.return_value = [{"count": 5, "batches": 2, "errorMessages": ["constraint violation on row 3"]}]
+    stats: dict = {}
+    result = build_relationships._safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "k")
+    assert result is False, "errorMessages > 0 must flip return value to False"
+
+    # Sanity: zero errorMessages returns True.
+    client2 = MagicMock()
+    client2.run.return_value = [{"count": 5, "batches": 2, "errorMessages": []}]
+    stats2: dict = {}
+    assert (
+        build_relationships._safe_run_batched(client2, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats2, "k") is True
+    )
+
+
+def test_safe_run_batched_logs_skip_count_when_expected_query_provided(caplog):
+    """When ``expected_query`` is provided and the actual count is less than
+    expected, an INFO ``[SKIP]`` log is emitted with the missing-row count.
+    This surfaces the silent skip in 5/6/8/9/10 link queries when MITRE/Malware
+    target nodes haven't been ingested."""
+    import importlib
+    import logging
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    # First call: expected_query → returns 100. Second call: apoc.periodic.iterate → returns 70.
+    client.run.side_effect = [
+        [{"c": 100}],  # expected
+        [{"count": 70, "batches": 1, "errorMessages": []}],  # apoc result
+    ]
+    stats: dict = {}
+    with caplog.at_level(logging.INFO, logger="build_relationships"):
+        build_relationships._safe_run_batched(
+            client,
+            "TEST",
+            "MATCH (n) RETURN n",
+            "SET n.x = 1",
+            stats,
+            "k",
+            expected_query="MATCH (a) WHERE EXISTS { ... } RETURN count(a) AS c",
+        )
+    logs = "\n".join(rec.message for rec in caplog.records)
+    assert "[SKIP]" in logs, "expected [SKIP] log when actual < expected"
+    assert "30/100" in logs, f"expected '30/100' missing-target count in log; got: {logs}"
+
+
+def test_build_relationships_link_queries_pass_expected_query():
+    """Pin that link queries 3a, 3b, 5, 6, 8, 9, 10 in build_relationships()
+    pass the ``expected_query`` keyword argument so the silent-skip log fires.
+    Without this, the round-13 visibility improvement is dead code."""
+    import importlib
+    import inspect
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    build_relationships = importlib.import_module("build_relationships")
+
+    src = inspect.getsource(build_relationships.build_relationships)
+    # All 7 expected_query labels we wired in round 13.
+    for var in (
+        "_q3a_expected",
+        "_q3b_expected",
+        "_q5_expected",
+        "_q6_expected",
+        "_q8_expected",
+        "_q9_expected",
+        "_q10_expected",
+    ):
+        assert var in src, f"build_relationships() should define {var} for silent-skip surfacing"
+    # And expected_query= keyword usage must appear at least 7 times.
+    assert src.count("expected_query=") >= 7, (
+        "expected_query= kwarg must be passed to _safe_run_batched for queries 3a/3b/5/6/8/9/10"
+    )
+
+
+def test_sync_to_neo4j_logs_when_items_empty(caplog):
+    """PR #33 round 13: ``sync_to_neo4j`` previously returned silently on
+    empty input. Now emits an INFO log so an operator can distinguish 'MISP
+    returned 0 events' from 'sync_to_neo4j was never called'."""
+    import importlib
+    import inspect
+
+    if "run_misp_to_neo4j" in sys.modules:
+        del sys.modules["run_misp_to_neo4j"]
+    run_misp_to_neo4j = importlib.import_module("run_misp_to_neo4j")
+
+    # Find sync_to_neo4j in the module — it's a method on MISPToNeo4jSync.
+    src = inspect.getsource(run_misp_to_neo4j.MISPToNeo4jSync.sync_to_neo4j)
+    assert "[NEO4J SYNC] no items received" in src, (
+        "sync_to_neo4j must log when items is empty (round 13 silent-skip fix)"
+    )
+
+
+def test_dropped_rels_log_emits_even_when_zero():
+    """PR #33 round 13: ``create_misp_relationships_batch`` previously logged
+    drops only when ``_dropped_rels > 0`` — invisible 'success' for the 0-drop
+    path. Now logs INFO when 0 drops so the operator sees an explicit baseline."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_misp_relationships_batch)
+    # Both branches must exist: WARNING (if drops) AND INFO (if zero).
+    assert "logger.warning" in src and "definitions dropped" in src, "WARN log for drops must still exist"
+    assert "logger.info" in src and "0/" in src and "dropped" in src, (
+        "INFO log for the zero-drop baseline must be emitted (round 13)"
+    )
+
+
+def test_drop_constraint_no_longer_uses_bare_pass():
+    """PR #33 round 13: silent ``except: pass`` on DROP CONSTRAINT replaced
+    with a DEBUG log — operator running in verbose mode can see which
+    legacy constraints were dropped vs which silently masked schema errors."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_constraints)
+    # Walk lines: any ``except Exception: pass`` (or bare ``except: pass``) must be gone
+    # in the old_constraints loop. Allow the comment to mention pass historically.
+    for i, line in enumerate(src.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        # A literal pass in the immediate body of an except is what we want gone.
+        if stripped == "pass" and "except" in (src.splitlines()[i - 1] if i > 0 else ""):
+            raise AssertionError(
+                f"create_constraints still has bare except:pass at line {i + 1} — round 13 added a DEBUG log"
+            )
+
+
+def test_misp_attributes_dropped_metric_exists_and_is_emitted():
+    """PR #33 round 13: ``MISP_ATTRIBUTES_DROPPED`` Prometheus counter
+    exposes silent-skip rate by reason class. Pin the metric is declared
+    and that the dedup function records into it.
+
+    NB: do NOT reload metrics_server (Prometheus duplicates a registered
+    Counter on re-import — would crash with 'Duplicated timeseries'). Use
+    source-level checks instead.
+    """
+    metrics_path = os.path.join(os.path.dirname(__file__), "..", "src", "metrics_server.py")
+    with open(metrics_path) as fh:
+        metrics_src = fh.read()
+    assert "MISP_ATTRIBUTES_DROPPED" in metrics_src, "MISP_ATTRIBUTES_DROPPED Counter must be declared"
+    assert "edgeguard_misp_attributes_dropped_total" in metrics_src, "Counter must use the canonical Prometheus name"
+    assert "def record_misp_attribute_dropped" in metrics_src, "helper function must exist"
+
+    rmtn_path = os.path.join(os.path.dirname(__file__), "..", "src", "run_misp_to_neo4j.py")
+    with open(rmtn_path) as fh:
+        rmtn_src = fh.read()
+    assert "record_misp_attribute_dropped" in rmtn_src, (
+        "run_misp_to_neo4j must call record_misp_attribute_dropped in its dedup path"
+    )

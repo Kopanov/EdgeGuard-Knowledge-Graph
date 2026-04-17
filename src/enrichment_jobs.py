@@ -547,7 +547,21 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("\n[4/4] IOC Confidence Decay...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
-    logger.info("\n[DONE] All enrichment jobs complete")
+    # PR #33 round 13: explicit aggregated summary so an operator scanning logs
+    # sees totals from all 4 jobs without grepping each function's output.
+    def _sum(d):
+        if isinstance(d, dict):
+            return sum(v for v in d.values() if isinstance(v, (int, float)))
+        return d if isinstance(d, (int, float)) else 0
+
+    logger.info(
+        "[ENRICHMENT SUMMARY] bridge=%s campaigns=%s calibration=%s decay=%s",
+        _sum(summary.get("bridge")),
+        _sum(summary.get("campaigns")),
+        _sum(summary.get("calibration")),
+        _sum(summary.get("decay")),
+    )
+    logger.info("[DONE] All enrichment jobs complete")
     return summary
 
 

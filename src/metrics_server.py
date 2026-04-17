@@ -90,6 +90,15 @@ MISP_EVENTS = Counter("edgeguard_misp_events_total", "Total MISP events created"
 
 MISP_ATTRIBUTES = Counter("edgeguard_misp_attributes_total", "Total MISP attributes created", ["type", "source"])
 
+# PR #33 round 13: dropped-attribute counter for the dedup pre-stage. Surfaces
+# silent-skip rate: any spike in a particular reason class (missing_cve_id,
+# missing_key) is a data-quality signal worth alerting on.
+MISP_ATTRIBUTES_DROPPED = Counter(
+    "edgeguard_misp_attributes_dropped_total",
+    "MISP attributes dropped during dedup/parse — by reason",
+    ["reason"],
+)
+
 MISP_PUSH_DURATION = Histogram(
     "edgeguard_misp_push_duration_seconds",
     "Time spent pushing to MISP",
@@ -244,6 +253,12 @@ def record_misp_push(source: str, zone: str, event_count: int, attr_count: int, 
 def record_misp_attribute(indicator_type: str, source: str):
     """Record MISP attribute creation."""
     MISP_ATTRIBUTES.labels(type=indicator_type, source=source).inc()
+
+
+def record_misp_attribute_dropped(reason: str, count: int = 1):
+    """Record an attribute dropped during dedup/parse — see MISP_ATTRIBUTES_DROPPED."""
+    safe = (reason or "unknown").replace('"', "")[:80]
+    MISP_ATTRIBUTES_DROPPED.labels(reason=safe).inc(count)
 
 
 def record_neo4j_sync(node_counts: Dict[str, int], duration: float):
