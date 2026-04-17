@@ -273,25 +273,33 @@ class EdgeGuardPipeline:
         """
         try:
             # Co-occurrence query: Indicators and Malware that share a MISP event
-            # are linked with INDICATES.  Works cross-source because misp_event_id
-            # is stored on every node that came through the MISP pipeline.
+            # are linked with INDICATES.  Works cross-source because every MISP-
+            # derived node accumulates its event ids in misp_event_ids[].
             # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators).
             #
-            # Symmetric scalar+array handling on BOTH ends of the join (2026-04 fix):
-            # outer query includes Indicators with non-empty misp_event_ids[] even when
-            # the legacy scalar is null; inner Malware match accepts the event id from
-            # either the scalar or the array. Pre-fix the join missed all Malware whose
-            # contribution to the event was a re-occurrence (only the first-seen scalar
-            # was matched).
+            # PR #33 round 10: dropped legacy scalar misp_event_id from both
+            # filter and join. Outer filter only includes nodes with a non-
+            # empty misp_event_ids array; inner join matches by array IN
+            # membership.
+            # PR #34 round 28 (bugbot MED): stamp r.src_uuid / r.trg_uuid on
+            # both co-occurrence and EXPLOITS edges so the CLI path produces
+            # the same cross-environment-traceable edges as the primary
+            # build_relationships.py path. Without this, edges created via
+            # run_pipeline.py CLI had NULL endpoint uuids, silently breaking
+            # the delta-sync contract for any operator who preferred this
+            # code path.
             cooccurrence_query = """
             CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE (i.misp_event_id IS NOT NULL AND i.misp_event_id <> "") OR (i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0) RETURN i',
+                'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0 RETURN i',
                 'WITH $i AS i
-                 WITH i, [eid IN coalesce(i.misp_event_ids, [i.misp_event_id]) WHERE eid IS NOT NULL AND eid <> ""  ][0..200] AS eids
+                 WITH i, [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ""][0..200] AS eids
                  UNWIND eids AS eid WITH i, eid
-                 MATCH (m:Malware) WHERE m.misp_event_id = eid OR (m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids)
+                 MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids
                  MERGE (i)-[r:INDICATES]->(m)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5 SET r.updated_at = datetime()',
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5, r.src_uuid = i.uuid, r.trg_uuid = m.uuid
+                 SET r.updated_at = datetime(),
+                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                     r.trg_uuid = coalesce(r.trg_uuid, m.uuid)',
                 {batchSize: 5000, parallel: false}
             )
             YIELD total
@@ -313,7 +321,10 @@ class EdgeGuardPipeline:
                 'WITH $i AS i
                  MATCH (c:CVE {cve_id: i.cve_id})
                  MERGE (i)-[r:EXPLOITS]->(c)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9 SET r.updated_at = datetime()',
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9, r.src_uuid = i.uuid, r.trg_uuid = c.uuid
+                 SET r.updated_at = datetime(),
+                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                     r.trg_uuid = coalesce(r.trg_uuid, c.uuid)',
                 {batchSize: 5000, parallel: false}
             )
             YIELD total
@@ -737,7 +748,10 @@ class EdgeGuardPipeline:
                     if len(parts) >= 2:
                         source_from_event = parts[1]  # e.g., "alienvault_otx"
                 except Exception as e:
-                    logger.debug(f"Could not extract source from event info '{event_info}': {e}")
+                    # PR #33 round 13: upgraded debug → warning so the
+                    # operator sees STIX export source-extraction failures
+                    # in production logs (debug is invisible by default).
+                    logger.warning(f"Could not extract source from event info '{event_info}': {e}")
 
                 try:
                     # Fetch full event details

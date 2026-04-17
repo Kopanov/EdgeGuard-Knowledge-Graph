@@ -107,13 +107,14 @@ re-querying the graph.
 **MISP traceability (2026-04):** every SDO sourced from a node with
 MISP provenance also carries:
 
-- `x_edgeguard_misp_event_ids: ["1234", "1235", ...]` — union of the
-  node's `misp_event_ids[]` array and the legacy scalar
-  `misp_event_id`. Lets ResilMesh resolve a STIX object back to the
-  originating MISP event(s) without round-tripping through Neo4j.
-- `x_edgeguard_misp_attribute_ids: ["uuid-a", ...]` — same union for
-  attribute UUIDs. Present on Indicator-derived SDOs (the only nodes
-  where the MISP attribute UUID is populated).
+- `x_edgeguard_misp_event_ids: ["1234", "1235", ...]` — every MISP event
+  that has observed this entity, taken from the node's `misp_event_ids[]`
+  array. Lets ResilMesh resolve a STIX object back to the originating
+  MISP events without round-tripping through Neo4j.
+- `x_edgeguard_misp_attribute_ids: ["uuid-a", ...]` — every MISP attribute
+  UUID that contributed to this entity, from `misp_attribute_ids[]`.
+  Present on Indicator-derived SDOs (the only nodes where MISP attribute
+  UUIDs are populated).
 
 Both fields are omitted entirely when the source node has no MISP
 references — bundles do not grow empty fields on every object.
@@ -222,3 +223,7 @@ file an issue with `stix-exporter` in the title.
 
 See [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md)
 for the full node/relationship mapping across both sides.
+
+---
+
+_Last updated: 2026-04-17_

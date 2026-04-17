@@ -427,8 +427,9 @@ def test_indicator_provenance_fields(graphql_client, monkeypatch):
         "source": ["alienvault_otx"],
         "last_updated": None,
         "edgeguard_managed": True,
-        "misp_event_id": "42",
-        "misp_attribute_id": "1337",
+        # PR #33 round 10: array-only provenance.
+        "misp_event_ids": ["42", "43"],
+        "misp_attribute_ids": ["1337", "1338"],
         "first_imported_at": "2025-01-15T10:00:00",
         "last_imported_from": "alienvault_otx",
     }
@@ -442,7 +443,7 @@ def test_indicator_provenance_fields(graphql_client, monkeypatch):
     query = """
     {
       indicators {
-        value mispEventId mispAttributeId mispEventUrl
+        value mispEventIds mispAttributeIds mispEventUrls
         firstImportedAt lastImportedFrom
       }
     }
@@ -452,15 +453,18 @@ def test_indicator_provenance_fields(graphql_client, monkeypatch):
     data = resp.json()
     assert "errors" not in data, data.get("errors")
     ind = data["data"]["indicators"][0]
-    assert ind["mispEventId"] == "42"
-    assert ind["mispAttributeId"] == "1337"
-    assert ind["mispEventUrl"] == "https://misp.example.com/events/view/42"
+    assert ind["mispEventIds"] == ["42", "43"]
+    assert ind["mispAttributeIds"] == ["1337", "1338"]
+    assert ind["mispEventUrls"] == [
+        "https://misp.example.com/events/view/42",
+        "https://misp.example.com/events/view/43",
+    ]
     assert ind["firstImportedAt"] == "2025-01-15T10:00:00"
     assert ind["lastImportedFrom"] == "alienvault_otx"
 
 
-def test_indicator_misp_url_absent_when_no_misp_url_env(graphql_client, monkeypatch):
-    """misp_event_url must be None when MISP_URL env var is not set."""
+def test_indicator_misp_urls_absent_when_no_misp_url_env(graphql_client, monkeypatch):
+    """misp_event_urls must be None when MISP_URL env var is not set."""
     client, session_ctx = graphql_client
     import graphql_api as gapi  # noqa: E402
 
@@ -475,8 +479,8 @@ def test_indicator_misp_url_absent_when_no_misp_url_env(graphql_client, monkeypa
         "source": ["threatfox"],
         "last_updated": None,
         "edgeguard_managed": True,
-        "misp_event_id": "99",
-        "misp_attribute_id": None,
+        "misp_event_ids": ["99"],
+        "misp_attribute_ids": None,
         "first_imported_at": None,
         "last_imported_from": None,
     }
@@ -487,18 +491,18 @@ def test_indicator_misp_url_absent_when_no_misp_url_env(graphql_client, monkeypa
     record.__getitem__ = MagicMock(side_effect=lambda k: node)
     session_ctx.run.return_value.__iter__ = MagicMock(return_value=iter([record]))
 
-    query = "{ indicators { value mispEventId mispEventUrl } }"
+    query = "{ indicators { value mispEventIds mispEventUrls } }"
     resp = client.post("/graphql", json={"query": query})
     assert resp.status_code == 200
     data = resp.json()
     assert "errors" not in data, data.get("errors")
     ind = data["data"]["indicators"][0]
-    assert ind["mispEventId"] == "99"
-    assert ind["mispEventUrl"] is None  # no MISP_URL → no URL
+    assert ind["mispEventIds"] == ["99"]
+    assert ind["mispEventUrls"] is None  # no MISP_URL → no URLs
 
 
 def test_vulnerability_provenance_fields(graphql_client):
-    """Vulnerability must expose misp_event_id and import audit timestamps."""
+    """Vulnerability must expose misp_event_ids and import audit timestamps."""
     client, session_ctx = graphql_client
     vuln_props = {
         "cve_id": "CVE-2025-0001",
@@ -510,7 +514,7 @@ def test_vulnerability_provenance_fields(graphql_client):
         "edgeguard_managed": True,
         "source": ["cisa_kev"],
         "last_updated": None,
-        "misp_event_id": "77",
+        "misp_event_ids": ["77", "78"],
         "first_imported_at": "2025-03-01T08:00:00",
         "last_imported_from": "cisa_kev",
     }
@@ -524,7 +528,7 @@ def test_vulnerability_provenance_fields(graphql_client):
     query = """
     {
       vulnerabilities {
-        cveId mispEventId firstImportedAt lastImportedFrom
+        cveId mispEventIds firstImportedAt lastImportedFrom
       }
     }
     """
@@ -534,7 +538,7 @@ def test_vulnerability_provenance_fields(graphql_client):
     assert "errors" not in data, data.get("errors")
     vuln = data["data"]["vulnerabilities"][0]
     assert vuln["cveId"] == "CVE-2025-0001"
-    assert vuln["mispEventId"] == "77"
+    assert vuln["mispEventIds"] == ["77", "78"]
     assert vuln["firstImportedAt"] == "2025-03-01T08:00:00"
     assert vuln["lastImportedFrom"] == "cisa_kev"
 

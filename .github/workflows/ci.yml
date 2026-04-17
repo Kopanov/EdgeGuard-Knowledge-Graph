@@ -29,13 +29,13 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Ruff — lint
-        run: ruff check src/ dags/ tests/
+        run: ruff check src/ dags/ tests/ scripts/
 
       - name: Ruff — format check
-        run: ruff format --check src/ dags/ tests/
+        run: ruff format --check src/ dags/ tests/ scripts/
 
       - name: Mypy — type check
-        run: mypy src/ --ignore-missing-imports --no-error-summary
+        run: mypy src/ scripts/ --ignore-missing-imports --no-error-summary
 
   # ── Unit tests ─────────────────────────────────────────────────────────────
   test:

@@ -21,9 +21,12 @@ Key design decisions (see proposal doc for justification):
   as ``coalesce(x.edgeguard_managed, true) = true``, which defaulted
   missing properties to ``true`` and let ResilMesh-owned nodes pass the
   filter — fixed in the bugbot pass on PR #25.
-- Backward compatibility with the legacy ``USES`` relationship type is
-  preserved alongside the new ``EMPLOYS_TECHNIQUE`` /
-  ``IMPLEMENTS_TECHNIQUE`` edges introduced by PR #24.
+- ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor/Campaign → Technique),
+  ``IMPLEMENTS_TECHNIQUE`` (capability: Malware/Tool → Technique), and
+  ``USES_TECHNIQUE`` (observation: Indicator → Technique) all collapse
+  back to STIX 2.1 ``relationship_type: "uses"`` on export. Pre-release
+  fresh start has no legacy ``USES`` edges; the read paths match only
+  the post-PR-#24 specialised edge types.
 - ATT&CK tactics are emitted as ``kill_chain_phases`` on the
   ``attack-pattern`` SDO, not as standalone objects (per STIX 2.1 ATT&CK
   convention).
@@ -34,6 +37,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import os
+import unicodedata
 import uuid
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -75,9 +79,19 @@ def _deterministic_id(obj_type: str, natural_key: str) -> str:
 
     STIX IDs look like ``indicator--<uuid>``; we use UUIDv5 with a fixed
     namespace so the same (type, key) pair always yields the same ID.
+
+    PR #34 round 25: apply the same NFC + strip normalization that
+    ``node_identity.canonicalize_field_value`` applies on the Neo4j side,
+    so cross-system uuid parity holds even for edge-case inputs
+    (trailing whitespace, NFD-encoded strings). The ``|``-escape is NOT
+    applied here because ``natural_key`` may already be a joined
+    multi-field string (e.g. ``"ipv4|203.0.113.5"``) — callers of this
+    function at multi-field SDO types MUST pre-escape each individual
+    field via ``node_identity.canonicalize_field_value`` BEFORE joining.
     """
     if not natural_key:
         natural_key = f"__missing__:{obj_type}"
+    natural_key = unicodedata.normalize("NFC", natural_key).strip()
     name = f"{obj_type}:{natural_key}".lower()
     return f"{obj_type}--{uuid.uuid5(EDGEGUARD_STIX_NAMESPACE, name)}"
 
@@ -182,7 +196,7 @@ class StixExporter:
               WHERE (v:CVE OR v:Vulnerability)
                 AND v.edgeguard_managed = true
             WITH i, malware, collect(DISTINCT v) AS vulns
-            OPTIONAL MATCH (i)-[:USES_TECHNIQUE|USES]->(t:Technique)
+            OPTIONAL MATCH (i)-[:USES_TECHNIQUE]->(t:Technique)
               WHERE t.edgeguard_managed = true
             WITH i, malware, vulns, collect(DISTINCT t) AS techniques
             OPTIONAL MATCH (i)-[:TARGETS]->(s:Sector)
@@ -274,11 +288,11 @@ class StixExporter:
             OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
               WHERE m.edgeguard_managed = true
             WITH a, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
+            OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
               WHERE t.edgeguard_managed = true
             WITH a, malware, collect(DISTINCT t) AS actor_tech
             UNWIND (CASE WHEN size(malware) = 0 THEN [null] ELSE malware END) AS m_each
-            OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE|USES]->(mt:Technique)
+            OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
               WHERE m_each IS NOT NULL AND mt.edgeguard_managed = true
             WITH a, malware, actor_tech,
                  collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
@@ -387,16 +401,16 @@ class StixExporter:
             MATCH (t:Technique {mitre_id: $mid})
             WHERE t.edgeguard_managed = true
             WITH t
-            OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t)
               WHERE a.edgeguard_managed = true
             WITH t, collect(DISTINCT a) AS actors
-            OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE m.edgeguard_managed = true
             WITH t, actors, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE tool.edgeguard_managed = true
             WITH t, actors, malware, collect(DISTINCT tool) AS tools
-            OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE]->(t)
               WHERE i.edgeguard_managed = true
             RETURN t AS seed,
                    actors,
@@ -541,7 +555,19 @@ class StixExporter:
         value = props.get("value", "")
         ind_type = props.get("indicator_type", "")
         pattern = _build_pattern(ind_type, value)
-        stix_id = _deterministic_id("indicator", f"{ind_type}|{value}")
+        # PR #34 round 25: pre-escape individual fields via
+        # ``canonicalize_field_value`` BEFORE joining with ``|`` so the
+        # resulting natural_key string cannot be ambiguous with another
+        # (type, value) pair where ``|`` appears in a different position.
+        # E.g. Indicator(type="ipv4|x", value="y") and
+        # Indicator(type="ipv4", value="x|y") used to both render as
+        # ``"ipv4|x|y"`` → same uuid → collision. Escaping disambiguates.
+        from node_identity import canonicalize_field_value
+
+        stix_id = _deterministic_id(
+            "indicator",
+            f"{canonicalize_field_value(ind_type)}|{canonicalize_field_value(value)}",
+        )
         obj = stix2.Indicator(
             id=stix_id,
             pattern=pattern,
@@ -673,8 +699,19 @@ class StixExporter:
         return _to_dict(obj)
 
     def _sector_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
+        # PR #34 round 22 (multi-agent UUID audit, HIGH): the previous
+        # ``f"sector|{name}"`` natural-key form prefixed every Sector
+        # canonical with ``sector|`` to disambiguate against generic STIX
+        # ``identity`` SDOs (which can represent users, organizations, etc.).
+        # That defensive prefix BROKE the central PR #34 parity contract:
+        # ``compute_node_uuid("Sector", {"name": name})`` canonicalizes to
+        # ``"identity:{name}"`` (no prefix) — different string, different
+        # UUID. The Neo4j n.uuid and the STIX SDO id UUID portion diverged
+        # for every Sector. EdgeGuard only ever emits sector-type identity
+        # SDOs, so the disambiguation prefix was dead defense. Drop it to
+        # restore parity. Pinned by test_sector_stix_parity_end_to_end.
         name = props.get("name") or props.get("sector") or ""
-        stix_id = _deterministic_id("identity", f"sector|{name}")
+        stix_id = _deterministic_id("identity", name)
         obj = stix2.Identity(
             id=stix_id,
             name=name,
@@ -839,34 +876,37 @@ def _attach_misp_provenance(sdo: Dict[str, Any], props: Dict[str, Any]) -> None:
     back to the originating MISP event(s) and attribute(s) without round-tripping
     through Neo4j.
 
-    Field semantics:
-    - ``x_edgeguard_misp_event_ids``: union of node's ``misp_event_ids[]`` array
-      and the legacy scalar ``misp_event_id`` (first-seen). Falls back to scalar
-      alone on nodes ingested before the array was populated.
-    - ``x_edgeguard_misp_attribute_ids``: union of ``misp_attribute_ids[]`` and the
-      scalar ``misp_attribute_id`` (MISP attribute UUIDs). Only present on
-      Indicator-derived SDOs in practice; harmless on other SDOs (omitted).
+    Field semantics (PR #33 round 10 — array-only after legacy-scalar drop):
+    - ``x_edgeguard_misp_event_ids``: ``misp_event_ids[]`` deduped and stringified.
+      Omitted from SDO when the source node has no array.
+    - ``x_edgeguard_misp_attribute_ids``: ``misp_attribute_ids[]`` deduped. Only
+      present on Indicator-derived SDOs in practice; harmless on other SDOs
+      (omitted when empty).
     """
     if not isinstance(sdo, dict):
         return
 
-    def _gather(scalar_key: str, array_key: str) -> List[str]:
-        out: List[str] = []
+    def _gather(array_key: str) -> List[str]:
         arr = props.get(array_key)
-        if isinstance(arr, (list, tuple)):
-            out.extend(str(v) for v in arr if v)
-        scalar = props.get(scalar_key)
-        if scalar:
-            s = str(scalar)
-            if s and s not in out:
-                out.append(s)
+        if not isinstance(arr, (list, tuple)):
+            return []
+        out: List[str] = []
+        seen: set = set()
+        for v in arr:
+            if v is None:
+                continue
+            s = str(v)
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
         return out
 
-    events = _gather("misp_event_id", "misp_event_ids")
+    events = _gather("misp_event_ids")
     if events:
         sdo["x_edgeguard_misp_event_ids"] = events
 
-    attrs = _gather("misp_attribute_id", "misp_attribute_ids")
+    attrs = _gather("misp_attribute_ids")
     if attrs:
         sdo["x_edgeguard_misp_attribute_ids"] = attrs
 

@@ -36,7 +36,6 @@ Auth:    Configured via environment variables
   // NVD-enriched fields
   cwe: LIST,                // CWE identifiers (e.g., ['CWE-787'])
   ref_tags: LIST,           // Reference tags (Vendor Advisory, Patch, etc.)
-  reference_urls: LIST,     // Actual advisory/patch URLs (up to 10)
   cpe_type: LIST,           // CPE types (a=application, o=os, h=hardware)
   result_impacts: LIST,     // CIA impact strings
   affected_products: LIST,  // CPE URIs (up to 10)
@@ -61,10 +60,11 @@ Auth:    Configured via environment variables
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
   last_updated: DATETIME,   // Last update
-  misp_event_id: STRING,    // Link to MISP event (first-seen, scalar legacy)
   misp_event_ids: LIST,     // Accumulated MISP event ids (set, deduped)
-  misp_attribute_id: STRING,  // 2026-04: MISP attribute UUID (stable cross-instance, from attr.uuid)
-  misp_attribute_ids: LIST, // 2026-04: Accumulated MISP attribute UUIDs (set, deduped)
+  misp_attribute_ids: LIST, // Accumulated MISP attribute UUIDs (stable cross-instance, from attr.uuid; set, deduped)
+  uuid: STRING,             // 2026-04 (PR #33): deterministic uuid5(namespace, canonical(label, natural_key))
+                            //                   — same value on local + cloud Neo4j; equals the UUID portion of the
+                            //                   corresponding STIX SDO id. See src/node_identity.py.
   // OTX enrichment fields
   attack_ids: LIST,              // MITRE ATT&CK technique IDs from OTX pulse
   targeted_countries: LIST,      // ISO country codes from OTX pulse
@@ -100,7 +100,6 @@ Auth:    Configured via environment variables
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
   last_updated: DATETIME,   // Last update
-  misp_event_id: STRING,    // When ingested from a MISP event (first-seen, scalar legacy)
   misp_event_ids: LIST      // Accumulated MISP event ids (set, deduped)
 })
 ```
@@ -115,8 +114,7 @@ Auth:    Configured via environment variables
   uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique; drives (Actor)-[:EMPLOYS_TECHNIQUE]->(Technique) edges in build_relationships.py. Property name retained as-is (STIX-side contract).
   confidence_score: FLOAT,  // 0.0-1.0
   first_seen: DATETIME,     // First observed
-  last_updated: DATETIME,   // Last update
-  original_source: STRING   // Original data source
+  last_updated: DATETIME    // Last update
 })
 ```
 
@@ -561,13 +559,14 @@ CREATE INDEX indicator_zone FOR (i:Indicator) ON (i.zone);
 CREATE INDEX malware_name FOR (m:Malware) ON (m.name);
 CREATE INDEX actor_name FOR (a:ThreatActor) ON (a.name);
 CREATE INDEX technique_mitre FOR (t:Technique) ON (t.mitre_id);
-CREATE INDEX indicator_original_source FOR (i:Indicator) ON (i.original_source);
-CREATE INDEX vulnerability_original_source FOR (v:Vulnerability) ON (v.original_source);
+// PR #34 round 18: indicator_original_source / vulnerability_original_source
+// indexes removed — the n.original_source property had zero readers.
 CREATE INDEX indicator_active FOR (i:Indicator) ON (i.active);
 CREATE INDEX vulnerability_active FOR (v:Vulnerability) ON (v.active);
-CREATE INDEX indicator_misp_event_id FOR (i:Indicator) ON (i.misp_event_id);
-CREATE INDEX vulnerability_misp_event_id FOR (v:Vulnerability) ON (v.misp_event_id);
-CREATE INDEX indicator_misp_attribute_id FOR (i:Indicator) ON (i.misp_attribute_id);  // 2026-04: direct MISP attribute UUID lookup
+// PR #33 round 10: legacy-scalar indexes (indicator/vulnerability/malware/
+// actor _misp_event_id and indicator_misp_attribute_id) removed. All readers
+// now match against misp_event_ids[] / misp_attribute_ids[] via list-membership
+// predicates (`eid IN n.misp_event_ids`).
 CREATE INDEX tactic_shortname FOR (t:Tactic) ON (t.shortname);
 CREATE INDEX technique_tactic_phases FOR (t:Technique) ON (t.tactic_phases);
 CREATE INDEX cvssv31_cve_id FOR (n:CVSSv31) ON (n.cve_id);
@@ -579,8 +578,6 @@ CREATE INDEX campaign_zone FOR (c:Campaign) ON (c.zone);
 CREATE INDEX indicator_last_updated FOR (i:Indicator) ON (i.last_updated);
 CREATE INDEX vulnerability_last_updated FOR (v:Vulnerability) ON (v.last_updated);
 CREATE INDEX cve_cve_id FOR (c:CVE) ON (c.cve_id);
-CREATE INDEX malware_misp_event_id FOR (m:Malware) ON (m.misp_event_id);
-CREATE INDEX actor_misp_event_id FOR (a:ThreatActor) ON (a.misp_event_id);
 
 // ResilMesh indexes (15)
 CREATE INDEX ip_address FOR (ip:IP) ON (ip.address);
@@ -815,4 +812,4 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 
 ---
 
-_Last updated: 2026-04-06_
+_Last updated: 2026-04-17_

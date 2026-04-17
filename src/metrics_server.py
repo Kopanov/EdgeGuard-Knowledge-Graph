@@ -90,6 +90,26 @@ MISP_EVENTS = Counter("edgeguard_misp_events_total", "Total MISP events created"
 
 MISP_ATTRIBUTES = Counter("edgeguard_misp_attributes_total", "Total MISP attributes created", ["type", "source"])
 
+# PR #33 round 13: dropped-attribute counter for the dedup pre-stage. Surfaces
+# silent-skip rate: any spike in a particular reason class (missing_cve_id,
+# missing_key) is a data-quality signal worth alerting on.
+MISP_ATTRIBUTES_DROPPED = Counter(
+    "edgeguard_misp_attributes_dropped_total",
+    "MISP attributes dropped during dedup/parse — by reason",
+    ["reason"],
+)
+
+# PR #34 round 18: counter for unmapped MISP attribute types. Each MISP
+# attribute type that EdgeGuard's mapping doesn't recognize falls into the
+# "unknown" bucket; this counter surfaces the type-name distribution so an
+# operator can see when MISP adds a new type and EdgeGuard's mapping needs
+# to catch up.
+MISP_UNMAPPED_ATTRIBUTE_TYPES = Counter(
+    "edgeguard_misp_unmapped_attribute_types_total",
+    "MISP attribute types not in EdgeGuard's mapping — by type name",
+    ["attr_type"],
+)
+
 MISP_PUSH_DURATION = Histogram(
     "edgeguard_misp_push_duration_seconds",
     "Time spent pushing to MISP",
@@ -244,6 +264,22 @@ def record_misp_push(source: str, zone: str, event_count: int, attr_count: int, 
 def record_misp_attribute(indicator_type: str, source: str):
     """Record MISP attribute creation."""
     MISP_ATTRIBUTES.labels(type=indicator_type, source=source).inc()
+
+
+def record_misp_attribute_dropped(reason: str, count: int = 1):
+    """Record an attribute dropped during dedup/parse — see MISP_ATTRIBUTES_DROPPED."""
+    safe = (reason or "unknown").replace('"', "")[:80]
+    MISP_ATTRIBUTES_DROPPED.labels(reason=safe).inc(count)
+
+
+def record_misp_unmapped_attribute_type(attr_type: str, count: int = 1):
+    """Record a MISP attribute type that EdgeGuard's mapping doesn't recognize.
+
+    See MISP_UNMAPPED_ATTRIBUTE_TYPES — surfaces silent fall-through to the
+    'unknown' bucket so operators see when MISP adds a new type.
+    """
+    safe = (attr_type or "<empty>").replace('"', "")[:80]
+    MISP_UNMAPPED_ATTRIBUTE_TYPES.labels(attr_type=safe).inc(count)
 
 
 def record_neo4j_sync(node_counts: Dict[str, int], duration: float):

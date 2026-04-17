@@ -563,7 +563,22 @@ class MISPCollector:
             "hostname": "domain",
             "uri": "url",
         }
-        return mapping.get(attr_type, "unknown")
+        mapped = mapping.get(attr_type)
+        if mapped is None:
+            # PR #34 round 18: surface unmapped MISP attribute types instead
+            # of silently returning "unknown". The counter lets an operator
+            # see which types are dropping into the bucket — useful when MISP
+            # adds a new attribute type and EdgeGuard's mapping needs to
+            # catch up.
+            try:
+                from metrics_server import record_misp_unmapped_attribute_type
+
+                record_misp_unmapped_attribute_type(attr_type or "<empty>")
+            except Exception:
+                pass
+            logger.debug("MISP attribute type %r is not mapped — falling back to 'unknown'", attr_type)
+            return "unknown"
+        return mapped
 
     def extract_cve(self, text):
         """Extract CVE ID from text"""

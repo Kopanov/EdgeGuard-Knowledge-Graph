@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-03-28**
+**Last updated: 2026-04-17**
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -67,7 +67,7 @@ All EdgeGuard nodes are **ResilMesh-schema compatible** where they overlap.
 
 | Node Label | Key Properties | Source |
 |------------|---------------|--------|
-| `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_seen`, `last_updated`, `misp_event_id`, `misp_event_ids[]`, `misp_attribute_id`, `misp_attribute_ids[]`, … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
+| `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_seen`, `last_updated`, `misp_event_ids[]`, `misp_attribute_ids[]`, **`uuid`** (deterministic, equal to the UUID portion of the STIX SDO id), … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
 | `Vulnerability` | `cve_id`, `severity`, `cvss_score`, `attack_vector`, `zone[]`, `published`, `last_modified` | NVD, CISA KEV, OTX |
 | `CVE` | `cve_id`, `description`, `published`, `last_modified`, `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]` | NVD |
 | `CVSSv31` | `vector_string`, `base_score`, `base_severity`, `attack_vector`, `attack_complexity`, `privileges_required`, `user_interaction`, `scope`, `confidentiality_impact`, `integrity_impact`, `availability_impact`, `impact_score`, `exploitability_score` | NVD (via CVE node) |
@@ -100,7 +100,7 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |
 | `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor (`build_relationships.py`) |
 | `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Same `cve_id` on indicator and vuln/CVE node (`build_relationships.py`) |
-| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence (event-id match — symmetric scalar+array on both ends, see [AIRFLOW_DAG_DESIGN.md](AIRFLOW_DAG_DESIGN.md) "2026-04 INDICATES co-occurrence symmetry fix") or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
+| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence — array-only on both ends (`eid IN n.misp_event_ids` for both Indicator and Malware; legacy scalar dropped PR #33 round 10) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
 | `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`) |
 | `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`) |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |

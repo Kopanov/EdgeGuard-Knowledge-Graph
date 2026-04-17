@@ -345,11 +345,12 @@ def test_technique_kill_chain_phases_emitted_as_property_not_sro():
     assert ap[0]["external_references"][0]["external_id"] == "T1055"
 
 
-def test_legacy_uses_rel_type_is_queried_for_backward_compat():
-    """The Cypher for actor/technique export must still match the legacy
-    ``USES`` rel type alongside the new EMPLOYS_/IMPLEMENTS_TECHNIQUE ones.
-    We assert this by inspecting the query string the exporter ran.
-    """
+def test_specialised_technique_rel_types_only_no_legacy_uses():
+    """PR #33 round 12 dropped the rollout-window ``|USES`` fallback. The
+    Cypher for actor/technique export must MATCH only the post-PR-#24
+    specialised rel types (EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE /
+    USES_TECHNIQUE) — no legacy ``USES`` alternation. Pre-release fresh
+    start has no legacy USES edges in any database."""
     rows = [
         {
             "seed": {"name": "APT29"},
@@ -363,10 +364,13 @@ def test_legacy_uses_rel_type_is_queried_for_backward_compat():
     exporter = StixExporter(client)
     exporter.export_threat_actor("APT29")
     q = client.driver._session.last_cypher
-    assert "EMPLOYS_TECHNIQUE|USES" in q
-    assert "IMPLEMENTS_TECHNIQUE|USES" in q
+    assert "EMPLOYS_TECHNIQUE" in q
+    assert "IMPLEMENTS_TECHNIQUE" in q
+    # Legacy fallback must NOT be back.
+    assert "EMPLOYS_TECHNIQUE|USES" not in q, "round-12 dropped the |USES fallback"
+    assert "IMPLEMENTS_TECHNIQUE|USES" not in q, "round-12 dropped the |USES fallback"
 
-    # And the technique-centric export also checks the legacy variant.
+    # Same check on the technique-centric export.
     rows2 = [
         {
             "seed": {"mitre_id": "T1059", "name": "CLI", "tactic_phases": []},
@@ -379,9 +383,12 @@ def test_legacy_uses_rel_type_is_queried_for_backward_compat():
     client2 = _mk_client(rows2)
     StixExporter(client2).export_technique("T1059")
     q2 = client2.driver._session.last_cypher
-    assert "EMPLOYS_TECHNIQUE|USES" in q2
-    assert "IMPLEMENTS_TECHNIQUE|USES" in q2
-    assert "USES_TECHNIQUE|USES" in q2
+    assert "EMPLOYS_TECHNIQUE" in q2
+    assert "IMPLEMENTS_TECHNIQUE" in q2
+    assert "USES_TECHNIQUE" in q2
+    assert "EMPLOYS_TECHNIQUE|USES" not in q2
+    assert "IMPLEMENTS_TECHNIQUE|USES" not in q2
+    assert "USES_TECHNIQUE|USES" not in q2
 
 
 def test_edgeguard_managed_filter_present_in_all_queries():

@@ -22,6 +22,7 @@ from typing import Dict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
+from node_identity import compute_node_uuid  # noqa: E402
 
 try:
     from metrics_server import record_enrichment_duration
@@ -154,10 +155,43 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
-            # Step 1: Materialise Campaign nodes (one per ThreatActor with evidence)
+            # Pre-fetch the names of every qualifying ThreatActor so we can
+            # compute deterministic Campaign uuids in Python (Campaign name is
+            # ``"<actor> Campaign"``). Without this, the MERGE below would
+            # create Campaign nodes with NULL uuid — silently breaking the
+            # cross-environment traceability contract this PR exists for.
+            # Caught in the post-PR-#33 fresh-eyes audit.
+            qualifying_actors_query = """
+            MATCH (a:ThreatActor)
+            WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+            RETURN a.name AS name
+            """
+            actor_names = [
+                r["name"] for r in session.run(qualifying_actors_query, timeout=NEO4J_READ_TIMEOUT) if r["name"]
+            ]
+            campaign_uuids = {name: compute_node_uuid("Campaign", {"name": f"{name} Campaign"}) for name in actor_names}
+
+            # Step 1: Materialise Campaign nodes (one per ThreatActor with evidence).
+            # ``c.uuid`` is set from the precomputed map keyed by the actor's name;
+            # the RUNS edge stamps src_uuid / trg_uuid from a.uuid / c.uuid (both
+            # bound, both set in this query).
+            #
+            # PR #34 round 21 (bugbot LOW): added the
+            # ``WHERE a.name IN keys($campaign_uuids)`` guard immediately after
+            # the outer MATCH. Bugbot caught a TOCTOU race: if a NEW
+            # ThreatActor gains an ATTRIBUTED_TO edge between the pre-fetch
+            # (line ~169) and this MERGE, the new actor enters the MERGE
+            # path but ``$campaign_uuids[a.name]`` returns NULL — the
+            # Campaign would be created with ``uuid=null``, silently
+            # breaking the cross-environment traceability contract until a
+            # subsequent rerun. Filtering ensures we only MERGE actors
+            # whose deterministic uuid was precomputed; new actors are
+            # picked up on the next run when they're included in the
+            # pre-fetch.
             create_cypher = """
             MATCH (a:ThreatActor)
             WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
+              AND a.name IN keys($campaign_uuids)
             WITH a
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(m:Malware)
             WITH a, collect(DISTINCT m) AS malware_list
@@ -175,7 +209,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                  ) AS all_zones
             MERGE (c:Campaign {name: a.name + ' Campaign'})
             ON CREATE SET c.created_at = datetime(),
-                          c.actor_name = a.name
+                          c.actor_name = a.name,
+                          c.uuid = $campaign_uuids[a.name]
             SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.active           = CASE WHEN indicator_total > 0 THEN true ELSE c.active END,
@@ -185,20 +220,47 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
                                        THEN first_seen ELSE c.first_seen END,
                 c.last_seen        = last_seen,
-                c.zone             = all_zones
-            MERGE (a)-[:RUNS]->(c)
+                c.zone             = all_zones,
+                c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
+            MERGE (a)-[r_runs:RUNS]->(c)
+            ON CREATE SET r_runs.src_uuid = a.uuid, r_runs.trg_uuid = c.uuid
+            SET r_runs.src_uuid = coalesce(r_runs.src_uuid, a.uuid),
+                r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid)
             RETURN count(DISTINCT c) AS campaigns
             """
-            result = session.run(create_cypher, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["campaigns_created"] = record["campaigns"] if record else 0
+
+            # Defense-in-depth: if any prior race wrote a Campaign with NULL
+            # uuid (from before this guard landed), backfill it now using the
+            # same precomputed dict. Costs one cheap query — covers historical
+            # corruption + any rare leak we missed.
+            backfill_cypher = """
+            MATCH (c:Campaign)
+            WHERE c.uuid IS NULL AND c.actor_name IN keys($campaign_uuids)
+            SET c.uuid = $campaign_uuids[c.actor_name]
+            RETURN count(c) AS backfilled
+            """
+            bf = session.run(backfill_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT).single()
+            backfilled = bf["backfilled"] if bf else 0
+            if backfilled:
+                logger.info(
+                    "[CAMPAIGN] backfilled c.uuid on %d pre-existing Campaign nodes (likely from a pre-round-21 race)",
+                    backfilled,
+                )
             time.sleep(3)
 
-            # Step 2: Link malware to their campaigns
+            # Step 2: Link malware to their campaigns. Both endpoints have
+            # n.uuid by now (Malware via merge_node_with_source, Campaign via
+            # step 1 above) so the edge SET reads bound .uuid directly.
             link_malware = """
             MATCH (a:ThreatActor)<-[:ATTRIBUTED_TO]-(m:Malware)
             MATCH (c:Campaign {actor_name: a.name})
-            MERGE (m)-[:PART_OF]->(c)
+            MERGE (m)-[r:PART_OF]->(c)
+            ON CREATE SET r.src_uuid = m.uuid, r.trg_uuid = c.uuid
+            SET r.src_uuid = coalesce(r.src_uuid, m.uuid),
+                r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -214,7 +276,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WHERE i.active = true
             WITH c, collect(i)[0..100] AS indicators
             UNWIND indicators AS i
-            MERGE (i)-[:PART_OF]->(c)
+            MERGE (i)-[r:PART_OF]->(c)
+            ON CREATE SET r.src_uuid = i.uuid, r.trg_uuid = c.uuid
+            SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
             RETURN count(*) AS links
             """
             result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
@@ -306,21 +371,13 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
             # Previously each edge re-counted all indicators in its event — millions
             # of redundant COUNT queries. Now: one COUNT per event, then join.
             #
-            # Event-membership is computed across the whole MISP id surface — both the
-            # legacy scalar ``misp_event_id`` (first-seen) AND the accumulated
-            # ``misp_event_ids[]`` array. Multi-event indicators were previously
-            # counted only against their first-seen event, which under-sized later
-            # events (and therefore mis-tiered their co-occurrence confidence).
+            # PR #33 round 10: dropped legacy scalar misp_event_id; event
+            # membership comes only from misp_event_ids[].
             logger.info("  [CALIBRATE] Pre-computing MISP event sizes...")
             event_sizes_query = """
             MATCH (i:Indicator)
-            WITH i,
-                 [eid IN coalesce(i.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN i.misp_event_id IS NOT NULL AND i.misp_event_id <> ''
-                      THEN [i.misp_event_id] ELSE [] END AS scalar_id
-            WITH i, apoc.coll.toSet(arr_ids + scalar_id) AS all_ids
-            WHERE size(all_ids) > 0
-            UNWIND all_ids AS eid
+            WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0
+            UNWIND [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ''] AS eid
             RETURN eid, count(DISTINCT i) AS sz
             """
             event_size_result = session.run(event_sizes_query, timeout=NEO4J_READ_TIMEOUT)
@@ -349,15 +406,12 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         results[tier_label] = 0
                         continue
 
-                    # Match indicators where the event id appears in EITHER the legacy
-                    # scalar field OR the accumulated misp_event_ids[] array. Falls
-                    # back to the scalar-only path on graphs that haven't been
-                    # populated with arrays yet.
+                    # Match indicators that have this event id in misp_event_ids[].
+                    # PR #33 round 10: dropped legacy scalar misp_event_id leg.
                     update_cypher = """
                     UNWIND $eids AS eid
                     MATCH (i:Indicator)
-                    WHERE i.misp_event_id = eid
-                       OR (i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids)
+                    WHERE i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids
                     MATCH (i)-[r:INDICATES|EXPLOITS]->(target)
                     WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"]
                     SET r.confidence_score = $conf,
@@ -386,21 +440,26 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                             f"  [CALIBRATE] {tier_label}: processing {len(large_eids)} large events "
                             f"(>{1000} indicators each) via apoc.periodic.iterate"
                         )
-                    # Same any-of semantics as the small-event path: indicators whose array
-                    # OR scalar carries this event id are in scope.
+                    # Same array-only semantics as the small-event path.
                     #
                     # Parameterized via apoc.periodic.iterate's ``params`` config so $eid and
-                    # $conf are safely bound inside both the matcher and the action (previously
-                    # f-string interpolation risked Cypher breakage if an event id ever
-                    # contained a quote or other special character).
+                    # $conf are safely bound inside both the matcher and the action.
+                    #
+                    # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
+                    # apoc.periodic.iterate runs the inner action in a NEW transaction
+                    # per batch — raw entity references from the outer query (``r``)
+                    # cannot safely be used as bound entities in the inner. Same
+                    # pattern as scripts/backfill_node_uuids.py round 11: outer
+                    # returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
+                    # ``MATCH ()-[r]->() WHERE id(r) = $rid`` to bind a fresh handle.
                     large_batch_query = (
                         "CALL apoc.periodic.iterate("
-                        "  'MATCH (i:Indicator) WHERE i.misp_event_id = $eid OR ("
-                        "    i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids"
-                        "  ) MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
+                        "  'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids "
+                        "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
                         '  WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
-                        "  RETURN r', "
-                        "  'SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
+                        "  RETURN id(r) AS rid', "
+                        "  'MATCH ()-[r]->() WHERE id(r) = $rid "
+                        "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
                         "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
                         ") YIELD total "
                         "RETURN total AS updated"
@@ -458,21 +517,57 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     """
     results: Dict = {"linked": 0, "errors": 0}
 
+    # Both REFERS_TO edges carry src_uuid + trg_uuid for cross-environment
+    # traceability — endpoints (Vulnerability + CVE) already have n.uuid set
+    # by their respective MERGE paths (merge_vulnerabilities_batch / merge_cve).
+    #
+    # The inner apoc.periodic.iterate action MUST be a single Cypher string
+    # literal. Python implicit-concat does NOT apply inside a triple-quoted
+    # outer string — adjacent ``'...' '...'`` fragments would be sent to
+    # Neo4j as separate quoted tokens and produce a syntax error. Bugbot
+    # caught this on PR #33 round 3. Keep the inner action on a single
+    # logical line (long but unambiguous).
     query = """
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
-        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[:REFERS_TO]->(c) MERGE (c)-[:REFERS_TO]->(v)',
+        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid) MERGE (c)-[r2:REFERS_TO]->(v) SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid)',
         {batchSize: 5000, parallel: false}
     )
     YIELD total
     RETURN total AS linked
     """
 
+    # PR #34 round 20: count Vulnerability orphans directly with NOT EXISTS.
+    # Replaces the broken round-18 ``expected_query`` design — that compared
+    # ``expected > results["linked"]`` where ``expected`` was pairs-with-CVE
+    # (subset) and ``results["linked"]`` was the apoc ``total`` (count of
+    # OUTER-query rows processed, regardless of inner MATCH success — a
+    # superset). The comparison was therefore always false (subset ≤ superset)
+    # and the orphan log NEVER fired. The new ``skip_query`` counts orphans
+    # directly: Vulnerabilities with cve_id but no matching CVE node — every
+    # one is an edge silently dropped by the bridge.
+    skip_query = (
+        "MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL "
+        "AND NOT EXISTS { MATCH (c:CVE {cve_id: v.cve_id}) } "
+        "RETURN count(v) AS c"
+    )
+
     try:
         with neo4j_client.driver.session() as session:
+            try:
+                skip_rec = session.run(skip_query, timeout=NEO4J_READ_TIMEOUT).single()
+                skip_count = skip_rec["c"] if skip_rec else 0
+            except Exception as exp_err:
+                logger.debug("bridge_vulnerability_cve skip_query failed: %s", exp_err)
+                skip_count = 0
             record = session.run(query, timeout=NEO4J_READ_TIMEOUT).single()
             results["linked"] = record["linked"] if record else 0
         logger.info(f"[BRIDGE] Vulnerability↔CVE REFERS_TO: {results['linked']} pairs linked")
+        if skip_count > 0:
+            logger.info(
+                "[BRIDGE] %d Vulnerability nodes have no matching CVE — likely missing NVD ingestion",
+                skip_count,
+            )
     except Exception as e:
         logger.warning(f"[BRIDGE] Vulnerability↔CVE bridge failed: {e}")
         results["errors"] += 1
@@ -519,7 +614,21 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
     logger.info("\n[4/4] IOC Confidence Decay...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
-    logger.info("\n[DONE] All enrichment jobs complete")
+    # PR #33 round 13: explicit aggregated summary so an operator scanning logs
+    # sees totals from all 4 jobs without grepping each function's output.
+    def _sum(d):
+        if isinstance(d, dict):
+            return sum(v for v in d.values() if isinstance(v, (int, float)))
+        return d if isinstance(d, (int, float)) else 0
+
+    logger.info(
+        "[ENRICHMENT SUMMARY] bridge=%s campaigns=%s calibration=%s decay=%s",
+        _sum(summary.get("bridge")),
+        _sum(summary.get("campaigns")),
+        _sum(summary.get("calibration")),
+        _sum(summary.get("decay")),
+    )
+    logger.info("[DONE] All enrichment jobs complete")
     return summary
 
 

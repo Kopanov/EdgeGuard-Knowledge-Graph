@@ -28,62 +28,62 @@ import strawberry
 @strawberry.type(description="CVSSv2 scoring node — bidirectional with CVE via HAS_CVSS_v2")
 class CVSSv2:
     vector_string: str
-    access_vector: Optional[str]
-    access_complexity: Optional[str]
-    authentication: Optional[str]
-    confidentiality_impact: Optional[str]
-    integrity_impact: Optional[str]
-    availability_impact: Optional[str]
-    base_score: Optional[float]
-    base_severity: Optional[str]
-    impact_score: Optional[float]
-    exploitability_score: Optional[float]
-    obtain_all_privilege: Optional[bool]
-    obtain_user_privilege: Optional[bool]
-    obtain_other_privilege: Optional[bool]
-    user_interaction_required: Optional[bool]
-    ac_insuf_info: Optional[bool]
+    access_vector: Optional[str] = None
+    access_complexity: Optional[str] = None
+    authentication: Optional[str] = None
+    confidentiality_impact: Optional[str] = None
+    integrity_impact: Optional[str] = None
+    availability_impact: Optional[str] = None
+    base_score: Optional[float] = None
+    base_severity: Optional[str] = None
+    impact_score: Optional[float] = None
+    exploitability_score: Optional[float] = None
+    obtain_all_privilege: Optional[bool] = None
+    obtain_user_privilege: Optional[bool] = None
+    obtain_other_privilege: Optional[bool] = None
+    user_interaction_required: Optional[bool] = None
+    ac_insuf_info: Optional[bool] = None
 
 
 @strawberry.type(description="CVSSv3.0 scoring node — bidirectional with CVE via HAS_CVSS_v30")
 class CVSSv30:
     vector_string: str
-    attack_vector: Optional[str]
-    attack_complexity: Optional[str]
-    privileges_required: Optional[str]
-    user_interaction: Optional[str]
-    scope: Optional[str]
-    confidentiality_impact: Optional[str]
-    integrity_impact: Optional[str]
-    availability_impact: Optional[str]
-    base_score: Optional[float]
-    base_severity: Optional[str]
-    impact_score: Optional[float]
-    exploitability_score: Optional[float]
+    attack_vector: Optional[str] = None
+    attack_complexity: Optional[str] = None
+    privileges_required: Optional[str] = None
+    user_interaction: Optional[str] = None
+    scope: Optional[str] = None
+    confidentiality_impact: Optional[str] = None
+    integrity_impact: Optional[str] = None
+    availability_impact: Optional[str] = None
+    base_score: Optional[float] = None
+    base_severity: Optional[str] = None
+    impact_score: Optional[float] = None
+    exploitability_score: Optional[float] = None
 
 
 @strawberry.type(description="CVSSv3.1 scoring node — bidirectional with CVE via HAS_CVSS_v31")
 class CVSSv31:
     vector_string: str
-    attack_vector: Optional[str]
-    attack_complexity: Optional[str]
-    privileges_required: Optional[str]
-    user_interaction: Optional[str]
-    scope: Optional[str]
-    confidentiality_impact: Optional[str]
-    integrity_impact: Optional[str]
-    availability_impact: Optional[str]
-    base_score: Optional[float]
-    base_severity: Optional[str]
-    impact_score: Optional[float]
-    exploitability_score: Optional[float]
+    attack_vector: Optional[str] = None
+    attack_complexity: Optional[str] = None
+    privileges_required: Optional[str] = None
+    user_interaction: Optional[str] = None
+    scope: Optional[str] = None
+    confidentiality_impact: Optional[str] = None
+    integrity_impact: Optional[str] = None
+    availability_impact: Optional[str] = None
+    base_score: Optional[float] = None
+    base_severity: Optional[str] = None
+    impact_score: Optional[float] = None
+    exploitability_score: Optional[float] = None
 
 
 @strawberry.type(description="CVSSv4.0 scoring node — bidirectional with CVE via HAS_CVSS_v40")
 class CVSSv40:
     vector_string: str
-    base_score: Optional[float]
-    base_severity: Optional[str]
+    base_score: Optional[float] = None
+    base_severity: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -99,23 +99,28 @@ class CVSSv40:
 )
 class CVE:
     cve_id: str
-    description: Optional[str]
-    published: Optional[str]
-    last_modified: Optional[str]
-    cpe_type: Optional[List[str]]
-    result_impacts: Optional[List[str]]
-    ref_tags: Optional[List[str]]
-    cwe: Optional[List[str]]
+    description: Optional[str] = None
+    published: Optional[str] = None
+    last_modified: Optional[str] = None
+    cpe_type: Optional[List[str]] = None
+    result_impacts: Optional[List[str]] = None
+    ref_tags: Optional[List[str]] = None
+    cwe: Optional[List[str]] = None
     # Scoring
-    base_score: Optional[float]
-    base_severity: Optional[str]
+    base_score: Optional[float] = None
+    base_severity: Optional[str] = None
     # Provenance — who wrote this node and when
-    edgeguard_managed: Optional[bool]
-    source: Optional[List[str]]
-    zone: Optional[List[str]]
-    first_imported_at: Optional[str]
-    last_updated: Optional[str]
-    last_imported_from: Optional[str]
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
+    source: Optional[List[str]] = None
+    zone: Optional[List[str]] = None
+    first_imported_at: Optional[str] = None
+    last_updated: Optional[str] = None
+    last_imported_from: Optional[str] = None
     # Linked CVSS nodes (resolved lazily by resolvers)
     cvss_v40: Optional[CVSSv40] = strawberry.field(default=None)
     cvss_v31: Optional[CVSSv31] = strawberry.field(default=None)
@@ -132,23 +137,29 @@ class CVE:
         "Vulnerability instance node — shared with ISIM. "
         "status is LIST OF STRING per ResilMesh schema (e.g. ['active'], ['rejected']). "
         "Links to CVE via REFERS_TO relationship. "
-        "misp_event_id lets analysts look up the originating MISP event for raw context."
+        "misp_event_ids[] lists every MISP event that has observed this vulnerability."
     )
 )
 class Vulnerability:
     cve_id: str
-    description: Optional[str]
-    status: Optional[List[str]]
-    severity: Optional[str]
-    cvss_score: Optional[float]
-    zone: Optional[List[str]]
-    edgeguard_managed: Optional[bool]
-    source: Optional[List[str]]
-    last_updated: Optional[str]
-    # Provenance
-    misp_event_id: Optional[str]
-    first_imported_at: Optional[str]
-    last_imported_from: Optional[str]
+    description: Optional[str] = None
+    status: Optional[List[str]] = None
+    severity: Optional[str] = None
+    cvss_score: Optional[float] = None
+    zone: Optional[List[str]] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
+    source: Optional[List[str]] = None
+    last_updated: Optional[str] = None
+    # Provenance — MISP back-references (PR #33 round 10: array-only,
+    # legacy scalar misp_event_id removed)
+    misp_event_ids: Optional[List[str]] = None
+    first_imported_at: Optional[str] = None
+    last_imported_from: Optional[str] = None
     # Enrichment fields
     version_constraints: Optional[str] = None  # JSON string
     cisa_cwes: Optional[List[str]] = None
@@ -165,27 +176,34 @@ class Vulnerability:
         "Threat Indicator (IP, domain, hash, URL). "
         "Not yet in ISIM GraphQL schema — EdgeGuard extension. "
         "confidence_score decays over time via enrichment jobs. "
-        "misp_event_id and misp_event_url let analysts retrieve the full raw MISP event "
-        "for context not stored in Neo4j (original attributes, comments, attachments)."
+        "misp_event_ids[] / misp_attribute_ids[] / misp_event_urls[] let analysts "
+        "retrieve the full raw MISP context for every event/attribute that contributed "
+        "to this indicator (original attributes, comments, attachments)."
     )
 )
 class Indicator:
     value: str
     indicator_type: str
-    confidence_score: Optional[float]
-    zone: Optional[List[str]]
-    active: Optional[bool]
-    source: Optional[List[str]]
-    last_updated: Optional[str]
-    edgeguard_managed: Optional[bool]
-    # Provenance — MISP back-references
-    misp_event_id: Optional[str]
-    misp_attribute_id: Optional[str]
-    # Computed from MISP_URL env + misp_event_id; allows one-click retrieval of raw MISP context
-    misp_event_url: Optional[str]
+    confidence_score: Optional[float] = None
+    zone: Optional[List[str]] = None
+    active: Optional[bool] = None
+    source: Optional[List[str]] = None
+    last_updated: Optional[str] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
+    # Provenance — MISP back-references (PR #33 round 10: array-only,
+    # legacy scalars misp_event_id / misp_attribute_id removed).
+    misp_event_ids: Optional[List[str]] = None
+    misp_attribute_ids: Optional[List[str]] = None
+    # Computed from MISP_URL env + each id in misp_event_ids[]; one URL per event.
+    misp_event_urls: Optional[List[str]] = None
     # Import audit trail
-    first_imported_at: Optional[str]
-    last_imported_from: Optional[str]
+    first_imported_at: Optional[str] = None
+    last_imported_from: Optional[str] = None
     # Enrichment fields
     yara_rules: Optional[List[str]] = None
     sigma_rules: Optional[List[str]] = None
@@ -201,36 +219,51 @@ class Indicator:
 @strawberry.type(description="Threat actor node — EdgeGuard-owned, planned ISIM extension.")
 class ThreatActor:
     name: str
-    description: Optional[str]
-    sophistication: Optional[str]
-    primary_motivation: Optional[str]
-    resource_level: Optional[str]
-    zone: Optional[List[str]]
-    confidence_score: Optional[float]
-    source: Optional[List[str]]
-    edgeguard_managed: Optional[bool]
+    description: Optional[str] = None
+    sophistication: Optional[str] = None
+    primary_motivation: Optional[str] = None
+    resource_level: Optional[str] = None
+    zone: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
+    source: Optional[List[str]] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 @strawberry.type(description="Malware family node — EdgeGuard-owned, planned ISIM extension.")
 class Malware:
     name: str
-    malware_types: Optional[List[str]]
-    description: Optional[str]
-    zone: Optional[List[str]]
-    confidence_score: Optional[float]
-    source: Optional[List[str]]
-    edgeguard_managed: Optional[bool]
+    malware_types: Optional[List[str]] = None
+    description: Optional[str] = None
+    zone: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
+    source: Optional[List[str]] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 @strawberry.type(description="MITRE ATT&CK technique — EdgeGuard-owned, planned ISIM extension.")
 class Technique:
     technique_id: str
     name: str
-    description: Optional[str]
-    tactic_refs: Optional[List[str]]
-    zone: Optional[List[str]]
-    confidence_score: Optional[float]
-    edgeguard_managed: Optional[bool]
+    description: Optional[str] = None
+    tactic_refs: Optional[List[str]] = None
+    zone: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
     # Enrichment fields
     detection: Optional[str] = None
     is_subtechnique: Optional[bool] = None
@@ -240,8 +273,13 @@ class Technique:
 class Tactic:
     tactic_id: str
     name: str
-    description: Optional[str]
-    edgeguard_managed: Optional[bool]
+    description: Optional[str] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 @strawberry.type(description="MITRE ATT&CK Tool (Cobalt Strike, Mimikatz, etc.) — EdgeGuard-owned.")
@@ -256,6 +294,8 @@ class Tool:
     sources: Optional[List[str]] = None
     confidence_score: Optional[float] = None
     edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — see other types for details.
+    uuid: Optional[str] = None
     first_imported_at: Optional[str] = None
     last_updated: Optional[str] = None
 
@@ -268,12 +308,17 @@ class Tool:
 )
 class Campaign:
     name: str
-    description: Optional[str]
-    zone: Optional[List[str]]
-    confidence_score: Optional[float]
-    first_seen: Optional[str]
-    last_seen: Optional[str]
-    edgeguard_managed: Optional[bool]
+    description: Optional[str] = None
+    zone: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
+    first_seen: Optional[str] = None
+    last_seen: Optional[str] = None
+    edgeguard_managed: Optional[bool] = None
+    # Deterministic per-node UUID — same value across local + cloud Neo4j
+    # for the same logical entity, and equal to the UUID portion of the
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
+    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    uuid: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

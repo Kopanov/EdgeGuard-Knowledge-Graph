@@ -160,6 +160,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
         base_score=eff_score,
         base_severity=eff_severity,
         edgeguard_managed=c.get("edgeguard_managed"),
+        uuid=c.get("uuid"),
         source=_neo4j_list(c.get("source")),
         zone=_neo4j_list(c.get("zone")),
         first_imported_at=str(c["first_imported_at"]) if c.get("first_imported_at") else None,
@@ -257,6 +258,15 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
     with client.driver.session() as session:
         for record in session.run(query, **params, timeout=NEO4J_READ_TIMEOUT):
             n = record["n"]
+            # PR #34 round 21 (bugbot LOW): normalize empty misp_event_ids
+            # to None for cross-resolver consistency. The Indicator resolver
+            # uses ``event_ids or None`` (line ~327) so empty lists collapse
+            # to None — Vulnerability used to return ``[]`` for the same empty
+            # state. The schema declares ``Optional[List[str]]`` so both shapes
+            # are valid GraphQL, but consumers (RAG / xAI) treating "absent"
+            # and "empty" differently would see the same logical state two
+            # different ways. Normalize at the resolver to converge.
+            vuln_event_ids = _neo4j_list(n.get("misp_event_ids")) or None
             results.append(
                 Vulnerability(
                     cve_id=n.get("cve_id", ""),
@@ -266,9 +276,10 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                     cvss_score=n.get("cvss_score"),
                     zone=_neo4j_list(n.get("zone")),
                     edgeguard_managed=n.get("edgeguard_managed"),
+                    uuid=n.get("uuid"),
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
-                    misp_event_id=n.get("misp_event_id"),
+                    misp_event_ids=vuln_event_ids,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
                     version_constraints=n.get("version_constraints"),
@@ -307,7 +318,10 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
     with client.driver.session() as session:
         for record in session.run(query, **params, timeout=NEO4J_READ_TIMEOUT):
             n = record["n"]
-            misp_event_id = n.get("misp_event_id")
+            event_ids = _neo4j_list(n.get("misp_event_ids")) or []
+            event_urls: Optional[List[str]] = (
+                [f"{MISP_URL}/events/view/{eid}" for eid in event_ids if eid] if (MISP_URL and event_ids) else None
+            )
             results.append(
                 Indicator(
                     value=n.get("value", ""),
@@ -318,9 +332,17 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     edgeguard_managed=n.get("edgeguard_managed"),
-                    misp_event_id=misp_event_id,
-                    misp_attribute_id=n.get("misp_attribute_id"),
-                    misp_event_url=(f"{MISP_URL}/events/view/{misp_event_id}" if MISP_URL and misp_event_id else None),
+                    uuid=n.get("uuid"),
+                    misp_event_ids=event_ids or None,
+                    # PR #34 round 22 (bugbot LOW): normalize empty list to None
+                    # for cross-resolver / cross-field consistency. Round 21
+                    # fixed the same shape on misp_event_ids and on the
+                    # Vulnerability resolver — bugbot caught the missed mirror
+                    # site here. Without this collapse, an Indicator with no
+                    # MISP attribute IDs surfaced ``misp_event_ids: null`` and
+                    # ``misp_attribute_ids: []`` in the same response.
+                    misp_attribute_ids=_neo4j_list(n.get("misp_attribute_ids")) or None,
+                    misp_event_urls=event_urls,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
                     yara_rules=n.get("yara_rules"),
@@ -422,6 +444,7 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -444,6 +467,7 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -468,6 +492,7 @@ class Query:
                 zone=_neo4j_list(n.get("zone")),
                 confidence_score=n.get("confidence_score"),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -487,6 +512,7 @@ class Query:
                 name=n.get("name", ""),
                 description=n.get("description"),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -509,6 +535,7 @@ class Query:
                 first_seen=str(n.get("first_seen")) if n.get("first_seen") else None,
                 last_seen=str(n.get("last_seen")) if n.get("last_seen") else None,
                 edgeguard_managed=n.get("edgeguard_managed"),
+                uuid=n.get("uuid"),
             ),
         )
 
@@ -554,6 +581,7 @@ class Query:
                         sources=_neo4j_list(n.get("source")),
                         confidence_score=n.get("confidence_score"),
                         edgeguard_managed=n.get("edgeguard_managed"),
+                        uuid=n.get("uuid"),
                         first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                         last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     )

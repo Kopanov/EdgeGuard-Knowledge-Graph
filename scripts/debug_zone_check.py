@@ -30,14 +30,20 @@ def _log(msg: str, data: dict, hyp: str = "", level: str = "INFO"):
 
 
 def _extract_zone_from_event_name(event_info: str):
-    """Exact copy of MISPToNeo4jSync._extract_zone_from_event_name (line 528)."""
+    """Exact copy of MISPToNeo4jSync._extract_zone_from_event_name (line 528).
+
+    PR #34 round 24: was using a hardcoded zone list, duplicating
+    ``config.VALID_ZONES``. Switched to import VALID_ZONES so adding a
+    5th zone in config is automatically reflected here.
+    """
+    from config import VALID_ZONES
+
     if not event_info:
         return None
     parts = event_info.split("-")
     if len(parts) >= 2 and parts[0].upper() == "EDGEGUARD":
         zone = parts[1].lower()
-        valid_zones = ["global", "finance", "energy", "healthcare"]  # ← hardcoded (line 555)
-        if zone in valid_zones:
+        if zone in VALID_ZONES:
             return zone
     return None
 

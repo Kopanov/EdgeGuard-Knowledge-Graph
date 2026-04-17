@@ -338,7 +338,9 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     """
     seen = set()
     unique_items: List[Dict] = []
-    _dropped = 0
+    # PR #33 round 13: track drop reasons separately so the Prometheus counter
+    # has labelled buckets ("missing_cve_id" vs "missing_key") for alerting.
+    _dropped_by_reason: Dict[str, int] = {}
     for item in items:
         tag = item.get("tag", "default")
         if _item_is_vulnerability_sync_bucket(item):
@@ -347,7 +349,7 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                 key = f"cve:{cid}"  # no tag — CVE merges on cve_id only
             else:
                 logger.debug("Dedup: dropping vulnerability with unresolvable CVE ID (tag=%s)", tag)
-                _dropped += 1
+                _dropped_by_reason["missing_cve_id"] = _dropped_by_reason.get("missing_cve_id", 0) + 1
                 continue
         elif item.get("value"):
             # Indicators merge on (indicator_type, value) — no tag
@@ -360,21 +362,42 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
             key = f"{item['type']}:{item['name']}"
         else:
             logger.debug("Dedup: dropping item with no identifiable key (type=%s, tag=%s)", item.get("type"), tag)
-            _dropped += 1
+            _dropped_by_reason["missing_key"] = _dropped_by_reason.get("missing_key", 0) + 1
             continue
 
         if key not in seen:
             seen.add(key)
             unique_items.append(item)
+    _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
         logger.info(
-            "Dedup: %s items → %s unique (%s duplicates removed, %s dropped for missing keys)",
+            "Dedup: %s items → %s unique (%s duplicates removed, %s dropped: %s)",
             len(items),
             len(unique_items),
             _dupes,
             _dropped,
+            _dropped_by_reason or "{}",
         )
+    # PR #33 round 13: emit per-reason drop counter so an operator can graph
+    # the silent-skip rate (e.g. spikes in missing_cve_id signal upstream
+    # parsing regressions). Wrap in try/except so a metrics outage doesn't
+    # break ingest.
+    #
+    # NB (PR #33 round 15): the import is inline (inside try/except) so the
+    # metrics_server module isn't a hard dependency for the ingest path —
+    # bugbot's static analysis flagged record_misp_attribute_dropped as
+    # "unused" because it doesn't follow inline-import call chains. This is
+    # the canonical call site; pinned by
+    # test_misp_attributes_dropped_metric_exists_and_is_emitted.
+    if _dropped_by_reason:
+        try:
+            from metrics_server import record_misp_attribute_dropped
+
+            for reason, count in _dropped_by_reason.items():
+                record_misp_attribute_dropped(reason, count)
+        except Exception:
+            logger.debug("Metrics recording for dropped attributes failed", exc_info=True)
     return unique_items
 
 
@@ -1862,8 +1885,9 @@ class MISPToNeo4jSync:
                         }
                     )
 
-        # Build sector targeting relationships
-        # Look for sector tags on items to build TARGETS relationships
+        # Build sector relationships from zone tags. Canonical edges:
+        #   Indicator     → Sector  via TARGETS
+        #   Vulnerability → Sector  via AFFECTS  (PR #33 round 12)
         for item in items:
             zones = item.get("zone", [])
             if isinstance(zones, str):
@@ -1875,13 +1899,13 @@ class MISPToNeo4jSync:
                     sector_name = zone.lower()
                     item_type = item.get("type", "")
 
-                    # Only MISP vulnerability rows become :Vulnerability TARGETS (not arbitrary cve_id fields).
+                    # Only MISP vulnerability rows become :Vulnerability AFFECTS (not arbitrary cve_id fields).
                     if item_type == "vulnerability":
                         cve_id = resolve_vulnerability_cve_id(item)
                         if cve_id:
                             relationships.append(
                                 {
-                                    "rel_type": "TARGETS",
+                                    "rel_type": "AFFECTS",
                                     "from_type": "Vulnerability",
                                     "from_key": {"cve_id": cve_id},
                                     "to_type": "Sector",
@@ -1891,7 +1915,7 @@ class MISPToNeo4jSync:
                                 }
                             )
                     elif item.get("indicator_type") or item_type == "indicator":
-                        # Indicator targets sector
+                        # Indicator → Sector — canonical TARGETS.
                         value = item.get("value")
                         indicator_type = item.get("indicator_type", "unknown")
                         if value:
@@ -2045,12 +2069,12 @@ class MISPToNeo4jSync:
                 description = raw_comment
                 attack_vector = "NETWORK"
 
-            # Build TARGETS relationship to sector if specified (only with a real CVE id)
+            # Vulnerability → Sector — canonical AFFECTS (PR #33 round 12).
             canon_cve = normalize_cve_id_for_graph(cve_id)
             if target_sector and canon_cve:
                 relationships.append(
                     {
-                        "rel_type": "TARGETS",
+                        "rel_type": "AFFECTS",
                         "from_type": "Vulnerability",
                         "from_key": {"cve_id": canon_cve},
                         "to_type": "Sector",
@@ -2697,6 +2721,10 @@ class MISPToNeo4jSync:
             (not recommended in small Airflow workers — can spike RAM).
         """
         if not items:
+            # PR #33 round 13: emit a clear log when the sync window is empty.
+            # Previously a silent early return — operators couldn't distinguish
+            # "MISP returned 0 events" from "sync_to_neo4j was never called".
+            logger.info("[NEO4J SYNC] no items received — skipping (empty MISP window or no parsable attributes)")
             return 0, 0, []
 
         indexed = list(enumerate(items))

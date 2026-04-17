@@ -30,6 +30,11 @@ try:
 except ImportError:
     raise ImportError("neo4j package not installed. Run: pip install neo4j")
 
+# Deterministic per-node UUIDs for cross-environment traceability — see
+# src/node_identity.py for the namespace, canonicalization rules, and the
+# per-label natural-key map.
+from node_identity import compute_node_uuid, edge_endpoint_uuids  # noqa: E402
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -130,6 +135,53 @@ def _validate_prop_name(name: str) -> str:
             "Only alphanumeric characters and underscores are allowed."
         )
     return name
+
+
+# --------------------------------------------------------------------------- #
+# Zone accumulation — override 'global' if any specific sector exists
+# --------------------------------------------------------------------------- #
+#
+# PR #34 round 24: the per-text/per-item zone detection in ``config.py`` and
+# the MISP writer enforce the rule "if a specific sector matches, drop
+# 'global' from the zone list." But the Neo4j MERGE layer used to accumulate
+# zones with a plain APOC set union — so an Indicator first ingested from a
+# healthcare-specific feed (zone=["healthcare"]) and later seen by a generic
+# feed (zone=["global"]) would accumulate to ``n.zone = ["healthcare",
+# "global"]`` after the second MERGE. That re-introduced "global" alongside
+# the specific sector and broke filtering / RAG semantics ("WHERE 'global'
+# IN n.zone" started matching healthcare nodes).
+#
+# This helper builds the canonical "drop-global-if-specifics-exist"
+# accumulator clause — one source of truth used by every node MERGE that
+# accumulates zones. The CASE expression is small enough that re-evaluating
+# the union twice is negligible vs the readability win.
+def _zone_override_global_clause(node_var: str, source_expr: str) -> str:
+    """Return a Cypher SET-clause fragment that accumulates zones with the
+    "specifics-override-global" rule applied at write time.
+
+    Args:
+        node_var: the bound node variable in the MERGE (e.g. ``"n"`` or ``"i"``).
+        source_expr: the Cypher expression yielding the new zones to merge in
+            (e.g. ``"$zone"`` or ``"item.zone"``). Must already be a list.
+
+    Returns:
+        A string suitable for splicing into a ``SET ...`` clause, e.g.::
+
+            f"SET {node_var}.score = 1, {_zone_override_global_clause('n', '$zone')}, ..."
+
+    Result semantics (for any ingestion):
+        - if union(existing, new) contains any sector other than 'global'
+          → store only the specifics (drop 'global')
+        - else (only 'global' or empty) → store the union as-is
+    """
+    # Validate the variable name to prevent Cypher injection via caller bug.
+    # (Both inputs are constructed by EdgeGuard code, never by user input —
+    # but a typo could still produce broken Cypher; better to fail loudly.)
+    if not _PROP_NAME_RE.match(node_var):
+        raise ValueError(f"_zone_override_global_clause: invalid node_var {node_var!r}")
+    union = f"apoc.coll.toSet(coalesce({node_var}.zone, []) + {source_expr})"
+    specifics = f"[z IN {union} WHERE z <> 'global']"
+    return f"{node_var}.zone = CASE WHEN size({specifics}) > 0 THEN {specifics} ELSE {union} END"
 
 
 def nonempty_graph_string(value: Any) -> Optional[str]:
@@ -320,7 +372,8 @@ class Neo4jClient:
 
                 # Get database info
                 db_info = session.run(
-                    "CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition"
+                    "CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition",
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
                 db_record = db_info.single()
 
@@ -490,8 +543,14 @@ class Neo4jClient:
             for stmt in old_constraints:
                 try:
                     session.run(stmt, timeout=NEO4J_READ_TIMEOUT)
-                except Exception:
-                    pass  # constraint didn't exist — fine
+                except Exception as drop_err:
+                    # PR #33 round 13: silent ``except: pass`` replaced with a
+                    # DEBUG log so an operator running in verbose mode can see
+                    # which old-constraint drops were no-ops vs which silently
+                    # masked a real schema error. Most invocations are no-ops
+                    # (constraint already absent on a fresh DB), so DEBUG is
+                    # the right level — INFO would spam.
+                    logger.debug("Drop legacy constraint %r: %s (likely already absent)", stmt[:60], drop_err)
 
             # Deduplicate CVSS nodes before creating single-key constraints.
             # Old compound key (cve_id, tag) may have created multiple nodes per CVE.
@@ -547,6 +606,28 @@ class Neo4jClient:
             "CREATE CONSTRAINT cvssv40_key IF NOT EXISTS FOR (n:CVSSv40) REQUIRE (n.cve_id) IS UNIQUE",
             # Campaign nodes — one per actor, keyed by name only
             "CREATE CONSTRAINT campaign_key IF NOT EXISTS FOR (c:Campaign) REQUIRE (c.name) IS UNIQUE",
+            # PR #34 round 26 (invariant audit): added the missing 10 UNIQUE
+            # constraints to match the labels declared in
+            # ``node_identity._NATURAL_KEYS``. Without these, two concurrent
+            # MERGEs on the same logical (label, key) could create duplicate
+            # nodes — silently violating the deterministic-uuid contract that
+            # underpins delta sync. Pinned by
+            # ``test_every_natural_key_label_has_a_unique_constraint``.
+            # ResilMesh / topology
+            "CREATE CONSTRAINT ip_key IF NOT EXISTS FOR (n:IP) REQUIRE (n.address) IS UNIQUE",
+            "CREATE CONSTRAINT host_key IF NOT EXISTS FOR (n:Host) REQUIRE (n.hostname) IS UNIQUE",
+            "CREATE CONSTRAINT device_key IF NOT EXISTS FOR (n:Device) REQUIRE (n.device_id) IS UNIQUE",
+            "CREATE CONSTRAINT subnet_key IF NOT EXISTS FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE",
+            "CREATE CONSTRAINT networkservice_key IF NOT EXISTS FOR (n:NetworkService) REQUIRE (n.port, n.protocol) IS UNIQUE",  # noqa: E501
+            "CREATE CONSTRAINT softwareversion_key IF NOT EXISTS FOR (n:SoftwareVersion) REQUIRE (n.version) IS UNIQUE",
+            "CREATE CONSTRAINT application_key IF NOT EXISTS FOR (n:Application) REQUIRE (n.name) IS UNIQUE",
+            "CREATE CONSTRAINT role_key IF NOT EXISTS FOR (n:Role) REQUIRE (n.permission) IS UNIQUE",
+            # User: composite (username, domain) — domain is normalized to
+            # 'default' for None/"" inputs (PR #34 round 25, see
+            # merge_resilmesh_user) so the constraint compares apples-to-apples.
+            "CREATE CONSTRAINT user_key IF NOT EXISTS FOR (n:User) REQUIRE (n.username, n.domain) IS UNIQUE",
+            # Alert: alert_id is the upstream-provided idempotency key.
+            "CREATE CONSTRAINT alert_key IF NOT EXISTS FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE",
         ]
 
         success_count = 0
@@ -591,20 +672,23 @@ class Neo4jClient:
             "CREATE INDEX malware_name IF NOT EXISTS FOR (m:Malware) ON (m.name)",
             "CREATE INDEX actor_name IF NOT EXISTS FOR (a:ThreatActor) ON (a.name)",
             "CREATE INDEX technique_mitre IF NOT EXISTS FOR (t:Technique) ON (t.mitre_id)",
-            # Original source tracking indexes
-            "CREATE INDEX indicator_original_source IF NOT EXISTS FOR (i:Indicator) ON (i.original_source)",
-            "CREATE INDEX vulnerability_original_source IF NOT EXISTS FOR (v:Vulnerability) ON (v.original_source)",
+            # PR #34 round 18: dropped indicator_original_source +
+            # vulnerability_original_source indexes — the n.original_source
+            # property they backed had ZERO production readers (no GraphQL
+            # field, no STIX export, no Cypher MATCH/WHERE). The Python
+            # helper that EXTRACTS original_source from MISP tags is alive
+            # (it derives the canonical `source` field), only the Neo4j
+            # property write + indexes were dead.
             # Active/inactive tracking indexes
             "CREATE INDEX indicator_active IF NOT EXISTS FOR (i:Indicator) ON (i.active)",
             "CREATE INDEX vulnerability_active IF NOT EXISTS FOR (v:Vulnerability) ON (v.active)",
-            "CREATE INDEX indicator_misp_event_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_event_id)",
-            "CREATE INDEX vulnerability_misp_event_id IF NOT EXISTS FOR (v:Vulnerability) ON (v.misp_event_id)",
-            # MISP attribute UUID lookup — direct traceability from a Neo4j Indicator
-            # back to the originating MISP attribute. Added 2026-04 alongside the
-            # parse_attribute fix that started populating this field for new ingests.
-            # Backfill of pre-existing nodes is in
-            # migrations/2026_04_indicator_misp_attribute_id_backfill.cypher.
-            "CREATE INDEX indicator_misp_attribute_id IF NOT EXISTS FOR (i:Indicator) ON (i.misp_attribute_id)",
+            # PR #33 round 10: dropped 5 legacy-scalar indexes (indicator/
+            # vulnerability/malware/actor _misp_event_id and
+            # indicator_misp_attribute_id). All readers now match against
+            # misp_event_ids[] / misp_attribute_ids[] via list-membership
+            # predicates (`eid IN n.misp_event_ids`) — Neo4j 5 handles those
+            # without an index; an explicit array-membership index would only
+            # help at much larger scale (>10M rows).
             "CREATE INDEX tactic_shortname IF NOT EXISTS FOR (t:Tactic) ON (t.shortname)",
             "CREATE INDEX technique_tactic_phases IF NOT EXISTS FOR (t:Technique) ON (t.tactic_phases)",
             # CVSS sub-node lookup indexes
@@ -620,9 +704,43 @@ class Neo4jClient:
             "CREATE INDEX vulnerability_last_updated IF NOT EXISTS FOR (v:Vulnerability) ON (v.last_updated)",
             # build_relationships performance: CVE.cve_id needed for EXPLOITS query
             "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
-            # Co-occurrence join: Malware/ThreatActor by misp_event_id
-            "CREATE INDEX malware_misp_event_id IF NOT EXISTS FOR (m:Malware) ON (m.misp_event_id)",
-            "CREATE INDEX actor_misp_event_id IF NOT EXISTS FOR (a:ThreatActor) ON (a.misp_event_id)",
+            # Deterministic per-node UUID indexes — added 2026-04 for delta-sync
+            # local→cloud (cloud MERGEs by uuid) and self-describing edge serialization
+            # (xAI / RAG consumers resolve r.src_uuid / r.trg_uuid back to nodes by uuid).
+            # Index, not UNIQUE constraint — natural-key UNIQUE constraints already
+            # prevent duplicate nodes; UUIDv5 collisions are negligible; and the
+            # constraint creation can't run before the backfill populates the field.
+            "CREATE INDEX indicator_uuid IF NOT EXISTS FOR (i:Indicator) ON (i.uuid)",
+            "CREATE INDEX vulnerability_uuid IF NOT EXISTS FOR (v:Vulnerability) ON (v.uuid)",
+            "CREATE INDEX cve_uuid IF NOT EXISTS FOR (c:CVE) ON (c.uuid)",
+            "CREATE INDEX malware_uuid IF NOT EXISTS FOR (m:Malware) ON (m.uuid)",
+            "CREATE INDEX actor_uuid IF NOT EXISTS FOR (a:ThreatActor) ON (a.uuid)",
+            "CREATE INDEX technique_uuid IF NOT EXISTS FOR (t:Technique) ON (t.uuid)",
+            "CREATE INDEX tactic_uuid IF NOT EXISTS FOR (t:Tactic) ON (t.uuid)",
+            "CREATE INDEX tool_uuid IF NOT EXISTS FOR (t:Tool) ON (t.uuid)",
+            "CREATE INDEX sector_uuid IF NOT EXISTS FOR (s:Sector) ON (s.uuid)",
+            "CREATE INDEX source_uuid IF NOT EXISTS FOR (s:Source) ON (s.uuid)",
+            "CREATE INDEX campaign_uuid IF NOT EXISTS FOR (c:Campaign) ON (c.uuid)",
+            "CREATE INDEX cvssv2_uuid IF NOT EXISTS FOR (n:CVSSv2) ON (n.uuid)",
+            "CREATE INDEX cvssv30_uuid IF NOT EXISTS FOR (n:CVSSv30) ON (n.uuid)",
+            "CREATE INDEX cvssv31_uuid IF NOT EXISTS FOR (n:CVSSv31) ON (n.uuid)",
+            "CREATE INDEX cvssv40_uuid IF NOT EXISTS FOR (n:CVSSv40) ON (n.uuid)",
+            # Topology uuid indexes — added 2026-04 round 7 to close the gap that the
+            # 8 ResilMesh topology merge_* functions weren't stamping n.uuid (audit
+            # finding after PR #33 round 6).
+            "CREATE INDEX ip_uuid IF NOT EXISTS FOR (i:IP) ON (i.uuid)",
+            "CREATE INDEX host_uuid IF NOT EXISTS FOR (h:Host) ON (h.uuid)",
+            "CREATE INDEX device_uuid IF NOT EXISTS FOR (d:Device) ON (d.uuid)",
+            "CREATE INDEX subnet_uuid IF NOT EXISTS FOR (s:Subnet) ON (s.uuid)",
+            "CREATE INDEX networkservice_uuid IF NOT EXISTS FOR (n:NetworkService) ON (n.uuid)",
+            "CREATE INDEX softwareversion_uuid IF NOT EXISTS FOR (sv:SoftwareVersion) ON (sv.uuid)",
+            "CREATE INDEX application_uuid IF NOT EXISTS FOR (a:Application) ON (a.uuid)",
+            "CREATE INDEX role_uuid IF NOT EXISTS FOR (r:Role) ON (r.uuid)",
+            # PR #34 round 23: User + Alert uuid indexes — close the
+            # delta-sync coverage gap. Both labels now stamp n.uuid in their
+            # respective MERGE sites (merge_resilmesh_user, create_alert_node).
+            "CREATE INDEX user_uuid IF NOT EXISTS FOR (u:User) ON (u.uuid)",
+            "CREATE INDEX alert_uuid IF NOT EXISTS FOR (a:Alert) ON (a.uuid)",
         ]
 
         success_count = 0
@@ -666,17 +784,23 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 for source_id, info in SOURCES.items():
+                    # Deterministic Source uuid — referenced by SOURCED_FROM edges'
+                    # trg_uuid stamping in merge_indicators_batch / merge_vulnerabilities_batch.
+                    source_uuid = compute_node_uuid("Source", {"source_id": source_id})
                     query = """
                     MERGE (s:Source {source_id: $source_id})
-                    ON CREATE SET s.created_at = datetime()
+                    ON CREATE SET s.created_at = datetime(),
+                                  s.uuid = $source_uuid
                     SET s.name = $name,
                         s.type = $type,
                         s.reliability = $reliability,
-                        s.updated_at = datetime()
+                        s.updated_at = datetime(),
+                        s.uuid = coalesce(s.uuid, $source_uuid)
                     """
                     session.run(
                         query,
                         source_id=source_id,
+                        source_uuid=source_uuid,
                         name=info["name"],
                         type=info["type"],
                         reliability=info["reliability"],
@@ -808,9 +932,22 @@ class Neo4jClient:
             tag_array = [tag_value] if tag_value else [source_id]
 
             _validate_label(label)
+
+            # Deterministic per-node UUID — uuid5(namespace, canonical(label, key_props)).
+            # Stable across machines and Neo4j instances so the cloud copy of a
+            # local Indicator has the same n.uuid; edges carry src_uuid/trg_uuid
+            # that resolve correctly cross-environment. Computed here from the
+            # actual MERGE key (not the label's documented natural key) so the
+            # uuid always matches what the Cypher MERGE binds to.
+            node_uuid = compute_node_uuid(label, key_props)
+
+            # PR #34 round 24: apply "specifics-override-global" at accumulation
+            # time — see _zone_override_global_clause for full rationale.
+            _zone_clause = _zone_override_global_clause("n", "$zone")
             query = f"""
             MERGE (n:{label} {{{key_set}}})
-            ON CREATE SET n.first_imported_at = datetime()
+            ON CREATE SET n.first_imported_at = datetime(),
+                          n.uuid = $node_uuid
 
             // Always accumulate sources and zones — provenance is never overwritten.
             // Use APOC to deduplicate the merged arrays in one step.
@@ -819,49 +956,53 @@ class Neo4jClient:
                     THEN $confidence
                     ELSE n.confidence_score END,
                 n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array),
-                n.zone = apoc.coll.toSet(coalesce(n.zone, []) + $zone),
+                {_zone_clause},
                 n.tags = apoc.coll.toSet(coalesce(n.tags, []) + $tag_array),
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
                 n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
-                n.edgeguard_managed = true
+                n.edgeguard_managed = true,
+                // n.uuid is deterministic — coalesce so we never overwrite it.
+                // (Defensive only; same input always produces same uuid, but if a
+                // node was created before this code was deployed it will get the
+                // uuid stamped here on next MERGE.)
+                n.uuid = coalesce(n.uuid, $node_uuid)
             """
 
-            # Add misp_event_id if present — accumulated as array for multi-event provenance.
-            # Keeps scalar misp_event_id for backward compat (first-seen event).
+            # PR #33 round 10: dropped legacy scalars misp_event_id / misp_attribute_id
+            # (pre-release, no real data to migrate). Multi-event provenance lives only
+            # in the misp_event_ids[] / misp_attribute_ids[] arrays, accumulated
+            # via apoc.coll.toSet so duplicates within an array are de-duped.
             misp_event_id = data.get("misp_event_id")
             if misp_event_id:
                 query += """,
-                n.misp_event_id = coalesce(n.misp_event_id, $misp_event_id),
                 n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + [$misp_event_id])"""
 
-            # Add misp_attribute_id if present in data (for indicators)
             misp_attribute_id = data.get("misp_attribute_id")
             if misp_attribute_id:
                 query += """,
-                n.misp_attribute_id = coalesce(n.misp_attribute_id, $misp_attribute_id),
                 n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
 
-            # Add original publication/modification dates from source feed.
-            # Preserved with coalesce (first-seen value wins) — distinct from
-            # first_imported_at (EdgeGuard import time) and last_updated (last sync).
-            first_seen = data.get("first_seen")
-            if first_seen:
-                query += """,
-                n.original_published_date = CASE
-                    WHEN n.original_published_date IS NULL OR $first_seen < n.original_published_date
-                    THEN $first_seen ELSE n.original_published_date END"""
-            last_seen_val = data.get("last_updated") or data.get("last_seen")
-            if last_seen_val:
-                query += """,
-                n.original_modified_date = CASE
-                    WHEN n.original_modified_date IS NULL OR $last_seen_val > n.original_modified_date
-                    THEN $last_seen_val ELSE n.original_modified_date END"""
+            # PR #34 round 17: deleted ``n.original_published_date`` and
+            # ``n.original_modified_date`` SET clauses. They were intended to
+            # capture the upstream NVD ``published`` / ``last_modified`` dates,
+            # but every non-NVD path (CISA KEV, OTX, MISP-event-only) silently
+            # fell back to the MISP event date — making the field name lie
+            # ("original" really means "first-seen-by-EdgeGuard"). The
+            # canonical EdgeGuard first-touch / last-modified values already
+            # live in ``first_imported_at`` (precise timestamp + TZ) and
+            # ``last_updated``. Zero readers in production: no GraphQL field,
+            # no STIX export, no Cypher consumer, no doc reference.
 
-            # Add original_source if present in data
-            if original_source:
-                query += ", n.original_source = $original_source"
+            # PR #34 round 18: deleted ``n.original_source`` SET clause +
+            # the matching index. The Neo4j property had ZERO production
+            # readers (no GraphQL field, no STIX export, no Cypher
+            # MATCH/WHERE). The Python helper that EXTRACTS original_source
+            # from MISP tags is alive (line 847 above) — it's stored on the
+            # SOURCED_FROM edge's r.raw_data JSON for audit trail, and the
+            # extraction in misp_collector derives the canonical `source`
+            # field. Only the dead n.original_source write is removed.
 
             # Add extra_props (aliases, description, etc.) if provided.
             # Validate every property name before interpolating into Cypher.
@@ -932,6 +1073,7 @@ class Neo4jClient:
                     "zone": zone,
                     "tag_array": tag_array,
                     "tag_value": tag_value,
+                    "node_uuid": node_uuid,
                     **params_extra,
                 }
                 if misp_event_id:
@@ -940,10 +1082,9 @@ class Neo4jClient:
                     params["misp_attribute_id"] = misp_attribute_id
                 if original_source:
                     params["original_source"] = original_source
-                if first_seen:
-                    params["first_seen"] = first_seen
-                if last_seen_val:
-                    params["last_seen_val"] = last_seen_val
+                # PR #34 round 17: dropped first_seen / last_seen_val params
+                # along with the original_published_date / original_modified_date
+                # SET clauses they bound to (see merger SET above for rationale).
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
 
             # Now create/update the SOURCED_FROM relationship with raw data
@@ -971,22 +1112,37 @@ class Neo4jClient:
             _validate_prop_name(k)
         key_conditions = " AND ".join([f"n.{k} = ${k}" for k in key_props.keys()])
 
+        # Endpoint uuids — same canonicalization as the actual node MERGEs, so
+        # r.src_uuid/r.trg_uuid resolve back to (label, key_props) and (Source, source_id).
+        src_uuid, trg_uuid = edge_endpoint_uuids(label, key_props, "Source", {"source_id": source_id})
+
         query = f"""
         MATCH (n:{label})
         WHERE {key_conditions}
         MATCH (s:Source {{source_id: $source_id}})
         MERGE (n)-[r:SOURCED_FROM]->(s)
         ON CREATE SET r.imported_at = datetime(),
-            r.raw_data = $raw_data
+            r.raw_data = $raw_data,
+            r.src_uuid = $src_uuid,
+            r.trg_uuid = $trg_uuid
         SET r.confidence = $confidence,
             r.source = $source_id,
             r.updated_at = datetime(),
-            r.edgeguard_managed = true
+            r.edgeguard_managed = true,
+            r.src_uuid = coalesce(r.src_uuid, $src_uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, $trg_uuid)
         """
 
         try:
             with self.driver.session() as session:
-                params = {**key_props, "source_id": source_id, "raw_data": raw_data_json, "confidence": confidence}
+                params = {
+                    **key_props,
+                    "source_id": source_id,
+                    "raw_data": raw_data_json,
+                    "confidence": confidence,
+                    "src_uuid": src_uuid,
+                    "trg_uuid": trg_uuid,
+                }
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
         except (
@@ -1064,8 +1220,14 @@ class Neo4jClient:
         data["cve_id"] = cve_id
         key_props = {"cve_id": cve_id}
 
-        # Promote CISA KEV fields and reference_urls to queryable node properties
-        # so analysts can filter on e.g. "all CVEs on the CISA KEV list".
+        # Promote CISA KEV fields to queryable node properties so analysts
+        # can filter on e.g. "all CVEs on the CISA KEV list".
+        #
+        # PR #34 round 18: deleted ``reference_urls`` from extra_props.
+        # The NVD collector parses up to 10 advisory URLs per CVE and
+        # forwards them here, but ZERO consumers downstream
+        # (no GraphQL field, no STIX export, no Cypher query). Same
+        # dead-write pattern as round-17's ``original_*_date`` cleanup.
         extra_props: Dict = {}
         if data.get("cisa_exploit_add"):
             extra_props["cisa_exploit_add"] = data["cisa_exploit_add"]
@@ -1075,8 +1237,6 @@ class Neo4jClient:
             extra_props["cisa_required_action"] = data["cisa_required_action"]
         if data.get("cisa_vulnerability_name"):
             extra_props["cisa_vulnerability_name"] = data["cisa_vulnerability_name"]
-        if data.get("reference_urls"):
-            extra_props["reference_urls"] = data["reference_urls"]
         if data.get("description"):
             extra_props["description"] = data["description"]
         if data.get("cvss_score") is not None:
@@ -1109,6 +1269,10 @@ class Neo4jClient:
           [CVE]-[:HAS_CVSS_v31]->[CVSSv31 {...}]
           [CVE]-[:HAS_CVSS_v30]->[CVSSv30 {...}]
           [CVE]-[:HAS_CVSS_v2]->[CVSSv2 {...}]
+
+        Both HAS_CVSS_v* edges are stamped with src_uuid/trg_uuid (the CVE's
+        and the CVSS sub-node's deterministic uuids) for cross-environment
+        traceability and self-describing edge serialization.
         """
         if not self.driver or not cve_id:
             return False
@@ -1125,17 +1289,40 @@ class Neo4jClient:
                 prop_assignments.append(f"n.{k} = ${k}")
             set_clause = ", ".join(prop_assignments) if prop_assignments else "n.created = true"
 
+            cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
+            cvss_uuid = compute_node_uuid(label, {"cve_id": cve_id})
+
             query = f"""
             MATCH (cve:CVE {{cve_id: $cve_id}})
             MERGE (n:{label} {{cve_id: $cve_id}})
+            ON CREATE SET n.uuid = $cvss_uuid
             SET {set_clause},
                 n.tag = coalesce(n.tag, $tag),
                 n.last_updated = datetime(),
-                n.edgeguard_managed = true
-            MERGE (cve)-[:{rel_type}]->(n)
-            MERGE (n)-[:{rel_type}]->(cve)
+                n.edgeguard_managed = true,
+                n.uuid = coalesce(n.uuid, $cvss_uuid)
+            MERGE (cve)-[r1:{rel_type}]->(n)
+                ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
+            SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
+                r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid)
+            MERGE (n)-[r2:{rel_type}]->(cve)
+                ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
+            SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
+                r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid)
             """
-            params = {"cve_id": cve_id, "tag": tag, **filtered_cvss}
+            # NB (PR #33 round 8, bugbot MED): spread filtered_cvss FIRST so the
+            # explicit cve_uuid / cvss_uuid / cve_id / tag entries below always
+            # win on key collision. If cvss_data ever contained a key named
+            # ``cve_uuid`` or ``cvss_uuid`` (passes _validate_prop_name), a
+            # later spread would silently overwrite the computed deterministic
+            # uuids with attribute data.
+            params = {
+                **filtered_cvss,
+                "cve_id": cve_id,
+                "tag": tag,
+                "cve_uuid": cve_uuid,
+                "cvss_uuid": cvss_uuid,
+            }
             dropped = len(cvss_data) - len(filtered_cvss)
             with self.driver.session() as session:
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
@@ -1242,23 +1429,15 @@ class Neo4jClient:
         and re-activate nodes whose events re-enter the active list.
 
         A node is considered active if ANY event in its ``misp_event_ids[]`` array is
-        active. The legacy scalar ``misp_event_id`` is the *first-seen* event only and
-        does not reflect later events that re-referenced the same attribute — using it
-        alone caused multi-event nodes to be marked inactive whenever their first event
-        rotated out of the incremental window even though they were still being
-        observed. We coalesce the array with the scalar so nodes ingested before
-        ``misp_event_ids[]`` accumulation still resolve correctly.
+        currently active. PR #33 round 10 dropped the legacy ``misp_event_id`` scalar
+        — provenance lives only in the array now.
 
         Both Indicators and Vulnerabilities get the symmetric pair:
 
-        - re-activation gate (``any(eid IN ... WHERE eid IN $active_ids)``) — sets
-          ``active = true`` unless ``retired_at`` indicates manual decommission.
-        - deactivation gate (``none(eid IN ... WHERE eid IN $active_ids)``) — sets
-          ``active = false``.
-
-        The Vulnerability re-activation gate was added 2026-04 alongside the array-
-        semantics fix; pre-fix only Indicators were re-activated, leaving Vulnerabilities
-        permanently inactive once they were ever flipped (Bugbot finding on PR #32).
+        - re-activation gate (``any(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
+          — sets ``active = true`` unless ``retired_at`` indicates manual decommission.
+        - deactivation gate (``none(eid IN n.misp_event_ids WHERE eid IN $active_ids)``)
+          — sets ``active = false``.
 
         Nodes without any MISP event reference are not affected.
 
@@ -1286,55 +1465,35 @@ class Neo4jClient:
             # ``retired_at`` (manual decommission) wins over the auto-active reset.
             query_indicators = """
             MATCH (n:Indicator)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             query_indicators_inactive = """
             MATCH (n:Indicator)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND none(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = false
             RETURN count(n) as count
             """
 
             # Re-activate Vulnerabilities where ANY of their MISP event IDs is active.
             # Mirrors query_indicators above so a Vulnerability that was marked inactive
-            # (by the legacy scalar-only logic, by a prior incremental window, or any
-            # other reason) gets re-activated when its events re-enter the active list.
+            # gets re-activated when its events re-enter the active list.
             # ``retired_at`` (manual decommission) wins over the auto-active reset.
-            # Bugbot caught this asymmetry post-merge: the docs in AIRFLOW_DAG_DESIGN.md
-            # and ARCHITECTURE.md claimed both labels got both gates, but Vulnerability
-            # had only the deactivation path (an inherited gap from the pre-2026-04 code).
             query_vulnerabilities = """
             MATCH (n:Vulnerability)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND any(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
             """
 
             # Mark inactive Vulnerabilities — same any-of / none-of semantics.
             query_vulnerabilities_inactive = """
             MATCH (n:Vulnerability)
-            WITH n,
-                 [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS arr_ids,
-                 CASE WHEN n.misp_event_id IS NOT NULL AND n.misp_event_id <> ''
-                      THEN [n.misp_event_id] ELSE [] END AS scalar_id
-            WITH n, arr_ids + scalar_id AS all_ids
-            WHERE size(all_ids) > 0 AND none(eid IN all_ids WHERE eid IN $active_ids)
+            WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
+            WHERE size(event_ids) > 0 AND none(eid IN event_ids WHERE eid IN $active_ids)
             SET n.active = false
             RETURN count(n) as count
             """
@@ -1395,6 +1554,11 @@ class Neo4jClient:
         success_count = 0
         error_count = 0
 
+        # The Source node uuid is the same for every row in this batch — compute
+        # once and pass as a query-level param. Used for r.trg_uuid on the
+        # SOURCED_FROM edge created by the inner Cypher.
+        source_node_uuid = compute_node_uuid("Source", {"source_id": source_id})
+
         # Process in batches
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i : i + BATCH_SIZE]
@@ -1414,6 +1578,14 @@ class Neo4jClient:
                         source_list = [source_list]
                     tag = item.get("tag", "default")
 
+                    # Per-row Indicator uuid — same uuid will be computed by every
+                    # other process MERGEing the same (indicator_type, value), so
+                    # cloud copy / delta-sync resolves correctly.
+                    node_uuid = compute_node_uuid(
+                        "Indicator",
+                        {"indicator_type": item.get("indicator_type"), "value": item.get("value")},
+                    )
+
                     batch_item = {
                         "indicator_type": item.get("indicator_type"),
                         "value": item.get("value"),
@@ -1423,13 +1595,15 @@ class Neo4jClient:
                         "confidence": item.get("confidence_score", 0.5),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
+                        "node_uuid": node_uuid,
                     }
 
-                    # Add original date fields for cross-source min/max tracking
-                    if item.get("first_seen"):
-                        batch_item["first_seen"] = item["first_seen"]
-                    if item.get("last_seen"):
-                        batch_item["last_seen"] = item["last_seen"]
+                    # PR #34 round 17: dropped first_seen / last_seen pass-through
+                    # along with the original_published_date / original_modified_date
+                    # SET clauses they bound to. The fields didn't actually carry the
+                    # upstream NVD published date for non-NVD CVEs (CISA, OTX, etc.) —
+                    # they fell back to the MISP event date. Canonical EdgeGuard times
+                    # live in first_imported_at + last_updated.
 
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
@@ -1455,30 +1629,28 @@ class Neo4jClient:
 
                     batch_data.append(batch_item)
 
-                query = """
+                # PR #34 round 24: zone-accumulation now applies the
+                # specifics-override-global rule on write — see
+                # _zone_override_global_clause for rationale.
+                _zone_clause = _zone_override_global_clause("n", "item.zone")
+                query = f"""
                 UNWIND $batch as item
-                MERGE (n:Indicator {indicator_type: item.indicator_type, value: item.value})
-                ON CREATE SET n.first_imported_at = datetime()
+                MERGE (n:Indicator {{indicator_type: item.indicator_type, value: item.value}})
+                ON CREATE SET n.first_imported_at = datetime(),
+                              n.uuid = item.node_uuid
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
                         ELSE n.confidence_score END,
                     n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
-                    n.zone = apoc.coll.toSet(coalesce(n.zone, []) + item.zone),
+                    {_zone_clause},
                     n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
-                    n.original_published_date = CASE
-                        WHEN n.original_published_date IS NULL OR item.first_seen < n.original_published_date
-                        THEN item.first_seen ELSE n.original_published_date END,
-                    n.original_modified_date = CASE
-                        WHEN n.original_modified_date IS NULL OR item.last_seen > n.original_modified_date
-                        THEN item.last_seen ELSE n.original_modified_date END,
-                    n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
+                    n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
-                    n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
                     n.url_status = coalesce(item.url_status, n.url_status),
@@ -1488,18 +1660,27 @@ class Neo4jClient:
                     n.sigma_rules = apoc.coll.toSet(coalesce(n.sigma_rules, []) + coalesce(item.sigma_rules, [])),
                     n.threat_label = coalesce(item.threat_label, n.threat_label)
                 WITH n, item
-                MATCH (s:Source {source_id: item.source_id})
+                MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
                 ON CREATE SET r.imported_at = datetime(),
-                    r.raw_data = item.raw_data
+                    r.raw_data = item.raw_data,
+                    r.src_uuid = item.node_uuid,
+                    r.trg_uuid = $source_node_uuid
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
-                    r.edgeguard_managed = true
+                    r.edgeguard_managed = true,
+                    r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
+                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid)
                 """
 
                 with self.driver.session() as session:
-                    session.run(query, batch=batch_data, timeout=NEO4J_READ_TIMEOUT)
+                    session.run(
+                        query,
+                        batch=batch_data,
+                        source_node_uuid=source_node_uuid,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
 
                 success_count += len(batch)
                 logger.debug(f"Batch merged {len(batch)} indicators")
@@ -1526,6 +1707,9 @@ class Neo4jClient:
 
         success_count = 0
         error_count = 0
+
+        # Source node uuid is stable for the whole batch — see merge_indicators_batch.
+        source_node_uuid = compute_node_uuid("Source", {"source_id": source_id})
 
         for i in range(0, len(items), BATCH_SIZE):
             batch = items[i : i + BATCH_SIZE]
@@ -1554,6 +1738,9 @@ class Neo4jClient:
                     if isinstance(source_list, str):
                         source_list = [source_list]
 
+                    # Per-row Vulnerability uuid; same logic as Indicator batch.
+                    node_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
+
                     batch_item = {
                         "cve_id": cve_id,
                         "tag": item.get("tag", "default"),
@@ -1562,6 +1749,7 @@ class Neo4jClient:
                         "confidence": item.get("confidence_score", 0.5),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
+                        "node_uuid": node_uuid,
                     }
 
                     # Add MISP IDs if present
@@ -1586,43 +1774,55 @@ class Neo4jClient:
                     error_count += skipped
                     continue
 
-                query = """
+                # PR #34 round 24: zone-accumulation applies the
+                # specifics-override-global rule on write.
+                _zone_clause = _zone_override_global_clause("n", "item.zone")
+                query = f"""
                 UNWIND $batch as item
-                MERGE (n:Vulnerability {cve_id: item.cve_id})
+                MERGE (n:Vulnerability {{cve_id: item.cve_id}})
                 ON CREATE SET n.first_imported_at = datetime(),
-                    n.status = item.status
+                    n.status = item.status,
+                    n.uuid = item.node_uuid
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
                         ELSE n.confidence_score END,
                     n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
-                    n.zone = apoc.coll.toSet(coalesce(n.zone, []) + item.zone),
+                    {_zone_clause},
                     n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
-                    n.misp_event_id = coalesce(n.misp_event_id, item.misp_event_id),
+                    n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
-                    n.misp_attribute_id = coalesce(n.misp_attribute_id, item.misp_attribute_id),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.version_constraints = coalesce(item.version_constraints, n.version_constraints),
                     n.cisa_cwes = apoc.coll.toSet(coalesce(n.cisa_cwes, []) + coalesce(item.cisa_cwes, [])),
                     n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes)
                 WITH n, item
-                MATCH (s:Source {source_id: item.source_id})
+                MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
                 ON CREATE SET r.imported_at = datetime(),
-                    r.raw_data = item.raw_data
+                    r.raw_data = item.raw_data,
+                    r.src_uuid = item.node_uuid,
+                    r.trg_uuid = $source_node_uuid
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
-                    r.edgeguard_managed = true
+                    r.edgeguard_managed = true,
+                    r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
+                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid)
                 """
 
                 with self.driver.session() as session:
-                    session.run(query, batch=batch_data, timeout=NEO4J_READ_TIMEOUT)
+                    session.run(
+                        query,
+                        batch=batch_data,
+                        source_node_uuid=source_node_uuid,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
 
                 success_count += len(batch_data)
                 error_count += skipped
@@ -1694,7 +1894,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, a.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1742,7 +1944,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, m.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, a.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1787,7 +1991,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         # Link to CVE nodes (NVD-sourced, ResilMesh schema)
         query_cve = """
@@ -1798,7 +2004,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1837,7 +2045,9 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.6,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, m.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -1867,11 +2077,18 @@ class Neo4jClient:
             logger.debug("Skipping indicator↔sector link: missing indicator value or sector name")
             return False
 
-        # First ensure the Sector node exists
+        # First ensure the Sector node exists with its deterministic uuid stamped.
+        # Pre-2026-04 the Sector creation here didn't stamp s.uuid — the
+        # subsequent rel query's ``coalesce(r.trg_uuid, s.uuid)`` then read
+        # NULL. Bugbot caught this on PR #33 round 5; same fix as 7a/7b in
+        # build_relationships.py.
+        sec_uuid = compute_node_uuid("Sector", {"name": sec})
         ensure_sector_query = """
         MERGE (s:Sector {name: $sector_name})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = $sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
         # Create the relationship
@@ -1883,12 +2100,19 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
 
         try:
             with self.driver.session() as session:
-                session.run(ensure_sector_query, sector_name=sec, timeout=NEO4J_READ_TIMEOUT)
+                session.run(
+                    ensure_sector_query,
+                    sector_name=sec,
+                    sector_uuid=sec_uuid,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
                 session.run(
                     rel_query,
                     indicator_value=iv,
@@ -1902,7 +2126,12 @@ class Neo4jClient:
             return False
 
     def create_vulnerability_sector_relationship(self, cve_id: str, sector_name: str, source_id: str = "misp") -> bool:
-        """Create TARGETS relationship: Vulnerability/CVE -> Sector.
+        """Create AFFECTS relationship: Vulnerability/CVE -> Sector.
+
+        PR #33 round 11 (bugbot LOW): edge type changed from TARGETS to
+        AFFECTS to match the canonical schema (TARGETS reserved for
+        Indicator → Sector; Vuln/CVE → Sector is AFFECTS — see
+        build_relationships.py 7b query and ARCHITECTURE.md).
 
         Handles both label variants:
         - Vulnerability: items from MISP/non-NVD sources
@@ -1917,10 +2146,17 @@ class Neo4jClient:
             logger.debug("Skipping vulnerability↔sector link: missing normalized CVE id or sector name")
             return False
 
+        # Same Sector uuid stamp as create_indicator_sector_relationship (round 5
+        # bugbot fix) — pre-compute the deterministic uuid and stamp on Sector
+        # creation so the rel query's ``coalesce(r.trg_uuid, s.uuid)`` reads a
+        # populated value rather than NULL.
+        sec_uuid = compute_node_uuid("Sector", {"name": sec})
         ensure_sector_query = """
         MERGE (s:Sector {name: $sector_name})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = $sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
         rel_props = """
@@ -1928,27 +2164,34 @@ class Neo4jClient:
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
 
-        # Vulnerability label (MISP/non-NVD)
+        # Vulnerability label (MISP/non-NVD) — AFFECTS per canonical schema.
         vuln_query = f"""
         MATCH (v:Vulnerability {{cve_id: $cve_id}})
         MATCH (s:Sector {{name: $sector_name}})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         {rel_props}
         """
-        # CVE label (NVD — ResilMesh schema)
+        # CVE label (NVD — ResilMesh schema) — AFFECTS per canonical schema.
         cve_query = f"""
         MATCH (v:CVE {{cve_id: $cve_id}})
         MATCH (s:Sector {{name: $sector_name}})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         {rel_props}
         """
 
         try:
             with self.driver.session() as session:
-                session.run(ensure_sector_query, sector_name=sec, timeout=NEO4J_READ_TIMEOUT)
+                session.run(
+                    ensure_sector_query,
+                    sector_name=sec,
+                    sector_uuid=sec_uuid,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
                 session.run(vuln_query, cve_id=cve, sector_name=sec, source_id=source_id, timeout=NEO4J_READ_TIMEOUT)
                 session.run(cve_query, cve_id=cve, sector_name=sec, source_id=source_id, timeout=NEO4J_READ_TIMEOUT)
             return True
@@ -2001,6 +2244,16 @@ class Neo4jClient:
             # Cypher MERGE can accumulate it on r.misp_event_ids[]. Empty/None →
             # the SET clause skips the array append (CASE expression).
             mev = str(rel.get("misp_event_id", "") or "")
+            # NOTE: edge src_uuid / trg_uuid are NO LONGER pre-computed in the
+            # dispatch loop. Each Cypher template SETs them directly from the
+            # MATCHed node's bound-variable .uuid (Mechanism B), e.g. for
+            # INDICATES: `r.src_uuid = coalesce(r.src_uuid, i.uuid)`. This
+            # eliminates an entire class of bugs where the precomputed uuid
+            # disagreed with the actual node uuid because the from_key dict
+            # was incomplete (e.g. Indicator from_key missing indicator_type
+            # → uuid computed from "" → wrong fallback uuid that doesn't
+            # match the node's n.uuid). Bugbot caught this on PR #33 round 4.
+            #
             # Backward-compat: accept legacy "USES" rel_type from callers that
             # haven't been migrated yet, and route based on from_type. New
             # code should emit the specialized rel_type directly.
@@ -2053,13 +2306,35 @@ class Neo4jClient:
                         )
                     else:
                         _dropped_rels += 1
-                elif from_type in ("Malware", "Tool"):
+                elif from_type == "Malware":
+                    # Malware natural key is `name` — used by the Cypher MATCH.
                     nm = nonempty_graph_string(fk.get("name"))
                     if nm and mid:
                         implements_rows.append(
                             {
                                 "entity": nm,
-                                "entity_label": from_type,
+                                "entity_label": "Malware",
+                                "mitre_id": mid,
+                                "source_id": source_id,
+                                "confidence": conf,
+                                "misp_event_id": mev,
+                            }
+                        )
+                    else:
+                        _dropped_rels += 1
+                elif from_type == "Tool":
+                    # Tool's natural key is `mitre_id` (UNIQUE constraint on Tool.mitre_id —
+                    # see Neo4jClient.create_constraints). Producers send from_key as
+                    # ``{"mitre_id": ...}`` — earlier shared-with-Malware code read
+                    # fk.get("name") and silently dropped Tool rows. Now Tool routes
+                    # through its own branch with the correct key, and the q_tool_implements
+                    # Cypher MATCHes on tool.mitre_id (not tool.name) to match.
+                    tool_mid = nonempty_graph_string(fk.get("mitre_id"))
+                    if tool_mid and mid:
+                        implements_rows.append(
+                            {
+                                "entity": tool_mid,
+                                "entity_label": "Tool",
                                 "mitre_id": mid,
                                 "source_id": source_id,
                                 "confidence": conf,
@@ -2101,10 +2376,15 @@ class Neo4jClient:
                 else:
                     _dropped_rels += 1
             elif rt == "TARGETS":
+                # Canonical: Indicator → Sector. PR #33 round 12 split the
+                # Vulnerability→Sector path off into a separate ``AFFECTS``
+                # branch (below) — TARGETS now exclusively means
+                # Indicator → Sector.
                 sec = nonempty_graph_string(tk.get("name"))
                 if not sec:
                     _dropped_rels += 1
                     continue
+                sec_uuid = compute_node_uuid("Sector", {"name": sec})
                 ft = rel.get("from_type")
                 if ft == "Indicator":
                     iv = nonempty_graph_string(fk.get("value"))
@@ -2116,28 +2396,47 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "sector_uuid": sec_uuid,
                             }
                         )
                     else:
                         _dropped_rels += 1
-                elif ft == "Vulnerability":
-                    cid = normalize_cve_id_for_graph(fk.get("cve_id"))
-                    if cid:
-                        tgt_vuln_rows.append(
-                            {
-                                "cve_id": cid,
-                                "sector": sec,
-                                "source_id": source_id,
-                                "confidence": conf,
-                                "misp_event_id": mev,
-                            }
-                        )
-                    else:
-                        _dropped_rels += 1
+                else:
+                    # TARGETS with non-Indicator from_type is now invalid (Vuln/CVE
+                    # use AFFECTS, Tool→Sector is unsupported here).
+                    logger.debug("Dropping TARGETS row with non-Indicator from_type=%s — use AFFECTS for Vuln/CVE", ft)
+                    _dropped_rels += 1
+            elif rt == "AFFECTS":
+                # Canonical: Vulnerability/CVE → Sector. Replayed against BOTH
+                # labels (q_aff_vuln + q_aff_cve) — Mechanism B uuids mean one
+                # row dict serves both queries (each template reads its
+                # MATCHed node's .uuid directly).
+                sec = nonempty_graph_string(tk.get("name"))
+                if not sec:
+                    _dropped_rels += 1
+                    continue
+                sec_uuid = compute_node_uuid("Sector", {"name": sec})
+                cid = normalize_cve_id_for_graph(fk.get("cve_id"))
+                if cid:
+                    tgt_vuln_rows.append(
+                        {
+                            "cve_id": cid,
+                            "sector": sec,
+                            "source_id": source_id,
+                            "confidence": conf,
+                            "misp_event_id": mev,
+                            "sector_uuid": sec_uuid,
+                        }
+                    )
+                else:
+                    _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
                 if iv and cid:
+                    # expl_rows replays against BOTH Vulnerability and CVE labels.
+                    # Mechanism B (template reads i.uuid / v.uuid directly) means
+                    # no per-label uuid precomputation needed.
                     expl_rows.append(
                         {
                             "value": iv,
@@ -2150,10 +2449,18 @@ class Neo4jClient:
                 else:
                     _dropped_rels += 1
 
+        # PR #33 round 13: log the drop count UNCONDITIONALLY so the operator
+        # can distinguish "0 drops" (healthy) from "we forgot to log" (silent).
+        # WARNING when there are drops, INFO when there are none.
         if _dropped_rels:
             logger.warning(
                 "Relationship batch: %s/%s definitions dropped (blank/missing endpoints)",
                 _dropped_rels,
+                len(relationships),
+            )
+        else:
+            logger.info(
+                "Relationship batch: 0/%s dropped (all definitions had non-blank endpoints)",
                 len(relationships),
             )
 
@@ -2175,7 +2482,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, a.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         # Attribution edge: Campaign → Technique. Separate from the
         # ThreatActor query so the planner hits a single label index.
@@ -2197,7 +2506,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, c.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         # Capability edge: Malware or Tool → Technique. Single query handles
         # both labels via CALL ... apoc.do.case-style branching; we run one
@@ -2218,12 +2529,19 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, m.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
+        # Tool's natural key (and UNIQUE constraint) is mitre_id, NOT name —
+        # the dispatch loop above puts the Tool's mitre_id into row.entity for
+        # this query. Aliases-based matching wouldn't apply here (Tool's
+        # canonical id is the MITRE id). Pre-2026-04 this query MATCHed by
+        # tool.name, which silently dropped every Tool row sent through this
+        # path because parse_attribute correctly sends from_key={"mitre_id": …}.
         q_tool_implements = """
         UNWIND $rows AS row
-        MATCH (tool:Tool)
-        WHERE (tool.name = row.entity OR row.entity IN coalesce(tool.aliases, []))
+        MATCH (tool:Tool {mitre_id: row.entity})
         MATCH (t:Technique {mitre_id: row.mitre_id})
         MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
@@ -2235,7 +2553,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, tool.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
         """
         q_attr = """
         UNWIND $rows AS row
@@ -2253,7 +2573,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, m.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, a.uuid)
         """
         q_ind_mal = """
         UNWIND $rows AS row
@@ -2270,13 +2592,17 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, m.uuid)
         """
         q_tgt_ind = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = row.sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (i:Indicator {value: row.value})
         MERGE (i)-[r:TARGETS]->(s)
@@ -2289,16 +2615,24 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
-        q_tgt_vuln = """
+        # PR #33 round 11 (bugbot LOW): Vulnerability/CVE → Sector edges use
+        # AFFECTS, not TARGETS. TARGETS is reserved for Indicator → Sector
+        # (see q_tgt_ind below + build_relationships.py 7a). Vuln/CVE → Sector
+        # is AFFECTS (build_relationships.py 7b + ARCHITECTURE.md edges table).
+        q_aff_vuln = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = row.sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:Vulnerability {cve_id: row.cve_id})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
@@ -2308,16 +2642,20 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
-        q_tgt_cve = """
+        q_aff_cve = """
         UNWIND $rows AS row
         MERGE (s:Sector {name: row.sector})
-        ON CREATE SET s.created_at = datetime()
-        SET s.updated_at = datetime()
+        ON CREATE SET s.created_at = datetime(),
+                      s.uuid = row.sector_uuid
+        SET s.updated_at = datetime(),
+            s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:CVE {cve_id: row.cve_id})
-        MERGE (v)-[r:TARGETS]->(s)
+        MERGE (v)-[r:AFFECTS]->(s)
         SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
             r.source_id = row.source_id,
             r.confidence_score = row.confidence,
@@ -2327,7 +2665,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
         q_expl_vuln = """
         UNWIND $rows AS row
@@ -2344,7 +2684,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         q_expl_cve = """
         UNWIND $rows AS row
@@ -2361,7 +2703,9 @@ class Neo4jClient:
                      THEN [row.misp_event_id] ELSE [] END
             ),
             r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
@@ -2400,11 +2744,17 @@ class Neo4jClient:
                 time.sleep(1)
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
+                # Same row payload replayed against two labels (Vulnerability + CVE).
+                # No per-label uuid swap is needed anymore — each template's SET
+                # reads its MATCHed node's bound .uuid directly (Mechanism B), so
+                # the same row dict works for both queries.
                 time.sleep(1)
-                _run_rows(session, "TARGETS_vulnerability", q_tgt_vuln, tgt_vuln_rows)
+                _run_rows(session, "AFFECTS_vulnerability", q_aff_vuln, tgt_vuln_rows)
                 time.sleep(1)
-                _run_rows(session, "TARGETS_cve", q_tgt_cve, tgt_vuln_rows)
+                _run_rows(session, "AFFECTS_cve", q_aff_cve, tgt_vuln_rows)
             if expl_rows:
+                # Same as TARGETS_vuln/cve — Mechanism B uuids mean one row dict
+                # serves both EXPLOITS templates without any precomputed swap.
                 time.sleep(1)
                 _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
                 time.sleep(1)
@@ -2513,12 +2863,13 @@ class Neo4jClient:
                 except Exception:
                     stats["multi_zone_count"] = 0
 
-                # Count active/inactive for Indicators and Vulnerabilities
+                # Count active/inactive for Indicators and Vulnerabilities (only those
+                # with at least one MISP event in misp_event_ids[]).
                 try:
                     result = session.run(
                         """
                         MATCH (n:Indicator)
-                        WHERE n.misp_event_id IS NOT NULL
+                        WHERE n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
                         RETURN n.active as active, count(n) as count
                     """,
                         timeout=NEO4J_READ_TIMEOUT,
@@ -2531,7 +2882,7 @@ class Neo4jClient:
                     result = session.run(
                         """
                         MATCH (n:Vulnerability)
-                        WHERE n.misp_event_id IS NOT NULL
+                        WHERE n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
                         RETURN n.active as active, count(n) as count
                     """,
                         timeout=NEO4J_READ_TIMEOUT,
@@ -2636,7 +2987,7 @@ class Neo4jClient:
         query = f"""
         MATCH (n:Indicator)
         WHERE (n.active = true OR n.active IS NULL)
-          AND n.misp_event_id IS NOT NULL
+          AND n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
         {type_filter}
         RETURN n
         LIMIT $limit
@@ -2672,7 +3023,7 @@ class Neo4jClient:
         query = f"""
         MATCH (n:Vulnerability)
         WHERE (n.active = true OR n.active IS NULL)
-          AND n.misp_event_id IS NOT NULL
+          AND n.misp_event_ids IS NOT NULL AND size(n.misp_event_ids) > 0
         {cvss_filter}
         RETURN n
         ORDER BY n.cvss_score DESC
@@ -2731,14 +3082,20 @@ class Neo4jClient:
         contributed data. We accumulate via apoc.coll.toSet so multiple
         sources are tracked.
         """
+        # PR #33 follow-up: stamp deterministic IP n.uuid for cross-environment
+        # traceability. Same compute_node_uuid pattern as the MISP-side mergers.
+        address = data.get("address")
+        ip_uuid = compute_node_uuid("IP", {"address": address})
         query = """
         MERGE (i:IP {address: $address})
+        ON CREATE SET i.uuid = $ip_uuid
         SET i.status = $status,
             i.tag = apoc.coll.toSet(coalesce(i.tag, []) + $tag_list),
             i.version = $version,
             i.edgeguard_managed = true,
             i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
-            i.last_updated = datetime()
+            i.last_updated = datetime(),
+            i.uuid = coalesce(i.uuid, $ip_uuid)
         """
         try:
             # Normalise tag to a list for ResilMesh compatibility
@@ -2747,12 +3104,14 @@ class Neo4jClient:
             with self.driver.session() as session:
                 session.run(
                     query,
-                    address=data.get("address"),
+                    address=address,
+                    ip_uuid=ip_uuid,
                     status=data.get("status"),
                     tag_list=tag_list,
                     version=data.get("version"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
-            logger.info(f"Created/updated IP: {data.get('address')}")
+            logger.info(f"Created/updated IP: {address}")
             return True
         except Exception as e:
             logger.error(f"Error creating IP: {e}")
@@ -2760,33 +3119,52 @@ class Neo4jClient:
 
     def merge_host(self, data: dict) -> bool:
         """MERGE a Host node. Properties: hostname"""
+        hostname = data.get("hostname")
+        host_uuid = compute_node_uuid("Host", {"hostname": hostname})
         query = """
         MERGE (h:Host {hostname: $hostname})
+        ON CREATE SET h.uuid = $host_uuid
         SET h.edgeguard_managed = true,
             h.first_seen = CASE WHEN h.first_seen IS NULL THEN datetime() ELSE h.first_seen END,
-            h.last_updated = datetime()
+            h.last_updated = datetime(),
+            h.uuid = coalesce(h.uuid, $host_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=data.get("hostname"))
-            logger.info(f"Created/updated Host: {data.get('hostname')}")
+                session.run(query, hostname=hostname, host_uuid=host_uuid, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Created/updated Host: {hostname}")
             return True
         except Exception as e:
             logger.error(f"Error creating Host: {e}")
             return False
 
     def merge_device(self, data: dict) -> bool:
-        """MERGE a Device node. (no properties)"""
+        """MERGE a Device node. Properties: device_id (required for deterministic uuid)."""
+        # Bugbot (PR #33 round 8, MED): the previous fallback ``str(id(data))``
+        # used Python's memory-address id() — non-deterministic across calls,
+        # processes, and machines. compute_node_uuid would then hash an
+        # ephemeral value, producing a different n.uuid every time the same
+        # logical Device was MERGEd, silently violating the uuid contract.
+        # Refuse the call instead of writing a poisoned node.
+        device_id = data.get("device_id")
+        if not device_id:
+            logger.error(
+                "merge_device: data missing required 'device_id' — cannot compute deterministic uuid; refusing"
+            )
+            return False
+        device_uuid = compute_node_uuid("Device", {"device_id": device_id})
         query = """
         MERGE (d:Device {device_id: $device_id})
+        ON CREATE SET d.uuid = $device_uuid
         SET d.edgeguard_managed = true,
             d.first_seen = CASE WHEN d.first_seen IS NULL THEN datetime() ELSE d.first_seen END,
-            d.last_updated = datetime()
+            d.last_updated = datetime(),
+            d.uuid = coalesce(d.uuid, $device_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=data.get("device_id", str(id(data))))
-            logger.info("Created/updated Device")
+                session.run(query, device_id=device_id, device_uuid=device_uuid, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Created/updated Device: {device_id}")
             return True
         except Exception as e:
             logger.error(f"Error creating Device: {e}")
@@ -2794,18 +3172,29 @@ class Neo4jClient:
 
     def merge_subnet(self, data: dict) -> bool:
         """MERGE a Subnet node. Properties: range, note, version"""
+        subnet_range = data.get("range")
+        subnet_uuid = compute_node_uuid("Subnet", {"range": subnet_range})
         query = """
         MERGE (s:Subnet {range: $range})
+        ON CREATE SET s.uuid = $subnet_uuid
         SET s.edgeguard_managed = true,
             s.note = $note,
             s.version = $version,
             s.first_seen = CASE WHEN s.first_seen IS NULL THEN datetime() ELSE s.first_seen END,
-            s.last_updated = datetime()
+            s.last_updated = datetime(),
+            s.uuid = coalesce(s.uuid, $subnet_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, range=data.get("range"), note=data.get("note"), version=data.get("version"))
-            logger.info(f"Created/updated Subnet: {data.get('range')}")
+                session.run(
+                    query,
+                    range=subnet_range,
+                    subnet_uuid=subnet_uuid,
+                    note=data.get("note"),
+                    version=data.get("version"),
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+            logger.info(f"Created/updated Subnet: {subnet_range}")
             return True
         except Exception as e:
             logger.error(f"Error creating Subnet: {e}")
@@ -2813,17 +3202,29 @@ class Neo4jClient:
 
     def merge_networkservice(self, data: dict) -> bool:
         """MERGE a NetworkService node. Properties: port, protocol, service"""
+        port = data.get("port")
+        protocol = data.get("protocol")
+        ns_uuid = compute_node_uuid("NetworkService", {"port": port, "protocol": protocol})
         query = """
         MERGE (ns:NetworkService {port: $port, protocol: $protocol})
+        ON CREATE SET ns.uuid = $ns_uuid
         SET ns.edgeguard_managed = true,
             ns.service = $service,
             ns.first_seen = CASE WHEN ns.first_seen IS NULL THEN datetime() ELSE ns.first_seen END,
-            ns.last_updated = datetime()
+            ns.last_updated = datetime(),
+            ns.uuid = coalesce(ns.uuid, $ns_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, port=data.get("port"), protocol=data.get("protocol"), service=data.get("service"))
-            logger.info(f"Created/updated NetworkService: {data.get('port')}/{data.get('protocol')}")
+                session.run(
+                    query,
+                    port=port,
+                    protocol=protocol,
+                    ns_uuid=ns_uuid,
+                    service=data.get("service"),
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+            logger.info(f"Created/updated NetworkService: {port}/{protocol}")
             return True
         except Exception as e:
             logger.error(f"Error creating NetworkService: {e}")
@@ -2831,17 +3232,27 @@ class Neo4jClient:
 
     def merge_softwareversion(self, data: dict) -> bool:
         """MERGE a SoftwareVersion node. Properties: cve_timestamp, version"""
+        version = data.get("version")
+        sv_uuid = compute_node_uuid("SoftwareVersion", {"version": version})
         query = """
         MERGE (sv:SoftwareVersion {version: $version})
+        ON CREATE SET sv.uuid = $sv_uuid
         SET sv.edgeguard_managed = true,
             sv.cve_timestamp = $cve_timestamp,
             sv.first_seen = CASE WHEN sv.first_seen IS NULL THEN datetime() ELSE sv.first_seen END,
-            sv.last_updated = datetime()
+            sv.last_updated = datetime(),
+            sv.uuid = coalesce(sv.uuid, $sv_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=data.get("version"), cve_timestamp=data.get("cve_timestamp"))
-            logger.info(f"Created/updated SoftwareVersion: {data.get('version')}")
+                session.run(
+                    query,
+                    version=version,
+                    sv_uuid=sv_uuid,
+                    cve_timestamp=data.get("cve_timestamp"),
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+            logger.info(f"Created/updated SoftwareVersion: {version}")
             return True
         except Exception as e:
             logger.error(f"Error creating SoftwareVersion: {e}")
@@ -2849,155 +3260,48 @@ class Neo4jClient:
 
     def merge_application(self, data: dict) -> bool:
         """MERGE an Application node. Properties: name"""
+        name = data.get("name")
+        app_uuid = compute_node_uuid("Application", {"name": name})
         query = """
         MERGE (a:Application {name: $name})
+        ON CREATE SET a.uuid = $app_uuid
         SET a.edgeguard_managed = true,
             a.first_seen = CASE WHEN a.first_seen IS NULL THEN datetime() ELSE a.first_seen END,
-            a.last_updated = datetime()
+            a.last_updated = datetime(),
+            a.uuid = coalesce(a.uuid, $app_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=data.get("name"))
-            logger.info(f"Created/updated Application: {data.get('name')}")
+                session.run(query, name=name, app_uuid=app_uuid, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Created/updated Application: {name}")
             return True
         except Exception as e:
             logger.error(f"Error creating Application: {e}")
             return False
 
-    def merge_cvssv2(self, data: dict) -> bool:
-        """MERGE a CVSSv2 node. Properties: vector_string, access_complexity, availability_impact, etc."""
-        query = """
-        MERGE (cv:CVSSv2 {vector_string: $vector_string})
-        SET cv.access_complexity = $access_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    access_complexity=data.get("access_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                )
-            logger.info(f"Created/updated CVSSv2: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv2: {e}")
-            return False
-
-    def merge_cvssv30(self, data: dict) -> bool:
-        """MERGE a CVSSv3.0 node."""
-        query = """
-        MERGE (cv:CVSSv30 {vector_string: $vector_string})
-        SET cv.attack_complexity = $attack_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.base_severity = $base_severity,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    attack_complexity=data.get("attack_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                    base_severity=data.get("base_severity"),
-                )
-            logger.info(f"Created/updated CVSSv3.0: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv3.0: {e}")
-            return False
-
-    def merge_cvssv31(self, data: dict) -> bool:
-        """MERGE a CVSSv3.1 node."""
-        query = """
-        MERGE (cv:CVSSv31 {vector_string: $vector_string})
-        SET cv.attack_complexity = $attack_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.base_severity = $base_severity,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    attack_complexity=data.get("attack_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                    base_severity=data.get("base_severity"),
-                )
-            logger.info(f"Created/updated CVSSv3.1: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv3.1: {e}")
-            return False
-
-    def merge_cvssv40(self, data: dict) -> bool:
-        """MERGE a CVSSv4.0 node."""
-        query = """
-        MERGE (cv:CVSSv40 {vector_string: $vector_string})
-        SET cv.attack_complexity = $attack_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.base_severity = $base_severity,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    attack_complexity=data.get("attack_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                    base_severity=data.get("base_severity"),
-                )
-            logger.info(f"Created/updated CVSSv4.0: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv4.0: {e}")
-            return False
+    # PR #33 round 12: deleted the 4 standalone merge_cvssv2/30/31/40 (and
+    # their create_cve_has_cvss_v* / create_cvssv*_has_cvssv*_cve helper
+    # callers). They were vector_string-keyed and uuid-less — superseded by
+    # the canonical _merge_cvss_node (called from merge_cve) which keys on
+    # cve_id and stamps the deterministic uuid. Pre-release fresh-start has
+    # no callers and no legacy data depending on the old path.
 
     def merge_role(self, data: dict) -> bool:
         """MERGE a Role node. Properties: permission"""
+        permission = data.get("permission")
+        role_uuid = compute_node_uuid("Role", {"permission": permission})
         query = """
         MERGE (r:Role {permission: $permission})
+        ON CREATE SET r.uuid = $role_uuid
         SET r.edgeguard_managed = true,
             r.first_seen = CASE WHEN r.first_seen IS NULL THEN datetime() ELSE r.first_seen END,
-            r.last_updated = datetime()
+            r.last_updated = datetime(),
+            r.uuid = coalesce(r.uuid, $role_uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=data.get("permission"))
-            logger.info(f"Created/updated Role: {data.get('permission')}")
+                session.run(query, permission=permission, role_uuid=role_uuid, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Created/updated Role: {permission}")
             return True
         except Exception as e:
             logger.error(f"Error creating Role: {e}")
@@ -3013,7 +3317,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=data.get("name"))
+                session.run(query, name=data.get("name"), timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated Component: {data.get('name')}")
             return True
         except Exception as e:
@@ -3039,6 +3343,7 @@ class Neo4jClient:
                     criticality=data.get("criticality"),
                     structure=data.get("structure"),
                     description=data.get("description"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated Mission: {data.get('name')}")
             return True
@@ -3056,7 +3361,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, name=data.get("name"))
+                session.run(query, name=data.get("name"), timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Created/updated OrganizationUnit: {data.get('name')}")
             return True
         except Exception as e:
@@ -3064,7 +3369,21 @@ class Neo4jClient:
             return False
 
     def merge_missiondependency(self, data: dict) -> bool:
-        """MERGE a MissionDependency node. (no properties)"""
+        """MERGE a MissionDependency node. Properties: dependency_id (required)."""
+        # PR #33 round 9: same anti-pattern audit as merge_device round 8 —
+        # the previous ``str(id(data))`` fallback used Python's memory-address
+        # id(), producing a different MERGE key every call for the same
+        # logical dependency. Each call would create a duplicate
+        # MissionDependency node. Refuse the call instead. (MissionDependency
+        # is not in _NATURAL_KEYS so there is no n.uuid to poison, but
+        # accepting an ephemeral key still violates the dedup contract.)
+        dependency_id = data.get("dependency_id")
+        if not dependency_id:
+            logger.error(
+                "merge_missiondependency: data missing required 'dependency_id' — "
+                "would create duplicate nodes per call; refusing"
+            )
+            return False
         query = """
         MERGE (md:MissionDependency {dependency_id: $dependency_id})
         SET md.edgeguard_managed = true,
@@ -3073,27 +3392,49 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=data.get("dependency_id", str(id(data))))
-            logger.info("Created/updated MissionDependency")
+                session.run(query, dependency_id=dependency_id, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Created/updated MissionDependency: {dependency_id}")
             return True
         except Exception as e:
             logger.error(f"Error creating MissionDependency: {e}")
             return False
 
     def merge_resilmesh_user(self, data: dict) -> bool:
-        """MERGE a ResilMesh User node. Properties: username, domain"""
+        """MERGE a ResilMesh User node. Properties: username, domain.
+
+        PR #34 round 23: stamps deterministic ``n.uuid`` so User nodes
+        participate in the cross-environment delta-sync contract.
+
+        PR #34 round 25 (red-team audit): normalize ``domain=None`` and
+        ``domain=""`` to ``"default"`` explicitly. Previously,
+        ``data.get("domain", "default")`` returned ``"default"`` ONLY when
+        the key was missing; if the caller passed ``domain=None`` or
+        ``domain=""`` explicitly, ``domain`` would be that falsy value →
+        ``compute_node_uuid`` produced a DIFFERENT uuid for the same
+        logical user. Three callers (missing key, None, empty string) all
+        represent "no domain specified" — must canonicalize to ONE form.
+        """
+        username = data.get("username")
+        if not username:
+            logger.error("merge_resilmesh_user: missing username — cannot MERGE without natural key")
+            return False
+        # ``data.get("domain") or "default"`` collapses None/""/missing-key
+        # to the single canonical "default" form.
+        domain = data.get("domain") or "default"
+        # Deterministic uuid — MUST use the same key dict the MERGE binds to.
+        node_uuid = compute_node_uuid("User", {"username": username, "domain": domain})
         query = """
         MERGE (u:User {username: $username, domain: $domain})
+        ON CREATE SET u.uuid = $node_uuid
         SET u.edgeguard_managed = true,
             u.first_seen = CASE WHEN u.first_seen IS NULL THEN datetime() ELSE u.first_seen END,
-            u.last_updated = datetime()
+            u.last_updated = datetime(),
+            u.uuid = coalesce(u.uuid, $node_uuid)
         """
         try:
-            # Provide default domain if not present
-            domain = data.get("domain", "default")
             with self.driver.session() as session:
-                session.run(query, username=data.get("username"), domain=domain)
-            logger.info(f"Created/updated ResilMesh User: {data.get('username')}")
+                session.run(query, username=username, domain=domain, node_uuid=node_uuid, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Created/updated ResilMesh User: {username}")
             return True
         except Exception as e:
             logger.error(f"Error creating User: {e}")
@@ -3106,23 +3447,35 @@ class Neo4jClient:
         ResilMesh platform directly (e.g., via ISIM GraphQL or NATS).
         The MISP pipeline uses ``merge_vulnerabilities_batch()`` instead,
         which keys on ``cve_id`` — both produce compatible nodes.
+
+        Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
+        through either path gets the same uuid.
         """
+        # Provide default values if not present
+        name = data.get("name", "unknown")
+        cve_id = data.get("cve_id", "CVE-0000-00000")
+        vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
+        ON CREATE SET v.uuid = $vuln_uuid
         SET v.name = coalesce(v.name, $name)
         SET v.status = $status,
             v.description = $description,
             v.edgeguard_managed = true,
             v.first_seen = CASE WHEN v.first_seen IS NULL THEN datetime() ELSE v.first_seen END,
-            v.last_updated = datetime()
+            v.last_updated = datetime(),
+            v.uuid = coalesce(v.uuid, $vuln_uuid)
         """
         try:
-            # Provide default values if not present
-            name = data.get("name", "unknown")
-            cve_id = data.get("cve_id", "CVE-0000-00000")
             with self.driver.session() as session:
                 session.run(
-                    query, name=name, cve_id=cve_id, status=data.get("status"), description=data.get("description")
+                    query,
+                    name=name,
+                    cve_id=cve_id,
+                    vuln_uuid=vuln_uuid,
+                    status=data.get("status"),
+                    description=data.get("description"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh Vulnerability: {name}")
             return True
@@ -3136,10 +3489,13 @@ class Neo4jClient:
         This is the ResilMesh-native path. The MISP pipeline uses
         ``merge_cve()`` which sets the same properties plus EdgeGuard
         extensions (CISA KEV, reference_urls). Both produce compatible
-        CVE nodes keyed on ``cve_id``.
+        CVE nodes keyed on ``cve_id`` with the same deterministic n.uuid.
         """
+        cve_id = data.get("cve_id")
+        cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
         query = """
         MERGE (c:CVE {cve_id: $cve_id})
+        ON CREATE SET c.uuid = $cve_uuid
         SET c.description = $description,
             c.published = $published,
             c.last_modified = $last_modified,
@@ -3151,14 +3507,16 @@ class Neo4jClient:
             c.tags = apoc.coll.toSet(coalesce(c.tags, []) + [$tag]),
             c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
-            c.last_updated = datetime()
+            c.last_updated = datetime(),
+            c.uuid = coalesce(c.uuid, $cve_uuid)
         """
         try:
             tag = data.get("tag", "default")
             with self.driver.session() as session:
                 session.run(
                     query,
-                    cve_id=data.get("cve_id"),
+                    cve_id=cve_id,
+                    cve_uuid=cve_uuid,
                     tag=tag,
                     description=data.get("description"),
                     published=data.get("published"),
@@ -3167,8 +3525,9 @@ class Neo4jClient:
                     result_impacts=data.get("result_impacts"),
                     ref_tags=data.get("ref_tags"),
                     cwe=data.get("cwe"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
-            logger.info(f"Created/updated ResilMesh CVE: {data.get('cve_id')}")
+            logger.info(f"Created/updated ResilMesh CVE: {cve_id}")
             return True
         except Exception as e:
             logger.error(f"Error creating CVE: {e}")
@@ -3191,6 +3550,7 @@ class Neo4jClient:
                     node_id=data.get("node_id"),
                     degree_centrality=data.get("degree_centrality"),
                     pagerank_centrality=data.get("pagerank_centrality"),
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Created/updated ResilMesh Node: {data.get('node_id')}")
             return True
@@ -3210,12 +3570,15 @@ class Neo4jClient:
         MATCH (sv:SoftwareVersion {version: $version})
         MATCH (h:Host {hostname: $hostname})
         MERGE (sv)-[r:ON]->(h)
+        ON CREATE SET r.src_uuid = sv.uuid, r.trg_uuid = h.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, sv.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, h.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=version, hostname=hostname)
+                session.run(query, version=version, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked SoftwareVersion {version} ON Host {hostname}")
             return True
         except Exception as e:
@@ -3229,12 +3592,15 @@ class Neo4jClient:
         MATCH (r:Role {permission: $permission})
         MATCH (d:Device {device_id: $device_id})
         MERGE (r)-[rel:TO]->(d)
+        ON CREATE SET rel.src_uuid = r.uuid, rel.trg_uuid = d.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, r.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, d.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=permission, device_id=device_id)
+                session.run(query, permission=permission, device_id=device_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Role {permission} TO Device {device_id}")
             return True
         except Exception as e:
@@ -3243,17 +3609,24 @@ class Neo4jClient:
 
     # 3. Role ASSIGNED_TO User
     def create_role_assigned_to_user(self, permission: str, username: str, domain: str = "default") -> bool:
-        """Create ASSIGNED_TO relationship: Role -> User"""
+        """Create ASSIGNED_TO relationship: Role -> User.
+
+        PR #34 round 23: stamps r.src_uuid / r.trg_uuid from bound endpoint
+        vars now that User has a deterministic n.uuid (added in round 23).
+        """
         query = """
         MATCH (r:Role {permission: $permission})
         MATCH (u:User {username: $username, domain: $domain})
         MERGE (r)-[rel:ASSIGNED_TO]->(u)
+        ON CREATE SET rel.src_uuid = r.uuid, rel.trg_uuid = u.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, r.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, u.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, permission=permission, username=username, domain=domain)
+                session.run(query, permission=permission, username=username, domain=domain, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Role {permission} ASSIGNED_TO User {username}")
             return True
         except Exception as e:
@@ -3262,17 +3635,23 @@ class Neo4jClient:
 
     # 4. User ASSIGNED_TO Role
     def create_user_assigned_to_role(self, username: str, domain: str, permission: str) -> bool:
-        """Create ASSIGNED_TO relationship: User -> Role"""
+        """Create ASSIGNED_TO relationship: User -> Role.
+
+        PR #34 round 23: stamps r.src_uuid / r.trg_uuid (round-23 User uuid).
+        """
         query = """
         MATCH (u:User {username: $username, domain: $domain})
         MATCH (r:Role {permission: $permission})
         MERGE (u)-[rel:ASSIGNED_TO]->(r)
+        ON CREATE SET rel.src_uuid = u.uuid, rel.trg_uuid = r.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, u.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, r.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, username=username, domain=domain, permission=permission)
+                session.run(query, username=username, domain=domain, permission=permission, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked User {username} ASSIGNED_TO Role {permission}")
             return True
         except Exception as e:
@@ -3286,12 +3665,15 @@ class Neo4jClient:
         MATCH (d:Device {device_id: $device_id})
         MATCH (r:Role {permission: $permission})
         MERGE (d)-[rel:TO]->(r)
+        ON CREATE SET rel.src_uuid = d.uuid, rel.trg_uuid = r.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, d.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, r.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=device_id, permission=permission)
+                session.run(query, device_id=device_id, permission=permission, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Device {device_id} TO Role {permission}")
             return True
         except Exception as e:
@@ -3305,12 +3687,15 @@ class Neo4jClient:
         MATCH (d:Device {device_id: $device_id})
         MATCH (h:Host {hostname: $hostname})
         MERGE (d)-[r:HAS_IDENTITY]->(h)
+        ON CREATE SET r.src_uuid = d.uuid, r.trg_uuid = h.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, d.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, h.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, device_id=device_id, hostname=hostname)
+                session.run(query, device_id=device_id, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Device {device_id} HAS_IDENTITY Host {hostname}")
             return True
         except Exception as e:
@@ -3318,19 +3703,27 @@ class Neo4jClient:
             return False
 
     # 7. SoftwareVersion IN Vulnerability
-    def create_softwareversion_in_vulnerability(self, version: str, vuln_name: str, cve_id: str = None) -> bool:
-        """Create IN relationship: SoftwareVersion -> Vulnerability"""
+    def create_softwareversion_in_vulnerability(self, *, version: str, cve_id: str) -> bool:
+        """Create IN relationship: SoftwareVersion -> Vulnerability.
+
+        Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS).
+        Keyword-only signature (PR #33 round 11) prevents positional swaps;
+        round 12 dropped the unused ``vuln_name`` log-only kwarg.
+        """
         query = """
         MATCH (sv:SoftwareVersion {version: $version})
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MERGE (sv)-[r:IN]->(v)
+        ON CREATE SET r.src_uuid = sv.uuid, r.trg_uuid = v.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, sv.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, version=version, vuln_name=vuln_name)
-            logger.info(f"Linked SoftwareVersion {version} IN Vulnerability {vuln_name}")
+                session.run(query, version=version, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Linked SoftwareVersion {version} IN Vulnerability {cve_id}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create SoftwareVersion IN Vulnerability: {e}")
@@ -3348,7 +3741,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, address=address, node_id=node_id)
+                session.run(query, address=address, node_id=node_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked IP {address} HAS_ASSIGNED Node {node_id}")
             return True
         except Exception as e:
@@ -3367,7 +3760,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, node_id=node_id, hostname=hostname)
+                session.run(query, node_id=node_id, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Node {node_id} IS_A Host {hostname}")
             return True
         except Exception as e:
@@ -3386,7 +3779,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, node_id=node_id, address=address)
+                session.run(query, node_id=node_id, address=address, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Node {node_id} HAS_ASSIGNED IP {address}")
             return True
         except Exception as e:
@@ -3405,7 +3798,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, node_id=node_id)
+                session.run(query, hostname=hostname, node_id=node_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} IS_A Node {node_id}")
             return True
         except Exception as e:
@@ -3419,12 +3812,15 @@ class Neo4jClient:
         MATCH (h:Host {hostname: $hostname})
         MATCH (d:Device {device_id: $device_id})
         MERGE (h)-[r:HAS_IDENTITY]->(d)
+        ON CREATE SET r.src_uuid = h.uuid, r.trg_uuid = d.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, h.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, d.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, device_id=device_id)
+                session.run(query, hostname=hostname, device_id=device_id, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} HAS_IDENTITY Device {device_id}")
             return True
         except Exception as e:
@@ -3438,12 +3834,15 @@ class Neo4jClient:
         MATCH (h:Host {hostname: $hostname})
         MATCH (sv:SoftwareVersion {version: $version})
         MERGE (h)-[r:ON]->(sv)
+        ON CREATE SET r.src_uuid = h.uuid, r.trg_uuid = sv.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, h.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, sv.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, version=version)
+                session.run(query, hostname=hostname, version=version, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} ON SoftwareVersion {version}")
             return True
         except Exception as e:
@@ -3457,12 +3856,15 @@ class Neo4jClient:
         MATCH (i:IP {address: $address})
         MATCH (s:Subnet {range: $subnet_range})
         MERGE (i)-[r:PART_OF]->(s)
+        ON CREATE SET r.src_uuid = i.uuid, r.trg_uuid = s.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, i.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, address=address, subnet_range=subnet_range)
+                session.run(query, address=address, subnet_range=subnet_range, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked IP {address} PART_OF Subnet {subnet_range}")
             return True
         except Exception as e:
@@ -3476,12 +3878,15 @@ class Neo4jClient:
         MATCH (s:Subnet {range: $subnet_range})
         MATCH (i:IP {address: $address})
         MERGE (s)-[r:PART_OF]->(i)
+        ON CREATE SET r.src_uuid = s.uuid, r.trg_uuid = i.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, s.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, i.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, subnet_range=subnet_range, address=address)
+                session.run(query, subnet_range=subnet_range, address=address, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Subnet {subnet_range} PART_OF IP {address}")
             return True
         except Exception as e:
@@ -3500,7 +3905,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, mission_name=mission_name, orgunit_name=orgunit_name)
+                session.run(query, mission_name=mission_name, orgunit_name=orgunit_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Mission {mission_name} FOR OrganizationUnit {orgunit_name}")
             return True
         except Exception as e:
@@ -3519,7 +3924,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, mission_name=mission_name, component_name=component_name)
+                session.run(query, mission_name=mission_name, component_name=component_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Mission {mission_name} SUPPORTS Component {component_name}")
             return True
         except Exception as e:
@@ -3538,7 +3943,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, dependency_id=dependency_id)
+                session.run(
+                    query, component_name=component_name, dependency_id=dependency_id, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Component {component_name} FROM MissionDependency {dependency_id}")
             return True
         except Exception as e:
@@ -3557,7 +3964,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, hostname=hostname)
+                session.run(query, component_name=component_name, hostname=hostname, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Component {component_name} PROVIDED_BY Host {hostname}")
             return True
         except Exception as e:
@@ -3576,7 +3983,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, mission_name=mission_name)
+                session.run(query, component_name=component_name, mission_name=mission_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Component {component_name} SUPPORTS Mission {mission_name}")
             return True
         except Exception as e:
@@ -3595,7 +4002,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, dependency_id=dependency_id)
+                session.run(
+                    query, component_name=component_name, dependency_id=dependency_id, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Component {component_name} TO MissionDependency {dependency_id}")
             return True
         except Exception as e:
@@ -3614,7 +4023,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, orgunit_name=orgunit_name, mission_name=mission_name)
+                session.run(query, orgunit_name=orgunit_name, mission_name=mission_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked OrganizationUnit {orgunit_name} FOR Mission {mission_name}")
             return True
         except Exception as e:
@@ -3633,7 +4042,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, child_orgunit=child_orgunit, parent_orgunit=parent_orgunit)
+                session.run(
+                    query, child_orgunit=child_orgunit, parent_orgunit=parent_orgunit, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked OrganizationUnit {child_orgunit} PART_OF OrganizationUnit {parent_orgunit}")
             return True
         except Exception as e:
@@ -3647,12 +4058,15 @@ class Neo4jClient:
         MATCH (child:Subnet {range: $child_subnet})
         MATCH (parent:Subnet {range: $parent_subnet})
         MERGE (child)-[r:PART_OF]->(parent)
+        ON CREATE SET r.src_uuid = child.uuid, r.trg_uuid = parent.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, child.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, parent.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, child_subnet=child_subnet, parent_subnet=parent_subnet)
+                session.run(query, child_subnet=child_subnet, parent_subnet=parent_subnet, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Subnet {child_subnet} PART_OF Subnet {parent_subnet}")
             return True
         except Exception as e:
@@ -3671,7 +4085,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, subnet_range=subnet_range, orgunit_name=orgunit_name)
+                session.run(query, subnet_range=subnet_range, orgunit_name=orgunit_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Subnet {subnet_range} PART_OF OrganizationUnit {orgunit_name}")
             return True
         except Exception as e:
@@ -3690,7 +4104,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=dependency_id, component_name=component_name)
+                session.run(
+                    query, dependency_id=dependency_id, component_name=component_name, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked MissionDependency {dependency_id} TO Component {component_name}")
             return True
         except Exception as e:
@@ -3709,7 +4125,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, dependency_id=dependency_id, component_name=component_name)
+                session.run(
+                    query, dependency_id=dependency_id, component_name=component_name, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked MissionDependency {dependency_id} FROM Component {component_name}")
             return True
         except Exception as e:
@@ -3728,7 +4146,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, orgunit_name=orgunit_name, subnet_range=subnet_range)
+                session.run(query, orgunit_name=orgunit_name, subnet_range=subnet_range, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked OrganizationUnit {orgunit_name} PART_OF Subnet {subnet_range}")
             return True
         except Exception as e:
@@ -3751,7 +4169,9 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, node1_id=node1_id, node2_id=node2_id, start=start, end=end)
+                session.run(
+                    query, node1_id=node1_id, node2_id=node2_id, start=start, end=end, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Node {node1_id} IS_CONNECTED_TO Node {node2_id}")
             return True
         except Exception as e:
@@ -3765,13 +4185,18 @@ class Neo4jClient:
         MATCH (ns:NetworkService {port: $port, protocol: $protocol})
         MATCH (h:Host {hostname: $hostname})
         MERGE (ns)-[r:ON]->(h)
+        ON CREATE SET r.src_uuid = ns.uuid, r.trg_uuid = h.uuid
         SET r.created_at = datetime(),
             r.updated_at = datetime(),
-            r.status = $status
+            r.status = $status,
+            r.src_uuid = coalesce(r.src_uuid, ns.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, h.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, port=port, protocol=protocol, hostname=hostname, status=status)
+                session.run(
+                    query, port=port, protocol=protocol, hostname=hostname, status=status, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked NetworkService {port}/{protocol} ON Host {hostname}")
             return True
         except Exception as e:
@@ -3790,7 +4215,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, component_name=component_name)
+                session.run(query, hostname=hostname, component_name=component_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Host {hostname} PROVIDED_BY Component {component_name}")
             return True
         except Exception as e:
@@ -3804,13 +4229,18 @@ class Neo4jClient:
         MATCH (h:Host {hostname: $hostname})
         MATCH (ns:NetworkService {port: $port, protocol: $protocol})
         MERGE (h)-[r:ON]->(ns)
+        ON CREATE SET r.src_uuid = h.uuid, r.trg_uuid = ns.uuid
         SET r.created_at = datetime(),
             r.updated_at = datetime(),
-            r.status = $status
+            r.status = $status,
+            r.src_uuid = coalesce(r.src_uuid, h.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, ns.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, hostname=hostname, port=port, protocol=protocol, status=status)
+                session.run(
+                    query, hostname=hostname, port=port, protocol=protocol, status=status, timeout=NEO4J_READ_TIMEOUT
+                )
             logger.info(f"Linked Host {hostname} ON NetworkService {port}/{protocol}")
             return True
         except Exception as e:
@@ -3829,7 +4259,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, app_name=app_name, component_name=component_name)
+                session.run(query, app_name=app_name, component_name=component_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Application {app_name} HAS_IDENTITY Component {component_name}")
             return True
         except Exception as e:
@@ -3848,7 +4278,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, component_name=component_name, app_name=app_name)
+                session.run(query, component_name=component_name, app_name=app_name, timeout=NEO4J_READ_TIMEOUT)
             logger.info(f"Linked Component {component_name} HAS_IDENTITY Application {app_name}")
             return True
         except Exception as e:
@@ -3856,222 +4286,105 @@ class Neo4jClient:
             return False
 
     # 35. Vulnerability REFERS_TO CVE
-    def create_vulnerability_refers_to_cve(self, vuln_name: str, cve_id: str) -> bool:
-        """Create REFERS_TO relationship: Vulnerability -> CVE"""
+    def create_vulnerability_refers_to_cve(self, *, cve_id: str) -> bool:
+        """Create REFERS_TO relationship: Vulnerability -> CVE.
+
+        Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS).
+        Keyword-only signature (PR #33 round 11) prevents positional swaps;
+        round 12 dropped the unused ``vuln_name`` log-only kwarg. Note: the
+        canonical bridge_vulnerability_cve query in enrichment_jobs.py creates
+        the same REFERS_TO edge — this helper is a single-pair convenience.
+        """
         query = """
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MATCH (c:CVE {cve_id: $cve_id})
         MERGE (v)-[r:REFERS_TO]->(c)
+        ON CREATE SET r.src_uuid = v.uuid, r.trg_uuid = c.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, vuln_name=vuln_name, cve_id=cve_id)
-            logger.info(f"Linked Vulnerability {vuln_name} REFERS_TO CVE {cve_id}")
+                session.run(query, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Linked Vulnerability {cve_id} REFERS_TO CVE {cve_id}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create Vulnerability REFERS_TO CVE: {e}")
             return False
 
     # 36. Vulnerability IN SoftwareVersion
-    def create_vulnerability_in_softwareversion(self, vuln_name: str, version: str) -> bool:
-        """Create IN relationship: Vulnerability -> SoftwareVersion"""
+    def create_vulnerability_in_softwareversion(self, *, cve_id: str, version: str) -> bool:
+        """Create IN relationship: Vulnerability -> SoftwareVersion.
+
+        Keyword-only (PR #33 round 11). Round 12 dropped vuln_name kwarg.
+        """
         query = """
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MATCH (sv:SoftwareVersion {version: $version})
         MERGE (v)-[r:IN]->(sv)
+        ON CREATE SET r.src_uuid = v.uuid, r.trg_uuid = sv.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, v.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, sv.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, vuln_name=vuln_name, version=version)
-            logger.info(f"Linked Vulnerability {vuln_name} IN SoftwareVersion {version}")
+                session.run(query, cve_id=cve_id, version=version, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Linked Vulnerability {cve_id} IN SoftwareVersion {version}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create Vulnerability IN SoftwareVersion: {e}")
             return False
 
     # 37. CVE REFERS_TO Vulnerability
-    def create_cve_refers_to_vulnerability(self, cve_id: str, vuln_name: str) -> bool:
-        """Create REFERS_TO relationship: CVE -> Vulnerability"""
+    def create_cve_refers_to_vulnerability(self, *, cve_id: str) -> bool:
+        """Create REFERS_TO relationship: CVE -> Vulnerability.
+
+        Keyword-only (PR #33 round 11). Round 12 dropped vuln_name kwarg.
+        """
         query = """
         MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (v:Vulnerability {name: $vuln_name})
+        MATCH (v:Vulnerability {cve_id: $cve_id})
         MERGE (c)-[r:REFERS_TO]->(v)
+        ON CREATE SET r.src_uuid = c.uuid, r.trg_uuid = v.uuid
         SET r.created_at = datetime(),
-            r.updated_at = datetime()
+            r.updated_at = datetime(),
+            r.src_uuid = coalesce(r.src_uuid, c.uuid),
+            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         try:
             with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vuln_name=vuln_name)
-            logger.info(f"Linked CVE {cve_id} REFERS_TO Vulnerability {vuln_name}")
+                session.run(query, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(f"Linked CVE {cve_id} REFERS_TO Vulnerability {cve_id}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create CVE REFERS_TO Vulnerability: {e}")
             return False
 
-    # 38. CVE HAS_CVSS_v40 CVSSv40
-    def create_cve_has_cvss_v40(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v40 relationship: CVE -> CVSSv40"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv40 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v40]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v40 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v40: {e}")
-            return False
-
-    # 39. CVE HAS_CVSS_v31 CVSSv31
-    def create_cve_has_cvss_v31(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v31 relationship: CVE -> CVSSv31"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv31 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v31]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v31 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v31: {e}")
-            return False
-
-    # 40. CVE HAS_CVSS_v30 CVSSv30
-    def create_cve_has_cvss_v30(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v30 relationship: CVE -> CVSSv30"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv30 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v30]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v30 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v30: {e}")
-            return False
-
-    # 41. CVE HAS_CVSS_v2 CVSSv2
-    def create_cve_has_cvss_v2(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v2 relationship: CVE -> CVSSv2"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv2 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v2]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v2 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v2: {e}")
-            return False
-
-    # 42. CVSSv2 HAS_CVSS_v2 CVE
-    def create_cvssv2_has_cvssv2_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v2 relationship: CVSSv2 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv2 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v2]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv2 {vector_string[:30]}... HAS_CVSS_v2 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv2 HAS_CVSS_v2 CVE: {e}")
-            return False
-
-    # 43. CVSSv30 HAS_CVSS_v30 CVE
-    def create_cvssv30_has_cvssv30_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v30 relationship: CVSSv30 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv30 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v30]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv30 {vector_string[:30]}... HAS_CVSS_v30 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv30 HAS_CVSS_v30 CVE: {e}")
-            return False
-
-    # 44. CVSSv31 HAS_CVSS_v31 CVE
-    def create_cvssv31_has_cvssv31_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v31 relationship: CVSSv31 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv31 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v31]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv31 {vector_string[:30]}... HAS_CVSS_v31 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv31 HAS_CVSS_v31 CVE: {e}")
-            return False
-
-    # 45. CVSSv40 HAS_CVSS_v40 CVE
-    def create_cvssv40_has_cvssv40_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v40 relationship: CVSSv40 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv40 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v40]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv40 {vector_string[:30]}... HAS_CVSS_v40 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv40 HAS_CVSS_v40 CVE: {e}")
-            return False
+    # PR #33 round 12: deleted the 8 vector_string-keyed CVSS edge helpers
+    # (create_cve_has_cvss_v2/30/31/40 + create_cvssv*_has_cvssv*_cve) along
+    # with the 4 standalone CVSS mergers above. The canonical _merge_cvss_node
+    # (called from merge_cve) creates the bidirectional HAS_CVSS_v* edges
+    # with stamped src_uuid/trg_uuid; no separate helper needed.
 
     # ============================================================
     # RESILMESH ALERT/INDICATOR METHODS
     # ============================================================
 
     def create_alert_node(self, alert_data: dict) -> bool:
-        """Create an Alert node from a ResilMesh alert."""
+        """Create an Alert node from a ResilMesh alert.
+
+        PR #34 round 23: stamps deterministic ``n.uuid`` so Alert nodes
+        participate in the cross-environment delta-sync contract.
+        """
         try:
             alert_id = alert_data.get("alert_id")
+            if not alert_id:
+                logger.error("create_alert_node: missing alert_id — cannot MERGE without natural key")
+                return False
             source = alert_data.get("source", "unknown")
             zone = alert_data.get("zone", ["global"])  # zone is now an array
             timestamp = alert_data.get("timestamp", datetime.now(timezone.utc).isoformat())
@@ -4085,8 +4398,12 @@ class Neo4jClient:
             description = threat.get("description", "")
             severity = threat.get("severity", 0)
 
+            # Deterministic uuid — keyed on alert_id (the UNIQUE constraint).
+            node_uuid = compute_node_uuid("Alert", {"alert_id": alert_id})
+
             query = """
             MERGE (a:Alert {alert_id: $alert_id})
+            ON CREATE SET a.uuid = $node_uuid
             SET a.source = $source,
                 a.zone = $zone,
                 a.timestamp = $timestamp,
@@ -4098,7 +4415,8 @@ class Neo4jClient:
                 a.cve = $cve,
                 a.enriched = false,
                 a.received_at = datetime(),
-                a.last_updated = datetime()
+                a.last_updated = datetime(),
+                a.uuid = coalesce(a.uuid, $node_uuid)
             """
 
             with self.driver.session() as session:
@@ -4114,6 +4432,8 @@ class Neo4jClient:
                     indicator_type=indicator_type,
                     malware=malware,
                     cve=cve,
+                    node_uuid=node_uuid,
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
 
             logger.info(f"Created/updated Alert node: {alert_id}")
@@ -4124,18 +4444,25 @@ class Neo4jClient:
             return False
 
     def link_alert_to_indicator(self, alert_id: str, indicator_value: str) -> bool:
-        """Create INVOLVES relationship between Alert and Indicator."""
+        """Create INVOLVES relationship between Alert and Indicator.
+
+        PR #34 round 23: stamps r.src_uuid / r.trg_uuid from bound endpoint
+        vars (Alert uuid added in round 23; Indicator uuid was already there).
+        """
         try:
             query = """
             MATCH (a:Alert {alert_id: $alert_id})
             MATCH (i:Indicator {value: $indicator_value})
             MERGE (a)-[r:INVOLVES]->(i)
+            ON CREATE SET r.src_uuid = a.uuid, r.trg_uuid = i.uuid
             SET r.created_at = datetime(),
-                r.source = 'resilmesh'
+                r.source = 'resilmesh',
+                r.src_uuid = coalesce(r.src_uuid, a.uuid),
+                r.trg_uuid = coalesce(r.trg_uuid, i.uuid)
             """
 
             with self.driver.session() as session:
-                session.run(query, alert_id=alert_id, indicator_value=indicator_value)
+                session.run(query, alert_id=alert_id, indicator_value=indicator_value, timeout=NEO4J_READ_TIMEOUT)
 
             logger.info(f"Linked Alert {alert_id} to Indicator {indicator_value}")
             return True
@@ -4156,7 +4483,11 @@ class Neo4jClient:
             """
             with self.driver.session() as session:
                 session.run(
-                    query, alert_id=alert_id, enrichment_data=json.dumps(enrichment_data), latency_ms=latency_ms
+                    query,
+                    alert_id=alert_id,
+                    enrichment_data=json.dumps(enrichment_data),
+                    latency_ms=latency_ms,
+                    timeout=NEO4J_READ_TIMEOUT,
                 )
             logger.info(f"Updated Alert {alert_id} with enrichment data")
             return True
@@ -4173,7 +4504,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                result = session.run(query, alert_id=alert_id)
+                result = session.run(query, alert_id=alert_id, timeout=NEO4J_READ_TIMEOUT)
                 record = result.single()
                 if record:
                     alert = dict(record["a"]._properties)
@@ -4212,11 +4543,15 @@ class Neo4jClient:
             "last_updated": now,
             "source": ["resilmesh"],
             "confidence_score": 0.8 if alert_data else 0.5,
-            "original_source": alert_data.get("source", "resilmesh") if alert_data else "unknown",
         }
 
-        query = """
-        MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
+        # PR #34 round 18: dropped n.original_source SET — Neo4j property had
+        # zero readers (see neo4j_client.py:606 deletion comment).
+        # PR #34 round 24: zone accumulation applies specifics-override-global
+        # rule on write.
+        _zone_clause_i = _zone_override_global_clause("i", "$zone")
+        query = f"""
+        MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
         SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
             i.last_updated = datetime(),
             i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
@@ -4224,8 +4559,7 @@ class Neo4jClient:
                 WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                 THEN $confidence_score
                 ELSE i.confidence_score END,
-            i.original_source = coalesce(i.original_source, $original_source),
-            i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone),
+            {_zone_clause_i},
             i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
             i.edgeguard_managed = true,
             i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
@@ -4237,16 +4571,15 @@ class Neo4jClient:
                 logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
                 return True
         except Exception:
-            fallback_query = """
-            MERGE (i:Indicator {indicator_type: $indicator_type, value: $value})
+            fallback_query = f"""
+            MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
             SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
                 i.last_updated = $last_updated,
                 i.confidence_score = CASE
                     WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                     THEN $confidence_score
                     ELSE i.confidence_score END,
-                i.original_source = coalesce(i.original_source, $original_source),
-                i.zone = apoc.coll.toSet(coalesce(i.zone, []) + $zone)
+                {_zone_clause_i}
             """
             try:
                 with self.driver.session() as session:

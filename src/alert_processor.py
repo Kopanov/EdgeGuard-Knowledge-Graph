@@ -445,14 +445,20 @@ class AlertProcessor:
                 if zones_record:
                     zone = zones_record["zone"]
                     if zone:
-                        # zone is now an array
+                        # PR #33 round 14 (bugbot LOW): defensive isinstance
+                        # guard. Pre-release fresh start expects ``zone`` to
+                        # always be a list (post-zone-array model), but this
+                        # path reads from EXISTING Neo4j data via Cypher —
+                        # any out-of-band write or schema-drift could deliver
+                        # a scalar string. Without the guard, ``len(zone)``
+                        # would count characters and the later
+                        # ``sectors_affected.append(tag)`` would crash with
+                        # AttributeError on the str.
                         if isinstance(zone, list):
-                            enrichment["sectors_affected"] = zone
-                            enrichment["cross_zone_detected"] = len(zone) > 1
+                            enrichment["sectors_affected"] = list(zone)
                         else:
-                            # Handle legacy case where zone might be a string
-                            enrichment["sectors_affected"] = [zone]
-                            enrichment["cross_zone_detected"] = False
+                            enrichment["sectors_affected"] = [str(zone)]
+                        enrichment["cross_zone_detected"] = len(enrichment["sectors_affected"]) > 1
 
                 # Add alert tags if present
                 if alert.tags:

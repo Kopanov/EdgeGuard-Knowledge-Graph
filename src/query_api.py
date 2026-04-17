@@ -158,12 +158,38 @@ app.add_middleware(
 
 from enum import Enum
 
+# PR #34 round 24 (bugbot MED, same-pattern fix): derive the ZoneEnum
+# members from ``config.VALID_ZONES`` so the FastAPI query-param validator
+# stays in lockstep with the canonical zone set. Previously the 4 members
+# were hardcoded — if a 5th zone were added to ``VALID_ZONES`` and someone
+# forgot to update this enum, the filter/membership check in the Cypher
+# layer would ACCEPT the new zone, but FastAPI would REJECT the inbound
+# query string before it ever reached the resolver (asymmetric behavior).
+# Now: one change in config.py propagates everywhere.
+#
+# Python's ``global`` is a reserved keyword, so the historical enum member
+# name is ``global_`` (trailing underscore) while its value stays ``"global"``.
+# Preserve that contract so consumers referencing ``ZoneEnum.global_`` keep
+# working.
 
-class ZoneEnum(str, Enum):
-    global_ = "global"
-    healthcare = "healthcare"
-    energy = "energy"
-    finance = "finance"
+
+def _zone_member_name(zone: str) -> str:
+    """Translate a zone string into a valid Python Enum member name.
+
+    Python reserved words can't be used as attribute names; we append a
+    trailing underscore by convention. Any other zone name is used as-is.
+    """
+    return f"{zone}_" if zone in {"global", "class", "import", "return"} else zone
+
+
+def _build_zone_enum() -> type:
+    from config import VALID_ZONES
+
+    members = {_zone_member_name(z): z for z in sorted(VALID_ZONES)}
+    return Enum("ZoneEnum", members, type=str)
+
+
+ZoneEnum = _build_zone_enum()
 
 
 class SeverityEnum(str, Enum):
@@ -681,17 +707,12 @@ async def graph_explore(
                 if zone:
                     zone_act = "AND $zone IN coalesce(a.zone, [])"
 
-                # Match both EMPLOYS_TECHNIQUE (the new post-2026-04 rel
-                # type) AND legacy USES so this read stays green during
-                # the rollout window between code deploy and the Cypher
-                # migration that rewrites existing USES edges. The write
-                # path has the same backward-compat fallback in
-                # create_misp_relationships_batch. Once the migration
-                # runs and no USES→Technique edges remain, the legacy
-                # half of this pattern becomes a no-op and can be
-                # removed in a follow-up PR.
+                # PR #33 round 12: dropped the `|USES` rollout-window
+                # fallback. Pre-release fresh start has no legacy USES edges;
+                # write path emits EMPLOYS_TECHNIQUE for ThreatActor →
+                # Technique exclusively (see build_relationships.py 5/11).
                 cypher = f"""
-                    MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
+                    MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
                     WHERE t.mitre_id IS NOT NULL AND a.edgeguard_managed = true
                     {zone_act}
                     WITH a, t

@@ -211,4 +211,4 @@ ignore = [
 # Unused variables in tests are common assertion patterns; E402 when imports follow sys.path / del sys.modules
 "tests/*.py" = ["F841", "E712", "E402"]
 "src/test_*.py" = ["F841", "F541"]
-"src/debug_zone_check.py" = ["E402"]
+"scripts/debug_zone_check.py" = ["E402"]
