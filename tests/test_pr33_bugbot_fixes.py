@@ -2469,3 +2469,253 @@ def test_sector_sdo_uuid_matches_compute_node_uuid():
             "Likely cause: a prefix/suffix was re-introduced in _sector_sdo, "
             "_deterministic_id, or node_identity's canonicalization for Sector."
         )
+
+
+# ---------------------------------------------------------------------------
+# Round 23 — extend uuid coverage to User + Alert (delta-sync gap closure)
+# ---------------------------------------------------------------------------
+
+
+def test_user_and_alert_are_in_natural_keys_map():
+    """PR #34 round 23: User + Alert added to _NATURAL_KEYS so they
+    participate in the cross-environment delta-sync contract. Pin the map
+    entries so a future contributor can't silently drop them — the moment
+    a label leaves _NATURAL_KEYS, every MERGE site that calls
+    ``compute_node_uuid("Label", ...)`` would raise KeyError at runtime.
+    """
+    from node_identity import _NATURAL_KEYS
+
+    assert _NATURAL_KEYS.get("User") == ("username", "domain"), (
+        "User natural key must be (username, domain) — matches the UNIQUE constraint"
+    )
+    assert _NATURAL_KEYS.get("Alert") == ("alert_id",), (
+        "Alert natural key must be (alert_id,) — matches the UNIQUE constraint"
+    )
+
+
+def test_merge_resilmesh_user_stamps_uuid():
+    """Round 23 behavioral pin: ``merge_resilmesh_user`` must compute the
+    deterministic uuid in Python and pass it as ``$node_uuid`` to the
+    Cypher MERGE. Drives the actual production path against a fake driver
+    and asserts the captured Cypher includes the uuid SET clause + the
+    correct node_uuid value."""
+    import importlib
+    from unittest.mock import MagicMock
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+    from node_identity import compute_node_uuid
+
+    captured: list = []
+
+    class _CapSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def run(self, query, **params):
+            captured.append((query, params))
+            r = MagicMock()
+            r.single = lambda: None
+            r.__iter__ = lambda self_: iter([])
+            return r
+
+    class _CapDriver:
+        def session(self, **_kw):
+            return _CapSession()
+
+        def close(self):
+            pass
+
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = _CapDriver()
+
+    ok = client.merge_resilmesh_user({"username": "alice", "domain": "corp.local"})
+    assert ok, "merge_resilmesh_user must succeed with the stub driver"
+    assert captured, "merge_resilmesh_user must issue at least one Cypher query"
+
+    cypher, params = captured[0]
+    assert "u.uuid = $node_uuid" in cypher, "Cypher must SET u.uuid from $node_uuid parameter"
+    assert "ON CREATE SET u.uuid = $node_uuid" in cypher, "ON CREATE must stamp u.uuid"
+    expected_uuid = compute_node_uuid("User", {"username": "alice", "domain": "corp.local"})
+    assert params.get("node_uuid") == expected_uuid, (
+        f"node_uuid param must equal compute_node_uuid('User', {{username, domain}}); "
+        f"got {params.get('node_uuid')}, expected {expected_uuid}"
+    )
+
+
+def test_create_alert_node_stamps_uuid():
+    """Round 23 behavioral pin: ``create_alert_node`` must compute and
+    stamp deterministic uuid via $node_uuid."""
+    import importlib
+    from unittest.mock import MagicMock
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+    from node_identity import compute_node_uuid
+
+    captured: list = []
+
+    class _CapSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def run(self, query, **params):
+            captured.append((query, params))
+            r = MagicMock()
+            r.single = lambda: None
+            r.__iter__ = lambda self_: iter([])
+            return r
+
+    class _CapDriver:
+        def session(self, **_kw):
+            return _CapSession()
+
+        def close(self):
+            pass
+
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = _CapDriver()
+
+    ok = client.create_alert_node(
+        {
+            "alert_id": "alert-12345",
+            "source": "edge-sensor-7",
+            "zone": ["energy"],
+            "threat": {"indicator": "1.2.3.4", "type": "ipv4", "severity": 8},
+        }
+    )
+    assert ok, "create_alert_node must succeed with the stub driver"
+    assert captured, "create_alert_node must issue Cypher"
+    cypher, params = captured[0]
+    assert "a.uuid = $node_uuid" in cypher
+    assert "ON CREATE SET a.uuid = $node_uuid" in cypher
+    expected = compute_node_uuid("Alert", {"alert_id": "alert-12345"})
+    assert params.get("node_uuid") == expected, (
+        f"node_uuid param must equal compute_node_uuid('Alert', {{alert_id}}); "
+        f"got {params.get('node_uuid')}, expected {expected}"
+    )
+
+
+def test_alert_node_refuses_missing_alert_id():
+    """Round 23 behavioral pin: like merge_device + merge_missiondependency
+    (rounds 8/9), Alert must refuse to MERGE without its natural key. A
+    missing alert_id has no deterministic uuid — better to fail loudly than
+    to write a node with NULL uuid that breaks delta sync silently."""
+    import importlib
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = None  # short-circuit: must not even reach the driver
+
+    assert client.create_alert_node({}) is False, "create_alert_node({}) must return False"
+    assert client.create_alert_node({"alert_id": ""}) is False, (
+        "create_alert_node with empty alert_id must return False"
+    )
+
+
+def test_role_user_edges_stamp_endpoint_uuids():
+    """Round 23: the Role↔User ASSIGNED_TO edges (both directions) must
+    stamp r.src_uuid + r.trg_uuid from the bound endpoint vars now that
+    User has a deterministic n.uuid. Source-shape pin (positive) — drives
+    the actual production helpers against a fake driver and asserts the
+    captured Cypher includes the stamp clauses."""
+    import importlib
+    from unittest.mock import MagicMock
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    captured: list = []
+
+    class _CapSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def run(self, query, **_params):
+            captured.append(query)
+            r = MagicMock()
+            r.single = lambda: None
+            return r
+
+    class _CapDriver:
+        def session(self, **_kw):
+            return _CapSession()
+
+        def close(self):
+            pass
+
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = _CapDriver()
+
+    client.create_role_assigned_to_user("admin", "alice", "corp.local")
+    client.create_user_assigned_to_role("alice", "corp.local", "admin")
+    client.link_alert_to_indicator("alert-12345", "1.2.3.4")
+
+    blob = "\n".join(captured)
+    # Role→User
+    assert "rel.src_uuid = r.uuid" in blob and "rel.trg_uuid = u.uuid" in blob, (
+        "Role→User edge must stamp src=r.uuid trg=u.uuid"
+    )
+    # User→Role
+    assert "rel.src_uuid = u.uuid" in blob and "rel.trg_uuid = r.uuid" in blob, (
+        "User→Role edge must stamp src=u.uuid trg=r.uuid"
+    )
+    # Alert→Indicator
+    assert "r.src_uuid = a.uuid" in blob and "r.trg_uuid = i.uuid" in blob, (
+        "Alert→Indicator (INVOLVES) edge must stamp src=a.uuid trg=i.uuid"
+    )
+    # All three must use coalesce on the SET path so re-runs don't overwrite.
+    assert blob.count("coalesce(rel.src_uuid") >= 2, "Role↔User SET must coalesce src_uuid"
+    assert blob.count("coalesce(r.src_uuid") >= 1, "Alert→Indicator SET must coalesce src_uuid"
+
+
+def test_backfill_includes_round23_edges():
+    """Round 23: the new User and Alert edges must be in EDGES_TO_BACKFILL
+    so existing graphs (pre-round-23 nodes/edges) get their uuids stamped
+    on the next backfill run."""
+    import importlib
+
+    if "scripts.backfill_node_uuids" in sys.modules:
+        del sys.modules["scripts.backfill_node_uuids"]
+    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    if scripts_path not in sys.path:
+        sys.path.insert(0, scripts_path)
+    backfill = importlib.import_module("backfill_node_uuids")
+
+    edges = set(backfill.EDGES_TO_BACKFILL)
+    assert ("ASSIGNED_TO", "Role", "User") in edges, "round-23 backfill must include Role→User ASSIGNED_TO edge"
+    assert ("ASSIGNED_TO", "User", "Role") in edges, "round-23 backfill must include User→Role ASSIGNED_TO edge"
+    assert ("INVOLVES", "Alert", "Indicator") in edges, "round-23 backfill must include Alert→Indicator INVOLVES edge"
+
+
+def test_round23_uuid_indexes_are_created():
+    """Round 23: User.uuid and Alert.uuid indexes must be in
+    create_indexes — without them, MERGE-by-uuid on the cloud receiver
+    is O(n) instead of O(1) for these labels."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    src = inspect.getsource(neo4j_client.Neo4jClient.create_indexes)
+    assert "user_uuid IF NOT EXISTS FOR (u:User) ON (u.uuid)" in src, "create_indexes must include the user_uuid index"
+    assert "alert_uuid IF NOT EXISTS FOR (a:Alert) ON (a.uuid)" in src, (
+        "create_indexes must include the alert_uuid index"
+    )

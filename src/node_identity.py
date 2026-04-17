@@ -108,6 +108,11 @@ _NATURAL_KEYS: Dict[str, Tuple[str, ...]] = {
     "SoftwareVersion": ("version",),
     "Application": ("name",),
     "Role": ("permission",),
+    # PR #34 round 23: extend coverage so local→cloud delta-sync works for
+    # User identities + processed Alerts. Both have well-defined UNIQUE
+    # constraints already (see Neo4jClient.create_constraints).
+    "User": ("username", "domain"),
+    "Alert": ("alert_id",),
 }
 
 
@@ -168,6 +173,18 @@ NEO4J_TO_STIX_TYPE: Dict[str, str] = {
     "CVSSv40": "x-edgeguard-cvssv40",
     # Source nodes are EdgeGuard-internal — also custom prefix.
     "Source": "x-edgeguard-source",
+    # PR #34 round 23: User and Alert get custom EdgeGuard prefixes (we don't
+    # STIX-export either today). User could in principle map to STIX
+    # ``identity`` (identity_class="individual"), but Sector ALSO maps to
+    # ``identity`` and shares the ``|`` separator in its natural-key form —
+    # in the (astronomically unlikely) case of a Sector named ``alice|corp``
+    # vs a User ``(alice, corp)``, the two would canonicalize identically
+    # and collide on uuid. Custom prefixes are collision-free by construction.
+    # If we ever STIX-export Users, switch to ``identity`` and add a User-
+    # side natural-key disambiguator at the same time (do NOT just flip the
+    # prefix without auditing the Sector overlap).
+    "User": "x-edgeguard-user",
+    "Alert": "x-edgeguard-alert",
 }
 
 # Lowercase-keyed mirror — derived from NEO4J_TO_STIX_TYPE so the two cannot

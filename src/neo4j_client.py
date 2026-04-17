@@ -666,6 +666,11 @@ class Neo4jClient:
             "CREATE INDEX softwareversion_uuid IF NOT EXISTS FOR (sv:SoftwareVersion) ON (sv.uuid)",
             "CREATE INDEX application_uuid IF NOT EXISTS FOR (a:Application) ON (a.uuid)",
             "CREATE INDEX role_uuid IF NOT EXISTS FOR (r:Role) ON (r.uuid)",
+            # PR #34 round 23: User + Alert uuid indexes — close the
+            # delta-sync coverage gap. Both labels now stamp n.uuid in their
+            # respective MERGE sites (merge_resilmesh_user, create_alert_node).
+            "CREATE INDEX user_uuid IF NOT EXISTS FOR (u:User) ON (u.uuid)",
+            "CREATE INDEX alert_uuid IF NOT EXISTS FOR (a:Alert) ON (a.uuid)",
         ]
 
         success_count = 0
@@ -3305,19 +3310,31 @@ class Neo4jClient:
             return False
 
     def merge_resilmesh_user(self, data: dict) -> bool:
-        """MERGE a ResilMesh User node. Properties: username, domain"""
+        """MERGE a ResilMesh User node. Properties: username, domain.
+
+        PR #34 round 23: stamps deterministic ``n.uuid`` so User nodes
+        participate in the cross-environment delta-sync contract.
+        """
+        username = data.get("username")
+        if not username:
+            logger.error("merge_resilmesh_user: missing username — cannot MERGE without natural key")
+            return False
+        # Provide default domain if not present (mirror existing behavior).
+        domain = data.get("domain", "default")
+        # Deterministic uuid — MUST use the same key dict the MERGE binds to.
+        node_uuid = compute_node_uuid("User", {"username": username, "domain": domain})
         query = """
         MERGE (u:User {username: $username, domain: $domain})
+        ON CREATE SET u.uuid = $node_uuid
         SET u.edgeguard_managed = true,
             u.first_seen = CASE WHEN u.first_seen IS NULL THEN datetime() ELSE u.first_seen END,
-            u.last_updated = datetime()
+            u.last_updated = datetime(),
+            u.uuid = coalesce(u.uuid, $node_uuid)
         """
         try:
-            # Provide default domain if not present
-            domain = data.get("domain", "default")
             with self.driver.session() as session:
-                session.run(query, username=data.get("username"), domain=domain)
-            logger.info(f"Created/updated ResilMesh User: {data.get('username')}")
+                session.run(query, username=username, domain=domain, node_uuid=node_uuid)
+            logger.info(f"Created/updated ResilMesh User: {username}")
             return True
         except Exception as e:
             logger.error(f"Error creating User: {e}")
@@ -3489,13 +3506,20 @@ class Neo4jClient:
 
     # 3. Role ASSIGNED_TO User
     def create_role_assigned_to_user(self, permission: str, username: str, domain: str = "default") -> bool:
-        """Create ASSIGNED_TO relationship: Role -> User"""
+        """Create ASSIGNED_TO relationship: Role -> User.
+
+        PR #34 round 23: stamps r.src_uuid / r.trg_uuid from bound endpoint
+        vars now that User has a deterministic n.uuid (added in round 23).
+        """
         query = """
         MATCH (r:Role {permission: $permission})
         MATCH (u:User {username: $username, domain: $domain})
         MERGE (r)-[rel:ASSIGNED_TO]->(u)
+        ON CREATE SET rel.src_uuid = r.uuid, rel.trg_uuid = u.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, r.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, u.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -3508,13 +3532,19 @@ class Neo4jClient:
 
     # 4. User ASSIGNED_TO Role
     def create_user_assigned_to_role(self, username: str, domain: str, permission: str) -> bool:
-        """Create ASSIGNED_TO relationship: User -> Role"""
+        """Create ASSIGNED_TO relationship: User -> Role.
+
+        PR #34 round 23: stamps r.src_uuid / r.trg_uuid (round-23 User uuid).
+        """
         query = """
         MATCH (u:User {username: $username, domain: $domain})
         MATCH (r:Role {permission: $permission})
         MERGE (u)-[rel:ASSIGNED_TO]->(r)
+        ON CREATE SET rel.src_uuid = u.uuid, rel.trg_uuid = r.uuid
         SET rel.created_at = datetime(),
-            rel.updated_at = datetime()
+            rel.updated_at = datetime(),
+            rel.src_uuid = coalesce(rel.src_uuid, u.uuid),
+            rel.trg_uuid = coalesce(rel.trg_uuid, r.uuid)
         """
         try:
             with self.driver.session() as session:
@@ -4226,9 +4256,16 @@ class Neo4jClient:
     # ============================================================
 
     def create_alert_node(self, alert_data: dict) -> bool:
-        """Create an Alert node from a ResilMesh alert."""
+        """Create an Alert node from a ResilMesh alert.
+
+        PR #34 round 23: stamps deterministic ``n.uuid`` so Alert nodes
+        participate in the cross-environment delta-sync contract.
+        """
         try:
             alert_id = alert_data.get("alert_id")
+            if not alert_id:
+                logger.error("create_alert_node: missing alert_id — cannot MERGE without natural key")
+                return False
             source = alert_data.get("source", "unknown")
             zone = alert_data.get("zone", ["global"])  # zone is now an array
             timestamp = alert_data.get("timestamp", datetime.now(timezone.utc).isoformat())
@@ -4242,8 +4279,12 @@ class Neo4jClient:
             description = threat.get("description", "")
             severity = threat.get("severity", 0)
 
+            # Deterministic uuid — keyed on alert_id (the UNIQUE constraint).
+            node_uuid = compute_node_uuid("Alert", {"alert_id": alert_id})
+
             query = """
             MERGE (a:Alert {alert_id: $alert_id})
+            ON CREATE SET a.uuid = $node_uuid
             SET a.source = $source,
                 a.zone = $zone,
                 a.timestamp = $timestamp,
@@ -4255,7 +4296,8 @@ class Neo4jClient:
                 a.cve = $cve,
                 a.enriched = false,
                 a.received_at = datetime(),
-                a.last_updated = datetime()
+                a.last_updated = datetime(),
+                a.uuid = coalesce(a.uuid, $node_uuid)
             """
 
             with self.driver.session() as session:
@@ -4271,6 +4313,7 @@ class Neo4jClient:
                     indicator_type=indicator_type,
                     malware=malware,
                     cve=cve,
+                    node_uuid=node_uuid,
                 )
 
             logger.info(f"Created/updated Alert node: {alert_id}")
@@ -4281,14 +4324,21 @@ class Neo4jClient:
             return False
 
     def link_alert_to_indicator(self, alert_id: str, indicator_value: str) -> bool:
-        """Create INVOLVES relationship between Alert and Indicator."""
+        """Create INVOLVES relationship between Alert and Indicator.
+
+        PR #34 round 23: stamps r.src_uuid / r.trg_uuid from bound endpoint
+        vars (Alert uuid added in round 23; Indicator uuid was already there).
+        """
         try:
             query = """
             MATCH (a:Alert {alert_id: $alert_id})
             MATCH (i:Indicator {value: $indicator_value})
             MERGE (a)-[r:INVOLVES]->(i)
+            ON CREATE SET r.src_uuid = a.uuid, r.trg_uuid = i.uuid
             SET r.created_at = datetime(),
-                r.source = 'resilmesh'
+                r.source = 'resilmesh',
+                r.src_uuid = coalesce(r.src_uuid, a.uuid),
+                r.trg_uuid = coalesce(r.trg_uuid, i.uuid)
             """
 
             with self.driver.session() as session:

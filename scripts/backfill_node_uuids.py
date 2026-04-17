@@ -144,6 +144,14 @@ EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
     # are now uuid-stamped).
     ("IN", "SoftwareVersion", "Vulnerability"),
     ("IN", "Vulnerability", "SoftwareVersion"),
+    # PR #34 round 23: User and Alert added to _NATURAL_KEYS so the
+    # delta-sync coverage extends to ResilMesh user identities and
+    # processed alerts. The 3 edges below all have both endpoints uuid-
+    # stamped now (Role/Indicator already stamped; User/Alert stamped in
+    # round 23).
+    ("ASSIGNED_TO", "Role", "User"),
+    ("ASSIGNED_TO", "User", "Role"),
+    ("INVOLVES", "Alert", "Indicator"),
 ]
 
 
