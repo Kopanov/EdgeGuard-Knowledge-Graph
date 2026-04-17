@@ -681,17 +681,12 @@ async def graph_explore(
                 if zone:
                     zone_act = "AND $zone IN coalesce(a.zone, [])"
 
-                # Match both EMPLOYS_TECHNIQUE (the new post-2026-04 rel
-                # type) AND legacy USES so this read stays green during
-                # the rollout window between code deploy and the Cypher
-                # migration that rewrites existing USES edges. The write
-                # path has the same backward-compat fallback in
-                # create_misp_relationships_batch. Once the migration
-                # runs and no USES→Technique edges remain, the legacy
-                # half of this pattern becomes a no-op and can be
-                # removed in a follow-up PR.
+                # PR #33 round 12: dropped the `|USES` rollout-window
+                # fallback. Pre-release fresh start has no legacy USES edges;
+                # write path emits EMPLOYS_TECHNIQUE for ThreatActor →
+                # Technique exclusively (see build_relationships.py 5/11).
                 cypher = f"""
-                    MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
+                    MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
                     WHERE t.mitre_id IS NOT NULL AND a.edgeguard_managed = true
                     {zone_act}
                     WITH a, t

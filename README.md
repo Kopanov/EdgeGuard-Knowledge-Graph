@@ -881,5 +881,5 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-05_
+_Last updated: 2026-04-17_
 

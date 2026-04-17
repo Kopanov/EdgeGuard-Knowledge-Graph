@@ -273,7 +273,11 @@ class TestCrossItemRelKeys:
         assert "tag" not in expl[0]["to_key"], f"EXPLOITS to_key should not have tag: {expl[0]['to_key']}"
         assert expl[0]["to_key"] == {"cve_id": "CVE-2021-44228"}
 
-    def test_vulnerability_sector_targets_no_tag(self):
+    def test_vulnerability_sector_affects_no_tag(self):
+        """PR #33 round 12: Vulnerability → Sector emits ``rel_type="AFFECTS"``
+        (not TARGETS). TARGETS is now reserved exclusively for Indicator →
+        Sector — the dispatcher routes the AFFECTS rows through q_aff_vuln /
+        q_aff_cve which emit AFFECTS edges (canonical schema)."""
         items = [
             {
                 "type": "vulnerability",
@@ -284,9 +288,13 @@ class TestCrossItemRelKeys:
             },
         ]
         rels = self._build_rels(items)
-        tgt = [r for r in rels if r["rel_type"] == "TARGETS" and r["from_type"] == "Vulnerability"]
-        assert len(tgt) == 1
-        assert "tag" not in tgt[0]["from_key"], f"TARGETS from_key (Vuln) has tag: {tgt[0]['from_key']}"
+        aff = [r for r in rels if r["rel_type"] == "AFFECTS" and r["from_type"] == "Vulnerability"]
+        assert len(aff) == 1
+        assert "tag" not in aff[0]["from_key"], f"AFFECTS from_key (Vuln) has tag: {aff[0]['from_key']}"
+
+        # Negative: Vulnerability must NOT emit TARGETS anymore.
+        tgt_vuln = [r for r in rels if r["rel_type"] == "TARGETS" and r["from_type"] == "Vulnerability"]
+        assert len(tgt_vuln) == 0, "Vulnerability → Sector must use AFFECTS, not TARGETS"
 
 
 # ===========================================================================

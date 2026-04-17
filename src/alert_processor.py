@@ -445,14 +445,12 @@ class AlertProcessor:
                 if zones_record:
                     zone = zones_record["zone"]
                     if zone:
-                        # zone is now an array
-                        if isinstance(zone, list):
-                            enrichment["sectors_affected"] = zone
-                            enrichment["cross_zone_detected"] = len(zone) > 1
-                        else:
-                            # Handle legacy case where zone might be a string
-                            enrichment["sectors_affected"] = [zone]
-                            enrichment["cross_zone_detected"] = False
+                        # PR #33 round 12: zone is always a list (post-zone-array
+                        # migration). Pre-release fresh start has no scalar-zone
+                        # legacy nodes; the migrate_zone_property.py one-shot ran
+                        # historically and is no longer needed.
+                        enrichment["sectors_affected"] = zone
+                        enrichment["cross_zone_detected"] = len(zone) > 1
 
                 # Add alert tags if present
                 if alert.tags:

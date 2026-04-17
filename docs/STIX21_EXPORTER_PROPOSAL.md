@@ -121,13 +121,14 @@ boolean property on the node if that changes.
 | `(Campaign)-[:ATTRIBUTED_TO]->(ThreatActor)`      | `relationship(attributed-to)` src=campaign tgt=intrusion-set           |                                                                                                                      |
 | `(Technique)-[:IN_TACTIC]->(Tactic)`              | *(no SRO)* — emitted as `kill_chain_phases` property on attack-pattern | STIX 2.1 ATT&CK convention.                                                                                           |
 | `(Indicator)-[:TARGETS]->(Sector)`                | `relationship(targets)` src=indicator tgt=identity                     |                                                                                                                      |
-| `(Vulnerability\|CVE)-[:TARGETS]->(Sector)`       | `relationship(targets)` src=vulnerability tgt=identity                 |                                                                                                                      |
+| `(Vulnerability\|CVE)-[:AFFECTS]->(Sector)`       | `relationship(affects)` src=vulnerability tgt=identity                 | TARGETS is reserved for Indicator → Sector; Vuln/CVE → Sector is AFFECTS (PR #33 round 11).                            |
 
-**Backward compatibility.** All Cypher queries also match the legacy
-`USES` rel type via `[:EMPLOYS_TECHNIQUE|USES]` /
-`[:IMPLEMENTS_TECHNIQUE|USES]` / `[:USES_TECHNIQUE|USES]`. This lets
-the exporter run against graphs that have not yet been re-built under
-PR #24. Remove the legacy branch once the full baseline rebuild lands.
+**Edge type semantics.** Pre-release fresh start emits the post-PR-#24
+specialised types directly: `EMPLOYS_TECHNIQUE` (attribution: ThreatActor
+/ Campaign → Technique), `IMPLEMENTS_TECHNIQUE` (capability: Malware /
+Tool → Technique), `USES_TECHNIQUE` (observation: Indicator → Technique).
+All three collapse back to STIX 2.1 `relationship_type: "uses"` on
+export.
 
 References:
 
@@ -283,3 +284,7 @@ intentionally does not add Docker fixtures.
    feedback on §7 decisions.
 4. Promote decisions to final, add per-partner auth (FU-5), then flip
    from DRAFT → production.
+
+---
+
+_Last updated: 2026-04-17_

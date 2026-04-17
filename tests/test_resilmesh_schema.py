@@ -10,6 +10,9 @@ def test_neo4j_client_has_resilmesh_node_methods():
     """Neo4jClient must have all ResilMesh network topology merge methods."""
     from neo4j_client import Neo4jClient
 
+    # PR #33 round 12: dropped merge_cvssv2/30/31/40 — vector_string-keyed,
+    # uuid-less standalone mergers superseded by the canonical _merge_cvss_node
+    # path (called from merge_cve) which keys on cve_id and stamps n.uuid.
     required_methods = [
         "merge_ip",
         "merge_host",
@@ -20,10 +23,6 @@ def test_neo4j_client_has_resilmesh_node_methods():
         "merge_application",
         "merge_networkservice",
         "merge_resilmesh_cve",
-        "merge_cvssv2",
-        "merge_cvssv30",
-        "merge_cvssv31",
-        "merge_cvssv40",
         "merge_resilmesh_user",
         "merge_role",
         "merge_component",
@@ -42,6 +41,8 @@ def test_neo4j_client_has_resilmesh_relationship_methods():
     """Neo4jClient must have all ResilMesh relationship creation methods."""
     from neo4j_client import Neo4jClient
 
+    # PR #33 round 12: dropped create_cve_has_cvss_v2/30/31/40 — those edges
+    # are now created bidirectionally by _merge_cvss_node (canonical path).
     required_methods = [
         "create_softwareversion_on_host",
         "create_role_to_device",
@@ -53,10 +54,6 @@ def test_neo4j_client_has_resilmesh_relationship_methods():
         "create_networkservice_on_host",
         "create_vulnerability_in_softwareversion",
         "create_cve_refers_to_vulnerability",
-        "create_cve_has_cvss_v2",
-        "create_cve_has_cvss_v30",
-        "create_cve_has_cvss_v31",
-        "create_cve_has_cvss_v40",
     ]
 
     client_methods = set(dir(Neo4jClient))

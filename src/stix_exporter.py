@@ -21,9 +21,12 @@ Key design decisions (see proposal doc for justification):
   as ``coalesce(x.edgeguard_managed, true) = true``, which defaulted
   missing properties to ``true`` and let ResilMesh-owned nodes pass the
   filter — fixed in the bugbot pass on PR #25.
-- Backward compatibility with the legacy ``USES`` relationship type is
-  preserved alongside the new ``EMPLOYS_TECHNIQUE`` /
-  ``IMPLEMENTS_TECHNIQUE`` edges introduced by PR #24.
+- ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor/Campaign → Technique),
+  ``IMPLEMENTS_TECHNIQUE`` (capability: Malware/Tool → Technique), and
+  ``USES_TECHNIQUE`` (observation: Indicator → Technique) all collapse
+  back to STIX 2.1 ``relationship_type: "uses"`` on export. Pre-release
+  fresh start has no legacy ``USES`` edges; the read paths match only
+  the post-PR-#24 specialised edge types.
 - ATT&CK tactics are emitted as ``kill_chain_phases`` on the
   ``attack-pattern`` SDO, not as standalone objects (per STIX 2.1 ATT&CK
   convention).
@@ -182,7 +185,7 @@ class StixExporter:
               WHERE (v:CVE OR v:Vulnerability)
                 AND v.edgeguard_managed = true
             WITH i, malware, collect(DISTINCT v) AS vulns
-            OPTIONAL MATCH (i)-[:USES_TECHNIQUE|USES]->(t:Technique)
+            OPTIONAL MATCH (i)-[:USES_TECHNIQUE]->(t:Technique)
               WHERE t.edgeguard_managed = true
             WITH i, malware, vulns, collect(DISTINCT t) AS techniques
             OPTIONAL MATCH (i)-[:TARGETS]->(s:Sector)
@@ -274,11 +277,11 @@ class StixExporter:
             OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
               WHERE m.edgeguard_managed = true
             WITH a, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
+            OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
               WHERE t.edgeguard_managed = true
             WITH a, malware, collect(DISTINCT t) AS actor_tech
             UNWIND (CASE WHEN size(malware) = 0 THEN [null] ELSE malware END) AS m_each
-            OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE|USES]->(mt:Technique)
+            OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
               WHERE m_each IS NOT NULL AND mt.edgeguard_managed = true
             WITH a, malware, actor_tech,
                  collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
@@ -387,16 +390,16 @@ class StixExporter:
             MATCH (t:Technique {mitre_id: $mid})
             WHERE t.edgeguard_managed = true
             WITH t
-            OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t)
               WHERE a.edgeguard_managed = true
             WITH t, collect(DISTINCT a) AS actors
-            OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE m.edgeguard_managed = true
             WITH t, actors, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE tool.edgeguard_managed = true
             WITH t, actors, malware, collect(DISTINCT tool) AS tools
-            OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE|USES]->(t)
+            OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE]->(t)
               WHERE i.edgeguard_managed = true
             RETURN t AS seed,
                    actors,

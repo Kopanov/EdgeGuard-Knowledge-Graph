@@ -1186,30 +1186,45 @@ def test_merge_device_refuses_missing_device_id():
     assert client.merge_device({"device_id": ""}) is False, "merge_device with empty device_id must return False"
 
 
-def test_standalone_cvss_mergers_documented_as_uuid_less():
-    """Bugbot (round 8, LOW): standalone merge_cvssv2/30/31/40 are intentionally
-    uuid-less per user decision (PR #33 audit on 2026-04-17). Pin that the
-    deferral is documented inline so a future contributor can see the
-    rationale before "fixing" by adding a misaligned uuid."""
+def test_standalone_cvss_mergers_were_deleted():
+    """PR #33 round 12: the 4 standalone vector_string-keyed CVSS mergers
+    (merge_cvssv2/30/31/40) and their 8 helper companions were deleted.
+    The canonical CVSS path is _merge_cvss_node, called from merge_cve,
+    which keys on cve_id and stamps deterministic uuid.
+
+    This test was originally added in round 8 to pin the deferred-decision
+    inline comment block; round 12 replaces it with a deletion guard."""
     import importlib
-    import inspect
 
     if "neo4j_client" in sys.modules:
         del sys.modules["neo4j_client"]
     neo4j_client = importlib.import_module("neo4j_client")
 
-    # The comment block precedes merge_cvssv2 — read the source from
-    # merge_application end through merge_cvssv2 begin and assert key phrases.
-    src = inspect.getsource(neo4j_client)
-    cv2_start = src.find("def merge_cvssv2")
-    assert cv2_start > 0, "merge_cvssv2 not found"
-    # Walk back to the previous function end — read 2000 chars before.
-    preceding = src[max(0, cv2_start - 2500) : cv2_start]
-    assert "vector_string-keyed" in preceding or "vector_string`-keyed" in preceding, (
-        "deferral note above standalone CVSS mergers is missing"
-    )
-    assert "deferred by user decision" in preceding or "Reconciling" in preceding, (
-        "deferral rationale above standalone CVSS mergers is missing"
+    # The standalone mergers must NOT exist on Neo4jClient.
+    for name in ("merge_cvssv2", "merge_cvssv30", "merge_cvssv31", "merge_cvssv40"):
+        assert not hasattr(neo4j_client.Neo4jClient, name), (
+            f"{name} should have been deleted in round 12 — it was a vector_string-keyed,"
+            " uuid-less standalone superseded by the canonical _merge_cvss_node path"
+        )
+    # And the companion edge helpers must be gone too.
+    for name in (
+        "create_cve_has_cvss_v2",
+        "create_cve_has_cvss_v30",
+        "create_cve_has_cvss_v31",
+        "create_cve_has_cvss_v40",
+        "create_cvssv2_has_cvssv2_cve",
+        "create_cvssv30_has_cvssv30_cve",
+        "create_cvssv31_has_cvssv31_cve",
+        "create_cvssv40_has_cvssv40_cve",
+    ):
+        assert not hasattr(neo4j_client.Neo4jClient, name), (
+            f"{name} should have been deleted in round 12 — _merge_cvss_node creates the "
+            "bidirectional HAS_CVSS_v* edges with stamped src_uuid/trg_uuid; no separate helper needed"
+        )
+
+    # The canonical path is still there.
+    assert hasattr(neo4j_client.Neo4jClient, "_merge_cvss_node"), (
+        "_merge_cvss_node (canonical CVSS path) must still exist"
     )
 
 

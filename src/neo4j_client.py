@@ -2283,15 +2283,14 @@ class Neo4jClient:
                 else:
                     _dropped_rels += 1
             elif rt == "TARGETS":
+                # Canonical: Indicator → Sector. PR #33 round 12 split the
+                # Vulnerability→Sector path off into a separate ``AFFECTS``
+                # branch (below) — TARGETS now exclusively means
+                # Indicator → Sector.
                 sec = nonempty_graph_string(tk.get("name"))
                 if not sec:
                     _dropped_rels += 1
                     continue
-                # Sector node uuid — kept as a row field because the Sector node
-                # is auto-CREATEd in the Cypher and we need a deterministic uuid
-                # to stamp on it. Same value for every row pointing at this
-                # sector; the connected edge's r.trg_uuid is filled from the
-                # bound s.uuid by the template (NOT from row.sector_uuid).
                 sec_uuid = compute_node_uuid("Sector", {"name": sec})
                 ft = rel.get("from_type")
                 if ft == "Indicator":
@@ -2309,25 +2308,35 @@ class Neo4jClient:
                         )
                     else:
                         _dropped_rels += 1
-                elif ft == "Vulnerability":
-                    cid = normalize_cve_id_for_graph(fk.get("cve_id"))
-                    if cid:
-                        # tgt_vuln_rows is replayed against BOTH Vulnerability and CVE
-                        # labels (q_aff_vuln + q_aff_cve, AFFECTS edges). With
-                        # Mechanism B uuids, no per-label precomputation is needed —
-                        # each template reads its MATCHed node's .uuid directly.
-                        tgt_vuln_rows.append(
-                            {
-                                "cve_id": cid,
-                                "sector": sec,
-                                "source_id": source_id,
-                                "confidence": conf,
-                                "misp_event_id": mev,
-                                "sector_uuid": sec_uuid,
-                            }
-                        )
-                    else:
-                        _dropped_rels += 1
+                else:
+                    # TARGETS with non-Indicator from_type is now invalid (Vuln/CVE
+                    # use AFFECTS, Tool→Sector is unsupported here).
+                    logger.debug("Dropping TARGETS row with non-Indicator from_type=%s — use AFFECTS for Vuln/CVE", ft)
+                    _dropped_rels += 1
+            elif rt == "AFFECTS":
+                # Canonical: Vulnerability/CVE → Sector. Replayed against BOTH
+                # labels (q_aff_vuln + q_aff_cve) — Mechanism B uuids mean one
+                # row dict serves both queries (each template reads its
+                # MATCHed node's .uuid directly).
+                sec = nonempty_graph_string(tk.get("name"))
+                if not sec:
+                    _dropped_rels += 1
+                    continue
+                sec_uuid = compute_node_uuid("Sector", {"name": sec})
+                cid = normalize_cve_id_for_graph(fk.get("cve_id"))
+                if cid:
+                    tgt_vuln_rows.append(
+                        {
+                            "cve_id": cid,
+                            "sector": sec,
+                            "source_id": source_id,
+                            "confidence": conf,
+                            "misp_event_id": mev,
+                            "sector_uuid": sec_uuid,
+                        }
+                    )
+                else:
+                    _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
@@ -3160,153 +3169,12 @@ class Neo4jClient:
             logger.error(f"Error creating Application: {e}")
             return False
 
-    # ---------------------------------------------------------------------
-    # Standalone CVSS mergers (vector_string-keyed) — NOT uuid-stamped
-    # ---------------------------------------------------------------------
-    #
-    # Bugbot (PR #33 round 8, LOW): the four functions below MERGE CVSS nodes
-    # keyed on ``vector_string`` and intentionally do NOT stamp ``n.uuid``.
-    # They are a parallel ResilMesh-style API to the canonical
-    # ``_merge_cvss_node`` (called from ``merge_cve``) which keys on ``cve_id``
-    # and stamps the deterministic uuid.
-    #
-    # Reconciling the two CVSS paths is a SEPARATE concern, deferred by user
-    # decision (see PR #33 audit on 2026-04-17). The canonical MISP→Neo4j
-    # production path uses ``_merge_cvss_node`` exclusively, so today's data
-    # is unaffected. If a future ResilMesh integrator invokes these mergers,
-    # the resulting CVSS nodes will:
-    #   1. lack ``n.uuid`` (silent NULL — backfill cannot fix it because
-    #      ``_NATURAL_KEYS["CVSSv*"]`` declares the natural key as ``cve_id``,
-    #      which these nodes won't have populated)
-    #   2. coexist with the canonical CVSS nodes under different identity
-    #
-    # When/if these are reconciled, options include:
-    #   (a) deprecate the standalone path and have callers go through merge_cve
-    #   (b) extend the standalone path to also accept cve_id and stamp uuid
-    #       via compute_node_uuid("CVSSv*", {"cve_id": cve_id})
-    # ---------------------------------------------------------------------
-
-    def merge_cvssv2(self, data: dict) -> bool:
-        """MERGE a CVSSv2 node. Properties: vector_string, access_complexity, availability_impact, etc."""
-        query = """
-        MERGE (cv:CVSSv2 {vector_string: $vector_string})
-        SET cv.access_complexity = $access_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    access_complexity=data.get("access_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                )
-            logger.info(f"Created/updated CVSSv2: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv2: {e}")
-            return False
-
-    def merge_cvssv30(self, data: dict) -> bool:
-        """MERGE a CVSSv3.0 node."""
-        query = """
-        MERGE (cv:CVSSv30 {vector_string: $vector_string})
-        SET cv.attack_complexity = $attack_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.base_severity = $base_severity,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    attack_complexity=data.get("attack_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                    base_severity=data.get("base_severity"),
-                )
-            logger.info(f"Created/updated CVSSv3.0: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv3.0: {e}")
-            return False
-
-    def merge_cvssv31(self, data: dict) -> bool:
-        """MERGE a CVSSv3.1 node."""
-        query = """
-        MERGE (cv:CVSSv31 {vector_string: $vector_string})
-        SET cv.attack_complexity = $attack_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.base_severity = $base_severity,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    attack_complexity=data.get("attack_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                    base_severity=data.get("base_severity"),
-                )
-            logger.info(f"Created/updated CVSSv3.1: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv3.1: {e}")
-            return False
-
-    def merge_cvssv40(self, data: dict) -> bool:
-        """MERGE a CVSSv4.0 node."""
-        query = """
-        MERGE (cv:CVSSv40 {vector_string: $vector_string})
-        SET cv.attack_complexity = $attack_complexity,
-            cv.availability_impact = $availability_impact,
-            cv.confidentiality_impact = $confidentiality_impact,
-            cv.integrity_impact = $integrity_impact,
-            cv.base_score = $base_score,
-            cv.base_severity = $base_severity,
-            cv.first_seen = CASE WHEN cv.first_seen IS NULL THEN datetime() ELSE cv.first_seen END,
-            cv.last_updated = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(
-                    query,
-                    vector_string=data.get("vector_string"),
-                    attack_complexity=data.get("attack_complexity"),
-                    availability_impact=data.get("availability_impact"),
-                    confidentiality_impact=data.get("confidentiality_impact"),
-                    integrity_impact=data.get("integrity_impact"),
-                    base_score=data.get("base_score"),
-                    base_severity=data.get("base_severity"),
-                )
-            logger.info(f"Created/updated CVSSv4.0: {data.get('vector_string', '')[:30]}...")
-            return True
-        except Exception as e:
-            logger.error(f"Error creating CVSSv4.0: {e}")
-            return False
+    # PR #33 round 12: deleted the 4 standalone merge_cvssv2/30/31/40 (and
+    # their create_cve_has_cvss_v* / create_cvssv*_has_cvssv*_cve helper
+    # callers). They were vector_string-keyed and uuid-less — superseded by
+    # the canonical _merge_cvss_node (called from merge_cve) which keys on
+    # cve_id and stamps the deterministic uuid. Pre-release fresh-start has
+    # no callers and no legacy data depending on the old path.
 
     def merge_role(self, data: dict) -> bool:
         """MERGE a Role node. Properties: permission"""
@@ -3686,19 +3554,12 @@ class Neo4jClient:
             return False
 
     # 7. SoftwareVersion IN Vulnerability
-    def create_softwareversion_in_vulnerability(self, *, version: str, cve_id: str, vuln_name: str = None) -> bool:
+    def create_softwareversion_in_vulnerability(self, *, version: str, cve_id: str) -> bool:
         """Create IN relationship: SoftwareVersion -> Vulnerability.
 
-        PR #33 round 9: MATCH switched from {name: vuln_name} to {cve_id: cve_id}
-        — Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS),
-        not name. The previous form silently failed to find any Vulnerability
-        node because Vulnerability MERGEs are keyed on cve_id everywhere.
-        ``vuln_name`` is retained as an optional kwarg for log readability;
-        it is no longer used in the MATCH.
-
-        PR #33 round 11 (bugbot MED): keyword-only signature — the round-9
-        positional reorder would silently swap values for any caller that
-        had passed positional args. Forcing keyword-only fails loudly.
+        Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS).
+        Keyword-only signature (PR #33 round 11) prevents positional swaps;
+        round 12 dropped the unused ``vuln_name`` log-only kwarg.
         """
         query = """
         MATCH (sv:SoftwareVersion {version: $version})
@@ -3713,10 +3574,7 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 session.run(query, version=version, cve_id=cve_id)
-            logger.info(
-                f"Linked SoftwareVersion {version} IN Vulnerability {cve_id}"
-                + (f" (name={vuln_name})" if vuln_name else "")
-            )
+            logger.info(f"Linked SoftwareVersion {version} IN Vulnerability {cve_id}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create SoftwareVersion IN Vulnerability: {e}")
@@ -4263,18 +4121,14 @@ class Neo4jClient:
             return False
 
     # 35. Vulnerability REFERS_TO CVE
-    def create_vulnerability_refers_to_cve(self, *, cve_id: str, vuln_name: str = None) -> bool:
+    def create_vulnerability_refers_to_cve(self, *, cve_id: str) -> bool:
         """Create REFERS_TO relationship: Vulnerability -> CVE.
 
-        Keyword-only (PR #33 round 11): forces callers to name the cve_id
-        argument so the round-9 positional reorder can't silently swap a
-        legacy ``vuln_name``-first call into a cve_id slot.
-
-        PR #33 round 9: MATCH switched from {name: vuln_name} to
-        {cve_id: cve_id}. Vulnerability's natural key is cve_id, not name.
-        Note: the canonical bridge_vulnerability_cve query in
-        enrichment_jobs.py creates the same REFERS_TO edge via the cve_id
-        natural key — this helper is a single-pair convenience alias.
+        Vulnerability's natural key is cve_id (per node_identity._NATURAL_KEYS).
+        Keyword-only signature (PR #33 round 11) prevents positional swaps;
+        round 12 dropped the unused ``vuln_name`` log-only kwarg. Note: the
+        canonical bridge_vulnerability_cve query in enrichment_jobs.py creates
+        the same REFERS_TO edge — this helper is a single-pair convenience.
         """
         query = """
         MATCH (v:Vulnerability {cve_id: $cve_id})
@@ -4289,22 +4143,17 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 session.run(query, cve_id=cve_id)
-            logger.info(
-                f"Linked Vulnerability {cve_id} REFERS_TO CVE {cve_id}" + (f" (name={vuln_name})" if vuln_name else "")
-            )
+            logger.info(f"Linked Vulnerability {cve_id} REFERS_TO CVE {cve_id}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create Vulnerability REFERS_TO CVE: {e}")
             return False
 
     # 36. Vulnerability IN SoftwareVersion
-    def create_vulnerability_in_softwareversion(self, *, cve_id: str, version: str, vuln_name: str = None) -> bool:
+    def create_vulnerability_in_softwareversion(self, *, cve_id: str, version: str) -> bool:
         """Create IN relationship: Vulnerability -> SoftwareVersion.
 
-        Keyword-only (PR #33 round 11) — see sibling helper docstring.
-
-        PR #33 round 9: MATCH switched from {name: vuln_name} to
-        {cve_id: cve_id}.
+        Keyword-only (PR #33 round 11). Round 12 dropped vuln_name kwarg.
         """
         query = """
         MATCH (v:Vulnerability {cve_id: $cve_id})
@@ -4319,23 +4168,17 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 session.run(query, cve_id=cve_id, version=version)
-            logger.info(
-                f"Linked Vulnerability {cve_id} IN SoftwareVersion {version}"
-                + (f" (name={vuln_name})" if vuln_name else "")
-            )
+            logger.info(f"Linked Vulnerability {cve_id} IN SoftwareVersion {version}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create Vulnerability IN SoftwareVersion: {e}")
             return False
 
     # 37. CVE REFERS_TO Vulnerability
-    def create_cve_refers_to_vulnerability(self, *, cve_id: str, vuln_name: str = None) -> bool:
+    def create_cve_refers_to_vulnerability(self, *, cve_id: str) -> bool:
         """Create REFERS_TO relationship: CVE -> Vulnerability.
 
-        Keyword-only (PR #33 round 11) — see sibling helper docstring.
-
-        PR #33 round 9: MATCH switched from {name: vuln_name} to
-        {cve_id: cve_id}. Vulnerability's natural key is cve_id.
+        Keyword-only (PR #33 round 11). Round 12 dropped vuln_name kwarg.
         """
         query = """
         MATCH (c:CVE {cve_id: $cve_id})
@@ -4350,165 +4193,17 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 session.run(query, cve_id=cve_id)
-            logger.info(
-                f"Linked CVE {cve_id} REFERS_TO Vulnerability {cve_id}" + (f" (name={vuln_name})" if vuln_name else "")
-            )
+            logger.info(f"Linked CVE {cve_id} REFERS_TO Vulnerability {cve_id}")
             return True
         except Exception as e:
             logger.warning(f"Failed to create CVE REFERS_TO Vulnerability: {e}")
             return False
 
-    # 38. CVE HAS_CVSS_v40 CVSSv40
-    def create_cve_has_cvss_v40(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v40 relationship: CVE -> CVSSv40"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv40 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v40]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v40 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v40: {e}")
-            return False
-
-    # 39. CVE HAS_CVSS_v31 CVSSv31
-    def create_cve_has_cvss_v31(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v31 relationship: CVE -> CVSSv31"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv31 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v31]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v31 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v31: {e}")
-            return False
-
-    # 40. CVE HAS_CVSS_v30 CVSSv30
-    def create_cve_has_cvss_v30(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v30 relationship: CVE -> CVSSv30"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv30 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v30]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v30 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v30: {e}")
-            return False
-
-    # 41. CVE HAS_CVSS_v2 CVSSv2
-    def create_cve_has_cvss_v2(self, cve_id: str, vector_string: str) -> bool:
-        """Create HAS_CVSS_v2 relationship: CVE -> CVSSv2"""
-        query = """
-        MATCH (c:CVE {cve_id: $cve_id})
-        MATCH (cv:CVSSv2 {vector_string: $vector_string})
-        MERGE (c)-[r:HAS_CVSS_v2]->(cv)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, vector_string=vector_string)
-            logger.info(f"Linked CVE {cve_id} HAS_CVSS_v2 {vector_string[:30]}...")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVE HAS_CVSS_v2: {e}")
-            return False
-
-    # 42. CVSSv2 HAS_CVSS_v2 CVE
-    def create_cvssv2_has_cvssv2_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v2 relationship: CVSSv2 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv2 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v2]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv2 {vector_string[:30]}... HAS_CVSS_v2 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv2 HAS_CVSS_v2 CVE: {e}")
-            return False
-
-    # 43. CVSSv30 HAS_CVSS_v30 CVE
-    def create_cvssv30_has_cvssv30_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v30 relationship: CVSSv30 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv30 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v30]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv30 {vector_string[:30]}... HAS_CVSS_v30 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv30 HAS_CVSS_v30 CVE: {e}")
-            return False
-
-    # 44. CVSSv31 HAS_CVSS_v31 CVE
-    def create_cvssv31_has_cvssv31_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v31 relationship: CVSSv31 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv31 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v31]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv31 {vector_string[:30]}... HAS_CVSS_v31 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv31 HAS_CVSS_v31 CVE: {e}")
-            return False
-
-    # 45. CVSSv40 HAS_CVSS_v40 CVE
-    def create_cvssv40_has_cvssv40_cve(self, vector_string: str, cve_id: str) -> bool:
-        """Create HAS_CVSS_v40 relationship: CVSSv40 -> CVE"""
-        query = """
-        MATCH (cv:CVSSv40 {vector_string: $vector_string})
-        MATCH (c:CVE {cve_id: $cve_id})
-        MERGE (cv)-[r:HAS_CVSS_v40]->(c)
-        SET r.created_at = datetime(),
-            r.updated_at = datetime()
-        """
-        try:
-            with self.driver.session() as session:
-                session.run(query, vector_string=vector_string, cve_id=cve_id)
-            logger.info(f"Linked CVSSv40 {vector_string[:30]}... HAS_CVSS_v40 CVE {cve_id}")
-            return True
-        except Exception as e:
-            logger.warning(f"Failed to create CVSSv40 HAS_CVSS_v40 CVE: {e}")
-            return False
+    # PR #33 round 12: deleted the 8 vector_string-keyed CVSS edge helpers
+    # (create_cve_has_cvss_v2/30/31/40 + create_cvssv*_has_cvssv*_cve) along
+    # with the 4 standalone CVSS mergers above. The canonical _merge_cvss_node
+    # (called from merge_cve) creates the bidirectional HAS_CVSS_v* edges
+    # with stamped src_uuid/trg_uuid; no separate helper needed.
 
     # ============================================================
     # RESILMESH ALERT/INDICATOR METHODS

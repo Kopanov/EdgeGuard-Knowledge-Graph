@@ -1862,8 +1862,9 @@ class MISPToNeo4jSync:
                         }
                     )
 
-        # Build sector targeting relationships
-        # Look for sector tags on items to build TARGETS relationships
+        # Build sector relationships from zone tags. Canonical edges:
+        #   Indicator     → Sector  via TARGETS
+        #   Vulnerability → Sector  via AFFECTS  (PR #33 round 12)
         for item in items:
             zones = item.get("zone", [])
             if isinstance(zones, str):
@@ -1875,13 +1876,13 @@ class MISPToNeo4jSync:
                     sector_name = zone.lower()
                     item_type = item.get("type", "")
 
-                    # Only MISP vulnerability rows become :Vulnerability TARGETS (not arbitrary cve_id fields).
+                    # Only MISP vulnerability rows become :Vulnerability AFFECTS (not arbitrary cve_id fields).
                     if item_type == "vulnerability":
                         cve_id = resolve_vulnerability_cve_id(item)
                         if cve_id:
                             relationships.append(
                                 {
-                                    "rel_type": "TARGETS",
+                                    "rel_type": "AFFECTS",
                                     "from_type": "Vulnerability",
                                     "from_key": {"cve_id": cve_id},
                                     "to_type": "Sector",
@@ -1891,7 +1892,7 @@ class MISPToNeo4jSync:
                                 }
                             )
                     elif item.get("indicator_type") or item_type == "indicator":
-                        # Indicator targets sector
+                        # Indicator → Sector — canonical TARGETS.
                         value = item.get("value")
                         indicator_type = item.get("indicator_type", "unknown")
                         if value:
@@ -2045,12 +2046,12 @@ class MISPToNeo4jSync:
                 description = raw_comment
                 attack_vector = "NETWORK"
 
-            # Build TARGETS relationship to sector if specified (only with a real CVE id)
+            # Vulnerability → Sector — canonical AFFECTS (PR #33 round 12).
             canon_cve = normalize_cve_id_for_graph(cve_id)
             if target_sector and canon_cve:
                 relationships.append(
                     {
-                        "rel_type": "TARGETS",
+                        "rel_type": "AFFECTS",
                         "from_type": "Vulnerability",
                         "from_key": {"cve_id": canon_cve},
                         "to_type": "Sector",

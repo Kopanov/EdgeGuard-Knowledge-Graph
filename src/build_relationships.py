@@ -49,6 +49,10 @@ _SECTOR_UUIDS: dict = {
 _SECTOR_UUID_CASE = (
     "CASE zone_name " + " ".join(f'WHEN "{name}" THEN "{u}"' for name, u in _SECTOR_UUIDS.items()) + " END"
 )
+# PR #33 round 12: derive the zone IN list from _SECTOR_UUIDS keys so adding
+# a 5th zone only requires updating the precompute map above (single source
+# of truth). Same double-quote convention as the CASE expression.
+_SECTOR_IN_LIST = "[" + ", ".join(f'"{name}"' for name in _SECTOR_UUIDS) + "]"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -227,7 +231,7 @@ def build_relationships():
         _q7a_inner = (
             "WITH $i AS i UNWIND i.zone AS zone_name WITH i, zone_name "
             'WHERE zone_name IS NOT NULL AND zone_name <> "" '
-            'AND zone_name IN ["healthcare", "energy", "finance", "global"] '
+            f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
@@ -249,7 +253,7 @@ def build_relationships():
         _q7b_inner = (
             "WITH $v AS v UNWIND v.zone AS zone_name WITH v, zone_name "
             'WHERE zone_name IS NOT NULL AND zone_name <> "" '
-            'AND zone_name IN ["healthcare", "energy", "finance", "global"] '
+            f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "

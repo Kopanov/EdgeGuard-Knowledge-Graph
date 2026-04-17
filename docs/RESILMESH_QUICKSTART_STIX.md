@@ -223,3 +223,7 @@ file an issue with `stix-exporter` in the title.
 
 See [RESILMESH_INTEGRATION_GUIDE.md](RESILMESH_INTEGRATION_GUIDE.md)
 for the full node/relationship mapping across both sides.
+
+---
+
+_Last updated: 2026-04-17_
