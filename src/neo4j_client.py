@@ -902,21 +902,16 @@ class Neo4jClient:
                 query += """,
                 n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
 
-            # Add original publication/modification dates from source feed.
-            # Preserved with coalesce (first-seen value wins) — distinct from
-            # first_imported_at (EdgeGuard import time) and last_updated (last sync).
-            first_seen = data.get("first_seen")
-            if first_seen:
-                query += """,
-                n.original_published_date = CASE
-                    WHEN n.original_published_date IS NULL OR $first_seen < n.original_published_date
-                    THEN $first_seen ELSE n.original_published_date END"""
-            last_seen_val = data.get("last_updated") or data.get("last_seen")
-            if last_seen_val:
-                query += """,
-                n.original_modified_date = CASE
-                    WHEN n.original_modified_date IS NULL OR $last_seen_val > n.original_modified_date
-                    THEN $last_seen_val ELSE n.original_modified_date END"""
+            # PR #34 round 17: deleted ``n.original_published_date`` and
+            # ``n.original_modified_date`` SET clauses. They were intended to
+            # capture the upstream NVD ``published`` / ``last_modified`` dates,
+            # but every non-NVD path (CISA KEV, OTX, MISP-event-only) silently
+            # fell back to the MISP event date — making the field name lie
+            # ("original" really means "first-seen-by-EdgeGuard"). The
+            # canonical EdgeGuard first-touch / last-modified values already
+            # live in ``first_imported_at`` (precise timestamp + TZ) and
+            # ``last_updated``. Zero readers in production: no GraphQL field,
+            # no STIX export, no Cypher consumer, no doc reference.
 
             # Add original_source if present in data
             if original_source:
@@ -1000,10 +995,9 @@ class Neo4jClient:
                     params["misp_attribute_id"] = misp_attribute_id
                 if original_source:
                     params["original_source"] = original_source
-                if first_seen:
-                    params["first_seen"] = first_seen
-                if last_seen_val:
-                    params["last_seen_val"] = last_seen_val
+                # PR #34 round 17: dropped first_seen / last_seen_val params
+                # along with the original_published_date / original_modified_date
+                # SET clauses they bound to (see merger SET above for rationale).
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
 
             # Now create/update the SOURCED_FROM relationship with raw data
@@ -1513,11 +1507,12 @@ class Neo4jClient:
                         "node_uuid": node_uuid,
                     }
 
-                    # Add original date fields for cross-source min/max tracking
-                    if item.get("first_seen"):
-                        batch_item["first_seen"] = item["first_seen"]
-                    if item.get("last_seen"):
-                        batch_item["last_seen"] = item["last_seen"]
+                    # PR #34 round 17: dropped first_seen / last_seen pass-through
+                    # along with the original_published_date / original_modified_date
+                    # SET clauses they bound to. The fields didn't actually carry the
+                    # upstream NVD published date for non-NVD CVEs (CISA, OTX, etc.) —
+                    # they fell back to the MISP event date. Canonical EdgeGuard times
+                    # live in first_imported_at + last_updated.
 
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
@@ -1560,12 +1555,6 @@ class Neo4jClient:
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
-                    n.original_published_date = CASE
-                        WHEN n.original_published_date IS NULL OR item.first_seen < n.original_published_date
-                        THEN item.first_seen ELSE n.original_published_date END,
-                    n.original_modified_date = CASE
-                        WHEN n.original_modified_date IS NULL OR item.last_seen > n.original_modified_date
-                        THEN item.last_seen ELSE n.original_modified_date END,
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),

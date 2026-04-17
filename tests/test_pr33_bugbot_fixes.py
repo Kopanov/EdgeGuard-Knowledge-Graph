@@ -1766,3 +1766,59 @@ def test_edge_endpoint_uuids_is_still_used_in_neo4j_client():
     assert "edge_endpoint_uuids(" in upsert_src, (
         "_upsert_sourced_relationship must use edge_endpoint_uuids to compute Source-edge uuids"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 17 — delete misleading original_published_date / original_modified_date
+# ---------------------------------------------------------------------------
+
+
+def test_original_date_fields_were_deleted_from_writes():
+    """User-driven cleanup (round 17): the ``n.original_published_date`` and
+    ``n.original_modified_date`` Cypher SET clauses were removed from
+    ``merge_node_with_source`` and ``merge_indicators_batch``. The fields
+    were intended to capture the upstream NVD published / last_modified
+    dates, but every non-NVD path (CISA KEV, OTX, MISP-event-only) silently
+    fell back to the MISP event date — making the field name lie about its
+    contents (e.g. CVE-2012-1854 from CISA KEV showed
+    original_published_date='2026-04-15' instead of the real 2012 date).
+
+    Canonical EdgeGuard times live in ``first_imported_at`` (precise
+    timestamp + TZ on every node) and ``last_updated``."""
+    import importlib
+    import inspect
+
+    if "neo4j_client" in sys.modules:
+        del sys.modules["neo4j_client"]
+    neo4j_client = importlib.import_module("neo4j_client")
+
+    def _code_only(src: str) -> str:
+        # Strip comment lines so the round-17 deletion-rationale comment
+        # (which legitimately mentions the field names) doesn't false-fail
+        # the negative assertion.
+        return "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+
+    # No production code path may write either property.
+    src_with_source = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_node_with_source))
+    assert "n.original_published_date" not in src_with_source, (
+        "merge_node_with_source must NOT write n.original_published_date (round 17)"
+    )
+    assert "n.original_modified_date" not in src_with_source, (
+        "merge_node_with_source must NOT write n.original_modified_date (round 17)"
+    )
+
+    src_indicators = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_indicators_batch))
+    assert "n.original_published_date" not in src_indicators, (
+        "merge_indicators_batch must NOT write n.original_published_date (round 17)"
+    )
+    assert "n.original_modified_date" not in src_indicators, (
+        "merge_indicators_batch must NOT write n.original_modified_date (round 17)"
+    )
+
+    # And the canonical EdgeGuard timestamp fields must still be written.
+    assert "n.first_imported_at = datetime()" in src_with_source, (
+        "first_imported_at must remain — that's the canonical EdgeGuard first-touch timestamp"
+    )
+    assert "n.last_updated = datetime()" in src_with_source, (
+        "last_updated must remain — that's the canonical EdgeGuard modification time"
+    )
