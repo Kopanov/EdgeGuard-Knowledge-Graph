@@ -146,6 +146,44 @@ def test_neo4j_uuid_equals_stix_sdo_id_uuid_portion(label, key_dict, stix_type, 
     )
 
 
+def test_sector_stix_parity_end_to_end():
+    """PR #34 round 22 (multi-agent UUID audit, HIGH): the parametrized
+    parity test above only exercises ``_deterministic_id`` directly with a
+    hand-crafted ``stix_natural_key_string``. It does NOT drive the actual
+    production helper ``_sector_sdo`` — which previously prepended
+    ``sector|`` to the natural key, breaking parity while the parametrized
+    test still passed (it was passing the WITHOUT-prefix form to
+    _deterministic_id, masking the production divergence).
+
+    This test closes the gap by driving ``_sector_sdo`` end-to-end: it
+    builds the actual STIX SDO that the exporter would emit, extracts the
+    UUID portion of the SDO's ``id``, and asserts it equals
+    ``compute_node_uuid("Sector", {"name": ...})``. A future regression
+    that re-adds a prefix anywhere along the path will fail this test."""
+    import importlib
+
+    if "stix_exporter" in sys.modules:
+        del sys.modules["stix_exporter"]
+    stix_exporter = importlib.import_module("stix_exporter")
+
+    # Bypass the heavy __init__ — _sector_sdo is a pure function on props.
+    exporter = stix_exporter.StixExporter.__new__(stix_exporter.StixExporter)
+
+    for sector_name in ("healthcare", "energy", "finance", "global"):
+        sdo = exporter._sector_sdo({"name": sector_name})
+        # SDO id form: ``identity--<uuid>``.
+        sdo_id = sdo["id"]
+        assert sdo_id.startswith("identity--"), f"expected identity-- prefix, got {sdo_id!r}"
+        sdo_uuid = sdo_id.split("--", 1)[1]
+
+        neo4j_uuid = compute_node_uuid("Sector", {"name": sector_name})
+        assert sdo_uuid == neo4j_uuid, (
+            f"Sector parity break for {sector_name!r}: "
+            f"_sector_sdo emitted UUID {sdo_uuid}, but compute_node_uuid returned {neo4j_uuid}. "
+            "Likely cause: _sector_sdo is wrapping the name in a prefix (e.g. 'sector|') again."
+        )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

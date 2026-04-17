@@ -2399,3 +2399,73 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         )
     finally:
         enrichment_jobs.logger.removeHandler(handler)
+
+
+# ---------------------------------------------------------------------------
+# Round 22 — bugbot findings on commit 513ee4e + multi-agent UUID audit
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_resolver_normalizes_empty_misp_attribute_ids_to_none():
+    """PR #34 round 22 (bugbot LOW): round 21 applied ``or None`` to
+    ``misp_event_ids`` in the Indicator resolver, AND to ``misp_event_ids``
+    in the Vulnerability resolver — but missed the parallel
+    ``misp_attribute_ids`` field in the Indicator resolver. An Indicator
+    with no MISP attribute IDs surfaced ``misp_event_ids: null`` and
+    ``misp_attribute_ids: []`` in the same response — inconsistent.
+
+    Fix: apply the same collapse. Pin the source shape to prevent a future
+    rewrite from re-introducing the asymmetry."""
+    import importlib
+    import inspect
+
+    if "graphql_api" in sys.modules:
+        del sys.modules["graphql_api"]
+    graphql_api = importlib.import_module("graphql_api")
+
+    src = inspect.getsource(graphql_api._resolve_indicators)
+    # Look for the normalized shape. Accept either quoting style.
+    assert (
+        '_neo4j_list(n.get("misp_attribute_ids")) or None' in src
+        or "_neo4j_list(n.get('misp_attribute_ids')) or None" in src
+    ), (
+        "Indicator resolver must normalize empty misp_attribute_ids to None — "
+        "match the round-21 pattern applied to misp_event_ids and the Vulnerability resolver"
+    )
+
+
+def test_sector_sdo_uuid_matches_compute_node_uuid():
+    """PR #34 round 22 (multi-agent UUID audit, HIGH): the Sector SDO's
+    id UUID must equal ``compute_node_uuid("Sector", {"name": name})``.
+    Before round 22 the exporter prepended ``sector|`` to the natural
+    key, breaking parity for every Sector (the very contract PR #34
+    exists to establish). This test drives the production
+    ``_sector_sdo`` end-to-end as a behavioral pin.
+
+    (Companion test lives in tests/test_node_identity.py for all 4 sector
+    names; this cross-file pin ensures the round-22 audit fix surfaces
+    in the bugbot-fixes regression suite too.)"""
+    import importlib
+
+    if "stix_exporter" in sys.modules:
+        del sys.modules["stix_exporter"]
+    stix_exporter = importlib.import_module("stix_exporter")
+
+    # Behavioral pin (load-bearing): build an SDO and compare UUIDs end-to-end.
+    # If a regression re-adds ANY prefix/suffix anywhere along the path
+    # (in _sector_sdo, in _deterministic_id, or in node_identity), the
+    # UUIDs diverge and this test fails — regardless of where the
+    # regression lands. No source-string-pin needed.
+    exporter = stix_exporter.StixExporter.__new__(stix_exporter.StixExporter)
+    from node_identity import compute_node_uuid
+
+    for sector_name in ("healthcare", "energy", "finance", "global"):
+        sdo = exporter._sector_sdo({"name": sector_name})
+        sdo_uuid = sdo["id"].split("--", 1)[1]
+        neo4j_uuid = compute_node_uuid("Sector", {"name": sector_name})
+        assert sdo_uuid == neo4j_uuid, (
+            f"parity break for Sector {sector_name!r}: "
+            f"_sector_sdo emitted {sdo_uuid}, compute_node_uuid returned {neo4j_uuid}. "
+            "Likely cause: a prefix/suffix was re-introduced in _sector_sdo, "
+            "_deterministic_id, or node_identity's canonicalization for Sector."
+        )

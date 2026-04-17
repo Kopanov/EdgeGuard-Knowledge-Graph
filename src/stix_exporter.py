@@ -676,8 +676,19 @@ class StixExporter:
         return _to_dict(obj)
 
     def _sector_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
+        # PR #34 round 22 (multi-agent UUID audit, HIGH): the previous
+        # ``f"sector|{name}"`` natural-key form prefixed every Sector
+        # canonical with ``sector|`` to disambiguate against generic STIX
+        # ``identity`` SDOs (which can represent users, organizations, etc.).
+        # That defensive prefix BROKE the central PR #34 parity contract:
+        # ``compute_node_uuid("Sector", {"name": name})`` canonicalizes to
+        # ``"identity:{name}"`` (no prefix) — different string, different
+        # UUID. The Neo4j n.uuid and the STIX SDO id UUID portion diverged
+        # for every Sector. EdgeGuard only ever emits sector-type identity
+        # SDOs, so the disambiguation prefix was dead defense. Drop it to
+        # restore parity. Pinned by test_sector_stix_parity_end_to_end.
         name = props.get("name") or props.get("sector") or ""
-        stix_id = _deterministic_id("identity", f"sector|{name}")
+        stix_id = _deterministic_id("identity", name)
         obj = stix2.Identity(
             id=stix_id,
             name=name,

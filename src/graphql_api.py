@@ -334,7 +334,14 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     edgeguard_managed=n.get("edgeguard_managed"),
                     uuid=n.get("uuid"),
                     misp_event_ids=event_ids or None,
-                    misp_attribute_ids=_neo4j_list(n.get("misp_attribute_ids")),
+                    # PR #34 round 22 (bugbot LOW): normalize empty list to None
+                    # for cross-resolver / cross-field consistency. Round 21
+                    # fixed the same shape on misp_event_ids and on the
+                    # Vulnerability resolver — bugbot caught the missed mirror
+                    # site here. Without this collapse, an Indicator with no
+                    # MISP attribute IDs surfaced ``misp_event_ids: null`` and
+                    # ``misp_attribute_ids: []`` in the same response.
+                    misp_attribute_ids=_neo4j_list(n.get("misp_attribute_ids")) or None,
                     misp_event_urls=event_urls,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
