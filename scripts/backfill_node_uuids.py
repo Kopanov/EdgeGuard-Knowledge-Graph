@@ -313,6 +313,17 @@ def backfill_edge(
     # to fire twice per edge — wasted writes on large graphs. The directed
     # pattern matches each relationship exactly once by id (relationships
     # have an intrinsic direction in Neo4j).
+    #
+    # On ``$rid`` / ``$a_uuid`` / ``$b_uuid`` in the inner query:
+    # ``apoc.periodic.iterate`` automatically binds every column RETURNed
+    # by the outer query as a ``$``-prefixed parameter in the inner
+    # action (APOC docs: "outer column values become inner parameters").
+    # So ``RETURN id(r) AS rid, a.uuid AS a_uuid`` → inner sees ``$rid``,
+    # ``$a_uuid`` as bound parameters. No ``params:`` config needed —
+    # that's for EXTRA parameters beyond the outer's RETURN columns
+    # (see ``enrichment_jobs.py::large_batch_query`` for that usage).
+    # Bugbot (PR #34 round 24 bugbot MED) flagged this as a potential
+    # unresolved-parameter bug — it isn't; APOC's contract is clear.
     update_query = f"""
     CALL apoc.periodic.iterate(
         'MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label})

@@ -16,13 +16,14 @@ from resilience import (
     get_circuit_breaker,
 )
 
-# Legacy alias used by older code / docs
-CircuitOpenError = CircuitBreakerOpenError
+# PR #34 round 28 (bug-hunter audit): deleted the ``CircuitOpenError`` alias
+# (``CircuitOpenError = CircuitBreakerOpenError``). It had ZERO importers across
+# src/, scripts/, dags/, tests/ — the migration to ``CircuitBreakerOpenError``
+# was complete. The alias just signaled "incomplete refactor" to readers.
 
 __all__ = [
     "CircuitBreaker",
     "CircuitBreakerOpenError",
-    "CircuitOpenError",
     "CircuitState",
     "get_circuit_breaker",
 ]

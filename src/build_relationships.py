@@ -183,7 +183,7 @@ def build_relationships():
 
     try:
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
-        logger.info("[LINK] 1/11 Technique → Tactic (kill-chain phase match)...")
+        logger.info("[LINK] 1/12 Technique → Tactic (kill-chain phase match)...")
         _outer = "MATCH (t:Technique) WHERE size(coalesce(t.tactic_phases, [])) > 0 RETURN t"
         _inner = 'WITH $t AS t MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = "kill_chain_phase", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, t.uuid), r.trg_uuid = coalesce(r.trg_uuid, tc.uuid)'
         if not _safe_run_batched(client, "Technique → Tactic", _outer, _inner, stats, "in_tactic"):
@@ -191,7 +191,7 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
-        logger.info("[LINK] 2/11 Malware → ThreatActor (exact name match)...")
+        logger.info("[LINK] 2/12 Malware → ThreatActor (exact name match)...")
         _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND m.attributed_to <> '') OR size(coalesce(m.aliases, [])) > 0 RETURN m"
         _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
@@ -199,7 +199,7 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
-        logger.info("[LINK] 3a/11 Indicator → Vulnerability (exact CVE match)...")
+        logger.info("[LINK] 3a/12 Indicator → Vulnerability (exact CVE match)...")
         _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
         _q3a_inner = 'WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)'
         # PR #34 round 20: count Indicator orphans (cve_id set but no
@@ -222,7 +222,7 @@ def build_relationships():
         time.sleep(_INTER_QUERY_PAUSE)
 
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
-        logger.info("[LINK] 3b/11 Indicator → CVE (exact CVE match)...")
+        logger.info("[LINK] 3b/12 Indicator → CVE (exact CVE match)...")
         _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
         _q3b_inner = 'WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)'
         _q3b_skip = (
@@ -249,7 +249,7 @@ def build_relationships():
         # PR #33 round 10: dropped legacy scalar misp_event_id from both filter
         # and join. Outer filter only selects Indicators with a non-empty
         # misp_event_ids[]; inner Malware match uses array IN-membership.
-        logger.info("[LINK] 4/11 Indicator → Malware (co-occurrence, batched)...")
+        logger.info("[LINK] 4/12 Indicator → Malware (co-occurrence, batched)...")
         _q4_outer = "MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0 RETURN i"
         _q4_inner = (
             "WITH $i AS i "
@@ -289,7 +289,7 @@ def build_relationships():
         # pairs — pairs whose Technique node does NOT exist. Each orphan
         # pair is an edge that the inner action silently fails to create.
         # Direct skip count, no comparison with APOC total needed.
-        logger.info("[LINK] 5/11 ThreatActor → Technique (ATT&CK explicit)...")
+        logger.info("[LINK] 5/12 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
         _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q5_skip = (
@@ -314,7 +314,7 @@ def build_relationships():
         # relationships. Capability semantics: "what the code can do".
         # PR #34 round 20: skip_query counts orphan (malware, technique-id)
         # pairs whose Technique node does NOT exist — direct skip count.
-        logger.info("[LINK] 6/11 Malware → Technique (MITRE explicit)...")
+        logger.info("[LINK] 6/12 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
         _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q6_skip = (
@@ -340,7 +340,7 @@ def build_relationships():
         # deterministic Python-precomputed value embedded as a Cypher CASE
         # expression literal (sector names are a fixed set of 4). Without this,
         # sec.uuid would be NULL and r.trg_uuid would inherit NULL.
-        logger.info("[LINK] 7a/11 Indicator → Sector (TARGETS)...")
+        logger.info("[LINK] 7a/12 Indicator → Sector (TARGETS)...")
         _q7a_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.zone, [])) > 0 RETURN i"
         # NB (PR #33 round 6): all string literals inside this inner query use
         # DOUBLE quotes. _safe_run_batched wraps the inner query in single
@@ -366,7 +366,7 @@ def build_relationships():
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
         # Same Sector-uuid stamp as 7a — see comment above.
-        logger.info("[LINK] 7b/11 Vulnerability/CVE → Sector (AFFECTS)...")
+        logger.info("[LINK] 7b/12 Vulnerability/CVE → Sector (AFFECTS)...")
         _q7b_outer = "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0 RETURN v"
         # See 7a above: double quotes for inner string literals.
         _q7b_inner = (
@@ -389,7 +389,7 @@ def build_relationships():
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
         # PR #34 round 20: skip_query counts orphan (indicator, attack_id)
         # pairs whose Technique node does NOT exist — direct skip count.
-        logger.info("[LINK] 8/11 Indicator → Technique (OTX attack_ids)...")
+        logger.info("[LINK] 8/12 Indicator → Technique (OTX attack_ids)...")
         _q8_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 RETURN i"
         _q8_inner = 'WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q8_skip = (
@@ -414,7 +414,7 @@ def build_relationships():
         # PR #34 round 20: skip_query counts Indicators with a non-empty
         # malware_family that have NO matching Malware node (by name, alias,
         # or family) — direct skip count, no comparison.
-        logger.info("[LINK] 9/11 Indicator → Malware (malware_family match)...")
+        logger.info("[LINK] 9/12 Indicator → Malware (malware_family match)...")
         _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
         _q9_inner = 'WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.created_at = datetime() SET r.confidence_score = CASE WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 ELSE r.confidence_score END, r.match_type = "malware_family", r.source_id = "malware_family_match", r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)'
         _q9_skip = (
@@ -443,7 +443,7 @@ def build_relationships():
         # Same capability semantics as Malware above; both are "code/tool can
         # execute this TTP". PR #34 round 20: skip_query counts orphan
         # (tool, technique-id) pairs whose Technique node does NOT exist.
-        logger.info("[LINK] 10/11 Tool → Technique (MITRE explicit)...")
+        logger.info("[LINK] 10/12 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
         _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q10_skip = (
@@ -494,13 +494,13 @@ def build_relationships():
         total_rels = sum(v for k, v in stats.items() if k != "multi_zone_indicators")
         per_query = ", ".join(f"{k}={v}" for k, v in sorted(stats.items()) if k != "multi_zone_indicators")
         logger.info(
-            "[BUILD_RELATIONSHIPS SUMMARY] total_edges=%d failures=%d/11 per_query=[%s]",
+            "[BUILD_RELATIONSHIPS SUMMARY] total_edges=%d failures=%d/12 per_query=[%s]",
             total_rels,
             failures,
             per_query,
         )
         if failures:
-            logger.warning("Relationship types failed: %d/11 — partial success", failures)
+            logger.warning("Relationship types failed: %d/12 — partial success", failures)
 
         if _METRICS_AVAILABLE:
             try:

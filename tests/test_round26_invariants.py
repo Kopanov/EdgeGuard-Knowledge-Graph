@@ -437,3 +437,66 @@ def test_backfill_edge_query_only_targets_null_endpoint_uuid():
         "backfill_edge query must filter on (r.src_uuid IS NULL OR r.trg_uuid IS NULL) — "
         "without it, re-running the backfill is O(|edges|) rather than O(|unstamped edges|)"
     )
+
+
+# ---------------------------------------------------------------------------
+# B7 — every CLI/optional code path that creates a typed edge between
+#      uuid-bearing labels must stamp src_uuid/trg_uuid (round-28 audit)
+# ---------------------------------------------------------------------------
+
+
+def test_run_pipeline_edges_stamp_endpoint_uuids():
+    """Round 28 (bugbot MED): the CLI path in ``run_pipeline.py`` creates
+    INDICATES (co-occurrence) and EXPLOITS edges via its own
+    apoc.periodic.iterate blocks. Before round 28 these did NOT stamp
+    r.src_uuid/r.trg_uuid — so edges created via the CLI path had NULL
+    endpoint uuids, silently breaking cross-environment delta sync for
+    any operator who preferred the CLI over the Airflow path.
+
+    Pin both edges' stamping via source-grep on the two apoc inner
+    queries."""
+    import importlib
+
+    if "run_pipeline" in sys.modules:
+        del sys.modules["run_pipeline"]
+    run_pipeline = importlib.import_module("run_pipeline")
+    src_path = run_pipeline.__file__
+    with open(src_path) as fh:
+        source = fh.read()
+
+    # Both inner queries must stamp src=i.uuid trg={m,c}.uuid.
+    for endpoint_var, edge_name in [("m", "INDICATES"), ("c", "EXPLOITS")]:
+        assert f"r.src_uuid = i.uuid, r.trg_uuid = {endpoint_var}.uuid" in source, (
+            f"{edge_name} edge in run_pipeline.py must stamp src=i.uuid trg={endpoint_var}.uuid "
+            "on ON CREATE (round-28 fix)"
+        )
+        assert f"coalesce(r.src_uuid, i.uuid)" in source and (  # noqa: F541
+            f"coalesce(r.trg_uuid, {endpoint_var}.uuid)" in source
+        ), f"{edge_name} edge in run_pipeline.py must coalesce src/trg uuids on SET (idempotent)"
+
+
+def test_build_relationships_summary_denominator_matches_query_count():
+    """Round 28 (bugbot LOW): the ``[BUILD_RELATIONSHIPS SUMMARY]`` log
+    line used to hardcode ``failures=%d/11`` but there are 12 independent
+    _safe_run_batched calls (queries 1, 2, 3a, 3b, 4, 5, 6, 7a, 7b, 8, 9,
+    10). "failures=12/11" is not a valid fraction.
+
+    Pin by counting _safe_run_batched calls in build_relationships() and
+    asserting the SUMMARY log uses the right denominator."""
+    import importlib
+    import inspect
+
+    if "build_relationships" in sys.modules:
+        del sys.modules["build_relationships"]
+    br = importlib.import_module("build_relationships")
+    src = inspect.getsource(br.build_relationships)
+
+    call_count = src.count("_safe_run_batched(")
+    assert call_count == 12, (
+        f"expected 12 _safe_run_batched calls in build_relationships(); got {call_count}. "
+        "If you added/removed a link query, also update the denominators below."
+    )
+    assert f"failures=%d/{call_count}" in src, (
+        f"[BUILD_RELATIONSHIPS SUMMARY] format must use /{call_count} denominator (not a stale number)"
+    )
+    assert f"%d/{call_count} — partial success" in src, f"warning format must use /{call_count}"

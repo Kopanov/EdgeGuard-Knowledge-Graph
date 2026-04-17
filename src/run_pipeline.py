@@ -281,6 +281,13 @@ class EdgeGuardPipeline:
             # filter and join. Outer filter only includes nodes with a non-
             # empty misp_event_ids array; inner join matches by array IN
             # membership.
+            # PR #34 round 28 (bugbot MED): stamp r.src_uuid / r.trg_uuid on
+            # both co-occurrence and EXPLOITS edges so the CLI path produces
+            # the same cross-environment-traceable edges as the primary
+            # build_relationships.py path. Without this, edges created via
+            # run_pipeline.py CLI had NULL endpoint uuids, silently breaking
+            # the delta-sync contract for any operator who preferred this
+            # code path.
             cooccurrence_query = """
             CALL apoc.periodic.iterate(
                 'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0 RETURN i',
@@ -289,7 +296,10 @@ class EdgeGuardPipeline:
                  UNWIND eids AS eid WITH i, eid
                  MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids
                  MERGE (i)-[r:INDICATES]->(m)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5 SET r.updated_at = datetime()',
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5, r.src_uuid = i.uuid, r.trg_uuid = m.uuid
+                 SET r.updated_at = datetime(),
+                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                     r.trg_uuid = coalesce(r.trg_uuid, m.uuid)',
                 {batchSize: 5000, parallel: false}
             )
             YIELD total
@@ -311,7 +321,10 @@ class EdgeGuardPipeline:
                 'WITH $i AS i
                  MATCH (c:CVE {cve_id: i.cve_id})
                  MERGE (i)-[r:EXPLOITS]->(c)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9 SET r.updated_at = datetime()',
+                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9, r.src_uuid = i.uuid, r.trg_uuid = c.uuid
+                 SET r.updated_at = datetime(),
+                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                     r.trg_uuid = coalesce(r.trg_uuid, c.uuid)',
                 {batchSize: 5000, parallel: false}
             )
             YIELD total

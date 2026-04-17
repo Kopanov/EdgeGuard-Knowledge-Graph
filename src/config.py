@@ -91,23 +91,14 @@ def get_sector_cutoff_date(sector: str = "global") -> str:
     return cutoff.strftime("%Y-%m-%d")
 
 
-def detect_zone_from_text(text: str, default_zone: str = "global") -> str:
-    """Detect sector/zone from text using SECTOR_KEYWORDS.
-
-    Args:
-        text: Text to analyze (malware name, description, etc.)
-        default_zone: Default zone if no match (default: "global")
-
-    Returns:
-        Zone name: 'healthcare', 'energy', 'finance', or 'global'
-    """
-    text_lower = text.lower()
-    for zone, keywords in SECTOR_KEYWORDS.items():
-        for keyword in keywords:
-            if re.search(r"\b" + re.escape(keyword) + r"\b", text_lower):
-                return zone
-    return default_zone
-
+# PR #34 round 28 (cross-checker audit): deleted ``detect_zone_from_text``
+# (singular). It returned the FIRST matching sector or the default — but every
+# call site in production uses the PLURAL ``detect_zones_from_text`` (returns
+# a list, supports multi-zone). The singular version had ZERO importers across
+# src/, scripts/, dags/, tests/ — pure dead public API. A future contributor
+# unaware of the deprecation could have grabbed it for "simple single-zone
+# detection" and silently lost multi-zone semantics. Deleted to remove the
+# trap.
 
 # Minimum weighted score for a sector to count in ``detect_zones_from_text`` (per field).
 # At default ``body`` weight 1.5, a single keyword match scores 1.5 — so 2.0 wrongly required
