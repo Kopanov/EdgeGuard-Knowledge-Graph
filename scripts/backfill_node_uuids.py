@@ -273,13 +273,21 @@ def backfill_edge(
     # APOC docs, the safe pattern is to RETURN id(r), id(a), id(b) as
     # primitive long values from the outer, then re-MATCH by id in the inner
     # (which binds fresh entity handles in the inner transaction).
+    #
+    # Bugbot (PR #33 round 15, LOW): the inner re-MATCH uses a DIRECTED
+    # pattern ``()-[r]->()`` rather than undirected ``()-[r]-()``. An
+    # undirected pattern in Cypher returns each relationship twice (once
+    # per traversal direction in the pattern semantics), causing the SET
+    # to fire twice per edge — wasted writes on large graphs. The directed
+    # pattern matches each relationship exactly once by id (relationships
+    # have an intrinsic direction in Neo4j).
     update_query = f"""
     CALL apoc.periodic.iterate(
         'MATCH (a:{from_label})-[r:{rel_type}]->(b:{to_label})
          WHERE (r.src_uuid IS NULL OR r.trg_uuid IS NULL)
            AND a.uuid IS NOT NULL AND b.uuid IS NOT NULL
          RETURN id(r) AS rid, a.uuid AS a_uuid, b.uuid AS b_uuid',
-        'MATCH ()-[r]-() WHERE id(r) = $rid
+        'MATCH ()-[r]->() WHERE id(r) = $rid
          SET r.src_uuid = coalesce(r.src_uuid, $a_uuid),
              r.trg_uuid = coalesce(r.trg_uuid, $b_uuid)',
         {{batchSize: $batch, parallel: false}}

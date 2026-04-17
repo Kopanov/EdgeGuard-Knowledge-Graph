@@ -383,6 +383,13 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     # the silent-skip rate (e.g. spikes in missing_cve_id signal upstream
     # parsing regressions). Wrap in try/except so a metrics outage doesn't
     # break ingest.
+    #
+    # NB (PR #33 round 15): the import is inline (inside try/except) so the
+    # metrics_server module isn't a hard dependency for the ingest path —
+    # bugbot's static analysis flagged record_misp_attribute_dropped as
+    # "unused" because it doesn't follow inline-import call chains. This is
+    # the canonical call site; pinned by
+    # test_misp_attributes_dropped_metric_exists_and_is_emitted.
     if _dropped_by_reason:
         try:
             from metrics_server import record_misp_attribute_dropped

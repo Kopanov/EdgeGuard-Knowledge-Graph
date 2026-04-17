@@ -1147,6 +1147,17 @@ def test_backfill_edge_inner_query_re_matches_relationship_by_id():
     )
     assert "$a_uuid" in src and "$b_uuid" in src, "inner must use bound $a_uuid / $b_uuid primitives in SET"
 
+    # PR #33 round 15 (bugbot LOW): inner re-MATCH must be DIRECTED so each
+    # relationship is matched exactly once by id (undirected returns each
+    # relationship twice — once per traversal direction — causing redundant SETs).
+    assert "MATCH ()-[r]->()" in src, (
+        "inner re-MATCH must be DIRECTED ()-[r]->() — undirected ()-[r]-() returns "
+        "each relationship twice and fires the SET twice per edge"
+    )
+    assert "MATCH ()-[r]-()" not in src.replace("MATCH ()-[r]->()", ""), (
+        "the round-11 undirected pattern ()-[r]-() must not return — round 15 fixed it"
+    )
+
     # Negative: the prior round-8 raw-entity rebind pattern must not return.
     assert "WITH $r AS r, $a AS a, $b AS b" not in src, (
         "round-8 raw-entity rebind pattern must NOT come back — entity handles "
