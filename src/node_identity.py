@@ -65,10 +65,33 @@ from typing import Any, Dict, Tuple
 # Namespace — MUST match src/stix_exporter.py:EDGEGUARD_STIX_NAMESPACE
 # --------------------------------------------------------------------------- #
 #
-# Reused intentionally so the UUID portion of a STIX SDO id equals the
-# corresponding Neo4j n.uuid for the same logical entity. Do NOT change this
-# value — it would invalidate every uuid in every running Neo4j and every
-# STIX bundle ever shipped to ResilMesh.
+# ╔══════════════════════════════════════════════════════════════════════════╗
+# ║                            FROZEN — DO NOT CHANGE                          ║
+# ╠══════════════════════════════════════════════════════════════════════════╣
+# ║ This UUID is the deterministic-uuid namespace for EVERY Neo4j n.uuid     ║
+# ║ and EVERY STIX SDO id ever produced by EdgeGuard. Changing it:           ║
+# ║                                                                            ║
+# ║ • Invalidates every node uuid in every running Neo4j (local + cloud)     ║
+# ║ • Invalidates every edge's r.src_uuid / r.trg_uuid                       ║
+# ║ • Invalidates every STIX SDO id in every bundle ever shipped to          ║
+# ║   ResilMesh (cached IDs become unmappable)                                ║
+# ║ • Forces a graph-wide migration: re-stamp every node + edge + re-export  ║
+# ║   every STIX bundle on every consumer                                      ║
+# ║                                                                            ║
+# ║ The same value is reused in src/stix_exporter.py:EDGEGUARD_STIX_NAMESPACE ║
+# ║ — that's intentional, NOT redundant. The reuse is what makes              ║
+# ║ ``compute_node_uuid("Indicator", {...})`` and                             ║
+# ║ ``stix_exporter._deterministic_id("indicator", "...")`` produce the same ║
+# ║ UUID for the same logical entity (cross-system traceability).             ║
+# ║                                                                            ║
+# ║ If you genuinely need to migrate to a new namespace (e.g. for tenant      ║
+# ║ isolation), do it via a coordinated migration:                             ║
+# ║   1. Add a new constant ``EDGEGUARD_NODE_UUID_NAMESPACE_V2``               ║
+# ║   2. Stamp BOTH old + new uuids on nodes during a transition window      ║
+# ║   3. Migrate consumers to read the new uuid                                 ║
+# ║   4. Drop the old uuid in a follow-up                                       ║
+# ║ Never just edit this constant in place.                                     ║
+# ╚══════════════════════════════════════════════════════════════════════════╝
 EDGEGUARD_NODE_UUID_NAMESPACE = _uuid_mod.UUID("5f2e1f9a-6a1b-5e0f-9b25-ed9ea2d574cb")
 
 

@@ -3177,7 +3177,7 @@ def test_every_session_run_has_explicit_timeout():
             misses.append((line_no, body[:80]))
         i = j + 1
 
-    assert not misses, f"session.run() calls without timeout= found (production hang risk):\n" + "\n".join(
+    assert not misses, "session.run() calls without timeout= found (production hang risk):\n" + "\n".join(
         f"  line {ln}: {snippet!r}" for ln, snippet in misses
     )
 

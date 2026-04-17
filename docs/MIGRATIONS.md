@@ -145,4 +145,76 @@ RETURN type(r) AS rel_type, count(r) AS missing;
 
 ---
 
+## Rollback / cleanup recipes
+
+The PR is backward-compatible (old code that doesn't read `n.uuid` /
+`r.src_uuid` / `r.trg_uuid` ignores the new fields), so a code revert is
+safe and requires no graph modification. The recipes below are for
+**emergency cleanup** — only run if you genuinely need to remove the
+fields (e.g. preparing to migrate to a new uuid namespace, or wiping
+test data).
+
+### Recipe R1 — drop all uuid fields
+
+**IRREVERSIBLE without re-running the backfill.** Removes the deterministic
+identifier from every node and every edge. Cloud sync stops working until
+the backfill is re-run.
+
+```cypher
+// Drop the uuid property on every node and every edge.
+MATCH (n) WHERE n.uuid IS NOT NULL SET n.uuid = null;
+MATCH ()-[r]->() WHERE r.src_uuid IS NOT NULL SET r.src_uuid = null;
+MATCH ()-[r]->() WHERE r.trg_uuid IS NOT NULL SET r.trg_uuid = null;
+```
+
+### Recipe R2 — drop the uuid indexes
+
+The 43 uuid indexes (one per label) sit empty after Recipe R1 — drop them
+to reclaim storage:
+
+```cypher
+// List every uuid index, then drop one by one.
+SHOW INDEXES YIELD name WHERE name ENDS WITH '_uuid';
+// → 43 names: indicator_uuid, vulnerability_uuid, ..., user_uuid, alert_uuid
+
+// For each:
+DROP INDEX indicator_uuid IF EXISTS;
+DROP INDEX vulnerability_uuid IF EXISTS;
+// (... repeat for all 43 — see Neo4jClient.create_indexes for the full list)
+```
+
+### Recipe R3 — re-stamp uuids after a canonicalization change
+
+The standard backfill (`scripts/backfill_node_uuids.py`) is **idempotent**:
+it skips nodes whose uuid is already set. If you've changed
+`node_identity.canonicalize_field_value` (e.g. added a new normalization)
+and want to re-stamp existing nodes, you must clear the uuid first:
+
+```bash
+# Step 1: clear uuids (Recipe R1, scoped to the affected label)
+cypher-shell -u neo4j -p $NEO4J_PASSWORD <<EOF
+MATCH (n:Indicator) SET n.uuid = null;
+MATCH ()-[r]->() WHERE startNode(r):Indicator OR endNode(r):Indicator
+SET r.src_uuid = null, r.trg_uuid = null;
+EOF
+
+# Step 2: re-run the backfill — picks up the cleared uuids.
+python scripts/backfill_node_uuids.py --labels Indicator
+```
+
+**WARNING**: re-stamping invalidates every cloud-side reference to those
+uuids. Coordinate with cloud Neo4j operators before running.
+
+### Recipe R4 — partial restart of the backfill
+
+If the backfill crashed halfway, just re-run it. Already-stamped nodes
+are skipped (the `WHERE n.uuid IS NULL` filter — pinned by
+`tests/test_round26_invariants.py::test_backfill_node_query_only_targets_null_uuid`).
+
+```bash
+python scripts/backfill_node_uuids.py
+```
+
+---
+
 _Last updated: 2026-04-17_

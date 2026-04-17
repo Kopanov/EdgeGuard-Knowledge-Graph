@@ -523,6 +523,201 @@ RETURN type(r) AS rel_type, count(r) AS missing;
 // Expected: empty for every edge type that connects documented labels.
 ```
 
+---
+
+## First-run: stand up a fresh cloud Neo4j
+
+Scenario: you have a production local Neo4j (the source of truth) and want to
+spin up an **empty** cloud Neo4j as a sync target. Recipe 1 (delta push) only
+covers incremental updates — for the initial population you need a full
+snapshot. Steps:
+
+1. **Deploy the round-25+ EdgeGuard code on the cloud-side worker** (or sync
+   service) so it has access to `compute_node_uuid` and the Neo4j client.
+   The cloud RECEIVER does not run any collectors — it only consumes deltas.
+
+2. **Provision the cloud Neo4j** (Neo4j 5.0+ recommended; APOC plugin
+   installed). Recommended cluster sizing: ≥ 8GB heap, ≥ 16GB page cache for
+   a 500K-node / 1M-edge graph.
+
+3. **Initialize the cloud schema** by running the standard EdgeGuard startup
+   sequence — this creates the 25 UNIQUE constraints + 43 uuid indexes
+   declared in `Neo4jClient.create_constraints` / `create_indexes`:
+
+   ```bash
+   # On the cloud-side worker
+   python -c "from src.neo4j_client import Neo4jClient; \
+              c = Neo4jClient(); c.connect(); \
+              c.create_constraints(); c.create_indexes(); c.close()"
+   ```
+
+   Index creation is online (non-blocking) but populating them on a fresh
+   empty graph is instant.
+
+4. **Confirm BACKFILL ran on the LOCAL side first.** This is critical: if any
+   local node has `n.uuid IS NULL`, the delta query in Recipe 1 EXCLUDES it
+   from the export → it never reaches cloud → silent data loss. Verify:
+   ```cypher
+   // On LOCAL Neo4j
+   MATCH (n) WHERE n.uuid IS NULL RETURN labels(n)[0] AS label, count(n) AS missing;
+   // MUST return empty before proceeding.
+   ```
+
+5. **Run the FULL snapshot push** (a one-shot variant of Recipe 1 with no
+   `last_updated` filter):
+
+   ```cypher
+   // LOCAL: extract every node with a uuid
+   MATCH (n) WHERE n.uuid IS NOT NULL
+   RETURN labels(n) AS labels, n.uuid AS uuid, properties(n) AS props
+   ```
+
+   Stream those into the cloud receiver and apply via:
+
+   ```cypher
+   // CLOUD: MERGE by uuid (label-scoped to handle CVE/Vulnerability twins)
+   UNWIND $rows AS d
+   CALL apoc.merge.node(d.labels, {uuid: d.uuid}, d.props, {}) YIELD node
+   RETURN count(node)
+   ```
+
+   Then for edges (extract LOCAL, apply CLOUD with the label-scoped MATCH
+   pattern from Recipe 1 lines 358-364).
+
+6. **Verify counts match** between local and cloud per-label and per-rel-type.
+   ```cypher
+   // RUN ON BOTH local + cloud, compare the output
+   MATCH (n) RETURN labels(n)[0] AS label, count(n) AS c ORDER BY label;
+   MATCH ()-[r]->() RETURN type(r) AS rel, count(r) AS c ORDER BY rel;
+   ```
+
+7. **Smoke test**: GraphQL query a representative node by uuid on both sides
+   and verify the response is identical.
+
+After this initial population, switch to Recipe 1 (delta push) for ongoing
+sync. Cadence: nightly is typical; hourly works for low-volume environments.
+
+---
+
+## Rollback recipes
+
+### Rollback A — undo a bad sync
+
+If a delta sync corrupted the cloud graph (wrong data, partial application,
+schema drift), the safest path is **restore from the cloud Neo4j snapshot**
+taken before the sync. EdgeGuard does not have an automated undo for sync
+operations — incremental MERGEs leave no audit trail.
+
+Pre-flight before every sync:
+
+```bash
+# CLOUD-side: snapshot before any sync run
+neo4j-admin database dump neo4j --to-path=/backups/cloud-pre-sync-$(date +%F-%H%M).dump
+```
+
+To restore:
+
+```bash
+# CLOUD-side: stop Neo4j, restore, restart
+systemctl stop neo4j
+neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1400.dump --overwrite-destination
+systemctl start neo4j
+```
+
+### Rollback B — revert PR #34 deploy
+
+If the PR itself is the problem (rare — code is backward-compatible):
+
+- Old code DOESN'T read `n.uuid` / `r.src_uuid` / `r.trg_uuid`, so reverting
+  the deploy leaves the new fields in place but unused. Graph stays
+  queryable. **Safe to revert.**
+- Old code STILL writes the new fields (defensive `coalesce` on every MERGE),
+  so even mid-revert the fields persist. No data loss either direction.
+
+### Rollback C — drop all uuid fields (urgent cleanup)
+
+Not normally needed (the fields are inert when unused), but documented for
+emergencies:
+
+```cypher
+// One-shot cleanup — removes every uuid field from every node and edge.
+// IRREVERSIBLE without a re-run of the backfill.
+MATCH (n) SET n.uuid = null;
+MATCH ()-[r]->() SET r.src_uuid = null, r.trg_uuid = null;
+
+// Drop the 43 uuid indexes (otherwise they sit empty)
+SHOW INDEXES YIELD name WHERE name ENDS WITH '_uuid'
+CALL { WITH name CALL db.index.fulltext.drop(name) RETURN count(*) AS dropped }
+RETURN sum(dropped);
+// (Adjust drop syntax to match your Neo4j version.)
+```
+
+### Rollback D — restart the backfill after a partial run
+
+The backfill is idempotent and resumable — if it crashed halfway, just re-run:
+
+```bash
+python scripts/backfill_node_uuids.py
+```
+
+Already-stamped nodes/edges are skipped (`WHERE n.uuid IS NULL` filter — see
+`tests/test_round26_invariants.py::test_backfill_node_query_only_targets_null_uuid`).
+
+If you want to **re-stamp** existing nodes (e.g. because you changed the
+canonicalization rules in `node_identity.py`), the backfill won't touch them.
+You'd need a custom one-shot:
+
+```cypher
+// CAUTION: this re-computes uuid for every Indicator. Run only if you
+// know you've changed the canonicalization (rare — would invalidate cloud
+// sync until cloud also recomputes).
+MATCH (i:Indicator) SET i.uuid = null;
+// then re-run the backfill
+```
+
+## ⚠️ CVE / Vulnerability twin-node design — read this before writing recipes
+
+EdgeGuard maintains TWO Neo4j labels for the same logical CVE:
+
+- `(:CVE)` — NVD-canonical, ResilMesh-shared. Created by the NVD collector.
+- `(:Vulnerability)` — EdgeGuard-managed, MISP-derived. Created by the MISP sync.
+
+Both use `cve_id` as the natural key, and both are deliberately mapped to STIX
+type `vulnerability` in `node_identity.NEO4J_TO_STIX_TYPE`. **This means the
+same `cve_id` produces the SAME `n.uuid` for both labels.** They're connected
+via `REFERS_TO` edges; an analyst can pivot freely between them.
+
+**Operational consequence — always scope MATCH-by-uuid to the LABEL:**
+
+```cypher
+✅ CORRECT — label-scoped MATCH
+MATCH (v:Vulnerability {uuid: $u}) RETURN v;
+MATCH (c:CVE          {uuid: $u}) RETURN c;
+
+❌ WRONG — bare MATCH matches BOTH twins (returns 2 rows for one logical CVE)
+MATCH (n {uuid: $u}) RETURN n;  // returns Vulnerability + CVE for same cve_id
+
+❌ WRONG — assumes uuid is unique per logical entity (it's not — it's per-twin)
+WITH 'abc-123-...' AS u
+MATCH (n {uuid: u}) DETACH DELETE n;  // deletes BOTH twins, not one
+```
+
+**For delta sync recipes**: every `MERGE`/`MATCH` keyed on `n.uuid` must
+include the label. Recipe 1 already does this with the
+`e.src_label IN labels(a)` guard — keep that pattern.
+
+**For STIX exporter consumers**: a STIX bundle has ONE `vulnerability` SDO
+per CVE. The bundle could have come from either twin. Cloud-side merge
+should: receive the SDO, find the matching `cve_id`, MERGE both
+`(:Vulnerability)` and `(:CVE)` if either is missing, then `MERGE
+(v)-[:REFERS_TO]-(c)` to keep them linked.
+
+This twin design is intentional (separation of concerns: NVD-canonical
+vs EdgeGuard-derived state) and pinned by
+`tests/test_node_identity.py::test_neo4j_uuid_equals_stix_sdo_id_uuid_portion`.
+
+---
+
 ## Caveats
 
 - **Topology / ResilMesh-owned nodes** (`Component`, `Mission`,
