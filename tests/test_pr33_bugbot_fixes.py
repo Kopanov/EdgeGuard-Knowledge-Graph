@@ -1169,7 +1169,15 @@ def test_merge_device_refuses_missing_device_id():
     """Bugbot (round 8, MED): the previous fallback ``str(id(data))`` for
     missing device_id used Python's memory-address id(), producing a
     different uuid every call for the same logical Device. Refuse the call
-    instead of writing a poisoned, non-deterministic node."""
+    instead of writing a poisoned, non-deterministic node.
+
+    PR #34 test-audit cleanup: dropped the weak ``str(id(data)) not in
+    code_only`` negative assertion. The behavioral check below (with
+    driver=None) is load-bearing: if the guard regresses AND the
+    str(id(data)) fallback returns, ``merge_device({})`` would attempt
+    a DB call against ``self.driver=None`` and raise AttributeError
+    instead of returning False — the test fails loudly. The source-
+    string pin was redundant."""
     import importlib
     import inspect
 
@@ -1178,12 +1186,9 @@ def test_merge_device_refuses_missing_device_id():
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.merge_device)
-    # The non-deterministic str(id(data)) fallback must be gone from EXECUTABLE
-    # code (the comment explaining the fix legitimately mentions it). Strip
-    # comment lines before scanning.
-    code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
-    assert "str(id(data))" not in code_only, "merge_device still uses non-deterministic str(id(data)) fallback in code"
-    # And there must be an explicit "missing device_id → return False" guard.
+    # Positive pin: the guard must exist (source search for present-form
+    # strings is safe — if the string isn't there the test fails loudly,
+    # no phantom-target risk).
     assert "if not device_id" in src or "if device_id is None" in src, (
         "merge_device must guard against missing device_id and return False — found no guard"
     )
@@ -1478,7 +1483,12 @@ def test_merge_missiondependency_refuses_missing_dependency_id():
     ``str(id(data))`` as a fallback for missing dependency_id — same anti-
     pattern eliminated from merge_device in round 8. Each call would produce
     a different MERGE key, creating duplicate nodes per call. Refuse the
-    call instead."""
+    call instead.
+
+    PR #34 test-audit cleanup: dropped the weak ``str(id(data)) not in
+    code_only`` negative assertion — same reasoning as
+    ``test_merge_device_refuses_missing_device_id``. The behavioral
+    driver=None check is load-bearing."""
     import importlib
     import inspect
 
@@ -1487,10 +1497,7 @@ def test_merge_missiondependency_refuses_missing_dependency_id():
     neo4j_client = importlib.import_module("neo4j_client")
 
     src = inspect.getsource(neo4j_client.Neo4jClient.merge_missiondependency)
-    code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
-    assert "str(id(data))" not in code_only, (
-        "merge_missiondependency still uses non-deterministic str(id(data)) fallback in code"
-    )
+    # Positive pin: the guard must exist.
     assert "if not dependency_id" in src or "if dependency_id is None" in src, (
         "merge_missiondependency must guard against missing dependency_id and return False"
     )
@@ -1837,43 +1844,101 @@ def test_original_date_fields_were_deleted_from_writes():
     original_published_date='2026-04-15' instead of the real 2012 date).
 
     Canonical EdgeGuard times live in ``first_imported_at`` (precise
-    timestamp + TZ on every node) and ``last_updated``."""
+    timestamp + TZ on every node) and ``last_updated``.
+
+    PR #34 test-audit cleanup: converted from source-string pin (comment-
+    stripped, phantom-target-risky) to BEHAVIORAL pin that captures the
+    actual Cypher sent to the driver and asserts on the SET clause. This
+    catches regressions regardless of whether the re-introduced SET line
+    is inside a #-comment, docstring, triple-quoted string, or variable
+    — the captured Cypher is the real send-to-Neo4j payload."""
     import importlib
-    import inspect
+    from unittest.mock import MagicMock
 
     if "neo4j_client" in sys.modules:
         del sys.modules["neo4j_client"]
     neo4j_client = importlib.import_module("neo4j_client")
 
-    def _code_only(src: str) -> str:
-        # Strip comment lines so the round-17 deletion-rationale comment
-        # (which legitimately mentions the field names) doesn't false-fail
-        # the negative assertion.
-        return "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+    # Capture every Cypher query sent via session.run().
+    captured: list[str] = []
 
-    # No production code path may write either property.
-    src_with_source = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_node_with_source))
-    assert "n.original_published_date" not in src_with_source, (
-        "merge_node_with_source must NOT write n.original_published_date (round 17)"
-    )
-    assert "n.original_modified_date" not in src_with_source, (
-        "merge_node_with_source must NOT write n.original_modified_date (round 17)"
-    )
+    class _CapSession:
+        def __enter__(self):
+            return self
 
-    src_indicators = _code_only(inspect.getsource(neo4j_client.Neo4jClient.merge_indicators_batch))
-    assert "n.original_published_date" not in src_indicators, (
-        "merge_indicators_batch must NOT write n.original_published_date (round 17)"
-    )
-    assert "n.original_modified_date" not in src_indicators, (
-        "merge_indicators_batch must NOT write n.original_modified_date (round 17)"
-    )
+        def __exit__(self, *_exc):
+            return False
 
-    # And the canonical EdgeGuard timestamp fields must still be written.
-    assert "n.first_imported_at = datetime()" in src_with_source, (
-        "first_imported_at must remain — that's the canonical EdgeGuard first-touch timestamp"
+        def run(self, query, *_a, **_kw):
+            captured.append(query)
+            result = MagicMock()
+            result.__iter__ = lambda self_: iter([])
+            result.single = lambda: None
+            return result
+
+    class _CapDriver:
+        def session(self, **_kw):
+            return _CapSession()
+
+        def close(self):
+            pass
+
+    client = neo4j_client.Neo4jClient.__new__(neo4j_client.Neo4jClient)
+    client.driver = _CapDriver()
+
+    # Invoke merge_node_with_source with representative data that would
+    # historically have triggered the deleted SET clauses (NVD-style CVE
+    # with published + last_modified).
+    ok = client.merge_node_with_source(
+        "CVE",
+        {"cve_id": "CVE-2024-TEST"},
+        {
+            "cve_id": "CVE-2024-TEST",
+            "published": "2024-01-01",
+            "last_modified": "2024-06-01",
+            "original_source": "nvd",
+        },
+        source_id="nvd",
     )
-    assert "n.last_updated = datetime()" in src_with_source, (
-        "last_updated must remain — that's the canonical EdgeGuard modification time"
+    assert ok, "merge_node_with_source must succeed with the stub driver"
+    assert captured, "merge_node_with_source must issue at least one Cypher query"
+
+    blob = "\n".join(captured)
+    # Negative assertions on the actual Cypher PAYLOAD — not source text,
+    # so comment-rephrasing / docstring games can't false-pass this test.
+    assert "n.original_published_date" not in blob, (
+        "round 17: n.original_published_date SET clause must not appear in sent Cypher"
+    )
+    assert "n.original_modified_date" not in blob, (
+        "round 17: n.original_modified_date SET clause must not appear in sent Cypher"
+    )
+    # Positive: the canonical EdgeGuard timestamps must still be stamped.
+    assert "n.first_imported_at = datetime()" in blob, (
+        "first_imported_at must remain — canonical EdgeGuard first-touch timestamp"
+    )
+    assert "n.last_updated = datetime()" in blob, "last_updated must remain — canonical EdgeGuard modification time"
+
+    # Also exercise merge_indicators_batch (UNWIND path) — same negatives.
+    captured.clear()
+    ok2 = client.merge_indicators_batch(
+        [
+            {
+                "indicator_type": "ipv4",
+                "value": "203.0.113.5",
+                "published": "2024-01-01",
+                "last_modified": "2024-06-01",
+            }
+        ],
+        source_id="nvd",
+    )
+    assert ok2 is not False, "merge_indicators_batch must succeed with the stub driver"
+    assert captured, "merge_indicators_batch must issue at least one Cypher query"
+    batch_blob = "\n".join(captured)
+    assert "n.original_published_date" not in batch_blob, (
+        "round 17: merge_indicators_batch must not SET n.original_published_date"
+    )
+    assert "n.original_modified_date" not in batch_blob, (
+        "round 17: merge_indicators_batch must not SET n.original_modified_date"
     )
 
 
@@ -1966,7 +2031,15 @@ def test_bridge_vulnerability_cve_logs_orphan_count():
     APOC ``total`` (count of OUTER rows processed, regardless of inner
     MATCH success) against pairs-with-CVE (a subset). The comparison
     ``expected > linked`` was always false (subset ≤ superset), so the
-    orphan log NEVER fired. Round 20 inverts: count orphans directly."""
+    orphan log NEVER fired. Round 20 inverts: count orphans directly.
+
+    PR #34 test-audit cleanup: dropped the weak comment-stripped negative
+    assertions (``expected_query not in code_src``,
+    ``expected > results not in code_src``). Those were vulnerable to
+    comment-rephrase regressions. The POSITIVE assertions below
+    (skip_query + NOT EXISTS pattern) together with the runtime
+    behavioral test ``test_bridge_vulnerability_cve_logs_orphan_count_runtime``
+    definitively prove the round-20 design is in place and working."""
     import importlib
     import inspect
 
@@ -1974,23 +2047,15 @@ def test_bridge_vulnerability_cve_logs_orphan_count():
         del sys.modules["enrichment_jobs"]
     enrichment_jobs = importlib.import_module("enrichment_jobs")
 
-    raw_src = inspect.getsource(enrichment_jobs.bridge_vulnerability_cve)
-    # Strip comment lines so the round-20 explanatory comment (which legitimately
-    # mentions the round-18 ``expected_query`` and ``expected > linked`` it
-    # replaced) doesn't false-fail the negative assertions below.
-    code_src = "\n".join(line for line in raw_src.splitlines() if not line.lstrip().startswith("#"))
-
-    assert "skip_query" in code_src, "bridge_vulnerability_cve must define a skip_query"
-    # Skip query must use NOT EXISTS — that's the point: count orphans.
-    assert "NOT EXISTS { MATCH (c:CVE {cve_id: v.cve_id}) }" in code_src, (
+    src = inspect.getsource(enrichment_jobs.bridge_vulnerability_cve)
+    # Positive-only source pins. If any of these strings aren't present,
+    # the test fails loudly — no phantom-target risk.
+    assert "skip_query" in src, "bridge_vulnerability_cve must define a skip_query"
+    # Skip query must use NOT EXISTS — that's the point: count orphans directly.
+    assert "NOT EXISTS { MATCH (c:CVE {cve_id: v.cve_id}) }" in src, (
         "skip_query must NOT EXISTS-MATCH the CVE the inner action would link"
     )
-    assert "no matching CVE" in code_src, "operator-facing log must mention orphan CVE count"
-    # The broken round-18 design must be gone (in actual code, not docstring).
-    assert "expected_query" not in code_src, "round-18 broken expected_query must be replaced by skip_query (round 20)"
-    assert "expected > results" not in code_src and "expected_rec" not in code_src, (
-        "round-18 broken expected-vs-linked comparison must be removed"
-    )
+    assert "no matching CVE" in src, "operator-facing log must mention orphan CVE count"
 
 
 def test_bridge_vulnerability_cve_logs_orphan_count_runtime(caplog):
