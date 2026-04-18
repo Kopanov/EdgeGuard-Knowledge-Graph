@@ -1056,21 +1056,25 @@ def cmd_validate(args):
         from version_compatibility import compare_pinned_vs_running
 
         rows = compare_pinned_vs_running()
-        warn_count = 0
         for _component, status, message in rows:
             if status == "ok":
                 ok(message)
             elif status == "warn":
                 warn(message)
-                warn_count += 1
             else:
                 info(message)
-        if warn_count:
-            # Track in issues list for the validate-exit-code summary, but
-            # only as warnings — version drift doesn't block deployment if
-            # the operator made a deliberate choice to run on a different
-            # line. The signal is informational.
-            issues.append(f"{warn_count} version pin(s) drift from running components")
+        # PR #36 commit 8425380 (bugbot MED): version-drift warnings are
+        # NOT appended to ``issues``. Two reasons:
+        #   1. The previous code appended a synthetic "N pins drifted"
+        #      string AND printed an apologetic comment claiming the
+        #      check "doesn't block deployment" — but ``cmd_validate``
+        #      returns exit 1 when ``issues`` is non-empty, so it
+        #      DID block. Self-contradicting.
+        #   2. Inconsistent with ``cmd_doctor`` which already treats
+        #      version drift as informational (never bumps ``all_ok``).
+        # If a future operator wants version drift to gate deploys, add
+        # an opt-in env var (e.g. ``EDGEGUARD_VALIDATE_FAIL_ON_DRIFT=1``)
+        # rather than reverting the default.
     except Exception as e:
         warn(f"Version compatibility check failed: {e}")
 
