@@ -158,17 +158,20 @@ try:
         record_source_truthful_future_clamp as _metric_future_clamp,
     )
 except ImportError:  # pragma: no cover — defensive
-
-    def _metric_accept(*_a: Any, **_kw: Any) -> None:
+    # Mypy enforces "all conditional function variants must have
+    # identical signatures" — keep these no-ops in lock-step with
+    # the metrics_server helpers they shadow. If you change a helper
+    # signature, change BOTH places.
+    def _metric_accept(source_id: Optional[str], field: str) -> None:
         return None
 
-    def _metric_drop(*_a: Any, **_kw: Any) -> None:
+    def _metric_drop(source_id: Optional[str], reason: str, field: str) -> None:
         return None
 
-    def _metric_coerce_reject(*_a: Any, **_kw: Any) -> None:
+    def _metric_coerce_reject(reason: str) -> None:
         return None
 
-    def _metric_future_clamp(*_a: Any, **_kw: Any) -> None:
+    def _metric_future_clamp() -> None:
         return None
 
 
