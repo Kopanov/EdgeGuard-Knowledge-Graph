@@ -206,15 +206,36 @@ class TestAllQueriesUseBatched:
 
 
 class TestInterQueryPauses:
-    """Verify that time.sleep(_INTER_QUERY_PAUSE) is called between queries."""
+    """Verify that env-gated query_pause() is called between queries.
 
-    def test_sleep_calls_in_source(self):
-        """The source of build_relationships() must contain time.sleep(_INTER_QUERY_PAUSE)."""
+    PR #40 (Performance Auditor Tier S S10): the previous hardcoded
+    ``_INTER_QUERY_PAUSE = 3`` constant burned ~36 seconds per
+    build_relationships run × multiple runs/day. Replaced with
+    ``query_pause()`` which reads ``EDGEGUARD_QUERY_PAUSE_SECONDS``
+    (default 0). The pacing call SITES are still required (so
+    operators on memory-constrained Neo4j can opt back in via the
+    env var) — what's removed is the hardcoded value.
+    """
+
+    def test_query_pause_calls_in_source(self):
+        """The source of build_relationships() must contain ``query_pause()``
+        between queries — operators need the call sites present so the
+        env-gated pause becomes possible to enable. Pre-PR-#40 the
+        equivalent assertion was ``time.sleep(_INTER_QUERY_PAUSE)``."""
         source = inspect.getsource(build_relationships.build_relationships)
-        assert "time.sleep(_INTER_QUERY_PAUSE)" in source, (
-            "build_relationships() must call time.sleep(_INTER_QUERY_PAUSE) between queries"
+        assert "query_pause()" in source, (
+            "build_relationships() must call query_pause() between queries — "
+            "the env-gated replacement for the old hardcoded time.sleep(_INTER_QUERY_PAUSE)"
+        )
+        # Negative pin: the old hardcoded pattern must NOT come back.
+        assert "time.sleep(_INTER_QUERY_PAUSE)" not in source, (
+            "PR #40 removed _INTER_QUERY_PAUSE — if this regresses, the audit "
+            "finding (30min-3h idle per baseline) returns silently"
         )
 
-    def test_inter_query_pause_value(self):
-        """_INTER_QUERY_PAUSE should be a positive number."""
-        assert build_relationships._INTER_QUERY_PAUSE > 0
+    def test_inter_query_pause_constant_removed(self):
+        """``_INTER_QUERY_PAUSE`` is GONE — the env var supersedes it."""
+        assert not hasattr(build_relationships, "_INTER_QUERY_PAUSE"), (
+            "_INTER_QUERY_PAUSE constant must be removed — env-gating via "
+            "EDGEGUARD_QUERY_PAUSE_SECONDS is the new contract"
+        )

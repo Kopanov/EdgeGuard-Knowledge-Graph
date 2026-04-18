@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
 from node_identity import compute_node_uuid  # noqa: E402
+from query_pause import query_pause
 
 try:
     from metrics_server import record_enrichment_duration
@@ -249,7 +250,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     "[CAMPAIGN] backfilled c.uuid on %d pre-existing Campaign nodes (likely from a pre-round-21 race)",
                     backfilled,
                 )
-            time.sleep(3)
+            query_pause()
 
             # Step 2: Link malware to their campaigns. Both endpoints have
             # n.uuid by now (Malware via merge_node_with_source, Campaign via
@@ -266,7 +267,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
-            time.sleep(3)
+            query_pause()
 
             # Step 3: Link active indicators to their campaigns (sample: up to 100 per campaign)
             # Using LIMIT inside WITH to avoid huge relationship fans
@@ -285,7 +286,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
-            time.sleep(3)
+            query_pause()
 
             # Step 4: Deactivate campaigns whose indicators are all retired
             logger.info("[DECAY] Deactivating campaigns with no active indicators...")
@@ -431,7 +432,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         record = result.single()
                         total_updated += record["updated"] if record else 0
                         if ci + 1000 < len(small_eids):
-                            time.sleep(3)
+                            query_pause()
 
                     # Large events: use apoc.periodic.iterate to batch at edge level.
                     # A 96K-indicator event can have millions of edges — too many for one tx.
@@ -473,7 +474,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         logger.info(
                             f"  [CALIBRATE]   event {eid} ({evt_size} indicators): {evt_updated} edges calibrated"
                         )
-                        time.sleep(3)  # Let Neo4j flush between large event batches
+                        query_pause()  # Let Neo4j flush between large event batches
 
                     results[tier_label] = total_updated
                     if total_updated:

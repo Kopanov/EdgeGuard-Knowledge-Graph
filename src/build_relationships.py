@@ -14,11 +14,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import logging
-import time
 
 from config import VALID_ZONES
 from neo4j_client import Neo4jClient
 from node_identity import compute_node_uuid
+from query_pause import query_pause
 
 try:
     from metrics_server import record_neo4j_relationships
@@ -27,8 +27,13 @@ try:
 except ImportError:
     _METRICS_AVAILABLE = False
 
-# Pause between queries to let Neo4j flush transactions and reclaim memory
-_INTER_QUERY_PAUSE = 3  # seconds
+# PR #40 (Performance Auditor Tier S S10): the previous hardcoded
+# ``_INTER_QUERY_PAUSE = 3`` × 12 sites burned 36 seconds of pure idle
+# time per build_relationships run, scheduler-blocking with no Neo4j
+# work happening. Now env-gated to 0 by default via ``query_pause()``;
+# operators on memory-constrained Neo4j who genuinely need pacing can
+# set ``EDGEGUARD_QUERY_PAUSE_SECONDS=1`` (or whatever) without a code
+# change. See ``src/query_pause.py`` for the rationale.
 
 # Pre-computed Sector node uuids for the known zones — used in the TARGETS
 # (7a) and AFFECTS (7b) queries below to stamp ``sec.uuid`` on Sector nodes
@@ -188,7 +193,7 @@ def build_relationships():
         _inner = 'WITH $t AS t MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = "kill_chain_phase", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, t.uuid), r.trg_uuid = coalesce(r.trg_uuid, tc.uuid)'
         if not _safe_run_batched(client, "Technique → Tactic", _outer, _inner, stats, "in_tactic"):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
         logger.info("[LINK] 2/12 Malware → ThreatActor (exact name match)...")
@@ -196,7 +201,7 @@ def build_relationships():
         _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/12 Indicator → Vulnerability (exact CVE match)...")
@@ -219,7 +224,7 @@ def build_relationships():
             skip_query=_q3a_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3b/12 Indicator → CVE (exact CVE match)...")
@@ -240,7 +245,7 @@ def build_relationships():
             skip_query=_q3b_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 4. Indicator → Malware (INDICATES) — MISP event co-occurrence (BATCHED)
         # This query caused OOM on 170K+ indicators. Uses apoc.periodic.iterate
@@ -281,7 +286,7 @@ def build_relationships():
             "indicates_cooccurrence",
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 5. ThreatActor → Technique (EMPLOYS_TECHNIQUE) — explicit ATT&CK
         # uses_techniques list. Attribution semantics: "who uses this TTP".
@@ -308,7 +313,7 @@ def build_relationships():
             skip_query=_q5_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 6. Malware → Technique (IMPLEMENTS_TECHNIQUE) — MITRE STIX uses
         # relationships. Capability semantics: "what the code can do".
@@ -333,7 +338,7 @@ def build_relationships():
             skip_query=_q6_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 7a. Indicator → Sector (TARGETS)
         # The Sector node is auto-CREATEd here — stamp its uuid with the
@@ -373,7 +378,7 @@ def build_relationships():
             client, "Indicator -> Sector (TARGETS)", _q7a_outer, _q7a_inner, stats, "indicator_targets_sector"
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 7b. Vulnerability/CVE → Sector (AFFECTS)
         # Same Sector-uuid stamp as 7a — see comment above.
@@ -399,7 +404,7 @@ def build_relationships():
             client, "Vulnerability/CVE -> Sector (AFFECTS)", _q7b_outer, _q7b_inner, stats, "vuln_affects_sector"
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 8. Indicator → Technique (USES_TECHNIQUE) — OTX attack_ids
         # PR #34 round 20: skip_query counts orphan (indicator, attack_id)
@@ -423,7 +428,7 @@ def build_relationships():
             skip_query=_q8_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 9. Indicator → Malware (INDICATES) — malware_family name match
         # PR #34 round 20: skip_query counts Indicators with a non-empty
@@ -452,7 +457,7 @@ def build_relationships():
             skip_query=_q9_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # 10. Tool → Technique (IMPLEMENTS_TECHNIQUE) — MITRE uses_techniques.
         # Same capability semantics as Malware above; both are "code/tool can
@@ -477,7 +482,7 @@ def build_relationships():
             skip_query=_q10_skip,
         ):
             failures += 1
-        time.sleep(_INTER_QUERY_PAUSE)
+        query_pause()
 
         # Cross-source dedup is handled at ingest time via single-key MERGE
         # (name for Malware/ThreatActor, cve_id for CVE/Vulnerability, mitre_id
