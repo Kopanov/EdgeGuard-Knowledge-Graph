@@ -629,7 +629,16 @@ class StixExporter:
         labels without a SOURCED_FROM edge — props is returned
         unchanged when no edges exist.
         """
+        # PR (S5) commit X (bugbot c136baf LOW): validate ``label``
+        # before f-string interpolation per project rule. Today's
+        # callers all pass hardcoded labels via _node_to_sdo, but
+        # the import boundary is the right place to defend against
+        # any future caller that might pass an attacker-controlled
+        # value (e.g. via a label query parameter).
+        from neo4j_client import _validate_label
         from node_identity import natural_key_props
+
+        _validate_label(label)
 
         # ----- Special case: Campaign reads its own pre-aggregated props
         if label == "Campaign":
@@ -1020,10 +1029,26 @@ class StixExporter:
                     "url": f"https://attack.mitre.org/tactics/{mitre_id}",
                 }
             )
+        # PR (S5) commit X (bugbot c136baf MED): STIX 2.1 §3.2 + §11.2
+        # require ``created`` + ``modified`` on EVERY SDO including
+        # custom types. Every other SDO builder uses the stix2 SDK
+        # which auto-stamps these. Since x-mitre-tactic is a custom
+        # type the SDK doesn't natively model, we stamp them here:
+        # - ``created`` = node's first_imported_at (when EdgeGuard
+        #   first added the Tactic — closest analogue to STIX's
+        #   "when this object was created by the producer")
+        # - ``modified`` = last_updated (when last touched).
+        # Both fall back to NOW if the node lacks them (defensive).
+        # Z-suffix normalized for STIX validator compatibility.
+        now_iso = _stix_ts(_dt.datetime.now(_dt.timezone.utc).isoformat())
+        created = _stix_ts(_iso_str(props.get("first_imported_at"))) or now_iso
+        modified = _stix_ts(_iso_str(props.get("last_updated"))) or now_iso
         sdo: Dict[str, Any] = {
             "type": "x-mitre-tactic",
             "spec_version": "2.1",
             "id": stix_id,
+            "created": created,
+            "modified": modified,
             "name": name,
             "description": props.get("description"),
         }
