@@ -3127,10 +3127,22 @@ class Neo4jClient:
         ResilMesh spec: tag is LIST OF STRING identifying components that
         contributed data. We accumulate via apoc.coll.toSet so multiple
         sources are tracked.
+
+        PR #37 (Bug Hunter Tier S A3): refuses to merge when ``address``
+        is missing or empty. Without this guard, ``MERGE (i:IP
+        {address: NULL})`` matches/creates a single sentinel node that
+        every subsequent unknown-IP merge HIJACKS — silently folding
+        all unknown-IP rows into one Neo4j node and breaking
+        deduplication. Common trigger: ResilMesh/ISIM payload arriving
+        from an incomplete CMDB sync. Same pattern fix as the existing
+        ``merge_device`` validation.
         """
+        address = data.get("address")
+        if not address or (isinstance(address, str) and not address.strip()):
+            logger.warning("merge_ip refused: missing or empty 'address' — skipping to avoid null-key collapse")
+            return False
         # PR #33 follow-up: stamp deterministic IP n.uuid for cross-environment
         # traceability. Same compute_node_uuid pattern as the MISP-side mergers.
-        address = data.get("address")
         ip_uuid = compute_node_uuid("IP", {"address": address})
         query = """
         MERGE (i:IP {address: $address})
@@ -3164,8 +3176,15 @@ class Neo4jClient:
             return False
 
     def merge_host(self, data: dict) -> bool:
-        """MERGE a Host node. Properties: hostname"""
+        """MERGE a Host node. Properties: hostname
+
+        PR #37: refuses null/empty hostname to avoid the same null-key
+        collapse described in ``merge_ip``.
+        """
         hostname = data.get("hostname")
+        if not hostname or (isinstance(hostname, str) and not hostname.strip()):
+            logger.warning("merge_host refused: missing or empty 'hostname' — skipping to avoid null-key collapse")
+            return False
         host_uuid = compute_node_uuid("Host", {"hostname": hostname})
         query = """
         MERGE (h:Host {hostname: $hostname})
@@ -3497,9 +3516,26 @@ class Neo4jClient:
         Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
         through either path gets the same uuid.
         """
-        # Provide default values if not present
+        # PR #37 (Bug Hunter Tier S A3): refuse to merge when ``cve_id`` is
+        # missing. Previously this defaulted to the sentinel
+        # ``"CVE-0000-00000"`` — every ResilMesh vuln payload missing a
+        # CVE then collapsed onto the SAME ``Vulnerability {cve_id:
+        # "CVE-0000-00000"}`` node, with ``name``/``status``/``description``
+        # overwritten on every call. Single poisoned node accumulated
+        # hundreds of unrelated vulnerability identities; last writer
+        # always won. ResilMesh users with vendor advisories or internal
+        # scan findings (no CVE assigned) hit this path silently.
+        # Caller MUST pass a real cve_id; refuse rather than corrupt.
+        cve_id = data.get("cve_id")
+        if not cve_id or (isinstance(cve_id, str) and not cve_id.strip()):
+            logger.warning(
+                "merge_resilmesh_vulnerability refused: missing 'cve_id' — "
+                "vendor advisories without a CVE need their own node type, "
+                "not the CVE-0000-00000 sentinel that silently collapses unrelated rows."
+            )
+            return False
+        # Default name only after cve_id validation
         name = data.get("name", "unknown")
-        cve_id = data.get("cve_id", "CVE-0000-00000")
         vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
