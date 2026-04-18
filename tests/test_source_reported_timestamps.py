@@ -406,14 +406,23 @@ def test_campaign_builder_aggregates_per_source_edges_via_traversal():
         "per-source provenance — regressing to node-level reads loses the "
         "per-source detail we built the edge architecture to capture"
     )
-    # MIN aggregation with coalesce fallback
-    assert "min(coalesce(r.source_reported_first_at, i.first_imported_at))" in pre_merge, (
-        "Campaign first_seen MUST be MIN(coalesce(edge_claim, node_db_local)) "
-        "so indicators with no SOURCED_FROM edges still contribute their "
-        "first_imported_at to the campaign timeline"
+    # PR (S5) commit X (bugbot c9bb277 MED): the aggregation MUST be
+    # two-stage — per-indicator across edges FIRST (native MIN/MAX
+    # ignores NULLs), THEN per-campaign across indicators with the
+    # node-level DB-local coalesce fallback. The previous single-stage
+    # `min/max(coalesce(r.X, i.Y))` pattern row-multiplied on NULL
+    # edges and polluted the MAX with i.last_updated wall-clock.
+    assert "min(r.source_reported_first_at) AS i_source_first" in pre_merge, (
+        "Campaign builder MUST aggregate per-indicator edge MIN first "
+        "(bugbot c9bb277 MED — prevents MAX pollution from NULL-edge rows)"
     )
-    # MAX aggregation with coalesce fallback
-    assert "max(coalesce(r.source_reported_last_at, i.last_updated))" in pre_merge
+    assert "max(r.source_reported_last_at)  AS i_source_last" in pre_merge
+    # Outer coalesce on the PER-INDICATOR aggregate, not the per-edge
+    assert "min(coalesce(i_source_first, i.first_imported_at))" in pre_merge, (
+        "Campaign first_seen MUST coalesce the PER-INDICATOR source MIN "
+        "(not the raw edge value) with the indicator's first_imported_at"
+    )
+    assert "max(coalesce(i_source_last,  i.last_updated))" in pre_merge
 
 
 def test_campaign_builder_last_seen_has_max_guard():

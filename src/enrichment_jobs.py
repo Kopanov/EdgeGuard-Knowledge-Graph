@@ -203,22 +203,36 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
             WHERE i.active = true
-            // PR (S5) commit X (architecture redesign): per-source
-            // timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
-            // edges, NOT on the node. For a Campaign aggregate we
-            // want "earliest claim across ALL (indicator, source)
-            // pairs" — so we traverse the edges per indicator and
-            // pull MIN(r.source_reported_first_at). Falls back to
-            // ``i.first_imported_at`` (DB-local "when EdgeGuard first
-            // saw this indicator from any source") when no source
-            // claim exists. MAX symmetric for last_seen.
+            // PR (S5) commit X (bugbot c9bb277 MED + architecture redesign):
+            // per-source timestamps live on SOURCED_FROM edges, not on
+            // the node. We want "earliest claim across ALL sources for
+            // this indicator" per indicator, THEN aggregate across
+            // indicators for the campaign.
+            //
+            // The previous shape `min/max(coalesce(r.X, i.Y))` had a
+            // row-multiplication bug (bugbot c9bb277 MED): for an
+            // indicator with N edges, the OPTIONAL MATCH produces N
+            // rows. If any edge had NULL source_reported_last_at, that
+            // row's coalesce fell back to `i.last_updated` (a recent
+            // sync wall-clock), and the outer `max()` would pick the
+            // wall-clock over the real older source claims from OTHER
+            // edges. Campaign `c.last_seen` would reflect EdgeGuard's
+            // sync time instead of the source's actual last-reported
+            // claim.
+            //
+            // Fix: aggregate edges per-indicator FIRST (ignoring NULL
+            // claims — that's what min/max do natively), THEN coalesce
+            // the per-indicator result with the node-level DB-local
+            // fallback ONLY when ALL source claims are NULL.
             OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
-            WITH a, malware_list, i, r
+            WITH a, malware_list, i,
+                 min(r.source_reported_first_at) AS i_source_first,
+                 max(r.source_reported_last_at)  AS i_source_last
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
-                 min(coalesce(r.source_reported_first_at, i.first_imported_at)) AS first_seen,
-                 max(coalesce(r.source_reported_last_at, i.last_updated))       AS last_seen
+                 min(coalesce(i_source_first, i.first_imported_at)) AS first_seen,
+                 max(coalesce(i_source_last,  i.last_updated))      AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
             WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(

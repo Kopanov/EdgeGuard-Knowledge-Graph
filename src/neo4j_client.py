@@ -223,6 +223,18 @@ def resolve_vulnerability_cve_id(item: Dict[str, Any]) -> Optional[str]:
 
 
 # Source definitions
+# PR (S5) commit X (bugbot HIGH on c9bb277 — partial): the ``SOURCES`` dict
+# MUST contain a key for every tag the collectors actually emit, because
+# the SOURCED_FROM edge MERGE does ``MATCH (s:Source {source_id: $id})``
+# against whatever source_id parse_attribute resolved — and a missing
+# match produces zero edges silently. CISA is already covered by both
+# ``cisa`` and ``cisa_kev`` entries. Feodo + SSL previously only had
+# the LEGACY short names (``feodo`` / ``sslbl``) while the collectors
+# emit ``feodo_tracker`` / ``ssl_blacklist`` (config.SOURCE_TAGS +
+# finance_feed_collector); those two paths were silently dropping
+# edge writes. Fixed by adding the canonical collector-tag entries
+# below (keeping legacy short-names for back-compat with any
+# pre-existing Source nodes — ensure_sources is idempotent).
 SOURCES = {
     "alienvault_otx": {"name": "AlienVault OTX", "type": "threat_intel", "reliability": 0.7},
     "virustotal": {"name": "VirusTotal", "type": "threat_intel", "reliability": 0.8},
@@ -232,8 +244,12 @@ SOURCES = {
     "misp": {"name": "MISP", "type": "threat_intel", "reliability": 0.75},
     "cisa": {"name": "CISA KEV", "type": "advisory", "reliability": 0.9},
     "cisa_kev": {"name": "CISA KEV", "type": "advisory", "reliability": 0.9},
+    # Both short-names AND canonical collector-emitted tags MUST exist:
     "feodo": {"name": "Feodo Tracker", "type": "threat_intel", "reliability": 0.7},
+    "feodo_tracker": {"name": "Feodo Tracker", "type": "threat_intel", "reliability": 0.7},
     "sslbl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
+    "ssl_blacklist": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
+    "abusech_ssl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
     "urlhaus": {"name": "URLhaus", "type": "threat_intel", "reliability": 0.7},
     "cybercure": {"name": "CyberCure", "type": "threat_intel", "reliability": 0.6},
     "threatfox": {"name": "ThreatFox", "type": "threat_intel", "reliability": 0.7},
