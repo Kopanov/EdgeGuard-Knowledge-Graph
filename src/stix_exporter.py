@@ -35,6 +35,8 @@ Key design decisions (see proposal doc for justification):
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import json
 import logging
 import os
 import unicodedata
@@ -749,17 +751,44 @@ class StixExporter:
         return sdo["id"]
 
     def _bundle(self, objects: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-        bundle_id = "bundle--" + str(uuid.uuid4())
-        # Bundle-level provenance — lets ResilMesh verify exactly which
-        # EdgeGuard build produced a bundle and when, so they can diff
-        # bundles across versions and correlate with their own ingest
-        # timestamps. Uses custom properties prefixed ``x_edgeguard_`` so
-        # the bundle still validates against STIX 2.1 (OASIS 3.7.2 allows
-        # producer-specific custom properties).
+        # PR #37: bundle assembly is now FULLY DETERMINISTIC. The
+        # previous form used ``uuid.uuid4()`` for ``bundle.id`` and
+        # iterated ``objects`` in dict-insertion order (which depends
+        # on Cypher row order — Neo4j does NOT guarantee row order
+        # absent ``ORDER BY``). Two consecutive identical exports
+        # produced different bundle IDs and different object array
+        # orders, so ResilMesh's ``diff bundles`` saw "everything
+        # changed" on every poll — directly contradicting the
+        # docstring promise (line 16) that "ResilMesh can diff
+        # bundles safely". The audit (Devil's Advocate + Logic Tracker
+        # both flagged this independently) made it Tier S for PR #37.
+        #
+        # Determinism plan:
+        #   1. Sort ``objects`` by ``id`` (stable across runs).
+        #   2. Compute ``bundle.id`` as ``uuid5`` of the sorted-id
+        #      content hash, so identical content → identical id.
+        #   3. Provenance ``generated_at`` is OPTIONALLY frozen by the
+        #      ``EDGEGUARD_DETERMINISTIC_BUNDLE`` env var so callers
+        #      that need byte-stable bundles (CI fixtures, snapshot
+        #      tests, ResilMesh diff polls) can opt in. Default keeps
+        #      the wall-clock timestamp for forensics — so an operator
+        #      can still answer "when was this bundle generated" from
+        #      the bundle alone.
+        objects_list = sorted(
+            list(objects),
+            key=lambda o: o.get("id", ""),
+        )
+        # Hash over the sorted ids only (NOT full payloads — payload
+        # field churn within an SDO would change the id otherwise; the
+        # bundle "identity" is "which objects are in it", not "what's
+        # the current snapshot of each").
+        ids_payload = json.dumps([o.get("id", "") for o in objects_list], separators=(",", ":"))
+        content_hash = hashlib.sha256(ids_payload.encode("utf-8")).hexdigest()
+        bundle_id = "bundle--" + str(uuid.uuid5(EDGEGUARD_STIX_NAMESPACE, content_hash))
         return {
             "type": "bundle",
             "id": bundle_id,
-            "objects": list(objects),
+            "objects": objects_list,
             "x_edgeguard_source": _bundle_provenance(),
         }
 
@@ -835,14 +864,31 @@ def _bundle_provenance() -> Dict[str, Any]:
     Kept in a module-level helper so tests can freeze the timestamp by
     monkeypatching ``_utcnow``. ``git_sha`` is read from the module
     constant so it is stable for a given process lifetime.
+
+    PR #37: when ``EDGEGUARD_DETERMINISTIC_BUNDLE`` is truthy, the
+    ``generated_at`` timestamp is omitted entirely so the bundle dict
+    becomes byte-stable across runs of the same graph state. Used by
+    ResilMesh diff-poll callers + CI snapshot tests. Default OFF so
+    forensic "when did this bundle leave EdgeGuard" use cases keep
+    working without code change.
     """
-    return {
+    provenance: Dict[str, Any] = {
         "producer": "EdgeGuard Knowledge Graph",
         "exporter": "stix_exporter",
-        "generated_at": _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "git_sha": _GIT_SHA or None,
         "spec_version": "2.1",
     }
+    if not _is_truthy_env("EDGEGUARD_DETERMINISTIC_BUNDLE"):
+        provenance["generated_at"] = _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return provenance
+
+
+def _is_truthy_env(name: str) -> bool:
+    """Same boolean parsing the rest of the codebase uses for env vars
+    (1/true/yes/on). Centralized here to keep the deterministic-bundle
+    behavior easy to swap without spelunking."""
+    val = os.getenv(name, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
 
 
 def _utcnow() -> _dt.datetime:
