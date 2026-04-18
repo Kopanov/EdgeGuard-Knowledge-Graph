@@ -262,6 +262,9 @@ def cmd_doctor(args):
             pass  # Non-critical diagnostic
 
     # Check MISP version compatibility
+    # PR #36 commit X (bugbot LOW): captured here once and threaded to
+    # ``compare_pinned_vs_running`` below to avoid a second MISP round-trip.
+    _captured_misp_version: Optional[str] = None
     if ok_flag:
         info("Checking MISP/PyMISP version compatibility...")
         try:
@@ -279,6 +282,10 @@ def cmd_doctor(args):
                 warn("This may cause Airflow DAG parser to hang. Use 'python3 src/run_pipeline.py' as workaround.")
             else:
                 ok(f"MISP server {version} compatible with PyMISP")
+            # Capture for the version-compat report below — skips the redundant probe
+            # (only "unknown" / falsy values fall through to a fresh capture).
+            if version and version != "unknown":
+                _captured_misp_version = version
         except Exception as e:
             warn(f"Could not check MISP version compatibility: {e}")
 
@@ -497,7 +504,9 @@ def cmd_doctor(args):
     try:
         from version_compatibility import compare_pinned_vs_running
 
-        rows = compare_pinned_vs_running()
+        # Pass the MISP version captured earlier (line ~272) to skip a
+        # redundant network round-trip — bugbot LOW finding on PR #36.
+        rows = compare_pinned_vs_running(misp_server_version=_captured_misp_version)
         for _component, status, message in rows:
             if status == "ok":
                 ok(message)

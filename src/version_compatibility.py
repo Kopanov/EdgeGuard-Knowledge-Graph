@@ -407,6 +407,7 @@ def compare_version(component: str, running: Optional[str]) -> Tuple[str, str]:
 def compare_pinned_vs_running(
     *,
     neo4j_client_factory=None,
+    misp_server_version: Optional[str] = None,
 ) -> List[Tuple[str, str, str]]:
     """Capture every component's running version + compare to its pin.
 
@@ -414,16 +415,33 @@ def compare_pinned_vs_running(
     deterministic order. Doctor / validate iterate this list and route
     each row by status to ``ok()`` / ``warn()`` / ``info()``.
 
-    The ``neo4j_client_factory`` parameter is plumbed only through to
-    ``get_neo4j_server_version`` — every other capture is process-local.
-    Tests use it to inject a stub client without a live Neo4j.
+    Parameters
+    ----------
+    neo4j_client_factory:
+        Optional factory for a Neo4j client. When provided, used by
+        ``get_neo4j_server_version`` instead of constructing a fresh
+        ``Neo4jClient`` (which would pay the
+        ``@retry_with_backoff`` cost). Tests inject mocks here.
+    misp_server_version:
+        Optional pre-captured MISP server version string. When provided,
+        skips the internal ``get_misp_server_version()`` call (which
+        otherwise instantiates ``MISPHealthCheck`` and makes a
+        round-trip to MISP).
+
+        PR #36 commit X (bugbot LOW): ``cmd_doctor`` already calls
+        ``MISPHealthCheck().check_health()`` earlier in the doctor
+        flow for the MISP/PyMISP version-compat check. Without this
+        parameter, ``compare_pinned_vs_running`` would do a SECOND
+        round-trip via ``get_misp_server_version`` → duplicate
+        network call on every doctor run. Caller passes the version
+        string from the earlier call to skip the redundant probe.
     """
     captures: Dict[str, Optional[str]] = {
         "neo4j_driver": get_neo4j_driver_version(),
         "neo4j_server": get_neo4j_server_version(neo4j_client_factory=neo4j_client_factory),
         "airflow": get_airflow_version(),
         "pymisp": get_pymisp_version(),
-        "misp_server": get_misp_server_version(),
+        "misp_server": misp_server_version if misp_server_version is not None else get_misp_server_version(),
     }
     # Stable ordering for predictable output
     order = ("neo4j_server", "neo4j_driver", "airflow", "pymisp", "misp_server")

@@ -98,7 +98,13 @@ def test_get_neo4j_server_version_calls_dbms_components():
         "Cypher MUST filter to component name 'Neo4j Kernel' — Neo4j 2025.05+ adds a "
         "'Cypher' row that would otherwise be picked up as the server version"
     )
-    fake_client.close.assert_called_once(), "client must be closed even on success"
+    # PR #36 commit X (bugbot LOW): the previous form was
+    # ``fake_client.close.assert_called_once(), "msg"`` — a bare
+    # tuple expression that discarded the message. assert_called_once()
+    # already raises AssertionError with its own descriptive output;
+    # the trailing message was dead code from a misremembered ``assert
+    # X, "msg"`` pattern.
+    fake_client.close.assert_called_once()
 
 
 def test_get_neo4j_server_version_returns_none_on_connection_failure():
@@ -412,6 +418,53 @@ def test_recommended_neo4j_driver_matches_airflow_image_requirements_pin():
         f"requirements-airflow-docker.txt pins neo4j~={pin}; CLI requirements.txt + "
         f"RECOMMENDED_VERSIONS['neo4j_driver']={recommended!r} — keep them aligned."
     )
+
+
+def test_compare_pinned_vs_running_uses_provided_misp_version_skipping_probe(monkeypatch):
+    """PR #36 commit X (bugbot LOW) regression pin.
+
+    When the caller passes ``misp_server_version=...``, the function
+    MUST use that value and NOT call ``get_misp_server_version()``.
+    Without this, ``cmd_doctor`` makes two MISP round-trips per run.
+    """
+    import version_compatibility
+
+    # Patch the internal MISP probe to bomb if invoked — proves the
+    # caller's pre-captured value is honored, not re-fetched.
+    def _bomb():
+        raise RuntimeError("get_misp_server_version must NOT be called when caller supplies misp_server_version")
+
+    monkeypatch.setattr(version_compatibility, "get_misp_server_version", _bomb)
+
+    fake_client = MagicMock()
+    fake_client.connect.return_value = False  # don't try a real Neo4j
+
+    rows = version_compatibility.compare_pinned_vs_running(
+        neo4j_client_factory=lambda: fake_client,
+        misp_server_version="2.4.180",
+    )
+    misp_row = next(r for r in rows if r[0] == "misp_server")
+    # Status should be "ok" since 2.4.180 matches the pinned major.minor of 2.4
+    assert misp_row[1] == "ok", f"misp_server with 2.4.180 should match pin 2.4; got {misp_row}"
+
+
+def test_compare_pinned_vs_running_falls_back_to_probe_when_no_value_provided(monkeypatch):
+    """Negative pin: caller doesn't pass misp_server_version → function
+    DOES call get_misp_server_version (the existing behavior pre-LOW)."""
+    import version_compatibility
+
+    probe_calls = {"n": 0}
+
+    def _counting_probe():
+        probe_calls["n"] += 1
+        return "2.4.180"
+
+    monkeypatch.setattr(version_compatibility, "get_misp_server_version", _counting_probe)
+
+    fake_client = MagicMock()
+    fake_client.connect.return_value = False
+    version_compatibility.compare_pinned_vs_running(neo4j_client_factory=lambda: fake_client)
+    assert probe_calls["n"] == 1, "default path must call get_misp_server_version exactly once"
 
 
 def test_recommended_pymisp_matches_requirements_pin():
