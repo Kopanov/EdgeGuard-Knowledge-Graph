@@ -175,9 +175,7 @@ def get_neo4j_server_version(neo4j_client_factory=None) -> Optional[str]:
         # accident (would falsely report server as e.g. "5" instead of
         # "2026.03.1"). Same Cypher as in ``_get_neo4j_server_version_fast``
         # — keep them in lockstep.
-        rows = client.run(
-            "CALL dbms.components() YIELD name, versions WHERE name = 'Neo4j Kernel' RETURN versions"
-        )
+        rows = client.run("CALL dbms.components() YIELD name, versions WHERE name = 'Neo4j Kernel' RETURN versions")
         if not rows:
             return None
         versions = rows[0].get("versions") if isinstance(rows[0], dict) else None
@@ -241,9 +239,7 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
             # that don't expose the canonical "Neo4j Kernel" component
             # name; the caller already handles None gracefully.
             result = session.run(
-                "CALL dbms.components() YIELD name, versions "
-                "WHERE name = 'Neo4j Kernel' "
-                "RETURN versions"
+                "CALL dbms.components() YIELD name, versions WHERE name = 'Neo4j Kernel' RETURN versions"
             )
             rows = list(result)
         if rows:
