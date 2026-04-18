@@ -252,22 +252,31 @@ def acquire_baseline_lock() -> bool:
         logger.error("Failed to acquire baseline lock at %s: %s", path, exc)
         return False
 
+    # PR #38 commit X (bugbot MED): close the fd EXACTLY ONCE. The
+    # previous structure had close inside both the except branch AND
+    # the finally, racing to double-close → EBADF on the second close
+    # (silently swallowed, but ugly). The cleaner pattern: close in
+    # finally only; on write failure, the finally still runs, then
+    # we unlink the partial sentinel AFTER the close completes.
+    write_failed = False
     try:
         os.write(fd, serialized)
     except OSError as exc:
         logger.error("Failed to write baseline-lock payload to %s: %s", path, exc)
-        # Roll back the empty/partial sentinel so the next attempt isn't blocked.
-        try:
-            os.close(fd)
-            os.unlink(path)
-        except OSError:
-            pass
-        return False
+        write_failed = True
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
+
+    if write_failed:
+        # Roll back the empty/partial sentinel so the next attempt isn't blocked.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return False
 
     logger.info(
         "Acquired baseline lock at %s (pid=%s host=%s)",
