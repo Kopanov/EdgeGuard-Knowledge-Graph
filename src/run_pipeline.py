@@ -901,10 +901,55 @@ class EdgeGuardPipeline:
         lock_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
         os.makedirs(lock_dir, exist_ok=True)
         lock_path = os.path.join(lock_dir, "pipeline.lock")
-        try:
-            if os.path.exists(lock_path):
+
+        # PR #38 (Bug Hunter Tier S S2): atomic lock acquisition via
+        # ``O_CREAT|O_EXCL|O_WRONLY``. The previous TOCTOU pattern —
+        # ``os.path.exists(lock_path)`` then ``with open(lock_path, "w")`` —
+        # could let two CLI invocations both find no lock and both write
+        # their PID, last writer wins. Two pipelines then ran concurrently,
+        # racing MISP event creation and Neo4j MERGEs (the very condition
+        # the lock was meant to prevent).
+        #
+        # ``O_EXCL`` is POSIX-defined as atomic create-or-fail: if the
+        # file already exists, ``os.open`` raises ``FileExistsError`` AND
+        # does NOT touch the existing file. No window for a racing process
+        # to slip in. Stale-lock recovery (the "PID is gone" case) still
+        # uses the read-then-unlink-then-retry pattern below — but the
+        # final lock acquisition itself is atomic.
+        def _try_atomic_lock_acquire(path: str) -> bool:
+            """Single atomic create-or-fail attempt.
+
+            Returns True iff THIS process now exclusively owns the lock
+            file. Returns False on FileExistsError (someone else holds
+            it). Any other OSError propagates to the caller.
+            """
+            try:
+                # 0o644 — owner rw, others r (matches the previous open(..., "w") default)
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                return False
+            try:
+                os.write(fd, str(os.getpid()).encode("ascii"))
+            finally:
+                os.close(fd)
+            return True
+
+        if not _try_atomic_lock_acquire(lock_path):
+            # File exists. Read the PID, decide if it's stale, and possibly retry once.
+            try:
                 with open(lock_path) as f:
                     old_pid = int(f.read().strip())
+            except (ValueError, OSError):
+                # Lock file unreadable / malformed — treat as stale and try to clean.
+                logger.warning(f"Lock file {lock_path} unreadable — treating as stale and removing.")
+                try:
+                    os.unlink(lock_path)
+                except OSError:
+                    pass
+                if not _try_atomic_lock_acquire(lock_path):
+                    logger.error("Lost lock-acquisition race after stale-lock cleanup. Aborting.")
+                    return False
+            else:
                 # Check if the process is still alive
                 try:
                     os.kill(old_pid, 0)
@@ -924,10 +969,17 @@ class EdgeGuardPipeline:
                     return False
                 except ProcessLookupError:
                     logger.info(f"Stale lock file found (PID {old_pid} is gone) — removing.")
-        except (ValueError, IOError):
-            pass
-        with open(lock_path, "w") as f:
-            f.write(str(os.getpid()))
+                    try:
+                        os.unlink(lock_path)
+                    except OSError:
+                        pass
+                    # Single retry; if a competitor grabbed it in the gap, fail loudly.
+                    if not _try_atomic_lock_acquire(lock_path):
+                        logger.error(
+                            "Lost lock-acquisition race after stale-lock cleanup — "
+                            "another process grabbed the lock. Aborting."
+                        )
+                        return False
 
         import atexit
         import signal

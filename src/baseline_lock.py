@@ -186,10 +186,32 @@ def acquire_baseline_lock() -> bool:
     The caller is responsible for calling `release_baseline_lock()` on
     exit — both success and failure paths. `_run_pipeline_inner` wraps
     this in a try/finally alongside the existing pipeline.lock cleanup.
+
+    PR #38 (Bug Hunter Tier S S2): the sentinel acquisition is now
+    ATOMIC via ``os.open(path, O_CREAT|O_EXCL|O_WRONLY)``. The previous
+    pattern — ``is_baseline_running()`` (read sentinel) THEN
+    ``os.replace(tmp, path)`` — was non-atomic: two concurrent
+    baselines could both see ``existing is None``, both write to their
+    own tmp file, both rename in (last writer wins), and both proceed
+    thinking they hold the lock. ``release_baseline_lock`` then
+    erroneously deleted the winner's sentinel via the loser's
+    PID-mismatch check. Net: both baselines ran unguarded against
+    scheduled DAGs — the exact race the lock was meant to prevent.
+
+    ``O_EXCL`` is POSIX-defined as atomic create-or-fail: if the
+    sentinel already exists, ``os.open`` raises ``FileExistsError`` AND
+    does not touch the existing file. No window for a racing process.
+    Stale-sentinel pruning (the dead-PID + age-based logic in
+    ``is_baseline_running``) still runs before the atomic acquisition;
+    if THAT detects a stale lock it unlinks first, then we attempt the
+    atomic create.
     """
     path = baseline_lock_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    # Stale-pruning: ``is_baseline_running`` will unlink an obviously-stale
+    # sentinel (dead PID, too old) and return None. If it returns a payload,
+    # there's a live baseline.
     existing = is_baseline_running()
     if existing is not None:
         logger.error(
@@ -209,16 +231,43 @@ def acquire_baseline_lock() -> bool:
         "started_at": datetime.now(timezone.utc).isoformat(),
         "monotonic_started": time.monotonic(),
     }
+    serialized = json.dumps(payload).encode("utf-8")
+
+    # Atomic create-or-fail. If FileExistsError fires, a competitor slipped
+    # in between our ``is_baseline_running`` check and this ``os.open`` —
+    # they win, we abort. If ANY other OSError fires, log + abort to be
+    # safe (we'd rather refuse than start a baseline whose lock state is
+    # unknowable).
     try:
-        # Atomic-ish write: write to tmp then rename so a reader never sees
-        # a half-written JSON blob.
-        tmp_path = f"{path}.tmp.{os.getpid()}"
-        with open(tmp_path, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp_path, path)
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        logger.error(
+            "Refusing to start baseline: lost the lock-acquisition race "
+            "to another baseline that started in the gap between the "
+            "stale-pruning check and the atomic create. Path: %s",
+            path,
+        )
+        return False
     except OSError as exc:
         logger.error("Failed to acquire baseline lock at %s: %s", path, exc)
         return False
+
+    try:
+        os.write(fd, serialized)
+    except OSError as exc:
+        logger.error("Failed to write baseline-lock payload to %s: %s", path, exc)
+        # Roll back the empty/partial sentinel so the next attempt isn't blocked.
+        try:
+            os.close(fd)
+            os.unlink(path)
+        except OSError:
+            pass
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     logger.info(
         "Acquired baseline lock at %s (pid=%s host=%s)",
