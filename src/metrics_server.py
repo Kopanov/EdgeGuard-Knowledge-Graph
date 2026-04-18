@@ -23,6 +23,7 @@ Metrics exposed:
 - edgeguard_source_truthful_claim_dropped_total - Source-truthful timestamp claim dropped (per source + reason + field)
 - edgeguard_source_truthful_coerce_rejected_total - coerce_iso input rejected (per failure-mode reason)
 - edgeguard_source_truthful_future_clamp_total - Future-dated timestamp clamped to now()
+- edgeguard_source_truthful_creator_rejected_total - Tag-impersonation rejection (per source + reason; chip 5e)
 """
 
 import json
@@ -112,6 +113,26 @@ MISP_UNMAPPED_ATTRIBUTE_TYPES = Counter(
     "edgeguard_misp_unmapped_attribute_types_total",
     "MISP attribute types not in EdgeGuard's mapping — by type name",
     ["attr_type"],
+)
+
+# Chip 5e — defense-in-depth against MISP tag impersonation. Counter
+# fires when ``extract_source_truthful_timestamps`` drops a claim
+# because the parent event's creator org is NOT on the EdgeGuard
+# trust allowlist (env vars EDGEGUARD_TRUSTED_MISP_ORG_UUIDS /
+# EDGEGUARD_TRUSTED_MISP_ORG_NAMES). A non-zero rate is the operator
+# signal for an active impersonation attempt OR a misconfigured
+# allowlist (e.g. operator forgot to add the EdgeGuard collector
+# org's UUID after a MISP migration).
+SOURCE_TRUTHFUL_CREATOR_REJECTED = Counter(
+    "edgeguard_source_truthful_creator_rejected_total",
+    "Source-truthful claim rejected because the parent MISP event's "
+    "creator org is not on the EdgeGuard trust allowlist (chip 5e). "
+    "Reason label is bounded — see source_trust.py for the enum.",
+    ["source_id", "reason"],
+    # reason ∈ {creator_org_not_allowlisted, creator_org_missing}.
+    # The other source_trust reasons (trust_check_disabled,
+    # creator_org_in_uuid_allowlist, creator_org_in_name_allowlist)
+    # are NOT rejection reasons and therefore never appear here.
 )
 
 MISP_PUSH_DURATION = Histogram(
@@ -504,6 +525,21 @@ def record_source_truthful_future_clamp() -> None:
     The accompanying WARNING log carries the original value for triage.
     """
     SOURCE_TRUTHFUL_FUTURE_CLAMP.inc()
+
+
+def record_source_truthful_creator_rejected(source_id: str | None, reason: str) -> None:
+    """Record a source-truthful claim rejected by the chip 5e creator-org check.
+
+    Wired from ``source_truthful_timestamps.extract_source_truthful_timestamps``
+    when the parent event's creator org fails the EdgeGuard trust
+    allowlist. Operators MUST alert on a non-zero rate for any
+    allowlisted source — that signal is either an active spoofing
+    attempt OR a misconfigured allowlist (e.g. forgot to register a
+    new EdgeGuard collector org's UUID after a MISP migration).
+    """
+    safe_source = (source_id or "<unknown>").strip().lower()[:80] or "<unknown>"
+    safe_reason = (reason or "unknown").replace('"', "")[:80]
+    SOURCE_TRUTHFUL_CREATOR_REJECTED.labels(source_id=safe_source, reason=safe_reason).inc()
 
 
 def record_misp_unmapped_attribute_type(attr_type: str, count: int = 1):

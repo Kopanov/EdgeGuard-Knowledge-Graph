@@ -2157,7 +2157,9 @@ class MISPToNeo4jSync:
             # (None, None) for sources not on the reliable allowlist —
             # then n.first_seen_at_source stays NULL ("we don't know"),
             # which the merge MIN-logic handles correctly.
-            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, nvd_meta=nvd_meta)
+            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(
+                attr, source_id, nvd_meta=nvd_meta, event_info=event_info
+            )
 
             # Single entry with zone as array for cross-zone queries
             item = {
@@ -2256,7 +2258,7 @@ class MISPToNeo4jSync:
             # PR (S5): source-truthful timestamps when source is on the
             # reliable allowlist (NVD/CISA/MITRE/etc.). Returns (None, None)
             # for unreliable sources so first_seen_at_source stays NULL.
-            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id)
+            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "actor",
                 "name": actor_name,
@@ -2323,7 +2325,7 @@ class MISPToNeo4jSync:
                 )
 
             # PR (S5): source-truthful timestamps via allowlist-gated helper.
-            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id)
+            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "malware",
                 "name": malware_name,
@@ -2386,7 +2388,7 @@ class MISPToNeo4jSync:
             # commit (8/10) extracts STIX created/modified, these become
             # populated for MITRE entities; until then NULL is the honest
             # answer.
-            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id)
+            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "technique",
                 "mitre_id": mitre_id,
@@ -2426,7 +2428,7 @@ class MISPToNeo4jSync:
                     break
 
             # PR (S5): source-truthful timestamps via allowlist-gated helper.
-            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id)
+            _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "tactic",
                 "mitre_id": mitre_id,
@@ -2500,7 +2502,9 @@ class MISPToNeo4jSync:
                 )
 
             # PR (S5): source-truthful timestamps via allowlist-gated helper.
-            _fs_at_source_tool, _ls_at_source_tool = extract_source_truthful_timestamps(attr, source_id)
+            _fs_at_source_tool, _ls_at_source_tool = extract_source_truthful_timestamps(
+                attr, source_id, event_info=event_info
+            )
             item = {
                 "type": "tool",
                 "mitre_id": mitre_id,
@@ -2599,7 +2603,9 @@ class MISPToNeo4jSync:
             # Returns (None, None) for sources NOT on the reliable
             # allowlist (OTX pulse-created is excluded — it's
             # publish-date, not IOC first-observed).
-            _fs_at_source_ind, _ls_at_source_ind = extract_source_truthful_timestamps(attr, source_id, tf_meta=tf_meta)
+            _fs_at_source_ind, _ls_at_source_ind = extract_source_truthful_timestamps(
+                attr, source_id, tf_meta=tf_meta, event_info=event_info
+            )
 
             item = {
                 "indicator_type": indicator_type,

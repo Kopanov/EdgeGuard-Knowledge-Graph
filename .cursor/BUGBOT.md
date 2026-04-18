@@ -82,6 +82,21 @@ The GraphQL `/graphql` route is a single endpoint but can be abused with deeply 
 Query strings, indicator values, or zone parameters from API requests must not be logged at INFO level.
 Log at DEBUG only, and strip newlines (`\n`, `\r`) before any logging to prevent log injection.
 
+### Threat model — source identity (chip 5e)
+EdgeGuard's source-truthful timestamp pipeline (PR #41) trusts the source identity carried in MISP attribute tags (`raw_data.original_source` / event-tag-resolved `source_id`). The trust boundary is the MISP write surface, not just EdgeGuard's collector accounts:
+- Compromised MISP user account in a shared MISP deployment.
+- Third-party feed pushing into a MISP that EdgeGuard also reads.
+- Internal user manually adding an attribute and (mis)tagging it with a "trusted" source name.
+
+Defense-in-depth lives in `src/source_trust.py`: a parent-event creator-org allowlist (`EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `EDGEGUARD_TRUSTED_MISP_ORG_NAMES`). When configured, `extract_source_truthful_timestamps` refuses claims whose `event["Orgc"]` isn't on the allowlist — IOC ingest still succeeds, only the source-truthful timestamp claim is dropped + the `edgeguard_source_truthful_creator_rejected_total` Prometheus counter increments.
+
+When neither env var is set, the check is BYPASSED (backward-compat for pre-release / dev). PRs that:
+- Widen the trust surface (e.g. accept claims without `Orgc`, default the allowlist to `*`, weaken the case-insensitive comparison, or call `extract_source_truthful_timestamps` without plumbing `event_info` through from `parse_attribute`) — flag as a Tier-S deploy blocker.
+- Add a NEW `extract_source_truthful_timestamps(...)` callsite without the `event_info=` kwarg — flag MED, the trust check is silently disabled for that path.
+- Remove the `creator_org_missing` rejection (treating "no Orgc" as trusted) — flag HIGH, lets unattributable events claim authoritative status.
+
+Per-attribute creator_user (`MISPAttribute` doesn't expose this directly — only the parent event's `Orgc` is reliably available across PyMISP versions) is a deliberate non-goal until MISP's REST surface stabilizes.
+
 ---
 
 ## 2. COLLECTORS — Blocking

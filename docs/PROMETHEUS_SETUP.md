@@ -229,6 +229,35 @@ sum by (reason) (rate(edgeguard_source_truthful_coerce_rejected_total[5m]))
 rate(edgeguard_source_truthful_future_clamp_total[5m]) > 1 / 60
 ```
 
+### Source-truthful tag-impersonation defense (chip 5e)
+
+Added in 2026-04 as defense-in-depth for the source-truthful timestamp pipeline (PR #41). When `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` is configured, EdgeGuard verifies the parent event's creator org against the allowlist before honoring a source-truthful claim. Rejections fire this counter:
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `edgeguard_source_truthful_creator_rejected_total` | Counter | `source_id`, `reason` | Source-truthful claim refused because the parent MISP event's creator org failed the EdgeGuard trust allowlist. `reason ∈ {creator_org_not_allowlisted, creator_org_missing}`. |
+
+**Operator alerts:**
+
+```promql
+# Spoofing-attempt detector — non-zero rate for any allowlisted source
+# is either an active impersonation OR an allowlist misconfiguration
+# (e.g. operator forgot to register a new EdgeGuard collector org's
+# UUID after a MISP migration).
+sum by (source_id, reason) (
+    rate(edgeguard_source_truthful_creator_rejected_total[5m])
+) > 0
+
+# Distinguish "we couldn't verify" (creator_org_missing — likely an
+# event from an old MISP version) from "we verified and rejected"
+# (creator_org_not_allowlisted — likely a spoofing attempt).
+sum by (reason) (
+    increase(edgeguard_source_truthful_creator_rejected_total[1h])
+)
+```
+
+**When neither allowlist env var is configured (the default), the trust check is BYPASSED and this counter never increments.** Pre-release / dev environments see no behavior change.
+
 ## Using Metrics in Code
 
 ### Recording Collection
@@ -504,4 +533,4 @@ docker-compose -f docker-compose.monitoring.yml down -v
 
 ---
 
-_Last updated: 2026-04-18 — added the four `edgeguard_source_truthful_*` counters that close the observability gap shipped with PR #41 (per-source first_seen / last_seen edge architecture); spawned-task chip 5b. Prior pass 2026-03-24: repo **`prometheus/prometheus.yml`** scrapes EdgeGuard metrics at **`host.docker.internal:8001`** (not 8000 REST). Metrics server default port **8001**._
+_Last updated: 2026-04-19 — chips 5b + 5e added five new source-truthful counters: `edgeguard_source_truthful_claim_accepted_total` / `_dropped_total` / `_coerce_rejected_total` / `_future_clamp_total` (PR #42, observability for the per-source first_seen / last_seen pipeline shipped in PR #41) plus `edgeguard_source_truthful_creator_rejected_total` (PR #44, fires when the MISP tag-impersonation defense refuses a source-truthful claim). Prior pass 2026-03-24: repo **`prometheus/prometheus.yml`** scrapes EdgeGuard metrics at **`host.docker.internal:8001`** (not 8000 REST). Metrics server default port **8001**._
