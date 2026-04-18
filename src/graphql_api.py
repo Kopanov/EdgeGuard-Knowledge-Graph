@@ -483,6 +483,13 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                # PR (S5) commit X (bugbot MED): source-truthful + import
+                # wall-clock timestamps, matching Indicator / Vulnerability /
+                # Malware resolvers.
+                first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
+                last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
+                first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
+                last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
             ),
         )
@@ -506,6 +513,12 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                # PR (S5) commit X (bugbot MED): source-truthful + import
+                # wall-clock timestamps, matching ThreatActor resolver.
+                first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
+                last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
+                first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
+                last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
             ),
         )

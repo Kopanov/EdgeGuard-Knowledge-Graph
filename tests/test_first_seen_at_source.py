@@ -355,6 +355,114 @@ def test_cypher_wraps_first_seen_at_source_with_datetime_function():
     )
 
 
+def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():
+    """PR (S5) commit X (bugbot HIGH) regression pin.
+
+    ALL SEVEN ``create_*_attribute`` methods MUST forward
+    ``first_seen`` / ``last_seen`` into the MISP attribute dict — not
+    just indicators + vulnerabilities. Previously five of the seven
+    (malware, actor, technique, tactic, tool) silently dropped those
+    fields at the MISPWriter handoff. MITRE is the primary affected
+    source: every MITRE ATT&CK SDO carries a canonical ``created``
+    timestamp that the MITRE collector maps into ``item["first_seen"]``.
+    Without the passthrough, MITRE-sourced Malware / ThreatActor /
+    Technique / Tactic / Tool nodes got ``first_seen_at_source = NULL``
+    despite MITRE being on the reliable allowlist.
+
+    This test exercises every code path and asserts the passthrough
+    works uniformly. Adding a new entity type without a passthrough
+    (a regression) fails this test.
+    """
+    from collectors.misp_writer import MISPWriter
+
+    writer = MISPWriter.__new__(MISPWriter)
+    writer.SOURCE_TAGS = {"mitre": "mitre_attck", "cisa": "cisa_kev"}
+    writer._get_zones_to_tag = lambda v: ["global"]  # type: ignore[method-assign]
+
+    FS = "2018-04-18T00:00:00Z"
+    LS = "2026-04-18T00:00:00Z"
+
+    # 1. Indicator
+    ind = {
+        "indicator_type": "ipv4",
+        "value": "203.0.113.5",
+        "tag": "abuseipdb",
+        "source": ["abuseipdb"],
+        "first_seen": FS,
+        "last_seen": LS,
+    }
+    attr = writer.create_attribute(ind)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS, (
+        "indicator path must forward first_seen / last_seen"
+    )
+
+    # 2. Vulnerability
+    vuln = {"cve_id": "CVE-2024-99999", "tag": "cisa", "first_seen": FS, "last_seen": LS}
+    attr = writer.create_vulnerability_attribute(vuln)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS
+
+    # 3. Malware
+    mal = {"name": "WannaCry", "tag": "mitre", "first_seen": FS, "last_seen": LS}
+    attr = writer.create_malware_attribute(mal)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS, (
+        "malware path MUST forward first_seen/last_seen — bugbot HIGH"
+    )
+
+    # 4. Threat actor
+    actor = {"name": "APT28", "tag": "mitre", "first_seen": FS, "last_seen": LS}
+    attr = writer.create_actor_attribute(actor)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS, (
+        "threat actor path MUST forward first_seen/last_seen — bugbot HIGH"
+    )
+
+    # 5. Technique
+    tech = {"mitre_id": "T1059", "name": "Cmd Interpreter", "tag": "mitre", "first_seen": FS, "last_seen": LS}
+    attr = writer.create_technique_attribute(tech)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS, (
+        "technique path MUST forward first_seen/last_seen — bugbot HIGH"
+    )
+
+    # 6. Tactic
+    tactic = {"mitre_id": "TA0001", "name": "Initial Access", "tag": "mitre", "first_seen": FS, "last_seen": LS}
+    attr = writer.create_tactic_attribute(tactic)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS, (
+        "tactic path MUST forward first_seen/last_seen — bugbot HIGH"
+    )
+
+    # 7. Tool
+    tool = {"mitre_id": "S0002", "name": "Mimikatz", "tag": "mitre", "first_seen": FS, "last_seen": LS}
+    attr = writer.create_tool_attribute(tool)
+    assert attr and attr.get("first_seen") == FS and attr.get("last_seen") == LS, (
+        "tool path MUST forward first_seen/last_seen — bugbot HIGH"
+    )
+
+
+def test_graphql_threat_actor_and_malware_expose_source_truthful_timestamps():
+    """PR (S5) commit X (bugbot MED) regression pin.
+
+    ThreatActor and Malware GraphQL types MUST expose
+    ``first_seen_at_source`` / ``last_seen_at_source`` so clients can
+    query the values. Previously only CVE / Vulnerability / Indicator /
+    Tool / Campaign exposed them; bugbot caught the omission.
+    """
+    path = os.path.join(_SRC, "graphql_schema.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    # Find the ThreatActor + Malware class bodies and assert the fields
+    for cls in ("class ThreatActor:", "class Malware:"):
+        start = src.find(cls)
+        assert start > 0, f"{cls} missing from graphql_schema.py"
+        # Next class boundary (or end-of-file)
+        next_class = src.find("\nclass ", start + 1)
+        body = src[start:next_class] if next_class > 0 else src[start:]
+        assert "first_seen_at_source: Optional[str]" in body, (
+            f"{cls} must expose first_seen_at_source GraphQL field (bugbot MED)"
+        )
+        assert "last_seen_at_source: Optional[str]" in body, (
+            f"{cls} must expose last_seen_at_source GraphQL field (bugbot MED)"
+        )
+
+
 def test_mispwriter_vulnerability_path_passes_first_seen_and_last_seen():
     """PR (S5) commit X (bugbot MED) regression pin.
 

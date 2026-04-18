@@ -39,6 +39,34 @@ if not SSL_VERIFY:
 logger = logging.getLogger(__name__)
 
 
+def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str, Any]) -> None:
+    """Forward the collector's ``first_seen`` / ``last_seen`` (or
+    ``last_modified``) into the MISP attribute dict via the MISP
+    2.4.120+ native fields.
+
+    PR (S5) commit X (bugbot HIGH): consolidated here to fix the
+    bug where only 2 of 7 ``create_*_attribute`` methods honored the
+    passthrough. Previously indicators (``87d3529``) and vulnerabilities
+    (``ac25b07``) got the fix; malware, threat actors, techniques,
+    tactics, and tools silently dropped their source-truthful
+    timestamps at the MISPWriter handoff. MITRE is the primary
+    affected source — every MITRE ATT&CK SDO carries a canonical
+    ``created`` timestamp, which the collector mapped into
+    ``item["first_seen"]`` but which was then discarded here.
+
+    Empty / whitespace-only values are intentionally dropped
+    (PyMISP rejects empty strings on these fields). Non-string values
+    are also skipped — the caller is responsible for coercion upstream.
+    """
+    first_seen = item.get("first_seen")
+    # last_modified (NVD / STIX) is accepted as an alias for last_seen.
+    last_seen = item.get("last_seen") or item.get("last_modified")
+    if first_seen and isinstance(first_seen, str) and first_seen.strip():
+        attribute["first_seen"] = first_seen
+    if last_seen and isinstance(last_seen, str) and last_seen.strip():
+        attribute["last_seen"] = last_seen
+
+
 def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
     """
     Same rules as ``neo4j_client.resolve_vulnerability_cve_id`` (keep in sync).
@@ -602,14 +630,10 @@ class MISPWriter:
         else:
             tags.append("confidence:low")
 
-        # Add first seen date if available
-        first_seen = indicator.get("first_seen")
-        # PR (S5) commit X (bugbot MED): also pass through last_seen so
-        # the source-truthful extractor on the sync side can populate
-        # n.last_seen_at_source. Previously last_seen was silently dropped
-        # at MISPWriter — collectors that mapped a real upstream value
-        # (e.g. AbuseIPDB blacklist's lastReportedAt) had it lost here.
-        last_seen = indicator.get("last_seen")
+        # PR (S5) commit X (bugbot HIGH): the first_seen / last_seen
+        # passthrough previously inlined here has been consolidated into
+        # the ``_apply_source_truthful_timestamps`` helper below
+        # (applied uniformly across all 7 create_*_attribute methods).
 
         # Encode rich metadata as JSON comment for sources with structured data
         # (same pattern as NVD_META for vulnerabilities).
@@ -662,21 +686,10 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
-        # Add first_seen timestamp if available
-        if first_seen:
-            try:
-                # Parse ISO format and convert to MISP format
-                if isinstance(first_seen, str):
-                    attribute["first_seen"] = first_seen
-            except (ValueError, TypeError, KeyError):
-                pass
-
-        # PR (S5) commit X (bugbot MED): also pass through last_seen.
-        # MISP 2.4.120+ supports the native last_seen attribute field;
-        # the source-truthful extractor reads it back into
-        # n.last_seen_at_source.
-        if last_seen and isinstance(last_seen, str):
-            attribute["last_seen"] = last_seen
+        # PR (S5) commit X (bugbot HIGH): consolidated via helper so
+        # the passthrough lives in ONE place — previously five of the
+        # seven create_*_attribute methods silently dropped these fields.
+        _apply_source_truthful_timestamps(attribute, indicator)
 
         return attribute
 
@@ -804,27 +817,7 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
-        # PR (S5) commit X (bugbot MED): pass through first_seen/last_seen
-        # to the MISP-native attribute fields so the source-truthful
-        # extractor on the sync side can populate
-        # ``Vulnerability.first_seen_at_source`` / ``last_seen_at_source``
-        # for ALL vulnerability sources (not just NVD via NVD_META).
-        #
-        # Concretely this fixes CISA KEV: the CISA collector sets
-        # ``vuln["first_seen"] = dateAdded`` (when CISA listed the CVE
-        # as actively exploited — the canonical source-truthful field)
-        # but previously it was silently dropped at this handoff.
-        # NVD's ``published`` flows via NVD_META.published (Layer 2)
-        # and now ALSO via the MISP-native field (Layer 1, lossless
-        # round-trip); the extractor's resolution order picks the
-        # first non-empty one.
-        first_seen = vuln.get("first_seen")
-        last_seen = vuln.get("last_seen") or vuln.get("last_modified")
-        if first_seen and isinstance(first_seen, str) and first_seen.strip():
-            attribute["first_seen"] = first_seen
-        if last_seen and isinstance(last_seen, str) and last_seen.strip():
-            attribute["last_seen"] = last_seen
-
+        _apply_source_truthful_timestamps(attribute, vuln)
         return attribute
 
     def create_malware_attribute(self, malware: Dict) -> Optional[Dict]:
@@ -902,6 +895,9 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
+        # PR (S5) commit X (bugbot HIGH): MITRE malware SDOs carry the
+        # canonical ``created`` / ``modified`` as first_seen / last_seen.
+        _apply_source_truthful_timestamps(attribute, malware)
         return attribute
 
     def create_actor_attribute(self, actor: Dict) -> Optional[Dict]:
@@ -972,6 +968,9 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
+        # PR (S5) commit X (bugbot HIGH): MITRE intrusion-set SDOs carry
+        # the canonical ``created`` / ``modified`` as first_seen / last_seen.
+        _apply_source_truthful_timestamps(attribute, actor)
         return attribute
 
     def create_technique_attribute(self, technique: Dict) -> Optional[Dict]:
@@ -1048,6 +1047,9 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
+        # PR (S5) commit X (bugbot HIGH): attack-pattern SDOs carry
+        # canonical ``created`` / ``modified`` as first_seen / last_seen.
+        _apply_source_truthful_timestamps(attribute, technique)
         return attribute
 
     def create_tactic_attribute(self, tactic: Dict) -> Optional[Dict]:
@@ -1091,6 +1093,9 @@ class MISPWriter:
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
         }
+        # PR (S5) commit X (bugbot HIGH): x-mitre-tactic SDOs carry
+        # canonical ``created`` / ``modified`` as first_seen / last_seen.
+        _apply_source_truthful_timestamps(attribute, tactic)
         return attribute
 
     def create_tool_attribute(self, tool: Dict) -> Optional[Dict]:
@@ -1148,6 +1153,9 @@ class MISPWriter:
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
         }
+        # PR (S5) commit X (bugbot HIGH): MITRE tool SDOs carry
+        # canonical ``created`` / ``modified`` as first_seen / last_seen.
+        _apply_source_truthful_timestamps(attribute, tool)
         return attribute
 
     def push_items(self, items: List[Dict], batch_size: int = 500) -> Tuple[int, int]:

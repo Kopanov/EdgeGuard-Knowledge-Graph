@@ -236,6 +236,16 @@ class ThreatActor:
     confidence_score: Optional[float] = None
     source: Optional[List[str]] = None
     edgeguard_managed: Optional[bool] = None
+    # PR (S5) commit X (bugbot MED): source-truthful and
+    # import-wall-clock timestamps, matching Indicator / Vulnerability /
+    # Malware. Populated by ``parse_attribute`` via the
+    # source_truthful_timestamps helper; MITRE intrusion-set SDOs carry
+    # a canonical ``created`` timestamp (actor first documented by
+    # MITRE) and ``modified`` (last STIX revision).
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
+    first_imported_at: Optional[str] = None
+    last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
     # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
@@ -252,6 +262,16 @@ class Malware:
     confidence_score: Optional[float] = None
     source: Optional[List[str]] = None
     edgeguard_managed: Optional[bool] = None
+    # PR (S5) commit X (bugbot MED): source-truthful and
+    # import-wall-clock timestamps, matching Indicator / Vulnerability /
+    # ThreatActor. Populated by ``parse_attribute`` via the
+    # source_truthful_timestamps helper; MITRE malware SDOs carry a
+    # canonical ``created`` timestamp (first documented by MITRE) and
+    # ``modified`` (last STIX revision).
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
+    first_imported_at: Optional[str] = None
+    last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
     # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
