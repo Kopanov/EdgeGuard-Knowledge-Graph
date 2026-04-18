@@ -288,6 +288,15 @@ class Technique:
     zone: Optional[List[str]] = None
     confidence_score: Optional[float] = None
     edgeguard_managed: Optional[bool] = None
+    # PR (S5) commit X (bugbot LOW): source-truthful + import-wall-clock
+    # timestamps for API parity with Indicator / Vulnerability /
+    # ThreatActor / Malware / Tool. MITRE attack-pattern SDOs carry
+    # canonical ``created`` / ``modified`` which the collector maps
+    # into item["first_seen"] / item["last_seen"].
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
+    first_imported_at: Optional[str] = None
+    last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
     # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
@@ -304,6 +313,13 @@ class Tactic:
     name: str
     description: Optional[str] = None
     edgeguard_managed: Optional[bool] = None
+    # PR (S5) commit X (bugbot LOW): source-truthful + import-wall-clock
+    # timestamps for API parity. x-mitre-tactic SDOs carry canonical
+    # ``created`` / ``modified``.
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
+    first_imported_at: Optional[str] = None
+    last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
     # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;

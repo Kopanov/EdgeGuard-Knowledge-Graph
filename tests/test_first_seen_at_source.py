@@ -437,29 +437,43 @@ def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():
     )
 
 
-def test_graphql_threat_actor_and_malware_expose_source_truthful_timestamps():
-    """PR (S5) commit X (bugbot MED) regression pin.
+def test_graphql_all_mitre_and_vuln_types_expose_source_truthful_timestamps():
+    """PR (S5) commit X (bugbot MED + LOW) regression pin.
 
-    ThreatActor and Malware GraphQL types MUST expose
-    ``first_seen_at_source`` / ``last_seen_at_source`` so clients can
-    query the values. Previously only CVE / Vulnerability / Indicator /
-    Tool / Campaign exposed them; bugbot caught the omission.
+    EVERY GraphQL type that can be populated by ``parse_attribute``
+    with source-truthful timestamps MUST expose
+    ``first_seen_at_source`` / ``last_seen_at_source`` (and the
+    companion import-wall-clock fields) so clients can query the
+    values. Previously some were missed iteratively:
+      - Round a77e67b: ThreatActor + Malware (bugbot MED)
+      - Round 9a414ac: Technique + Tactic (bugbot LOW)
+    This test locks in the full set so further omissions in new
+    entity types fail the test immediately.
     """
     path = os.path.join(_SRC, "graphql_schema.py")
     with open(path) as fh:
         src = _code_only(fh.read())
-    # Find the ThreatActor + Malware class bodies and assert the fields
-    for cls in ("class ThreatActor:", "class Malware:"):
+    required_classes = (
+        "class Vulnerability:",
+        "class Indicator:",
+        "class ThreatActor:",
+        "class Malware:",
+        "class Technique:",
+        "class Tactic:",
+        "class Tool:",
+    )
+    for cls in required_classes:
         start = src.find(cls)
         assert start > 0, f"{cls} missing from graphql_schema.py"
-        # Next class boundary (or end-of-file)
         next_class = src.find("\nclass ", start + 1)
         body = src[start:next_class] if next_class > 0 else src[start:]
         assert "first_seen_at_source: Optional[str]" in body, (
-            f"{cls} must expose first_seen_at_source GraphQL field (bugbot MED)"
+            f"{cls} must expose first_seen_at_source GraphQL field "
+            "(bugbot MED/LOW — API parity across all source-truthful types)"
         )
         assert "last_seen_at_source: Optional[str]" in body, (
-            f"{cls} must expose last_seen_at_source GraphQL field (bugbot MED)"
+            f"{cls} must expose last_seen_at_source GraphQL field "
+            "(bugbot MED/LOW — API parity across all source-truthful types)"
         )
 
 
