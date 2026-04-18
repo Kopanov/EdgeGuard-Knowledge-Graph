@@ -476,11 +476,18 @@ def test_aliases_do_not_collide_with_other_sources_canonical_ids():
 # ---------------------------------------------------------------------------
 
 
-def test_adding_a_new_source_propagates_to_all_five_derivations():
+def test_adding_a_new_source_propagates_to_all_five_derivations(monkeypatch):
     """Smoke test that synthesizes a new ``Source(...)`` entry, prepends
     it to a copy of the registry, and verifies every derivation picks
     it up. Catches a future refactor that misses one of the five
-    derivation helpers."""
+    derivation helpers.
+
+    PR #43 audit M1 (Bug Hunter): use ``monkeypatch.setattr`` instead
+    of manual try/finally — pytest's monkeypatch handles teardown
+    safely even when an assertion in the middle raises, signaling to
+    readers that this test mutates module globals.
+    """
+    import source_registry
     from source_registry import (
         Source,
         cli_to_canonical_tag_map,
@@ -505,43 +512,137 @@ def test_adding_a_new_source_propagates_to_all_five_derivations():
         reliable_first_seen=True,
     )
 
-    # Monkeypatch the registry tuple to include the test source. Done
-    # via a direct attribute set on the module to avoid plumbing a
-    # fixture — this is a self-contained roundtrip check.
+    monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (test_source,))
+
+    # Each derivation re-reads _REGISTRY on every call; no caching.
+    neo4j_dict = to_neo4j_sources_dict()
+    cli_dict = to_cli_sources_dict()
+    cli_to_canon = cli_to_canonical_tag_map()
+    reliable = reliable_first_seen_aliases()
+    misp = source_to_misp_tag_map()
+
+    # 1. Neo4j SOURCES picks it up via canonical id AND alias
+    assert "testsrc_canonical_id_12345" in neo4j_dict
+    assert "testsrc_alias_67890" in neo4j_dict
+    assert neo4j_dict["testsrc_canonical_id_12345"]["name"] == "Test Source"
+
+    # 2. CLI DEFAULT_SOURCES picks it up via cli_id
+    assert "testsrc_cli" in cli_dict
+    assert cli_dict["testsrc_cli"]["api_key_env"] == "TESTSRC_API_KEY"
+
+    # 3. SOURCE_TAGS picks it up via cli_id (full map, not legacy subset)
+    assert cli_to_canon["testsrc_cli"] == "testsrc_canonical_id_12345"
+
+    # 4. _RELIABLE_FIRST_SEEN_SOURCES picks up canonical AND alias
+    assert "testsrc_canonical_id_12345" in reliable
+    assert "testsrc_alias_67890" in reliable
+
+    # 5. MISPWriter.SOURCE_TAGS picks up canonical AND alias
+    assert misp["testsrc_canonical_id_12345"] == "source:TestSrc-Unique-12345"
+    assert misp["testsrc_alias_67890"] == "source:TestSrc-Unique-12345"
+
+
+def test_to_cli_sources_dict_raises_on_duplicate_cli_id(monkeypatch):
+    """PR #43 audit M2 (Devil's Advocate / Cross-Checker): adding a
+    second Source with a cli_id that already exists silently
+    overwrote the earlier entry's CLI listing — uniqueness MUST be
+    a runtime error, not a silent collision."""
+    import pytest
+
     import source_registry
+    from source_registry import Source, to_cli_sources_dict
 
-    original_registry = source_registry._REGISTRY
-    try:
-        source_registry._REGISTRY = original_registry + (test_source,)
+    # Synthesize a Source whose cli_id collides with an existing one
+    # ("nvd" is a registered cli_id on the canonical NVD record).
+    colliding = Source(
+        canonical_id="testsrc_collision_canonical",
+        display_name="Collision Source",
+        source_type="threat_intel",
+        reliability=0.5,
+        misp_tag="source:Collision-Test",
+        reliable_first_seen=True,
+        cli_id="nvd",  # collides with NVD's existing cli_id
+    )
+    monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (colliding,))
 
-        # Each derivation re-reads _REGISTRY on every call; no caching.
-        neo4j_dict = to_neo4j_sources_dict()
-        cli_dict = to_cli_sources_dict()
-        cli_to_canon = cli_to_canonical_tag_map()
-        reliable = reliable_first_seen_aliases()
-        misp = source_to_misp_tag_map()
+    with pytest.raises(ValueError, match="duplicate cli_id"):
+        to_cli_sources_dict()
 
-        # 1. Neo4j SOURCES picks it up via canonical id AND alias
-        assert "testsrc_canonical_id_12345" in neo4j_dict
-        assert "testsrc_alias_67890" in neo4j_dict
-        assert neo4j_dict["testsrc_canonical_id_12345"]["name"] == "Test Source"
 
-        # 2. CLI DEFAULT_SOURCES picks it up via cli_id
-        assert "testsrc_cli" in cli_dict
-        assert cli_dict["testsrc_cli"]["api_key_env"] == "TESTSRC_API_KEY"
+def test_cli_to_canonical_tag_map_raises_on_duplicate_cli_id(monkeypatch):
+    """Same uniqueness invariant on the SOURCE_TAGS derivation."""
+    import pytest
 
-        # 3. SOURCE_TAGS picks it up via cli_id (full map, not legacy subset)
-        assert cli_to_canon["testsrc_cli"] == "testsrc_canonical_id_12345"
+    import source_registry
+    from source_registry import Source, cli_to_canonical_tag_map
 
-        # 4. _RELIABLE_FIRST_SEEN_SOURCES picks up canonical AND alias
-        assert "testsrc_canonical_id_12345" in reliable
-        assert "testsrc_alias_67890" in reliable
+    colliding = Source(
+        canonical_id="testsrc_collision_canonical_2",
+        display_name="Collision Source 2",
+        source_type="threat_intel",
+        reliability=0.5,
+        misp_tag="source:Collision-Test-2",
+        reliable_first_seen=True,
+        cli_id="cisa",  # collides with CISA KEV's existing cli_id
+    )
+    monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (colliding,))
 
-        # 5. MISPWriter.SOURCE_TAGS picks up canonical AND alias
-        assert misp["testsrc_canonical_id_12345"] == "source:TestSrc-Unique-12345"
-        assert misp["testsrc_alias_67890"] == "source:TestSrc-Unique-12345"
-    finally:
-        source_registry._REGISTRY = original_registry
+    with pytest.raises(ValueError, match="duplicate cli_id"):
+        cli_to_canonical_tag_map()
+
+
+def test_cli_ids_are_unique_in_the_real_registry():
+    """Static check on the actual ``_REGISTRY`` — every Source with a
+    non-None ``cli_id`` MUST have a unique value. Catches a
+    contributor accidentally re-using an existing cli_id even before
+    a derivation helper is exercised in production."""
+    from source_registry import all_sources
+
+    seen: dict[str, str] = {}
+    for src in all_sources():
+        if src.cli_id is None:
+            continue
+        prior = seen.get(src.cli_id)
+        assert prior is None, (
+            f"duplicate cli_id={src.cli_id!r} in real registry: both {prior!r} and {src.canonical_id!r} use it"
+        )
+        seen[src.cli_id] = src.canonical_id
+
+
+def test_full_cli_to_canonical_tag_map_is_not_used_in_src(tmp_path):
+    """PR #43 audit M3 (Maintainer Dev): the full
+    ``cli_to_canonical_tag_map()`` (~12 keys) MUST NOT be imported
+    into ``src/`` outside of ``source_registry.py`` and tests. The
+    legacy-subset variant (``..._legacy_subset``) is what production
+    callers wire — using the full map silently widens
+    ``config.SOURCE_TAGS`` from 7 to 12 keys, which lets typo'd
+    ``SOURCE_TAGS["X"]`` lookups silently succeed instead of raising
+    ``KeyError`` at collector init.
+    """
+    import os
+    import re
+
+    src_root = os.path.join(os.path.dirname(__file__), "..", "src")
+    bad_pattern = re.compile(
+        r"\bfrom\s+source_registry\s+import\s+[^#\n]*\bcli_to_canonical_tag_map\b(?!_legacy_subset)"
+    )
+    bad_files = []
+    for dirpath, _, filenames in os.walk(src_root):
+        for fname in filenames:
+            if not fname.endswith(".py"):
+                continue
+            path = os.path.join(dirpath, fname)
+            if os.path.basename(path) == "source_registry.py":
+                continue
+            with open(path) as fh:
+                content = fh.read()
+            for m in bad_pattern.finditer(content):
+                bad_files.append((path, m.group(0)))
+    assert not bad_files, (
+        f"Imports of full cli_to_canonical_tag_map (without _legacy_subset) found: {bad_files}. "
+        "Use cli_to_canonical_tag_map_legacy_subset to preserve the historical 7-key shape "
+        "and the KeyError-on-typo guarantee."
+    )
 
 
 def test_dataclass_is_frozen_so_registry_cannot_be_mutated_at_runtime():

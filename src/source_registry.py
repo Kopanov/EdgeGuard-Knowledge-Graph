@@ -442,11 +442,26 @@ def to_cli_sources_dict() -> Dict[str, Dict[str, object]]:
 
     One entry per source whose ``cli_id`` is set (currently all of
     them). Skips sources with ``cli_id is None``.
+
+    Raises ``ValueError`` if two ``Source`` records share a ``cli_id``
+    (PR #43 audit M2 — Devil's Advocate / Cross-Checker): the previous
+    implementation silently overwrote the earlier entry, so a
+    contributor who accidentally re-used an existing ``cli_id`` for
+    a new source would get the new mapping AND drop the old one with
+    no error. Both ``to_cli_sources_dict`` and
+    ``cli_to_canonical_tag_map`` enforce the same uniqueness check.
     """
     out: Dict[str, Dict[str, object]] = {}
     for src in _REGISTRY:
         if src.cli_id is None:
             continue
+        if src.cli_id in out:
+            raise ValueError(
+                f"duplicate cli_id={src.cli_id!r} in registry: "
+                f"second occurrence on canonical_id={src.canonical_id!r}. "
+                "Each cli_id must map to exactly one Source — silently "
+                "overwriting would drop the earlier source from the CLI listing."
+            )
         out[src.cli_id] = {
             "name": src.cli_display_name or src.display_name,
             "api_key_env": src.api_key_env,
@@ -469,14 +484,27 @@ def cli_to_canonical_tag_map() -> Dict[str, str]:
 
     NOTE: the legacy ``config.SOURCE_TAGS`` only listed 7 sources
     (the ones with collectors that look themselves up by shortname).
-    For backward-compat we ship a ``LEGACY_SUBSET`` constant that
-    matches the historical 7-key shape; the FULL registry-derived
-    map is also available for future callers that want it.
+    For backward-compat ``cli_to_canonical_tag_map_legacy_subset``
+    matches the historical 7-key shape — wire it from
+    ``config.SOURCE_TAGS``. **Use the full map below ONLY for new
+    callers** (PR #43 audit M3): existing collector code does
+    ``SOURCE_TAGS["X"]`` and relies on KeyError on typos. Widening
+    the legacy 7 keys to all 12 silently starts resolving keys that
+    previously failed — undesired behavior change.
+
+    Raises ``ValueError`` on duplicate ``cli_id`` — same uniqueness
+    invariant as ``to_cli_sources_dict``.
     """
     out: Dict[str, str] = {}
     for src in _REGISTRY:
         if src.cli_id is None:
             continue
+        if src.cli_id in out:
+            raise ValueError(
+                f"duplicate cli_id={src.cli_id!r} in registry: "
+                f"second occurrence on canonical_id={src.canonical_id!r}. "
+                "Each cli_id must map to exactly one canonical_id."
+            )
         out[src.cli_id] = src.canonical_id
     return out
 
