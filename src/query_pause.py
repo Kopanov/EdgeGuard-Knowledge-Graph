@@ -49,6 +49,14 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR = "EDGEGUARD_QUERY_PAUSE_SECONDS"
 
+# PR #39 commit X (bugbot LOW): cap the configured pause so a typo'd
+# ``inf`` or absurd large value (``EDGEGUARD_QUERY_PAUSE_SECONDS=999999``)
+# can't hang the worker indefinitely. 60s is well above the original
+# ``time.sleep(3)`` × 12 sites (=36s) that the audit found wasteful;
+# operators with a genuine reason to exceed this cap should fix the
+# upstream bottleneck instead.
+_MAX_PAUSE_SECS = 60
+
 
 def query_pause_seconds() -> float:
     """Return the configured hot-loop pause in seconds.
@@ -61,11 +69,25 @@ def query_pause_seconds() -> float:
     raw = os.getenv(_ENV_VAR, "0").strip()
     try:
         seconds = float(raw)
-        # Negative or NaN treated as 0 (defensive — operator typo shouldn't
-        # silently flip the sign or hang indefinitely).
+        # PR #39 commit X (bugbot LOW): the previous ``not (seconds >= 0)``
+        # guard caught negative + NaN but NOT ``inf`` (``inf >= 0`` is True).
+        # Setting ``EDGEGUARD_QUERY_PAUSE_SECONDS=inf`` would hang the
+        # process forever in ``time.sleep(inf)`` — exactly the failure
+        # mode the comment said the guard prevented. Cap to ``_MAX_PAUSE_SECS``
+        # explicitly. 60s is generous (more than the original hardcoded
+        # ``time.sleep(3)`` × 12 sites = 36s the audit found).
         if not (seconds >= 0):
             logger.debug(f"{_ENV_VAR}={raw!r} parsed to invalid value {seconds!r}; using 0")
             return 0.0
+        if seconds > _MAX_PAUSE_SECS:
+            logger.warning(
+                "%s=%r exceeds the %ss safety cap — clamping. Set a value <= %s.",
+                _ENV_VAR,
+                seconds,
+                _MAX_PAUSE_SECS,
+                _MAX_PAUSE_SECS,
+            )
+            return float(_MAX_PAUSE_SECS)
         return seconds
     except (ValueError, TypeError) as e:
         logger.debug(f"{_ENV_VAR}={raw!r} unparseable ({e}); using 0")

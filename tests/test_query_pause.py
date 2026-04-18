@@ -76,6 +76,42 @@ def test_query_pause_seconds_negative_treated_as_zero(monkeypatch):
     assert query_pause_seconds() == 0.0
 
 
+def test_query_pause_seconds_inf_clamped_to_max(monkeypatch):
+    """PR #39 commit X (bugbot LOW) regression pin.
+
+    ``EDGEGUARD_QUERY_PAUSE_SECONDS=inf`` would have passed the old
+    ``not (seconds >= 0)`` guard (``inf >= 0`` is True), then
+    ``time.sleep(inf)`` would hang the worker forever — exactly the
+    failure mode the original comment said was prevented. The cap
+    catches this.
+    """
+    from query_pause import _MAX_PAUSE_SECS, query_pause_seconds
+
+    monkeypatch.setenv("EDGEGUARD_QUERY_PAUSE_SECONDS", "inf")
+    result = query_pause_seconds()
+    assert result == float(_MAX_PAUSE_SECS), f"inf must be clamped to _MAX_PAUSE_SECS ({_MAX_PAUSE_SECS}); got {result}"
+
+    monkeypatch.setenv("EDGEGUARD_QUERY_PAUSE_SECONDS", "Infinity")
+    assert query_pause_seconds() == float(_MAX_PAUSE_SECS)
+
+
+def test_query_pause_seconds_absurdly_large_clamped_to_max(monkeypatch):
+    """Same cap applies to large finite values — operator setting
+    ``999999`` (10+ days) typed too many digits; refuse silently."""
+    from query_pause import _MAX_PAUSE_SECS, query_pause_seconds
+
+    monkeypatch.setenv("EDGEGUARD_QUERY_PAUSE_SECONDS", "999999")
+    assert query_pause_seconds() == float(_MAX_PAUSE_SECS)
+
+
+def test_query_pause_seconds_value_at_cap_is_returned_unchanged(monkeypatch):
+    """Boundary: exactly ``_MAX_PAUSE_SECS`` is allowed."""
+    from query_pause import _MAX_PAUSE_SECS, query_pause_seconds
+
+    monkeypatch.setenv("EDGEGUARD_QUERY_PAUSE_SECONDS", str(_MAX_PAUSE_SECS))
+    assert query_pause_seconds() == float(_MAX_PAUSE_SECS)
+
+
 def test_query_pause_skips_sleep_when_env_unset(monkeypatch):
     """The skipping must be at the call-site level — query_pause()
     must NOT call time.sleep() at all when seconds is 0. Otherwise
