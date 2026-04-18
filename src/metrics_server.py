@@ -19,6 +19,10 @@ Metrics exposed:
 - edgeguard_last_success_timestamp - Unix timestamp of last successful collection
 - edgeguard_pipeline_duration_seconds - Total pipeline duration
 - edgeguard_dag_runs_total - DAG run counter by status
+- edgeguard_source_truthful_claim_accepted_total - Source-truthful timestamp claim accepted (per source + field)
+- edgeguard_source_truthful_claim_dropped_total - Source-truthful timestamp claim dropped (per source + reason + field)
+- edgeguard_source_truthful_coerce_rejected_total - coerce_iso input rejected (per failure-mode reason)
+- edgeguard_source_truthful_future_clamp_total - Future-dated timestamp clamped to now()
 """
 
 import json
@@ -229,6 +233,59 @@ ENRICHMENT_DURATION = Histogram(
     buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
 )
 
+# ================================================================================
+# Source-truthful timestamp pipeline (PR #41 follow-up)
+# ================================================================================
+# Counters that surface how the per-source first_seen / last_seen pipeline
+# (src/source_truthful_timestamps.py) is performing in production. Without
+# them an operator has no visibility into:
+#  - which sources actually supply the values vs. emit honest-NULL
+#  - the failure-mode distribution of coerce_iso (sentinel epochs vs.
+#    malformed strings vs. overflow)
+#  - upstream feed bugs producing future-dated timestamps
+# Cardinality budget: ~16 sources × {first_seen, last_seen, both} × small
+# reason set ≈ low hundreds of cells; well within Prometheus comfort.
+
+SOURCE_TRUTHFUL_CLAIM_ACCEPTED = Counter(
+    "edgeguard_source_truthful_claim_accepted_total",
+    "Source-truthful timestamp claim accepted onto the SOURCED_FROM edge — by source + field. "
+    "Incremented exactly once per (extract call, field) when the final post-Layer-2 value is non-NULL.",
+    ["source_id", "field"],  # field ∈ {first_seen, last_seen}
+)
+
+SOURCE_TRUTHFUL_CLAIM_DROPPED = Counter(
+    "edgeguard_source_truthful_claim_dropped_total",
+    "Source-truthful timestamp claim dropped — by source + reason + field. "
+    "honest-NULL drops (source on the allowlist but supplied no value) ARE counted here under "
+    "reason=no_data_from_source — operators looking at total_dropped should expect a non-zero baseline.",
+    ["source_id", "reason", "field"],
+    # reason ∈ {
+    #   "source_not_in_allowlist",  # caller's source not on the reliable list (Layer 1 filter)
+    #   "no_data_from_source",      # source on the list but Layer 1 + Layer 2 both empty (honest-NULL)
+    # }
+    # field: first_seen / last_seen — "both" is used for the single
+    # source_not_in_allowlist emit (we never even attempt per-field).
+)
+
+SOURCE_TRUTHFUL_COERCE_REJECTED = Counter(
+    "edgeguard_source_truthful_coerce_rejected_total",
+    "coerce_iso input rejected — by failure-mode reason. No source_id label: coerce_iso is a "
+    "pure utility called from many sites (STIX exporter, alert processor, etc.) without source context.",
+    ["reason"],
+    # reason ∈ {
+    #   "sentinel_epoch",    # int/float ≤ 0 or > epoch ceil
+    #   "malformed_string",  # non-ISO / invalid calendar / non-ASCII / parse failure
+    #   "overflow",          # OverflowError / OSError from datetime.fromtimestamp
+    # }
+)
+
+SOURCE_TRUTHFUL_FUTURE_CLAMP = Counter(
+    "edgeguard_source_truthful_future_clamp_total",
+    "Future-dated timestamp clamped to now() — likely upstream feed bug or operator clock drift. "
+    "The corresponding WARNING log carries the original value for triage.",
+    [],
+)
+
 # Set application info
 APP_INFO.info(
     {"version": os.getenv("EDGEGUARD_VERSION", "1.0.0"), "environment": os.getenv("EDGEGUARD_ENV", "development")}
@@ -270,6 +327,103 @@ def record_misp_attribute_dropped(reason: str, count: int = 1):
     """Record an attribute dropped during dedup/parse — see MISP_ATTRIBUTES_DROPPED."""
     safe = (reason or "unknown").replace('"', "")[:80]
     MISP_ATTRIBUTES_DROPPED.labels(reason=safe).inc(count)
+
+
+# ----------------------------------------------------------------------------
+# Source-truthful timestamp pipeline helpers (see SOURCE_TRUTHFUL_* counters)
+# ----------------------------------------------------------------------------
+# These are imported defensively from src/source_truthful_timestamps.py so
+# they tolerate import failures (tests that don't bring up prometheus_client,
+# etc.). The counters themselves are always-on once this module imports.
+
+# Allowlist used to keep the source_id label cardinality bounded. Anything
+# outside the list collapses to "<other>" so a malformed / surprise tag
+# can't blow up Prometheus storage. Mirrors
+# ``source_truthful_timestamps._RELIABLE_FIRST_SEEN_SOURCES`` plus a few
+# common relays we explicitly reject (so the operator can SEE the relay
+# rejection rate, not just have it disappear).
+_SOURCE_LABEL_ALLOWLIST = frozenset(
+    {
+        # Allowlisted sources (mirror _RELIABLE_FIRST_SEEN_SOURCES).
+        "nvd",
+        "cisa",
+        "cisa_kev",
+        "mitre",
+        "mitre_attck",
+        "virustotal",
+        "vt",
+        "abuseipdb",
+        "threatfox",
+        "urlhaus",
+        "feodo",
+        "feodo_tracker",
+        "sslbl",
+        "ssl_blacklist",
+        "abusech_ssl",
+        # Rejected-on-purpose sources we still want a counter for so
+        # operators see the rejection rate as signal, not silence.
+        "otx",
+        "alienvault_otx",
+        "cybercure",
+        "misp",
+    }
+)
+
+
+def _safe_source_label(source_id: str | None) -> str:
+    """Coerce a source_id to a bounded-cardinality Prometheus label.
+
+    ``None`` / empty → ``"<unknown>"``; anything outside the allowlist →
+    ``"<other>"``. Caps Prometheus storage at ~20 source labels rather
+    than allowing an unbounded set of malformed / spoofed tags.
+    """
+    if not source_id:
+        return "<unknown>"
+    norm = source_id.strip().lower()
+    if not norm:
+        return "<unknown>"
+    return norm if norm in _SOURCE_LABEL_ALLOWLIST else "<other>"
+
+
+def record_source_truthful_claim_accepted(source_id: str | None, field: str) -> None:
+    """Record a source-truthful claim that survived the full pipeline.
+
+    Called from ``extract_source_truthful_timestamps`` exactly once per
+    (call, field) when the final post-Layer-2 value is non-NULL.
+    """
+    SOURCE_TRUTHFUL_CLAIM_ACCEPTED.labels(source_id=_safe_source_label(source_id), field=field).inc()
+
+
+def record_source_truthful_claim_dropped(source_id: str | None, reason: str, field: str) -> None:
+    """Record a source-truthful claim that did NOT make it onto the edge.
+
+    Called from ``extract_source_truthful_timestamps`` for two distinct
+    reasons (source_not_in_allowlist / no_data_from_source). Honest-NULL
+    drops are counted here under ``no_data_from_source`` — operators
+    monitoring this counter should expect a non-zero baseline.
+    """
+    safe_reason = (reason or "unknown").replace('"', "")[:80]
+    SOURCE_TRUTHFUL_CLAIM_DROPPED.labels(source_id=_safe_source_label(source_id), reason=safe_reason, field=field).inc()
+
+
+def record_source_truthful_coerce_rejected(reason: str) -> None:
+    """Record a coerce_iso input that the input-hardening layer refused.
+
+    Called from inside ``coerce_iso`` itself — pure utility, no source
+    context available. The reason label IS bounded
+    (sentinel_epoch / malformed_string / overflow); see the counter
+    definition for the full enum.
+    """
+    safe = (reason or "unknown").replace('"', "")[:80]
+    SOURCE_TRUTHFUL_COERCE_REJECTED.labels(reason=safe).inc()
+
+
+def record_source_truthful_future_clamp() -> None:
+    """Record one future-dated timestamp clamp (likely feed bug / clock drift).
+
+    The accompanying WARNING log carries the original value for triage.
+    """
+    SOURCE_TRUTHFUL_FUTURE_CLAMP.inc()
 
 
 def record_misp_unmapped_attribute_type(attr_type: str, count: int = 1):
