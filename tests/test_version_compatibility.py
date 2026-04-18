@@ -412,3 +412,61 @@ def test_recommended_pymisp_matches_requirements_pin():
     assert pin, "requirements.txt must pin pymisp"
     recommended = RECOMMENDED_VERSIONS["pymisp"]
     assert pin.startswith(recommended)
+
+
+def test_recommended_airflow_matches_requirements_pin():
+    """PR #36 commit X (bugbot MED) regression pin.
+
+    Was previously blocked because ``read_requirements_pin``'s regex
+    didn't tolerate pip extras syntax — ``apache-airflow[postgres]~=3.2``
+    returned None and the test couldn't be written. With the regex
+    fix, this test now closes the only remaining gap in the
+    ``RECOMMENDED_VERSIONS`` ↔ pin-files sync coverage.
+    """
+    from version_compatibility import RECOMMENDED_VERSIONS, read_requirements_pin
+
+    pin = read_requirements_pin("requirements.txt", "apache-airflow")
+    assert pin, (
+        "requirements.txt must pin apache-airflow (with [postgres] extras) — "
+        "if this fails, either the pin was removed OR the extras-syntax regex regressed"
+    )
+    recommended = RECOMMENDED_VERSIONS["airflow"]
+    assert pin.startswith(recommended), (
+        f"requirements.txt pins apache-airflow~={pin}, but RECOMMENDED_VERSIONS['airflow']={recommended!r}. "
+        "Bump both together or doctor's drift warning lies."
+    )
+
+
+def test_read_requirements_pin_handles_pip_extras_syntax():
+    """Pure-function pin: ``read_requirements_pin`` MUST recognize
+    ``<package>[<extras>]~=<version>`` (pip extras form). Was a Tier-S
+    bugbot finding because the previous regex silently returned None
+    on any package with extras (apache-airflow being the most common
+    example). Includes a synthetic temp-file fixture so the test
+    doesn't depend on the real requirements.txt always pinning
+    apache-airflow with extras.
+    """
+    import tempfile
+    from pathlib import Path
+
+    import version_compatibility
+
+    with tempfile.TemporaryDirectory() as td:
+        # Place a fake requirements file under a temporary repo root.
+        # The function reads relative to ``_REPO_ROOT``, so monkeypatch via
+        # the module attribute.
+        fake_req = Path(td) / "fake-requirements.txt"
+        fake_req.write_text(
+            "# header\napache-airflow[postgres]~=3.2\nneo4j~=5.27\nstuff[a,b,c]  ~=  1.2\nno-extras~=9.9\n"
+        )
+        original_root = version_compatibility._REPO_ROOT
+        version_compatibility._REPO_ROOT = td
+        try:
+            assert version_compatibility.read_requirements_pin("fake-requirements.txt", "apache-airflow") == "3.2"
+            assert version_compatibility.read_requirements_pin("fake-requirements.txt", "stuff") == "1.2"
+            # No-extras form still works (regression: the new (?:\[...\])?
+            # group is optional, not required)
+            assert version_compatibility.read_requirements_pin("fake-requirements.txt", "no-extras") == "9.9"
+            assert version_compatibility.read_requirements_pin("fake-requirements.txt", "neo4j") == "5.27"
+        finally:
+            version_compatibility._REPO_ROOT = original_root

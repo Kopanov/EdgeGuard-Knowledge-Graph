@@ -466,8 +466,15 @@ def read_requirements_pin(req_file: str, package: str) -> Optional[str]:
                 # Skip comments / blanks
                 if not stripped or stripped.startswith("#"):
                     continue
-                # Match ``<package>~=<version>`` allowing optional whitespace + extras
-                pattern = rf"^{re.escape(package)}\s*~=\s*([\d.]+)\s*$"
+                # PR #36 commit X (bugbot MED): the previous regex claimed to
+                # allow "optional whitespace + extras" but never had an
+                # optional bracket group, so ``apache-airflow[postgres]~=3.2``
+                # silently returned None — the only RECOMMENDED_VERSIONS
+                # entry without pin-file sync coverage. Now the bracketed
+                # extras form (``<package>[<extras>]~=<version>``) is
+                # explicitly tolerated. Extras content itself is uninspected
+                # — we only care about the package name + the version pin.
+                pattern = rf"^{re.escape(package)}(?:\[[^\]]*\])?\s*~=\s*([\d.]+)\s*$"
                 m = re.match(pattern, stripped)
                 if m:
                     return m.group(1)
