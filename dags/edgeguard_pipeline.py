@@ -625,85 +625,17 @@ def _method_accepts_kwarg(callable_obj, name: str) -> bool:
     return False
 
 
-# Exception type names that indicate a TRANSIENT external problem (network,
-# upstream provider outage, DNS, timeout) rather than an EdgeGuard bug.
-# Names matched against ``type(exc).__name__`` so we don't have to import
-# every collector's optional HTTP library — works whether ``requests`` is
-# installed or not, and tolerates third-party libraries (``httpx``,
-# ``urllib3``, ``aiohttp``) that ship parallel exception hierarchies.
-#
-# PR #35: introduced when the CyberCure feed had a provider-side outage and
-# blocked the entire baseline pipeline (cybercure → tier2_feeds → blocked
-# full_neo4j_sync, build_relationships, baseline_complete). The user
-# policy is "if a feed fails for an external reason, log + continue,
-# don't block everything."
-_TRANSIENT_EXTERNAL_EXCEPTION_NAMES: frozenset = frozenset(
-    {
-        # stdlib + requests
-        "ConnectionError",
-        "ConnectionRefusedError",
-        "ConnectionResetError",
-        "ConnectionAbortedError",
-        "TimeoutError",
-        "Timeout",
-        "ReadTimeout",
-        "ConnectTimeout",
-        "ConnectTimeoutError",
-        "ReadTimeoutError",
-        "HTTPError",
-        "ChunkedEncodingError",
-        "ContentDecodingError",
-        # urllib3 / requests adapters
-        "MaxRetryError",
-        "NewConnectionError",
-        "ProtocolError",
-        "ProxyError",
-        "SSLError",
-        # DNS
-        "NameResolutionError",
-        "gaierror",
-        # httpx
-        "ConnectError",
-        "TransportError",
-        "RemoteProtocolError",
-        # asyncio / aiohttp
-        "ClientConnectorError",
-        "ClientConnectionError",
-        "ClientOSError",
-        "ClientResponseError",
-        "ServerDisconnectedError",
-        # boto3-style (in case a collector uses S3-backed feeds later)
-        "EndpointConnectionError",
-    }
+# PR #35 commit 2: ``_is_transient_external_error`` and the transient-name
+# frozenset moved to ``src/collector_failure_alerts.py`` so the CLI path
+# (``src/run_pipeline.py``) can use the same classifier. The local names
+# below are kept as backward-compatible aliases — existing tests + comments
+# in this file still reference them.
+from collector_failure_alerts import (  # noqa: E402
+    _TRANSIENT_EXTERNAL_EXCEPTION_NAMES,
 )
-
-
-def _is_transient_external_error(exc: BaseException) -> bool:
-    """Return True if *exc* looks like a transient external-service failure.
-
-    Match by class name (and walk the MRO) so we don't have to import the
-    HTTP library of every collector — works for ``requests``, ``httpx``,
-    ``urllib3``, ``aiohttp``, stdlib socket/ssl errors, and anything else
-    whose class name matches ``_TRANSIENT_EXTERNAL_EXCEPTION_NAMES``.
-
-    Conservative: when in doubt, return False so the exception re-raises
-    and a real bug gets surfaced. Better to fail loudly on a TypeError
-    than silently swallow it as "transient."
-    """
-    if exc is None:
-        return False
-    # Walk the MRO of exc's class so subclasses match too (e.g. a
-    # custom CyberCureRequestTimeout that subclasses TimeoutError).
-    for cls in type(exc).__mro__:
-        if cls.__name__ in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES:
-            return True
-    # Also walk the cause chain (``raise X from Y`` patterns) — a
-    # collector might wrap a network error in a domain-specific exception
-    # whose name we don't recognize, but the underlying cause is transient.
-    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
-    if cause is not None and cause is not exc:
-        return _is_transient_external_error(cause)
-    return False
+from collector_failure_alerts import (
+    is_transient_external_error as _is_transient_external_error,
+)
 
 
 def run_collector_with_metrics(
@@ -938,7 +870,7 @@ def run_collector_with_metrics(
             logger.warning(
                 f"{collector_name.upper()} skipped after {duration:.2f}s — transient external error "
                 f"({type(e).__name__}: {e}); marking task SUCCESS so downstream tasks proceed. "
-                f"Investigate via metrics edgeguard_collector_skip_total{{reason='transient_external_error'}}."
+                f"Investigate via metrics edgeguard_collector_skips_total{{reason_class='transient_external_error'}}."
             )
             return make_skipped_optional_source(
                 collector_name,
