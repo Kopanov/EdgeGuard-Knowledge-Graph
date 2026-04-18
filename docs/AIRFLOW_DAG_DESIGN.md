@@ -187,7 +187,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 **Note on Actor/Malware/Tool → Technique:** All three are sourced from **explicit** STIX **`relationship_type: uses`** objects in the MITRE ATT&CK bundle — **not** from fuzzy text matching and **not** from actor/technique MISP co-occurrence (which is always empty). The MITRE collector populates **`uses_techniques`** on actors directly from the bundle; for **malware** and **tool**, the same list is embedded in MISP as **`MITRE_USES_TECHNIQUES:{...}`** on the attribute comment so `run_misp_to_neo4j` can restore **`uses_techniques`** on **`Malware`** / **`Tool`** nodes. `build_relationships.py` uses `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label and emits the specialized edge type matching the source label.
 
-> **2026-04 refactor note:** Prior to April 2026 all three edges were a single generic `USES`. They were split into `EMPLOYS_TECHNIQUE` (attribution — actor/campaign) and `IMPLEMENTS_TECHNIQUE` (capability — malware/tool) to improve Cypher clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1 `relationship_type: "uses"` on export. See [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) for the graph rewrite and [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) for the semantic rationale.
+> **2026-04 refactor note:** Prior to April 2026 all three edges were a single generic `USES`. They were split into `EMPLOYS_TECHNIQUE` (attribution — actor/campaign) and `IMPLEMENTS_TECHNIQUE` (capability — malware/tool) to improve Cypher clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1 `relationship_type: "uses"` on export. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* See [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) for the semantic rationale.
 
 > **PR #33 round 10 — array-only INDICATES co-occurrence:** the legacy
 > first-seen scalar `misp_event_id` was dropped pre-release. The Indicator
@@ -325,33 +325,43 @@ Where:
 
 ### Provenance Tracking Properties
 
-Each node stores:
+Per the **PR #41 source-truthful architecture** (see
+[`migrations/2026_04_first_seen_at_source.md`](../migrations/2026_04_first_seen_at_source.md)),
+**node-level timestamps are DB-local only** — per-source observation
+claims live on the `SOURCED_FROM` edge so multi-source IOCs preserve
+full provenance. The legacy `n.first_seen` field has been retired.
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `sources` | List[String] | All sources that reported this entity |
-| `first_seen` | Timestamp | When first imported |
-| `last_updated` | Timestamp | Last time modified |
-| `confidence_score` | Float | 0.1 - 1.0 (corroboration-based) |
-| `validation_status` | String | verified, pending, disputed |
+| Property | Where | Type | Description |
+|----------|-------|------|-------------|
+| `sources` | node | List[String] | All sources that reported this entity |
+| `first_imported_at` | node | Timestamp | When EdgeGuard first imported the node (ON CREATE only — never overwritten) |
+| `last_updated` | node | Timestamp | DB-local refresh timestamp (set on every MERGE) |
+| `confidence_score` | node | Float | 0.1 - 1.0 (corroboration-based) |
+| `validation_status` | node | String | verified, pending, disputed |
+| `imported_at` | edge `SOURCED_FROM` | Timestamp | Per-source DB-local import time |
+| `updated_at` | edge `SOURCED_FROM` | Timestamp | Per-source DB-local refresh time |
+| `source_reported_first_at` | edge `SOURCED_FROM` | Timestamp / NULL | MIN-CASE of source's claimed first observation; NULL when source did not report (honest-NULL principle) |
+| `source_reported_last_at` | edge `SOURCED_FROM` | Timestamp / NULL | MAX-CASE of source's claimed last observation; NULL when source did not report |
 
 ### Example: Multi-Source CVE
 
 ```cypher
 // Day 1: NVD reports CVE-2024-1234
 MERGE (v:Vulnerability {cve_id: 'CVE-2024-1234'})
-SET 
-    v.sources = ['NVD'],
-    v.confidence_score = 0.5,
-    v.first_seen = timestamp(),
-    v.last_updated = timestamp()
+ON CREATE SET v.first_imported_at = datetime()
+SET v.sources           = ['NVD'],
+    v.confidence_score  = 0.5,
+    v.last_updated      = datetime()
+// ... and the SOURCED_FROM edge carries the per-source NVD timestamps.
 
 // Day 3: MISP reports same CVE
 MERGE (v:Vulnerability {cve_id: 'CVE-2024-1234'})
-SET 
-    v.sources = ['NVD', 'MISP'],
+SET v.sources          = ['NVD', 'MISP'],
     v.confidence_score = 0.7,  // Boosted!
-    v.last_updated = timestamp()
+    v.last_updated     = datetime()
+// `first_imported_at` is NEVER overwritten (ON CREATE only); MISP's
+// per-source claims land on a NEW SOURCED_FROM edge, leaving NVD's
+// provenance intact.
 
 // Day 5: CISA KEV reports it (known exploited)
 MERGE (v:Vulnerability {cve_id: 'CVE-2024-1234'})
@@ -413,4 +423,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-04-15 — `Dockerfile.airflow` base **`apache/airflow:3.2.0-python3.12`** (Python 3.12). Upgraded from 2.11.2 in the April 2026 Airflow 2→3 upgrade — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for the operational rollout._
+_Last updated: 2026-04-18 — PR #41 cleanup pass updated the 2026-04 USES→specialized-edge refactor note to reflect pre-release posture (no migration script ships; a fresh baseline rerun writes the specialized edge types). `Dockerfile.airflow` base **`apache/airflow:3.2.0-python3.12`** (Python 3.12), upgraded from 2.11.2 in the April 2026 Airflow 2→3 upgrade — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for the operational rollout._

@@ -12,7 +12,7 @@
 | AlienVault OTX | ✅ Yes | 30 requests/min (free) | Free | JSON |
 | NVD | ✅ Yes (free) | 50 requests/30 sec (with key) | Free | JSON |
 | CISA KEV | ❌ No | No limit (CSV download) | Free | JSON |
-| MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.0/2.1 |
+| MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.1 |
 | VirusTotal | ✅ Yes | 4 requests/min (free) | $200+/month | JSON |
 | AbuseIPDB | ✅ Yes | 1,000 requests/day (free) | $50+/month | JSON |
 | URLhaus | ❌ No | No limit (CSV) | Free | CSV |
@@ -106,12 +106,12 @@
 | **Registration** | Not required |
 | **Rate Limit** | None (GitHub download) |
 | **Data Provided** | Techniques, tactics, threat actors, malware, relationships |
-| **Format** | STIX 2.0 / STIX 2.1 |
+| **Format** | STIX 2.1 |
 | **Update Frequency** | Quarterly releases |
 
 **Data Download:**
-- Full dataset: https://github.com/mitre/cti (STIX 2.0)
-- Better formatted: https://github.com/mitre-attack/attack-stix-data (STIX 2.1)
+- Canonical dataset: https://github.com/mitre-attack/attack-stix-data (STIX 2.1) — what EdgeGuard ingests.
+- Legacy dataset: https://github.com/mitre/cti — kept for reference; the older STIX 2.0 export has been superseded by the STIX 2.1 dataset above.
 
 **Pricing:** Free
 

@@ -73,7 +73,7 @@ For connecting to a remote Neo4j server instead of localhost:
 export NEO4J_URI="bolt://your-neo4j-server.com:7687"
 export NEO4J_USER="neo4j"
 export NEO4J_PASSWORD="your-secure-password"
-export NEO4J_DATABASE="neo4j"  # Optional, for Neo4j 5.x
+export NEO4J_DATABASE="neo4j"  # Optional — explicit database name (multi-DB has been default since Neo4j 4.x)
 ```
 
 ### Option 2: Connection Types
@@ -91,7 +91,9 @@ If using Docker Compose for Neo4j:
 ```yaml
 services:
   neo4j:
-    image: neo4j:5.x
+    # Track the production pin in the repo's top-level docker-compose.yml.
+    # Project moved to Neo4j CalVer in 2025; current pin: 2026.03.1-community.
+    image: neo4j:2026.03.1-community
     environment:
       - NEO4J_AUTH=neo4j/your-secure-password
     ports:

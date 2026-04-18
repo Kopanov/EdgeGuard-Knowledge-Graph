@@ -786,72 +786,14 @@ def test_q7b_inner_has_no_unescaped_single_quotes():
 
 
 # ---------------------------------------------------------------------------
-# Round-6 finding #7 (LOW): backfill edge count overstates updateable
+# (Removed) Round-6 finding #7 — backfill edge count overstates updateable
 # ---------------------------------------------------------------------------
-
-
-def test_backfill_edge_count_query_filters_uuid_endpoints():
-    """The count query in ``backfill_edge`` must include the same
-    ``a.uuid IS NOT NULL AND b.uuid IS NOT NULL`` filter the update query
-    uses. Without that, ``committed X / Y`` reports X<Y on every clean run
-    (the gap = edges with NULL endpoint uuids that we cannot update), which
-    operators may misread as a partial failure."""
-    import importlib
-    import inspect
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
-
-    src = inspect.getsource(backfill_node_uuids.backfill_edge)
-
-    # Slice the source between `count_query = (` and the matching close-paren
-    # at the assignment's terminating paren. We can't use a naive regex because
-    # the body itself contains parentheses (e.g., `(r.src_uuid IS NULL OR ...)`).
-    # Instead, walk forward and balance parens.
-    start = src.index("count_query = (")
-    open_paren_idx = src.index("(", start)
-    depth = 0
-    for i in range(open_paren_idx, len(src)):
-        if src[i] == "(":
-            depth += 1
-        elif src[i] == ")":
-            depth -= 1
-            if depth == 0:
-                cq = src[open_paren_idx + 1 : i]
-                break
-    else:
-        raise AssertionError("could not balance parens for count_query")
-
-    assert "a.uuid IS NOT NULL" in cq, (
-        "count_query missing `a.uuid IS NOT NULL` filter — must match update_query or X/Y log will mislead operators"
-    )
-    assert "b.uuid IS NOT NULL" in cq, "count_query missing `b.uuid IS NOT NULL` filter — must match update_query"
-
-
-def test_backfill_edge_separately_logs_skipped_endpointless_edges():
-    """The fix doesn't just hide the gap — it also logs a WARNING when edges
-    have NULL endpoint nodes (the `skipped` count) so the operator knows to
-    run node backfill for those labels. Pin the WARNING phrasing so a
-    refactor can't silently drop it."""
-    import importlib
-    import inspect
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
-
-    src = inspect.getsource(backfill_node_uuids.backfill_edge)
-    assert "skipped_query" in src, "skipped_query (counts edges with NULL endpoint uuids) is missing"
-    assert "logger.warning" in src and "endpoint nodes without uuid" in src, (
-        "the WARNING log instructing the operator to run node backfill first is missing"
-    )
+# The two ``test_backfill_edge_*`` tests in this slot pinned behavior of
+# ``scripts/backfill_node_uuids.py``, which was deleted in the PR #41
+# pre-release cleanup pass (no production graph to migrate; every edge MERGE
+# in build_relationships.py / neo4j_client.py stamps r.src_uuid /
+# r.trg_uuid at write time, and a fresh baseline rerun stamps every uuid).
+# The tests were removed with the script.
 
 
 # ---------------------------------------------------------------------------
@@ -991,35 +933,11 @@ def test_topology_relationship_helpers_stamp_endpoint_uuids():
         )
 
 
-def test_backfill_includes_topology_edges():
-    """EDGES_TO_BACKFILL must list the topology edge tuples so a one-time
-    backfill picks them up; otherwise pre-existing topology edges keep
-    NULL src/trg_uuid forever."""
-    import importlib
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill_node_uuids.EDGES_TO_BACKFILL)
-    expected = {
-        ("ON", "SoftwareVersion", "Host"),
-        ("ON", "Host", "SoftwareVersion"),
-        ("ON", "NetworkService", "Host"),
-        ("ON", "Host", "NetworkService"),
-        ("TO", "Role", "Device"),
-        ("TO", "Device", "Role"),
-        ("HAS_IDENTITY", "Device", "Host"),
-        ("HAS_IDENTITY", "Host", "Device"),
-        ("PART_OF", "IP", "Subnet"),
-        ("PART_OF", "Subnet", "IP"),
-        ("PART_OF", "Subnet", "Subnet"),
-    }
-    missing = expected - edges
-    assert not missing, f"backfill is missing topology edge entries: {missing}"
+# (Removed) test_backfill_includes_topology_edges — pinned EDGES_TO_BACKFILL
+# in scripts/backfill_node_uuids.py, deleted in the PR #41 cleanup pass.
+# The write-time guarantee (every topology relationship helper stamps
+# r.src_uuid / r.trg_uuid) is pinned by
+# test_topology_relationship_helpers_stamp_endpoint_uuids above.
 
 
 def test_topology_uuid_matches_compute_node_uuid_contract():
@@ -1086,83 +1004,11 @@ def test_merge_cvss_node_params_spread_filtered_first():
     )
 
 
-def test_backfill_validates_labels_before_interpolation():
-    """Bugbot (round 8, LOW): backfill's ``--labels`` flag is user-supplied
-    and flowed unvalidated into f-string Cypher. Pin that the three backfill
-    Cypher-building functions call ``_validate_label`` and (for edges)
-    ``_validate_rel_type``."""
-    import importlib
-    import inspect
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
-
-    for fn_name in ("count_null_uuid_nodes", "backfill_label"):
-        fn = getattr(backfill_node_uuids, fn_name)
-        src = inspect.getsource(fn)
-        assert "_validate_label(" in src, f"{fn_name} does not call _validate_label before f-string interpolation"
-
-    edge_src = inspect.getsource(backfill_node_uuids.backfill_edge)
-    assert "_validate_label(from_label)" in edge_src
-    assert "_validate_label(to_label)" in edge_src
-    assert "_validate_rel_type(rel_type)" in edge_src
-
-
-def test_backfill_edge_inner_query_re_matches_relationship_by_id():
-    """Bugbot (round 11, MED): apoc.periodic.iterate runs the inner query
-    in a NEW transaction per batch. Raw entity references (r, a, b) from
-    the outer cannot safely be referenced in that new transaction — the
-    handle was bound to the outer transaction's lifetime. The safe pattern
-    is to RETURN id(r) (and the endpoint uuids as primitive strings) from
-    the outer, then re-MATCH by id in the inner.
-
-    This test was originally added in round 8 asserting the
-    ``WITH $r AS r`` rebind pattern; round 11 superseded that with the
-    safer id()-based pattern."""
-    import importlib
-    import inspect
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
-
-    src = inspect.getsource(backfill_node_uuids.backfill_edge)
-
-    # Outer must return the relationship id and endpoint uuids as primitives.
-    assert "id(r)" in src, "outer query must RETURN id(r) — primitive long, transaction-safe"
-    assert "a.uuid AS a_uuid" in src, "outer must RETURN a.uuid as a primitive string for cross-transaction safety"
-    assert "b.uuid AS b_uuid" in src, "outer must RETURN b.uuid as a primitive string for cross-transaction safety"
-
-    # Inner must re-MATCH the relationship by id and use $-bound primitive uuids.
-    assert "id(r) = $rid" in src, (
-        "inner must re-MATCH the relationship by id() in the new transaction — "
-        "raw entity refs (r, a, b) are not safe across apoc.periodic.iterate batches"
-    )
-    assert "$a_uuid" in src and "$b_uuid" in src, "inner must use bound $a_uuid / $b_uuid primitives in SET"
-
-    # PR #33 round 15 (bugbot LOW): inner re-MATCH must be DIRECTED so each
-    # relationship is matched exactly once by id (undirected returns each
-    # relationship twice — once per traversal direction — causing redundant SETs).
-    assert "MATCH ()-[r]->()" in src, (
-        "inner re-MATCH must be DIRECTED ()-[r]->() — undirected ()-[r]-() returns "
-        "each relationship twice and fires the SET twice per edge"
-    )
-    assert "MATCH ()-[r]-()" not in src.replace("MATCH ()-[r]->()", ""), (
-        "the round-11 undirected pattern ()-[r]-() must not return — round 15 fixed it"
-    )
-
-    # Negative: the prior round-8 raw-entity rebind pattern must not return.
-    assert "WITH $r AS r, $a AS a, $b AS b" not in src, (
-        "round-8 raw-entity rebind pattern must NOT come back — entity handles "
-        "from outer query don't survive apoc.periodic.iterate's per-batch transactions"
-    )
+# (Removed) test_backfill_validates_labels_before_interpolation
+# (Removed) test_backfill_edge_inner_query_re_matches_relationship_by_id
+# Both pinned scripts/backfill_node_uuids.py, deleted in the PR #41 cleanup
+# pass. Equivalent invariants for the live MERGE sites are pinned by the
+# label-allowlist tests above and by tests in test_round26_invariants.py.
 
 
 def test_merge_device_refuses_missing_device_id():
@@ -1309,26 +1155,11 @@ def test_vulnerability_helpers_stamp_endpoint_uuids():
         assert "coalesce(" in src, f"{fn_name} missing coalesce — re-runs would NOT repair NULL src/trg_uuid"
 
 
-def test_backfill_includes_software_version_in_vulnerability_edges():
-    """The IN edge between SoftwareVersion and Vulnerability is now uuid-
-    stamped (round 9 helper fix); backfill must enumerate it so existing
-    edges get repaired on the next run."""
-    import importlib
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill_node_uuids = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill_node_uuids.EDGES_TO_BACKFILL)
-    assert ("IN", "SoftwareVersion", "Vulnerability") in edges, (
-        "EDGES_TO_BACKFILL missing (IN, SoftwareVersion, Vulnerability)"
-    )
-    assert ("IN", "Vulnerability", "SoftwareVersion") in edges, (
-        "EDGES_TO_BACKFILL missing (IN, Vulnerability, SoftwareVersion)"
-    )
+# (Removed) test_backfill_includes_software_version_in_vulnerability_edges
+# Pinned EDGES_TO_BACKFILL in scripts/backfill_node_uuids.py, deleted in
+# the PR #41 cleanup pass. The write-time guarantee (the IN helper between
+# SoftwareVersion and Vulnerability stamps r.src_uuid / r.trg_uuid) is
+# pinned by test_vulnerability_helpers_stamp_endpoint_uuids above.
 
 
 # ---------------------------------------------------------------------------
@@ -1456,26 +1287,12 @@ def test_create_vulnerability_sector_relationship_uses_affects():
     )
 
 
-def test_backfill_no_longer_lists_targets_for_vuln_or_cve():
-    """EDGES_TO_BACKFILL must drop the (TARGETS, Vulnerability, Sector) and
-    (TARGETS, CVE, Sector) tuples now that those edges are AFFECTS."""
-    import importlib
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill.EDGES_TO_BACKFILL)
-    assert ("TARGETS", "Vulnerability", "Sector") not in edges, "stale TARGETS Vulnerability→Sector still in backfill"
-    assert ("TARGETS", "CVE", "Sector") not in edges, "stale TARGETS CVE→Sector still in backfill"
-    # And the canonical AFFECTS entries must be present.
-    assert ("AFFECTS", "Vulnerability", "Sector") in edges
-    assert ("AFFECTS", "CVE", "Sector") in edges
-    # TARGETS Indicator→Sector remains (canonical).
-    assert ("TARGETS", "Indicator", "Sector") in edges
+# (Removed) test_backfill_no_longer_lists_targets_for_vuln_or_cve
+# Pinned EDGES_TO_BACKFILL in scripts/backfill_node_uuids.py, deleted in
+# the PR #41 cleanup pass. The canonical write-time guarantee
+# (Vuln/CVE→Sector uses AFFECTS, not TARGETS) is still pinned by
+# test_create_vulnerability_sector_relationship_uses_affects above and
+# test_misp_batch_uses_affects_for_vuln_cve_to_sector below.
 
 
 def test_merge_missiondependency_refuses_missing_dependency_id():
@@ -2125,138 +1942,19 @@ def test_calibrate_large_event_uses_id_based_rebinding():
     )
 
 
-def test_backfill_lists_both_has_cvss_directions():
-    """Bugbot has flagged HAS_CVSS_v* reverse-direction entries in
-    EDGES_TO_BACKFILL as 'redundant' (PR #34 round 18, false positive).
-    They are NOT redundant: ``_merge_cvss_node`` creates two physically-
-    separate edges per CVE↔CVSS pair (one in each direction), each with
-    its own r.src_uuid / r.trg_uuid that must be backfilled. Pin both
-    directions present so a future bugbot rerun can be quickly disproven."""
-    import importlib
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill.EDGES_TO_BACKFILL)
-    for v in ("v2", "v30", "v31", "v40"):
-        rel = f"HAS_CVSS_{v}"
-        cvss_label = f"CVSS{v}"
-        forward = (rel, "CVE", cvss_label)
-        reverse = (rel, cvss_label, "CVE")
-        assert forward in edges, f"backfill missing forward edge ({forward})"
-        assert reverse in edges, (
-            f"backfill missing REVERSE edge ({reverse}) — _merge_cvss_node creates BOTH "
-            "directions (CVE→CVSS and CVSS→CVE), so both must be backfilled"
-        )
+# (Removed) test_backfill_lists_both_has_cvss_directions
+# (Removed) test_backfill_omits_cvss_sourced_from_intentionally
+# (Removed) test_backfill_rejects_conflicting_nodes_only_and_edges_only
+# All three pinned scripts/backfill_node_uuids.py, deleted in the PR #41
+# cleanup pass. The corresponding write-time invariants — _merge_cvss_node
+# creates bidirectional HAS_CVSS_v* edges and does NOT call
+# _upsert_sourced_relationship — are still enforced at the merge sites
+# themselves. No CLI to validate now that the script is gone.
 
 
 # ---------------------------------------------------------------------------
 # Round 20 — bugbot findings on commit 106d41a
 # ---------------------------------------------------------------------------
-
-
-def test_backfill_omits_cvss_sourced_from_intentionally():
-    """PR #34 round 20 (bugbot LOW, false positive): bugbot suggested adding
-    SOURCED_FROM edges for CVSSv2/v30/v31/v40 to EDGES_TO_BACKFILL. This is
-    wrong — ``_merge_cvss_node`` in neo4j_client.py does NOT create a
-    SOURCED_FROM edge. CVSS records are attributes of their parent CVE;
-    provenance flows through the CVE's own SOURCED_FROM edge. No such edges
-    exist in production, so nothing to backfill.
-
-    Pin the omission so a well-intentioned "add CVSS SOURCED_FROM" refactor
-    gets caught by CI instead of running a multi-hour backfill that finds
-    zero matching edges in the graph."""
-    import importlib
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill.EDGES_TO_BACKFILL)
-    for cvss_label in ("CVSSv2", "CVSSv30", "CVSSv31", "CVSSv40"):
-        assert ("SOURCED_FROM", cvss_label, "Source") not in edges, (
-            f"SOURCED_FROM ({cvss_label}→Source) must NOT be in EDGES_TO_BACKFILL — "
-            "_merge_cvss_node doesn't create this edge type; provenance flows through parent CVE"
-        )
-
-    # Also pin the cross-check: every *other* label whose SOURCED_FROM edge
-    # IS created by the code path (via merge_node_with_source) must be present.
-    for label in ("Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique", "Tactic", "Tool"):
-        assert ("SOURCED_FROM", label, "Source") in edges, (
-            f"SOURCED_FROM ({label}→Source) is produced by merge_node_with_source and must be backfilled"
-        )
-
-    # Verify neo4j_client's _merge_cvss_node does NOT call _upsert_sourced_relationship
-    # (the method that would create a CVSS SOURCED_FROM). If this ever changes,
-    # this test fails and the operator MUST add the CVSS entries above.
-    import neo4j_client
-
-    src_path = neo4j_client.__file__
-    with open(src_path) as fh:
-        source = fh.read()
-    cvss_start = source.find("def _merge_cvss_node")
-    cvss_end = source.find("def merge_malware", cvss_start)
-    assert cvss_start > 0 and cvss_end > cvss_start, "could not locate _merge_cvss_node body"
-    cvss_block = source[cvss_start:cvss_end]
-    assert "_upsert_sourced_relationship" not in cvss_block, (
-        "_merge_cvss_node now calls _upsert_sourced_relationship — SOURCED_FROM edges now exist "
-        "for CVSS nodes; EDGES_TO_BACKFILL MUST be updated to include them"
-    )
-
-
-def test_backfill_rejects_conflicting_nodes_only_and_edges_only():
-    """PR #34 round 20 (bugbot LOW): passing both ``--nodes-only`` AND
-    ``--edges-only`` used to silently skip BOTH passes and exit 0 — the
-    operator could believe the backfill ran. argparse's mutually-exclusive
-    group now rejects the conflict at CLI parse time."""
-    import importlib
-    import subprocess
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    # Source-level pin: the mutually_exclusive_group must be used for the
-    # two flags. A refactor that drops the group would regress the guard.
-    src_path = backfill.__file__
-    with open(src_path) as fh:
-        source = fh.read()
-    assert "add_mutually_exclusive_group" in source, (
-        "the --nodes-only / --edges-only flags must be in a mutually-exclusive group"
-    )
-
-    # Behavioral check: invoking the script with both flags must exit non-zero
-    # and write the argparse conflict message to stderr. Use ``-h``-adjacent
-    # probing — we parse-args directly and catch SystemExit via subprocess so
-    # we don't need a live Neo4j driver.
-    env = os.environ.copy()
-    # Prevent the script from attempting an actual Neo4j connection before
-    # argparse runs (argparse runs first in main(), so this is defense-in-depth).
-    env.setdefault("NEO4J_URI", "bolt://invalid:7687")
-    result = subprocess.run(
-        [sys.executable, src_path, "--nodes-only", "--edges-only"],
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=10,
-    )
-    assert result.returncode != 0, (
-        "passing both --nodes-only and --edges-only must exit non-zero (argparse rejects the conflict)"
-    )
-    combined = (result.stderr + result.stdout).lower()
-    assert "not allowed" in combined or "mutually exclusive" in combined, (
-        f"argparse conflict message missing from output; got stderr:\n{result.stderr}\n\nstdout:\n{result.stdout}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2684,23 +2382,11 @@ def test_role_user_edges_stamp_endpoint_uuids():
     assert blob.count("coalesce(r.src_uuid") >= 1, "Alert→Indicator SET must coalesce src_uuid"
 
 
-def test_backfill_includes_round23_edges():
-    """Round 23: the new User and Alert edges must be in EDGES_TO_BACKFILL
-    so existing graphs (pre-round-23 nodes/edges) get their uuids stamped
-    on the next backfill run."""
-    import importlib
-
-    if "scripts.backfill_node_uuids" in sys.modules:
-        del sys.modules["scripts.backfill_node_uuids"]
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill.EDGES_TO_BACKFILL)
-    assert ("ASSIGNED_TO", "Role", "User") in edges, "round-23 backfill must include Role→User ASSIGNED_TO edge"
-    assert ("ASSIGNED_TO", "User", "Role") in edges, "round-23 backfill must include User→Role ASSIGNED_TO edge"
-    assert ("INVOLVES", "Alert", "Indicator") in edges, "round-23 backfill must include Alert→Indicator INVOLVES edge"
+# (Removed) test_backfill_includes_round23_edges
+# Pinned EDGES_TO_BACKFILL in scripts/backfill_node_uuids.py, deleted in
+# the PR #41 cleanup pass. The write-time guarantee (Role↔User and
+# Alert→Indicator helpers stamp r.src_uuid / r.trg_uuid) is pinned by
+# test_role_user_edges_stamp_endpoint_uuids above.
 
 
 def test_round23_uuid_indexes_are_created():
@@ -2802,26 +2488,24 @@ def test_all_merge_sites_use_zone_override_helper():
         )
 
 
-def test_backfill_migration_exists_and_shape():
-    """PR #34 round 24: a one-shot migration must exist to heal any
-    pre-round-24 nodes whose ``n.zone`` array already accumulated 'global'
-    alongside specific sectors. Pin the file's existence + the core
-    Cypher shape so a rename/refactor can't orphan the migration."""
-    migration_path = os.path.join(os.path.dirname(__file__), "..", "migrations", "2026_04_zone_override_heal.cypher")
-    assert os.path.isfile(migration_path), f"expected migration file at {migration_path}"
-    with open(migration_path) as fh:
-        content = fh.read()
+def test_zone_override_enforced_at_write_time_no_migration_needed():
+    """PR (S5) pre-release cleanup: the PR #34 round-24 zone-heal
+    migration was deleted (no production graph carries the corrupted
+    ``['healthcare', 'global']`` shape — pre-release, fresh baseline).
 
-    # Core semantics must be present.
-    assert "'global' IN n.zone" in content, "migration must target rows with 'global' in zone"
-    assert "size([z IN n.zone WHERE z IS NOT NULL AND z <> 'global']) > 0" in content, (
-        "migration must only heal when at least one SPECIFIC sector exists "
-        "(otherwise we'd strip 'global' from legitimately-global-only nodes)"
+    The write-time override rule is enforced in-code via
+    ``_zone_override_global_clause`` — new ingestions cannot produce
+    the corrupted shape. This test pins the write-time rule directly
+    (matrix covered by the neighbouring
+    ``test_zone_clause_semantic_matrix_via_ephemeral_cypher``) instead
+    of pinning a migration artifact that no longer exists.
+    """
+    path = os.path.join(os.path.dirname(__file__), "..", "src", "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    assert "_zone_override_global_clause" in src, (
+        "write-time zone-override helper must exist so new ingestions cannot produce ['specific', 'global'] corruption"
     )
-    assert "SET n.zone = [z IN n.zone WHERE z IS NOT NULL AND z <> 'global']" in content, (
-        "migration must write the filtered (global-stripped) list back"
-    )
-    assert "RETURN count(n) AS healed" in content, "migration should surface a heal count for the operator"
 
 
 def test_zone_clause_semantic_matrix_via_ephemeral_cypher():
@@ -2979,35 +2663,11 @@ def test_debug_zone_check_uses_valid_zones():
     assert "VALID_ZONES" in src, "_extract_zone_from_event_name must use VALID_ZONES"
 
 
-def test_backfill_has_no_dead_indicates_entries():
-    """PR #34 round 24 (bugbot round 22 LOW): EDGES_TO_BACKFILL used to
-    include ``("INDICATES", "Indicator", "Vulnerability")`` and
-    ``("INDICATES", "Indicator", "CVE")`` — production never creates
-    INDICATES between those label pairs (Indicator→Vulnerability/CVE uses
-    EXPLOITS; INDICATES is only Indicator→Malware). Dead entries matched
-    0 edges and produced misleading "0 edges need backfill" log lines."""
-    import importlib
-
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-
-    if "backfill_node_uuids" in sys.modules:
-        del sys.modules["backfill_node_uuids"]
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    edges = set(backfill.EDGES_TO_BACKFILL)
-    assert ("INDICATES", "Indicator", "Vulnerability") not in edges, (
-        "dead INDICATES entry must not be in EDGES_TO_BACKFILL — Indicator→Vulnerability uses EXPLOITS, not INDICATES"
-    )
-    assert ("INDICATES", "Indicator", "CVE") not in edges, (
-        "dead INDICATES entry must not be in EDGES_TO_BACKFILL — Indicator→CVE uses EXPLOITS, not INDICATES"
-    )
-    # Positive cross-check: the legitimate Indicator→Malware INDICATES
-    # and Indicator→Vuln/CVE EXPLOITS must all still be present.
-    assert ("INDICATES", "Indicator", "Malware") in edges, "legitimate INDICATES backfill entry missing"
-    assert ("EXPLOITS", "Indicator", "Vulnerability") in edges
-    assert ("EXPLOITS", "Indicator", "CVE") in edges
+# (Removed) test_backfill_has_no_dead_indicates_entries
+# Pinned EDGES_TO_BACKFILL in scripts/backfill_node_uuids.py, deleted in
+# the PR #41 cleanup pass. The semantic invariant — Indicator→Malware uses
+# INDICATES, Indicator→Vulnerability/CVE uses EXPLOITS — is enforced at the
+# write-time MERGE sites in build_relationships.py and neo4j_client.py.
 
 
 def test_adding_a_fifth_zone_propagates_through_all_derived_sources():

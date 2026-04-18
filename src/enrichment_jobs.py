@@ -143,8 +143,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       actor_name      — source actor name
       indicator_count — number of indicators at last update
       malware_count   — number of malware families at last update
-      first_seen      — earliest indicator.first_imported_at
-      last_seen       — latest indicator.last_updated
+      first_seen      — earliest world-truthful indicator first observation
+                        (from coalesce(i.first_seen_at_source,
+                        i.first_imported_at) — see PR (S5) for the
+                        source-truthful timestamps design)
+      last_seen       — latest world-truthful indicator last observation
+                        (from coalesce(i.last_seen_at_source,
+                        i.last_updated))
       zone            — union of all indicator zones
       tag             — actor tag (for UNIQUE constraint key)
     """
@@ -198,11 +203,36 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
             WHERE i.active = true
+            // PR (S5) (bugbot c9bb277 MED + architecture redesign):
+            // per-source timestamps live on SOURCED_FROM edges, not on
+            // the node. We want "earliest claim across ALL sources for
+            // this indicator" per indicator, THEN aggregate across
+            // indicators for the campaign.
+            //
+            // The previous shape `min/max(coalesce(r.X, i.Y))` had a
+            // row-multiplication bug (bugbot c9bb277 MED): for an
+            // indicator with N edges, the OPTIONAL MATCH produces N
+            // rows. If any edge had NULL source_reported_last_at, that
+            // row's coalesce fell back to `i.last_updated` (a recent
+            // sync wall-clock), and the outer `max()` would pick the
+            // wall-clock over the real older source claims from OTHER
+            // edges. Campaign `c.last_seen` would reflect EdgeGuard's
+            // sync time instead of the source's actual last-reported
+            // claim.
+            //
+            // Fix: aggregate edges per-indicator FIRST (ignoring NULL
+            // claims — that's what min/max do natively), THEN coalesce
+            // the per-indicator result with the node-level DB-local
+            // fallback ONLY when ALL source claims are NULL.
+            OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
+            WITH a, malware_list, i,
+                 min(r.source_reported_first_at) AS i_source_first,
+                 max(r.source_reported_last_at)  AS i_source_last
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
-                 min(i.first_imported_at) AS first_seen,
-                 max(i.last_updated)      AS last_seen
+                 min(coalesce(i_source_first, i.first_imported_at)) AS first_seen,
+                 max(coalesce(i_source_last,  i.last_updated))      AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
             WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(
@@ -218,9 +248,29 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.last_updated     = datetime(),
                 c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
-                c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
+                // PR (S5) (bugbot LOW): the AND-guard on the
+                // incoming aggregate prevents a transient NULL aggregate
+                // (e.g. brand-new campaign with zero active indicators)
+                // from overwriting an existing non-NULL c.first_seen.
+                // Same defensive shape on c.last_seen below.
+                c.first_seen       = CASE WHEN first_seen IS NOT NULL
+                                       AND (c.first_seen IS NULL OR first_seen < c.first_seen)
                                        THEN first_seen ELSE c.first_seen END,
-                c.last_seen        = last_seen,
+                // PR (S5) (bugbot MED): MAX-guard c.last_seen
+                // symmetrically with c.first_seen. Rationale: the
+                // aggregation now reads ``max(coalesce(i.last_seen_at_source,
+                // i.last_updated))`` — with source-truthful data, an
+                // indicator's ``last_seen_at_source`` can be much OLDER
+                // than its ``last_updated`` (e.g. source claims 2020,
+                // EdgeGuard last sync'd in 2026). Without the MAX-guard,
+                // ``c.last_seen`` would regress backwards on the first
+                // post-deploy enrichment run. The CASE mirrors the
+                // first_seen pattern and is safe against both baseline
+                // and incremental (MAX preserves the newest observation).
+                // bugbot LOW: same NULL-aggregate defensive guard.
+                c.last_seen        = CASE WHEN last_seen IS NOT NULL
+                                       AND (c.last_seen IS NULL OR last_seen > c.last_seen)
+                                       THEN last_seen ELSE c.last_seen END,
                 c.zone             = all_zones,
                 c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
             MERGE (a)-[r_runs:RUNS]->(c)
@@ -449,9 +499,8 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
                     # apoc.periodic.iterate runs the inner action in a NEW transaction
                     # per batch — raw entity references from the outer query (``r``)
-                    # cannot safely be used as bound entities in the inner. Same
-                    # pattern as scripts/backfill_node_uuids.py round 11: outer
-                    # returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
+                    # cannot safely be used as bound entities in the inner. Pattern:
+                    # outer returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
                     # ``MATCH ()-[r]->() WHERE id(r) = $rid`` to bind a fresh handle.
                     large_batch_query = (
                         "CALL apoc.periodic.iterate("

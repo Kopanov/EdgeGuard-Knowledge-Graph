@@ -27,7 +27,7 @@ export MISP_API_KEY="your-misp-api-key"          # REQUIRED
 export NEO4J_URI="bolt://localhost:7687"
 export NEO4J_USER="neo4j"
 export NEO4J_PASSWORD="your-strong-password"     # REQUIRED, no default
-export NEO4J_DATABASE="neo4j"                    # Optional, Neo4j 5+
+export NEO4J_DATABASE="neo4j"                    # Optional — explicit database name (multi-DB default since Neo4j 4.x)
 
 # SSL / TLS
 export EDGEGUARD_SSL_VERIFY=true                 # default; set false ONLY for local self-signed dev

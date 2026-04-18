@@ -781,4 +781,82 @@ python -m collectors.energy_feed_collector
 
 ---
 
-_Last updated: 2026-03-28_
+## Adding a new reliable source — checklist
+
+When adding a new collector that has a **canonical first-reported / last-reported timestamp** that should flow into the source-truthful timestamp pipeline (PR S5, 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`), follow this **8-step checklist**:
+
+### 1. Add to `_RELIABLE_FIRST_SEEN_SOURCES` allowlist
+
+In `src/source_truthful_timestamps.py`, add your source's tag(s) to the `_RELIABLE_FIRST_SEEN_SOURCES` frozenset. Include both the canonical name AND any aliases (e.g. `"feodo"` + `"feodo_tracker"`) — the allowlist must accept whatever string the collector writes to `item["tag"]`.
+
+### 2. Add to `SOURCE_MAPPING` in `run_misp_to_neo4j.py`
+
+In `src/run_misp_to_neo4j.py::SOURCE_MAPPING`, map the human label (e.g. `"My-New-Source"`) to the canonical tag. Tag MUST match what the collector emits; the static test `test_collector_emitted_tags_match_allowlist` will fail otherwise.
+
+### 3. Add to `SOURCE_TAGS` in `config.py`
+
+In `src/config.py::SOURCE_TAGS`, add the human-readable label → tag mapping. This is what MISPWriter uses to tag attributes and what `extract_source_from_tags` reads back.
+
+### 4. Add to `SOURCES` dict in `neo4j_client.py`
+
+In `src/neo4j_client.py::SOURCES`, add an entry for your tag (canonical + any aliases). `ensure_sources()` MERGEs a `:Source` node per entry; the SOURCED_FROM edge MERGE then matches on `source_id`. **A missing entry causes the merge_indicators_batch / merge_vulnerabilities_batch defensive check to refuse the entire batch** with a clear error log (Red Team v3 H1 protection).
+
+### 5. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
+
+In your new `collectors/<name>_collector.py`, populate the source-truthful timestamps directly from upstream:
+
+```python
+processed.append({
+    "type": "indicator",  # or vulnerability, malware, etc.
+    "value": <value>,
+    "tag": "your_source_tag",
+    "source": ["your_source_tag"],
+    # PR (S5): source-truthful timestamps. NULL is honest — do NOT
+    # fall back to wall-clock NOW. The source-truthful extractor will
+    # return None for missing values, and the SOURCED_FROM edge MIN/MAX
+    # CASE preserves any prior value.
+    "first_seen": upstream_data.get("first_reported_at") or None,
+    "last_seen":  upstream_data.get("last_reported_at")  or None,
+    # ...
+})
+```
+
+### 6. Verify MISPWriter passthrough fires for your entity type
+
+The `_apply_source_truthful_timestamps` helper in `src/collectors/misp_writer.py` is called from all 7 `create_*_attribute` methods (indicator, vulnerability, malware, actor, technique, tactic, tool) AS THE LAST STATEMENT before `return attribute`. If you add a NEW entity type, you must add the helper call to its `create_*_attribute` method too — the bugbot fix in commit `9a414ac` had to do exactly this for 5 entity types after they were missed. The helper uses `coerce_iso` to accept int epochs, datetime objects, and date-only strings.
+
+### 7. Add Layer-2 META JSON parser if your source ships structured metadata
+
+If your source ships a structured-metadata JSON blob (like NVD_META, TF_META, CISA_META) that needs to round-trip through the MISP attribute comment field, add a Layer-2 fallback branch in `src/source_truthful_timestamps.py::extract_source_truthful_timestamps`. Most sources only need Layer-1 (MISP-native attribute fields).
+
+### 8. Update `tests/test_source_reported_timestamps.py`
+
+Add your tag to the static enumeration in `test_collector_emitted_tags_match_allowlist` so the test catches future tag drift.
+
+### Verification
+
+After adding a new source, run:
+
+```bash
+.venv/bin/python -m pytest tests/test_source_reported_timestamps.py -v
+```
+
+The full suite should pass. If any test fails, the new source isn't wired through correctly — the assertion message names the exact symbol you missed.
+
+For an end-to-end smoke test:
+
+```cypher
+MATCH (n)-[r:SOURCED_FROM]->(:Source {source_id: "your_source_tag"})
+RETURN n.uuid,
+       r.source_reported_first_at,
+       r.source_reported_last_at,
+       r.imported_at,
+       r.updated_at
+LIMIT 10;
+```
+
+Should show populated source-reported timestamps if your upstream provides them.
+
+---
+
+_Last updated: 2026-04-18_

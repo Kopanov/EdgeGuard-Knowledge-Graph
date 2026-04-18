@@ -137,7 +137,7 @@ All zone values are validated against `VALID_ZONES` in `config.py` before any wr
 
 **`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`**, **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`**, and **`(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** are built from the **explicit STIX `uses` relationship objects** in the MITRE ATT&CK bundle — **not** from substring / `CONTAINS` matching and **not** from cross-event co-occurrence (which yields 0 for actor/technique pairs).
 
-> **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. See [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) for the rewrite path. The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
+> **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
 
 The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
 
@@ -239,7 +239,7 @@ When data is pushed to MISP, it gets tagged with:
 
 | Relationship | From → To | How it is created |
 |---|---|---|
-| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at` |
+| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` on malware/tool (MISP **`MITRE_USES_TECHNIQUES:`** round-trip for malware) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
@@ -254,6 +254,19 @@ When data is pushed to MISP, it gets tagged with:
 
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
 `imported_at` is set once on first creation (`ON CREATE SET`) and never overwritten.
+
+**Source-truthful timestamps on `SOURCED_FROM` edges (PR S5, 2026-04):**
+The two new edge properties `r.source_reported_first_at` /
+`r.source_reported_last_at` carry the per-source first/last claim
+("NVD says it published 2013-01-15", "AbuseIPDB says it first reported
+2024-01-15"). Updated via MIN/MAX CASE with NULL short-circuit so
+stale imports cannot regress earlier claims. Node-level
+`n.first_imported_at` (ON CREATE SET only) and `n.last_updated`
+(refreshed every MERGE) carry only DB-local truths — they cannot be
+misread as real-world claims. STIX export aggregates MIN across all
+edges for `valid_from`. See `docs/KNOWLEDGE_GRAPH.md` for the full
+schema and `migrations/2026_04_first_seen_at_source.md` for operator
+verification queries + post-deploy backfill script.
 
 **MISP traceability on edges (2026-04):** every relationship MERGEd by
 `Neo4jClient.create_misp_relationships_batch` (i.e. all `EMPLOYS_TECHNIQUE`,
@@ -297,9 +310,9 @@ and every MISP-derived edge carries `r.src_uuid` / `r.trg_uuid`. Same input
 
 The implementation lives in [src/node_identity.py](../src/node_identity.py)
 and is wired into every node MERGE in `Neo4jClient` plus the 12 link
-queries in `build_relationships.py`. Backfill for the existing graph runs
-via [`scripts/backfill_node_uuids.py`](../scripts/backfill_node_uuids.py)
-— operator runbook in [MIGRATIONS.md](MIGRATIONS.md).
+queries in `build_relationships.py`. *Pre-release framework — no backfill
+script ships; a fresh baseline rerun stamps every uuid at write time. See
+[MIGRATIONS.md](MIGRATIONS.md) for the heal-by-rebaseline contract.*
 
 ---
 
@@ -437,4 +450,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the n.uuid backfill-script pointer with the heal-by-rebaseline contract (pre-release framework, no production graph) and reframed the USES→specialized-edge history as "fresh baseline writes the specialized edge type directly"._

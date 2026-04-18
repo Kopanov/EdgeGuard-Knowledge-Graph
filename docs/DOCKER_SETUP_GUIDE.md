@@ -11,7 +11,7 @@ This guide is an **operator checklist** for running the full EdgeGuard Compose s
 - **Docker Desktop** (or Docker Engine + Compose v2) with enough **RAM allocated to the Docker VM** for Neo4j + Airflow + anything else you run.
 - **Disk:** tens of GB free for images and volumes (Neo4j grows with data).
 - **RAM:** there is no single magic number. If you give Neo4j a **12g heap and 8g pagecache**, the host (and Docker VM) needs **well above 20g** just for that service, plus Airflow, Postgres, APIs, and optional MISP. A **32g** workstation is a reasonable target for that class of tuning; smaller hosts should use smaller `NEO4J_*` values or accept slower baselines.
-- **Airflow image:** the repo’s **`Dockerfile.airflow`** extends **`apache/airflow:2.11.x-python3.12`** — task code runs on **Python 3.12**. After changing the base tag, rebuild the **`edgeguard-airflow`** image (see [SETUP_GUIDE.md](SETUP_GUIDE.md)).
+- **Airflow image:** the repo’s **`Dockerfile.airflow`** extends **`apache/airflow:3.2.0-python3.12`** (upgraded from 2.11.x in the April 2026 Airflow 2→3 migration; see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)) — task code runs on **Python 3.12**. After changing the base tag, rebuild the **`edgeguard-airflow`** image (see [SETUP_GUIDE.md](SETUP_GUIDE.md)).
 
 **Security:** put real passwords and API keys only in **`.env`** (never committed). Copy from [`.env.example`](../.env.example). Do not paste production secrets into chat or docs.
 

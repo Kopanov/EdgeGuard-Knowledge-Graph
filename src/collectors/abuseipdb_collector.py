@@ -407,13 +407,34 @@ class AbuseIPDBCollector:
         zone_text = " ".join(p for p in zone_parts if p)
         zones = detect_zones_from_text(zone_text) if zone_text else ["global"]
 
+        # PR (S5) — Source-Truth Investigator audit: this branch
+        # (blacklist endpoint) used to set ``first_seen = lastReportedAt``,
+        # which is SEMANTICALLY WRONG — ``lastReportedAt`` is the date of
+        # the MOST RECENT report (= last_seen), not the FIRST report.
+        # The check endpoint (``_format_check_data`` above) correctly
+        # uses ``firstSeen``; the blacklist endpoint doesn't expose that
+        # field, so we leave ``first_seen`` UNSET entirely. parse_attribute's
+        # source-truthful extractor will then see ``attr.first_seen=None``
+        # and skip ``first_seen_at_source`` (NULL = "we don't know when
+        # AbuseIPDB first saw this IP via blacklist endpoint" — honest
+        # signal).
+        #
+        # PR (S5) (bugbot HIGH) follow-up: the previous attempt
+        # set ``first_seen`` to wall-clock NOW "for back-compat". That was
+        # wrong — it leaks through MISPWriter:664 → MISP attribute → the
+        # extractor reads it back → AbuseIPDB IS on the reliable allowlist
+        # → wall-clock NOW gets stored as first_seen_at_source. Today's
+        # date masquerading as world-truth on every blacklist IP.
+        # Fix: omit first_seen entirely. Honest NULL > misleading wall-clock.
+        last_reported = data.get("lastReportedAt", "")
         return {
             "indicator_type": "ipv4" if "." in ip else "ipv6",
             "value": ip,
             "zone": zones,
             "tag": "abuseipdb",
             "source": ["abuseipdb"],
-            "first_seen": data.get("lastReportedAt", datetime.now(timezone.utc).isoformat()),
+            # first_seen INTENTIONALLY OMITTED — see comment above.
+            "last_seen": last_reported,
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "confidence_score": abuse_score / 100.0,
             "abuse_score": abuse_score,

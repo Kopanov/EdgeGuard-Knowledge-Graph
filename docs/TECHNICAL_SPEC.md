@@ -446,7 +446,7 @@ Auth:    Configured via environment variables
 
 | Relationship | From | To | Properties |
 |--------------|------|-----|------------|
-| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` (~0.95), `match_type='mitre_explicit'`, … (`build_relationships.py`, `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — see [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher).* |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` (~0.95), `match_type='mitre_explicit'`, … (`build_relationships.py`, `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — pre-release framework, no migration script shipped; a fresh baseline rerun writes the specialized edge type directly.* |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; same MITRE STIX **`uses`** source via `node.uses_techniques` (`build_relationships.py`). Split from a generic `USES` in 2026-04. |
 | `ATTRIBUTED_TO` | Malware | ThreatActor | `confidence_score`, `match_type`, `created_at` (`build_relationships.py`) |
 | `INDICATES` | Indicator | Malware | Initial `confidence_score` 0.5, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; **also** `malware_family` name match from ThreatFox/VT (`confidence_score` 0.8); calibrated by `enrichment_jobs.calibrate_cooccurrence_confidence` |
@@ -812,4 +812,4 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the EMPLOYS_TECHNIQUE migration-script pointer with the heal-by-rebaseline contract (pre-release framework)._

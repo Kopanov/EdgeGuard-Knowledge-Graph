@@ -444,6 +444,16 @@ class URLhausCollector:
                         zones = get_zones_from_malware(tags) if tags else ["global"]
 
                     if url_value and url_value.startswith("http"):
+                        # PR (S5) (Logic Tracker MED): also forward
+                        # the source's ``last_online`` field as ``last_seen``
+                        # so the SOURCED_FROM edge captures URLhaus's own
+                        # last-reported claim. Previously ``last_online`` was
+                        # parsed and stored on the node only; the source-
+                        # truthful extractor never saw it, so the edge's
+                        # ``r.source_reported_last_at`` stayed NULL for
+                        # every URLhaus IOC. ``last_online`` may be empty
+                        # for currently-online URLs; coerce_iso handles
+                        # the empty-string case.
                         results.append(
                             {
                                 "indicator_type": "url",
@@ -452,6 +462,7 @@ class URLhausCollector:
                                 "tag": "urlhaus",
                                 "source": ["urlhaus"],
                                 "first_seen": parts[1].strip().strip('"') if len(parts) > 1 else "",
+                                "last_seen": last_online or None,
                                 "last_updated": datetime.now(timezone.utc).isoformat(),
                                 "confidence_score": 0.6,
                                 "threat_type": threat,

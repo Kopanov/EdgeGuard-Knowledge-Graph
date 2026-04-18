@@ -1,6 +1,9 @@
 services:
   neo4j:
-    image: neo4j:5.15.0
+    # Mirrors the production pin in the repo top-level docker-compose.yml.
+    # Project moved to Neo4j CalVer in 2025; bump in lock-step with the
+    # top-level compose file so version_compatibility.py drift checks stay green.
+    image: neo4j:2026.03.1-community
     container_name: edgeguard_neo4j
     restart: unless-stopped
     ports:

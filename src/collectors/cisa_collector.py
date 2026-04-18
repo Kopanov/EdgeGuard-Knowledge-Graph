@@ -261,7 +261,19 @@ class CISACollector:
                         "zone": sectors,  # zone is now an array
                         "tag": self.tag,
                         "source": [self.tag],
-                        "first_seen": date_added or datetime.now(timezone.utc).isoformat(),
+                        # PR (S5) (bugbot MED follow-on): kill the
+                        # wall-clock fallback for first_seen. CISA's
+                        # ``dateAdded`` is the source-truthful field — when
+                        # it's empty we'd rather emit None and let the
+                        # extractor's MIN logic preserve any prior value
+                        # than poison Neo4j with a wall-clock NOW that
+                        # would be misread downstream as "first observed
+                        # right now". Same pattern as the AbuseIPDB
+                        # blacklist fix in commit 87d3529.
+                        # ``last_updated`` is intentionally NOT
+                        # source-truthful — it's EdgeGuard's local sync
+                        # wall-clock, which is the correct semantics.
+                        "first_seen": date_added or None,
                         "last_updated": datetime.now(timezone.utc).isoformat(),
                         "confidence_score": 0.9,  # High confidence - known exploited
                         "severity": severity,

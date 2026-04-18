@@ -270,7 +270,7 @@ Flag any version that checks only `event_info.get("info")` (event name) as fallb
 
 ### ThreatActor→Technique EMPLOYS_TECHNIQUE must use `uses_techniques` list, not `misp_event_id` co-occurrence
 
-In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (prior to 2026-04 this was a generic `USES`; see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) and [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher)):
+In `build_relationships.py`, the query linking `ThreatActor` to `Technique` must match on `a.uses_techniques` and use the specialized rel type `EMPLOYS_TECHNIQUE` (prior to 2026-04 this was a generic `USES`; see [`docs/KNOWLEDGE_GRAPH.md`](../docs/KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) — pre-release framework, no migration script shipped; a fresh baseline rerun writes the specialized edge type directly):
 
 ```cypher
 -- CORRECT

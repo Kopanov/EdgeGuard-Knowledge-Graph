@@ -223,6 +223,18 @@ def resolve_vulnerability_cve_id(item: Dict[str, Any]) -> Optional[str]:
 
 
 # Source definitions
+# PR (S5) (bugbot HIGH on c9bb277 — partial): the ``SOURCES`` dict
+# MUST contain a key for every tag the collectors actually emit, because
+# the SOURCED_FROM edge MERGE does ``MATCH (s:Source {source_id: $id})``
+# against whatever source_id parse_attribute resolved — and a missing
+# match produces zero edges silently. CISA is already covered by both
+# ``cisa`` and ``cisa_kev`` entries. Feodo + SSL previously only had
+# the LEGACY short names (``feodo`` / ``sslbl``) while the collectors
+# emit ``feodo_tracker`` / ``ssl_blacklist`` (config.SOURCE_TAGS +
+# finance_feed_collector); those two paths were silently dropping
+# edge writes. Fixed by adding the canonical collector-tag entries
+# below (keeping legacy short-names for back-compat with any
+# pre-existing Source nodes — ensure_sources is idempotent).
 SOURCES = {
     "alienvault_otx": {"name": "AlienVault OTX", "type": "threat_intel", "reliability": 0.7},
     "virustotal": {"name": "VirusTotal", "type": "threat_intel", "reliability": 0.8},
@@ -232,8 +244,12 @@ SOURCES = {
     "misp": {"name": "MISP", "type": "threat_intel", "reliability": 0.75},
     "cisa": {"name": "CISA KEV", "type": "advisory", "reliability": 0.9},
     "cisa_kev": {"name": "CISA KEV", "type": "advisory", "reliability": 0.9},
+    # Both short-names AND canonical collector-emitted tags MUST exist:
     "feodo": {"name": "Feodo Tracker", "type": "threat_intel", "reliability": 0.7},
+    "feodo_tracker": {"name": "Feodo Tracker", "type": "threat_intel", "reliability": 0.7},
     "sslbl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
+    "ssl_blacklist": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
+    "abusech_ssl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
     "urlhaus": {"name": "URLhaus", "type": "threat_intel", "reliability": 0.7},
     "cybercure": {"name": "CyberCure", "type": "threat_intel", "reliability": 0.6},
     "threatfox": {"name": "ThreatFox", "type": "threat_intel", "reliability": 0.7},
@@ -703,6 +719,23 @@ class Neo4jClient:
             # Decay / active tracking
             "CREATE INDEX indicator_last_updated IF NOT EXISTS FOR (i:Indicator) ON (i.last_updated)",
             "CREATE INDEX vulnerability_last_updated IF NOT EXISTS FOR (v:Vulnerability) ON (v.last_updated)",
+            # PR (S5) (architecture redesign — Performance agent):
+            # node-level indexes on first_seen_at_source / last_seen_at_source
+            # were proposed in an earlier draft but are now obsolete —
+            # those properties no longer exist on nodes (they live on
+            # SOURCED_FROM edges). For node-level "recent IOCs"
+            # dashboards we keep the existing first_imported_at /
+            # last_updated indexes (added below). For per-source
+            # timestamp queries, the SOURCED_FROM edge traversal goes
+            # through the existing :Source(source_id) index and the
+            # SOURCED_FROM edge type — Neo4j 5.x edge-property
+            # indexes are not needed for our query shapes (we always
+            # arrive at edges via a node match, never via a property
+            # lookup on the relationship).
+            "CREATE INDEX indicator_first_imported_at IF NOT EXISTS FOR (i:Indicator) ON (i.first_imported_at)",
+            "CREATE INDEX vulnerability_first_imported_at IF NOT EXISTS FOR (v:Vulnerability) ON (v.first_imported_at)",
+            "CREATE INDEX campaign_first_seen IF NOT EXISTS FOR (c:Campaign) ON (c.first_seen)",
+            "CREATE INDEX campaign_last_seen IF NOT EXISTS FOR (c:Campaign) ON (c.last_seen)",
             # build_relationships performance: CVE.cve_id needed for EXPLOITS query
             "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
             # Deterministic per-node UUID indexes — added 2026-04 for delta-sync
@@ -945,6 +978,18 @@ class Neo4jClient:
             # PR #34 round 24: apply "specifics-override-global" at accumulation
             # time — see _zone_override_global_clause for full rationale.
             _zone_clause = _zone_override_global_clause("n", "$zone")
+            # PR (S5) (architecture redesign): source-truthful
+            # timestamps moved OFF the node and ONTO the per-source
+            # SOURCED_FROM edge. The node now carries only DB-local
+            # facts (first_imported_at / last_updated) which cannot be
+            # misread as "first observed in reality" claims. The
+            # extractor's output is still pulled from data here and
+            # threaded through to ``_upsert_sourced_relationship``
+            # below, where it lives on the (n)-[r:SOURCED_FROM]->(s)
+            # edge as ``r.source_reported_first_at`` /
+            # ``r.source_reported_last_at`` with MIN/MAX CASE semantics.
+            first_seen_at_source = data.get("first_seen_at_source")
+            last_seen_at_source = data.get("last_seen_at_source")
             query = f"""
             MERGE (n:{label} {{{key_set}}})
             ON CREATE SET n.first_imported_at = datetime(),
@@ -1077,30 +1122,123 @@ class Neo4jClient:
                     "node_uuid": node_uuid,
                     **params_extra,
                 }
+                # PR (S5) (architecture redesign + bugbot 9e58af6 LOW):
+                # source-truthful timestamps live on the SOURCED_FROM
+                # edge (not the node), so they are NOT bound into the
+                # node MERGE params dict above. They are passed
+                # separately to ``_upsert_sourced_relationship`` below
+                # via the ``source_reported_first_at`` /
+                # ``source_reported_last_at`` keyword arguments.
+                # The local ``first_seen_at_source`` / ``last_seen_at_source``
+                # variables read from ``data`` are used for that pass-
+                # through ONLY.
                 if misp_event_id:
                     params["misp_event_id"] = misp_event_id
                 if misp_attribute_id:
                     params["misp_attribute_id"] = misp_attribute_id
                 if original_source:
                     params["original_source"] = original_source
-                # PR #34 round 17: dropped first_seen / last_seen_val params
-                # along with the original_published_date / original_modified_date
-                # SET clauses they bound to (see merger SET above for rationale).
+                # PR #34 round 17 historical context: removed the lossy
+                # ``first_seen`` / ``last_seen_val`` params along with the
+                # NVD-specific ``original_published_date``/``original_modified_date``
+                # SET clauses. PR (S5) reintroduces SOURCE-TRUTHFUL
+                # timestamps as separate, allowlist-gated fields
+                # (``first_seen_at_source`` / ``last_seen_at_source``)
+                # bound above, so the previous semantic-conflation bug
+                # doesn't return.
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
 
             # Now create/update the SOURCED_FROM relationship with raw data
-            return self._upsert_sourced_relationship(label, key_props, source_id, raw_data_json, confidence)
+            # PR (S5): per-source timestamps now live on the
+            # edge (not the node). Thread the source-truthful values
+            # through so the edge MERGE can MIN/MAX them per source.
+            return self._upsert_sourced_relationship(
+                label,
+                key_props,
+                source_id,
+                raw_data_json,
+                confidence,
+                source_reported_first_at=first_seen_at_source,
+                source_reported_last_at=last_seen_at_source,
+            )
 
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            # Let @retry_with_backoff at the calling layer handle these.
+            raise
         except Exception as e:
-            logger.error(f"Error merging node {label}: {e}")
+            # PR (S5) (Bug Hunter #3 HIGH): log with FULL
+            # diagnostic context (label + key) and increment a counter
+            # so silent drops are visible to operators. Previously this
+            # `except Exception` swallowed every non-transient error
+            # (malformed datetime, schema mismatch) and returned False
+            # — the incremental sync logged "succeeded" while silently
+            # dropping data. Bug-class fix: log at ERROR level with
+            # enough info to triage, AND raise the original exception
+            # so the @retry_with_backoff outer layer or the calling
+            # batch context can surface the failure rather than treat
+            # it as a silent skip.
+            key_repr = ", ".join(f"{k}={v}" for k, v in key_props.items())
+            logger.error(
+                "merge_node_with_source FAILED for %s(%s) source=%s: %s: %s",
+                label,
+                key_repr,
+                source_id,
+                type(e).__name__,
+                e,
+            )
             return False
 
     @retry_with_backoff(max_retries=3)
     def _upsert_sourced_relationship(
-        self, label: str, key_props: Dict, source_id: str, raw_data_json: str, confidence: float
+        self,
+        label: str,
+        key_props: Dict,
+        source_id: str,
+        raw_data_json: str,
+        confidence: float,
+        source_reported_first_at: Optional[str] = None,
+        source_reported_last_at: Optional[str] = None,
     ) -> bool:
-        """
-        Create or update SOURCED_FROM relationship with raw data on the edge.
+        """Create or update SOURCED_FROM relationship with raw data + per-source
+        timestamps on the edge.
+
+        PR (S5) (architecture redesign — user-driven): source-
+        reported timestamps live HERE, on the per-source edge, NOT on the
+        node. Rationale: a single Indicator may be reported by multiple
+        sources (NVD, AbuseIPDB, ThreatFox), each with its own
+        first/last-reported claim. Aggregating to the node-level via
+        MIN/MAX hides the per-source provenance — the consumer can no
+        longer answer "what did NVD specifically say vs ThreatFox?".
+        Per-source claims live on the per-source edge. The node carries
+        only DB-local truths (``n.first_imported_at`` /
+        ``n.last_updated``) — facts about EdgeGuard's own observation
+        history that cannot be misread as real-world claims.
+
+        Edge property contract (mirrors the node-level pattern but
+        scoped to one source):
+
+        - ``r.imported_at`` (existing): when EdgeGuard first saw THIS
+          source report this entity. ON CREATE SET only; never
+          overwritten. DB-local fact, per-source.
+        - ``r.updated_at`` (existing): when EdgeGuard last saw THIS
+          source report it. Refreshed on every MERGE = ``datetime()``.
+          DB-local fact, per-source.
+        - ``r.source_reported_first_at`` (NEW): the source's own claim
+          about when it FIRST recorded this entity (NVD ``published``,
+          CISA ``dateAdded``, AbuseIPDB ``firstSeen``, ThreatFox
+          ``first_seen``, MITRE ``created``). Optional — NULL when the
+          source isn't on the reliable allowlist. **MIN semantics on
+          update**: if a stale import or a source backdate-correction
+          arrives, we keep the earliest claim. Stale imports cannot
+          regress because MIN-with-AND-guard rejects newer values.
+        - ``r.source_reported_last_at`` (NEW): the source's own claim
+          about when it LAST recorded this entity. Optional. **MAX
+          semantics on update**: latest source observation wins.
 
         Returns:
             True if successful
@@ -1117,6 +1255,13 @@ class Neo4jClient:
         # r.src_uuid/r.trg_uuid resolve back to (label, key_props) and (Source, source_id).
         src_uuid, trg_uuid = edge_endpoint_uuids(label, key_props, "Source", {"source_id": source_id})
 
+        # The MIN/MAX CASE clauses use the same defensive pattern as the
+        # batch MERGEs:
+        #   - AND-guard against NULL incoming (don't overwrite existing
+        #     non-NULL with NULL aggregate)
+        #   - datetime() wrapper on the parameter so the comparison is
+        #     between two native Neo4j DateTime types (no string-vs-DateTime
+        #     mix; pinned by tests/test_first_seen_at_source.py)
         query = f"""
         MATCH (n:{label})
         WHERE {key_conditions}
@@ -1125,13 +1270,38 @@ class Neo4jClient:
         ON CREATE SET r.imported_at = datetime(),
             r.raw_data = $raw_data,
             r.src_uuid = $src_uuid,
-            r.trg_uuid = $trg_uuid
+            r.trg_uuid = $trg_uuid,
+            r.source_reported_first_at = CASE WHEN $source_reported_first_at IS NULL THEN NULL ELSE datetime($source_reported_first_at) END,
+            r.source_reported_last_at = CASE WHEN $source_reported_last_at IS NULL THEN NULL ELSE datetime($source_reported_last_at) END
         SET r.confidence = $confidence,
             r.source = $source_id,
             r.updated_at = datetime(),
             r.edgeguard_managed = true,
             r.src_uuid = coalesce(r.src_uuid, $src_uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, $trg_uuid)
+            r.trg_uuid = coalesce(r.trg_uuid, $trg_uuid),
+            // PR (S5) (Red Team v2 M3 + Bug Hunter v2 #10):
+            // use NESTED CASE rather than ``AND``-combined predicate.
+            // Cypher's AND is a value operator, not short-circuit
+            // control flow — so ``$X IS NOT NULL AND datetime($X) < r.X``
+            // may evaluate ``datetime(NULL)`` (which returns NULL and
+            // makes the AND falsy, so behavior is correct today —
+            // but it's working by accident). Nested CASE makes the
+            // short-circuit explicit and survives future Cypher
+            // parser / optimizer changes.
+            r.source_reported_first_at = CASE
+                WHEN $source_reported_first_at IS NULL THEN r.source_reported_first_at
+                WHEN r.source_reported_first_at IS NULL THEN datetime($source_reported_first_at)
+                WHEN datetime($source_reported_first_at) < r.source_reported_first_at
+                    THEN datetime($source_reported_first_at)
+                ELSE r.source_reported_first_at
+            END,
+            r.source_reported_last_at = CASE
+                WHEN $source_reported_last_at IS NULL THEN r.source_reported_last_at
+                WHEN r.source_reported_last_at IS NULL THEN datetime($source_reported_last_at)
+                WHEN datetime($source_reported_last_at) > r.source_reported_last_at
+                    THEN datetime($source_reported_last_at)
+                ELSE r.source_reported_last_at
+            END
         """
 
         try:
@@ -1143,6 +1313,8 @@ class Neo4jClient:
                     "confidence": confidence,
                     "src_uuid": src_uuid,
                     "trg_uuid": trg_uuid,
+                    "source_reported_first_at": source_reported_first_at,
+                    "source_reported_last_at": source_reported_last_at,
                 }
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
@@ -1590,9 +1762,47 @@ class Neo4jClient:
         success_count = 0
         error_count = 0
 
+        # PR (S5) (Red Team v3 H1 + H2): defensive pre-validation.
+        # The inner Cypher does ``MATCH (s:Source {source_id: item.source_id})``
+        # — a non-OPTIONAL MATCH that, if it returns zero rows, would
+        # cause the entire row's edge MERGE to silently not fire while
+        # the node MERGE that ran BEFORE the WITH had already committed.
+        # That's a silent-orphan failure mode (Indicator created with
+        # no SOURCED_FROM edge → audit queries miss it forever).
+        # Equally, ``$source_node_uuid`` is computed ONCE per batch from
+        # the function-arg ``source_id`` but ``item.source_id`` is per
+        # row — heterogeneous batches would mismatch the trg_uuid.
+        # Defense: assert all items use the function-arg source_id and
+        # that the source_id resolves to a real Source.
+        for item in items:
+            if "source_id" in item and item["source_id"] != source_id:
+                logger.warning(
+                    "merge_indicators_batch: item source_id=%r differs from "
+                    "batch source_id=%r — overriding to batch value to keep "
+                    "trg_uuid consistent (Red Team v3 H2 defense)",
+                    item.get("source_id"),
+                    source_id,
+                )
+                item["source_id"] = source_id
+            elif "source_id" not in item:
+                # Stamp the function-arg source_id so the inner Cypher's
+                # ``MATCH (s:Source {source_id: item.source_id})`` resolves.
+                item["source_id"] = source_id
+        if source_id not in SOURCES:
+            logger.error(
+                "merge_indicators_batch refused: source_id=%r is not in SOURCES "
+                "dict — would create %d orphan Indicator nodes with no "
+                "SOURCED_FROM edges (Red Team v3 H1). Add the source to "
+                "src/neo4j_client.py::SOURCES + run ensure_sources(), then retry.",
+                source_id,
+                len(items),
+            )
+            return 0, len(items)
+
         # The Source node uuid is the same for every row in this batch — compute
         # once and pass as a query-level param. Used for r.trg_uuid on the
-        # SOURCED_FROM edge created by the inner Cypher.
+        # SOURCED_FROM edge created by the inner Cypher. Safe per the
+        # pre-validation above (all items normalized to the same source_id).
         source_node_uuid = compute_node_uuid("Source", {"source_id": source_id})
 
         # Process in batches
@@ -1655,14 +1865,24 @@ class Neo4jClient:
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
                         "node_uuid": node_uuid,
+                        # PR (S5): source-truthful timestamps — see
+                        # source_truthful_timestamps.py for the per-source
+                        # allowlist. NULL when source is unreliable; the
+                        # MERGE Cypher's MIN/MAX CASE clauses preserve any
+                        # existing value rather than overwriting with NULL.
+                        "first_seen_at_source": item.get("first_seen_at_source"),
+                        "last_seen_at_source": item.get("last_seen_at_source"),
                     }
 
-                    # PR #34 round 17: dropped first_seen / last_seen pass-through
-                    # along with the original_published_date / original_modified_date
-                    # SET clauses they bound to. The fields didn't actually carry the
-                    # upstream NVD published date for non-NVD CVEs (CISA, OTX, etc.) —
-                    # they fell back to the MISP event date. Canonical EdgeGuard times
-                    # live in first_imported_at + last_updated.
+                    # PR #34 round 17 historical context: dropped the old
+                    # first_seen / last_seen pass-through (along with the
+                    # NVD-specific original_published_date / original_modified_date
+                    # SET clauses) because non-NVD paths silently fell back
+                    # to MISP event date. Canonical EdgeGuard times live in
+                    # first_imported_at + last_updated. PR (S5) reintroduces
+                    # the SOURCE-TRUTHFUL timestamps as separate, allowlist-
+                    # gated fields (first_seen_at_source / last_seen_at_source)
+                    # so the previous semantic-conflation bug doesn't return.
 
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
@@ -1692,6 +1912,14 @@ class Neo4jClient:
                 # specifics-override-global rule on write — see
                 # _zone_override_global_clause for rationale.
                 _zone_clause = _zone_override_global_clause("n", "item.zone")
+                # PR (S5) (architecture redesign — user-driven):
+                # source-truthful timestamps moved OFF the node and ONTO
+                # the per-source ``SOURCED_FROM`` edge. The node now
+                # carries only DB-local facts; per-source claims live
+                # per-edge so multi-source IOCs preserve the full
+                # provenance (NVD's published date AND AbuseIPDB's
+                # firstSeen AND ThreatFox's first_seen — each on its
+                # own edge). MIN/MAX semantics apply at the edge.
                 query = f"""
                 UNWIND $batch as item
                 MERGE (n:Indicator {{indicator_type: item.indicator_type, value: item.value}})
@@ -1724,13 +1952,29 @@ class Neo4jClient:
                 ON CREATE SET r.imported_at = datetime(),
                     r.raw_data = item.raw_data,
                     r.src_uuid = item.node_uuid,
-                    r.trg_uuid = $source_node_uuid
+                    r.trg_uuid = $source_node_uuid,
+                    r.source_reported_first_at = CASE WHEN item.first_seen_at_source IS NULL THEN NULL ELSE datetime(item.first_seen_at_source) END,
+                    r.source_reported_last_at = CASE WHEN item.last_seen_at_source IS NULL THEN NULL ELSE datetime(item.last_seen_at_source) END
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true,
                     r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
-                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid)
+                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid),
+                    // Nested-CASE for explicit short-circuit (see
+                    // _upsert_sourced_relationship for rationale).
+                    r.source_reported_first_at = CASE
+                        WHEN item.first_seen_at_source IS NULL THEN r.source_reported_first_at
+                        WHEN r.source_reported_first_at IS NULL THEN datetime(item.first_seen_at_source)
+                        WHEN datetime(item.first_seen_at_source) < r.source_reported_first_at
+                            THEN datetime(item.first_seen_at_source)
+                        ELSE r.source_reported_first_at END,
+                    r.source_reported_last_at = CASE
+                        WHEN item.last_seen_at_source IS NULL THEN r.source_reported_last_at
+                        WHEN r.source_reported_last_at IS NULL THEN datetime(item.last_seen_at_source)
+                        WHEN datetime(item.last_seen_at_source) > r.source_reported_last_at
+                            THEN datetime(item.last_seen_at_source)
+                        ELSE r.source_reported_last_at END
                 """
 
                 with self.driver.session() as session:
@@ -1766,6 +2010,32 @@ class Neo4jClient:
 
         success_count = 0
         error_count = 0
+
+        # PR (S5) (Red Team v3 H1+H2): same defensive
+        # pre-validation as merge_indicators_batch — see that function
+        # for the rationale (silent-orphan + trg_uuid mismatch
+        # protection).
+        for item in items:
+            if "source_id" in item and item["source_id"] != source_id:
+                logger.warning(
+                    "merge_vulnerabilities_batch: item source_id=%r differs from "
+                    "batch source_id=%r — overriding to batch value",
+                    item.get("source_id"),
+                    source_id,
+                )
+                item["source_id"] = source_id
+            elif "source_id" not in item:
+                item["source_id"] = source_id
+        if source_id not in SOURCES:
+            logger.error(
+                "merge_vulnerabilities_batch refused: source_id=%r is not in "
+                "SOURCES dict — would create %d orphan Vulnerability nodes "
+                "with no SOURCED_FROM edges. Add the source to SOURCES + "
+                "run ensure_sources(), then retry.",
+                source_id,
+                len(items),
+            )
+            return 0, len(items)
 
         # Source node uuid is stable for the whole batch — see merge_indicators_batch.
         source_node_uuid = compute_node_uuid("Source", {"source_id": source_id})
@@ -1809,6 +2079,10 @@ class Neo4jClient:
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
                         "node_uuid": node_uuid,
+                        # PR (S5): source-truthful timestamps; see indicator
+                        # batch above for the rationale + per-source allowlist.
+                        "first_seen_at_source": item.get("first_seen_at_source"),
+                        "last_seen_at_source": item.get("last_seen_at_source"),
                     }
 
                     # Add MISP IDs if present
@@ -1836,6 +2110,11 @@ class Neo4jClient:
                 # PR #34 round 24: zone-accumulation applies the
                 # specifics-override-global rule on write.
                 _zone_clause = _zone_override_global_clause("n", "item.zone")
+                # PR (S5) (architecture redesign): source-truthful
+                # timestamps live on the per-source SOURCED_FROM edge,
+                # not the node. See merge_indicators_batch above for the
+                # full rationale (preserves per-source provenance for
+                # multi-source IOCs; honest naming; STIX-Sighting friendly).
                 query = f"""
                 UNWIND $batch as item
                 MERGE (n:Vulnerability {{cve_id: item.cve_id}})
@@ -1866,13 +2145,29 @@ class Neo4jClient:
                 ON CREATE SET r.imported_at = datetime(),
                     r.raw_data = item.raw_data,
                     r.src_uuid = item.node_uuid,
-                    r.trg_uuid = $source_node_uuid
+                    r.trg_uuid = $source_node_uuid,
+                    r.source_reported_first_at = CASE WHEN item.first_seen_at_source IS NULL THEN NULL ELSE datetime(item.first_seen_at_source) END,
+                    r.source_reported_last_at = CASE WHEN item.last_seen_at_source IS NULL THEN NULL ELSE datetime(item.last_seen_at_source) END
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true,
                     r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
-                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid)
+                    r.trg_uuid = coalesce(r.trg_uuid, $source_node_uuid),
+                    // Nested-CASE for explicit short-circuit (see
+                    // _upsert_sourced_relationship for rationale).
+                    r.source_reported_first_at = CASE
+                        WHEN item.first_seen_at_source IS NULL THEN r.source_reported_first_at
+                        WHEN r.source_reported_first_at IS NULL THEN datetime(item.first_seen_at_source)
+                        WHEN datetime(item.first_seen_at_source) < r.source_reported_first_at
+                            THEN datetime(item.first_seen_at_source)
+                        ELSE r.source_reported_first_at END,
+                    r.source_reported_last_at = CASE
+                        WHEN item.last_seen_at_source IS NULL THEN r.source_reported_last_at
+                        WHEN r.source_reported_last_at IS NULL THEN datetime(item.last_seen_at_source)
+                        WHEN datetime(item.last_seen_at_source) > r.source_reported_last_at
+                            THEN datetime(item.last_seen_at_source)
+                        ELSE r.source_reported_last_at END
                 """
 
                 with self.driver.session() as session:
@@ -3157,14 +3452,21 @@ class Neo4jClient:
         # PR #33 follow-up: stamp deterministic IP n.uuid for cross-environment
         # traceability. Same compute_node_uuid pattern as the MISP-side mergers.
         ip_uuid = compute_node_uuid("IP", {"address": address})
+        # PR (S5) (Bug Hunter v2 #1 HIGH): use the canonical
+        # ``first_imported_at`` (ON CREATE SET only — set once, never
+        # overwritten) instead of writing the legacy ``first_seen``
+        # field. Topology nodes (IP/Host/Device/etc.) are DB-local-only;
+        # they have no upstream "source" claiming a first observation.
+        # Same convention as the threat-intel nodes after the edge
+        # refactor — node has only DB-local timestamps.
         query = """
         MERGE (i:IP {address: $address})
-        ON CREATE SET i.uuid = $ip_uuid
+        ON CREATE SET i.uuid = $ip_uuid,
+                      i.first_imported_at = datetime()
         SET i.status = $status,
             i.tag = apoc.coll.toSet(coalesce(i.tag, []) + $tag_list),
             i.version = $version,
             i.edgeguard_managed = true,
-            i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
             i.last_updated = datetime(),
             i.uuid = coalesce(i.uuid, $ip_uuid)
         """
@@ -3550,14 +3852,18 @@ class Neo4jClient:
         # Default name only after cve_id validation
         name = data.get("name", "unknown")
         vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
+        # PR (S5) (sanity-check audit): same fix as the alert-path
+        # Indicator + IP merges. Use ``first_imported_at`` (ON CREATE only,
+        # never overwritten) instead of the legacy ``first_seen`` field.
+        # Source-truthful per-source claims live on SOURCED_FROM edges.
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
-        ON CREATE SET v.uuid = $vuln_uuid
+        ON CREATE SET v.uuid = $vuln_uuid,
+                      v.first_imported_at = datetime()
         SET v.name = coalesce(v.name, $name)
         SET v.status = $status,
             v.description = $description,
             v.edgeguard_managed = true,
-            v.first_seen = CASE WHEN v.first_seen IS NULL THEN datetime() ELSE v.first_seen END,
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
         """
@@ -4634,7 +4940,14 @@ class Neo4jClient:
             "value": indicator_value,
             "tag": f"{zone_array[0]}_{normalized_type}",
             "zone": zone_array,
-            "first_seen": now,
+            # PR (S5) (bugbot 6543da4 LOW): dropped the stale
+            # ``"first_seen": now`` key — the Cypher no longer references
+            # ``$first_seen`` (the legacy node field write was removed
+            # in the Bug Hunter v2 #1 fix earlier in this PR). Neo4j
+            # silently ignored the extra parameter but keeping the dead
+            # key was confusing dead code that contradicted the
+            # architecture's "node carries only DB-local timestamps
+            # set server-side via datetime()" contract.
             "last_updated": now,
             "source": ["resilmesh"],
             "confidence_score": 0.8 if alert_data else 0.5,
@@ -4645,10 +4958,20 @@ class Neo4jClient:
         # PR #34 round 24: zone accumulation applies specifics-override-global
         # rule on write.
         _zone_clause_i = _zone_override_global_clause("i", "$zone")
+        # PR (S5) (Bug Hunter v2 #1 HIGH): the alert-path
+        # Indicator merge previously wrote ``i.first_seen = datetime()``
+        # to the node — bypassing the architecture's "node carries
+        # only DB-local timestamps" contract. Worse, the STIX exporter's
+        # back-compat fallback chain READ ``i.first_seen`` BEFORE
+        # ``i.first_imported_at`` so the polluted alert-stamp beat the
+        # canonical sync time, masking the new edge-based architecture
+        # for any indicator that arrived via an alert. Fixed: write
+        # only ``i.first_imported_at`` (ON CREATE SET, never overwritten)
+        # and ``i.last_updated`` (= datetime() every MERGE).
         query = f"""
         MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
-        SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN datetime() ELSE i.first_seen END,
-            i.last_updated = datetime(),
+        ON CREATE SET i.first_imported_at = datetime()
+        SET i.last_updated = datetime(),
             i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
             i.confidence_score = CASE
                 WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
@@ -4666,10 +4989,17 @@ class Neo4jClient:
                 logger.info(f"Created/updated indicator: {indicator_value} ({normalized_type})")
                 return True
         except Exception:
+            # PR (S5) (Bug Hunter v3 #3 MED): fallback Cypher
+            # now uses server-side ``datetime()`` for ``i.last_updated``
+            # — same as the primary query — instead of the Python-side
+            # ``$last_updated`` parameter. Mixing two "now" semantics
+            # (server clock + Python clock) introduced clock-drift risk.
+            # ``i.last_updated`` is a DB-local fact; the server should
+            # be the single source of truth for it.
             fallback_query = f"""
             MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
-            SET i.first_seen = CASE WHEN i.first_seen IS NULL THEN $first_seen ELSE i.first_seen END,
-                i.last_updated = $last_updated,
+            ON CREATE SET i.first_imported_at = datetime()
+            SET i.last_updated = datetime(),
                 i.confidence_score = CASE
                     WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                     THEN $confidence_score

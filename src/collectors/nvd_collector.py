@@ -822,12 +822,32 @@ class NVDCollector:
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
-                        # ResilMesh-compatible timestamp property names
+                        # PR (S5): source-truthful first/last claim
+                        # come from NVD's ``published`` and ``lastModified``.
+                        # Both fields fall back to None (NOT wall-clock NOW)
+                        # so the SOURCED_FROM edge MIN/MAX CASE logic preserves
+                        # any prior claim. Same pattern as the CISA + AbuseIPDB
+                        # wall-clock leak fixes. ``published`` and
+                        # ``last_modified`` are also kept as ResilMesh-compatible
+                        # plain string fields on the node for STIX export.
                         "published": published_str,
-                        "last_modified": cve_data.get("lastModified", datetime.now(timezone.utc).isoformat()),
-                        # EdgeGuard internal timestamps (kept for backward compat)
-                        "first_seen": published_str or datetime.now(timezone.utc).isoformat(),
-                        "last_updated": cve_data.get("lastModified", datetime.now(timezone.utc).isoformat()),
+                        "last_modified": cve_data.get("lastModified") or None,
+                        # ``first_seen`` / ``last_seen`` flow into the
+                        # source-truthful extractor → SOURCED_FROM edge as
+                        # ``r.source_reported_first_at`` / ``r.source_reported_last_at``.
+                        "first_seen": published_str or None,
+                        "last_seen": cve_data.get("lastModified") or None,
+                        # PR (S5) (Logic Tracker v3 LOW + Bug
+                        # Hunter v3 #6): the previously-restored
+                        # ``"last_updated"`` key was based on a misleading
+                        # bugbot premise — ``parse_attribute`` reads
+                        # MISP-side data (``nvd_meta.get("last_modified")``
+                        # / ``attr.get("timestamp")``), NEVER the
+                        # collector's item dict. The key has zero
+                        # consumers. Dropped to keep one source-of-truth
+                        # per concept (last_seen for the source claim;
+                        # n.last_updated is set server-side from
+                        # ``datetime()``).
                         "confidence_score": 0.9 if cisa_exploit_add else 0.6,
                         "severity": severity.upper(),
                         "cvss_score": cvss_score,

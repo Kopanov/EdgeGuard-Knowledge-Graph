@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-04-17**
+**Last updated: 2026-04-18** — PR #41 cleanup pass replaced the USES→specialized-edge "migration script" pointer with the heal-by-rebaseline contract (pre-release framework, no migration script ships).
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -94,7 +94,7 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 
 | Relationship | From → To | Description |
 |---|---|---|
-| `SOURCED_FROM` | Any node → `Source` | Provenance tracking with `raw_data`, `imported_at` (immutable), `updated_at`, `confidence` |
+| `SOURCED_FROM` | Any node → `Source` | **Per-source provenance** — one edge per (entity, source) pair. Carries `raw_data`, `imported_at` (immutable), `updated_at`, `confidence`, plus per-source claim properties **`source_reported_first_at`** (MIN-guarded) and **`source_reported_last_at`** (MAX-guarded) — what the source itself says about when it first/last recorded the entity. STIX export aggregates `MIN(r.source_reported_first_at)` across all edges to populate `Indicator.valid_from`. See [`docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema) for the full property contract. |
 | `EMPLOYS_TECHNIQUE` | `ThreatActor` / `Campaign` → `Technique` | **Attribution.** Actor employs a MITRE technique (explicit STIX **`uses`** → `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — see below.* |
 | `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability.** Malware or tool implements a MITRE technique (same STIX **`uses`** → `uses_techniques` on the source node; MISP **`MITRE_USES_TECHNIQUES:`** round-trip for Malware). *Split from a generic `USES` in 2026-04 — see below.* |
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |
@@ -152,9 +152,9 @@ Graph                                                  → STIX 2.1 SRO
 (Indicator)  -[:USES_TECHNIQUE]->(Technique)           → relationship { source_ref: indicator,      relationship_type: "indicates", target_ref: attack-pattern }
 ```
 
-**Backward compatibility during rollout:** `create_misp_relationships_batch` in `src/neo4j_client.py` still accepts `rel_type="USES"` when `to_type="Technique"` and routes it to the correct specialized type based on `from_type`. Partners with code that emits the legacy value will keep working. The backward-compat branch will be removed in a follow-up PR once the migration has run and no callers remain.
+**Backward compatibility during rollout:** `create_misp_relationships_batch` in `src/neo4j_client.py` still accepts `rel_type="USES"` when `to_type="Technique"` and routes it to the correct specialized type based on `from_type`. Partners with code that emits the legacy value will keep working.
 
-**Migration script:** [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) — idempotent APOC-batched rewrite of existing `USES→Technique` edges. Preserves all properties via `SET r2 += properties(r)`. Pre/post sanity-check queries are included inline at the top of the file.
+**Migration:** *Pre-release framework — no production graph exists, so no migration script is shipped.* The first baseline run already writes the specialized edge types (`EMPLOYS_TECHNIQUE` for actor/campaign, `IMPLEMENTS_TECHNIQUE` for malware/tool); a fresh baseline rerun heals any dev/test graph that still carries the legacy generic `USES` edges.
 
 **What to update in your code:**
 

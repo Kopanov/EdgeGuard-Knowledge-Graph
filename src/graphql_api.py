@@ -477,6 +477,11 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                # PR (S5) (bugbot MED): source-truthful + import
+                # wall-clock timestamps, matching Indicator / Vulnerability /
+                # Malware resolvers.
+                first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
+                last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
             ),
         )
@@ -500,6 +505,8 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
+                last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
             ),
         )
@@ -525,6 +532,8 @@ class Query:
                 zone=_neo4j_list(n.get("zone")),
                 confidence_score=n.get("confidence_score"),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
+                last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
             ),
         )
@@ -545,6 +554,8 @@ class Query:
                 name=n.get("name", ""),
                 description=n.get("description"),
                 edgeguard_managed=n.get("edgeguard_managed"),
+                first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
+                last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
             ),
         )

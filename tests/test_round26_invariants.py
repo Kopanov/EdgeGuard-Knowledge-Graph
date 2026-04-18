@@ -360,83 +360,14 @@ def test_zone_override_global_helper_drops_global_when_specifics_present():
 
 
 # ---------------------------------------------------------------------------
-# B6 — Backfill idempotency on partial graph
+# (Removed) B6 / B6b — Backfill idempotency on partial graph
 # ---------------------------------------------------------------------------
-
-
-def test_backfill_node_query_only_targets_null_uuid():
-    """B6: the backfill script's per-label query MUST only target nodes
-    with NULL or empty uuid. Re-running the script on a graph that's
-    50% stamped MUST be a no-op for the already-stamped nodes (it should
-    not overwrite their uuids — they were either correct, or in which
-    case re-stamping would be redundant; or wrong, and re-stamping would
-    silently corrupt them with the new computation).
-
-    AST-scan the backfill script's queries to verify the WHERE clause.
-    """
-    import importlib
-
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    if "backfill_node_uuids" in sys.modules:
-        del sys.modules["backfill_node_uuids"]
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    src_path = backfill.__file__
-    with open(src_path) as fh:
-        source = fh.read()
-
-    # Every Cypher query that updates n.uuid must also filter on
-    # `n.uuid IS NULL` (or the empty-string variant).
-    # Find every ``SET n.uuid =`` (or alias n2.uuid, etc.) and verify the
-    # surrounding query has the null-check.
-    set_uuid_pattern = re.compile(r"SET\s+(\w+)\.uuid\s*=", re.IGNORECASE)
-    matches = list(set_uuid_pattern.finditer(source))
-    assert matches, "expected at least one SET n.uuid clause in backfill script"
-
-    for m in matches:
-        # Look at the 800 chars surrounding the match for the null-check.
-        start = max(0, m.start() - 800)
-        end = min(len(source), m.end() + 200)
-        ctx = source[start:end]
-        var = m.group(1)
-        null_check_present = f"{var}.uuid IS NULL" in ctx or f'{var}.uuid = ""' in ctx or f"{var}.uuid = ''" in ctx
-        assert null_check_present, (
-            f"backfill SET {var}.uuid found at line {source[: m.start()].count(chr(10)) + 1} "
-            f"but no IS NULL / = '' filter in the surrounding query — "
-            f"re-running the backfill would overwrite already-stamped uuids"
-        )
-
-
-# ---------------------------------------------------------------------------
-# B6b — Backfill edge query also only targets NULL src/trg uuids
-# ---------------------------------------------------------------------------
-
-
-def test_backfill_edge_query_only_targets_null_endpoint_uuid():
-    """B6 (continued): the edge backfill MUST also be idempotent — only
-    update edges whose src_uuid OR trg_uuid is NULL. Re-runs must be
-    no-ops for fully-stamped edges."""
-    import importlib
-
-    scripts_path = os.path.join(os.path.dirname(__file__), "..", "scripts")
-    if scripts_path not in sys.path:
-        sys.path.insert(0, scripts_path)
-    if "backfill_node_uuids" in sys.modules:
-        del sys.modules["backfill_node_uuids"]
-    backfill = importlib.import_module("backfill_node_uuids")
-
-    src_path = backfill.__file__
-    with open(src_path) as fh:
-        source = fh.read()
-
-    # The edge backfill function must include filter on r.src_uuid IS NULL OR
-    # r.trg_uuid IS NULL (otherwise it'd re-stamp every edge on every run).
-    assert "r.src_uuid IS NULL" in source and "r.trg_uuid IS NULL" in source, (
-        "backfill_edge query must filter on (r.src_uuid IS NULL OR r.trg_uuid IS NULL) — "
-        "without it, re-running the backfill is O(|edges|) rather than O(|unstamped edges|)"
-    )
+# Both pinned scripts/backfill_node_uuids.py, deleted in the PR #41
+# pre-release cleanup pass. The script's "only target NULL uuids" guard
+# is now moot: every node/edge MERGE in the live code stamps uuids at
+# write time, and the heal path for a misshapen dev/test graph is a
+# fresh baseline rerun (see docs/MIGRATIONS.md), not a re-runnable
+# Python migration script.
 
 
 # ---------------------------------------------------------------------------

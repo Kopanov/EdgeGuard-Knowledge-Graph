@@ -27,6 +27,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# PR (S5) (bugbot LOW): consolidated to source_truthful_timestamps.iso_str
+# to kill the duplication with stix_exporter. Single source of truth.
+from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
+
+
 @dataclass
 class ResilMeshAlert:
     """
@@ -290,14 +295,28 @@ class AlertProcessor:
 
         try:
             with self.neo4j.driver.session() as session:
-                # Query 1: Find indicator and direct properties
+                # PR (S5) (architecture redesign): per-source
+                # timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
+                # edges, NOT on the node. For the alert enrichment
+                # payload we still want a single value per indicator —
+                # we aggregate MIN(r.source_reported_first_at) /
+                # MAX(r.source_reported_last_at) across all source
+                # edges so ResilMesh sees the earliest claim across
+                # all sources. Falls back to ``i.first_imported_at``
+                # (DB-local) when no source claim exists.
                 indicator_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
+                    OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
+                    WITH i,
+                         min(r.source_reported_first_at) AS source_first,
+                         max(r.source_reported_last_at)  AS source_last
                     RETURN i {
                         .value, .indicator_type, .zone, .source,
-                        .confidence_score, .first_seen, .last_updated
-                    } as indicator
+                        .confidence_score,
+                        .first_imported_at, .last_updated
+                    } as indicator,
+                    source_first, source_last
                 """,
                     indicator=indicator,
                 )
@@ -307,8 +326,18 @@ class AlertProcessor:
                     ind_data = indicator_record["indicator"]
                     metadata["indicator_found"] = True
                     enrichment["confidence"] = ind_data.get("confidence_score", 0.0)
-                    enrichment["first_seen"] = ind_data.get("first_seen")
-                    enrichment["last_updated"] = ind_data.get("last_updated")
+                    # PR (S5): prefer source-claimed first/last
+                    # (aggregated across edges); fall back to DB-local
+                    # ``first_imported_at`` / ``last_updated`` when no
+                    # source claim is on file. ``_iso_str`` wraps each
+                    # candidate so neo4j.time.DateTime values become
+                    # plain ISO-8601 strings (NATS payload is JSON).
+                    enrichment["first_seen"] = _iso_str(indicator_record.get("source_first")) or _iso_str(
+                        ind_data.get("first_imported_at")
+                    )
+                    enrichment["last_updated"] = _iso_str(indicator_record.get("source_last")) or _iso_str(
+                        ind_data.get("last_updated")
+                    )
 
                     # Add zone from indicator if different from alert
                     ind_zone = ind_data.get("zone")
