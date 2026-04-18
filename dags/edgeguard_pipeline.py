@@ -625,6 +625,87 @@ def _method_accepts_kwarg(callable_obj, name: str) -> bool:
     return False
 
 
+# Exception type names that indicate a TRANSIENT external problem (network,
+# upstream provider outage, DNS, timeout) rather than an EdgeGuard bug.
+# Names matched against ``type(exc).__name__`` so we don't have to import
+# every collector's optional HTTP library — works whether ``requests`` is
+# installed or not, and tolerates third-party libraries (``httpx``,
+# ``urllib3``, ``aiohttp``) that ship parallel exception hierarchies.
+#
+# PR #35: introduced when the CyberCure feed had a provider-side outage and
+# blocked the entire baseline pipeline (cybercure → tier2_feeds → blocked
+# full_neo4j_sync, build_relationships, baseline_complete). The user
+# policy is "if a feed fails for an external reason, log + continue,
+# don't block everything."
+_TRANSIENT_EXTERNAL_EXCEPTION_NAMES: frozenset = frozenset(
+    {
+        # stdlib + requests
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "TimeoutError",
+        "Timeout",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ConnectTimeoutError",
+        "ReadTimeoutError",
+        "HTTPError",
+        "ChunkedEncodingError",
+        "ContentDecodingError",
+        # urllib3 / requests adapters
+        "MaxRetryError",
+        "NewConnectionError",
+        "ProtocolError",
+        "ProxyError",
+        "SSLError",
+        # DNS
+        "NameResolutionError",
+        "gaierror",
+        # httpx
+        "ConnectError",
+        "TransportError",
+        "RemoteProtocolError",
+        # asyncio / aiohttp
+        "ClientConnectorError",
+        "ClientConnectionError",
+        "ClientOSError",
+        "ClientResponseError",
+        "ServerDisconnectedError",
+        # boto3-style (in case a collector uses S3-backed feeds later)
+        "EndpointConnectionError",
+    }
+)
+
+
+def _is_transient_external_error(exc: BaseException) -> bool:
+    """Return True if *exc* looks like a transient external-service failure.
+
+    Match by class name (and walk the MRO) so we don't have to import the
+    HTTP library of every collector — works for ``requests``, ``httpx``,
+    ``urllib3``, ``aiohttp``, stdlib socket/ssl errors, and anything else
+    whose class name matches ``_TRANSIENT_EXTERNAL_EXCEPTION_NAMES``.
+
+    Conservative: when in doubt, return False so the exception re-raises
+    and a real bug gets surfaced. Better to fail loudly on a TypeError
+    than silently swallow it as "transient."
+    """
+    if exc is None:
+        return False
+    # Walk the MRO of exc's class so subclasses match too (e.g. a
+    # custom CyberCureRequestTimeout that subclasses TimeoutError).
+    for cls in type(exc).__mro__:
+        if cls.__name__ in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES:
+            return True
+    # Also walk the cause chain (``raise X from Y`` patterns) — a
+    # collector might wrap a network error in a domain-specific exception
+    # whose name we don't recognize, but the underlying cause is transient.
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause is not None and cause is not exc:
+        return _is_transient_external_error(cause)
+    return False
+
+
 def run_collector_with_metrics(
     collector_name: str,
     collector_class,
@@ -822,16 +903,53 @@ def run_collector_with_metrics(
         # Already logged and metrics updated above (collector success=false path).
         raise
     except Exception as e:
+        # PR #35: distinguish TRANSIENT external errors (network, upstream
+        # 5xx, DNS, SSL handshake, timeout) from CATASTROPHIC bugs
+        # (TypeError, ImportError, programming mistakes). The user policy
+        # is "if a feed fails for an external reason, log + continue;
+        # don't block the whole pipeline." A CyberCure outage on the
+        # provider's end shouldn't keep the baseline DAG from running
+        # build_relationships + enrichment + completion.
+        #
+        # Transient errors → log, record metric, send alert, return a
+        # "skipped" status with success=True. Airflow task stays GREEN
+        # (no upstream_failed propagation), failure remains visible via
+        # logs + Prometheus + Slack alert.
+        # Catastrophic errors → re-raise as before. A missing module or
+        # type error indicates a real bug we want to surface loudly.
         duration = time.time() - start_time
         record_error(collector_name, type(e).__name__)
-        record_dag_run("edgeguard_pipeline", "failure")
-
-        # Record failure in enhanced metrics
         if METRICS_SERVER_AVAILABLE:
-            record_collection(collector_name, "global", 0, "failed")
             record_pipeline_error(f"collect_{collector_name}", type(e).__name__, collector_name)
         set_source_health(collector_name, "global", False)
 
+        if _is_transient_external_error(e):
+            from collectors.collector_utils import make_skipped_optional_source
+
+            record_dag_run("edgeguard_pipeline", "success")
+            if METRICS_SERVER_AVAILABLE:
+                record_collection(collector_name, "global", 0, "skipped")
+                record_collection_duration(collector_name, "global", duration)
+                record_collector_skip(collector_name, "transient_external_error")
+            send_slack_alert(
+                f"Collector {collector_name} skipped due to transient external error "
+                f"({type(e).__name__}: {str(e)[:200]}); pipeline continues"
+            )
+            logger.warning(
+                f"{collector_name.upper()} skipped after {duration:.2f}s — transient external error "
+                f"({type(e).__name__}: {e}); marking task SUCCESS so downstream tasks proceed. "
+                f"Investigate via metrics edgeguard_collector_skip_total{{reason='transient_external_error'}}."
+            )
+            return make_skipped_optional_source(
+                collector_name,
+                skip_reason=f"transient external error: {type(e).__name__}: {e}",
+                skip_reason_class="transient_external_error",
+            )
+
+        # Catastrophic — fail loudly.
+        record_dag_run("edgeguard_pipeline", "failure")
+        if METRICS_SERVER_AVAILABLE:
+            record_collection(collector_name, "global", 0, "failed")
         send_slack_alert(f"Collector {collector_name} failed: {str(e)}")
         logger.error(f"{collector_name.upper()} collection failed: {e}")
         raise
@@ -1961,6 +2079,14 @@ baseline_build_rels_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
     execution_timeout=timedelta(minutes=45),
+    # PR #35: NONE_FAILED_MIN_ONE_SUCCESS — run if the upstream
+    # full_neo4j_sync didn't crash (success OR skipped, but not failed).
+    # Default ALL_SUCCESS would block this task even when the sync
+    # succeeded but a sibling collector failed and somehow propagated
+    # upstream_failed through the group boundary. NONE_FAILED_MIN_ONE_SUCCESS
+    # is the safe choice: still respects real sync failures, but no
+    # false-positive blocks from collector glitches.
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 
@@ -1968,6 +2094,8 @@ baseline_enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_baseline_enrichment,
     execution_timeout=timedelta(hours=5),
+    # PR #35: same rationale as build_relationships above.
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 
@@ -1988,6 +2116,11 @@ baseline_complete = BashOperator(
         echo "=========================================="
     """,
     execution_timeout=timedelta(minutes=5),
+    # PR #35: ALL_DONE — the "complete" marker should ALWAYS run so the
+    # operator gets a clear "baseline finished" signal in the logs even
+    # if some upstream task failed. Useful when scrolling through Airflow
+    # logs to see "did the run terminate gracefully or hang?"
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=baseline_dag,
 )
 

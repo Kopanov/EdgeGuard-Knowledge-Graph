@@ -1,0 +1,301 @@
+"""PR #35 regression tests — collector failures must not block the baseline pipeline.
+
+Background
+----------
+A CyberCure feed outage on 2026-04-18 raised ``ConnectionError`` from inside
+``CyberCureCollector.collect()``. The previous ``run_collector_with_metrics``
+re-raised every ``Exception``, marking the Airflow task FAILED. The default
+``trigger_rule="all_success"`` on downstream baseline tasks
+(``build_relationships``, ``run_enrichment_jobs``, ``baseline_complete``)
+then blocked the entire pipeline — full_neo4j_sync had ``ALL_DONE`` and
+ran, but build_relationships saw upstream_failed and skipped.
+
+User policy: "if a feed fails for an external reason, log + continue, don't
+block everything." PR #35 implements this with two complementary fixes:
+
+1. ``_is_transient_external_error`` classifier + graceful-degradation branch
+   in ``run_collector_with_metrics``. Network/timeout/HTTP errors → return
+   skipped status (success=True), task stays GREEN, Slack alert + Prometheus
+   metric still record the failure for visibility.
+2. Explicit ``trigger_rule`` on the three downstream baseline tasks so the
+   chain has unambiguous semantics regardless of upstream task state.
+
+These tests pin both fixes so a future refactor can't silently regress them.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+_DAGS = os.path.join(os.path.dirname(__file__), "..", "dags")
+_SRC = os.path.join(os.path.dirname(__file__), "..", "src")
+for _p in (_DAGS, _SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+# ---------------------------------------------------------------------------
+# Transient-error classifier
+# ---------------------------------------------------------------------------
+
+
+def _import_dag_module():
+    """Defer import — Airflow may not be installed in every test env.
+
+    Mirrors the cleanup in ``test_edgeguard_collector_contract.py``:
+    ``test_graphql_api.py`` registers MagicMock placeholders for
+    ``airflow.*`` (and Airflow 3.2's ``opentelemetry.*`` deps) so GraphQL
+    tests can import without a real Airflow install. If those stubs are
+    still in ``sys.modules`` when we try to import ``edgeguard_pipeline``,
+    the import either fails or pulls in a half-mocked Airflow that
+    breaks the DAG file. Purge before importing so we get the REAL
+    Airflow.
+    """
+    for key in list(sys.modules):
+        if (
+            key == "edgeguard_pipeline"
+            or key.startswith("airflow")
+            or key == "opentelemetry"
+            or key.startswith("opentelemetry.")
+        ):
+            del sys.modules[key]
+    import importlib
+
+    return importlib.import_module("edgeguard_pipeline")
+
+
+def test_transient_error_classifier_recognizes_common_network_errors():
+    """The classifier must recognize stdlib + popular HTTP library errors
+    by class name. Without this, ``CyberCureCollector`` raising a
+    ``requests.ConnectionError`` would be treated as a hard bug instead
+    of a transient external failure."""
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env — skipping DAG-module test")
+
+    # Stdlib
+    assert ep._is_transient_external_error(ConnectionError("boom"))
+    assert ep._is_transient_external_error(ConnectionRefusedError())
+    assert ep._is_transient_external_error(ConnectionResetError())
+    assert ep._is_transient_external_error(TimeoutError())
+
+    # Subclass via custom class — MRO walk must catch it.
+    class CyberCureRequestTimeout(TimeoutError):
+        pass
+
+    assert ep._is_transient_external_error(CyberCureRequestTimeout())
+
+    # Cause-chain: outer exception name not in list, but __cause__ is.
+    class CollectorError(Exception):
+        pass
+
+    try:
+        try:
+            raise ConnectionError("upstream 503")
+        except ConnectionError as inner:
+            raise CollectorError("collector wrapper") from inner
+    except CollectorError as e:
+        assert ep._is_transient_external_error(e), "must walk __cause__ chain"
+
+
+def test_transient_error_classifier_does_not_swallow_real_bugs():
+    """A TypeError, ValueError, AttributeError, ImportError etc. must NOT
+    be classified as transient — they indicate a real EdgeGuard bug we
+    want to surface loudly. Otherwise we'd silently swallow code defects."""
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env")
+
+    for exc in (
+        TypeError("argument mismatch"),
+        ValueError("bad input"),
+        AttributeError("None has no foo"),
+        ImportError("missing module"),
+        KeyError("missing key"),
+        RuntimeError("generic"),
+        ZeroDivisionError("math"),
+    ):
+        assert not ep._is_transient_external_error(exc), (
+            f"{type(exc).__name__} must not be treated as transient — would silently swallow real bug"
+        )
+
+    # Also: None / non-exception input must safely return False
+    assert not ep._is_transient_external_error(None)
+
+
+def test_transient_error_classifier_recognizes_named_third_party_errors():
+    """Even without ``requests`` / ``httpx`` installed, the classifier must
+    recognize their exception class names by walking ``type(exc).__mro__``.
+    Synthesize fake classes with the canonical names to verify."""
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env")
+
+    # The classifier matches on class name strings — simulate every entry
+    # in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES and verify each is recognized.
+    for name in ep._TRANSIENT_EXTERNAL_EXCEPTION_NAMES:
+        # Skip the names that are also stdlib (already covered above).
+        if name in {"ConnectionError", "ConnectionRefusedError", "TimeoutError"}:
+            continue
+        synth = type(name, (Exception,), {})
+        instance = synth("simulated")
+        assert ep._is_transient_external_error(instance), (
+            f"name {name!r} declared transient but classifier doesn't recognize it"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Trigger-rule pins on downstream baseline tasks
+# ---------------------------------------------------------------------------
+
+
+def test_baseline_downstream_tasks_have_non_blocking_trigger_rules():
+    """The three downstream-of-collectors tasks (build_relationships,
+    run_enrichment_jobs, baseline_complete) must have explicit
+    non-default trigger rules so a single collector failure cannot block
+    the pipeline.
+
+    Source-grep the DAG file because importing the actual TaskGroup
+    requires Airflow runtime."""
+    dag_path = os.path.join(os.path.dirname(__file__), "..", "dags", "edgeguard_pipeline.py")
+    with open(dag_path) as fh:
+        src = fh.read()
+
+    # Locate the three task definitions and verify each has the trigger_rule
+    # arg with the expected value. Use a regex that tolerates indentation.
+    import re
+
+    def _has_trigger_rule(task_id: str, expected_rule: str) -> bool:
+        pattern = rf"task_id=\"{re.escape(task_id)}\".*?trigger_rule=TriggerRule\.{re.escape(expected_rule)}"
+        return bool(re.search(pattern, src, re.DOTALL))
+
+    assert _has_trigger_rule("build_relationships", "NONE_FAILED_MIN_ONE_SUCCESS"), (
+        "build_relationships task must use NONE_FAILED_MIN_ONE_SUCCESS — "
+        "default ALL_SUCCESS would block when a sibling collector failed"
+    )
+    assert _has_trigger_rule("run_enrichment_jobs", "NONE_FAILED_MIN_ONE_SUCCESS"), (
+        "run_enrichment_jobs must use NONE_FAILED_MIN_ONE_SUCCESS"
+    )
+    assert _has_trigger_rule("baseline_complete", "ALL_DONE"), (
+        "baseline_complete must use ALL_DONE so the operator gets a "
+        "termination signal even if some upstream task failed"
+    )
+
+
+def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_error():
+    """End-to-end behavioral test: ``run_collector_with_metrics`` with a
+    collector that raises a transient error must:
+      - return a dict with ``success=True`` and ``skipped=True``
+      - NOT re-raise
+      - call set_source_health(..., False) so dashboards show degradation
+    """
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env")
+
+    from unittest.mock import MagicMock, patch
+
+    # Build a fake collector class whose .collect() raises ConnectionError.
+    class _FailingCollector:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def collect(self, *_a, **_kw):
+            raise ConnectionError("simulated CyberCure outage")
+
+    fake_writer = MagicMock()
+
+    # Patch the heavy/external calls so the function only exercises the
+    # transient-handling branch.
+    with (
+        patch.object(ep, "ensure_metrics_server", lambda: None),
+        patch.object(ep, "log_circuit_breaker_status", lambda: None),
+        patch.object(ep, "is_collector_enabled_by_allowlist", lambda _: True),
+        patch.object(ep, "send_slack_alert", lambda *_a, **_kw: None),
+        patch.object(ep, "set_source_health", MagicMock()) as set_health,
+        patch.object(ep, "record_dag_run", MagicMock()),
+        patch.object(ep, "record_collection", MagicMock()),
+        patch.object(ep, "record_collection_duration", MagicMock()),
+        patch.object(ep, "record_collector_skip", MagicMock()) as record_skip,
+        patch.object(ep, "record_pipeline_error", MagicMock()),
+        patch.object(ep, "record_error", MagicMock()),
+        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+    ):
+        result = ep.run_collector_with_metrics(
+            "cybercure",
+            _FailingCollector,
+            fake_writer,
+            limit=10,
+        )
+
+    assert isinstance(result, dict), "must return a status dict, not raise"
+    assert result.get("success") is True, "transient external error must be reported as success=True"
+    assert result.get("skipped") is True, "must be marked skipped"
+    assert result.get("skip_reason_class") == "transient_external_error", (
+        f"skip_reason_class wrong: {result.get('skip_reason_class')}"
+    )
+    (
+        set_health.assert_called_with("cybercure", "global", False),
+        ("must mark source unhealthy so dashboards show degradation"),
+    )
+    # The skip metric must record the reason so operators can see WHY downstream proceeded.
+    assert any(call.args[1] == "transient_external_error" for call in record_skip.call_args_list), (
+        "must record_collector_skip(..., 'transient_external_error') for visibility"
+    )
+
+
+def test_run_collector_with_metrics_still_raises_on_real_bugs():
+    """Negative pin: a TypeError or ImportError must STILL re-raise. We
+    explicitly do NOT want to silently swallow real bugs."""
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env")
+
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+
+    class _BuggyCollector:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def collect(self, *_a, **_kw):
+            raise TypeError("argument 'foo' missing — real bug, not transient")
+
+    fake_writer = MagicMock()
+
+    with (
+        patch.object(ep, "ensure_metrics_server", lambda: None),
+        patch.object(ep, "log_circuit_breaker_status", lambda: None),
+        patch.object(ep, "is_collector_enabled_by_allowlist", lambda _: True),
+        patch.object(ep, "send_slack_alert", lambda *_a, **_kw: None),
+        patch.object(ep, "set_source_health", MagicMock()),
+        patch.object(ep, "record_dag_run", MagicMock()),
+        patch.object(ep, "record_collection", MagicMock()),
+        patch.object(ep, "record_pipeline_error", MagicMock()),
+        patch.object(ep, "record_error", MagicMock()),
+        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+    ):
+        with pytest.raises(TypeError, match="real bug"):
+            ep.run_collector_with_metrics(
+                "buggy",
+                _BuggyCollector,
+                fake_writer,
+                limit=10,
+            )
