@@ -326,6 +326,13 @@ class MITRECollector:
                                 "zone": self.detect_sectors(description) or ["global"],
                                 "tag": self.tag,
                                 "source": [self.tag],
+                                # PR (S5): MITRE STIX objects carry created/modified
+                                # timestamps that ARE canonical world-truth (when MITRE first
+                                # published the technique/actor/etc.). Pass them through to
+                                # MISP via the first_seen/last_seen attribute fields, which
+                                # parse_attribute will then route to first_seen_at_source.
+                                "first_seen": obj.get("created"),
+                                "last_seen": obj.get("modified"),
                                 "platforms": obj.get("x_mitre_platforms", []),
                                 "data_sources": obj.get("x_mitre_data_sources", []),
                                 "tactic_phases": tactic_phases,
@@ -356,6 +363,13 @@ class MITRECollector:
                                 "zone": self.detect_sectors(tactic_desc) or ["global"],
                                 "tag": self.tag,
                                 "source": [self.tag],
+                                # PR (S5): MITRE STIX objects carry created/modified
+                                # timestamps that ARE canonical world-truth (when MITRE first
+                                # published the technique/actor/etc.). Pass them through to
+                                # MISP via the first_seen/last_seen attribute fields, which
+                                # parse_attribute will then route to first_seen_at_source.
+                                "first_seen": obj.get("created"),
+                                "last_seen": obj.get("modified"),
                                 "confidence_score": 0.9,
                             }
                         )
@@ -375,6 +389,13 @@ class MITRECollector:
                             "zone": sectors,
                             "tag": self.tag,
                             "source": [self.tag],
+                            # PR (S5): MITRE STIX objects carry created/modified
+                            # timestamps that ARE canonical world-truth (when MITRE first
+                            # published the technique/actor/etc.). Pass them through to
+                            # MISP via the first_seen/last_seen attribute fields, which
+                            # parse_attribute will then route to first_seen_at_source.
+                            "first_seen": obj.get("created"),
+                            "last_seen": obj.get("modified"),
                             "confidence_score": 0.7,
                             # Explicit technique list from MITRE ATT&CK USES relationships.
                             # Stored as a node property so build_relationships.py can create
@@ -399,6 +420,13 @@ class MITRECollector:
                             "zone": sectors,
                             "tag": self.tag,
                             "source": [self.tag],
+                            # PR (S5): MITRE STIX objects carry created/modified
+                            # timestamps that ARE canonical world-truth (when MITRE first
+                            # published the technique/actor/etc.). Pass them through to
+                            # MISP via the first_seen/last_seen attribute fields, which
+                            # parse_attribute will then route to first_seen_at_source.
+                            "first_seen": obj.get("created"),
+                            "last_seen": obj.get("modified"),
                             "confidence_score": 0.7,
                             # Explicit technique IDs from ATT&CK relationship objects (malware ``uses`` technique).
                             # Serialized into MISP via ``MITRE_USES_TECHNIQUES:`` so MISP→Neo4j can rebuild edges.
@@ -434,6 +462,13 @@ class MITRECollector:
                             "zone": sectors,
                             "tag": self.tag,
                             "source": [self.tag],
+                            # PR (S5): MITRE STIX objects carry created/modified
+                            # timestamps that ARE canonical world-truth (when MITRE first
+                            # published the technique/actor/etc.). Pass them through to
+                            # MISP via the first_seen/last_seen attribute fields, which
+                            # parse_attribute will then route to first_seen_at_source.
+                            "first_seen": obj.get("created"),
+                            "last_seen": obj.get("modified"),
                             "confidence_score": 0.7,
                             "uses_techniques": _tool_uses.get(tool_name, []),
                         }
