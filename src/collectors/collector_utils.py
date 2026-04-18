@@ -181,6 +181,20 @@ def request_with_rate_limit_retries(
     Returns:
         Final ``requests.Response`` (may still have status != 200).
     """
+    # PR (security A8) — Red Team Tier A: default ``allow_redirects=False``
+    # for all collector outbound HTTP. Without this, a compromised/hijacked
+    # upstream feed (URLhaus, MITRE, NVD, etc.) can redirect a fetch to:
+    #   * cloud metadata endpoints (169.254.169.254 → AWS/GCP/Azure creds)
+    #   * internal services (127.0.0.1:7474 → Neo4j Browser, 7687 → Bolt)
+    #   * .internal hostnames in private VPC ranges
+    # The redirected response body lands in MISP and ultimately Neo4j, and
+    # may leak via /graph/explore.
+    #
+    # Caller can override per-call by passing ``allow_redirects=True``
+    # explicitly when redirect-following is genuinely needed and the
+    # destination is trusted.
+    kwargs.setdefault("allow_redirects", False)
+
     attempts_allowed = max(1, max_rate_limit_retries + 1)
     rate_limit_hits = 0
     attempt = 0

@@ -67,10 +67,43 @@ MISP_URL = os.getenv("MISP_URL", "").rstrip("/")
 EDGEGUARD_API_KEY = os.getenv("EDGEGUARD_API_KEY", "")
 _ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()
 
+# PR (security A6) — Red Team Tier A: previously the API-key requirement
+# only fired when ``EDGEGUARD_ENV=prod``. A staging deployment with the
+# default ``EDGEGUARD_ENV=dev`` (or no env var at all) silently ran with
+# NO authentication — and ``_verify_api_key`` short-circuited the check
+# whenever ``EDGEGUARD_API_KEY`` was empty, making every endpoint
+# anonymously accessible. An internet-exposed staging instance would
+# leak the entire graph via ``/graph/explore?limit=500``.
+#
+# New rule: in non-prod environments, EITHER set ``EDGEGUARD_API_KEY``
+# (auth enforced for everyone) OR bind to loopback only (``127.0.0.1``)
+# so the unauthenticated endpoint isn't reachable from the network.
+# Operators who genuinely want public unauth dev access can opt in
+# via the explicit escape hatch ``EDGEGUARD_ALLOW_UNAUTH=1``.
+# PR #40 commit X (bugbot HIGH): the security check MUST read the same
+# env var the server actually binds to. The server at line 725 reads
+# ``EDGEGUARD_GRAPHQL_HOST`` (with "127.0.0.1" default). The previous
+# code here read ``EDGEGUARD_API_HOST`` first (a REST-API var that the
+# GraphQL server never honors) — an operator setting
+# ``EDGEGUARD_API_HOST=127.0.0.1`` (loopback for REST) +
+# ``EDGEGUARD_GRAPHQL_HOST=0.0.0.0`` (all-interfaces for GraphQL)
+# would pass this safety check but the server would actually bind to
+# 0.0.0.0 unauthenticated.
+_BIND_HOST = os.getenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1").strip()
+_ALLOW_UNAUTH = os.getenv("EDGEGUARD_ALLOW_UNAUTH", "").strip().lower() in ("1", "true", "yes", "on")
+
 if _ENV == "prod" and not EDGEGUARD_API_KEY:
     raise RuntimeError(
         "EDGEGUARD_API_KEY must be set when EDGEGUARD_ENV=prod. "
         "Set a strong random value before starting the GraphQL API in production."
+    )
+
+if not EDGEGUARD_API_KEY and _BIND_HOST not in ("127.0.0.1", "localhost", "::1") and not _ALLOW_UNAUTH:
+    raise RuntimeError(
+        f"EDGEGUARD_API_KEY is unset AND the bind host ({_BIND_HOST!r}) is not loopback. "
+        "Refusing to start an unauthenticated GraphQL endpoint reachable from the network. "
+        "Either set EDGEGUARD_API_KEY (recommended), bind to 127.0.0.1, "
+        "or opt in explicitly with EDGEGUARD_ALLOW_UNAUTH=1 (not recommended)."
     )
 
 
@@ -595,7 +628,36 @@ class Query:
 
 GRAPHQL_PLAYGROUND = os.getenv("EDGEGUARD_GRAPHQL_PLAYGROUND", "false").lower() == "true"
 
-schema = strawberry.Schema(query=Query)
+# PR (security S8 + A7) — Red Team Tier S/A — defense in depth on the
+# GraphQL surface:
+#
+# * ``QueryDepthLimiter(max_depth=8)``: cap nested-field depth so a
+#   malicious request can't fan out into hundreds of OPTIONAL MATCH
+#   joins per resolver and exhaust the Neo4j bolt pool. 8 is generous —
+#   the deepest legitimate query in our schema (CVE → vuln → indicator
+#   → malware → technique → tactic) is 6.
+#
+# * ``DisableIntrospection``: hide the schema in production
+#   (``EDGEGUARD_ENV=prod``) so reconnaissance probes can't enumerate
+#   every queryable field for follow-up complexity attacks. Stays
+#   ON in dev/staging so developers can use GraphiQL/Apollo Studio.
+#
+# Both are extensions, not middleware — they run inside Strawberry's
+# request lifecycle so the limit applies BEFORE the resolver fans out
+# (vs. middleware which would run after parse).
+from graphql.validation import NoSchemaIntrospectionCustomRule  # noqa: E402
+from strawberry.extensions import QueryDepthLimiter  # noqa: E402
+from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
+
+_GRAPHQL_MAX_DEPTH = int(os.getenv("EDGEGUARD_GRAPHQL_MAX_DEPTH", "8"))
+_IS_PROD = os.getenv("EDGEGUARD_ENV", "dev").strip().lower() == "prod"
+
+_extensions: list = [QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH)]
+if _IS_PROD:
+    # Block introspection in prod via the canonical graphql-core rule.
+    _extensions.append(AddValidationRules([NoSchemaIntrospectionCustomRule]))
+
+schema = strawberry.Schema(query=Query, extensions=_extensions)
 graphql_router = GraphQLRouter(schema, graphql_ide="graphiql" if GRAPHQL_PLAYGROUND else None)
 
 
