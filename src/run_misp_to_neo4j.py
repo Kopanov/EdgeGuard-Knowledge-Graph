@@ -1956,6 +1956,28 @@ class MISPToNeo4jSync:
         if not value:
             return None, []
 
+        # PR (security A9) — Red Team Tier A: cap inbound attribute value
+        # size. Without this, a poisoned/buggy upstream feed (compromised
+        # OTX pulse, hostile CyberCure indicator, malformed NVD item)
+        # could stuff a 100MB string into one attribute → sync worker
+        # OOMs, MISP cache bloats, Neo4j page cache thrashes once stored.
+        # 4 KB is generous: longest legitimate MISP value is a SHA-512
+        # (128 chars), an IPv6 address (45 chars), or a long URL (~2KB).
+        # 4096 chars is well above the 99.9th percentile.
+        # Operators with genuine large-value use cases (rare) can override
+        # via EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES.
+        _max_value_bytes = int(os.getenv("EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES", "4096"))
+        if len(value.encode("utf-8")) > _max_value_bytes:
+            logger.warning(
+                "Refusing oversized MISP attribute value (%d bytes > cap %d) — "
+                "type=%s event=%s. Set EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES to override.",
+                len(value.encode("utf-8")),
+                _max_value_bytes,
+                attr_type,
+                event_info.get("id", "?"),
+            )
+            return None, []
+
         # MISP attribute UUID — stable cross-instance identifier (unlike attr.id which
         # is a per-instance auto-increment). Captured once and threaded into every
         # item dict so Neo4j nodes carry direct traceability back to the originating

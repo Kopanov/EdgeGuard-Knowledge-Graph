@@ -242,10 +242,16 @@ def cmd_doctor(args):
 
             misp_url = os.getenv("MISP_URL", "https://localhost:8443")
             misp_key = os.getenv("MISP_API_KEY", "")
+            # PR (security S7) — Red Team Tier S: was hardcoded ``verify=False``,
+            # which sent the API key over MITM-able TLS regardless of operator
+            # config. Now respects ``SSL_VERIFY`` (the same flag every other
+            # outbound HTTP call in EdgeGuard already honors). An on-path
+            # attacker can no longer silently downgrade this probe to
+            # plaintext-equivalent.
             resp = _req.get(
                 f"{misp_url}/events/index",
                 headers={"Authorization": misp_key, "Accept": "application/json"},
-                verify=False,
+                verify=SSL_VERIFY,
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -360,10 +366,28 @@ def cmd_doctor(args):
         all_ok = False
 
     # Check Airflow DAG state if webserver is reachable
-    if airflow_ok:
+    # PR (security S6) — Red Team Tier S: previously used
+    # ``os.getenv("AIRFLOW_API_PASSWORD", "airflow")`` which silently
+    # used the literal default ``"airflow"`` when unset. Combined with
+    # the equivalent default user ``"airflow"`` already in
+    # airflow_client.py, this exposed the Airflow REST API (DAG triggering,
+    # task-instance reset) to anyone who could reach port 8082 with
+    # ``airflow:airflow``. Now: if no password set, SKIP the deeper API
+    # check (we still know from the /health probe above whether the
+    # webserver is reachable). Operator must set AIRFLOW_API_PASSWORD
+    # explicitly to enable the DAG-list diagnostic.
+    airflow_password = os.getenv("AIRFLOW_API_PASSWORD", "").strip()
+    if airflow_ok and not airflow_password:
+        info(
+            "AIRFLOW_API_PASSWORD not set — skipping DAG state check. "
+            "Set the env var to enable detailed DAG diagnostics."
+        )
+    if airflow_ok and airflow_password:
         try:
             resp = requests.get(
-                f"{airflow_url}/api/v1/dags", timeout=10, auth=("airflow", os.getenv("AIRFLOW_API_PASSWORD", "airflow"))
+                f"{airflow_url}/api/v1/dags",
+                timeout=10,
+                auth=(os.getenv("AIRFLOW_API_USER", "airflow"), airflow_password),
             )
             if resp.status_code == 200:
                 dags = resp.json().get("dags", [])

@@ -84,6 +84,23 @@ if _ENV == "prod" and not _API_KEY:
         "EDGEGUARD_API_KEY must be set when EDGEGUARD_ENV=prod. "
         "Set a strong random value before starting the API in production."
     )
+
+# PR (security A6) — Red Team Tier A: in non-prod environments, refuse
+# to start an unauthenticated API endpoint that's reachable from the
+# network. Operator must EITHER set EDGEGUARD_API_KEY (auth enforced)
+# OR bind to loopback only (127.0.0.1). Genuine "public unauth dev"
+# is opt-in via EDGEGUARD_ALLOW_UNAUTH=1.
+_BIND_HOST = os.getenv("EDGEGUARD_API_HOST", "127.0.0.1").strip()
+_ALLOW_UNAUTH = os.getenv("EDGEGUARD_ALLOW_UNAUTH", "").strip().lower() in ("1", "true", "yes", "on")
+
+if not _API_KEY and _BIND_HOST not in ("127.0.0.1", "localhost", "::1") and not _ALLOW_UNAUTH:
+    raise RuntimeError(
+        f"EDGEGUARD_API_KEY is unset AND the bind host ({_BIND_HOST!r}) is not loopback. "
+        "Refusing to start an unauthenticated REST API reachable from the network. "
+        "Either set EDGEGUARD_API_KEY (recommended), bind to 127.0.0.1, "
+        "or opt in explicitly with EDGEGUARD_ALLOW_UNAUTH=1 (not recommended)."
+    )
+
 if not _API_KEY:
     logger.warning(
         "EDGEGUARD_API_KEY is not configured — all API endpoints are UNAUTHENTICATED. "
