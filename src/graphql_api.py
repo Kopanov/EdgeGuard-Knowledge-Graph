@@ -80,7 +80,16 @@ _ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()
 # so the unauthenticated endpoint isn't reachable from the network.
 # Operators who genuinely want public unauth dev access can opt in
 # via the explicit escape hatch ``EDGEGUARD_ALLOW_UNAUTH=1``.
-_BIND_HOST = os.getenv("EDGEGUARD_API_HOST", os.getenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1")).strip()
+# PR #40 commit X (bugbot HIGH): the security check MUST read the same
+# env var the server actually binds to. The server at line 725 reads
+# ``EDGEGUARD_GRAPHQL_HOST`` (with "127.0.0.1" default). The previous
+# code here read ``EDGEGUARD_API_HOST`` first (a REST-API var that the
+# GraphQL server never honors) — an operator setting
+# ``EDGEGUARD_API_HOST=127.0.0.1`` (loopback for REST) +
+# ``EDGEGUARD_GRAPHQL_HOST=0.0.0.0`` (all-interfaces for GraphQL)
+# would pass this safety check but the server would actually bind to
+# 0.0.0.0 unauthenticated.
+_BIND_HOST = os.getenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1").strip()
 _ALLOW_UNAUTH = os.getenv("EDGEGUARD_ALLOW_UNAUTH", "").strip().lower() in ("1", "true", "yes", "on")
 
 if _ENV == "prod" and not EDGEGUARD_API_KEY:

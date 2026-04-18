@@ -206,6 +206,35 @@ def test_graphql_api_refuses_to_start_unauthenticated_on_external_bind():
     assert "EDGEGUARD_ALLOW_UNAUTH" in src
 
 
+def test_graphql_api_security_check_reads_same_env_as_actual_bind():
+    """PR #40 commit X (bugbot HIGH) regression pin.
+
+    The bind-host security check MUST read the same env var the server
+    actually binds to. Previously the check read ``EDGEGUARD_API_HOST``
+    first (a REST-API var; GraphQL server never honors it), then fell
+    back to ``EDGEGUARD_GRAPHQL_HOST``. An operator setting
+    ``EDGEGUARD_API_HOST=127.0.0.1`` + ``EDGEGUARD_GRAPHQL_HOST=0.0.0.0``
+    would PASS the safety check (sees 127.0.0.1 from API_HOST) while
+    the server actually bound to 0.0.0.0 unauthenticated.
+
+    Pin: the security check env var === the actual-bind env var.
+    """
+    path = os.path.join(_SRC, "graphql_api.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    # The security check should NOT consult EDGEGUARD_API_HOST
+    # (that's a REST-only var the GraphQL server doesn't honor)
+    assert 'os.getenv("EDGEGUARD_API_HOST"' not in src, (
+        "graphql_api.py security check must NOT read EDGEGUARD_API_HOST — "
+        "that env var is for REST API only; GraphQL server reads "
+        "EDGEGUARD_GRAPHQL_HOST. Mixed precedence creates a bypass."
+    )
+    # Both the security check and the server bind must read the same var
+    assert src.count('os.getenv("EDGEGUARD_GRAPHQL_HOST"') >= 2, (
+        "graphql_api.py must read EDGEGUARD_GRAPHQL_HOST in BOTH the security check AND the actual server bind"
+    )
+
+
 # ---------------------------------------------------------------------------
 # A8 — Collectors must NOT follow redirects by default
 # ---------------------------------------------------------------------------
