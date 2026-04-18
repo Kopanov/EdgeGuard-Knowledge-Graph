@@ -205,6 +205,151 @@ def send_slack_alert(message: str, channel: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Structured failure log — actionable, grep-friendly, dashboard-aligned
+# ---------------------------------------------------------------------------
+
+
+def _extract_http_status(exc: BaseException) -> int | None:
+    """Pull the HTTP status code off an HTTP error, if available.
+
+    Handles two common shapes:
+      - requests.HTTPError → ``exc.response.status_code``
+      - aiohttp.ClientResponseError → ``exc.status``
+
+    Returns None if neither shape applies (e.g. raw ConnectionError,
+    timeout — those have no HTTP status).
+    """
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        return status
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        return status
+    return None
+
+
+def _extract_url(exc: BaseException) -> str | None:
+    """Pull the URL off an HTTP error, if available.
+
+    Handles:
+      - requests.HTTPError → ``exc.response.url``
+      - aiohttp.ClientResponseError → ``exc.request_info.url`` or ``exc.url``
+      - Fallback: parse ``str(exc)`` for ``"... for url: <URL>"`` (requests'
+        default ``HTTPError.__str__`` includes this)
+    """
+    response = getattr(exc, "response", None)
+    url = getattr(response, "url", None)
+    if url:
+        return str(url)
+    request_info = getattr(exc, "request_info", None)
+    url = getattr(request_info, "url", None)
+    if url:
+        return str(url)
+    url = getattr(exc, "url", None)
+    if url:
+        return str(url)
+    # Last resort: parse from the str(exc) form
+    msg = str(exc)
+    marker = " for url: "
+    idx = msg.find(marker)
+    if idx > 0:
+        return msg[idx + len(marker) :].strip().split()[0]
+    return None
+
+
+def _format_failure_log_block(
+    source_name: str,
+    exc: BaseException,
+    *,
+    classification: str,
+    zone: str = "global",
+    duration_s: float | None = None,
+) -> str:
+    """Build the multi-line structured log block emitted on collector failure.
+
+    Format (3 lines, deterministic, grep-friendly):
+
+        [<source>] <STATUS>  reason=<reason>  exc=<class>  http_status=<int>
+                  url=<url>  duration=<s>
+        ACTION: <human-readable next step for the operator>
+        METRICS: <prometheus metric writes that just fired>
+
+    All fields after ``exc=`` are OPTIONAL — included only when extractable
+    from the exception. Operators can grep e.g. ``grep "http_status=503"``
+    or ``grep "ACTION: provider-side"`` to find specific failure modes
+    across DAG run logs.
+
+    Why a structured block instead of free text:
+      - Operator triage: ACTION line tells them WHAT TO DO without reading code
+      - Postmortems: METRICS line cross-refs the Prometheus signals
+      - Log aggregation (Loki, ELK): key=value parses cleanly into fields
+      - Frequent regression: the same fields are present every time, so
+        Grafana log panels can extract them with one stable regex
+    """
+    exc_type = type(exc).__name__
+    fields: list = [f"reason={'transient_external_error' if classification == 'transient' else 'catastrophic'}"]
+    fields.append(f"exc={exc_type}")
+    http_status = _extract_http_status(exc)
+    if http_status is not None:
+        fields.append(f"http_status={http_status}")
+    url = _extract_url(exc)
+    if url:
+        # Truncate ridiculously long URLs (>200 chars) to keep the log line readable
+        fields.append(f"url={url[:200]}")
+    if duration_s is not None:
+        fields.append(f"duration={duration_s:.2f}s")
+    # Always include the (truncated) exception message at the end so the log
+    # still tells you WHAT happened even if no HTTP status / URL was extractable.
+    exc_msg = str(exc)[:200].replace("\n", " ").replace("\r", " ")
+    if exc_msg and exc_msg != exc_type:
+        fields.append(f'msg="{exc_msg}"')
+
+    if classification == "transient":
+        status_word = "SKIPPED"
+        action = (
+            "ACTION: provider-side outage or transient network error — pipeline CONTINUED, downstream tasks "
+            "will run with whatever data was already in MISP/Neo4j. The next scheduled DAG run will retry "
+            "this collector (incremental DAGs run every ~30min/4h/8h/24h depending on tier). For most "
+            "feeds, the next run's window overlaps and recovers the missed data automatically (see "
+            "docs/AIRFLOW_DAGS.md for per-collector catch-up behavior). If the same source skips for >3 "
+            "consecutive runs, treat as a sustained outage: page on-call OR manually re-trigger the DAG "
+            "after the provider recovers."
+        )
+        metrics_summary = (
+            "METRICS: edgeguard_collector_skips_total{source="
+            + source_name
+            + ",reason_class=transient_external_error} +1; "
+            "edgeguard_collection_total{source=" + source_name + ",zone=" + zone + ",status=skipped} +1; "
+            "edgeguard_source_health{source=" + source_name + ",zone=" + zone + "}=0"
+        )
+    else:
+        status_word = "FAILED"
+        action = (
+            "ACTION: NOT a transient external error — likely a real bug, config error, or unrecognized "
+            "exception type. Task FAILED; downstream baseline tasks (build_relationships, "
+            "run_enrichment_jobs) WILL NOT run until the next successful DAG run (NONE_FAILED_MIN_ONE_SUCCESS "
+            "trigger rule). See the traceback above this log line. After fixing, re-trigger the DAG. "
+            "If you believe this exception class IS a transient external error and should not block, add "
+            "its name to _TRANSIENT_EXTERNAL_EXCEPTION_NAMES in src/collector_failure_alerts.py."
+        )
+        metrics_summary = (
+            "METRICS: edgeguard_collection_total{source=" + source_name + ",zone=" + zone + ",status=failed} +1; "
+            "edgeguard_pipeline_errors_total{task=collect_"
+            + source_name
+            + ",error_type="
+            + exc_type
+            + ",source="
+            + source_name
+            + "} +1; "
+            "edgeguard_source_health{source=" + source_name + ",zone=" + zone + "}=0"
+        )
+
+    fields_str = "  ".join(fields)
+    return f"[{source_name}] {status_word}  {fields_str}\n{action}\n{metrics_summary}"
+
+
+# ---------------------------------------------------------------------------
 # Convenience: classify + record + alert in one call
 # ---------------------------------------------------------------------------
 
@@ -214,11 +359,14 @@ def report_collector_failure(
     exc: BaseException,
     *,
     zone: str = "global",
+    duration_s: float | None = None,
 ) -> str:
     """Centralized failure-reporting helper for both DAG and CLI paths.
 
     Always:
-      - Logs the failure with classification (transient vs catastrophic)
+      - Logs a structured 3-line block (status + key=value fields, ACTION,
+        METRICS — see ``_format_failure_log_block``) so operators see WHY
+        and WHAT TO DO without opening source code
       - Calls ``set_source_health(source, zone, False)`` so the dashboard
         shows degradation
       - Calls ``record_pipeline_error(...)`` for the error-rate metric
@@ -245,6 +393,10 @@ def report_collector_failure(
     exc_type = type(exc).__name__
     exc_msg = str(exc)[:200]
 
+    log_block = _format_failure_log_block(
+        source_name, exc, classification=classification, zone=zone, duration_s=duration_s
+    )
+
     try:
         from metrics_server import (
             record_collection,
@@ -253,11 +405,8 @@ def report_collector_failure(
             set_source_health,
         )
     except Exception:
-        # Metrics server unavailable — log and bail without dashboards.
-        logger.warning(
-            f"[{source_name}] {classification} failure ({exc_type}: {exc_msg}) "
-            "— metrics_server import failed, no Prometheus signal emitted"
-        )
+        # Metrics server unavailable — log structured block + bail without dashboards.
+        logger.warning("%s\nNOTE: metrics_server import failed — no Prometheus signal emitted.", log_block)
         send_slack_alert(f"Collector {source_name} failed ({classification}, no metrics): {exc_type}: {exc_msg}")
         return classification
 
@@ -275,18 +424,17 @@ def report_collector_failure(
     if transient:
         _safe(record_collector_skip, source_name, "transient_external_error")
         _safe(record_collection, source_name, zone, 0, "skipped")
-        logger.warning(
-            f"[{source_name}] TRANSIENT external error ({exc_type}: {exc_msg}) — "
-            "marking source unhealthy, pipeline continues. "
-            "Investigate via edgeguard_collector_skips_total{reason_class='transient_external_error'}"
-        )
+        logger.warning(log_block)
         send_slack_alert(
-            f"Collector {source_name} skipped due to transient external error "
-            f"({exc_type}: {exc_msg}); pipeline continues"
+            f"Collector {source_name} SKIPPED (transient: {exc_type}). "
+            f"Pipeline continued. Full triage in Airflow logs (grep '[{source_name}] SKIPPED')."
         )
     else:
         _safe(record_collection, source_name, zone, 0, "failed")
-        logger.error(f"[{source_name}] CATASTROPHIC failure ({exc_type}: {exc_msg}) — see traceback")
-        send_slack_alert(f"[CRITICAL] Collector {source_name} hard-failed: {exc_type}: {exc_msg}")
+        logger.error(log_block)
+        send_slack_alert(
+            f"[CRITICAL] Collector {source_name} HARD-FAILED ({exc_type}). "
+            f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{source_name}] FAILED')."
+        )
 
     return classification

@@ -382,3 +382,158 @@ def test_cli_except_branches_call_report_failure_with_metrics():
         f"every except branch must call _report_failure_with_metrics; "
         f"got {helper_calls} calls but {appends} except branches — missing dashboard signal in some branches"
     )
+
+
+# ---------------------------------------------------------------------------
+# Structured failure log block — actionable, grep-friendly, dashboard-aligned
+# ---------------------------------------------------------------------------
+
+
+def test_failure_log_block_for_http_503_includes_status_url_and_action():
+    """Vanko's request: when a collector skips, the log line must say
+    EXACTLY why and what to do — not just "transient external error".
+
+    Pin the structure of ``_format_failure_log_block`` for the canonical
+    HTTP 503 case so an operator running ``grep "[cybercure] SKIPPED"`` in
+    the Airflow logs sees:
+      - source name + SKIPPED status
+      - reason + exception class
+      - HTTP status code (extracted from ``exc.response.status_code``)
+      - URL (extracted from ``exc.response.url``)
+      - duration (so they know how long the retries took)
+      - ACTION line: human-readable next-step instructions
+      - METRICS line: which Prometheus counters fired
+    """
+    from collector_failure_alerts import _format_failure_log_block
+
+    HTTPError = type("HTTPError", (Exception,), {})
+
+    class _Resp:
+        def __init__(self, code, url):
+            self.status_code = code
+            self.url = url
+
+    exc = HTTPError("503 Server Error: Service Unavailable for url: https://api.cybercure.io/v1/ioc")
+    exc.response = _Resp(503, "https://api.cybercure.io/v1/ioc")  # type: ignore[attr-defined]
+
+    block = _format_failure_log_block("cybercure", exc, classification="transient", duration_s=35.2)
+
+    assert block.startswith("[cybercure] SKIPPED  "), f"header wrong: {block[:60]!r}"
+    assert "reason=transient_external_error" in block
+    assert "exc=HTTPError" in block
+    assert "http_status=503" in block, "must extract HTTP status from exc.response.status_code"
+    assert "url=https://api.cybercure.io/v1/ioc" in block, "must extract URL from exc.response.url"
+    assert "duration=35.20s" in block, "duration must include trailing 's'"
+    assert "\nACTION:" in block, "must have a literal ACTION: line so operator sees next-step"
+    assert "pipeline CONTINUED" in block
+    assert "next scheduled DAG run" in block
+    assert "\nMETRICS:" in block, "must have a literal METRICS: line referencing Prometheus counters"
+    assert "edgeguard_collector_skips_total{source=cybercure" in block
+    assert "edgeguard_source_health{source=cybercure,zone=global}=0" in block
+
+
+def test_failure_log_block_for_aiohttp_4xx_extracts_status_via_exc_status():
+    """aiohttp's ClientResponseError stores the HTTP status on ``exc.status``
+    (not ``exc.response.status_code``). The extractor must handle both shapes."""
+    from collector_failure_alerts import _format_failure_log_block
+
+    ClientResponseError = type("ClientResponseError", (Exception,), {})
+    exc = ClientResponseError("401 Unauthorized")
+    exc.status = 401  # type: ignore[attr-defined]
+    exc.url = "https://api.virustotal.com/api/v3/files/abc123"  # type: ignore[attr-defined]
+
+    block = _format_failure_log_block("virustotal", exc, classification="catastrophic", duration_s=1.4)
+
+    assert "[virustotal] FAILED" in block
+    assert "http_status=401" in block, "aiohttp .status attribute must be picked up by extractor"
+    assert "url=https://api.virustotal.com/" in block
+    assert "Task FAILED" in block
+    assert "downstream baseline tasks" in block, "catastrophic action must explain downstream-blocking impact"
+
+
+def test_failure_log_block_for_connection_error_omits_http_fields():
+    """Plain ConnectionError has no HTTP status / URL — the formatter must
+    OMIT those fields rather than emit ``http_status=None``. Empty fields
+    pollute logs."""
+    from collector_failure_alerts import _format_failure_log_block
+
+    block = _format_failure_log_block(
+        "feodo",
+        ConnectionError("[Errno 111] Connection refused"),
+        classification="transient",
+        duration_s=12.5,
+    )
+
+    assert "[feodo] SKIPPED" in block
+    assert "exc=ConnectionError" in block
+    assert "http_status" not in block, "must NOT emit http_status when not extractable"
+    assert "url=" not in block, "must NOT emit url when not extractable"
+    assert "duration=12.50s" in block
+
+
+def test_failure_log_block_truncates_oversized_url_and_message():
+    """A 5KB error message or 500-char URL would blow up the log line.
+    Both must be truncated to keep grep / Loki output readable."""
+    from collector_failure_alerts import _format_failure_log_block
+
+    HTTPError = type("HTTPError", (Exception,), {})
+    long_url = "https://example.com/" + "a" * 500
+
+    class _Resp:
+        def __init__(self, code, url):
+            self.status_code = code
+            self.url = url
+
+    exc = HTTPError("HTTP 500: " + "x" * 5000)
+    exc.response = _Resp(500, long_url)  # type: ignore[attr-defined]
+
+    block = _format_failure_log_block("test_src", exc, classification="transient")
+
+    url_field_start = block.index("url=") + 4
+    url_field_end = block.find("  ", url_field_start)
+    if url_field_end < 0:
+        url_field_end = block.find("\n", url_field_start)
+    url_value = block[url_field_start:url_field_end]
+    assert len(url_value) <= 200, f"URL must be truncated to ≤200 chars, got {len(url_value)}"
+
+    msg_field_start = block.index('msg="') + 5
+    msg_field_end = block.find('"', msg_field_start)
+    msg_value = block[msg_field_start:msg_field_end]
+    assert len(msg_value) <= 200, f"msg must be truncated to ≤200 chars, got {len(msg_value)}"
+    assert "\n" not in msg_value and "\r" not in msg_value, "msg must NOT contain newlines"
+
+
+def test_failure_log_block_metrics_line_lists_canonical_counter_names():
+    """The METRICS: line is a contract for operators copying queries into
+    Grafana. Pin the exact metric names so a typo doesn't ship."""
+    from collector_failure_alerts import _format_failure_log_block
+
+    t = _format_failure_log_block("x", ConnectionError("y"), classification="transient")
+    assert "edgeguard_collector_skips_total{source=x,reason_class=transient_external_error} +1" in t
+    assert "edgeguard_collection_total{source=x,zone=global,status=skipped} +1" in t
+    assert "edgeguard_source_health{source=x,zone=global}=0" in t
+
+    c = _format_failure_log_block("y", TypeError("real bug"), classification="catastrophic")
+    assert "edgeguard_collection_total{source=y,zone=global,status=failed} +1" in c
+    assert "edgeguard_pipeline_errors_total{task=collect_y,error_type=TypeError,source=y} +1" in c
+    assert "edgeguard_source_health{source=y,zone=global}=0" in c
+    assert "edgeguard_collector_skips_total" not in c, "catastrophic must NOT mention skip counter"
+
+
+def test_dag_path_uses_shared_log_block_helper():
+    """The DAG path's run_collector_with_metrics must route both transient
+    and catastrophic logs through ``_format_failure_log_block`` (the same
+    helper as the CLI path) so operators see IDENTICAL output regardless
+    of how EdgeGuard was invoked."""
+    dag_path = os.path.join(os.path.dirname(__file__), "..", "dags", "edgeguard_pipeline.py")
+    with open(dag_path) as fh:
+        src = fh.read()
+
+    assert "from collector_failure_alerts import _format_failure_log_block" in src, (
+        "DAG path must import the shared structured-log helper"
+    )
+    # Both classification paths must call the helper. Use a tolerant pattern
+    # since formatter may wrap the call.
+    assert "_format_failure_log_block(" in src, "DAG must call the helper somewhere"
+    assert 'classification="transient"' in src, "DAG must classify transient via the helper"
+    assert 'classification="catastrophic"' in src, "DAG must classify catastrophic via the helper"

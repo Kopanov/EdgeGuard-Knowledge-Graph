@@ -855,6 +855,13 @@ def run_collector_with_metrics(
             record_pipeline_error(f"collect_{collector_name}", type(e).__name__, collector_name)
         set_source_health(collector_name, "global", False)
 
+        # PR #35 commit 6: route through the shared structured-log helper
+        # so the operator-facing message is identical to the CLI path
+        # (key=value fields + ACTION line + METRICS line). See
+        # ``src/collector_failure_alerts.py::_format_failure_log_block``
+        # for the format contract.
+        from collector_failure_alerts import _format_failure_log_block
+
         if _is_transient_external_error(e):
             from collectors.collector_utils import make_skipped_optional_source
 
@@ -863,14 +870,11 @@ def run_collector_with_metrics(
                 record_collection(collector_name, "global", 0, "skipped")
                 record_collection_duration(collector_name, "global", duration)
                 record_collector_skip(collector_name, "transient_external_error")
+            log_block = _format_failure_log_block(collector_name, e, classification="transient", duration_s=duration)
+            logger.warning(log_block)
             send_slack_alert(
-                f"Collector {collector_name} skipped due to transient external error "
-                f"({type(e).__name__}: {str(e)[:200]}); pipeline continues"
-            )
-            logger.warning(
-                f"{collector_name.upper()} skipped after {duration:.2f}s — transient external error "
-                f"({type(e).__name__}: {e}); marking task SUCCESS so downstream tasks proceed. "
-                f"Investigate via metrics edgeguard_collector_skips_total{{reason_class='transient_external_error'}}."
+                f"Collector {collector_name} SKIPPED (transient: {type(e).__name__}). "
+                f"Pipeline continued. Full triage in Airflow logs (grep '[{collector_name}] SKIPPED')."
             )
             return make_skipped_optional_source(
                 collector_name,
@@ -882,8 +886,12 @@ def run_collector_with_metrics(
         record_dag_run("edgeguard_pipeline", "failure")
         if METRICS_SERVER_AVAILABLE:
             record_collection(collector_name, "global", 0, "failed")
-        send_slack_alert(f"Collector {collector_name} failed: {str(e)}")
-        logger.error(f"{collector_name.upper()} collection failed: {e}")
+        log_block = _format_failure_log_block(collector_name, e, classification="catastrophic", duration_s=duration)
+        logger.error(log_block)
+        send_slack_alert(
+            f"[CRITICAL] Collector {collector_name} HARD-FAILED ({type(e).__name__}). "
+            f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{collector_name}] FAILED')."
+        )
         raise
 
 
