@@ -262,6 +262,9 @@ def cmd_doctor(args):
             pass  # Non-critical diagnostic
 
     # Check MISP version compatibility
+    # PR #36 commit X (bugbot LOW): captured here once and threaded to
+    # ``compare_pinned_vs_running`` below to avoid a second MISP round-trip.
+    _captured_misp_version: Optional[str] = None
     if ok_flag:
         info("Checking MISP/PyMISP version compatibility...")
         try:
@@ -279,6 +282,10 @@ def cmd_doctor(args):
                 warn("This may cause Airflow DAG parser to hang. Use 'python3 src/run_pipeline.py' as workaround.")
             else:
                 ok(f"MISP server {version} compatible with PyMISP")
+            # Capture for the version-compat report below — skips the redundant probe
+            # (only "unknown" / falsy values fall through to a fresh capture).
+            if version and version != "unknown":
+                _captured_misp_version = version
         except Exception as e:
             warn(f"Could not check MISP version compatibility: {e}")
 
@@ -484,6 +491,31 @@ def cmd_doctor(args):
     info("Checking circuit breakers...")
     ok_flag, msg = check_circuit_breakers()
     ok(msg)
+
+    # Check version compatibility (PR #36 — Vanko's request: capture
+    # actual running versions of Neo4j server/driver, Airflow, MISP,
+    # PyMISP and warn on drift from the pinned recommendations in
+    # docker-compose.yml / requirements*.txt). Best-effort: every
+    # capture function in version_compatibility returns ``None`` on
+    # failure rather than raising, so a missing optional dep can NEVER
+    # crash doctor (Vanko's stale-checkout NameError class of bug —
+    # also pinned structurally by ``test_edgeguard_doctor_audit.py``).
+    info("Checking version compatibility...")
+    try:
+        from version_compatibility import compare_pinned_vs_running
+
+        # Pass the MISP version captured earlier (line ~272) to skip a
+        # redundant network round-trip — bugbot LOW finding on PR #36.
+        rows = compare_pinned_vs_running(misp_server_version=_captured_misp_version)
+        for _component, status, message in rows:
+            if status == "ok":
+                ok(message)
+            elif status == "warn":
+                warn(message)
+            else:
+                info(message)
+    except Exception as e:
+        warn(f"Version compatibility check failed: {e}")
 
     section("Diagnosis Complete")
     if all_ok:
@@ -1022,6 +1054,38 @@ def cmd_validate(args):
             warn("Neo4j not connected — schema check skipped")
     except Exception as e:
         warn(f"Neo4j schema check failed: {e}")
+
+    # Check version compatibility (PR #36 — Vanko's request). Validate's
+    # role is config validation, but version drift IS a configuration
+    # issue: a 2026.x Neo4j server pinned at the 5.26 docker tag will be
+    # silently downgraded on the next ``docker-compose up``. Surface it
+    # here so it shows up in the operator's pre-deploy validation pass.
+    info("Checking version compatibility...")
+    try:
+        from version_compatibility import compare_pinned_vs_running
+
+        rows = compare_pinned_vs_running()
+        for _component, status, message in rows:
+            if status == "ok":
+                ok(message)
+            elif status == "warn":
+                warn(message)
+            else:
+                info(message)
+        # PR #36 commit 8425380 (bugbot MED): version-drift warnings are
+        # NOT appended to ``issues``. Two reasons:
+        #   1. The previous code appended a synthetic "N pins drifted"
+        #      string AND printed an apologetic comment claiming the
+        #      check "doesn't block deployment" — but ``cmd_validate``
+        #      returns exit 1 when ``issues`` is non-empty, so it
+        #      DID block. Self-contradicting.
+        #   2. Inconsistent with ``cmd_doctor`` which already treats
+        #      version drift as informational (never bumps ``all_ok``).
+        # If a future operator wants version drift to gate deploys, add
+        # an opt-in env var (e.g. ``EDGEGUARD_VALIDATE_FAIL_ON_DRIFT=1``)
+        # rather than reverting the default.
+    except Exception as e:
+        warn(f"Version compatibility check failed: {e}")
 
     section("Validation Complete")
     if issues:

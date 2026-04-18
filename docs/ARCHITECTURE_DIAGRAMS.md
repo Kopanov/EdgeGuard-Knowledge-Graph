@@ -32,7 +32,7 @@ graph TB
         COLL[Collectors<br/>11 sources]
         MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming<br/>OOM-safe chunking]
-        NEO4J[(Neo4j 5.27<br/>Knowledge Graph<br/>ports 7474 / 7687)]
+        NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL[build_relationships<br/>11 relationship types]
         ENRICH[Enrichment Jobs<br/>Decay / Campaigns /<br/>Calibration / CVE Bridge]
     end
@@ -290,9 +290,9 @@ flowchart LR
 
 | Layer | Technology | Version |
 |-------|-----------|---------|
-| Graph Database | Neo4j Community | 5.27 |
+| Graph Database | Neo4j Community | 2026.03 |
 | Threat Intel Platform | MISP | 2.4.x |
-| Orchestration | Apache Airflow | 2.11 |
+| Orchestration | Apache Airflow | 3.2 |
 | REST API | FastAPI + Uvicorn | latest |
 | GraphQL API | Strawberry | latest |
 | Messaging | NATS | latest |
