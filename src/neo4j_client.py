@@ -33,7 +33,7 @@ except ImportError:
 # Deterministic per-node UUIDs for cross-environment traceability — see
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
-from node_identity import compute_node_uuid, edge_endpoint_uuids  # noqa: E402
+from node_identity import canonicalize_merge_key, compute_node_uuid, edge_endpoint_uuids  # noqa: E402
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1179,11 +1179,26 @@ class Neo4jClient:
         return self.merge_node_with_source("Vulnerability", key_props, data, source_id, extra_props=extra_props or None)
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
-        """MERGE an Indicator node with source tracking."""
-        key_props = {
-            "indicator_type": data.get("indicator_type"),
-            "value": data.get("value"),
-        }
+        """MERGE an Indicator node with source tracking.
+
+        PR #37 commit X (bugbot HIGH): the natural-key value is canonicalized
+        via ``canonicalize_merge_key`` BEFORE the MERGE, matching the
+        treatment in ``merge_indicators_batch`` and ``merge_malware``/
+        ``merge_actor``. Without this, indicators arriving through the
+        single-item path (VirusTotal enrichment, STIX pipeline import,
+        ``_sync_single_item`` fallback) retained original casing in the
+        Cypher MERGE while UUID was computed case-insensitively → two
+        Neo4j nodes sharing ONE uuid. The audit-driven batch fix was
+        applied in PR #37 commit 3 but the single-item path was missed
+        — bugbot caught it.
+        """
+        key_props = canonicalize_merge_key(
+            "Indicator",
+            {
+                "indicator_type": data.get("indicator_type"),
+                "value": data.get("value"),
+            },
+        )
         # Promote enrichment fields to queryable node properties
         extra_props: Dict = {}
         if data.get("attack_ids"):
@@ -1339,8 +1354,19 @@ class Neo4jClient:
             return False
 
     def merge_malware(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
-        """MERGE a Malware node with source tracking."""
-        key_props = {"name": data.get("name")}
+        """MERGE a Malware node with source tracking.
+
+        PR #37 (Logic Tracker Tier S): the natural-key ``name`` is now
+        lowercase + NFC + stripped via ``canonicalize_merge_key`` BEFORE
+        the MERGE. Without this, ``Malware{name:"TrickBot"}`` (OTX) and
+        ``Malware{name:"trickbot"}`` (CyberCure) became two distinct
+        nodes that shared the SAME ``n.uuid`` (UUID computation already
+        lowercases its hash input — see node_identity.py:340 — so the
+        original Cypher-side case-sensitive MERGE was the only thing
+        creating duplicates). Operators who relied on display case can
+        recover the variant strings from ``n.aliases[]``.
+        """
+        key_props = canonicalize_merge_key("Malware", {"name": data.get("name")})
         # Store malware types and aliases on the node for easier querying
         malware_types = data.get("malware_types", [])
         aliases = data.get("aliases", [])
@@ -1357,8 +1383,17 @@ class Neo4jClient:
         return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
-        """MERGE a ThreatActor node with source tracking."""
-        key_props = {"name": data.get("name")}
+        """MERGE a ThreatActor node with source tracking.
+
+        PR #37: same ``canonicalize_merge_key`` treatment as ``merge_malware``
+        — actor names like "APT29"/"apt29"/"Apt29" all merge into a single
+        canonical lowercase node. Display-case variants are still
+        recoverable via ``n.aliases[]``. (Note: this does NOT solve the
+        actor-rename problem — e.g. APT29 → Cozy Bear → Midnight Blizzard
+        — that's Tier A A1 and needs an alias-graph resolution pass,
+        not just casing.)
+        """
+        key_props = canonicalize_merge_key("ThreatActor", {"name": data.get("name")})
         aliases = data.get("aliases", [])
         description = data.get("description", "")
         # uses_techniques: list of MITRE technique IDs this actor explicitly uses,
@@ -1578,17 +1613,40 @@ class Neo4jClient:
                         source_list = [source_list]
                     tag = item.get("tag", "default")
 
-                    # Per-row Indicator uuid — same uuid will be computed by every
-                    # other process MERGEing the same (indicator_type, value), so
-                    # cloud copy / delta-sync resolves correctly.
-                    node_uuid = compute_node_uuid(
+                    # PR #37 (Logic Tracker Tier S): canonicalize the merge-key
+                    # value via ``canonicalize_merge_key`` BEFORE both UUID
+                    # computation and the Cypher MERGE. Without this, an
+                    # Indicator with ``value="Conti"`` (one feed) and
+                    # ``value="conti"`` (another feed) collided on uuid (UUID
+                    # is computed case-insensitively at node_identity.py:340)
+                    # but landed as TWO Cypher nodes (MERGE matches case-
+                    # sensitively). Canonicalization is per-type — IPs/hashes/
+                    # domains lowercased; URLs/emails/file-paths left as-is
+                    # (case is meaningful there). See node_identity.py
+                    # ``canonicalize_merge_key`` for the full rules.
+                    # PR #37 commit X (bugbot LOW): import is hoisted to
+                    # module level (line 36) so it doesn't re-resolve
+                    # once per item in this hot batch loop.
+                    canonical_key = canonicalize_merge_key(
                         "Indicator",
                         {"indicator_type": item.get("indicator_type"), "value": item.get("value")},
+                    )
+                    canonical_value = canonical_key.get("value")
+
+                    # Per-row Indicator uuid — same uuid will be computed by every
+                    # other process MERGEing the same (indicator_type, value), so
+                    # cloud copy / delta-sync resolves correctly. Computed from
+                    # the CANONICAL value so the uuid + the MERGE key agree
+                    # (otherwise we'd silently re-introduce the duplicate-uuid
+                    # state that caused the bug).
+                    node_uuid = compute_node_uuid(
+                        "Indicator",
+                        {"indicator_type": item.get("indicator_type"), "value": canonical_value},
                     )
 
                     batch_item = {
                         "indicator_type": item.get("indicator_type"),
-                        "value": item.get("value"),
+                        "value": canonical_value,
                         "tag": tag,
                         "source_id": source_id,
                         "source_array": source_list,
@@ -3081,10 +3139,22 @@ class Neo4jClient:
         ResilMesh spec: tag is LIST OF STRING identifying components that
         contributed data. We accumulate via apoc.coll.toSet so multiple
         sources are tracked.
+
+        PR #37 (Bug Hunter Tier S A3): refuses to merge when ``address``
+        is missing or empty. Without this guard, ``MERGE (i:IP
+        {address: NULL})`` matches/creates a single sentinel node that
+        every subsequent unknown-IP merge HIJACKS — silently folding
+        all unknown-IP rows into one Neo4j node and breaking
+        deduplication. Common trigger: ResilMesh/ISIM payload arriving
+        from an incomplete CMDB sync. Same pattern fix as the existing
+        ``merge_device`` validation.
         """
+        address = data.get("address")
+        if not address or (isinstance(address, str) and not address.strip()):
+            logger.warning("merge_ip refused: missing or empty 'address' — skipping to avoid null-key collapse")
+            return False
         # PR #33 follow-up: stamp deterministic IP n.uuid for cross-environment
         # traceability. Same compute_node_uuid pattern as the MISP-side mergers.
-        address = data.get("address")
         ip_uuid = compute_node_uuid("IP", {"address": address})
         query = """
         MERGE (i:IP {address: $address})
@@ -3118,8 +3188,15 @@ class Neo4jClient:
             return False
 
     def merge_host(self, data: dict) -> bool:
-        """MERGE a Host node. Properties: hostname"""
+        """MERGE a Host node. Properties: hostname
+
+        PR #37: refuses null/empty hostname to avoid the same null-key
+        collapse described in ``merge_ip``.
+        """
         hostname = data.get("hostname")
+        if not hostname or (isinstance(hostname, str) and not hostname.strip()):
+            logger.warning("merge_host refused: missing or empty 'hostname' — skipping to avoid null-key collapse")
+            return False
         host_uuid = compute_node_uuid("Host", {"hostname": hostname})
         query = """
         MERGE (h:Host {hostname: $hostname})
@@ -3451,9 +3528,26 @@ class Neo4jClient:
         Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
         through either path gets the same uuid.
         """
-        # Provide default values if not present
+        # PR #37 (Bug Hunter Tier S A3): refuse to merge when ``cve_id`` is
+        # missing. Previously this defaulted to the sentinel
+        # ``"CVE-0000-00000"`` — every ResilMesh vuln payload missing a
+        # CVE then collapsed onto the SAME ``Vulnerability {cve_id:
+        # "CVE-0000-00000"}`` node, with ``name``/``status``/``description``
+        # overwritten on every call. Single poisoned node accumulated
+        # hundreds of unrelated vulnerability identities; last writer
+        # always won. ResilMesh users with vendor advisories or internal
+        # scan findings (no CVE assigned) hit this path silently.
+        # Caller MUST pass a real cve_id; refuse rather than corrupt.
+        cve_id = data.get("cve_id")
+        if not cve_id or (isinstance(cve_id, str) and not cve_id.strip()):
+            logger.warning(
+                "merge_resilmesh_vulnerability refused: missing 'cve_id' — "
+                "vendor advisories without a CVE need their own node type, "
+                "not the CVE-0000-00000 sentinel that silently collapses unrelated rows."
+            )
+            return False
+        # Default name only after cve_id validation
         name = data.get("name", "unknown")
-        cve_id = data.get("cve_id", "CVE-0000-00000")
         vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
