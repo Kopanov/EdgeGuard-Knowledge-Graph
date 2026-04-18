@@ -659,3 +659,186 @@ def test_dataclass_is_frozen_so_registry_cannot_be_mutated_at_runtime():
     except dataclasses.FrozenInstanceError:
         return
     raise AssertionError("Source dataclass MUST be frozen to prevent registry mutation")
+
+
+# ---------------------------------------------------------------------------
+# Audit-2 fixes — bugbot follow-ups on f4b3b70
+# ---------------------------------------------------------------------------
+
+
+def test_audit2_post_init_rejects_uppercase_canonical_id():
+    """PR #43 audit-2 (LOW): a future ``Source(canonical_id="VT")`` (or
+    typo'd uppercase) breaks ``get_source`` (which lowercases the
+    input but compared raw keys). ``__post_init__`` MUST fail loudly
+    at construction so the contributor sees the error immediately."""
+    import pytest
+
+    from source_registry import Source
+
+    with pytest.raises(ValueError, match="must be lowercase ASCII"):
+        Source(
+            canonical_id="UPPERCASE_BAD",
+            display_name="Bad",
+            source_type="threat_intel",
+            reliability=0.5,
+            misp_tag="source:Bad",
+            reliable_first_seen=False,
+        )
+
+
+def test_audit2_post_init_rejects_uppercase_alias():
+    """Same defense for aliases."""
+    import pytest
+
+    from source_registry import Source
+
+    with pytest.raises(ValueError, match="alias .* must be lowercase ASCII"):
+        Source(
+            canonical_id="ok_lower",
+            aliases=("OK_LOWER", "BAD_UPPER"),
+            display_name="Bad",
+            source_type="threat_intel",
+            reliability=0.5,
+            misp_tag="source:Bad",
+            reliable_first_seen=False,
+        )
+
+
+def test_audit2_post_init_rejects_non_ascii_canonical_id():
+    """Reject non-ASCII identifiers — Cypher / Prometheus / collector
+    code paths assume ASCII canonical_ids."""
+    import pytest
+
+    from source_registry import Source
+
+    with pytest.raises(ValueError, match="must be lowercase ASCII"):
+        Source(
+            canonical_id="café",  # non-ASCII
+            display_name="Cafe",
+            source_type="threat_intel",
+            reliability=0.5,
+            misp_tag="source:Cafe",
+            reliable_first_seen=False,
+        )
+
+
+def test_audit2_to_cli_sources_dict_preserves_legacy_iteration_order():
+    """PR #43 audit-2 (LOW — bugbot): the legacy ``DEFAULT_SOURCES``
+    dict had a hand-curated key order driving the ``edgeguard sources``
+    CLI listing. After the refactor that order MUST be preserved
+    byte-for-byte (operators iterating the listing depend on it)."""
+    from edgeguard import DEFAULT_SOURCES
+
+    expected_order = (
+        "otx",
+        "nvd",
+        "virustotal",
+        "cisa",
+        "mitre",
+        "abuseipdb",
+        "urlhaus",
+        "cybercure",
+        "feodo",
+        "sslbl",
+        "threatfox",
+        "misp",
+    )
+    assert tuple(DEFAULT_SOURCES.keys()) == expected_order, (
+        f"DEFAULT_SOURCES iteration order drift: expected {expected_order}, got {tuple(DEFAULT_SOURCES.keys())}"
+    )
+
+
+def test_audit2_new_source_appears_at_end_of_cli_listing(monkeypatch):
+    """A new source whose ``cli_id`` isn't in
+    ``_LEGACY_CLI_LISTING_ORDER`` MUST be appended at the end (not
+    silently dropped or interleaved)."""
+    import source_registry
+    from source_registry import Source, to_cli_sources_dict
+
+    new_src = Source(
+        canonical_id="newsrc_canonical",
+        display_name="New Source",
+        source_type="threat_intel",
+        reliability=0.5,
+        misp_tag="source:NewSource-Test",
+        reliable_first_seen=False,
+        cli_id="newsrc_cli_unique",
+    )
+    monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (new_src,))
+
+    cli_dict = to_cli_sources_dict()
+    assert "newsrc_cli_unique" in cli_dict
+    # Last key MUST be the new one — appended at the tail
+    assert tuple(cli_dict.keys())[-1] == "newsrc_cli_unique"
+
+
+def test_audit2_alias_collision_across_sources_fails_at_import(monkeypatch):
+    """PR #43 audit-2 (MED — bugbot): two Sources sharing an alias
+    silently produce divergent results between ``get_source`` (first
+    wins) and ``to_neo4j_sources_dict`` (last wins). The runtime
+    validator MUST raise so the contributor's typo never reaches
+    production."""
+    import pytest
+
+    import source_registry
+    from source_registry import Source, _validate_no_alias_collisions
+
+    # Synthesize a Source whose alias collides with NVD's canonical id
+    colliding = Source(
+        canonical_id="testsrc_alias_collision",
+        aliases=("nvd",),  # collides with NVD's canonical id
+        display_name="Alias Collision Test",
+        source_type="threat_intel",
+        reliability=0.5,
+        misp_tag="source:AliasCollision-Test",
+        reliable_first_seen=False,
+    )
+    monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (colliding,))
+
+    with pytest.raises(ValueError, match="alias collision on 'nvd'"):
+        _validate_no_alias_collisions()
+
+
+def test_audit2_alias_alias_collision_across_sources_fails(monkeypatch):
+    """The other arm — two Sources whose ALIASES collide (not just
+    alias-vs-canonical-id). The pre-audit-2 test
+    ``test_aliases_do_not_collide_with_other_sources_canonical_ids``
+    didn't catch this case."""
+    import pytest
+
+    import source_registry
+    from source_registry import Source, _validate_no_alias_collisions
+
+    a = Source(
+        canonical_id="testsrc_a_unique",
+        aliases=("shared_alias_xyz",),
+        display_name="A",
+        source_type="threat_intel",
+        reliability=0.5,
+        misp_tag="source:A-test",
+        reliable_first_seen=False,
+    )
+    b = Source(
+        canonical_id="testsrc_b_unique",
+        aliases=("shared_alias_xyz",),  # same alias as A
+        display_name="B",
+        source_type="threat_intel",
+        reliability=0.5,
+        misp_tag="source:B-test",
+        reliable_first_seen=False,
+    )
+    monkeypatch.setattr(source_registry, "_REGISTRY", source_registry._REGISTRY + (a, b))
+
+    with pytest.raises(ValueError, match="alias collision on 'shared_alias_xyz'"):
+        _validate_no_alias_collisions()
+
+
+def test_audit2_real_registry_has_no_alias_collisions():
+    """Static check: the actual ``_REGISTRY`` MUST pass the
+    alias-collision validator. Catches a contributor accidentally
+    re-using an existing alias even before any derivation helper
+    is exercised."""
+    from source_registry import _validate_no_alias_collisions
+
+    # Should not raise
+    _validate_no_alias_collisions()

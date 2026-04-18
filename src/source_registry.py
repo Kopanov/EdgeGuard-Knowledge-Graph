@@ -164,6 +164,27 @@ class Source:
     # preserves both.
     cli_display_name: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        """Validate Source invariants at construction time.
+
+        PR #43 audit-2 (Maintainer Dev / Bug Hunter): the previous
+        contract said "MUST be lowercased" in a docstring but no
+        runtime check enforced it. Adding ``Source(aliases=("VT",))``
+        with uppercase silently broke ``get_source`` (which lowercases
+        the input but compared against the raw key). Catch the violation
+        at registration so a future contributor sees the failure
+        immediately.
+        """
+        # canonical_id MUST be lowercase ASCII (matches Cypher / collector convention)
+        if self.canonical_id != self.canonical_id.lower() or not self.canonical_id.isascii():
+            raise ValueError(f"Source(canonical_id={self.canonical_id!r}): canonical_id must be lowercase ASCII")
+        # Same for every alias
+        for alias in self.aliases:
+            if alias != alias.lower() or not alias.isascii():
+                raise ValueError(
+                    f"Source(canonical_id={self.canonical_id!r}, aliases=...): alias {alias!r} must be lowercase ASCII"
+                )
+
     @property
     def all_keys(self) -> Tuple[str, ...]:
         """``(canonical_id,) + aliases`` — every key under which this
@@ -405,6 +426,35 @@ def all_aliases() -> FrozenSet[str]:
     return frozenset(out)
 
 
+def _validate_no_alias_collisions() -> None:
+    """PR #43 audit-2 (MED — bugbot): two ``Source`` records sharing an
+    alias would produce divergent results between ``get_source`` (which
+    returns the FIRST match) and the dict-building helpers (``out[key] = ...``
+    LAST wins). Validate at module import time so a contributor's typo
+    fails immediately, not silently in production.
+
+    Pre-existing test ``test_aliases_do_not_collide_with_other_sources_canonical_ids``
+    only checked alias-vs-canonical-id collisions; this catches the
+    alias-vs-alias case too.
+    """
+    seen: Dict[str, str] = {}  # key → first canonical_id that owns it
+    for src in _REGISTRY:
+        for key in src.all_keys:
+            owner = seen.get(key)
+            if owner is not None and owner != src.canonical_id:
+                raise ValueError(
+                    f"Source registry: alias collision on {key!r} — "
+                    f"both {owner!r} and {src.canonical_id!r} claim it. "
+                    "Two sources sharing an alias produce divergent results "
+                    "between get_source (first wins) and the dict-building "
+                    "helpers (last wins). Pick a unique alias."
+                )
+            seen[key] = src.canonical_id
+
+
+_validate_no_alias_collisions()
+
+
 # ===========================================================================
 # Derivation helpers — each replaces one of the 5 legacy registries
 # ===========================================================================
@@ -434,6 +484,32 @@ def to_neo4j_sources_dict() -> Dict[str, Dict[str, object]]:
     return out
 
 
+# PR #43 audit-2 (LOW — bugbot): the legacy `edgeguard.DEFAULT_SOURCES`
+# dict had a hand-curated key order that drove the `edgeguard sources`
+# CLI listing. The pre-refactor order was (otx, nvd, virustotal, cisa,
+# mitre, abuseipdb, urlhaus, cybercure, feodo, sslbl, threatfox, misp);
+# the registry order matches `neo4j_client.SOURCES` instead, which
+# differs. Use this explicit list to preserve operator-facing ordering.
+# Anything not in the list is appended in registry order at the end —
+# so adding a new Source with a fresh `cli_id` doesn't require updating
+# this list (it just appears at the end of the CLI listing, which is
+# the expected behavior for a new source).
+_LEGACY_CLI_LISTING_ORDER: Tuple[str, ...] = (
+    "otx",
+    "nvd",
+    "virustotal",
+    "cisa",
+    "mitre",
+    "abuseipdb",
+    "urlhaus",
+    "cybercure",
+    "feodo",
+    "sslbl",
+    "threatfox",
+    "misp",
+)
+
+
 def to_cli_sources_dict() -> Dict[str, Dict[str, object]]:
     """Re-creates the legacy ``edgeguard.DEFAULT_SOURCES`` dict shape.
 
@@ -443,6 +519,12 @@ def to_cli_sources_dict() -> Dict[str, Dict[str, object]]:
     One entry per source whose ``cli_id`` is set (currently all of
     them). Skips sources with ``cli_id is None``.
 
+    Insertion order matches the legacy ``DEFAULT_SOURCES`` order via
+    ``_LEGACY_CLI_LISTING_ORDER`` (PR #43 audit-2 LOW — bugbot:
+    operators iterating the CLI listing depend on this order).
+    Sources whose ``cli_id`` is not in the legacy list are appended
+    in registry order at the end.
+
     Raises ``ValueError`` if two ``Source`` records share a ``cli_id``
     (PR #43 audit M2 — Devil's Advocate / Cross-Checker): the previous
     implementation silently overwrote the earlier entry, so a
@@ -451,25 +533,39 @@ def to_cli_sources_dict() -> Dict[str, Dict[str, object]]:
     no error. Both ``to_cli_sources_dict`` and
     ``cli_to_canonical_tag_map`` enforce the same uniqueness check.
     """
-    out: Dict[str, Dict[str, object]] = {}
+    by_cli_id: Dict[str, Source] = {}
     for src in _REGISTRY:
         if src.cli_id is None:
             continue
-        if src.cli_id in out:
+        if src.cli_id in by_cli_id:
             raise ValueError(
                 f"duplicate cli_id={src.cli_id!r} in registry: "
                 f"second occurrence on canonical_id={src.canonical_id!r}. "
                 "Each cli_id must map to exactly one Source — silently "
                 "overwriting would drop the earlier source from the CLI listing."
             )
-        out[src.cli_id] = {
-            "name": src.cli_display_name or src.display_name,
-            "api_key_env": src.api_key_env,
-            "rate_limit": src.rate_limit,
-            "enabled": src.cli_default_enabled,
-            "description": src.cli_description,
-        }
+        by_cli_id[src.cli_id] = src
+
+    out: Dict[str, Dict[str, object]] = {}
+    # First emit entries in the documented legacy order
+    for cli_id in _LEGACY_CLI_LISTING_ORDER:
+        if cli_id in by_cli_id:
+            out[cli_id] = _cli_payload(by_cli_id.pop(cli_id))
+    # Then any new sources (not in the legacy list) in registry order
+    for cli_id, src in by_cli_id.items():
+        out[cli_id] = _cli_payload(src)
     return out
+
+
+def _cli_payload(src: Source) -> Dict[str, object]:
+    """Helper: construct the per-source CLI dict payload."""
+    return {
+        "name": src.cli_display_name or src.display_name,
+        "api_key_env": src.api_key_env,
+        "rate_limit": src.rate_limit,
+        "enabled": src.cli_default_enabled,
+        "description": src.cli_description,
+    }
 
 
 def cli_to_canonical_tag_map() -> Dict[str, str]:
