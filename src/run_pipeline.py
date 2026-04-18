@@ -21,6 +21,7 @@ from typing import Optional
 import requests
 
 from collector_allowlist import collect_sources_allowlist_from_env, is_collector_enabled_by_allowlist
+from collector_failure_alerts import report_collector_failure
 from collectors.abuseipdb_collector import AbuseIPDBCollector
 from collectors.cisa_collector import CISACollector
 from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
@@ -34,6 +35,34 @@ from collectors.virustotal_collector import VirusTotalCollector
 from collectors.vt_collector import VTCollector
 from config import baseline_collection_limit_from_env, get_effective_limit
 from neo4j_client import Neo4jClient
+
+
+# PR #35 commit 2: surface CLI-path collector failures to Prometheus + Slack
+# (Vanko follow-up audit). Wrapped in a thin helper so the four except
+# branches below stay readable AND so the call is best-effort: a metric
+# emission failure never masks the underlying collector exception.
+def _report_failure_with_metrics(source_name: str, exc: BaseException) -> None:
+    """Best-effort dashboard-visibility for a CLI-path collector failure.
+
+    Calls ``report_collector_failure`` from ``collector_failure_alerts``
+    which:
+      - classifies transient vs catastrophic via class-name walk
+      - emits Prometheus metrics (collection-status, source-health,
+        skip-counter, pipeline-error)
+      - sends a Slack alert if EDGEGUARD_ENABLE_SLACK_ALERTS=1
+
+    Wrapped in a try/except so a metrics-server outage or Slack 500
+    doesn't break the CLI's own error reporting.
+    """
+    try:
+        report_collector_failure(source_name, exc)
+    except Exception as report_err:
+        logging.getLogger(__name__).warning(
+            "[%s] failure-reporting helper raised %s — continuing without dashboard signal",
+            source_name,
+            type(report_err).__name__,
+        )
+
 
 # Import STIX conversion from run_misp_to_neo4j
 try:
@@ -1210,18 +1239,24 @@ class EdgeGuardPipeline:
                 msg = f"Timeout: {e}"
                 logger.error(f"   [ERR] {source_name} collector timed out - service may be slow")
                 step2_exceptions.append((source_name, msg))
+                # PR #35 commit 2: emit Prometheus + Slack visibility
+                # so CLI-path failures are dashboard-visible, not just logged.
+                _report_failure_with_metrics(source_name, e)
             except requests.exceptions.ConnectionError as e:
                 msg = f"ConnectionError: {e}"
                 logger.error(f"   [ERR] {source_name} collector failed - connection error (service down?)")
                 step2_exceptions.append((source_name, msg))
+                _report_failure_with_metrics(source_name, e)
             except ImportError as e:
                 msg = f"ImportError: {e}"
                 logger.error(f"   [ERR] {source_name} collector failed - missing dependency: {e}")
                 step2_exceptions.append((source_name, msg))
+                _report_failure_with_metrics(source_name, e)
             except Exception as e:
                 msg = f"{type(e).__name__}: {e}"
                 logger.error(f"   [ERR] {source_name} collector failed: {msg}")
                 step2_exceptions.append((source_name, msg))
+                _report_failure_with_metrics(source_name, e)
 
         logger.info(f"\n[STATS] Total pushed to MISP: {total_pushed} items")
         logger.info("\n[SUMMARY] Step 2 — collection by source:")

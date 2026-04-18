@@ -97,7 +97,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import pendulum
 from airflow import DAG
@@ -625,6 +625,19 @@ def _method_accepts_kwarg(callable_obj, name: str) -> bool:
     return False
 
 
+# PR #35 commit 2: ``_is_transient_external_error`` and the transient-name
+# frozenset moved to ``src/collector_failure_alerts.py`` so the CLI path
+# (``src/run_pipeline.py``) can use the same classifier. The local names
+# below are kept as backward-compatible aliases — existing tests + comments
+# in this file still reference them.
+from collector_failure_alerts import (  # noqa: E402
+    _TRANSIENT_EXTERNAL_EXCEPTION_NAMES,
+)
+from collector_failure_alerts import (
+    is_transient_external_error as _is_transient_external_error,
+)
+
+
 def run_collector_with_metrics(
     collector_name: str,
     collector_class,
@@ -822,18 +835,100 @@ def run_collector_with_metrics(
         # Already logged and metrics updated above (collector success=false path).
         raise
     except Exception as e:
+        # PR #35: distinguish TRANSIENT external errors (network, upstream
+        # 5xx, DNS, SSL handshake, timeout) from CATASTROPHIC bugs
+        # (TypeError, ImportError, programming mistakes). The user policy
+        # is "if a feed fails for an external reason, log + continue;
+        # don't block the whole pipeline." A CyberCure outage on the
+        # provider's end shouldn't keep the baseline DAG from running
+        # build_relationships + enrichment + completion.
+        #
+        # Transient errors → log, record metric, send alert, return a
+        # "skipped" status with success=True. Airflow task stays GREEN
+        # (no upstream_failed propagation), failure remains visible via
+        # logs + Prometheus + Slack alert.
+        # Catastrophic errors → re-raise as before. A missing module or
+        # type error indicates a real bug we want to surface loudly.
         duration = time.time() - start_time
-        record_error(collector_name, type(e).__name__)
-        record_dag_run("edgeguard_pipeline", "failure")
 
-        # Record failure in enhanced metrics
+        # PR #35 commit 8 (bugbot MED): ``record_error`` and
+        # ``record_pipeline_error`` USED to fire here, BEFORE the
+        # transient/catastrophic split. That meant a transient network
+        # glitch — task returns SUCCESS-skipped — would still bump the
+        # error counter, giving operators false-positive alerts on
+        # ``rate(pipeline_errors_total) > 0``. The structured METRICS
+        # log line for transient explicitly OMITS pipeline_errors_total,
+        # confirming the increment was unintended. Moved both into the
+        # catastrophic branch below; transient now only touches the
+        # skip + collection counters + source-health (matching the log).
+        # ``set_source_health`` stays here — degradation IS visible
+        # regardless of classification (operators always want to know a
+        # source is currently failing, even if "transient + auto-recovers
+        # next run").
+        #
+        # PR #35 commit 9 (bugbot MED): every metric call in this handler
+        # is now wrapped in ``_safe()``. Without this, a Prometheus client
+        # error (e.g. label cardinality blow-up, registry contention) raised
+        # from inside ``record_collection`` would propagate UP through the
+        # ``except Exception as e:`` and the Airflow task would FAIL —
+        # exactly the outcome PR #35 exists to prevent. Mirrors the
+        # ``_safe`` wrapper in ``src.collector_failure_alerts.report_collector_failure``.
+        def _safe(fn: Any, *args: Any) -> None:
+            try:
+                fn(*args)
+            except Exception as me:
+                logger.debug(f"metric emit failed ({getattr(fn, '__name__', fn)}): {me}")
+
+        _safe(set_source_health, collector_name, "global", False)
+
+        # PR #35 commit 6: route through the shared structured-log helper
+        # so the operator-facing message is identical to the CLI path
+        # (key=value fields + ACTION line + METRICS line). See
+        # ``src/collector_failure_alerts.py::_format_failure_log_block``
+        # for the format contract.
+        from collector_failure_alerts import _format_failure_log_block
+
+        if _is_transient_external_error(e):
+            from collectors.collector_utils import make_skipped_optional_source
+
+            _safe(record_dag_run, "edgeguard_pipeline", "success")
+            if METRICS_SERVER_AVAILABLE:
+                _safe(record_collection, collector_name, "global", 0, "skipped")
+                _safe(record_collection_duration, collector_name, "global", duration)
+                _safe(record_collector_skip, collector_name, "transient_external_error")
+            log_block = _format_failure_log_block(collector_name, e, classification="transient", duration_s=duration)
+            logger.warning(log_block)
+            try:
+                send_slack_alert(
+                    f"Collector {collector_name} SKIPPED (transient: {type(e).__name__}). "
+                    f"Pipeline continued. Full triage in Airflow logs (grep '[{collector_name}] SKIPPED')."
+                )
+            except Exception as se:  # noqa: BLE001 - alerter must never block the skip path
+                logger.debug(f"slack alert emit failed (transient skip): {se}")
+            return make_skipped_optional_source(
+                collector_name,
+                skip_reason=f"transient external error: {type(e).__name__}: {e}",
+                skip_reason_class="transient_external_error",
+            )
+
+        # Catastrophic — fail loudly. NOW emit the error counters (post-split,
+        # so transient-skipped tasks no longer false-positive these metrics).
+        # Same _safe() wrapping: a metric-emission error MUST NOT mask the
+        # original catastrophic exception that we want to surface to operators.
+        _safe(record_error, collector_name, type(e).__name__)
+        _safe(record_dag_run, "edgeguard_pipeline", "failure")
         if METRICS_SERVER_AVAILABLE:
-            record_collection(collector_name, "global", 0, "failed")
-            record_pipeline_error(f"collect_{collector_name}", type(e).__name__, collector_name)
-        set_source_health(collector_name, "global", False)
-
-        send_slack_alert(f"Collector {collector_name} failed: {str(e)}")
-        logger.error(f"{collector_name.upper()} collection failed: {e}")
+            _safe(record_pipeline_error, f"collect_{collector_name}", type(e).__name__, collector_name)
+            _safe(record_collection, collector_name, "global", 0, "failed")
+        log_block = _format_failure_log_block(collector_name, e, classification="catastrophic", duration_s=duration)
+        logger.error(log_block)
+        try:
+            send_slack_alert(
+                f"[CRITICAL] Collector {collector_name} HARD-FAILED ({type(e).__name__}). "
+                f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{collector_name}] FAILED')."
+            )
+        except Exception as se:  # noqa: BLE001 - alerter must never mask the original exception
+            logger.debug(f"slack alert emit failed (catastrophic): {se}")
         raise
 
 
@@ -1961,6 +2056,14 @@ baseline_build_rels_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
     execution_timeout=timedelta(minutes=45),
+    # PR #35: NONE_FAILED_MIN_ONE_SUCCESS — run if the upstream
+    # full_neo4j_sync didn't crash (success OR skipped, but not failed).
+    # Default ALL_SUCCESS would block this task even when the sync
+    # succeeded but a sibling collector failed and somehow propagated
+    # upstream_failed through the group boundary. NONE_FAILED_MIN_ONE_SUCCESS
+    # is the safe choice: still respects real sync failures, but no
+    # false-positive blocks from collector glitches.
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 
@@ -1968,6 +2071,8 @@ baseline_enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_baseline_enrichment,
     execution_timeout=timedelta(hours=5),
+    # PR #35: same rationale as build_relationships above.
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 
@@ -1988,6 +2093,11 @@ baseline_complete = BashOperator(
         echo "=========================================="
     """,
     execution_timeout=timedelta(minutes=5),
+    # PR #35: ALL_DONE — the "complete" marker should ALWAYS run so the
+    # operator gets a clear "baseline finished" signal in the logs even
+    # if some upstream task failed. Useful when scrolling through Airflow
+    # logs to see "did the run terminate gracefully or hang?"
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=baseline_dag,
 )
 
