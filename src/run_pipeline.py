@@ -921,17 +921,40 @@ class EdgeGuardPipeline:
 
             Returns True iff THIS process now exclusively owns the lock
             file. Returns False on FileExistsError (someone else holds
-            it). Any other OSError propagates to the caller.
+            it). Returns False on write failure too — the partial sentinel
+            is rolled back so a retry can proceed cleanly. Any other
+            OSError on the create itself propagates to the caller.
+
+            PR #38 commit X (bugbot MED): added the write-failure
+            rollback. Previously a write OSError propagated up
+            uncaught while the empty/partial lock file lingered on
+            disk → next CLI invocation would see a "live" lock and
+            refuse to start, even though the prior process never
+            actually held it. Mirrors the baseline_lock.py pattern.
             """
             try:
                 # 0o644 — owner rw, others r (matches the previous open(..., "w") default)
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
                 return False
+            write_failed = False
             try:
                 os.write(fd, str(os.getpid()).encode("ascii"))
+            except OSError as exc:
+                logger.error(f"Failed to write pipeline-lock PID to {path}: {exc}")
+                write_failed = True
             finally:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if write_failed:
+                # Roll back the partial sentinel so the next attempt isn't blocked.
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                return False
             return True
 
         if not _try_atomic_lock_acquire(lock_path):

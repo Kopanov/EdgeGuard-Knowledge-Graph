@@ -130,6 +130,17 @@ def test_acquire_baseline_lock_is_atomic_under_concurrent_attempts(tmp_path, mon
     for t in threads:
         t.join(timeout=5)
 
+    # PR #38 commit X (bugbot LOW): assert BOTH threads completed before
+    # counting successes. Thread exceptions don't propagate to the main
+    # thread — they print to stderr and the thread silently dies. Without
+    # this length check, a thread that crashed instead of returning False
+    # would skip ``results.append(...)`` and leave ``results`` with one
+    # entry; if THAT entry is True the success count still equals 1 and
+    # the test falsely passes.
+    assert len(results) == 2, (
+        f"Both threads must have completed and recorded a result; got {len(results)} results. "
+        f"A missing result means a thread crashed silently — investigate stderr."
+    )
     successes = sum(1 for r in results if r is True)
     assert successes == 1, (
         f"Exactly ONE thread must acquire the baseline lock; got {successes} successes. "
