@@ -596,6 +596,61 @@ def test_mispwriter_vulnerability_path_passes_first_seen_and_last_seen():
     assert "last_seen" not in attr2
 
 
+def test_virustotal_demo_mode_is_deleted():
+    """PR (S5) commit X regression pin.
+
+    The VirusTotal collector previously shipped ``_collect_demo_data`` —
+    a fallback that returned 3 hardcoded hashes (EICAR + demo SHAs)
+    tagged ``virustotal`` with wall-clock NOW ``first_seen``. Since
+    the VT v3 Intelligence API pipeline (``_collect_from_files``) is
+    the real production collector, the demo method served no
+    production purpose and risked poisoning the graph with fake
+    intelligence if a dev piped the output through MISPWriter
+    (``virustotal`` is on the reliable source-truthful allowlist).
+
+    The fix is NOT to null out ``first_seen`` — the fix is to delete
+    the demo method entirely. Airflow + enrichment callers already
+    skip correctly when the API key is absent; non-Airflow callers
+    now get an empty list and a warning log pointing to the VT
+    signup URL. Production behaviour is unchanged; dev callers who
+    relied on the demo hashes should set ``VIRUSTOTAL_API_KEY`` to
+    run the real collector.
+
+    This test asserts the method is GONE and that no code path can
+    emit wall-clock NOW under the ``virustotal`` tag.
+    """
+    path = os.path.join(_SRC, "collectors", "virustotal_collector.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    assert "def _collect_demo_data" not in src, (
+        "_collect_demo_data must be DELETED — the VT pipeline is the real "
+        "production collector; the demo method was a legacy dev shortcut "
+        "that risked poisoning Indicator.first_seen_at_source with "
+        "wall-clock NOW under the reliable ``virustotal`` tag"
+    )
+    assert "_collect_demo_data" not in src, "No code path may reference _collect_demo_data (method deleted)"
+
+
+def test_nvd_collector_does_not_inject_wall_clock_first_seen():
+    """PR (S5) commit X regression pin.
+
+    Same bug class as the AbuseIPDB + CISA wall-clock-NOW fallbacks —
+    NVD's ``"first_seen": published_str or datetime.now(...).isoformat()``
+    would poison ``Vulnerability.first_seen_at_source`` with sync
+    wall-clock NOW whenever NVD's ``published`` was empty (rare but
+    observable). Fix: emit ``None`` so the extractor's MIN logic
+    preserves any prior value.
+    """
+    path = os.path.join(_SRC, "collectors", "nvd_collector.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    assert '"first_seen": published_str or None' in src, (
+        "NVD collector first_seen MUST emit None when published_str is empty "
+        "(not wall-clock NOW) — otherwise the extractor writes wall-clock "
+        "into n.first_seen_at_source, silently corrupting the source-truth."
+    )
+
+
 def test_cisa_collector_does_not_inject_wall_clock_first_seen():
     """PR (S5) commit X (bugbot MED follow-on) regression pin.
 

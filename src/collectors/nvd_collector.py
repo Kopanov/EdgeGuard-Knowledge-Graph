@@ -826,7 +826,18 @@ class NVDCollector:
                         "published": published_str,
                         "last_modified": cve_data.get("lastModified", datetime.now(timezone.utc).isoformat()),
                         # EdgeGuard internal timestamps (kept for backward compat)
-                        "first_seen": published_str or datetime.now(timezone.utc).isoformat(),
+                        # PR (S5) commit X (bugbot-class MED follow-on): kill the
+                        # wall-clock fallback on first_seen. NVD's ``published``
+                        # is the canonical source-truthful field; when it's
+                        # empty (rare — should never happen for real CVEs) we
+                        # emit None so the extractor's MIN logic preserves any
+                        # prior value instead of poisoning Neo4j with NOW.
+                        # Same bug class as the CISA wall-clock fix
+                        # (commit ac25b07) and the AbuseIPDB blacklist fix
+                        # (commit 87d3529). ``last_updated`` is intentionally
+                        # NOT source-truthful — it's EdgeGuard's local sync
+                        # wall-clock, which is the correct semantics.
+                        "first_seen": published_str or None,
                         "last_updated": cve_data.get("lastModified", datetime.now(timezone.utc).isoformat()),
                         "confidence_score": 0.9 if cisa_exploit_add else 0.6,
                         "severity": severity.upper(),

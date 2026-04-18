@@ -85,7 +85,17 @@ class VirusTotalCollector:
         if limit is None:
             limit = 10
 
-        # Optional source: no key → skip Airflow task success + metrics (same contract as AbuseIPDB)
+        # Optional source: no key → skip Airflow task success + metrics (same contract as AbuseIPDB).
+        # PR (S5) commit X: the non-Airflow path previously returned
+        # ``_collect_demo_data()`` — synthetic hashes tagged ``virustotal``
+        # with wall-clock-NOW first_seen. The VT pipeline is a real,
+        # production-ready collector (``_collect_from_files`` via the v3
+        # Intelligence API); demo mode was a legacy development shortcut
+        # from before the real path worked. It served no production
+        # purpose and risked poisoning the graph if a dev piped the
+        # output through MISPWriter. Deleted — set VIRUSTOTAL_API_KEY to
+        # run the real collector; no key means no data (consistent with
+        # every other optional-source path).
         if not optional_api_key_effective(self.api_key, VIRUSTOTAL_API_KEY_PLACEHOLDERS):
             logger.warning(
                 "VirusTotal: No API key — skipping collection (optional source). "
@@ -101,7 +111,7 @@ class VirusTotalCollector:
                     skip_reason=("VIRUSTOTAL_API_KEY not set (optional — https://www.virustotal.com/gui/join-us)"),
                     skip_reason_class="missing_virustotal_key",
                 )
-            return self._collect_demo_data(limit)
+            return []
 
         try:
             indicators = self._collect_from_files(limit)
@@ -306,32 +316,15 @@ class VirusTotalCollector:
         names = str(attrs.get("meaningful_name", "")) + str(attrs.get("names", ""))
         return detect_zones_from_text(names)
 
-    def _collect_demo_data(self, limit):
-        """Return demo data when no API key"""
-        # Known malware hashes for testing
-        demo_hashes = [
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",  # Empty hash (demo)
-            "44d88612fea8a8f36de82e1278abb02f",  # EICAR test
-            "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",  # Password
-        ]
-
-        indicators = []
-        for h in demo_hashes[:limit]:
-            indicators.append(
-                {
-                    "indicator_type": "hash",
-                    "value": h,
-                    "zone": [DEFAULT_SECTOR],  # zone is now an array
-                    "tag": self.tag,
-                    "source": [self.tag],
-                    "first_seen": datetime.now(timezone.utc).isoformat(),
-                    "last_updated": datetime.now(timezone.utc).isoformat(),
-                    "confidence_score": 0.5,
-                }
-            )
-
-        logger.info(f"[OK] VirusTotal: Demo mode - {len(indicators)} indicators")
-        return indicators
+    # PR (S5) commit X: ``_collect_demo_data`` was deleted. The VT
+    # pipeline (``_collect_from_files`` via the v3 Intelligence API) is
+    # the real, production collector; the previous demo method returned
+    # 3 hardcoded hashes (EICAR + known demo SHAs) tagged ``virustotal``
+    # with wall-clock NOW first_seen — a source-truth poisoning risk
+    # (the tag is on the reliable allowlist). It was only reachable via
+    # direct Python calls with ``push_to_misp=False``; all Airflow +
+    # enrichment paths already skipped correctly when the API key was
+    # absent. Set ``VIRUSTOTAL_API_KEY`` to run the real collector.
 
     def query_domain(self, domain):
         """
