@@ -231,7 +231,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.last_updated     = datetime(),
                 c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
-                c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
+                // PR (S5) commit X (bugbot LOW): the AND-guard on the
+                // incoming aggregate prevents a transient NULL aggregate
+                // (e.g. brand-new campaign with zero active indicators)
+                // from overwriting an existing non-NULL c.first_seen.
+                // Same defensive shape on c.last_seen below.
+                c.first_seen       = CASE WHEN first_seen IS NOT NULL
+                                       AND (c.first_seen IS NULL OR first_seen < c.first_seen)
                                        THEN first_seen ELSE c.first_seen END,
                 // PR (S5) commit X (bugbot MED): MAX-guard c.last_seen
                 // symmetrically with c.first_seen. Rationale: the
@@ -244,7 +250,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 // post-deploy enrichment run. The CASE mirrors the
                 // first_seen pattern and is safe against both baseline
                 // and incremental (MAX preserves the newest observation).
-                c.last_seen        = CASE WHEN c.last_seen IS NULL OR last_seen > c.last_seen
+                // bugbot LOW: same NULL-aggregate defensive guard.
+                c.last_seen        = CASE WHEN last_seen IS NOT NULL
+                                       AND (c.last_seen IS NULL OR last_seen > c.last_seen)
                                        THEN last_seen ELSE c.last_seen END,
                 c.zone             = all_zones,
                 c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])

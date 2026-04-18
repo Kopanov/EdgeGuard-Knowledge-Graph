@@ -389,6 +389,43 @@ def test_campaign_builder_last_seen_has_max_guard():
     assert "first_seen < c.first_seen" in block, (
         "c.first_seen MIN-guard must remain in place (symmetric with last_seen)"
     )
+    # PR (S5) commit X (bugbot LOW): defensive NULL-aggregate guards on
+    # both CASE clauses prevent a transient NULL aggregate (brand-new
+    # campaign with zero active indicators in this run) from
+    # overwriting an existing non-NULL value.
+    assert "first_seen IS NOT NULL" in block, "c.first_seen CASE must guard against NULL aggregate (bugbot LOW)"
+    assert "last_seen IS NOT NULL" in block, "c.last_seen CASE must guard against NULL aggregate (bugbot LOW)"
+
+
+def test_coerce_iso_normalizes_date_only_strings_to_full_iso():
+    """PR (S5) commit X (bugbot MED) regression pin.
+
+    CISA KEV's ``dateAdded`` is universally date-only (e.g.
+    ``"2026-04-16"``). Neo4j's Cypher ``datetime()`` function rejects
+    bare-date strings — it requires a time component. Without
+    normalization, ``datetime("2026-04-16")`` would crash the entire
+    vulnerability batch MERGE inside the UNWIND query.
+
+    ``coerce_iso`` must normalize ``YYYY-MM-DD`` → ``YYYY-MM-DDT00:00:00+00:00``
+    so the value round-trips safely through Neo4j datetime().
+    """
+    from source_truthful_timestamps import coerce_iso
+
+    # Date-only is normalized to UTC midnight
+    assert coerce_iso("2026-04-16") == "2026-04-16T00:00:00+00:00"
+    assert coerce_iso("2019-01-15") == "2019-01-15T00:00:00+00:00"
+    # Already-full ISO strings pass through untouched
+    assert coerce_iso("2024-03-15T12:34:56Z") == "2024-03-15T12:34:56Z"
+    assert coerce_iso("2024-03-15T00:00:00+00:00") == "2024-03-15T00:00:00+00:00"
+    # Garbage strings pass through (downstream handles them)
+    assert coerce_iso("not-a-date") == "not-a-date"
+    # 10-char non-date strings are passthrough (the heuristic is
+    # date-shape-specific, not just length-10)
+    assert coerce_iso("abcdefghij") == "abcdefghij"
+    # None / empty-string still return None
+    assert coerce_iso(None) is None
+    assert coerce_iso("") is None
+    assert coerce_iso("   ") is None
 
 
 def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():

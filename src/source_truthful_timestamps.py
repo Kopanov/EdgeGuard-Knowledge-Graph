@@ -218,6 +218,16 @@ def coerce_iso(val: Any) -> Optional[str]:
     Handles None/empty, Unix int/float epoch, datetime objects, and
     passthrough strings. Returns ``None`` for unparseable / empty inputs
     so the caller can distinguish "missing" from "set to wall-clock now".
+
+    PR (S5) commit X (bugbot MED): date-only strings (e.g. CISA KEV's
+    ``"2026-04-16"``) are now normalized to a full ISO-8601 datetime
+    by appending ``T00:00:00+00:00``. Without this, downstream Neo4j
+    Cypher ``datetime(item.first_seen_at_source)`` calls would crash
+    on the date-only format (Neo4j's ``datetime()`` requires a time
+    component) — taking the entire vulnerability batch MERGE down.
+    The most affected source is CISA KEV: ``dateAdded`` is universally
+    date-only. Same potential exposure for any other feed that ships
+    bare dates.
     """
     if val is None:
         return None
@@ -228,7 +238,14 @@ def coerce_iso(val: Any) -> Optional[str]:
     if isinstance(val, datetime):
         return val.isoformat()
     if isinstance(val, str):
-        return val
+        # Bugbot MED fix: normalize bare-date strings (YYYY-MM-DD) by
+        # appending UTC midnight so downstream Cypher datetime() parses.
+        # Cheap regex check — only 10-char strings of the exact shape
+        # qualify; anything longer is assumed to already include a time.
+        s = val.strip()
+        if len(s) == 10 and s[4] == "-" and s[7] == "-" and s[:4].isdigit() and s[5:7].isdigit() and s[8:10].isdigit():
+            return s + "T00:00:00+00:00"
+        return s
     return None
 
 
