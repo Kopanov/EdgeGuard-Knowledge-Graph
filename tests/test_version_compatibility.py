@@ -89,6 +89,15 @@ def test_get_neo4j_server_version_calls_dbms_components():
     cypher = fake_client.run.call_args[0][0]
     assert "dbms.components()" in cypher
     assert "versions" in cypher
+    # PR #36 commit X (bugbot MED): Neo4j 2025.05+ adds a "Cypher" row
+    # to dbms.components() output. We MUST filter to Neo4j Kernel so we
+    # never pick up the Cypher-language version (e.g. "5") as the server
+    # version. Pin the WHERE filter at the source-grep level — without
+    # it, doctor reports falsely on every 2026.x deploy.
+    assert "Neo4j Kernel" in cypher, (
+        "Cypher MUST filter to component name 'Neo4j Kernel' — Neo4j 2025.05+ adds a "
+        "'Cypher' row that would otherwise be picked up as the server version"
+    )
     fake_client.close.assert_called_once(), "client must be closed even on success"
 
 

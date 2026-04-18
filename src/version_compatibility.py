@@ -169,7 +169,15 @@ def get_neo4j_server_version(neo4j_client_factory=None) -> Optional[str]:
         # Some test factories return an instance directly without needing connect()
         if hasattr(client, "connect") and not client.connect():
             return None
-        rows = client.run("CALL dbms.components() YIELD versions RETURN versions")
+        # PR #36 commit X (bugbot MED): Neo4j 2025.05+ added a "Cypher" row
+        # to ``CALL dbms.components()`` output. Filter to ``Neo4j Kernel``
+        # explicitly so we never pick the Cypher-language version row by
+        # accident (would falsely report server as e.g. "5" instead of
+        # "2026.03.1"). Same Cypher as in ``_get_neo4j_server_version_fast``
+        # — keep them in lockstep.
+        rows = client.run(
+            "CALL dbms.components() YIELD name, versions WHERE name = 'Neo4j Kernel' RETURN versions"
+        )
         if not rows:
             return None
         versions = rows[0].get("versions") if isinstance(rows[0], dict) else None
@@ -219,7 +227,24 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
             max_connection_lifetime=10,
         )
         with driver.session(default_access_mode="READ") as session:
-            result = session.run("CALL dbms.components() YIELD versions RETURN versions")
+            # PR #36 commit X (bugbot MED): Neo4j 2025.05+ added a "Cypher"
+            # row to ``CALL dbms.components()`` output (with ``versions:
+            # ["5", "25"]`` — the Cypher language version). Without an
+            # explicit ``WHERE name = 'Neo4j Kernel'`` filter, ``rows[0]``
+            # may pick up the Cypher row instead of the kernel row →
+            # we'd report the server version as ``"5"`` and the doctor
+            # check would falsely scream MAJOR drift on the new
+            # ``neo4j:2026.03.1-community`` image.
+            #
+            # Filter at the Cypher layer so we never have to guess from
+            # row order. The query still returns ``[]`` on Neo4j forks
+            # that don't expose the canonical "Neo4j Kernel" component
+            # name; the caller already handles None gracefully.
+            result = session.run(
+                "CALL dbms.components() YIELD name, versions "
+                "WHERE name = 'Neo4j Kernel' "
+                "RETURN versions"
+            )
             rows = list(result)
         if rows:
             row = rows[0]
