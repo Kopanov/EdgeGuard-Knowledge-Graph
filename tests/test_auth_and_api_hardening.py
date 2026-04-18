@@ -122,7 +122,12 @@ def test_graphql_introspection_disabled_in_prod(monkeypatch):
     # _IS_PROD and re-builds _extensions accordingly.
     monkeypatch.setenv("EDGEGUARD_ENV", "prod")
     monkeypatch.setenv("EDGEGUARD_API_KEY", "test-key-must-be-set-in-prod")
-    monkeypatch.setenv("EDGEGUARD_API_HOST", "127.0.0.1")  # loopback so A6 doesn't refuse
+    # PR #40 commit X (bugbot MED): the previous code set EDGEGUARD_API_HOST,
+    # which graphql_api.py never reads. With EDGEGUARD_GRAPHQL_HOST set to a
+    # non-loopback value in the host environment (Docker CI sets
+    # 0.0.0.0), the module's import-time A6 check would raise RuntimeError
+    # and crash the test setup. Set the var graphql_api ACTUALLY reads.
+    monkeypatch.setenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1")
 
     import importlib
 
@@ -142,7 +147,7 @@ def test_graphql_introspection_disabled_in_prod(monkeypatch):
     # Cleanup: reload once more without prod so other tests get back to baseline
     monkeypatch.delenv("EDGEGUARD_ENV", raising=False)
     monkeypatch.delenv("EDGEGUARD_API_KEY", raising=False)
-    monkeypatch.delenv("EDGEGUARD_API_HOST", raising=False)
+    monkeypatch.delenv("EDGEGUARD_GRAPHQL_HOST", raising=False)
     if "graphql_api" in sys.modules:
         del sys.modules["graphql_api"]
 
@@ -152,7 +157,9 @@ def test_graphql_introspection_left_on_in_dev(monkeypatch):
     developers can use GraphiQL / Apollo Studio / schema autocomplete."""
     monkeypatch.delenv("EDGEGUARD_ENV", raising=False)  # default: dev
     monkeypatch.delenv("EDGEGUARD_API_KEY", raising=False)
-    monkeypatch.setenv("EDGEGUARD_API_HOST", "127.0.0.1")
+    # Set the var graphql_api ACTUALLY reads (see comment in the prod-mode
+    # test above for why setting EDGEGUARD_API_HOST was the wrong fix).
+    monkeypatch.setenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1")
 
     import importlib
 
