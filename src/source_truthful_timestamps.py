@@ -252,7 +252,6 @@ def extract_source_truthful_timestamps(
     *,
     nvd_meta: Optional[Dict[str, Any]] = None,
     tf_meta: Optional[Dict[str, Any]] = None,
-    otx_meta: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Extract ``(first_seen_at_source, last_seen_at_source)`` for one
     MISP attribute, returning ``(None, None)`` when the source is not
@@ -278,6 +277,13 @@ def extract_source_truthful_timestamps(
     contains — their first_seen field is semantically wrong for our
     purpose (pulse-publish-date, not IOC first-seen).
 
+    PR (S5) commit X (bugbot LOW): removed the dead ``otx_meta``
+    parameter + the corresponding unreachable ``elif src in
+    {"otx", ...}`` branch. OTX is excluded from the allowlist so
+    the branch could never fire. If OTX ever exposes a reliable
+    per-IOC first-seen field, add it back to the allowlist + add
+    the ``otx_meta`` parameter back here.
+
     Parameters
     ----------
     attr:
@@ -286,7 +292,7 @@ def extract_source_truthful_timestamps(
         The original source identifier, normalized lowercase. Caller
         should resolve relays — pass the tag of the source that
         ORIGINALLY observed the indicator, not the relay collector.
-    nvd_meta, tf_meta, otx_meta:
+    nvd_meta, tf_meta:
         Pre-parsed source-specific META JSON dicts (when the parser
         already extracted them for other purposes). Avoids re-parsing
         the comment field.
@@ -306,12 +312,6 @@ def extract_source_truthful_timestamps(
     elif src == "threatfox" and tf_meta:
         first_seen = first_seen or _coerce_iso(tf_meta.get("first_seen"))
         last_seen = last_seen or _coerce_iso(tf_meta.get("last_seen"))
-    elif src in {"otx", "alienvault_otx"} and otx_meta:
-        # NOTE: OTX is NOT in the reliable allowlist (see top of module).
-        # This branch is unreachable today; left for future if OTX adds a
-        # reliable per-IOC first-seen field.
-        first_seen = first_seen or _coerce_iso(otx_meta.get("first_seen"))
-        last_seen = last_seen or _coerce_iso(otx_meta.get("last_seen"))
 
     return (_clamp_future_to_now(first_seen), _clamp_future_to_now(last_seen))
 

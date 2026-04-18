@@ -296,15 +296,25 @@ def test_cypher_wraps_first_seen_at_source_with_datetime_function():
     )
 
 
-def test_stix_sighting_emission_env_var_hook_present():
-    """The opt-in Sighting SRO emission env var must be honored at
-    module level (full implementation is a follow-up; the hook is
-    here so consumers can already discover the toggle)."""
+def test_stix_sighting_emission_env_var_name_is_documented():
+    """The opt-in Sighting SRO emission env var name must remain
+    DOCUMENTED in the module so future implementers can find the
+    reserved name, even though the variable itself is not assigned
+    today (follow-up PR will reintroduce + implement the consumer).
+
+    PR (S5) commit X (bugbot LOW): the previously-defined
+    ``_EMIT_SIGHTINGS = os.environ.get(...)`` was unused at module
+    level — bugbot correctly flagged it as dead code. The env-var
+    name stays in a comment so it isn't accidentally re-used for
+    another purpose; the implementation lands in a separate PR.
+    """
     path = os.path.join(_SRC, "stix_exporter.py")
     with open(path) as fh:
-        src = _code_only(fh.read())
+        src = fh.read()
     assert "EDGEGUARD_STIX_EMIT_SIGHTINGS" in src, (
-        "stix_exporter must define the EDGEGUARD_STIX_EMIT_SIGHTINGS env var hook"
+        "stix_exporter must keep the reserved env-var name documented "
+        "(in a comment) so the follow-up Sighting-SRO implementation "
+        "PR can find + reuse it"
     )
 
 

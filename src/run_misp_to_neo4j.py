@@ -2576,9 +2576,7 @@ class MISPToNeo4jSync:
             # Returns (None, None) for sources NOT on the reliable
             # allowlist (OTX pulse-created is excluded — it's
             # publish-date, not IOC first-observed).
-            _fs_at_source_ind, _ls_at_source_ind = extract_source_truthful_timestamps(
-                attr, source_id, tf_meta=tf_meta, otx_meta=otx_meta
-            )
+            _fs_at_source_ind, _ls_at_source_ind = extract_source_truthful_timestamps(attr, source_id, tf_meta=tf_meta)
 
             item = {
                 "indicator_type": indicator_type,

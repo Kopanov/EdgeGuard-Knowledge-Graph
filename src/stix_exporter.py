@@ -66,24 +66,14 @@ _DEFAULT_DEPTH = 2
 # the EDGEGUARD_GIT_SHA env var at import time; empty string if unset.
 _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 
-# PR (S5): opt-in Sighting SRO emission for full canonical STIX 2.1
-# fidelity. Default OFF to keep bundle size sane (would add ~1 SRO per
-# indicator, +N bundle entries). Operators with consumers that
-# specifically rely on canonical STIX Sighting SROs (rare — most
-# downstream tools are happy with valid_from on the Indicator SDO,
-# which is what this PR populates correctly) can opt in.
-#
-# IMPLEMENTATION STATUS: env var honored at the bundle-assembly level
-# (see ``_emit_sighting_for_indicator`` below) but the per-source
-# aggregation Cypher is a stub. Full implementation requires joining
-# the SOURCED_FROM edges to compute per-(source, indicator) windows.
-# Tracked as a follow-up to this PR.
-_EMIT_SIGHTINGS = os.environ.get("EDGEGUARD_STIX_EMIT_SIGHTINGS", "").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+# PR (S5) commit X (bugbot LOW): the previously-defined ``_EMIT_SIGHTINGS``
+# env-var hook for opt-in Sighting SRO emission was removed — it was
+# evaluated on import but never read by any function (no consumer
+# existed; the implementation was deferred to a follow-up PR). Will
+# be reintroduced together with the actual per-source aggregation
+# Cypher when that follow-up lands. The env var name
+# ``EDGEGUARD_STIX_EMIT_SIGHTINGS`` is reserved for that future use
+# but has no effect today.
 
 
 # PR (S5) commit X (bugbot LOW): consolidated to a shared module to
