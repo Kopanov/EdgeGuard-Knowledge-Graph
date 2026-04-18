@@ -73,7 +73,15 @@ services:
   # Neo4j — graph database
   # ─────────────────────────────────────────────────────────────────────────────
   neo4j:
-    image: neo4j:5.26.23-community
+    # Neo4j moved to CalVer with the 2026.x release line (was 5.x). The
+    # Python driver pinned in requirements*.txt is still on the 5.x line
+    # and is wire-compat with 2026.x server per Neo4j's official matrix
+    # (https://neo4j.com/developer/kb/neo4j-supported-versions/) — driver
+    # bump to 6.x is a separate PR.
+    # See ``src/version_compatibility.py::RECOMMENDED_VERSIONS`` for the
+    # canonical pin table; ``edgeguard doctor`` warns if the running
+    # server drifts from this tag.
+    image: neo4j:2026.03.1-community
     container_name: edgeguard_neo4j
     restart: unless-stopped
     ports:

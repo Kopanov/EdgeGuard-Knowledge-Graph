@@ -39,6 +39,18 @@ To keep dependencies clean and reproducible, use a dedicated environment per pro
 
 **Version:** EdgeGuard requires **Python 3.12+** (`requires-python` in `pyproject.toml`, CI, and `Dockerfile`). Apache Airflow **3.2** (upgraded from 2.11 in April 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)) supports Python 3.10–3.14 upstream; this repository standardizes on 3.12 for a single supported interpreter line.
 
+**Pinned component versions** (PR #36 — Vanko's request to make these explicit and verifiable at runtime):
+
+| Component | Pinned in | Recommended | Verified by |
+|---|---|---|---|
+| Neo4j server | `docker-compose.yml` `neo4j:` image | `2026.03.x-community` (CalVer; was 5.26.x before April 2026) | `edgeguard doctor` |
+| Neo4j Python driver | `requirements.txt`, `requirements-airflow-docker.txt` | `~=5.27` (5.x driver is wire-compat with 2026.x server per [Neo4j compat matrix](https://neo4j.com/developer/kb/neo4j-supported-versions/)) | `edgeguard doctor` |
+| Apache Airflow | `Dockerfile.airflow` `FROM apache/airflow:` | `3.2.0-python3.12` | `edgeguard doctor` |
+| PyMISP | `requirements.txt`, `requirements-airflow-docker.txt` | `~=2.4` | `edgeguard doctor` |
+| MISP server | (operator-controlled deploy) | `2.4.x` | `edgeguard doctor` |
+
+The single source of truth for the comparison logic is `src/version_compatibility.py::RECOMMENDED_VERSIONS`. `edgeguard doctor` and `edgeguard validate` capture the actual running versions and warn on drift. A regression test (`tests/test_version_compatibility.py::test_recommended_*_matches_*_pin`) fails CI if anyone bumps a pin file without updating the recommended-versions table.
+
 #### 2.1 Create a conda environment (recommended)
 
 ```bash

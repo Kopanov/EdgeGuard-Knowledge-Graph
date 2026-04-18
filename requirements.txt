@@ -12,6 +12,12 @@
 # =============================================================================
 
 # ── Core ─────────────────────────────────────────────────────────────────────
+# neo4j driver: pinned to 5.x. The Neo4j SERVER (docker-compose.yml ``neo4j:``
+# image tag) is on the 2026.x CalVer release line; the 5.x Python driver is
+# wire-compat with 2026.x servers per https://neo4j.com/developer/kb/neo4j-supported-versions/
+# A driver bump to 6.x is a separate PR with its own testing pass.
+# ``edgeguard doctor`` warns if running driver/server drift from this pin —
+# see src/version_compatibility.py::RECOMMENDED_VERSIONS.
 neo4j~=5.27
 requests~=2.32
 pandas~=2.2

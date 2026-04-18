@@ -485,6 +485,29 @@ def cmd_doctor(args):
     ok_flag, msg = check_circuit_breakers()
     ok(msg)
 
+    # Check version compatibility (PR #36 — Vanko's request: capture
+    # actual running versions of Neo4j server/driver, Airflow, MISP,
+    # PyMISP and warn on drift from the pinned recommendations in
+    # docker-compose.yml / requirements*.txt). Best-effort: every
+    # capture function in version_compatibility returns ``None`` on
+    # failure rather than raising, so a missing optional dep can NEVER
+    # crash doctor (Vanko's stale-checkout NameError class of bug —
+    # also pinned structurally by ``test_edgeguard_doctor_audit.py``).
+    info("Checking version compatibility...")
+    try:
+        from version_compatibility import compare_pinned_vs_running
+
+        rows = compare_pinned_vs_running()
+        for _component, status, message in rows:
+            if status == "ok":
+                ok(message)
+            elif status == "warn":
+                warn(message)
+            else:
+                info(message)
+    except Exception as e:
+        warn(f"Version compatibility check failed: {e}")
+
     section("Diagnosis Complete")
     if all_ok:
         ok("EdgeGuard is healthy")
@@ -1022,6 +1045,34 @@ def cmd_validate(args):
             warn("Neo4j not connected — schema check skipped")
     except Exception as e:
         warn(f"Neo4j schema check failed: {e}")
+
+    # Check version compatibility (PR #36 — Vanko's request). Validate's
+    # role is config validation, but version drift IS a configuration
+    # issue: a 2026.x Neo4j server pinned at the 5.26 docker tag will be
+    # silently downgraded on the next ``docker-compose up``. Surface it
+    # here so it shows up in the operator's pre-deploy validation pass.
+    info("Checking version compatibility...")
+    try:
+        from version_compatibility import compare_pinned_vs_running
+
+        rows = compare_pinned_vs_running()
+        warn_count = 0
+        for _component, status, message in rows:
+            if status == "ok":
+                ok(message)
+            elif status == "warn":
+                warn(message)
+                warn_count += 1
+            else:
+                info(message)
+        if warn_count:
+            # Track in issues list for the validate-exit-code summary, but
+            # only as warnings — version drift doesn't block deployment if
+            # the operator made a deliberate choice to run on a different
+            # line. The signal is informational.
+            issues.append(f"{warn_count} version pin(s) drift from running components")
+    except Exception as e:
+        warn(f"Version compatibility check failed: {e}")
 
     section("Validation Complete")
     if issues:
