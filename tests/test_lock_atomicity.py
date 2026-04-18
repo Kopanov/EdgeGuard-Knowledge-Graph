@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from typing import List
 
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
@@ -170,40 +171,46 @@ def test_acquire_baseline_lock_then_retry_returns_false(tmp_path, monkeypatch):
     baseline_lock.release_baseline_lock()
 
 
-def test_acquire_baseline_lock_recovers_from_corrupt_sentinel(tmp_path, monkeypatch):
-    """PR #38 commit X (bugbot MED) regression pin.
+def _backdate_mtime(path: str, seconds_ago: int = 600) -> None:
+    """Set the file's mtime to N seconds ago. Used to simulate a stale
+    crash-debris sentinel that's old enough for the auto-recovery path
+    to engage (PR #38 commit X added a 5-minute mtime guard to prevent
+    the TOCTOU race where Process B unlinks Process A's mid-write file)."""
+    target_ts = time.time() - seconds_ago
+    os.utime(path, (target_ts, target_ts))
+
+
+def test_acquire_baseline_lock_recovers_from_aged_corrupt_sentinel(tmp_path, monkeypatch):
+    """PR #38 commit X regression pin.
 
     Background: with O_EXCL atomic create-or-fail, a process killed
     AFTER ``os.open`` creates the sentinel but BEFORE ``os.write``
-    completes leaves an empty/corrupt file behind. ``is_baseline_running``
-    returns None (its JSON parse silently fails on empty content), the
-    dead-PID/age pruning never fires, and ``os.open`` then hits
-    FileExistsError forever — permanent lock-out until manual cleanup.
+    completes leaves an empty/corrupt file behind.
 
-    Fix: after FileExistsError, probe the sentinel content via
-    ``_is_corrupt_sentinel``; if it's empty/junk, unlink + retry.
+    Fix: after FileExistsError, probe via ``_is_corrupt_sentinel``;
+    if it's empty/junk AND OLDER THAN 5 MINUTES, unlink + retry. The
+    age check is critical for correctness — see the
+    ``_is_corrupt_sentinel`` docstring for the TOCTOU race scenario
+    that hits without it (bugbot HIGH).
     """
     import baseline_lock
 
     sentinel_path = str(tmp_path / "baseline.lock")
     monkeypatch.setattr(baseline_lock, "baseline_lock_path", lambda: sentinel_path)
 
-    # Simulate a crash artifact: empty sentinel file
+    # Simulate a STALE crash artifact: empty file, mtime 10 minutes ago
     with open(sentinel_path, "w") as fh:
         fh.write("")
+    _backdate_mtime(sentinel_path, seconds_ago=600)
 
-    # acquire_baseline_lock must detect the corrupt file, unlink it, retry,
-    # and succeed.
     assert baseline_lock.acquire_baseline_lock() is True, (
-        "Empty sentinel (crash artifact) must be auto-recovered; if this fails the "
-        "operator is permanently locked out until manual deletion."
+        "Aged empty sentinel (crash debris > 5min old) must be auto-recovered"
     )
     baseline_lock.release_baseline_lock()
 
 
-def test_acquire_baseline_lock_recovers_from_truncated_json_sentinel(tmp_path, monkeypatch):
-    """Same recovery path for truncated/malformed JSON content (a power-loss
-    artifact that wrote a few bytes before dying)."""
+def test_acquire_baseline_lock_recovers_from_aged_truncated_json_sentinel(tmp_path, monkeypatch):
+    """Same recovery path for truncated/malformed JSON, BUT only when aged."""
     import baseline_lock
 
     sentinel_path = str(tmp_path / "baseline.lock")
@@ -211,9 +218,42 @@ def test_acquire_baseline_lock_recovers_from_truncated_json_sentinel(tmp_path, m
 
     with open(sentinel_path, "w") as fh:
         fh.write('{"pid": 12345, "host":')  # truncated mid-JSON
+    _backdate_mtime(sentinel_path, seconds_ago=600)
 
     assert baseline_lock.acquire_baseline_lock() is True
     baseline_lock.release_baseline_lock()
+
+
+def test_acquire_baseline_lock_REFUSES_fresh_empty_sentinel(tmp_path, monkeypatch):
+    """PR #38 commit X (bugbot HIGH) regression pin — the critical
+    NEGATIVE case for the TOCTOU race fix.
+
+    Without the age guard, a competitor's mid-write empty file (just
+    after their O_EXCL succeeded, just before their os.write completes)
+    would be misclassified as crash debris by THIS process and unlinked.
+    Both processes would end up "holding" the lock — re-introducing
+    the very bug PR #38 fixed.
+
+    The age guard requires the empty file to be 5+ minutes old before
+    auto-recovery engages. A fresh empty file (likely active competitor)
+    must REFUSE.
+    """
+    import baseline_lock
+
+    sentinel_path = str(tmp_path / "baseline.lock")
+    monkeypatch.setattr(baseline_lock, "baseline_lock_path", lambda: sentinel_path)
+
+    # Fresh empty sentinel (mtime = now) — simulates a competitor who
+    # just did O_EXCL and hasn't yet written their PID.
+    with open(sentinel_path, "w") as fh:
+        fh.write("")
+
+    assert baseline_lock.acquire_baseline_lock() is False, (
+        "A FRESH empty sentinel must NOT be auto-recovered — it might be a "
+        "competitor's mid-write O_EXCL. If this regresses, the TOCTOU race returns."
+    )
+    # Sentinel still exists (we did not unlink it)
+    assert os.path.exists(sentinel_path), "fresh sentinel must NOT be unlinked"
 
 
 def test_acquire_baseline_lock_does_NOT_unlink_valid_sentinel(tmp_path, monkeypatch):
@@ -226,14 +266,23 @@ def test_acquire_baseline_lock_does_NOT_unlink_valid_sentinel(tmp_path, monkeypa
     sentinel_path = str(tmp_path / "baseline.lock")
     monkeypatch.setattr(baseline_lock, "baseline_lock_path", lambda: sentinel_path)
 
-    # Write a sentinel that LOOKS like a live lock from a competing process
-    # (with a fake but live PID — this process's own pid will pass os.kill(p, 0))
+    # PR #38 commit X (bugbot LOW): use a DYNAMIC ``started_at`` instead
+    # of a hardcoded date. The original hardcoded
+    # ``"2026-04-18T12:00:00+00:00"`` would have made this test pass
+    # today but FAIL after that timestamp aged past
+    # ``BASELINE_MAX_CROSS_HOST_AGE_HOURS`` (default 24h) — at which
+    # point ``is_baseline_running`` would prune the sentinel as stale,
+    # ``acquire_baseline_lock`` would succeed, and the assertion would
+    # flip. Using ``datetime.now(timezone.utc)`` keeps the started_at
+    # anchored to "now" relative to test execution.
     import json as _json
+    from datetime import datetime as _dt
+    from datetime import timezone as _tz
 
     payload = {
         "pid": os.getpid(),
         "host": "competitor.example",
-        "started_at": "2026-04-18T12:00:00+00:00",
+        "started_at": _dt.now(_tz.utc).isoformat(),
         "monotonic_started": 0.0,
     }
     with open(sentinel_path, "w") as fh:

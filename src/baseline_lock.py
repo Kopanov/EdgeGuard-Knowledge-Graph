@@ -178,21 +178,62 @@ def _safe_remove(path: str) -> None:
         logger.warning("Failed to remove baseline lock %s: %s", path, exc)
 
 
+# How long a sentinel must be unchanged before we'll treat "empty or
+# unparseable content" as crash debris vs. an active-write-in-progress
+# by a competitor. 5 minutes is MASSIVELY conservative — a legitimate
+# ``os.open(O_EXCL)`` → ``os.write`` window is sub-millisecond — but it
+# eliminates the window where Process B could mistake Process A's
+# mid-write empty file for a crash artifact and unlink it.
+#
+# See ``_is_corrupt_sentinel`` docstring for the race scenario.
+_CRASH_RECOVERY_AGE_SECS = 300
+
+
 def _is_corrupt_sentinel(path: str) -> bool:
-    """Return True iff the sentinel file at ``path`` is empty or unparseable
-    JSON (i.e. a crash-during-write artifact, not a live lock).
+    """Return True iff the sentinel file at ``path`` is BOTH:
+      * empty or contains unparseable-as-dict content, AND
+      * older than ``_CRASH_RECOVERY_AGE_SECS`` (mtime check).
 
-    Used by ``acquire_baseline_lock`` to recover from the SIGKILL-between-
-    O_EXCL-and-write race. Distinct from the empty-string check in
-    ``is_baseline_running`` because that one returns None on the SAME
-    condition (with the implicit interpretation "no live lock"); this one
-    explicitly says "this file is junk, safe to unlink".
+    The mtime check is CRITICAL for correctness (PR #38 bugbot HIGH).
+    Without it, this recovery path re-introduces the TOCTOU race that
+    atomic ``O_EXCL`` was added to eliminate:
 
-    Returns False if the file is missing (the caller's prior FileExistsError
-    must have raced with a competitor's ``release_baseline_lock``), or if
-    it parses as a valid JSON object — that's a real live lock and we
-    must NOT delete it.
+      Process A: os.open(O_EXCL) → succeeds, fd held
+      Process B: os.open(O_EXCL) → FileExistsError
+      Process B: reads file → empty (A hasn't written yet!)
+      Process B: _is_corrupt_sentinel → True (WITHOUT age check)
+      Process B: unlinks file → succeeds
+      Process A: writes to orphaned inode → succeeds
+      Process A: returns True  ┐
+      Process B: os.open(O_EXCL) → succeeds on the re-created file
+      Process B: returns True  ┘  BOTH hold the "lock" — bug returns.
+
+    With the age check, Process B sees file is fresh (mtime seconds ago,
+    not minutes) and refuses rather than unlinking. Only genuinely stale
+    crash debris (5+ minutes old, empty) gets auto-recovered.
+
+    Distinct from the empty-string check in ``is_baseline_running``
+    because that one returns None on the SAME condition (interpretation:
+    "no live lock"); this one explicitly says "this file is junk AND old
+    enough to be safely unlinked".
+
+    Returns False if the file is missing, too young for the age check,
+    or parses as a valid JSON dict (a real live lock — we must NOT
+    delete it).
     """
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+    age_secs = time.time() - stat.st_mtime
+    if age_secs < _CRASH_RECOVERY_AGE_SECS:
+        # File is fresh — might be a competitor's mid-write O_EXCL. Refuse
+        # to interpret as crash debris regardless of content.
+        return False
+
     try:
         with open(path) as f:
             content = f.read().strip()

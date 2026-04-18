@@ -971,8 +971,34 @@ class EdgeGuardPipeline:
                 with open(lock_path) as f:
                     old_pid = int(f.read().strip())
             except (ValueError, OSError):
-                # Lock file unreadable / malformed — treat as stale and try to clean.
-                logger.warning(f"Lock file {lock_path} unreadable — treating as stale and removing.")
+                # Lock file unreadable / malformed.
+                #
+                # PR #38 commit X (bugbot HIGH): age-gate the auto-recovery
+                # to avoid the same TOCTOU race fixed in baseline_lock.py
+                # (see ``_is_corrupt_sentinel`` docstring there for the
+                # full scenario). Without an age check, Process B could
+                # see Process A's mid-write empty file, unlink it, and
+                # retry — both processes end up "holding" the lock.
+                #
+                # Refuse the auto-recovery if the file is fresh (< 5 min);
+                # operator must manually delete a fresh lock that's
+                # genuinely corrupt.
+                _PIPELINE_LOCK_RECOVERY_AGE_SECS = 300
+                try:
+                    age_secs = time.time() - os.stat(lock_path).st_mtime
+                except OSError:
+                    age_secs = 0  # treat unstat-able as fresh → refuse
+                if age_secs < _PIPELINE_LOCK_RECOVERY_AGE_SECS:
+                    logger.error(
+                        f"Lock file {lock_path} is unreadable BUT only {age_secs:.0f}s old — "
+                        f"refusing to auto-recover (could race a competitor mid-write). "
+                        f"Either wait {(_PIPELINE_LOCK_RECOVERY_AGE_SECS - age_secs):.0f}s or "
+                        f"manually delete the file if you're sure it's stale."
+                    )
+                    return False
+                logger.warning(
+                    f"Lock file {lock_path} unreadable + {age_secs:.0f}s old — treating as stale and removing."
+                )
                 try:
                     os.unlink(lock_path)
                 except OSError:
