@@ -34,6 +34,7 @@ except ImportError:
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
 from node_identity import canonicalize_merge_key, compute_node_uuid, edge_endpoint_uuids  # noqa: E402
+from query_pause import query_pause  # noqa: E402
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -2780,42 +2781,42 @@ class Neo4jClient:
         with self.driver.session() as session:
             _run_rows(session, "EMPLOYS_TECHNIQUE_actor", q_actor_employs, actor_employs_rows)
             if actor_employs_rows:
-                time.sleep(1)
+                query_pause()
             _run_rows(session, "EMPLOYS_TECHNIQUE_campaign", q_campaign_employs, campaign_employs_rows)
             if campaign_employs_rows:
-                time.sleep(1)
+                query_pause()
             # Split IMPLEMENTS_TECHNIQUE rows by entity_label so each UNWIND
             # hits a single label index instead of a union scan.
             mal_impl_rows = [r for r in implements_rows if r.get("entity_label") == "Malware"]
             tool_impl_rows = [r for r in implements_rows if r.get("entity_label") == "Tool"]
             _run_rows(session, "IMPLEMENTS_TECHNIQUE_malware", q_malware_implements, mal_impl_rows)
             if mal_impl_rows:
-                time.sleep(1)
+                query_pause()
             _run_rows(session, "IMPLEMENTS_TECHNIQUE_tool", q_tool_implements, tool_impl_rows)
             if tool_impl_rows:
-                time.sleep(1)
+                query_pause()
             _run_rows(session, "ATTRIBUTED_TO", q_attr, attr_rows)
             if attr_rows:
-                time.sleep(1)
+                query_pause()
             _run_rows(session, "INDICATES_malware", q_ind_mal, ind_mal_rows)
             if ind_mal_rows:
-                time.sleep(1)
+                query_pause()
             _run_rows(session, "TARGETS_indicator", q_tgt_ind, tgt_ind_rows)
             if tgt_vuln_rows:
                 # Same row payload replayed against two labels (Vulnerability + CVE).
                 # No per-label uuid swap is needed anymore — each template's SET
                 # reads its MATCHed node's bound .uuid directly (Mechanism B), so
                 # the same row dict works for both queries.
-                time.sleep(1)
+                query_pause()
                 _run_rows(session, "AFFECTS_vulnerability", q_aff_vuln, tgt_vuln_rows)
-                time.sleep(1)
+                query_pause()
                 _run_rows(session, "AFFECTS_cve", q_aff_cve, tgt_vuln_rows)
             if expl_rows:
                 # Same as TARGETS_vuln/cve — Mechanism B uuids mean one row dict
                 # serves both EXPLOITS templates without any precomputed swap.
-                time.sleep(1)
+                query_pause()
                 _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
-                time.sleep(1)
+                query_pause()
                 _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
 
         return total

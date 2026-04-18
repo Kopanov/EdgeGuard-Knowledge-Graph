@@ -49,6 +49,7 @@ from neo4j_client import (
     normalize_cve_id_for_graph,
     resolve_vulnerability_cve_id,
 )
+from query_pause import query_pause
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
 
 try:
@@ -2757,8 +2758,11 @@ class MISPToNeo4jSync:
             for it in chunk:
                 it.pop("relationships", None)
             # Pause between chunks to let Neo4j flush transactions
+            # PR #40: env-gated to 0 by default (was hardcoded 3s × ~880 chunks
+            # at baseline scale = ~44min of pure idle time per baseline). Set
+            # ``EDGEGUARD_QUERY_PAUSE_SECONDS=1`` to re-enable on memory-constrained Neo4j.
             if ci < n_chunks - 1:  # Skip delay after the last chunk
-                time.sleep(3)
+                query_pause()
             # Forced full GC on huge graphs can spike RAM in small workers (OOM/SIGKILL).
             # Opt-in only: EDGEGUARD_DEBUG_GC=1
             if os.environ.get("EDGEGUARD_DEBUG_GC", "").strip().lower() in ("1", "true", "yes"):
@@ -2865,8 +2869,9 @@ class MISPToNeo4jSync:
                     created_count,
                 )
             # Pause between chunks to let Neo4j flush transactions (skip after last chunk)
+            # PR #40: env-gated via EDGEGUARD_QUERY_PAUSE_SECONDS (default 0).
             if idx < total_chunks - 1:
-                time.sleep(3)
+                query_pause()
 
         return created_count
 
@@ -3040,9 +3045,10 @@ class MISPToNeo4jSync:
                     self.stats["relationships_created"] += rels_created
 
                 # Release page memory and pause before next page
+                # PR #40: env-gated via EDGEGUARD_QUERY_PAUSE_SECONDS (default 0).
                 del page_items, unique_items, page_rels
                 gc.collect()
-                time.sleep(3)  # Let Neo4j flush transactions between pages
+                query_pause()  # Let Neo4j flush transactions between pages
 
             logger.info(
                 "Event %s: page %s/%s done — %s items synced so far",
