@@ -382,17 +382,27 @@ def report_collector_failure(
         METRICS — see ``_format_failure_log_block``) so operators see WHY
         and WHAT TO DO without opening source code
       - Calls ``set_source_health(source, zone, False)`` so the dashboard
-        shows degradation
-      - Calls ``record_pipeline_error(...)`` for the error-rate metric
+        shows degradation regardless of classification (operators want to
+        know a source is currently failing even if it'll auto-recover next run)
 
     For TRANSIENT errors:
       - Calls ``record_collector_skip(source, "transient_external_error")``
       - Calls ``record_collection(source, zone, 0, "skipped")``
       - Sends a non-blocking Slack alert (if configured)
+      - Does NOT call ``record_pipeline_error`` — see PR #35 commit 8 below
 
     For CATASTROPHIC errors:
       - Calls ``record_collection(source, zone, 0, "failed")``
+      - Calls ``record_pipeline_error(...)`` for the error-rate metric
       - Sends a CRITICAL Slack alert (if configured)
+
+    PR #35 commit 8 (bugbot MED): ``record_pipeline_error`` USED to fire
+    unconditionally before the transient/catastrophic split. That gave
+    operators alerting on ``rate(pipeline_errors_total) > 0`` false-positive
+    pages on every transient network glitch. Moved into the catastrophic
+    branch so the error counter only ticks for things that actually FAIL
+    the task — matching the contract the structured METRICS log line
+    already documented.
 
     Returns the classification string (``"transient"`` or
     ``"catastrophic"``) so the caller can decide whether to re-raise.
@@ -432,12 +442,16 @@ def report_collector_failure(
         except Exception as me:
             logger.debug(f"metric emit failed ({fn.__name__}): {me}")
 
+    # source_health degrades for BOTH classifications — operators want to
+    # see "currently failing" regardless of expected auto-recovery.
     _safe(set_source_health, source_name, zone, False)
-    _safe(record_pipeline_error, f"collect_{source_name}", exc_type, source_name)
 
     if transient:
         _safe(record_collector_skip, source_name, "transient_external_error")
         _safe(record_collection, source_name, zone, 0, "skipped")
+        # PR #35 commit 8: NO record_pipeline_error here — transient skips
+        # must NOT contribute to ``pipeline_errors_total`` (would false-
+        # positive on rate-based alerts). See docstring above.
         logger.warning(log_block)
         send_slack_alert(
             f"Collector {source_name} SKIPPED (transient: {exc_type}). "
@@ -445,6 +459,10 @@ def report_collector_failure(
         )
     else:
         _safe(record_collection, source_name, zone, 0, "failed")
+        # Catastrophic: NOW emit the error counter — matches the
+        # ``edgeguard_pipeline_errors_total`` line in the catastrophic
+        # block's METRICS summary.
+        _safe(record_pipeline_error, f"collect_{source_name}", exc_type, source_name)
         logger.error(log_block)
         send_slack_alert(
             f"[CRITICAL] Collector {source_name} HARD-FAILED ({exc_type}). "

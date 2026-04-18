@@ -850,9 +850,20 @@ def run_collector_with_metrics(
         # Catastrophic errors → re-raise as before. A missing module or
         # type error indicates a real bug we want to surface loudly.
         duration = time.time() - start_time
-        record_error(collector_name, type(e).__name__)
-        if METRICS_SERVER_AVAILABLE:
-            record_pipeline_error(f"collect_{collector_name}", type(e).__name__, collector_name)
+        # PR #35 commit 8 (bugbot MED): ``record_error`` and
+        # ``record_pipeline_error`` USED to fire here, BEFORE the
+        # transient/catastrophic split. That meant a transient network
+        # glitch — task returns SUCCESS-skipped — would still bump the
+        # error counter, giving operators false-positive alerts on
+        # ``rate(pipeline_errors_total) > 0``. The structured METRICS
+        # log line for transient explicitly OMITS pipeline_errors_total,
+        # confirming the increment was unintended. Moved both into the
+        # catastrophic branch below; transient now only touches the
+        # skip + collection counters + source-health (matching the log).
+        # ``set_source_health`` stays here — degradation IS visible
+        # regardless of classification (operators always want to know a
+        # source is currently failing, even if "transient + auto-recovers
+        # next run").
         set_source_health(collector_name, "global", False)
 
         # PR #35 commit 6: route through the shared structured-log helper
@@ -882,9 +893,12 @@ def run_collector_with_metrics(
                 skip_reason_class="transient_external_error",
             )
 
-        # Catastrophic — fail loudly.
+        # Catastrophic — fail loudly. NOW emit the error counters (post-split,
+        # so transient-skipped tasks no longer false-positive these metrics).
+        record_error(collector_name, type(e).__name__)
         record_dag_run("edgeguard_pipeline", "failure")
         if METRICS_SERVER_AVAILABLE:
+            record_pipeline_error(f"collect_{collector_name}", type(e).__name__, collector_name)
             record_collection(collector_name, "global", 0, "failed")
         log_block = _format_failure_log_block(collector_name, e, classification="catastrophic", duration_s=duration)
         logger.error(log_block)

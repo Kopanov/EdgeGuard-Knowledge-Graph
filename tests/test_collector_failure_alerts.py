@@ -333,7 +333,11 @@ def test_report_collector_failure_transient_emits_skip_metrics(monkeypatch):
     metrics["record_collector_skip"].assert_called_once_with("cybercure", "transient_external_error")
     metrics["record_collection"].assert_called_once_with("cybercure", "global", 0, "skipped")
     metrics["set_source_health"].assert_called_once_with("cybercure", "global", False)
-    metrics["record_pipeline_error"].assert_called_once_with("collect_cybercure", "ConnectionError", "cybercure")
+    # PR #35 commit 8 (bugbot MED): pipeline_errors_total MUST NOT increment on
+    # transient skips — would false-positive operator alerts on
+    # ``rate(pipeline_errors_total) > 0``. The structured METRICS log line
+    # for transient also explicitly omits this metric (consistency check).
+    metrics["record_pipeline_error"].assert_not_called()  # transient must NOT bump error counter
 
 
 def test_report_collector_failure_catastrophic_emits_failed_metrics(monkeypatch):
@@ -627,3 +631,62 @@ def test_format_failure_log_block_does_not_crash_on_malformed_url_marker():
     assert "[test_src] SKIPPED" in block
     # url field MUST be omitted (no extractable URL)
     assert "url=" not in block, "must omit url field when extraction can't find one"
+
+
+def test_dag_path_does_not_increment_pipeline_errors_on_transient_skip():
+    """PR #35 commit 8 (bugbot MED): the DAG path's
+    ``run_collector_with_metrics`` must NOT call ``record_pipeline_error``
+    when the exception is transient. The error counter is for things that
+    actually FAIL the task; transient skips return SUCCESS.
+
+    Source-grep pin since exercising the real DAG function requires a
+    full Airflow context. Verifies that ``record_pipeline_error`` only
+    appears INSIDE the ``# Catastrophic — fail loudly`` branch, never
+    in the unconditional pre-split block."""
+    dag_path = os.path.join(os.path.dirname(__file__), "..", "dags", "edgeguard_pipeline.py")
+    with open(dag_path) as fh:
+        src = fh.read()
+
+    # Strip comment lines so the round-8 explanatory comment (which legitimately
+    # mentions the previous wrong-place call) doesn't false-fail the negative
+    # assertions below. Same _code_only pattern used elsewhere in the suite.
+    def _code_only(text: str) -> str:
+        return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+    # Locate the failure handler (everything between ``except Exception as e:``
+    # and the trailing ``raise`` in run_collector_with_metrics)
+    handler_start = src.find("except Exception as e:", src.find("def run_collector_with_metrics"))
+    assert handler_start > 0, "could not locate the except Exception handler"
+    handler_end = src.find("\n# ===", handler_start)  # next section divider
+    if handler_end < 0:
+        handler_end = handler_start + 5000
+    handler_raw = src[handler_start:handler_end]
+    handler = _code_only(handler_raw)
+
+    # Locate the transient branch (between ``if _is_transient_external_error``
+    # and the next ``# Catastrophic`` comment) — use raw to find the comment
+    # marker, then strip comments from the slice.
+    transient_start_raw = handler_raw.find("if _is_transient_external_error")
+    catastrophic_start_raw = handler_raw.find("# Catastrophic", transient_start_raw)
+    assert transient_start_raw > 0 and catastrophic_start_raw > transient_start_raw, (
+        "could not locate transient/catastrophic split"
+    )
+    transient_branch = _code_only(handler_raw[transient_start_raw:catastrophic_start_raw])
+    catastrophic_branch = _code_only(handler_raw[catastrophic_start_raw:])
+    pre_split = _code_only(handler_raw[:transient_start_raw])
+
+    assert "record_pipeline_error" not in transient_branch, (
+        "transient branch (executable code) MUST NOT call record_pipeline_error — "
+        "would false-positive rate(edgeguard_pipeline_errors_total) > 0 alerts."
+    )
+
+    # Sanity: catastrophic branch DOES call it (so we're not just hiding it everywhere)
+    assert "record_pipeline_error" in catastrophic_branch, (
+        "catastrophic branch must call record_pipeline_error — that's the point"
+    )
+
+    # And the unconditional pre-split block must also not call it.
+    assert "record_pipeline_error" not in pre_split, (
+        "pre-split executable block MUST NOT call record_pipeline_error — "
+        "would fire for transient skips before the classifier branches."
+    )
