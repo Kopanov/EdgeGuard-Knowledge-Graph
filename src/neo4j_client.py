@@ -33,7 +33,7 @@ except ImportError:
 # Deterministic per-node UUIDs for cross-environment traceability — see
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
-from node_identity import compute_node_uuid, edge_endpoint_uuids  # noqa: E402
+from node_identity import canonicalize_merge_key, compute_node_uuid, edge_endpoint_uuids  # noqa: E402
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1351,8 +1351,6 @@ class Neo4jClient:
         creating duplicates). Operators who relied on display case can
         recover the variant strings from ``n.aliases[]``.
         """
-        from node_identity import canonicalize_merge_key
-
         key_props = canonicalize_merge_key("Malware", {"name": data.get("name")})
         # Store malware types and aliases on the node for easier querying
         malware_types = data.get("malware_types", [])
@@ -1380,8 +1378,6 @@ class Neo4jClient:
         — that's Tier A A1 and needs an alias-graph resolution pass,
         not just casing.)
         """
-        from node_identity import canonicalize_merge_key
-
         key_props = canonicalize_merge_key("ThreatActor", {"name": data.get("name")})
         aliases = data.get("aliases", [])
         description = data.get("description", "")
@@ -1613,9 +1609,10 @@ class Neo4jClient:
                     # domains lowercased; URLs/emails/file-paths left as-is
                     # (case is meaningful there). See node_identity.py
                     # ``canonicalize_merge_key`` for the full rules.
-                    from node_identity import canonicalize_merge_key as _canonical
-
-                    canonical_key = _canonical(
+                    # PR #37 commit X (bugbot LOW): import is hoisted to
+                    # module level (line 36) so it doesn't re-resolve
+                    # once per item in this hot batch loop.
+                    canonical_key = canonicalize_merge_key(
                         "Indicator",
                         {"indicator_type": item.get("indicator_type"), "value": item.get("value")},
                     )
