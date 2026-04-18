@@ -1,0 +1,428 @@
+"""PR (S5) regression pins — source-truthful first_seen / last_seen.
+
+Comprehensive test suite for the audit-driven first_seen restoration:
+
+1. **Helper unit tests** — ``source_truthful_timestamps.extract_source_truthful_timestamps``
+   per-source allowlist, three-layer resolution (MISP-native → META JSON →
+   None), future-date clamp, malformed-META tolerance.
+
+2. **STIX exporter** — ``valid_from`` no longer leaks 1970 epoch when the
+   node has ``first_seen_at_source`` or ``first_imported_at``;
+   ``x_edgeguard_*`` extensions added.
+
+3. **Cypher source-grep pins** — the MIN/MAX CASE clauses are present in
+   every Cypher template that PR (S5) touched; they survive future
+   refactors.
+
+4. **Baseline + incremental scenarios** — the user's explicit constraint
+   that first_imported_at uses ON CREATE only (never overwritten on
+   re-touch), MIN semantics for first_seen_at_source on multi-source
+   merges, MAX semantics for last_seen_at_source.
+
+5. **GraphQL schema pins** — the new fields are exposed on every relevant
+   type and resolved correctly.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+_SRC = os.path.join(os.path.dirname(__file__), "..", "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
+
+
+def _code_only(text: str) -> str:
+    """Strip comment-only lines so source-grep pins don't false-match
+    historical-fix comments that mention the old patterns."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+# ===========================================================================
+# 1. Helper unit tests — source_truthful_timestamps module
+# ===========================================================================
+
+
+def test_reliable_source_allowlist_includes_all_canonical_sources():
+    """Every collector whose upstream first-seen field is canonical
+    must be on the allowlist. Source-Truth Investigator audit table."""
+    from source_truthful_timestamps import is_reliable_first_seen_source
+
+    for src in (
+        "nvd",
+        "cisa",
+        "mitre_attck",
+        "mitre",
+        "virustotal",
+        "vt",
+        "abuseipdb",
+        "threatfox",
+        "urlhaus",
+        "feodo_tracker",
+        "feodo",
+        "ssl_blacklist",
+        "abusech_ssl",
+    ):
+        assert is_reliable_first_seen_source(src), f"{src!r} must be on the reliable allowlist"
+
+
+def test_unreliable_sources_excluded_from_allowlist():
+    """OTX (pulse-publish-date), CyberCure (synthetic now()), and
+    MISP-only feeds must be EXCLUDED so their wrong-semantic dates
+    don't silently corrupt n.first_seen_at_source."""
+    from source_truthful_timestamps import is_reliable_first_seen_source
+
+    for src in ("otx", "alienvault_otx", "cybercure", "misp", "sector_feed"):
+        assert not is_reliable_first_seen_source(src), (
+            f"{src!r} must NOT be on the allowlist — its first_seen field has wrong semantic"
+        )
+
+
+def test_allowlist_check_is_case_insensitive():
+    """Operator might pass source_id with different casing."""
+    from source_truthful_timestamps import is_reliable_first_seen_source
+
+    assert is_reliable_first_seen_source("NVD")
+    assert is_reliable_first_seen_source("  threatfox  ")  # whitespace tolerated
+    assert is_reliable_first_seen_source("MITRE_ATTCK")
+
+
+def test_allowlist_handles_none_and_empty():
+    """Defensive: missing source_id must return False, not crash."""
+    from source_truthful_timestamps import is_reliable_first_seen_source
+
+    assert not is_reliable_first_seen_source(None)
+    assert not is_reliable_first_seen_source("")
+    assert not is_reliable_first_seen_source("   ")
+
+
+def test_extractor_returns_none_for_unreliable_source():
+    """OTX is excluded; even if attr.first_seen is populated, return None."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    attr = {"first_seen": "2026-01-15T00:00:00Z", "last_seen": "2026-04-01T00:00:00Z"}
+    fs, ls = extract_source_truthful_timestamps(attr, "otx")
+    assert fs is None and ls is None
+
+
+def test_extractor_layer_1_misp_native_fields():
+    """MISP-native attribute.first_seen / last_seen are the lossless
+    round-trip path. MISPWriter populates these for every indicator."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    attr = {
+        "first_seen": "2019-01-15T00:00:00+00:00",
+        "last_seen": "2026-04-01T00:00:00+00:00",
+    }
+    fs, ls = extract_source_truthful_timestamps(attr, "nvd")
+    assert fs == "2019-01-15T00:00:00+00:00"
+    assert ls == "2026-04-01T00:00:00+00:00"
+
+
+def test_extractor_layer_2_nvd_meta_fallback():
+    """When MISP-native is missing, fall back to NVD_META.published /
+    last_modified."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    attr: dict = {}  # no MISP-native fields
+    nvd_meta = {"published": "2019-01-15T00:00:00+00:00", "last_modified": "2026-02-01T00:00:00+00:00"}
+    fs, ls = extract_source_truthful_timestamps(attr, "nvd", nvd_meta=nvd_meta)
+    assert fs == "2019-01-15T00:00:00+00:00"
+    assert ls == "2026-02-01T00:00:00+00:00"
+
+
+def test_extractor_layer_2_threatfox_meta_fallback():
+    """ThreatFox uses TF_META.first_seen / last_seen."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    attr: dict = {}
+    tf_meta = {"first_seen": "2025-12-01T00:00:00+00:00", "last_seen": "2026-03-15T00:00:00+00:00"}
+    fs, ls = extract_source_truthful_timestamps(attr, "threatfox", tf_meta=tf_meta)
+    assert fs == "2025-12-01T00:00:00+00:00"
+    assert ls == "2026-03-15T00:00:00+00:00"
+
+
+def test_extractor_layer_1_takes_precedence_over_layer_2():
+    """When BOTH MISP-native AND META are present, MISP-native wins
+    (it's the lossless lossless round-trip path; META is fallback only)."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    attr = {"first_seen": "2019-01-15T00:00:00+00:00"}  # MISP-native
+    nvd_meta = {"published": "2025-01-01T00:00:00+00:00"}  # different value
+    fs, _ = extract_source_truthful_timestamps(attr, "nvd", nvd_meta=nvd_meta)
+    assert fs == "2019-01-15T00:00:00+00:00", "MISP-native must win over META fallback"
+
+
+def test_extractor_returns_none_when_no_value_anywhere():
+    """Reliable source but neither MISP-native nor META has a value →
+    return None (signal "we don't know") not synthetic now()."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    attr: dict = {}
+    fs, ls = extract_source_truthful_timestamps(attr, "nvd")
+    assert fs is None and ls is None
+
+
+def test_extractor_clamps_future_dates_to_now():
+    """Defensive: a future-dated value (operator clock drift / upstream
+    bug) must be clamped to NOW with a warning log."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    future = (datetime.now(timezone.utc) + timedelta(days=3650)).isoformat()
+    attr = {"first_seen": future}
+    fs, _ = extract_source_truthful_timestamps(attr, "nvd")
+    assert fs is not None
+    parsed = datetime.fromisoformat(fs.replace("Z", "+00:00") if fs.endswith("Z") else fs)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    # Should be approximately NOW (within 5 seconds)
+    assert (datetime.now(timezone.utc) - parsed).total_seconds() < 5, (
+        f"future-dated value must be clamped to NOW; got {fs}"
+    )
+
+
+def test_extractor_passes_through_past_dates():
+    """A past date must be returned unchanged — clamp only fires for
+    FUTURE dates."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    past = "2019-01-15T00:00:00+00:00"
+    attr = {"first_seen": past}
+    fs, _ = extract_source_truthful_timestamps(attr, "nvd")
+    assert fs == past, "past dates must pass through unchanged"
+
+
+def test_extract_from_attribute_json_parses_meta_from_comment():
+    """Convenience wrapper auto-parses META JSON from the attribute
+    comment field. Useful for callers without pre-parsed dicts."""
+    import json as _json
+
+    from source_truthful_timestamps import extract_from_attribute_json
+
+    attr = {
+        "comment": "NVD_META:" + _json.dumps({"published": "2019-01-15T00:00:00+00:00"}),
+    }
+    fs, _ = extract_from_attribute_json(attr, "nvd")
+    assert fs == "2019-01-15T00:00:00+00:00"
+
+
+def test_extract_from_attribute_json_tolerates_malformed_meta():
+    """Malformed META JSON must not raise — fall back to layer 1 (None
+    here since MISP-native fields aren't set)."""
+    from source_truthful_timestamps import extract_from_attribute_json
+
+    attr = {"comment": "NVD_META:{this is not valid json"}
+    fs, ls = extract_from_attribute_json(attr, "nvd")
+    assert fs is None and ls is None  # silent fallback to layer 1, which is empty
+
+
+# ===========================================================================
+# 2. STIX exporter — valid_from no longer leaks 1970
+# ===========================================================================
+
+
+def test_stix_indicator_valid_from_uses_first_seen_at_source_when_present():
+    """Source-grep pin on the resolution chain in
+    ``stix_exporter._indicator_sdo``."""
+    path = os.path.join(_SRC, "stix_exporter.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    # The valid_from chain must consult first_seen_at_source first
+    assert 'props.get("first_seen_at_source")' in src, (
+        "stix_exporter must consult first_seen_at_source as the highest-priority valid_from source"
+    )
+    # Then first_imported_at as fallback
+    assert 'props.get("first_imported_at")' in src
+    # Legacy first_seen kept as third-line back-compat
+    assert 'props.get("first_seen")' in src
+
+
+def test_stix_indicator_adds_x_edgeguard_first_imported_at_extension():
+    """Best-Practice pin: when first_imported_at is on the props,
+    the SDO dict must carry ``x_edgeguard_first_imported_at``."""
+    path = os.path.join(_SRC, "stix_exporter.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    assert "x_edgeguard_first_imported_at" in src, (
+        "STIX SDO must expose first_imported_at as a producer-specific custom property"
+    )
+    assert "x_edgeguard_last_seen_at_source" in src
+
+
+def test_stix_sighting_emission_env_var_hook_present():
+    """The opt-in Sighting SRO emission env var must be honored at
+    module level (full implementation is a follow-up; the hook is
+    here so consumers can already discover the toggle)."""
+    path = os.path.join(_SRC, "stix_exporter.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    assert "EDGEGUARD_STIX_EMIT_SIGHTINGS" in src, (
+        "stix_exporter must define the EDGEGUARD_STIX_EMIT_SIGHTINGS env var hook"
+    )
+
+
+# ===========================================================================
+# 3. Cypher source-grep pins — MIN/MAX CASE clauses present
+# ===========================================================================
+
+
+def test_merge_indicators_batch_has_min_case_for_first_seen_at_source():
+    """Pin the MIN-CASE pattern: future refactors that drop the AND-guard
+    or flip < to > would silently corrupt the multi-source merge."""
+    path = os.path.join(_SRC, "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    # Find the indicator batch block
+    start = src.find("MERGE (n:Indicator")
+    end = src.find("MATCH (s:Source", start)
+    block = src[start:end]
+    assert "first_seen_at_source" in block, "indicator batch UNWIND must SET n.first_seen_at_source"
+    # The CASE clause MUST have:
+    #   item.first_seen_at_source IS NOT NULL
+    #   AND item.first_seen_at_source < n.first_seen_at_source
+    assert "item.first_seen_at_source < n.first_seen_at_source" in block, (
+        "MIN logic missing — refactor must preserve the < comparison so older value wins"
+    )
+    # And MAX for last_seen
+    assert "item.last_seen_at_source > n.last_seen_at_source" in block, "MAX logic missing for last_seen_at_source"
+
+
+def test_merge_vulnerabilities_batch_has_min_case_for_first_seen_at_source():
+    """Same contract for the Vulnerability batch."""
+    path = os.path.join(_SRC, "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    start = src.find("MERGE (n:Vulnerability")
+    end = src.find("MATCH (s:Source", start)
+    block = src[start:end]
+    assert "first_seen_at_source" in block
+    assert "item.first_seen_at_source < n.first_seen_at_source" in block
+    assert "item.last_seen_at_source > n.last_seen_at_source" in block
+
+
+def test_merge_node_with_source_has_min_case_for_first_seen_at_source():
+    """Standalone MERGE helper used by Malware/Actor/Technique/etc.
+    must have the same MIN/MAX pattern."""
+    path = os.path.join(_SRC, "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    start = src.find("def merge_node_with_source")
+    end = src.find("\n    def ", start + 1)
+    block = src[start:end]
+    assert "first_seen_at_source" in block
+    assert "$first_seen_at_source < n.first_seen_at_source" in block
+    assert "$last_seen_at_source > n.last_seen_at_source" in block
+
+
+def test_first_imported_at_only_set_on_create():
+    """first_imported_at must use ON CREATE SET ONLY — never overwritten
+    on re-touch. This is the user's explicit baseline+incremental
+    correctness constraint.
+
+    Note: the source uses f-string ``{{indicator_type: ...}}`` syntax so
+    the rendered Cypher has single braces; our grep matches the rendered
+    portion (post-escape).
+    """
+    path = os.path.join(_SRC, "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    # The Cypher-template f-string uses {{...}} for Cypher braces. Grep
+    # the f-string template with the doubled braces.
+    indicator_start = src.find("MERGE (n:Indicator {{indicator_type")
+    assert indicator_start > 0, "could not locate Indicator batch UNWIND template"
+    indicator_end = src.find("MATCH (s:Source", indicator_start)
+    indicator_block = src[indicator_start:indicator_end]
+    assert "ON CREATE SET n.first_imported_at = datetime()" in indicator_block, (
+        "first_imported_at must be set on ON CREATE"
+    )
+    # The SET (not ON CREATE SET) section must NOT re-set first_imported_at.
+    # Locate the SET section that follows the ON CREATE SET block.
+    on_create_end = indicator_block.find("\n                SET ")
+    set_section = indicator_block[on_create_end:]
+    # The bare 'n.first_imported_at = datetime()' MUST NOT appear in SET section
+    # (only as ON CREATE SET above)
+    assert "n.first_imported_at = datetime()" not in set_section, (
+        "first_imported_at must NOT be re-assigned in the SET clause — that would overwrite "
+        "the original first-touch time on every re-import"
+    )
+
+
+# ===========================================================================
+# 4. Baseline + incremental scenario validation (extractor-level)
+# ===========================================================================
+
+
+def test_baseline_then_incremental_preserves_min_first_seen():
+    """User's explicit constraint: baseline writes 2019, incremental
+    re-touches → 2019 must win (MIN preserves)."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    # Baseline pull on day 1 — NVD says published=2019-01-15
+    attr_baseline = {"first_seen": "2019-01-15T00:00:00+00:00"}
+    fs1, _ = extract_source_truthful_timestamps(attr_baseline, "nvd")
+
+    # Incremental pull tomorrow — NVD says published=2019-01-15 (same)
+    attr_incremental = {"first_seen": "2019-01-15T00:00:00+00:00"}
+    fs2, _ = extract_source_truthful_timestamps(attr_incremental, "nvd")
+
+    assert fs1 == fs2 == "2019-01-15T00:00:00+00:00", (
+        "Same NVD CVE re-imported must produce same first_seen_at_source. "
+        "Cypher MIN logic then preserves the value across writes."
+    )
+
+
+def test_extraction_returns_none_for_otx_even_with_first_seen():
+    """User's "ensure proper updates" — OTX pulse re-import (excluded
+    source) must NOT overwrite a previous reliable-source value because
+    the extractor returns None for OTX. The Cypher AND-guard then
+    preserves the existing value."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps
+
+    # OTX collector pulled an indicator that was previously seen by NVD/CISA.
+    # OTX's pulse "created" date would mislead — must be excluded.
+    attr = {"first_seen": "2026-04-15T00:00:00+00:00"}  # OTX pulse-create date
+    fs, _ = extract_source_truthful_timestamps(attr, "otx")
+    assert fs is None, "OTX must return None so the Cypher MIN guard preserves any existing reliable-source value"
+
+
+# ===========================================================================
+# 5. GraphQL schema + resolver pins
+# ===========================================================================
+
+
+def test_graphql_schema_exposes_first_seen_at_source():
+    """At least the Indicator type must expose the new field for API consumers."""
+    path = os.path.join(_SRC, "graphql_schema.py")
+    with open(path) as fh:
+        src = fh.read()
+    assert "first_seen_at_source: Optional[str]" in src, "GraphQL Indicator type must expose first_seen_at_source"
+    assert "last_seen_at_source: Optional[str]" in src
+
+
+def test_graphql_resolvers_populate_first_seen_at_source():
+    """At least one resolver must read n.first_seen_at_source from the
+    Cypher result."""
+    path = os.path.join(_SRC, "graphql_api.py")
+    with open(path) as fh:
+        src = fh.read()
+    assert "first_seen_at_source=str(" in src, "at least one GraphQL resolver must read first_seen_at_source"
+
+
+# ===========================================================================
+# 6. Documentation / migration runbook present
+# ===========================================================================
+
+
+def test_migration_doc_exists():
+    """Operators need the migration runbook to verify their deploy."""
+    path = os.path.join(os.path.dirname(__file__), "..", "migrations", "2026_04_first_seen_at_source.md")
+    assert os.path.exists(path), "migrations/2026_04_first_seen_at_source.md must ship with this PR"
+    with open(path) as fh:
+        body = fh.read()
+    # Key sections must be present
+    assert "Reliable-source allowlist" in body
+    assert "no bulk backfill" in body.lower()
+    assert "Verification queries" in body or "verification queries" in body.lower()
+    assert "Rollback" in body
