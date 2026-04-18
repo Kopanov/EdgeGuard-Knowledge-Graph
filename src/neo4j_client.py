@@ -1339,8 +1339,21 @@ class Neo4jClient:
             return False
 
     def merge_malware(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
-        """MERGE a Malware node with source tracking."""
-        key_props = {"name": data.get("name")}
+        """MERGE a Malware node with source tracking.
+
+        PR #37 (Logic Tracker Tier S): the natural-key ``name`` is now
+        lowercase + NFC + stripped via ``canonicalize_merge_key`` BEFORE
+        the MERGE. Without this, ``Malware{name:"TrickBot"}`` (OTX) and
+        ``Malware{name:"trickbot"}`` (CyberCure) became two distinct
+        nodes that shared the SAME ``n.uuid`` (UUID computation already
+        lowercases its hash input — see node_identity.py:340 — so the
+        original Cypher-side case-sensitive MERGE was the only thing
+        creating duplicates). Operators who relied on display case can
+        recover the variant strings from ``n.aliases[]``.
+        """
+        from node_identity import canonicalize_merge_key
+
+        key_props = canonicalize_merge_key("Malware", {"name": data.get("name")})
         # Store malware types and aliases on the node for easier querying
         malware_types = data.get("malware_types", [])
         aliases = data.get("aliases", [])
@@ -1357,8 +1370,19 @@ class Neo4jClient:
         return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
-        """MERGE a ThreatActor node with source tracking."""
-        key_props = {"name": data.get("name")}
+        """MERGE a ThreatActor node with source tracking.
+
+        PR #37: same ``canonicalize_merge_key`` treatment as ``merge_malware``
+        — actor names like "APT29"/"apt29"/"Apt29" all merge into a single
+        canonical lowercase node. Display-case variants are still
+        recoverable via ``n.aliases[]``. (Note: this does NOT solve the
+        actor-rename problem — e.g. APT29 → Cozy Bear → Midnight Blizzard
+        — that's Tier A A1 and needs an alias-graph resolution pass,
+        not just casing.)
+        """
+        from node_identity import canonicalize_merge_key
+
+        key_props = canonicalize_merge_key("ThreatActor", {"name": data.get("name")})
         aliases = data.get("aliases", [])
         description = data.get("description", "")
         # uses_techniques: list of MITRE technique IDs this actor explicitly uses,
@@ -1578,17 +1602,39 @@ class Neo4jClient:
                         source_list = [source_list]
                     tag = item.get("tag", "default")
 
-                    # Per-row Indicator uuid — same uuid will be computed by every
-                    # other process MERGEing the same (indicator_type, value), so
-                    # cloud copy / delta-sync resolves correctly.
-                    node_uuid = compute_node_uuid(
+                    # PR #37 (Logic Tracker Tier S): canonicalize the merge-key
+                    # value via ``canonicalize_merge_key`` BEFORE both UUID
+                    # computation and the Cypher MERGE. Without this, an
+                    # Indicator with ``value="Conti"`` (one feed) and
+                    # ``value="conti"`` (another feed) collided on uuid (UUID
+                    # is computed case-insensitively at node_identity.py:340)
+                    # but landed as TWO Cypher nodes (MERGE matches case-
+                    # sensitively). Canonicalization is per-type — IPs/hashes/
+                    # domains lowercased; URLs/emails/file-paths left as-is
+                    # (case is meaningful there). See node_identity.py
+                    # ``canonicalize_merge_key`` for the full rules.
+                    from node_identity import canonicalize_merge_key as _canonical
+
+                    canonical_key = _canonical(
                         "Indicator",
                         {"indicator_type": item.get("indicator_type"), "value": item.get("value")},
+                    )
+                    canonical_value = canonical_key.get("value")
+
+                    # Per-row Indicator uuid — same uuid will be computed by every
+                    # other process MERGEing the same (indicator_type, value), so
+                    # cloud copy / delta-sync resolves correctly. Computed from
+                    # the CANONICAL value so the uuid + the MERGE key agree
+                    # (otherwise we'd silently re-introduce the duplicate-uuid
+                    # state that caused the bug).
+                    node_uuid = compute_node_uuid(
+                        "Indicator",
+                        {"indicator_type": item.get("indicator_type"), "value": canonical_value},
                     )
 
                     batch_item = {
                         "indicator_type": item.get("indicator_type"),
-                        "value": item.get("value"),
+                        "value": canonical_value,
                         "tag": tag,
                         "source_id": source_id,
                         "source_array": source_list,

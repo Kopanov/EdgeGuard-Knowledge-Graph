@@ -359,6 +359,115 @@ def compute_node_uuid(label: str, key_dict: Dict[str, Any]) -> str:
 # function only added public-API surface and a maintenance burden.
 
 
+# ---------------------------------------------------------------------------
+# PR #37 — case-insensitive MERGE-key canonicalization
+# ---------------------------------------------------------------------------
+#
+# The audit (Logic Tracker Tier S) caught that ``compute_node_uuid``
+# already lowercases its hash input (see ``canonical_node_key`` line 340)
+# but Cypher MERGE patterns like ``MERGE (n:Malware {name: $name})``
+# match case-SENSITIVELY. Result: ``Malware{name:"TrickBot"}`` (OTX) and
+# ``Malware{name:"trickbot"}`` (CyberCure) become two distinct Neo4j
+# nodes that share the SAME ``n.uuid`` (because UUID is computed
+# case-insensitively). Two physically-different nodes claiming the
+# same uuid violates the uuid uniqueness intent and silently inflates
+# counts everywhere.
+#
+# Fix
+# ---
+# Lowercase + NFC-normalize + strip the natural-key VALUE in Python
+# BEFORE handing it to Cypher, for the labels/types where case
+# semantically does NOT matter. The original-case value is dropped at
+# the merge key (``Malware{name:"trickbot"}``); UI consumers wanting
+# the original-case display can use ``aliases[]`` which already stores
+# every observed variant.
+#
+# Per-type rules
+# --------------
+# * Malware/ThreatActor/Campaign name: lowercase (case never matters
+#   for identity)
+# * Indicator value with type in
+#   {ipv4, ipv6, domain, hostname, md5, sha1, sha256, sha512, ssdeep,
+#    ja3, ja3s, jarm, mutex, btc, xmr, eth}: lowercase (RFC + standard
+#   convention says these are case-insensitive)
+# * Indicator value with type in {url, email, filename, regkey, cmdline}:
+#   LEFT AS-IS — case is meaningful (URL path, file path, regkey path
+#   are all case-sensitive on most systems; email local-part is
+#   technically case-sensitive per RFC even though usually treated
+#   case-insensitively)
+#
+# Existing graphs need a one-time migration
+# (``migrations/2026_04_canonicalize_case_insensitive_merge_keys.cypher``)
+# to merge already-created case-duplicates. After that runs, this
+# helper prevents new duplicates from forming.
+
+# Neo4j node labels whose natural-key field is a free-text NAME — case
+# never matters for identity.
+_CASE_INSENSITIVE_NAME_LABELS = frozenset({"malware", "threatactor", "campaign"})
+
+# Indicator types where case is semantically irrelevant (RFC + de-facto
+# convention). Lowercase the ``value`` for these. Excluded explicitly:
+# ``url`` (path is case-sensitive), ``email`` (local-part technically is),
+# ``filename``, ``filepath``, ``regkey``, ``cmdline`` (file/registry/CLI
+# paths are case-sensitive on most systems).
+_CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
+    {
+        "ipv4",
+        "ipv6",
+        "domain",
+        "hostname",
+        "md5",
+        "sha1",
+        "sha256",
+        "sha512",
+        "ssdeep",
+        "imphash",
+        "ja3",
+        "ja3s",
+        "jarm",
+        "mutex",
+        "btc",
+        "xmr",
+        "eth",
+    }
+)
+
+
+def canonicalize_merge_key(label: str, key_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of ``key_dict`` with the natural-key field lowercased
+    + NFC-normalized + stripped, IF the (label, indicator_type) pair is
+    case-insensitive per the project rules above.
+
+    Pure function — never raises. If the (label, type) is NOT in the
+    case-insensitive set, the dict is returned essentially unchanged
+    (still NFC + strip applied so trailing-whitespace duplicates collapse,
+    matching what ``compute_node_uuid`` does on its hash input).
+
+    Returns a NEW dict — caller's dict is never mutated.
+    """
+    out: Dict[str, Any] = dict(key_dict)
+    canonical_label = (label or "").lower().strip()
+
+    if canonical_label in _CASE_INSENSITIVE_NAME_LABELS:
+        name = key_dict.get("name")
+        if isinstance(name, str):
+            out["name"] = unicodedata.normalize("NFC", name).strip().lower()
+    elif canonical_label == "indicator":
+        indicator_type = key_dict.get("indicator_type")
+        value = key_dict.get("value")
+        if isinstance(value, str):
+            normalized = unicodedata.normalize("NFC", value).strip()
+            if isinstance(indicator_type, str) and indicator_type.lower() in _CASE_INSENSITIVE_INDICATOR_TYPES:
+                out["value"] = normalized.lower()
+            else:
+                # Still strip + NFC even when not lowercased — at minimum
+                # collapses trailing-whitespace duplicates.
+                out["value"] = normalized
+    # Other labels: caller can pass them through; we don't second-guess
+    # what's case-sensitive for unknown label types.
+    return out
+
+
 def edge_endpoint_uuids(
     from_label: str,
     from_key: Dict[str, Any],
