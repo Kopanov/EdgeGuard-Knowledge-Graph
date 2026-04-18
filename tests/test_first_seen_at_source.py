@@ -64,8 +64,67 @@ def test_reliable_source_allowlist_includes_all_canonical_sources():
         "feodo",
         "ssl_blacklist",
         "abusech_ssl",
+        # CISA: collector emits "cisa_kev" via config.SOURCE_TAGS["cisa"];
+        # tests + direct callers may use the bare "cisa" form. BOTH must
+        # be on the allowlist or the CISA passthrough is dead.
+        # Bugbot caught the misalignment in commit ac25b07.
+        "cisa_kev",
     ):
         assert is_reliable_first_seen_source(src), f"{src!r} must be on the reliable allowlist"
+
+
+def test_collector_emitted_tags_match_allowlist():
+    """PR (S5) commit X (bugbot MED): every tag a collector actually
+    emits MUST be on the reliable-first-seen allowlist (or be on the
+    intentional-exclude list). Bugbot caught the
+    ``SOURCE_TAGS["cisa"] == "cisa_kev"`` mismatch in commit
+    ac25b07 — the CISA collector emits ``"cisa_kev"`` but the
+    allowlist only had ``"cisa"``, making the entire CISA
+    source-truthful passthrough dead at runtime.
+
+    This test enumerates every tag string that the live collectors
+    pass to the MISPWriter handoff and asserts each one is decisively
+    classified — either reliable (allowlisted) or intentionally
+    excluded. New collectors / tag renames will fail this test
+    until the allowlist is updated, surfacing the bug before
+    deploy instead of after.
+    """
+    from source_truthful_timestamps import is_reliable_first_seen_source
+
+    # Static enumeration of every tag a collector emits. Source: grep
+    # ``self.tag = ... | "tag":`` across src/collectors/*.py. If this
+    # list goes stale, the test fails.
+    collector_emitted_tags = {
+        "nvd",  # nvd_collector
+        "cisa_kev",  # cisa_collector (via SOURCE_TAGS["cisa"])
+        "mitre_attck",  # mitre_collector (via SOURCE_TAGS["mitre"])
+        "virustotal",  # virustotal_collector + vt_collector
+        "abuseipdb",  # abuseipdb_collector
+        "threatfox",  # global_feed_collector
+        "urlhaus",  # global_feed_collector
+        "feodo_tracker",  # finance_feed_collector
+        "ssl_blacklist",  # finance_feed_collector
+        # Intentionally excluded from the reliable allowlist:
+        "alienvault_otx",  # otx_collector — pulse-publish-date, not IOC first-seen
+        "misp",  # misp_collector — pipeline metadata
+    }
+    intentionally_excluded = {"alienvault_otx", "misp", "cybercure"}
+
+    for tag in collector_emitted_tags:
+        is_reliable = is_reliable_first_seen_source(tag)
+        if tag in intentionally_excluded:
+            assert not is_reliable, (
+                f"{tag!r} is on the EXCLUDE list but somehow ended up on the reliable allowlist — that's a logic bug"
+            )
+        else:
+            assert is_reliable, (
+                f"Collector emits {tag!r} but it's NOT on the reliable "
+                "first-seen allowlist. The source-truthful extractor will "
+                "return (None, None) for ALL data from this collector, "
+                "silently dropping the canonical first-observed timestamp. "
+                "Add it to _RELIABLE_FIRST_SEEN_SOURCES in "
+                "src/source_truthful_timestamps.py."
+            )
 
 
 def test_unreliable_sources_excluded_from_allowlist():

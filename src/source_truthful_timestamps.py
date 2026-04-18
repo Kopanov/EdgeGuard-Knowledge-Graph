@@ -115,7 +115,13 @@ logger = logging.getLogger(__name__)
 _RELIABLE_FIRST_SEEN_SOURCES: frozenset = frozenset(
     {
         "nvd",
+        # CISA: collector emits "cisa_kev" (config.SOURCE_TAGS["cisa"] =
+        # "cisa_kev"); legacy collectors / tests / direct callers may
+        # still pass "cisa". Both must be on the allowlist or the CISA
+        # passthrough fix in PR (S5) is dead. Bugbot caught the
+        # misalignment in commit ac25b07.
         "cisa",
+        "cisa_kev",
         "mitre_attck",
         "mitre",
         "virustotal",
