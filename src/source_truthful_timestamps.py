@@ -194,9 +194,25 @@ def _clamp_future_to_now(iso: Optional[str]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-def _coerce_iso(val: Any) -> Optional[str]:
-    """Local copy of run_misp_to_neo4j._coerce_to_iso to keep this
-    module self-contained (no circular import). Same semantics."""
+def coerce_iso(val: Any) -> Optional[str]:
+    """Canonical ISO-8601 coercion helper for source-truthful timestamp
+    values arriving from collectors / MISP / NVD JSON.
+
+    PR (S5) commit X (bugbot LOW): consolidated here as the **single
+    source of truth**. Previously this logic existed both as a
+    private ``_coerce_iso`` in this module AND as a private
+    ``_coerce_to_iso`` in ``run_misp_to_neo4j``. Bugbot correctly
+    flagged the duplication as a divergence risk — a bug fix in one
+    copy wouldn't propagate to the other. ``run_misp_to_neo4j``
+    now imports this function directly (no circular import:
+    ``run_misp_to_neo4j`` already imports
+    ``extract_source_truthful_timestamps`` from this module, so the
+    dependency arrow already points the same way).
+
+    Handles None/empty, Unix int/float epoch, datetime objects, and
+    passthrough strings. Returns ``None`` for unparseable / empty inputs
+    so the caller can distinguish "missing" from "set to wall-clock now".
+    """
     if val is None:
         return None
     if isinstance(val, str) and not val.strip():
@@ -208,6 +224,11 @@ def _coerce_iso(val: Any) -> Optional[str]:
     if isinstance(val, str):
         return val
     return None
+
+
+# Backward-compat alias kept private — internal callers in this module
+# still spell it _coerce_iso. Public consumers should use coerce_iso.
+_coerce_iso = coerce_iso
 
 
 def iso_str(val: Any) -> Optional[str]:
@@ -261,15 +282,52 @@ def extract_source_truthful_timestamps(
 
     1. **MISP-native attribute fields** (``attr["first_seen"]`` /
        ``attr["last_seen"]``). MISPWriter populates these for every
-       indicator (``misp_writer.py:664``); MISP 2.4.120+ supports
-       them natively. This is the lossless path — the upstream
-       collector's value is preserved through MISP and read back here.
+       indicator (``misp_writer.py:create_indicator_attribute``) and
+       every vulnerability (``misp_writer.py:create_vulnerability_attribute``,
+       added in PR S5 follow-up to fix bugbot MED). MISP 2.4.120+
+       supports them natively. **This is the canonical, lossless
+       round-trip path** — the upstream collector's value is preserved
+       through MISP and read back here unchanged. ALL 9 allowlisted
+       sources rely on Layer 1 as the primary path.
     2. **Source-specific META JSON** carried in the MISP attribute
-       comment (``NVD_META.published`` for CVEs; ``TF_META`` for
-       ThreatFox; etc.). Fallback when MISP-native field wasn't
-       populated.
+       comment. **Layer 2 only exists for sources that already
+       persist a structured-metadata blob in the comment field for
+       other reasons** (NVD ships ``NVD_META`` JSON for CVSS / CWE /
+       reference data; ThreatFox ships ``TF_META`` JSON for malware
+       family / Malpedia / reporter). The 7 other allowlisted sources
+       (CISA, MITRE, VirusTotal, AbuseIPDB, URLhaus, Feodo, SSL
+       Blacklist) do NOT have a Layer 2 fallback — by design. Each
+       ships only a free-text comment (no structured JSON), so there
+       is nothing to parse back. Their first-seen value flows through
+       Layer 1 (MISP-native fields) exclusively. If Layer 1 is empty
+       AND the source is one of those 7, the function returns
+       ``None`` — semantically "we don't know" — and the caller's
+       MERGE preserves any prior value via MIN logic.
     3. **None** — signal "we don't know"; caller's MERGE preserves
        any existing value via MIN logic.
+
+    Coverage matrix (PR S5 final state):
+
+    +---------------+---------+---------+---------------------------+
+    | Source        | Layer 1 | Layer 2 | Notes                     |
+    +===============+=========+=========+===========================+
+    | NVD           |   ✅    |   ✅    | NVD_META.published        |
+    | CISA          |   ✅    |   ❌    | dateAdded via Layer 1     |
+    | MITRE         |   ✅    |   ❌    | STIX created via Layer 1  |
+    | VirusTotal    |   ✅    |   ❌    | first_submission via L1   |
+    | AbuseIPDB     |   ✅    |   ❌    | firstSeen via Layer 1     |
+    | ThreatFox     |   ✅    |   ✅    | TF_META.first_seen        |
+    | URLhaus       |   ✅    |   ❌    | dateadded via Layer 1     |
+    | Feodo         |   ✅    |   ❌    | first_seen via Layer 1    |
+    | SSL Blacklist |   ✅    |   ❌    | date via Layer 1          |
+    +---------------+---------+---------+---------------------------+
+
+    Adding Layer 2 for the 7 source-without-META-JSON sources would
+    require introducing new comment-encoded JSON blobs (``CISA_META``,
+    ``VT_META``, etc.) — significant new code for a marginal
+    safety net (Layer 1 already covers them with the MISP 2.4.120+
+    native-field round-trip). Tracked as a possible follow-up if
+    operational evidence shows Layer 1 dropouts for any source.
 
     Future-dated values are clamped to ``now()`` with a WARNING log.
     Unreliable / relay-only sources (OTX, CyberCure, MISP-only)

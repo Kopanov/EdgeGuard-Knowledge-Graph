@@ -804,6 +804,27 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
+        # PR (S5) commit X (bugbot MED): pass through first_seen/last_seen
+        # to the MISP-native attribute fields so the source-truthful
+        # extractor on the sync side can populate
+        # ``Vulnerability.first_seen_at_source`` / ``last_seen_at_source``
+        # for ALL vulnerability sources (not just NVD via NVD_META).
+        #
+        # Concretely this fixes CISA KEV: the CISA collector sets
+        # ``vuln["first_seen"] = dateAdded`` (when CISA listed the CVE
+        # as actively exploited — the canonical source-truthful field)
+        # but previously it was silently dropped at this handoff.
+        # NVD's ``published`` flows via NVD_META.published (Layer 2)
+        # and now ALSO via the MISP-native field (Layer 1, lossless
+        # round-trip); the extractor's resolution order picks the
+        # first non-empty one.
+        first_seen = vuln.get("first_seen")
+        last_seen = vuln.get("last_seen") or vuln.get("last_modified")
+        if first_seen and isinstance(first_seen, str) and first_seen.strip():
+            attribute["first_seen"] = first_seen
+        if last_seen and isinstance(last_seen, str) and last_seen.strip():
+            attribute["last_seen"] = last_seen
+
         return attribute
 
     def create_malware_attribute(self, malware: Dict) -> Optional[Dict]:

@@ -296,6 +296,109 @@ def test_cypher_wraps_first_seen_at_source_with_datetime_function():
     )
 
 
+def test_mispwriter_vulnerability_path_passes_first_seen_and_last_seen():
+    """PR (S5) commit X (bugbot MED) regression pin.
+
+    ``create_vulnerability_attribute`` MUST forward the collector's
+    ``first_seen`` / ``last_seen`` (or ``last_modified``) into the
+    MISP attribute dict so the source-truthful extractor can recover
+    the canonical timestamps for non-NVD vulnerability sources (CISA
+    KEV in particular). Without this passthrough, CISA's ``dateAdded``
+    is silently dropped at the MISPWriter handoff and CISA-sourced
+    Vulnerability nodes get ``first_seen_at_source = NULL`` despite
+    CISA being on the reliable allowlist.
+    """
+    from collectors.misp_writer import MISPWriter
+
+    writer = MISPWriter.__new__(MISPWriter)
+    # Bypass __init__ — we only need the method.
+    writer.SOURCE_TAGS = {"cisa": "source:CISA"}
+    writer._get_zones_to_tag = lambda v: ["global"]  # type: ignore[method-assign]
+    vuln = {
+        "cve_id": "CVE-2024-99999",
+        "description": "test",
+        "tag": "cisa",
+        "severity": "HIGH",
+        "cvss_score": 7.5,
+        "first_seen": "2024-03-15T00:00:00Z",
+        "last_seen": "2024-03-20T00:00:00Z",
+    }
+    attr = writer.create_vulnerability_attribute(vuln)
+    assert attr is not None
+    assert attr.get("first_seen") == "2024-03-15T00:00:00Z", (
+        "vulnerability MISP attribute MUST carry first_seen so the "
+        "source-truthful extractor (Layer 1 MISP-native field) can "
+        "populate Vulnerability.first_seen_at_source for CISA + other "
+        "non-NVD vulnerability sources"
+    )
+    assert attr.get("last_seen") == "2024-03-20T00:00:00Z"
+
+    # Empty / missing values must NOT inject a falsy value into the
+    # MISP attribute (PyMISP rejects empty strings on those fields).
+    vuln2 = {"cve_id": "CVE-2024-88888", "tag": "cisa", "severity": "LOW", "cvss_score": 1.0}
+    attr2 = writer.create_vulnerability_attribute(vuln2)
+    assert attr2 is not None
+    assert "first_seen" not in attr2
+    assert "last_seen" not in attr2
+
+
+def test_cisa_collector_does_not_inject_wall_clock_first_seen():
+    """PR (S5) commit X (bugbot MED follow-on) regression pin.
+
+    The CISA collector previously had
+    ``"first_seen": date_added or datetime.now(...).isoformat()`` —
+    the wall-clock fallback poisoned ``Vulnerability.first_seen_at_source``
+    with the sync-run-time NOW for any KEV entry missing ``dateAdded``
+    (rare, but observed). Same bug class as the AbuseIPDB blacklist
+    fix in commit 87d3529. The fix: emit ``None`` when ``dateAdded``
+    is empty so the extractor's MIN logic preserves any prior value
+    instead of overwriting it with NOW.
+    """
+    path = os.path.join(_SRC, "collectors", "cisa_collector.py")
+    with open(path) as fh:
+        src = _code_only(fh.read())
+    assert "datetime.now(timezone.utc).isoformat()" not in (
+        src.split('"first_seen"')[1].split('"last_updated"')[0] if '"first_seen"' in src else ""
+    ), (
+        "CISA collector first_seen MUST NOT fall back to wall-clock NOW — "
+        "use 'date_added or None' so the source-truthful extractor preserves "
+        "any prior value via MIN logic"
+    )
+    assert '"first_seen": date_added or None' in src, (
+        "CISA collector MUST emit None when dateAdded is empty (not wall-clock NOW)"
+    )
+
+
+def test_coerce_iso_is_single_source_of_truth():
+    """PR (S5) commit X (bugbot LOW) regression pin.
+
+    ``run_misp_to_neo4j`` previously had a private ``_coerce_to_iso``
+    that was a character-for-character copy of
+    ``source_truthful_timestamps._coerce_iso``. Bugbot correctly
+    flagged the duplication as a divergence risk. The fix:
+    ``run_misp_to_neo4j`` now imports the canonical helper as
+    ``_coerce_to_iso`` and the local ``def`` is gone.
+    """
+    path = os.path.join(_SRC, "run_misp_to_neo4j.py")
+    with open(path) as fh:
+        src = fh.read()
+    # Must NOT redefine the helper locally
+    assert "def _coerce_to_iso(" not in _code_only(src), (
+        "run_misp_to_neo4j must NOT redefine _coerce_to_iso — import the canonical impl from source_truthful_timestamps"
+    )
+    # Must import it
+    assert "from source_truthful_timestamps import coerce_iso as _coerce_to_iso" in src, (
+        "run_misp_to_neo4j must import the canonical coerce_iso (aliased to _coerce_to_iso for call-site compat)"
+    )
+    # source_truthful_timestamps must export the public name
+    path2 = os.path.join(_SRC, "source_truthful_timestamps.py")
+    with open(path2) as fh:
+        src2 = _code_only(fh.read())
+    assert "def coerce_iso(" in src2, (
+        "source_truthful_timestamps must define the public coerce_iso (canonical single source of truth)"
+    )
+
+
 def test_stix_sighting_emission_env_var_name_is_documented():
     """The opt-in Sighting SRO emission env var name must remain
     DOCUMENTED in the module so future implementers can find the

@@ -51,6 +51,7 @@ from neo4j_client import (
 )
 from query_pause import query_pause
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
+from source_truthful_timestamps import coerce_iso as _coerce_to_iso
 from source_truthful_timestamps import extract_source_truthful_timestamps
 
 try:
@@ -124,22 +125,12 @@ except (ValueError, TypeError):
     MISP_EVENTS_INDEX_MAX_PAGES = 100
 
 
-def _coerce_to_iso(val: Any) -> Optional[str]:
-    """Convert a timestamp value to an ISO 8601 UTC string.
-
-    Handles None/empty, Unix int timestamps, datetime objects, and passthrough strings.
-    """
-    if val is None:
-        return None
-    if isinstance(val, str) and not val.strip():
-        return None
-    if isinstance(val, (int, float)):
-        return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
-    if isinstance(val, datetime):
-        return val.isoformat()
-    if isinstance(val, str):
-        return val
-    return None
+# PR (S5) commit X (bugbot LOW): the local ``_coerce_to_iso`` helper was
+# deleted; the canonical implementation now lives in
+# ``source_truthful_timestamps.coerce_iso`` (imported above as
+# ``_coerce_to_iso`` to keep the existing call-site spelling). Single
+# source of truth — bug fix in one place propagates to all callers
+# (parse_attribute, MISPWriter handoff, alert_processor read-side).
 
 
 def _is_edgeguard_index_event(ev: Dict[str, Any]) -> bool:
