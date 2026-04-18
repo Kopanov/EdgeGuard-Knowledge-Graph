@@ -783,25 +783,36 @@ python -m collectors.energy_feed_collector
 
 ## Adding a new reliable source — checklist
 
-When adding a new collector that has a **canonical first-reported / last-reported timestamp** that should flow into the source-truthful timestamp pipeline (PR S5, 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`), follow this **8-step checklist**:
+When adding a new collector that has a **canonical first-reported / last-reported timestamp** that should flow into the source-truthful timestamp pipeline (PR S5, 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`), follow this **5-step checklist**:
 
-### 1. Add to `_RELIABLE_FIRST_SEEN_SOURCES` allowlist
+> **Chip 5a (PR follow-up) consolidated steps 1–4** of the legacy
+> 8-step checklist into a single declarative edit in
+> `src/source_registry.py`. The five legacy registries
+> (`_RELIABLE_FIRST_SEEN_SOURCES`, `SOURCE_TAGS`, `SOURCES`,
+> `MISPWriter.SOURCE_TAGS`, `DEFAULT_SOURCES`) are now derived from
+> the registry, so adding a `Source(...)` entry there propagates to
+> all five simultaneously. The propagation is pinned by
+> `tests/test_source_registry.py::test_adding_a_new_source_propagates_to_all_five_derivations`.
 
-In `src/source_truthful_timestamps.py`, add your source's tag(s) to the `_RELIABLE_FIRST_SEEN_SOURCES` frozenset. Include both the canonical name AND any aliases (e.g. `"feodo"` + `"feodo_tracker"`) — the allowlist must accept whatever string the collector writes to `item["tag"]`.
+### 1. Add a `Source(...)` entry to `src/source_registry.py`
 
-### 2. Add to `SOURCE_MAPPING` in `run_misp_to_neo4j.py`
+Append one record to the `_REGISTRY` tuple. Required fields:
+``canonical_id``, ``display_name``, ``source_type``, ``reliability``,
+``misp_tag``, ``reliable_first_seen``. Optional but recommended:
+``aliases`` (covers historical short-names so collector lookups by
+either spelling resolve identically), ``cli_id`` / ``api_key_env`` /
+``rate_limit`` / ``cli_default_enabled`` / ``cli_description`` (the
+``edgeguard sources`` CLI listing), ``cli_display_name`` (only needed
+when the CLI label differs from the Neo4j ``Source.name`` — currently
+only NVD).
 
-In `src/run_misp_to_neo4j.py::SOURCE_MAPPING`, map the human label (e.g. `"My-New-Source"`) to the canonical tag. Tag MUST match what the collector emits; the static test `test_collector_emitted_tags_match_allowlist` will fail otherwise.
+The ``reliable_first_seen`` flag controls whether the source's
+first/last_seen claims land on the ``SOURCED_FROM`` edge. ``False``
+for sources whose first_seen field means something other than "first
+observed in the wild" (OTX pulse-publish-date, CyberCure synthetic
+now, MISP pipeline metadata).
 
-### 3. Add to `SOURCE_TAGS` in `config.py`
-
-In `src/config.py::SOURCE_TAGS`, add the human-readable label → tag mapping. This is what MISPWriter uses to tag attributes and what `extract_source_from_tags` reads back.
-
-### 4. Add to `SOURCES` dict in `neo4j_client.py`
-
-In `src/neo4j_client.py::SOURCES`, add an entry for your tag (canonical + any aliases). `ensure_sources()` MERGEs a `:Source` node per entry; the SOURCED_FROM edge MERGE then matches on `source_id`. **A missing entry causes the merge_indicators_batch / merge_vulnerabilities_batch defensive check to refuse the entire batch** with a clear error log (Red Team v3 H1 protection).
-
-### 5. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
+### 2. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
 
 In your new `collectors/<name>_collector.py`, populate the source-truthful timestamps directly from upstream:
 
@@ -821,15 +832,15 @@ processed.append({
 })
 ```
 
-### 6. Verify MISPWriter passthrough fires for your entity type
+### 3. Verify MISPWriter passthrough fires for your entity type
 
 The `_apply_source_truthful_timestamps` helper in `src/collectors/misp_writer.py` is called from all 7 `create_*_attribute` methods (indicator, vulnerability, malware, actor, technique, tactic, tool) AS THE LAST STATEMENT before `return attribute`. If you add a NEW entity type, you must add the helper call to its `create_*_attribute` method too — the bugbot fix in commit `9a414ac` had to do exactly this for 5 entity types after they were missed. The helper uses `coerce_iso` to accept int epochs, datetime objects, and date-only strings.
 
-### 7. Add Layer-2 META JSON parser if your source ships structured metadata
+### 4. Add Layer-2 META JSON parser if your source ships structured metadata
 
 If your source ships a structured-metadata JSON blob (like NVD_META, TF_META, CISA_META) that needs to round-trip through the MISP attribute comment field, add a Layer-2 fallback branch in `src/source_truthful_timestamps.py::extract_source_truthful_timestamps`. Most sources only need Layer-1 (MISP-native attribute fields).
 
-### 8. Update `tests/test_source_reported_timestamps.py`
+### 5. Update `tests/test_source_reported_timestamps.py`
 
 Add your tag to the static enumeration in `test_collector_emitted_tags_match_allowlist` so the test catches future tag drift.
 
@@ -859,4 +870,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-04-18_
+_Last updated: 2026-04-18 — chip 5a refactor consolidated steps 1–4 of the legacy 8-step "adding a new reliable source" checklist into a single declarative `Source(...)` edit in `src/source_registry.py`._

@@ -167,29 +167,18 @@ _INT_EPOCH_CEIL = 253_402_300_799  # 9999-12-31 UTC (datetime.fromtimestamp limi
 # change the upstream truth, but the source_id of the COLLECTOR that
 # fetched the relayed copy might be "otx". We need to credit the
 # original source's first_seen, not the relay's.
-_RELIABLE_FIRST_SEEN_SOURCES: frozenset = frozenset(
-    {
-        "nvd",
-        # CISA: collector emits "cisa_kev" (config.SOURCE_TAGS["cisa"] =
-        # "cisa_kev"); legacy collectors / tests / direct callers may
-        # still pass "cisa". Both must be on the allowlist or the CISA
-        # passthrough fix in PR (S5) is dead. Bugbot caught the
-        # misalignment in commit ac25b07.
-        "cisa",
-        "cisa_kev",
-        "mitre_attck",
-        "mitre",
-        "virustotal",
-        "vt",
-        "abuseipdb",
-        "threatfox",
-        "urlhaus",
-        "feodo_tracker",
-        "feodo",
-        "ssl_blacklist",
-        "abusech_ssl",
-    }
-)
+#
+# Single-source-of-truth derivation from src/source_registry.py (chip 5a).
+# Each Source(reliable_first_seen=True) entry contributes its canonical id
+# AND every alias to the frozenset, so a collector calling with EITHER
+# spelling (e.g. "cisa" or "cisa_kev", "mitre" or "mitre_attck", "feodo"
+# or "feodo_tracker", "vt" or "virustotal") resolves identically.
+# Bugbot's commit ac25b07 caught the misalignment that the alias-coverage
+# requirement existed but wasn't centrally enforced; the registry refactor
+# makes the alias-vs-canonical relationship the single source.
+import source_registry as _source_registry  # noqa: E402  — sequenced after the bounds-constant block above
+
+_RELIABLE_FIRST_SEEN_SOURCES: frozenset = _source_registry.reliable_first_seen_aliases()
 
 
 def _normalize_source_key(source_id: Optional[str]) -> str:
