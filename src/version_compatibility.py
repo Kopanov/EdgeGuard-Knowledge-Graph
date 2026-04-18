@@ -72,9 +72,21 @@ logger = logging.getLogger(__name__)
 # ``test_recommended_versions_match_pin_files`` regression test fails
 # loudly if the two drift apart.
 #
-# Format: each value is the MINIMUM acceptable major.minor. The compat
-# check warns if running version is older (drift from the deployment
-# baseline) or newer by a major version (likely a breaking change).
+# Format: each value is the EXACT recommended major.minor. The compat
+# check is "ok" only on an exact major.minor match (patch drift is
+# silently fine — that's what the project's ``~=N.M`` SemVer policy
+# in ``requirements.txt`` already documents as non-breaking). ANY
+# minor drift in either direction is "warn":
+#   * older running version → operator hasn't upgraded yet
+#   * newer running minor   → someone bypassed the ``~=`` pin (manual
+#     install, container override, custom build) and the documented
+#     baseline no longer matches the deployed env
+# Major drift additionally calls out likely breaking changes —
+# operators should verify Cypher / API call sites before deploying.
+# (PR #36 bugbot MED — was previously labeled "MINIMUM" which conflicted
+# with the actual exact-match-on-major.minor behavior; the label
+# created a trap for future developers reading the comment in
+# isolation.)
 RECOMMENDED_VERSIONS: Dict[str, str] = {
     # Neo4j server: we run the 2026.x community edition. Server release
     # line moved from 5.x → 2026.x in early 2026 (CalVer rebrand). The 5.x
