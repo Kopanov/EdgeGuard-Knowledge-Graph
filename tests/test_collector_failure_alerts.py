@@ -212,7 +212,7 @@ def test_slack_alert_is_opt_in_and_silent_by_default(monkeypatch):
     # Patch requests.post to detect any accidental call.
     with patch("requests.post") as post_mock:
         send_slack_alert("test message")
-    post_mock.assert_not_called(), "send_slack_alert must not call HTTP when disabled"
+    post_mock.assert_not_called()  # send_slack_alert must not call HTTP when disabled
 
 
 def test_slack_alert_no_ops_when_webhook_url_missing(monkeypatch):
@@ -224,7 +224,7 @@ def test_slack_alert_no_ops_when_webhook_url_missing(monkeypatch):
 
     with patch("requests.post") as post_mock:
         send_slack_alert("test message")
-    post_mock.assert_not_called(), "no webhook URL → must not attempt HTTP"
+    post_mock.assert_not_called()  # no webhook URL → must not attempt HTTP
 
 
 def test_slack_alert_swallows_post_errors(monkeypatch):
@@ -315,10 +315,7 @@ def test_report_collector_failure_catastrophic_emits_failed_metrics(monkeypatch)
 
     assert classification == "catastrophic"
     metrics["record_collection"].assert_called_once_with("buggy_collector", "global", 0, "failed")
-    (
-        metrics["record_collector_skip"].assert_not_called(),
-        ("catastrophic errors must NOT be counted as skipped — confuses on-call"),
-    )
+    metrics["record_collector_skip"].assert_not_called()  # catastrophic errors must NOT be counted as skipped — confuses on-call
     metrics["set_source_health"].assert_called_once_with("buggy_collector", "global", False)
     metrics["record_pipeline_error"].assert_called_once_with("collect_buggy_collector", "TypeError", "buggy_collector")
 
