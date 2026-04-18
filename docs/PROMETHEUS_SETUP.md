@@ -189,7 +189,7 @@ on the failure-mode distribution of the input-hardening layer
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
 | `edgeguard_source_truthful_claim_accepted_total` | Counter | `source_id`, `field` | Per-source claim survived all layers and lands on `r.source_reported_first_at` / `r.source_reported_last_at`. `field ∈ {first_seen, last_seen}`. |
-| `edgeguard_source_truthful_claim_dropped_total` | Counter | `source_id`, `reason`, `field` | Per-source claim did NOT make it onto the edge. `reason ∈ {source_not_in_allowlist, no_data_from_source}`. Honest-NULL drops (source on the allowlist but supplied no value) ARE counted here under `no_data_from_source` — non-zero baseline expected. |
+| `edgeguard_source_truthful_claim_dropped_total` | Counter | `source_id`, `reason`, `field` | Per-source claim did NOT make it onto the edge. `reason ∈ {source_not_in_allowlist, no_data_from_source}`. `field ∈ {first_seen, last_seen}` — both reasons emit per-field (the relay-rejection drop and the honest-NULL drop appear in the same per-field denominator, so the operator query below is correct). Honest-NULL drops (source on the allowlist but supplied no value) ARE counted under `no_data_from_source` — non-zero baseline expected. |
 | `edgeguard_source_truthful_coerce_rejected_total` | Counter | `reason` | `coerce_iso` input rejected. `reason ∈ {sentinel_epoch, malformed_string, overflow}`. No `source_id` label — `coerce_iso` is a pure utility called from many sites without source context. |
 | `edgeguard_source_truthful_future_clamp_total` | Counter | - | Future-dated timestamp clamped to `now()`. Likely upstream feed bug or operator clock drift. The accompanying WARNING log carries the original value. |
 
@@ -203,12 +203,23 @@ a malformed or spoofed source tag from blowing up Prometheus.
 **Operator queries:**
 
 ```promql
-# Per-source acceptance rate (1.0 = source always supplies first_seen)
+# Per-source acceptance rate (1.0 = source always supplies first_seen).
+# Includes ALL drops in the denominator — both honest-NULL
+# (no_data_from_source) and unreliable-source filter
+# (source_not_in_allowlist) — so the rate reflects the full
+# pipeline, not just the post-allowlist-filter slice.
 rate(edgeguard_source_truthful_claim_accepted_total{field="first_seen"}[5m])
   /
-ignoring(reason) sum without(reason) (
+(
     rate(edgeguard_source_truthful_claim_accepted_total{field="first_seen"}[5m])
-  + rate(edgeguard_source_truthful_claim_dropped_total{reason="no_data_from_source", field="first_seen"}[5m])
+  + sum without (reason) (
+        rate(edgeguard_source_truthful_claim_dropped_total{field="first_seen"}[5m])
+    )
+)
+
+# Relay-rejection visibility — count of unreliable-source drops per source
+sum by (source_id) (
+    rate(edgeguard_source_truthful_claim_dropped_total{reason="source_not_in_allowlist"}[5m])
 )
 
 # coerce_iso failure-mode distribution (spot a misbehaving collector)

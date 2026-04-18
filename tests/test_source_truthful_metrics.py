@@ -140,17 +140,29 @@ def test_extract_emits_no_data_counter_for_reliable_source_with_None_values():
     assert after_accept - before_accept == 0.0
 
 
-def test_extract_emits_source_not_in_allowlist_counter_once_for_unreliable_source():
-    """Unreliable source (OTX) → ONE source_not_in_allowlist DROPPED
-    increment with field='both'. Per-field drop counters must NOT
-    increment (we never even attempt extraction)."""
+def test_extract_emits_source_not_in_allowlist_counter_per_field_for_unreliable_source():
+    """PR #42 audit M3 (Logic Tracker): unreliable source (OTX) →
+    TWO source_not_in_allowlist DROPPED increments, one per field
+    (first_seen + last_seen). The earlier draft of this test asserted
+    a single field='both' emit; the per-field-symmetric emit makes
+    the documented PromQL acceptance-rate query
+    ``accepted{field=X} / sum without(reason)(accepted+dropped){field=X}``
+    correct (the relay drop now appears in the same field-bucketed
+    denominator as the no_data drop).
+
+    no_data_from_source counters MUST NOT fire — we never even
+    attempt Layer-1/Layer-2 extraction for unreliable sources.
+    """
     from metrics_server import SOURCE_TRUTHFUL_CLAIM_DROPPED
     from source_truthful_timestamps import extract_source_truthful_timestamps
 
-    before_both = _counter_value(
-        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="source_not_in_allowlist", field="both"
-    )
     before_first = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="source_not_in_allowlist", field="first_seen"
+    )
+    before_last = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="source_not_in_allowlist", field="last_seen"
+    )
+    before_no_data = _counter_value(
         SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="no_data_from_source", field="first_seen"
     )
 
@@ -160,14 +172,18 @@ def test_extract_emits_source_not_in_allowlist_counter_once_for_unreliable_sourc
     )
     assert out == (None, None)
 
-    after_both = _counter_value(
-        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="source_not_in_allowlist", field="both"
-    )
     after_first = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="source_not_in_allowlist", field="first_seen"
+    )
+    after_last = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="source_not_in_allowlist", field="last_seen"
+    )
+    after_no_data = _counter_value(
         SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="otx", reason="no_data_from_source", field="first_seen"
     )
-    assert after_both - before_both == 1.0, "source_not_in_allowlist counter should fire exactly once for OTX"
-    assert after_first - before_first == 0.0, "per-field DROPPED counters must NOT fire for unreliable sources"
+    assert after_first - before_first == 1.0, "source_not_in_allowlist must fire for field=first_seen"
+    assert after_last - before_last == 1.0, "source_not_in_allowlist must fire for field=last_seen"
+    assert after_no_data - before_no_data == 0.0, "no_data_from_source must NOT fire for unreliable sources"
 
 
 def test_extract_layer2_fallback_counts_as_accepted_not_dropped():
@@ -392,3 +408,110 @@ def test_new_counters_appear_in_generate_latest_output():
     assert "edgeguard_source_truthful_claim_dropped_total" in payload
     assert "edgeguard_source_truthful_coerce_rejected_total" in payload
     assert "edgeguard_source_truthful_future_clamp_total" in payload
+
+
+# ===========================================================================
+# 6. Cross-module parity (PR #42 audit M1) — allowlist drift detector
+# ===========================================================================
+
+
+def test_source_label_allowlist_mirrors_reliable_first_seen_sources():
+    """PR #42 audit M1 (Cross-Checker): the metrics ``_SOURCE_LABEL_ALLOWLIST``
+    MUST be a SUPERSET of ``_RELIABLE_FIRST_SEEN_SOURCES`` so every reliable
+    source resolves to its own Prometheus cell (rather than collapsing
+    into ``<other>``).
+
+    Drift is silent: the previous draft included ``sslbl`` even though
+    no source emits that tag, and any new source added to the reliable
+    allowlist would have been missed. This test catches the next drift
+    automatically.
+    """
+    from metrics_server import _REJECTED_ON_PURPOSE_SOURCES, _source_label_allowlist
+    from source_truthful_timestamps import _RELIABLE_FIRST_SEEN_SOURCES
+
+    allowlist = _source_label_allowlist()
+    missing = set(_RELIABLE_FIRST_SEEN_SOURCES) - allowlist
+    assert not missing, (
+        f"_SOURCE_LABEL_ALLOWLIST is missing reliable sources: {missing}. "
+        "Every source on the source-truthful allowlist MUST appear here so "
+        "its metric label resolves to its own cell, not <other>."
+    )
+    # Symmetric: every metric-allowlisted entry must be either a reliable
+    # source OR an explicitly-rejected relay (otherwise it's dead weight).
+    extras = allowlist - set(_RELIABLE_FIRST_SEEN_SOURCES) - _REJECTED_ON_PURPOSE_SOURCES
+    assert not extras, (
+        f"_SOURCE_LABEL_ALLOWLIST has extras not in either canonical set: {extras}. "
+        "Allowlist composition is RELIABLE ∪ REJECTED_ON_PURPOSE — anything else is drift."
+    )
+
+
+# ===========================================================================
+# 7. PR #42 audit M2 — bounded enum guards on reason/field labels
+# ===========================================================================
+
+
+def test_drop_counter_clamps_unknown_reason_to_other():
+    """An out-of-band reason value (future caller passes
+    ``reason="garbage"``) MUST clamp to ``<other>`` rather than create
+    a new Prometheus cell — otherwise cardinality grows unbounded."""
+    from metrics_server import (
+        SOURCE_TRUTHFUL_CLAIM_DROPPED,
+        record_source_truthful_claim_dropped,
+    )
+
+    before = _counter_value(SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="nvd", reason="<other>", field="first_seen")
+    record_source_truthful_claim_dropped("nvd", "totally_made_up_reason", "first_seen")
+    after = _counter_value(SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="nvd", reason="<other>", field="first_seen")
+    assert after - before == 1.0
+
+
+def test_coerce_counter_clamps_unknown_reason_to_other():
+    """Same protection on ``record_source_truthful_coerce_rejected``."""
+    from metrics_server import (
+        SOURCE_TRUTHFUL_COERCE_REJECTED,
+        record_source_truthful_coerce_rejected,
+    )
+
+    before = _counter_value(SOURCE_TRUTHFUL_COERCE_REJECTED, reason="<other>")
+    record_source_truthful_coerce_rejected("garbage_reason_not_in_enum")
+    after = _counter_value(SOURCE_TRUTHFUL_COERCE_REJECTED, reason="<other>")
+    assert after - before == 1.0
+
+
+def test_drop_counter_clamps_unknown_field_to_other():
+    """The ``field`` label is also enum-guarded — ``"both"`` (the legacy
+    pre-M3 value) and any other out-of-band value collapse to
+    ``<other>`` so we'd see the regression as a metric blip rather
+    than as silent cardinality drift."""
+    from metrics_server import (
+        SOURCE_TRUTHFUL_CLAIM_DROPPED,
+        record_source_truthful_claim_dropped,
+    )
+
+    before = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="nvd", reason="no_data_from_source", field="<other>"
+    )
+    record_source_truthful_claim_dropped("nvd", "no_data_from_source", "both")  # legacy field value
+    after = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="nvd", reason="no_data_from_source", field="<other>"
+    )
+    assert after - before == 1.0
+
+
+def test_drop_counter_clamps_empty_field_to_unknown():
+    """Empty / None field → ``<unknown>`` (distinguishable from
+    ``<other>``: empty means missing data, other means out-of-band
+    value)."""
+    from metrics_server import (
+        SOURCE_TRUTHFUL_CLAIM_DROPPED,
+        record_source_truthful_claim_dropped,
+    )
+
+    before = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="nvd", reason="no_data_from_source", field="<unknown>"
+    )
+    record_source_truthful_claim_dropped("nvd", "no_data_from_source", "")
+    after = _counter_value(
+        SOURCE_TRUTHFUL_CLAIM_DROPPED, source_id="nvd", reason="no_data_from_source", field="<unknown>"
+    )
+    assert after - before == 1.0

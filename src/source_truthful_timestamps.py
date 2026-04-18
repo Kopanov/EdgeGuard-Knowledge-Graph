@@ -554,10 +554,17 @@ def extract_source_truthful_timestamps(
         the comment field.
     """
     if not is_reliable_first_seen_source(source_id):
-        # Single emit (field="both") — we never even attempt per-field
-        # extraction for unreliable sources, so per-field counters would
-        # double-count this case.
-        _metric_drop(source_id, "source_not_in_allowlist", "both")
+        # PR #42 audit M3 (Logic Tracker): emit per-field — symmetric
+        # with the no_data_from_source path below — so the documented
+        # PromQL acceptance-rate query
+        # ``accepted{field=X} / sum without(reason)(accepted+dropped){field=X}``
+        # gives correct denominators. Earlier draft emitted once with
+        # ``field="both"`` which broke per-field aggregation for
+        # relays like OTX (every OTX hit collapsed into a third
+        # ``field`` value not visible in the per-first_seen / per-last_seen
+        # operator queries).
+        _metric_drop(source_id, "source_not_in_allowlist", "first_seen")
+        _metric_drop(source_id, "source_not_in_allowlist", "last_seen")
         return (None, None)
 
     # Layer 1: MISP-native attribute fields (the lossless round-trip path)

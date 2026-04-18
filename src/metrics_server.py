@@ -338,36 +338,76 @@ def record_misp_attribute_dropped(reason: str, count: int = 1):
 
 # Allowlist used to keep the source_id label cardinality bounded. Anything
 # outside the list collapses to "<other>" so a malformed / surprise tag
-# can't blow up Prometheus storage. Mirrors
-# ``source_truthful_timestamps._RELIABLE_FIRST_SEEN_SOURCES`` plus a few
-# common relays we explicitly reject (so the operator can SEE the relay
-# rejection rate, not just have it disappear).
-_SOURCE_LABEL_ALLOWLIST = frozenset(
+# can't blow up Prometheus storage.
+#
+# Composition is two-part:
+#   1. RELIABLE — every entry in
+#      ``source_truthful_timestamps._RELIABLE_FIRST_SEEN_SOURCES``
+#      (mirrored byte-for-byte; see test
+#      ``test_source_label_allowlist_mirrors_reliable_first_seen_sources``
+#      that pins parity).
+#   2. REJECTED-ON-PURPOSE — relays we deliberately exclude from the
+#      reliable allowlist but still want metric visibility for so
+#      operators can SEE the rejection rate as signal, not silence.
+#
+# PR #42 audit M1 (Cross-Checker): the previous hand-maintained
+# allowlist drifted from ``_RELIABLE_FIRST_SEEN_SOURCES`` — it
+# included ``sslbl`` even though no source emits that tag (the
+# canonical SSL-Blacklist tags are ``ssl_blacklist`` /
+# ``abusech_ssl``). Drift was silent: the sslbl cell was dead and a
+# future source added to the reliable allowlist would have collapsed
+# into ``<other>`` until somebody remembered to update both files.
+_REJECTED_ON_PURPOSE_SOURCES: frozenset[str] = frozenset(
     {
-        # Allowlisted sources (mirror _RELIABLE_FIRST_SEEN_SOURCES).
-        "nvd",
-        "cisa",
-        "cisa_kev",
-        "mitre",
-        "mitre_attck",
-        "virustotal",
-        "vt",
-        "abuseipdb",
-        "threatfox",
-        "urlhaus",
-        "feodo",
-        "feodo_tracker",
-        "sslbl",
-        "ssl_blacklist",
-        "abusech_ssl",
-        # Rejected-on-purpose sources we still want a counter for so
-        # operators see the rejection rate as signal, not silence.
         "otx",
         "alienvault_otx",
         "cybercure",
         "misp",
     }
 )
+
+
+def _build_source_label_allowlist() -> frozenset[str]:
+    """Compose the metrics allowlist from the source-truthful module.
+
+    Lazy + late-bound so the import order (``metrics_server`` ←
+    ``source_truthful_timestamps``) doesn't form a cycle: the
+    source-truthful module imports ``record_*`` functions from us,
+    so we cannot import ``_RELIABLE_FIRST_SEEN_SOURCES`` at
+    module-load time. By the time any caller hits
+    ``_safe_source_label``, the source-truthful module is already
+    fully imported (the call only fires from inside its
+    ``extract_source_truthful_timestamps`` body).
+    """
+    try:
+        from source_truthful_timestamps import _RELIABLE_FIRST_SEEN_SOURCES
+    except ImportError:  # pragma: no cover — defensive
+        return _REJECTED_ON_PURPOSE_SOURCES
+    return frozenset(_RELIABLE_FIRST_SEEN_SOURCES) | _REJECTED_ON_PURPOSE_SOURCES
+
+
+# Module-level cache: built lazily on first call. ``None`` sentinel
+# means "not yet initialized"; ``frozenset()`` would be the empty
+# allowlist which is a different state (every source → ``<other>``).
+#
+# CRITICAL: this MUST be lazy. ``source_truthful_timestamps`` imports
+# the ``record_*`` helpers from this module. If we eagerly build the
+# allowlist at import time, Python's circular-import handling returns
+# a half-initialized ``metrics_server`` to ``source_truthful_timestamps``
+# — its defensive ``try/except ImportError`` catches the missing
+# names and silently installs no-op shims. The metrics never fire.
+# Lazy build avoids that: by the time ``_source_label_allowlist`` is
+# called from inside ``_safe_source_label``, both modules are fully
+# loaded and the import succeeds.
+_SOURCE_LABEL_ALLOWLIST_CACHE: frozenset[str] | None = None
+
+
+def _source_label_allowlist() -> frozenset[str]:
+    """Return the cached allowlist; build on first call."""
+    global _SOURCE_LABEL_ALLOWLIST_CACHE
+    if _SOURCE_LABEL_ALLOWLIST_CACHE is None:
+        _SOURCE_LABEL_ALLOWLIST_CACHE = _build_source_label_allowlist()
+    return _SOURCE_LABEL_ALLOWLIST_CACHE
 
 
 def _safe_source_label(source_id: str | None) -> str:
@@ -382,7 +422,40 @@ def _safe_source_label(source_id: str | None) -> str:
     norm = source_id.strip().lower()
     if not norm:
         return "<unknown>"
-    return norm if norm in _SOURCE_LABEL_ALLOWLIST else "<other>"
+    # Use the lazy lookup so a hypothetical late binding of
+    # source_truthful_timestamps still resolves correctly. Falls back
+    # to the eagerly-built constant if the module-level cache has
+    # already settled.
+    return norm if norm in _source_label_allowlist() else "<other>"
+
+
+# PR #42 audit M2 (Bug Hunter): bounded enums for ``reason`` labels on
+# the source-truthful counters. Without these, a future caller could
+# pass an unbounded string and blow up Prometheus cardinality —
+# Prometheus stores ONE time series per unique label combination, so
+# even one ``reason=<random uuid>`` per call would O(N) explode the
+# memory footprint over time. PR #42 audit M3 (Logic Tracker): the
+# ``field`` label gets the same treatment for the same reason, plus
+# the historical ``"both"`` value was dropped when source_not_in_allowlist
+# switched to per-field emit (see source_truthful_timestamps.py).
+_VALID_DROP_REASONS: frozenset[str] = frozenset({"source_not_in_allowlist", "no_data_from_source"})
+_VALID_COERCE_REASONS: frozenset[str] = frozenset({"sentinel_epoch", "malformed_string", "overflow"})
+_VALID_FIELD_LABELS: frozenset[str] = frozenset({"first_seen", "last_seen"})
+
+
+def _safe_enum_label(value: str | None, valid: frozenset[str]) -> str:
+    """Clamp a label value to a known enum; unknown → ``<other>``.
+
+    Empty / None → ``<unknown>`` (operator-distinguishable from
+    ``<other>``: the former is missing data, the latter is an
+    out-of-band reason value worth investigating).
+    """
+    if not value:
+        return "<unknown>"
+    norm = value.strip().lower()[:80].replace('"', "")
+    if not norm:
+        return "<unknown>"
+    return norm if norm in valid else "<other>"
 
 
 def record_source_truthful_claim_accepted(source_id: str | None, field: str) -> None:
@@ -391,7 +464,10 @@ def record_source_truthful_claim_accepted(source_id: str | None, field: str) -> 
     Called from ``extract_source_truthful_timestamps`` exactly once per
     (call, field) when the final post-Layer-2 value is non-NULL.
     """
-    SOURCE_TRUTHFUL_CLAIM_ACCEPTED.labels(source_id=_safe_source_label(source_id), field=field).inc()
+    SOURCE_TRUTHFUL_CLAIM_ACCEPTED.labels(
+        source_id=_safe_source_label(source_id),
+        field=_safe_enum_label(field, _VALID_FIELD_LABELS),
+    ).inc()
 
 
 def record_source_truthful_claim_dropped(source_id: str | None, reason: str, field: str) -> None:
@@ -402,8 +478,11 @@ def record_source_truthful_claim_dropped(source_id: str | None, reason: str, fie
     drops are counted here under ``no_data_from_source`` — operators
     monitoring this counter should expect a non-zero baseline.
     """
-    safe_reason = (reason or "unknown").replace('"', "")[:80]
-    SOURCE_TRUTHFUL_CLAIM_DROPPED.labels(source_id=_safe_source_label(source_id), reason=safe_reason, field=field).inc()
+    SOURCE_TRUTHFUL_CLAIM_DROPPED.labels(
+        source_id=_safe_source_label(source_id),
+        reason=_safe_enum_label(reason, _VALID_DROP_REASONS),
+        field=_safe_enum_label(field, _VALID_FIELD_LABELS),
+    ).inc()
 
 
 def record_source_truthful_coerce_rejected(reason: str) -> None:
@@ -414,8 +493,9 @@ def record_source_truthful_coerce_rejected(reason: str) -> None:
     (sentinel_epoch / malformed_string / overflow); see the counter
     definition for the full enum.
     """
-    safe = (reason or "unknown").replace('"', "")[:80]
-    SOURCE_TRUTHFUL_COERCE_REJECTED.labels(reason=safe).inc()
+    SOURCE_TRUTHFUL_COERCE_REJECTED.labels(
+        reason=_safe_enum_label(reason, _VALID_COERCE_REASONS),
+    ).inc()
 
 
 def record_source_truthful_future_clamp() -> None:
