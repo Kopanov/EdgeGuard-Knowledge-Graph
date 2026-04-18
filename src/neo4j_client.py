@@ -1104,13 +1104,18 @@ class Neo4jClient:
                     "tag_array": tag_array,
                     "tag_value": tag_value,
                     "node_uuid": node_uuid,
-                    # PR (S5): source-truthful timestamps; bind even when None
-                    # so the Cypher CASE clauses can compare against them.
-                    # NULL never overwrites a populated value (CASE guards).
-                    "first_seen_at_source": first_seen_at_source,
-                    "last_seen_at_source": last_seen_at_source,
                     **params_extra,
                 }
+                # PR (S5) commit X (architecture redesign + bugbot 9e58af6 LOW):
+                # source-truthful timestamps live on the SOURCED_FROM
+                # edge (not the node), so they are NOT bound into the
+                # node MERGE params dict above. They are passed
+                # separately to ``_upsert_sourced_relationship`` below
+                # via the ``source_reported_first_at`` /
+                # ``source_reported_last_at`` keyword arguments.
+                # The local ``first_seen_at_source`` / ``last_seen_at_source``
+                # variables read from ``data`` are used for that pass-
+                # through ONLY.
                 if misp_event_id:
                     params["misp_event_id"] = misp_event_id
                 if misp_attribute_id:
@@ -3767,14 +3772,18 @@ class Neo4jClient:
         # Default name only after cve_id validation
         name = data.get("name", "unknown")
         vuln_uuid = compute_node_uuid("Vulnerability", {"cve_id": cve_id})
+        # PR (S5) commit X (sanity-check audit): same fix as the alert-path
+        # Indicator + IP merges. Use ``first_imported_at`` (ON CREATE only,
+        # never overwritten) instead of the legacy ``first_seen`` field.
+        # Source-truthful per-source claims live on SOURCED_FROM edges.
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
-        ON CREATE SET v.uuid = $vuln_uuid
+        ON CREATE SET v.uuid = $vuln_uuid,
+                      v.first_imported_at = datetime()
         SET v.name = coalesce(v.name, $name)
         SET v.status = $status,
             v.description = $description,
             v.edgeguard_managed = true,
-            v.first_seen = CASE WHEN v.first_seen IS NULL THEN datetime() ELSE v.first_seen END,
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
         """
