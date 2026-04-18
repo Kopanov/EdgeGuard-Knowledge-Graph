@@ -822,23 +822,24 @@ class NVDCollector:
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
-                        # ResilMesh-compatible timestamp property names
+                        # PR (S5) commit X: source-truthful first/last claim
+                        # come from NVD's ``published`` and ``lastModified``.
+                        # Both fields fall back to None (NOT wall-clock NOW)
+                        # so the SOURCED_FROM edge MIN/MAX CASE logic preserves
+                        # any prior claim. Same pattern as the CISA + AbuseIPDB
+                        # wall-clock leak fixes. ``published`` and
+                        # ``last_modified`` are also kept as ResilMesh-compatible
+                        # plain string fields on the node for STIX export.
                         "published": published_str,
-                        "last_modified": cve_data.get("lastModified", datetime.now(timezone.utc).isoformat()),
-                        # EdgeGuard internal timestamps (kept for backward compat)
-                        # PR (S5) commit X (bugbot-class MED follow-on): kill the
-                        # wall-clock fallback on first_seen. NVD's ``published``
-                        # is the canonical source-truthful field; when it's
-                        # empty (rare — should never happen for real CVEs) we
-                        # emit None so the extractor's MIN logic preserves any
-                        # prior value instead of poisoning Neo4j with NOW.
-                        # Same bug class as the CISA wall-clock fix
-                        # (commit ac25b07) and the AbuseIPDB blacklist fix
-                        # (commit 87d3529). ``last_updated`` is intentionally
-                        # NOT source-truthful — it's EdgeGuard's local sync
-                        # wall-clock, which is the correct semantics.
+                        "last_modified": cve_data.get("lastModified") or None,
+                        # ``first_seen`` / ``last_seen`` flow into the
+                        # source-truthful extractor → SOURCED_FROM edge as
+                        # ``r.source_reported_first_at`` / ``r.source_reported_last_at``.
+                        # ``last_updated`` (the ITEM key, not the node prop) is
+                        # actually unused on the consumer side now — the node's
+                        # ``n.last_updated`` is set server-side from datetime().
                         "first_seen": published_str or None,
-                        "last_updated": cve_data.get("lastModified", datetime.now(timezone.utc).isoformat()),
+                        "last_seen": cve_data.get("lastModified") or None,
                         "confidence_score": 0.9 if cisa_exploit_add else 0.6,
                         "severity": severity.upper(),
                         "cvss_score": cvss_score,

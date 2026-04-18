@@ -327,32 +327,42 @@ def test_stix_iso_str_helper_handles_neo4j_datetime_objects():
     assert _iso_str(_FakeNeo4jDateTime()) == "2019-01-15T00:00:00+00:00"
 
 
-def test_cypher_wraps_first_seen_at_source_with_datetime_function():
-    """PR (S5) commit X (bugbot HIGH) regression pin.
+def test_edge_cypher_wraps_source_reported_with_datetime_and_min_max_case():
+    """PR (S5) commit X (architecture redesign) regression pin.
 
-    The Cypher SET clauses MUST wrap the incoming ISO string with
-    Neo4j's ``datetime()`` function so the stored type is native
-    DateTime, matching ``first_imported_at`` and ``last_updated``.
-    Without this wrapper, the comparison ``$item.first_seen_at_source <
-    n.first_seen_at_source`` mixes String + DateTime types and either
-    crashes or produces wrong results.
+    Per-source timestamps live on ``(n)-[r:SOURCED_FROM]->(s)`` edges,
+    not on the node. The edge MERGE Cypher MUST:
+    1. Wrap incoming ISO with ``datetime()`` so the stored type is
+       Neo4j native DateTime (consistent with r.imported_at /
+       r.updated_at).
+    2. Use MIN CASE for r.source_reported_first_at — earliest source
+       claim wins (correctness against stale imports + backdated
+       corrections).
+    3. Use MAX CASE for r.source_reported_last_at — latest claim wins.
+    4. AND-guard against NULL incoming values so a source that
+       doesn't report a timestamp can't NULL-out an existing claim.
     """
     path = os.path.join(_SRC, "neo4j_client.py")
     with open(path) as fh:
         src = fh.read()
-    # The MIN/MAX comparisons must use datetime() on the param side.
-    # Search for the pattern in the indicator batch.
     indicator_start = src.find("MERGE (n:Indicator {{indicator_type")
     assert indicator_start > 0
-    indicator_end = src.find("MATCH (s:Source", indicator_start)
+    # Edge MERGE block follows the node MERGE in the same Cypher string
+    indicator_end = src.find('"""', indicator_start)
     block = src[indicator_start:indicator_end]
-    assert "datetime(item.first_seen_at_source) < n.first_seen_at_source" in block, (
-        "Indicator batch MIN comparison MUST wrap incoming ISO string with datetime() — "
-        "otherwise mixes String and Neo4j DateTime types"
+    assert "datetime(item.first_seen_at_source) < r.source_reported_first_at" in block, (
+        "Edge SOURCED_FROM MUST MIN-guard r.source_reported_first_at "
+        "with datetime()-wrapped comparison (architecture redesign)"
     )
-    assert "datetime(item.last_seen_at_source) > n.last_seen_at_source" in block, (
-        "MAX comparison MUST also use datetime() wrapper for type-safety"
+    assert "datetime(item.last_seen_at_source) > r.source_reported_last_at" in block, (
+        "Edge SOURCED_FROM MUST MAX-guard r.source_reported_last_at"
     )
+    # Nested-CASE NULL short-circuit (Red Team v2 M3 + Bug Hunter v2 #10)
+    assert "item.first_seen_at_source IS NULL" in block, (
+        "Nested-CASE NULL short-circuit needed for explicit control-flow "
+        "(Cypher AND is not guaranteed to short-circuit across versions)"
+    )
+    assert "item.last_seen_at_source IS NULL" in block
 
 
 def test_campaign_builder_last_seen_has_max_guard():
@@ -397,6 +407,57 @@ def test_campaign_builder_last_seen_has_max_guard():
     assert "last_seen IS NOT NULL" in block, "c.last_seen CASE must guard against NULL aggregate (bugbot LOW)"
 
 
+def test_coerce_iso_rejects_int_epoch_below_1990_floor():
+    """PR (S5) commit X (Bug Hunter v2 #7 HIGH) regression pin.
+
+    A bare ``1700000`` (year 1970-Jan-20) is almost certainly a
+    misencoded field — but the original ``0 <= val`` bound let it
+    sail through, anchoring MIN aggregates to 1970 and reintroducing
+    the original "1970-leak" bug through a different door. Sanity
+    floor: 1990-01-01 (``631_152_000``). Anything earlier returns
+    None so the MIN/MAX CASE logic preserves any prior value.
+    """
+    from source_truthful_timestamps import coerce_iso
+
+    # Garbage: pre-1990 epoch → None
+    assert coerce_iso(1700000) is None  # ~1970-01-20
+    assert coerce_iso(0) is None  # 1970-01-01 itself
+    assert coerce_iso(631_151_999) is None  # 1989-12-31
+    # Legit modern epochs pass
+    assert coerce_iso(631_152_000) == "1990-01-01T00:00:00+00:00"
+    assert coerce_iso(1700000000) is not None  # ~2023-11
+    # Negative / overflow: None (bounded gracefully, no crash)
+    assert coerce_iso(-1) is None
+    assert coerce_iso(2**63) is None
+    assert coerce_iso(253402300800) is None  # year 10000 (above ceil)
+
+
+def test_coerce_iso_rejects_invalid_full_iso_strings():
+    """PR (S5) commit X (Red Team v2 H3 HIGH) regression pin.
+
+    Previously the FULL-STRING branch (anything not exactly 10 chars)
+    just passed the value through unchecked. So
+    ``coerce_iso("2024-13-99T10:00:00Z")`` (length 20 — fails the
+    date-only shape check) flowed through unguarded → Cypher
+    ``datetime()`` rejected → entire UNWIND batch crashed.
+
+    Fix: validate ALL string inputs via ``datetime.fromisoformat``
+    (with Z-tolerance shim); return None on parse failure.
+    """
+    from source_truthful_timestamps import coerce_iso
+
+    # Invalid calendar dates in full ISO strings → None
+    assert coerce_iso("2024-13-99T10:00:00Z") is None
+    assert coerce_iso("2024-02-30T00:00:00Z") is None  # Feb 30
+    # Valid full ISO passes through
+    assert coerce_iso("2024-03-15T10:00:00Z") == "2024-03-15T10:00:00Z"
+    assert coerce_iso("2024-03-15T10:00:00+00:00") == "2024-03-15T10:00:00+00:00"
+    assert coerce_iso("2024-03-15T14:00:00-04:00") == "2024-03-15T14:00:00-04:00"
+    # Garbage strings → None
+    assert coerce_iso("not-a-date") is None
+    assert coerce_iso("hello world") is None
+
+
 def test_coerce_iso_normalizes_date_only_strings_to_full_iso():
     """PR (S5) commit X (bugbot MED) regression pin.
 
@@ -417,11 +478,11 @@ def test_coerce_iso_normalizes_date_only_strings_to_full_iso():
     # Already-full ISO strings pass through untouched
     assert coerce_iso("2024-03-15T12:34:56Z") == "2024-03-15T12:34:56Z"
     assert coerce_iso("2024-03-15T00:00:00+00:00") == "2024-03-15T00:00:00+00:00"
-    # Garbage strings pass through (downstream handles them)
-    assert coerce_iso("not-a-date") == "not-a-date"
-    # 10-char non-date strings are passthrough (the heuristic is
-    # date-shape-specific, not just length-10)
-    assert coerce_iso("abcdefghij") == "abcdefghij"
+    # PR (S5) commit X (Red Team v2 H3): garbage strings now return
+    # None (was passthrough). Validating ALL strings prevents Cypher
+    # ``datetime()`` from crashing on bad input mid-batch.
+    assert coerce_iso("not-a-date") is None
+    assert coerce_iso("abcdefghij") is None  # 10-char non-date
     # None / empty-string still return None
     assert coerce_iso(None) is None
     assert coerce_iso("") is None
@@ -510,23 +571,26 @@ def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():
     )
 
 
-def test_graphql_all_mitre_and_vuln_types_expose_source_truthful_timestamps():
-    """PR (S5) commit X (bugbot MED + LOW) regression pin.
+def test_graphql_node_types_do_not_expose_source_truthful_fields_anymore():
+    """PR (S5) commit X (architecture redesign) regression pin.
 
-    EVERY GraphQL type that can be populated by ``parse_attribute``
-    with source-truthful timestamps MUST expose
-    ``first_seen_at_source`` / ``last_seen_at_source`` (and the
-    companion import-wall-clock fields) so clients can query the
-    values. Previously some were missed iteratively:
-      - Round a77e67b: ThreatActor + Malware (bugbot MED)
-      - Round 9a414ac: Technique + Tactic (bugbot LOW)
-    This test locks in the full set so further omissions in new
-    entity types fail the test immediately.
+    Per-source timestamps live on the SOURCED_FROM edge — they are NO
+    LONGER node properties. The 7 GraphQL types (CVE / Vulnerability /
+    Indicator / ThreatActor / Malware / Technique / Tactic / Tool)
+    MUST NOT expose ``first_seen_at_source`` / ``last_seen_at_source``
+    as direct fields, because exposing them would either:
+      a) Require an N+1 edge-aggregate query per resolver hit (perf), or
+      b) Lie about a single value when the truth is per-source.
+
+    Consumers that need per-source detail should query the edges
+    directly. Consumers that need an aggregate should use
+    ``first_imported_at`` / ``last_updated`` (DB-local, accurate).
     """
     path = os.path.join(_SRC, "graphql_schema.py")
     with open(path) as fh:
         src = _code_only(fh.read())
-    required_classes = (
+    classes_with_timestamps = (
+        "class CVE:",
         "class Vulnerability:",
         "class Indicator:",
         "class ThreatActor:",
@@ -534,20 +598,20 @@ def test_graphql_all_mitre_and_vuln_types_expose_source_truthful_timestamps():
         "class Technique:",
         "class Tactic:",
         "class Tool:",
+        "class Campaign:",
     )
-    for cls in required_classes:
+    for cls in classes_with_timestamps:
         start = src.find(cls)
-        assert start > 0, f"{cls} missing from graphql_schema.py"
+        if start < 0:
+            continue
         next_class = src.find("\nclass ", start + 1)
         body = src[start:next_class] if next_class > 0 else src[start:]
-        assert "first_seen_at_source: Optional[str]" in body, (
-            f"{cls} must expose first_seen_at_source GraphQL field "
-            "(bugbot MED/LOW — API parity across all source-truthful types)"
+        assert "first_seen_at_source: Optional" not in body, (
+            f"{cls} MUST NOT expose first_seen_at_source — the field was "
+            "moved off the node onto the SOURCED_FROM edge in the "
+            "PR (S5) architecture redesign"
         )
-        assert "last_seen_at_source: Optional[str]" in body, (
-            f"{cls} must expose last_seen_at_source GraphQL field "
-            "(bugbot MED/LOW — API parity across all source-truthful types)"
-        )
+        assert "last_seen_at_source: Optional" not in body, f"{cls} MUST NOT expose last_seen_at_source — moved to edge"
 
 
 def test_mispwriter_vulnerability_path_passes_first_seen_and_last_seen():
@@ -735,58 +799,77 @@ def test_stix_sighting_emission_env_var_name_is_documented():
 # ===========================================================================
 
 
-def test_merge_indicators_batch_has_min_case_for_first_seen_at_source():
-    """Pin the MIN-CASE pattern: future refactors that drop the AND-guard
-    or flip < to > would silently corrupt the multi-source merge."""
+def test_merge_indicators_batch_writes_source_reported_to_edge():
+    """PR (S5) commit X (architecture redesign) regression pin.
+
+    The Indicator batch UNWIND writes per-source timestamps to the
+    SOURCED_FROM edge (not to the node). MIN/MAX CASE with AND-guard +
+    datetime() wrapper, all on the EDGE properties.
+    """
     path = os.path.join(_SRC, "neo4j_client.py")
     with open(path) as fh:
         src = fh.read()
-    # Find the indicator batch block
+    # Find the indicator batch block (full Cypher string ends at """)
     start = src.find("MERGE (n:Indicator")
-    end = src.find("MATCH (s:Source", start)
+    end = src.find('"""', start)
     block = src[start:end]
-    assert "first_seen_at_source" in block, "indicator batch UNWIND must SET n.first_seen_at_source"
-    # PR (S5) commit X (bugbot HIGH): the comparison MUST wrap the param
-    # side with ``datetime()`` so types match (n.first_seen_at_source is
-    # a Neo4j DateTime; the param is an ISO string). Without the wrapper
-    # the comparison mixes String + DateTime types and either crashes
-    # or produces wrong results.
-    assert "datetime(item.first_seen_at_source) < n.first_seen_at_source" in block, (
-        "MIN logic missing or datetime() wrapper dropped — refactor must preserve "
-        "BOTH the < comparison AND the datetime() type-safety wrapper"
+    # Per-source timestamps must be on the edge
+    assert "r.source_reported_first_at" in block, "edge must carry source_reported_first_at"
+    assert "r.source_reported_last_at" in block, "edge must carry source_reported_last_at"
+    assert "datetime(item.first_seen_at_source) < r.source_reported_first_at" in block, (
+        "MIN logic on edge missing or datetime() wrapper dropped"
     )
-    assert "datetime(item.last_seen_at_source) > n.last_seen_at_source" in block, (
-        "MAX logic missing or datetime() wrapper dropped"
+    assert "datetime(item.last_seen_at_source) > r.source_reported_last_at" in block, (
+        "MAX logic on edge missing or datetime() wrapper dropped"
     )
+    # And the node MUST NOT carry these fields anymore
+    node_only_block = block[: block.find("MATCH (s:Source")]
+    assert "n.first_seen_at_source" not in node_only_block, (
+        "Node must NOT write first_seen_at_source — moved to edge in architecture redesign"
+    )
+    assert "n.last_seen_at_source" not in node_only_block, "Node must NOT write last_seen_at_source"
 
 
-def test_merge_vulnerabilities_batch_has_min_case_for_first_seen_at_source():
-    """Same contract for the Vulnerability batch (with datetime() wrapper)."""
+def test_merge_vulnerabilities_batch_writes_source_reported_to_edge():
+    """Same contract for the Vulnerability batch."""
     path = os.path.join(_SRC, "neo4j_client.py")
     with open(path) as fh:
         src = fh.read()
     start = src.find("MERGE (n:Vulnerability")
-    end = src.find("MATCH (s:Source", start)
+    end = src.find('"""', start)
     block = src[start:end]
-    assert "first_seen_at_source" in block
-    assert "datetime(item.first_seen_at_source) < n.first_seen_at_source" in block
-    assert "datetime(item.last_seen_at_source) > n.last_seen_at_source" in block
+    assert "r.source_reported_first_at" in block
+    assert "r.source_reported_last_at" in block
+    assert "datetime(item.first_seen_at_source) < r.source_reported_first_at" in block
+    assert "datetime(item.last_seen_at_source) > r.source_reported_last_at" in block
+    node_only = block[: block.find("MATCH (s:Source")]
+    assert "n.first_seen_at_source" not in node_only
+    assert "n.last_seen_at_source" not in node_only
 
 
-def test_merge_node_with_source_has_min_case_for_first_seen_at_source():
-    """Standalone MERGE helper used by Malware/Actor/Technique/etc.
-    must have the same MIN/MAX pattern with datetime() wrapper.
-    Standalone form uses ``$first_seen_at_source`` (parameter binding)
-    instead of ``item.field`` (UNWIND row binding)."""
+def test_upsert_sourced_relationship_writes_source_reported_with_min_max_case():
+    """Standalone helper used by ``merge_node_with_source`` (which
+    services Malware/Actor/Technique/etc.) MUST write per-source
+    timestamps to the edge with the nested-CASE MIN/MAX + explicit
+    NULL short-circuit + datetime() wrapper (Red Team v2 M3 +
+    Bug Hunter v2 #10 — Cypher AND is not guaranteed short-circuit
+    so we use nested CASE for explicit control-flow)."""
     path = os.path.join(_SRC, "neo4j_client.py")
     with open(path) as fh:
         src = fh.read()
-    start = src.find("def merge_node_with_source")
+    start = src.find("def _upsert_sourced_relationship")
     end = src.find("\n    def ", start + 1)
     block = src[start:end]
-    assert "first_seen_at_source" in block
-    assert "datetime($first_seen_at_source) < n.first_seen_at_source" in block
-    assert "datetime($last_seen_at_source) > n.last_seen_at_source" in block
+    assert "r.source_reported_first_at" in block
+    assert "r.source_reported_last_at" in block
+    # MIN / MAX comparisons with datetime() wrapper for type safety
+    assert "datetime($source_reported_first_at) < r.source_reported_first_at" in block
+    assert "datetime($source_reported_last_at) > r.source_reported_last_at" in block
+    # Nested-CASE NULL short-circuit (explicit, not AND-based)
+    assert "$source_reported_first_at IS NULL" in block, (
+        "Nested-CASE NULL short-circuit must be present (Red Team v2 M3)"
+    )
+    assert "$source_reported_last_at IS NULL" in block
 
 
 def test_first_imported_at_only_set_on_create():
@@ -865,22 +948,32 @@ def test_extraction_returns_none_for_otx_even_with_first_seen():
 # ===========================================================================
 
 
-def test_graphql_schema_exposes_first_seen_at_source():
-    """At least the Indicator type must expose the new field for API consumers."""
+def test_graphql_schema_does_not_expose_node_level_source_truthful_fields():
+    """PR (S5) commit X (architecture redesign): no GraphQL type may
+    expose ``first_seen_at_source`` / ``last_seen_at_source`` as a
+    node property — they live on the SOURCED_FROM edge now."""
     path = os.path.join(_SRC, "graphql_schema.py")
     with open(path) as fh:
         src = fh.read()
-    assert "first_seen_at_source: Optional[str]" in src, "GraphQL Indicator type must expose first_seen_at_source"
-    assert "last_seen_at_source: Optional[str]" in src
+    assert "first_seen_at_source: Optional" not in src, (
+        "GraphQL schema MUST NOT expose first_seen_at_source on any node type — "
+        "moved to SOURCED_FROM edge in the architecture redesign"
+    )
+    assert "last_seen_at_source: Optional" not in src
 
 
-def test_graphql_resolvers_populate_first_seen_at_source():
-    """At least one resolver must read n.first_seen_at_source from the
-    Cypher result."""
+def test_graphql_resolvers_no_longer_populate_node_level_source_truthful():
+    """PR (S5) commit X (architecture redesign): no resolver may read
+    ``n.first_seen_at_source`` / ``n.last_seen_at_source`` from a node
+    Cypher result — those fields no longer exist on nodes."""
     path = os.path.join(_SRC, "graphql_api.py")
     with open(path) as fh:
         src = fh.read()
-    assert "first_seen_at_source=str(" in src, "at least one GraphQL resolver must read first_seen_at_source"
+    assert "first_seen_at_source=str(" not in src, (
+        "GraphQL resolvers MUST NOT read first_seen_at_source from a node — "
+        "the field lives on the SOURCED_FROM edge now"
+    )
+    assert "last_seen_at_source=str(" not in src
 
 
 # ===========================================================================
@@ -889,13 +982,26 @@ def test_graphql_resolvers_populate_first_seen_at_source():
 
 
 def test_migration_doc_exists():
-    """Operators need the migration runbook to verify their deploy."""
+    """Operators need the migration runbook to verify their deploy.
+
+    PR (S5) commit X (architecture redesign): doc was rewritten for
+    the edge model. Assertions updated to match the new content
+    sections.
+    """
     path = os.path.join(os.path.dirname(__file__), "..", "migrations", "2026_04_first_seen_at_source.md")
     assert os.path.exists(path), "migrations/2026_04_first_seen_at_source.md must ship with this PR"
     with open(path) as fh:
-        body = fh.read()
+        body = fh.read().lower()
     # Key sections must be present
-    assert "Reliable-source allowlist" in body
-    assert "no bulk backfill" in body.lower()
-    assert "Verification queries" in body or "verification queries" in body.lower()
-    assert "Rollback" in body
+    assert "reliable-source allowlist" in body
+    assert "verification queries" in body
+    # The new doc uses "what's not backfilled" instead of "no bulk backfill"
+    assert "backfill" in body, "doc must address the backfill story"
+    # Edge-model specifics
+    assert "sourced_from" in body, "edge label must be referenced"
+    assert "source_reported_first_at" in body, "new edge property must be documented"
+    assert "first_imported_at" in body
+    # Operator FAQ section + consumer migration table
+    assert "operator faq" in body
+    # Backfill script is referenced
+    assert "backfill" in body

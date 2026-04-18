@@ -94,7 +94,7 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 
 | Relationship | From → To | Description |
 |---|---|---|
-| `SOURCED_FROM` | Any node → `Source` | Provenance tracking with `raw_data`, `imported_at` (immutable), `updated_at`, `confidence` |
+| `SOURCED_FROM` | Any node → `Source` | **Per-source provenance** — one edge per (entity, source) pair. Carries `raw_data`, `imported_at` (immutable), `updated_at`, `confidence`, plus per-source claim properties **`source_reported_first_at`** (MIN-guarded) and **`source_reported_last_at`** (MAX-guarded) — what the source itself says about when it first/last recorded the entity. STIX export aggregates `MIN(r.source_reported_first_at)` across all edges to populate `Indicator.valid_from`. See [`docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema) for the full property contract. |
 | `EMPLOYS_TECHNIQUE` | `ThreatActor` / `Campaign` → `Technique` | **Attribution.** Actor employs a MITRE technique (explicit STIX **`uses`** → `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — see below.* |
 | `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability.** Malware or tool implements a MITRE technique (same STIX **`uses`** → `uses_techniques` on the source node; MISP **`MITRE_USES_TECHNIQUES:`** round-trip for Malware). *Split from a generic `USES` in 2026-04 — see below.* |
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |

@@ -54,16 +54,40 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     ``created`` timestamp, which the collector mapped into
     ``item["first_seen"]`` but which was then discarded here.
 
-    Empty / whitespace-only values are intentionally dropped
-    (PyMISP rejects empty strings on these fields). Non-string values
-    are also skipped — the caller is responsible for coercion upstream.
+    PR (S5) commit X (post-merge audit — converged finding from
+    bugbot MED / Cross-Checker F5 / Red Team #6 / Bug Hunter #1/#5 /
+    Logic Tracker #6): the previous ``isinstance(str)`` gate silently
+    dropped THREE real-world scenarios:
+    1. VirusTotal's ``first_submission_date`` is an **int** epoch —
+       collector passes it straight through, `isinstance(str)` False,
+       dropped → entire VT source-truthful path broken.
+    2. ``datetime`` objects (from e.g. ``stix2.utils.STIXdatetime`` or
+       any future collector using structured parsing) — dropped.
+    3. Date-only strings like CISA's ``"2024-03-15"`` — passed the
+       string gate but Neo4j's Cypher ``datetime()`` then rejected
+       them, crashing the UNWIND batch. The ``coerce_iso`` helper was
+       hardened to normalize these to ``"2024-03-15T00:00:00+00:00"``
+       on the READ path, but the WRITE path (here) bypassed it.
+
+    Fix: use the canonical ``coerce_iso`` helper from
+    ``source_truthful_timestamps``. It handles None, empty string,
+    Unix int/float epoch, datetime objects, date-only strings
+    (normalized to ISO with UTC midnight), and full ISO — returning
+    ``None`` for unparseable / empty inputs. If the result is a
+    non-empty string, we set it on the MISP attribute; otherwise the
+    field is intentionally omitted (PyMISP rejects empty strings).
     """
-    first_seen = item.get("first_seen")
+    # Lazy import to avoid a potential circular dependency (the
+    # source_truthful_timestamps module lives at src/ root; this
+    # collector module is under src/collectors/).
+    from source_truthful_timestamps import coerce_iso
+
+    first_seen = coerce_iso(item.get("first_seen"))
     # last_modified (NVD / STIX) is accepted as an alias for last_seen.
-    last_seen = item.get("last_seen") or item.get("last_modified")
-    if first_seen and isinstance(first_seen, str) and first_seen.strip():
+    last_seen = coerce_iso(item.get("last_seen")) or coerce_iso(item.get("last_modified"))
+    if first_seen:
         attribute["first_seen"] = first_seen
-    if last_seen and isinstance(last_seen, str) and last_seen.strip():
+    if last_seen:
         attribute["last_seen"] = last_seen
 
 

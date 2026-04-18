@@ -30,6 +30,23 @@ class _FakeSession:
         self._rows = rows
         self.last_cypher: str = ""
         self.last_params: Dict[str, Any] = {}
+        # PR (S5) commit X (architecture redesign): the StixExporter now
+        # also runs short per-node aggregate queries against the
+        # SOURCED_FROM edges (``_enrich_props_with_source_aggregates``)
+        # AFTER the main export query. Without history tracking,
+        # ``last_cypher`` would only ever hold the secondary aggregate
+        # query — assertions on the export Cypher would always fail.
+        # ``cypher_history`` keeps the full ordered list; ``main_cypher``
+        # is the FIRST cypher (the export query). Tests that previously
+        # asserted on ``last_cypher`` have been updated to use
+        # ``main_cypher`` so they keep passing under the new architecture.
+        self.cypher_history: List[str] = []
+
+    @property
+    def main_cypher(self) -> str:
+        """The first Cypher executed in this session — the export
+        query (NOT a follow-up source-truthful aggregate)."""
+        return self.cypher_history[0] if self.cypher_history else ""
 
     def __enter__(self):
         return self
@@ -40,6 +57,7 @@ class _FakeSession:
     def run(self, cypher: str, **params: Any) -> _FakeResult:
         self.last_cypher = cypher
         self.last_params = params
+        self.cypher_history.append(cypher)
         return _FakeResult(self._rows)
 
 
@@ -124,7 +142,7 @@ def test_actor_campaign_query_uses_runs_direction():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_threat_actor("APT28")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     # The query must match (a:ThreatActor)-[:RUNS]->(c:Campaign), not
     # the reverse. Match on the full pattern so a future refactor that
     # accidentally flips direction fails loudly here.
@@ -150,7 +168,7 @@ def test_export_technique_uses_with_aggregation_to_avoid_cartesian():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_technique("T1059")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     # Must see the aggregation step between OPTIONAL MATCH clauses.
     assert "collect(DISTINCT a) AS actors" in q
     assert "collect(DISTINCT m) AS malware" in q
@@ -177,7 +195,7 @@ def test_export_indicator_uses_with_aggregation_to_avoid_cartesian():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_indicator("1.2.3.4")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     # Each collection must be folded into a WITH before the next OPTIONAL MATCH.
     assert "collect(DISTINCT m) AS malware" in q
     assert "collect(DISTINCT v) AS vulns" in q
@@ -203,7 +221,7 @@ def test_export_cve_uses_with_aggregation_to_avoid_cartesian():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_cve("CVE-2021-44228")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     # Aggregation step between the two OPTIONAL MATCHes.
     assert "WITH v, collect(DISTINCT i) AS indicators" in q
     # Sectors still collected at RETURN time.
@@ -363,7 +381,7 @@ def test_specialised_technique_rel_types_only_no_legacy_uses():
     client = _mk_client(rows)
     exporter = StixExporter(client)
     exporter.export_threat_actor("APT29")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     assert "EMPLOYS_TECHNIQUE" in q
     assert "IMPLEMENTS_TECHNIQUE" in q
     # Legacy fallback must NOT be back.
@@ -382,7 +400,7 @@ def test_specialised_technique_rel_types_only_no_legacy_uses():
     ]
     client2 = _mk_client(rows2)
     StixExporter(client2).export_technique("T1059")
-    q2 = client2.driver._session.last_cypher
+    q2 = client2.driver._session.main_cypher
     assert "EMPLOYS_TECHNIQUE" in q2
     assert "IMPLEMENTS_TECHNIQUE" in q2
     assert "USES_TECHNIQUE" in q2
@@ -403,7 +421,7 @@ def test_edgeguard_managed_filter_present_in_all_queries():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_indicator("evil.com")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     # Bugbot regression: the original filter used
     # `coalesce(x.edgeguard_managed, true) = true`, which defaulted missing
     # properties to true and let ResilMesh-owned nodes leak through. Enforce
@@ -446,7 +464,7 @@ def test_cve_export_uses_affects_not_targets_for_sectors():
     ]
     client = _mk_client(rows)
     StixExporter(client).export_cve("CVE-2021-44228")
-    q = client.driver._session.last_cypher
+    q = client.driver._session.main_cypher
     assert "[:AFFECTS]->(s:Sector)" in q
     assert "[:TARGETS]->(s:Sector)" not in q
 

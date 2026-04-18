@@ -203,19 +203,22 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
             WHERE i.active = true
+            // PR (S5) commit X (architecture redesign): per-source
+            // timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
+            // edges, NOT on the node. For a Campaign aggregate we
+            // want "earliest claim across ALL (indicator, source)
+            // pairs" — so we traverse the edges per indicator and
+            // pull MIN(r.source_reported_first_at). Falls back to
+            // ``i.first_imported_at`` (DB-local "when EdgeGuard first
+            // saw this indicator from any source") when no source
+            // claim exists. MAX symmetric for last_seen.
+            OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
+            WITH a, malware_list, i, r
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
-                 // PR (S5): use source-truthful first_seen_at_source when
-                 // available, falling back to first_imported_at for nodes
-                 // without source-truth (legacy data + unreliable-source
-                 // indicators). Same fallback chain as the STIX exporter
-                 // ``valid_from``. Previously this read first_imported_at
-                 // unconditionally — the docstring "earliest indicator
-                 // sighting" lied; it actually meant "earliest EdgeGuard
-                 // sync time" (semantic gap caught by Logic Tracker audit).
-                 min(coalesce(i.first_seen_at_source, i.first_imported_at)) AS first_seen,
-                 max(coalesce(i.last_seen_at_source, i.last_updated))       AS last_seen
+                 min(coalesce(r.source_reported_first_at, i.first_imported_at)) AS first_seen,
+                 max(coalesce(r.source_reported_last_at, i.last_updated))       AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
             WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(

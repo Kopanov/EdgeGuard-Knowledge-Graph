@@ -699,10 +699,18 @@ class MISPToNeo4jSync:
 
     # Source mapping from MISP event/tag names to Neo4j source_ids.
     # Every entry must map to the *actual* originating source, not a proxy.
+    # PR (S5) commit X (Logic Tracker MED): the canonical Neo4j source_id
+    # MUST match the value the collector emits (config.SOURCE_TAGS).
+    # CISA collector emits ``cisa_kev`` (via SOURCE_TAGS["cisa"]) — the
+    # mapping target here MUST be ``cisa_kev`` to keep all the per-source
+    # node properties (n.tags, n.source) using ONE canonical literal
+    # rather than two (``cisa`` vs ``cisa_kev``) that won't dedupe via
+    # apoc.coll.toSet. Same for any other source whose collector tag
+    # differs from a "human" source label here.
     SOURCE_MAPPING = {
         "AlienVault-OTX": "alienvault_otx",
         "NVD": "nvd",
-        "CISA-KEV": "cisa",
+        "CISA-KEV": "cisa_kev",
         "MITRE-ATT&CK": "mitre_attck",
         "VirusTotal": "virustotal",
         "AbuseIPDB": "abuseipdb",
@@ -2159,7 +2167,18 @@ class MISPToNeo4jSync:
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
-                "first_seen": _coerce_to_iso(nvd_meta.get("published") or event_info.get("date")),
+                # PR (S5) commit X (user-surfaced semantic gap):
+                # the legacy ``item["first_seen"]`` field was polluted
+                # by MISP event_info.date (= "when EdgeGuard wrote the
+                # MISP event"), not "when the source first observed
+                # the IOC". For CVE-2013 imported today, it was setting
+                # first_seen=2026-04-18 (today's event date) on a
+                # 13-year-old vulnerability. Deleted — consumers
+                # should read ``first_seen_at_source`` (source-truth,
+                # may be NULL) OR ``first_imported_at`` (EdgeGuard
+                # sync time, always set) depending on what they
+                # actually need. The Cypher ON CREATE SET path
+                # stamps first_imported_at = datetime() in neo4j_client.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
                 "last_updated": _coerce_to_iso(nvd_meta.get("last_modified") or attr.get("timestamp")),
@@ -2247,7 +2266,10 @@ class MISPToNeo4jSync:
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
-                "first_seen": _coerce_to_iso(event_info.get("date")),
+                # PR (S5) commit X: legacy first_seen removed —
+                # was polluted by MISP event_info.date. Read
+                # first_seen_at_source (source-truth) OR
+                # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
@@ -2311,7 +2333,10 @@ class MISPToNeo4jSync:
                 "zone": zones,  # zone is now an array
                 "tag": source_id,
                 "source": [source_id],
-                "first_seen": _coerce_to_iso(event_info.get("date")),
+                # PR (S5) commit X: legacy first_seen removed —
+                # was polluted by MISP event_info.date. Read
+                # first_seen_at_source (source-truth) OR
+                # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
@@ -2372,7 +2397,10 @@ class MISPToNeo4jSync:
                 "tag": source_id,
                 "source": [source_id],
                 "platforms": platforms,
-                "first_seen": _coerce_to_iso(event_info.get("date")),
+                # PR (S5) commit X: legacy first_seen removed —
+                # was polluted by MISP event_info.date. Read
+                # first_seen_at_source (source-truth) OR
+                # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
@@ -2408,7 +2436,10 @@ class MISPToNeo4jSync:
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
-                "first_seen": _coerce_to_iso(event_info.get("date")),
+                # PR (S5) commit X: legacy first_seen removed —
+                # was polluted by MISP event_info.date. Read
+                # first_seen_at_source (source-truth) OR
+                # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
@@ -2480,7 +2511,8 @@ class MISPToNeo4jSync:
                 "source": [source_id],
                 "tool_types": tool_types,
                 "uses_techniques": uses_techniques,
-                "first_seen": _coerce_to_iso(event_info.get("date")),
+                # PR (S5) commit X: legacy first_seen removed (see
+                # vulnerability site for the rationale).
                 "first_seen_at_source": _fs_at_source_tool,
                 "last_seen_at_source": _ls_at_source_tool,
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
@@ -2577,7 +2609,8 @@ class MISPToNeo4jSync:
                 "zone": zones,  # zone is now an array
                 "tag": source_id,
                 "source": [source_id],
-                "first_seen": _coerce_to_iso(event_info.get("date")),
+                # PR (S5) commit X: legacy first_seen removed (see
+                # vulnerability site for the rationale).
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,
                 "pulse_name": otx_meta.get("pulse_name") or tf_meta.get("malware_family") or raw_comment,

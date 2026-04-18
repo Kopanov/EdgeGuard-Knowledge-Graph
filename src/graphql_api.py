@@ -197,8 +197,6 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
         source=_neo4j_list(c.get("source")),
         zone=_neo4j_list(c.get("zone")),
         first_imported_at=str(c["first_imported_at"]) if c.get("first_imported_at") else None,
-        first_seen_at_source=str(c["first_seen_at_source"]) if c.get("first_seen_at_source") else None,
-        last_seen_at_source=str(c["last_seen_at_source"]) if c.get("last_seen_at_source") else None,
         last_updated=str(c["last_updated"]) if c.get("last_updated") else None,
         last_imported_from=c.get("last_imported_from"),
         version_constraints=c.get("version_constraints"),
@@ -316,8 +314,6 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     misp_event_ids=vuln_event_ids,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
-                    first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                    last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                     last_imported_from=n.get("last_imported_from"),
                     version_constraints=n.get("version_constraints"),
                     cisa_cwes=n.get("cisa_cwes"),
@@ -381,8 +377,6 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     misp_attribute_ids=_neo4j_list(n.get("misp_attribute_ids")) or None,
                     misp_event_urls=event_urls,
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
-                    first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                    last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                     last_imported_from=n.get("last_imported_from"),
                     yara_rules=n.get("yara_rules"),
                     sigma_rules=n.get("sigma_rules"),
@@ -486,8 +480,6 @@ class Query:
                 # PR (S5) commit X (bugbot MED): source-truthful + import
                 # wall-clock timestamps, matching Indicator / Vulnerability /
                 # Malware resolvers.
-                first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                 last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
@@ -513,10 +505,6 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
-                # PR (S5) commit X (bugbot MED): source-truthful + import
-                # wall-clock timestamps, matching ThreatActor resolver.
-                first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                 last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
@@ -544,10 +532,6 @@ class Query:
                 zone=_neo4j_list(n.get("zone")),
                 confidence_score=n.get("confidence_score"),
                 edgeguard_managed=n.get("edgeguard_managed"),
-                # PR (S5) commit X (bugbot LOW): source-truthful + import
-                # wall-clock timestamps, matching the rest of the API.
-                first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                 last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
@@ -570,10 +554,6 @@ class Query:
                 name=n.get("name", ""),
                 description=n.get("description"),
                 edgeguard_managed=n.get("edgeguard_managed"),
-                # PR (S5) commit X (bugbot LOW): source-truthful + import
-                # wall-clock timestamps, matching the rest of the API.
-                first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                 last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                 uuid=n.get("uuid"),
@@ -647,8 +627,6 @@ class Query:
                         edgeguard_managed=n.get("edgeguard_managed"),
                         uuid=n.get("uuid"),
                         first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
-                        first_seen_at_source=str(n["first_seen_at_source"]) if n.get("first_seen_at_source") else None,
-                        last_seen_at_source=str(n["last_seen_at_source"]) if n.get("last_seen_at_source") else None,
                         last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
                     )
                 )

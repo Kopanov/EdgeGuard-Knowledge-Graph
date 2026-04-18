@@ -1,96 +1,128 @@
-"""Per-source first_seen / last_seen extraction for the MISP→Neo4j sync.
+"""Per-source first_seen / last_seen extraction + edge stamping for MISP→Neo4j.
+
+Model: two pairs, honest naming
+-------------------------------
+
+EdgeGuard stores timestamps in TWO semantically-distinct places:
+
+**Node properties — DB-local facts ONLY.** Cannot be misread as
+real-world claims.
+
+* ``n.first_imported_at`` — when EdgeGuard first MERGEd this node.
+  ON CREATE SET only; never overwritten. Set once per node lifetime.
+* ``n.last_updated`` — when EdgeGuard last MERGEd / touched this node.
+  Refreshed to ``datetime()`` on every MERGE.
+
+**Edge properties on ``(:Node)-[r:SOURCED_FROM]->(:Source)`` —
+per-source claims.** One edge per (entity, source) pair.
+
+* ``r.imported_at`` / ``r.updated_at`` — DB-local facts scoped to THIS
+  source. When EdgeGuard first/last saw this source report this entity.
+* ``r.source_reported_first_at`` — the source's OWN claim about when
+  it first recorded the entity. Nullable (NULL = "we don't have a
+  meaningful claim from this source"). MIN CASE with AND-guard:
+  earliest claim wins; stale imports cannot regress.
+* ``r.source_reported_last_at`` — the source's own last-reported
+  claim. Nullable. MAX CASE with AND-guard: latest claim wins.
+
+**Why the edge design**: an indicator reported by NVD + AbuseIPDB +
+ThreatFox has three SOURCED_FROM edges. Each edge preserves that
+source's specific claim. Aggregating to a single node property would
+destroy the per-source provenance. Queries that want a single
+canonical value compute ``MIN(r.source_reported_first_at)`` / ``MAX(...)``
+across the edges on read (STIX valid_from, alert enrichment, campaign
+aggregate all do this).
+
+**The names are deliberate**. ``source_reported_first_at`` on the
+edge makes explicit: "what the source claims", not "first observed
+in reality". (Sources record "when we cataloged it", not "when
+observed in the wild". NVD's ``published`` is catalog-date; CISA's
+``dateAdded`` is list-date; MITRE's ``created`` is TAXII-store-date.)
 
 Why this module exists
 ----------------------
 The proactive-audit Logic Tracker found (Tier S item S5) that EdgeGuard
-ships ``Indicator.valid_from = 1970-01-01T00:00:00Z`` to ResilMesh on
-EVERY indicator, because:
+was shipping ``Indicator.valid_from = 1970-01-01T00:00:00Z`` to ResilMesh
+on every indicator. Multiple upstream handoffs were silently dropping
+the source's first-seen claim. This module:
 
-1. ``parse_attribute`` populated ``item["first_seen"]`` from
-   ``event_info.get("date")`` — the **MISP event date**, which is
-   "when EdgeGuard wrote the MISP event", NOT "when the world first
-   observed this indicator".
-2. PR #34 round 17 deliberately removed ``first_seen`` from the
-   Neo4j Indicator/Vulnerability batch MERGE because the value was
-   unreliable. So the Neo4j node had no ``first_seen``.
-3. ``stix_exporter._build_indicator`` falls back to a 1970 epoch
-   sentinel when ``first_seen`` is missing — ResilMesh receives
-   year-1970 timestamps every poll.
+1. Defines the ``_RELIABLE_FIRST_SEEN_SOURCES`` allowlist — which
+   sources have a meaningfully-semantic first-reported timestamp
+   (NVD, CISA, MITRE, VirusTotal, AbuseIPDB, ThreatFox, URLhaus,
+   Feodo Tracker, SSL Blacklist) vs. excluded (OTX pulse-publish-date,
+   CyberCure synthetic now, MISP pipeline metadata).
+2. Exposes ``extract_source_truthful_timestamps(attr, source_id, ...)``
+   which reads MISP-native + Layer-2 META-JSON fallbacks and returns
+   ``(first_seen, last_seen)`` claims for the allowlisted source.
+3. Exposes ``coerce_iso()`` and ``iso_str()`` — input-hardened ISO-8601
+   coercion helpers (ASCII gate on shape check, calendar-date validation,
+   int-epoch sanity bounds, future-date clamping). Used by MISPWriter
+   on write and by STIX/alert readers on read.
 
-The Source-Truth Investigator audit confirmed that 9 of 11
-collectors DO capture a reliable upstream first-seen field, but it
-silently drops at the MISPWriter handoff (only NVD survives via
-``NVD_META`` JSON in the comment field) OR at the
-``parse_attribute`` reader.
+The caller (``run_misp_to_neo4j.parse_attribute``) stuffs the
+extracted ``(first_seen, last_seen)`` pair into the item dict as
+``item["first_seen_at_source"]`` / ``item["last_seen_at_source"]``,
+and ``neo4j_client`` forwards them to the edge MERGE Cypher as
+``r.source_reported_first_at`` / ``r.source_reported_last_at``.
 
-Design — OpenCTI / MISP / STIX 2.1 industry consensus
------------------------------------------------------
-Two distinct properties on every Indicator/Vulnerability/Malware/
-ThreatActor/Campaign node:
+Allowlist — WHAT EACH SOURCE'S TIMESTAMP ACTUALLY MEANS
+-------------------------------------------------------
+Names in the allowlist must match the exact tag each collector emits
+(see ``test_collector_emitted_tags_match_allowlist`` for the pin).
+Dual-aliases (``cisa`` / ``cisa_kev``) are retained because
+``config.SOURCE_TAGS`` maps the human label to one form but legacy
+callers / tests use the other.
 
-* ``n.first_seen_at_source``: source-truthful first observation,
-  ISO-8601 with TZ. NULLable. The source's own claim about when
-  the world first saw this entity.
-* ``n.first_imported_at``: EdgeGuard's first MERGE wall-clock time,
-  ISO-8601 with TZ. **Always set on ON CREATE; never overwritten.**
+* ✅ ``nvd`` — NVD ``published`` (when NVD published the CVE to its
+  catalog; NOT when first exploited)
+* ✅ ``cisa`` / ``cisa_kev`` — CISA ``dateAdded`` (when CISA added it
+  to KEV; typically AFTER attacks observed in the wild)
+* ✅ ``mitre_attck`` / ``mitre`` — STIX ``created`` from MITRE's TAXII
+  server (when MITRE cataloged the technique/malware/actor; NOT when
+  first observed in the wild — MITRE imports often batch-stamp at
+  2017-05-31 from the original CTI content)
+* ✅ ``virustotal`` / ``vt`` — ``first_submission_date`` (when first
+  submitted to VT's scanner; NOT when first seen in the wild)
+* ✅ ``abuseipdb`` — ``firstSeen`` (when first reported to AbuseIPDB;
+  the blacklist endpoint intentionally emits NULL for first_seen —
+  see abuseipdb_collector.py for rationale)
+* ✅ ``threatfox`` — ``first_seen`` (when first tracked by ThreatFox)
+* ✅ ``urlhaus`` — ``dateadded`` (when added to URLhaus catalog;
+  ``last_online`` → ``last_seen``)
+* ✅ ``feodo_tracker`` / ``feodo`` — ``first_seen`` (when first C2 IP
+  sighted by Feodo Tracker)
+* ✅ ``ssl_blacklist`` / ``abusech_ssl`` — CSV ``Listingdate``
+* ❌ ``alienvault_otx`` — pulse.created is the pulse-author-time,
+  NOT the IOC first-observed time. Excluded.
+* ❌ ``cybercure`` — synthetic ``now()``. Excluded.
+* ❌ ``misp`` — MISP-collector / sector feeds; pipeline metadata only.
 
-Same shape for ``last_seen_at_source`` vs ``last_updated``.
+**When the source is NOT in the allowlist OR the source's field
+is missing, the extractor returns (None, None).** The edge MIN/MAX
+CASE with AND-guard then preserves any prior value — NULL never
+overwrites a populated claim.
 
-This mirrors the OpenCTI model exactly — ``first_seen`` (source
-truth) vs ``created_at`` (DB-local). It also maps cleanly onto
-STIX 2.1: ``Indicator.valid_from = first_seen_at_source`` (canonical
-STIX field), ``first_imported_at`` becomes a producer-specific
-``x_edgeguard_*`` extension.
+Stale-import + regression protection
+------------------------------------
+The MIN/MAX CASE pattern on the edge (applied in 3 Cypher sites:
+``merge_indicators_batch``, ``merge_vulnerabilities_batch``,
+``_upsert_sourced_relationship``) handles every realistic scenario:
 
-Allowlist — only TRUSTED upstream sources populate first_seen_at_source
-----------------------------------------------------------------------
-Not all sources have a meaningful "first seen" semantic:
-
-* ✅ NVD ``published`` — when NVD first published the CVE (canonical)
-* ✅ CISA ``dateAdded`` — when KEV listed the CVE (canonical)
-* ✅ MITRE ATT&CK STIX ``created`` — STIX object creation (canonical)
-* ✅ VirusTotal ``first_submission_date`` — first submission to VT (canonical)
-* ✅ AbuseIPDB ``firstSeen`` — first report to AbuseIPDB (canonical)
-* ✅ ThreatFox ``first_seen`` — first sighting by ThreatFox (canonical)
-* ✅ URLhaus ``dateadded`` — when URL was added (canonical)
-* ✅ Feodo Tracker ``first_seen`` — first C2 IP sighting (canonical)
-* ✅ SSL Blacklist ``date`` — first listing (canonical)
-* ❌ OTX pulse ``created`` — when the pulse was AUTHORED, NOT when
-  the indicator was first observed. Misleading; excluded.
-* ❌ CyberCure synthetic ``now()`` — useless; excluded.
-* ❌ MISP-collector / sector feeds ``event.date`` — pipeline
-  metadata; excluded.
-
-When the source is NOT in the allowlist OR the source's first_seen
-field is missing, ``first_seen_at_source`` is set to NULL (not the
-sync time). NULL semantically means "we don't know"; it's
-intentionally distinct from ``first_imported_at`` which always has a
-value.
-
-Baseline + incremental correctness
-----------------------------------
-The Cypher pattern uses MIN logic for first_seen_at_source so
-out-of-order arrivals work correctly:
-
-  ON CREATE SET n.first_seen_at_source = item.first_seen_at_source
-  SET n.first_seen_at_source = CASE
-    WHEN item.first_seen_at_source IS NOT NULL
-     AND (n.first_seen_at_source IS NULL OR item.first_seen_at_source < n.first_seen_at_source)
-    THEN item.first_seen_at_source
-    ELSE n.first_seen_at_source
-  END
-
-Scenarios this handles correctly:
-* Baseline writes 2019-01-15 (NVD); incremental tomorrow writes
-  same → 2019 preserved (MIN keeps older)
-* Out-of-order: incremental writes NULL today, baseline backfills
-  2019-01-15 next week → 2019 takes over (MIN of NULL+value = value)
-* MISP attribute re-uploaded with truncated first_seen=event_date
-  (newer than original) → REJECTED, original older value preserved
-* Multi-source: NVD writes 2019, then OTX writes NULL → 2019 stays
-* Incremental re-touches existing node from baseline →
-  ``first_imported_at`` UNCHANGED (ON CREATE only); MIN preserves
-  earliest source observation
+* Baseline writes 2019-01-15 (NVD); incremental tomorrow re-writes
+  same value → MIN keeps 2019.
+* Out-of-order: incremental writes NULL today (NULL AND-guard blocks
+  the overwrite); baseline backfills 2019 next week → 2019 wins.
+* Stale MISP re-upload with `first_seen = event_date` (newer than
+  original) → MIN rejects the later value; original preserved.
+* Source corrects itself (NVD re-reports with earlier published
+  date): MIN accepts the legitimate backdate.
+* New source arrives (NVD already wrote 2019, now ThreatFox reports
+  2024): a NEW edge is created for ThreatFox with its own 2024 claim;
+  NVD's edge 2019 is untouched. STIX aggregate `valid_from` = MIN
+  across both edges = 2019.
+* Incremental re-touches existing node → ``n.first_imported_at``
+  UNCHANGED (ON CREATE SET only); per-source edges'
+  ``source_reported_first_at`` preserve earliest via MIN.
 """
 
 from __future__ import annotations
@@ -100,6 +132,21 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Sanity bounds for int/float Unix epoch parsing in coerce_iso
+# ---------------------------------------------------------------------------
+# Floor: 1990-01-01 UTC (631152000). EdgeGuard is a threat-intel platform;
+# no legitimate source-truth claim predates this. A bare ``1700000`` (year
+# 1970-Jan-20, almost certainly a misencoded field) would otherwise sail
+# through the wide ``0 <= val`` bound and permanently anchor MIN aggregates
+# to 1970 — reintroducing the original "1970-leak" bug through a different
+# door (Bug Hunter v2 #7).
+# Ceil: 9999-12-31 UTC (253402300799). Beyond this, datetime.fromtimestamp
+# raises OverflowError on most platforms.
+_INT_EPOCH_FLOOR = 631_152_000  # 1990-01-01 UTC
+_INT_EPOCH_CEIL = 253_402_300_799  # 9999-12-31 UTC
 
 
 # ---------------------------------------------------------------------------
@@ -234,17 +281,81 @@ def coerce_iso(val: Any) -> Optional[str]:
     if isinstance(val, str) and not val.strip():
         return None
     if isinstance(val, (int, float)):
-        return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+        # PR (S5) commit X (Red Team #4 HIGH + Bug Hunter v2 #7 HIGH):
+        # bound the int/float epoch to a SANITY range, not just the
+        # raw datetime.fromtimestamp range. Two failure modes:
+        #
+        # - Without ANY bound: malformed JSON ints (``2**63``, negative
+        #   sentinels like ``-1``, millisecond-encoded epochs
+        #   misinterpreted as seconds) raise ``OverflowError`` / ``OSError``,
+        #   crashing the entire ``parse_attribute`` call.
+        # - With only the wide ``0 <= val <= 253402300799`` bound:
+        #   a malformed ``1700000`` (year 1970-Jan-20, almost certainly
+        #   a misencoded field) sails through — and that 1970 date then
+        #   anchors ``MIN(r.source_reported_first_at)`` permanently,
+        #   reintroducing the original "1970-leak" bug through a
+        #   different door (Bug Hunter v2 #7).
+        #
+        # Sanity floor: year 1990 (``631152000``). EdgeGuard is a
+        # threat-intel platform; pre-1990 timestamps are not legitimate
+        # source-truth claims. Anything earlier is a parse error / data
+        # corruption — return None so MIN preserves any prior value.
+        try:
+            if not (_INT_EPOCH_FLOOR <= val <= _INT_EPOCH_CEIL):
+                return None
+            return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
+        except (ValueError, OSError, OverflowError):
+            return None
     if isinstance(val, datetime):
         return val.isoformat()
     if isinstance(val, str):
-        # Bugbot MED fix: normalize bare-date strings (YYYY-MM-DD) by
-        # appending UTC midnight so downstream Cypher datetime() parses.
-        # Cheap regex check — only 10-char strings of the exact shape
-        # qualify; anything longer is assumed to already include a time.
+        # PR (S5) commit X (Red Team HIGH ×2 + Red Team v2 H3 HIGH):
+        # defensive input validation on string parsing.
+        # - Red Team #1: ``str.isdigit()`` returns True for fullwidth
+        #   Unicode digits (e.g. "２０２４"). Without an ASCII gate,
+        #   non-ASCII date strings would pass the shape check, get
+        #   the timezone suffix appended, and then crash Neo4j's
+        #   Cypher ``datetime()`` — taking the entire UNWIND batch
+        #   down.
+        # - Red Team #3: invalid calendar dates like "2024-13-99" pass
+        #   the shape check but are rejected by Cypher datetime().
+        #   Same batch-crash exposure.
+        # - Red Team v2 H3: previously the FULL-STRING branch (anything
+        #   not exactly 10 chars) just returned the string unchanged,
+        #   without validation. So ``"2024-13-99T10:00:00Z"`` (length
+        #   20 — fails the date-only shape check) flowed through
+        #   unguarded → Cypher datetime() rejected → entire UNWIND
+        #   batch crashed. Fix: validate ALL string inputs via
+        #   ``datetime.fromisoformat``; return None on parse failure.
         s = val.strip()
-        if len(s) == 10 and s[4] == "-" and s[7] == "-" and s[:4].isdigit() and s[5:7].isdigit() and s[8:10].isdigit():
+        # 1. Date-only branch (YYYY-MM-DD, 10 chars): normalize to UTC
+        #    midnight after validating the calendar date is real.
+        if (
+            len(s) == 10
+            and s.isascii()
+            and s[4] == "-"
+            and s[7] == "-"
+            and s[:4].isdigit()
+            and s[5:7].isdigit()
+            and s[8:10].isdigit()
+        ):
+            try:
+                datetime.fromisoformat(s)
+            except ValueError:
+                return None
             return s + "T00:00:00+00:00"
+        # 2. Full-string branch: validate via fromisoformat (with the
+        #    Z-tolerance shim used elsewhere in the module).
+        normalized = s.replace("Z", "+00:00") if s.endswith("Z") else s
+        try:
+            datetime.fromisoformat(normalized)
+        except (ValueError, TypeError):
+            # Unparseable — return None so the caller's MIN/MAX logic
+            # preserves any prior value rather than crashing the
+            # downstream Cypher ``datetime()`` call. Logged at the
+            # caller layer (extract_source_truthful_timestamps) where
+            # source_id context is available for better triage.
+            return None
         return s
     return None
 

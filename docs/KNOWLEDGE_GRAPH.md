@@ -65,6 +65,30 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `IN_TACTIC` | Technique → Tactic | Kill-chain phase exact match (confidence 1.0) |
 | `HAS_CVSS_v2/v30/v31/v40` | CVE ↔ CVSS sub-nodes | Bidirectional (ResilMesh schema) |
 | `REFERS_TO` | CVE ↔ Vulnerability | Bidirectional bridge by cve_id (`enrichment_jobs.bridge_vulnerability_cve`) |
+| `SOURCED_FROM` | Node → Source | **Per-source provenance edge.** ONE edge per (entity, source) pair (multi-source IOCs preserve full provenance). See [SOURCED_FROM edge schema](#sourced_from-edge-schema) below for the full property contract. |
+
+### SOURCED_FROM edge schema
+
+Every threat-intel node (Indicator, Vulnerability, Malware, ThreatActor, Technique, Tactic, Tool) carries one `(:Node)-[r:SOURCED_FROM]->(:Source)` edge per reporting source. The edge holds both DB-local facts (when EdgeGuard saw this source report this entity) AND the source's own claim (when the source itself says it first/last recorded the entity). Per-source attribution preserves full provenance for multi-source IOCs.
+
+| Property | Semantic | Type | Write rule | Source |
+|---|---|---|---|---|
+| `r.imported_at` | When EdgeGuard FIRST saw THIS source report this entity | DateTime | `ON CREATE SET = datetime()` (set once per edge, never overwritten) | DB-local |
+| `r.updated_at` | When EdgeGuard LAST saw this source report it | DateTime | `SET = datetime()` on every MERGE (always current) | DB-local |
+| `r.source_reported_first_at` | Source's own claim about when it first recorded the entity (NVD `published`, CISA `dateAdded`, MITRE `created`, ThreatFox `first_seen`, AbuseIPDB `firstSeen`, etc.) | Optional DateTime | MIN CASE with NULL short-circuit: earliest claim wins; stale imports cannot regress | Source claim |
+| `r.source_reported_last_at` | Source's own claim about when it last recorded the entity | Optional DateTime | MAX CASE with NULL short-circuit: latest claim wins | Source claim |
+| `r.confidence` | Per-source confidence score for THIS observation | Float | `SET = $confidence` every MERGE | Per-collector |
+| `r.source` | Source identifier (string copy of source_id; redundant with `s.source_id` but cached on edge for performance) | String | `SET = $source_id` every MERGE | Per-collector |
+| `r.raw_data` | Full source-specific payload as JSON (audit trail for one (entity, source) observation) | String (JSON) | `ON CREATE SET = $raw_data` (rarely overwritten — set once unless a re-sync explicitly rewrites) | Per-collector |
+| `r.src_uuid` | Indicator/CVE/Malware/etc. node UUID (cached on edge for serialized-edge consumers — RAG / xAI use cases) | String (UUID) | `ON CREATE` + coalesce | Computed |
+| `r.trg_uuid` | Source node UUID (cached on edge, same rationale as `src_uuid`) | String (UUID) | `ON CREATE` + coalesce | Computed |
+| `r.edgeguard_managed` | Always `true` for edges EdgeGuard owns; allows STIX export to filter against ResilMesh-owned data | Boolean | `SET = true` every MERGE | DB-local |
+
+**Why per-source on edges, not aggregates on nodes?** A single Indicator may be reported by multiple sources (NVD + AbuseIPDB + ThreatFox), each with its own claim. Aggregating to a node-level value via MIN/MAX would destroy the per-source detail. Queries that want a single canonical value compute `MIN(r.source_reported_first_at)` / `MAX(r.source_reported_last_at)` across edges on read (STIX `valid_from`, alert enrichment, campaign aggregate all do this). Read-side aggregation is cheap (~9 edges max per indicator); write-side per-source isolation prevents cross-source contention.
+
+**Honest naming.** `source_reported_first_at` makes explicit "what the source claims to have first recorded", NOT "first observed in the wild". Sources record catalog dates: NVD's `published` is when NVD published the CVE record (after the vuln was actively exploited); MITRE's `created` is when MITRE added the SDO to its TAXII store; etc.
+
+**MIN/MAX merge semantics handle every realistic ordering scenario** — see `src/source_truthful_timestamps.py` module docstring or `migrations/2026_04_first_seen_at_source.md` for the full scenario walkthrough (baseline + incremental + out-of-order + stale-import + multi-source).
 
 ### Technique edges: attribution vs capability vs observation
 

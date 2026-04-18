@@ -295,24 +295,28 @@ class AlertProcessor:
 
         try:
             with self.neo4j.driver.session() as session:
-                # Query 1: Find indicator and direct properties
-                # PR (S5): pull source-truthful first/last_seen on the
-                # Indicator node so the alert enrichment ResilMesh receives
-                # carries world-truth observation times rather than
-                # EdgeGuard's local sync clock. The legacy ``first_seen`` /
-                # ``last_updated`` fields are kept in the projection for
-                # back-compat with older nodes that haven't been re-touched
-                # since PR (S5) commits 1-3 landed.
+                # PR (S5) commit X (architecture redesign): per-source
+                # timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
+                # edges, NOT on the node. For the alert enrichment
+                # payload we still want a single value per indicator —
+                # we aggregate MIN(r.source_reported_first_at) /
+                # MAX(r.source_reported_last_at) across all source
+                # edges so ResilMesh sees the earliest claim across
+                # all sources. Falls back to ``i.first_imported_at``
+                # (DB-local) when no source claim exists.
                 indicator_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
+                    OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
+                    WITH i,
+                         min(r.source_reported_first_at) AS source_first,
+                         max(r.source_reported_last_at)  AS source_last
                     RETURN i {
                         .value, .indicator_type, .zone, .source,
                         .confidence_score,
-                        .first_seen_at_source, .last_seen_at_source,
-                        .first_imported_at,
-                        .first_seen, .last_updated
-                    } as indicator
+                        .first_imported_at, .last_updated
+                    } as indicator,
+                    source_first, source_last
                 """,
                     indicator=indicator,
                 )
@@ -322,23 +326,16 @@ class AlertProcessor:
                     ind_data = indicator_record["indicator"]
                     metadata["indicator_found"] = True
                     enrichment["confidence"] = ind_data.get("confidence_score", 0.0)
-                    # PR (S5): prefer source-truthful values; fall back to
-                    # legacy fields when source-truth isn't populated. Same
-                    # resolution chain the STIX exporter uses for
-                    # ``valid_from``.
-                    #
-                    # PR (S5) commit X (bugbot MED): the values can be
-                    # ``neo4j.time.DateTime`` objects (the driver returns
-                    # those for node DateTime properties) which are NOT
-                    # JSON-serializable for the NATS alert payload. Wrap
-                    # each candidate in ``_iso_str()`` so the enrichment
-                    # dict carries plain ISO-8601 strings only.
-                    enrichment["first_seen"] = (
-                        _iso_str(ind_data.get("first_seen_at_source"))
-                        or _iso_str(ind_data.get("first_imported_at"))
-                        or _iso_str(ind_data.get("first_seen"))
+                    # PR (S5) commit X: prefer source-claimed first/last
+                    # (aggregated across edges); fall back to DB-local
+                    # ``first_imported_at`` / ``last_updated`` when no
+                    # source claim is on file. ``_iso_str`` wraps each
+                    # candidate so neo4j.time.DateTime values become
+                    # plain ISO-8601 strings (NATS payload is JSON).
+                    enrichment["first_seen"] = _iso_str(indicator_record.get("source_first")) or _iso_str(
+                        ind_data.get("first_imported_at")
                     )
-                    enrichment["last_updated"] = _iso_str(ind_data.get("last_seen_at_source")) or _iso_str(
+                    enrichment["last_updated"] = _iso_str(indicator_record.get("source_last")) or _iso_str(
                         ind_data.get("last_updated")
                     )
 

@@ -781,4 +781,72 @@ python -m collectors.energy_feed_collector
 
 ---
 
-_Last updated: 2026-03-28_
+## Adding a new reliable source — checklist
+
+When adding a 10th+ collector that has a **canonical first-reported / last-reported timestamp** that should flow into the source-truthful timestamp pipeline (PR S5, 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`), follow this 5-step checklist:
+
+### 1. Add to `_RELIABLE_FIRST_SEEN_SOURCES` allowlist
+
+In `src/source_truthful_timestamps.py`, add your source's tag(s) to the `_RELIABLE_FIRST_SEEN_SOURCES` frozenset. Include both the canonical name AND any aliases (e.g. `"feodo"` + `"feodo_tracker"`) — the allowlist must accept whatever string the collector writes to `item["tag"]`.
+
+### 2. Add to `SOURCE_MAPPING` in `run_misp_to_neo4j.py`
+
+In `src/run_misp_to_neo4j.py::SOURCE_MAPPING`, map the human label (e.g. `"My-New-Source"`) to the canonical tag. Tag MUST match what the collector emits; the static test `test_collector_emitted_tags_match_allowlist` will fail otherwise.
+
+### 3. Add to `SOURCE_TAGS` in `config.py`
+
+In `src/config.py::SOURCE_TAGS`, add the human-readable label → tag mapping. This is what MISPWriter uses to tag attributes and what `extract_source_from_tags` reads back.
+
+### 4. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
+
+In your new `collectors/<name>_collector.py`, populate the source-truthful timestamps directly from upstream:
+
+```python
+processed.append({
+    "type": "indicator",  # or vulnerability, malware, etc.
+    "value": <value>,
+    "tag": "your_source_tag",
+    "source": ["your_source_tag"],
+    # PR (S5): source-truthful timestamps. NULL is honest — do NOT
+    # fall back to wall-clock NOW. The source-truthful extractor will
+    # return None for missing values, and the SOURCED_FROM edge MIN/MAX
+    # CASE preserves any prior value.
+    "first_seen": upstream_data.get("first_reported_at") or None,
+    "last_seen":  upstream_data.get("last_reported_at")  or None,
+    # ...
+})
+```
+
+The `_apply_source_truthful_timestamps` helper in `src/collectors/misp_writer.py` calls `coerce_iso` to handle int epochs, datetime objects, and date-only strings — so any of these formats are accepted.
+
+### 5. Update `tests/test_first_seen_at_source.py`
+
+Add your tag to the static enumeration in `test_collector_emitted_tags_match_allowlist` so the test catches future tag drift.
+
+### Verification
+
+After adding a new source, run:
+
+```bash
+.venv/bin/python -m pytest tests/test_first_seen_at_source.py -v
+```
+
+All 38 tests should pass. If any fail, the new source isn't wired through correctly.
+
+For an end-to-end smoke test:
+
+```cypher
+MATCH (n)-[r:SOURCED_FROM]->(:Source {source_id: "your_source_tag"})
+RETURN n.uuid,
+       r.source_reported_first_at,
+       r.source_reported_last_at,
+       r.imported_at,
+       r.updated_at
+LIMIT 10;
+```
+
+Should show populated source-reported timestamps if your upstream provides them.
+
+---
+
+_Last updated: 2026-04-18_

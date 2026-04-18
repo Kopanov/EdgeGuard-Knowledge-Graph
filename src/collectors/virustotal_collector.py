@@ -243,6 +243,14 @@ class VirusTotalCollector:
 
                     zones = self._detect_zones_from_names(attrs)
 
+                    # PR (S5) commit X (Logic Tracker v2 F3 MED): map
+                    # ``last_analysis_date`` (epoch int) to item["last_seen"]
+                    # so ``r.source_reported_last_at`` gets populated on
+                    # the SOURCED_FROM edge for VT-sourced indicators.
+                    # Previously the edge's last_seen stayed NULL forever
+                    # even though VT DOES expose a canonical "last scanned"
+                    # timestamp. ``coerce_iso`` handles the int-epoch
+                    # transparently (sanity-bounded to >= year 1990).
                     indicators.append(
                         {
                             "indicator_type": "hash",
@@ -251,6 +259,7 @@ class VirusTotalCollector:
                             "tag": self.tag,
                             "source": [self.tag],
                             "first_seen": attrs.get("first_submission_date", ""),
+                            "last_seen": attrs.get("last_analysis_date") or attrs.get("last_modification_date"),
                             "last_updated": datetime.now(timezone.utc).isoformat(),
                             "confidence_score": conf,
                         }

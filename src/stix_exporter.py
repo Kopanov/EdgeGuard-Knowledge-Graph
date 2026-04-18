@@ -81,6 +81,50 @@ _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 # of truth — bug fix in one place propagates to all callers.
 from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 
+
+def _stix_ts(s: Optional[str]) -> Optional[str]:
+    """Normalize an ISO-8601 timestamp string for stix2 SDK acceptance.
+
+    PR (S5) commit X (post-redesign): stix2's `valid_from` validator
+    rejects the ``+00:00`` UTC offset form ("not in a recognizable
+    format"); it requires the ``Z`` short form. Both ``coerce_iso``
+    output and Python's ``datetime.isoformat()`` produce ``+00:00`` —
+    we normalize at the stix2 boundary instead of mutating those
+    helpers (Neo4j and OpenCTI both accept either form, so the rest
+    of the codebase stays in the more-explicit ``+00:00`` form).
+
+    PR (S5) commit X (Bug Hunter v2 #5 MED): also handle non-UTC
+    offsets. A future collector that emits an Eastern-time-stamped
+    value like ``"2024-03-15T14:00:00-04:00"`` would have previously
+    flowed through unchanged → stix2 rejects it ("not a recognizable
+    format") → the entire SDO build crashes → the indicator silently
+    disappears from the bundle. Fix: parse and normalize to UTC ``Z``
+    form. If parsing fails, fall back to passthrough so the existing
+    error surfaces at the stix2 layer rather than swallowing here.
+    """
+    if not s:
+        return s
+    if s.endswith("+00:00"):
+        return s[:-6] + "Z"
+    if s.endswith("Z"):
+        return s
+    # Possibly a non-UTC offset — try to parse and normalize to Z.
+    # Anything Python's fromisoformat accepts is good; anything else
+    # passes through and stix2 will surface the error properly.
+    try:
+        parsed = _dt.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return s
+    if parsed.tzinfo is None:
+        # Naive — assume UTC to avoid silently dropping the value.
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    else:
+        parsed = parsed.astimezone(_dt.timezone.utc)
+    # ``.isoformat()`` on a UTC datetime yields ``+00:00``; collapse to Z.
+    out = parsed.isoformat()
+    return out[:-6] + "Z" if out.endswith("+00:00") else out
+
+
 # ---------------------------------------------------------------------------
 # Deterministic IDs
 # ---------------------------------------------------------------------------
@@ -175,6 +219,16 @@ class StixExporter:
     def __init__(self, neo4j_client: Any) -> None:
         """Wrap a connected Neo4jClient (or any object exposing ``.driver``)."""
         self.client = neo4j_client
+        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1 — triple-converged
+        # HIGH): per-call cache for the source-truthful edge aggregate.
+        # Without it, ``_node_to_sdo`` runs one Cypher round-trip PER node
+        # in the bundle — depth=2 with 20 nodes = 21 RTTs ≈ 100-200 ms
+        # latency on every ResilMesh enrichment call (DoS-able by a single
+        # depth-heavy export request). The cache is keyed by
+        # (label, sorted-natural-key-tuple) so repeat lookups for the same
+        # entity within one bundle don't re-query.
+        # Cleared at the start of every public ``export_*`` method.
+        self._aggregate_cache: Dict[Any, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -194,6 +248,10 @@ class StixExporter:
         query time. A future optimisation would push the filter into
         the query itself.
         """
+        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # the per-export-call source-aggregate cache so subsequent
+        # bundles never see stale aggregates from a prior export.
+        self._reset_export_cache()
         # Each OPTIONAL MATCH is aggregated into a collect() before the next
         # one starts. Without the WITH ... collect() fence pattern the four
         # OPTIONAL MATCH clauses form a Cartesian product — every row from
@@ -296,6 +354,10 @@ class StixExporter:
         latency. Aggregating at each step keeps the row count bounded
         by the size of one collection at a time.
         """
+        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # the per-export-call source-aggregate cache so subsequent
+        # bundles never see stale aggregates from a prior export.
+        self._reset_export_cache()
         rows = self._run(
             """
             MATCH (a:ThreatActor)
@@ -413,6 +475,10 @@ class StixExporter:
         each step bounds the row count by the size of one collection at
         a time.
         """
+        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # the per-export-call source-aggregate cache so subsequent
+        # bundles never see stale aggregates from a prior export.
+        self._reset_export_cache()
         rows = self._run(
             """
             MATCH (t:Technique {mitre_id: $mid})
@@ -477,6 +543,10 @@ class StixExporter:
         (primary relation). ``depth=2`` (default) also includes affected
         sectors. See ``export_indicator`` for the general semantics.
         """
+        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # the per-export-call source-aggregate cache so subsequent
+        # bundles never see stale aggregates from a prior export.
+        self._reset_export_cache()
         rows = self._run(
             """
             MATCH (v)
@@ -523,6 +593,128 @@ class StixExporter:
     # Node → SDO mapping
     # ------------------------------------------------------------------
 
+    def _enrich_props_with_source_aggregates(self, label: str, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Pull per-source MIN(first)/MAX(last) aggregates from the
+        ``SOURCED_FROM`` edges and inject them into the props dict so
+        the per-type SDO builders find them under the same keys they
+        used to read from the node.
+
+        PR (S5) commit X (architecture redesign): per-source timestamps
+        live on edges (``r.source_reported_first_at`` /
+        ``r.source_reported_last_at``), not on the node. The STIX
+        ``valid_from`` semantics still want a single value per
+        Indicator — we compute it as MIN across all SOURCED_FROM edges
+        so the bundle reflects "the earliest claim from any source
+        about when this entity was first observed". MAX symmetric for
+        last_seen.
+
+        PR (S5) commit X (Bug Hunter v2 #3 MED): for ``Campaign`` the
+        SOURCED_FROM edges don't carry source claims (Campaign is a
+        derived aggregate built by enrichment_jobs). We instead read
+        the campaign's own ``first_seen`` / ``last_seen`` properties —
+        which the campaign builder already aggregates correctly across
+        the campaign's indicators. So Campaign SDOs DO get the
+        ``x_edgeguard_*`` extensions, just sourced from a different
+        place than other entity types.
+
+        PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1 HIGH ×3):
+        cached per-export-call to eliminate the N+1 query problem.
+
+        PR (S5) commit X (Bug Hunter v2 #4 + Logic Tracker v2 F8 MED):
+        previously the silent-bail paths returned props with NO log
+        — operator could not see why ``x_edgeguard_*`` extensions were
+        missing from a bundle. Now both bail paths emit a WARNING.
+
+        Returns a new dict (does not mutate the input). Safe for
+        labels without a SOURCED_FROM edge — props is returned
+        unchanged when no edges exist.
+        """
+        from node_identity import natural_key_props
+
+        # ----- Special case: Campaign reads its own pre-aggregated props
+        if label == "Campaign":
+            out = dict(props)
+            if props.get("first_seen") is not None and "first_seen_at_source" not in out:
+                out["first_seen_at_source"] = props["first_seen"]
+            if props.get("last_seen") is not None and "last_seen_at_source" not in out:
+                out["last_seen_at_source"] = props["last_seen"]
+            return out
+
+        try:
+            keys = natural_key_props(label)
+        except KeyError:
+            return props
+        # Skip Source / Sector — they don't carry per-source claims
+        # (Source IS the source; Sector is a category).
+        if label in ("Source", "Sector"):
+            return props
+
+        # Build cache key from (label, sorted natural-key tuple).
+        # Sort so order-independent for multi-key labels like NetworkService.
+        cache_key = (label, tuple(sorted((k, props.get(k)) for k in keys)))
+
+        # If any natural-key value is None we can't safely look up — bail
+        # (with WARNING so operator can see the missing extension).
+        if any(v is None for _, v in cache_key[1]):
+            logger.warning(
+                "STIX source-aggregate skipped for %s — missing natural-key value(s) %s; "
+                "x_edgeguard_first_seen_at_source extension will be absent from this SDO",
+                label,
+                {k: v for k, v in cache_key[1]},
+            )
+            return props
+
+        # Per-export-call cache hit?
+        if cache_key in self._aggregate_cache:
+            agg = self._aggregate_cache[cache_key]
+        else:
+            where = " AND ".join(f"n.`{k}` = $key_{k}" for k in keys)
+            params = {f"key_{k}": props.get(k) for k in keys}
+            try:
+                rows = self._run(
+                    f"""
+                    MATCH (n:{label}) WHERE {where}
+                    OPTIONAL MATCH (n)-[r:SOURCED_FROM]->(:Source)
+                    RETURN min(r.source_reported_first_at) AS first_seen_at_source,
+                           max(r.source_reported_last_at) AS last_seen_at_source
+                    """,
+                    params,
+                )
+            except Exception as e:
+                # If the lookup fails (driver issue, transient), we still
+                # return a valid SDO — just without the source-truthful
+                # extension. The caller's ``valid_from`` chain falls
+                # through to ``first_imported_at``. Log so operators see
+                # the silent degradation.
+                logger.warning(
+                    "STIX source-aggregate query FAILED for %s key=%s: %s: %s — "
+                    "SDO emitted without x_edgeguard_* extensions",
+                    label,
+                    params,
+                    type(e).__name__,
+                    e,
+                )
+                return props
+            agg = rows[0] if rows else {}
+            self._aggregate_cache[cache_key] = agg
+
+        out = dict(props)
+        if agg.get("first_seen_at_source") is not None:
+            out["first_seen_at_source"] = agg["first_seen_at_source"]
+        if agg.get("last_seen_at_source") is not None:
+            out["last_seen_at_source"] = agg["last_seen_at_source"]
+        return out
+
+    def _reset_export_cache(self) -> None:
+        """Clear the per-export-call source-aggregate cache.
+
+        PR (S5) commit X: called at the start of every public ``export_*``
+        method so subsequent exports don't see stale aggregates from
+        prior calls. The cache is bundle-scoped — eliminates N+1
+        within one bundle without leaking state across bundles.
+        """
+        self._aggregate_cache.clear()
+
     def _node_to_sdo(self, label: str, props: Dict[str, Any]) -> Dict[str, Any]:
         """Turn a Neo4j node dict into a STIX 2.1 SDO dict.
 
@@ -537,7 +729,18 @@ class StixExporter:
         an ``x_edgeguard_zones`` custom property. This resolves open
         question §7.4 of the proposal doc: ResilMesh can filter bundles
         by sector without traversing the graph itself.
+
+        PR (S5) commit X (architecture redesign): the source-truthful
+        first_seen / last_seen used to live on the node; they're now
+        on the per-source ``SOURCED_FROM`` edges. We aggregate across
+        edges (MIN/MAX) here before passing to the per-type builder
+        so ``valid_from`` and ``x_edgeguard_*`` extensions remain
+        populated correctly.
         """
+        # Enrich with per-source aggregates BEFORE delegating to type
+        # builders so they see the same `first_seen_at_source` /
+        # `last_seen_at_source` keys they used to read from the node.
+        props = self._enrich_props_with_source_aggregates(label, props)
         label = label.lower()
         if label == "indicator":
             sdo = self._indicator_sdo(props)
@@ -549,6 +752,16 @@ class StixExporter:
             sdo = self._technique_sdo(props)
         elif label == "tool":
             sdo = self._tool_sdo(props)
+        elif label == "tactic":
+            # PR (S5) commit X (Logic Tracker v2 F1 HIGH): Tactic was
+            # missing from the dispatcher and silently routed to
+            # ``x-edgeguard-unknown``, so MITRE x-mitre-tactic SDOs
+            # never received the source-truthful x_edgeguard_*
+            # extensions even though the per-source edges DID get
+            # populated correctly. Fix: explicit dispatcher branch +
+            # dedicated builder that emits MITRE's canonical
+            # ``x-mitre-tactic`` custom SDO type.
+            sdo = self._tactic_sdo(props)
         elif label == "campaign":
             sdo = self._campaign_sdo(props)
         elif label in ("cve", "vulnerability"):
@@ -567,6 +780,46 @@ class StixExporter:
         return sdo
 
     # ---- per-type constructors ----------------------------------------
+
+    def _apply_source_truthful_custom_props(self, sdo_dict: Dict[str, Any], props: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach the EdgeGuard source-truthful / import-wall-clock
+        timestamp custom properties to any STIX 2.1 SDO dict.
+
+        PR (S5) commit X (Logic Tracker + Cross-Checker HIGH): originally
+        these `x_edgeguard_*` fields were only added to the Indicator
+        SDO. Vulnerability / Malware / ThreatActor / Technique / Tactic /
+        Tool / Campaign SDOs shipped to ResilMesh without the
+        source-truth extension — so the PR's named bug ("Indicator.
+        valid_from = 1970 epoch leak") was only half-fixed: downstream
+        STIX consumers still lost the source-truth signal for every
+        non-Indicator entity type.
+
+        The three custom properties emitted (all optional, all gated on
+        presence + `_iso_str` coercion so a `neo4j.time.DateTime`
+        serializes as a plain string):
+
+        - ``x_edgeguard_first_seen_at_source`` — source-truthful first
+          observation (STIX 2.1 §11.2 producer extension, analogous to
+          the OpenCTI `first_seen` concept for non-Indicator SDOs)
+        - ``x_edgeguard_last_seen_at_source`` — source-truthful last
+          observation (analogous to OpenCTI `last_seen`)
+        - ``x_edgeguard_first_imported_at`` — EdgeGuard-local
+          "when we first synced this node" wall-clock, DB-record
+          semantic (analogous to OpenCTI `created_at`)
+        - ``x_edgeguard_last_updated`` — EdgeGuard-local last-sync
+          wall-clock (analogous to OpenCTI `updated_at`). Cross-Checker
+          F8: symmetric with `first_imported_at`; consumers polling for
+          "has this SDO been touched since my last read" need the pair.
+        """
+        if props.get("first_seen_at_source"):
+            sdo_dict["x_edgeguard_first_seen_at_source"] = _iso_str(props["first_seen_at_source"])
+        if props.get("last_seen_at_source"):
+            sdo_dict["x_edgeguard_last_seen_at_source"] = _iso_str(props["last_seen_at_source"])
+        if props.get("first_imported_at"):
+            sdo_dict["x_edgeguard_first_imported_at"] = _iso_str(props["first_imported_at"])
+        if props.get("last_updated"):
+            sdo_dict["x_edgeguard_last_updated"] = _iso_str(props["last_updated"])
+        return sdo_dict
 
     def _indicator_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         value = props.get("value", "")
@@ -608,11 +861,29 @@ class StixExporter:
         # driver becomes a plain ISO-8601 string before stix2 sees it.
         # Without the cast, ``stix2.utils.parse_into_datetime()`` raises
         # because it doesn't recognize the neo4j driver type.
-        valid_from = (
+        # PR (S5) commit X (Cross-Checker F1 — MEDIUM): replace the
+        # ``"1970-01-01T00:00:00Z"`` tail-of-chain fallback with the
+        # CURRENT wall-clock. STIX 2.1 §4.8 `valid_from` semantic is
+        # "time from which this Indicator is considered valid". A
+        # 1970 sentinel reads to consumers as a real claim and is
+        # misleading. OpenCTI's convention + MITRE's own indicator SDOs
+        # use the object's ``created`` timestamp when no source first-
+        # seen exists — we mirror that here via ``now()`` (our ``created``
+        # is auto-stamped by stix2 at this same instant).
+        # PR (S5) commit X (Bug Hunter v2 #1 HIGH): dropped the back-compat
+        # ``props.get("first_seen")`` step in the chain. The legacy node
+        # field was being written by the alert-path Indicator merge (see
+        # neo4j_client.py:merge_resilmesh_indicator BEFORE this commit) —
+        # which polluted ``valid_from`` with the alert-arrival wall-clock
+        # for any indicator that arrived via an alert. The alert path
+        # is now fixed; consumers reading the legacy ``i.first_seen``
+        # field on ANY remaining baseline node get None here, falling
+        # through to ``first_imported_at`` (the canonical DB-local sync
+        # time) — semantically correct.
+        valid_from = _stix_ts(
             _iso_str(props.get("first_seen_at_source"))
             or _iso_str(props.get("first_imported_at"))
-            or _iso_str(props.get("first_seen"))
-            or "1970-01-01T00:00:00Z"
+            or _dt.datetime.now(_dt.timezone.utc).isoformat()
         )
         obj = stix2.Indicator(
             id=stix_id,
@@ -623,18 +894,13 @@ class StixExporter:
             indicator_types=_listify(props.get("indicator_classification") or ["malicious-activity"]),
             allow_custom=True,
         )
-        # PR (S5): expose first_imported_at as a producer-specific custom
-        # property so consumers can distinguish source-truthful timestamp
-        # (valid_from) from EdgeGuard's local sync time. Mirrors the
-        # OpenCTI / STIX 2.1 best-practice pattern (Best-Practice
-        # Researcher agent recommendation). _iso_str cast also applied
-        # so neo4j DateTime values serialize as JSON-safe strings.
-        sdo_dict = _to_dict(obj)
-        if props.get("first_imported_at"):
-            sdo_dict["x_edgeguard_first_imported_at"] = _iso_str(props["first_imported_at"])
-        if props.get("last_seen_at_source"):
-            sdo_dict["x_edgeguard_last_seen_at_source"] = _iso_str(props["last_seen_at_source"])
-        return sdo_dict
+        # PR (S5): expose source-truthful + import-wall-clock timestamps
+        # as producer-specific custom properties so consumers can
+        # distinguish the two semantics. Mirrors the OpenCTI / STIX 2.1
+        # best-practice pattern. Now applied via shared helper so every
+        # SDO type emits the same envelope (Logic Tracker HIGH —
+        # previously only Indicator got the custom props).
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
@@ -652,7 +918,9 @@ class StixExporter:
             description=props.get("description"),
             allow_custom=True,
         )
-        return _to_dict(obj)
+        # PR (S5) commit X (Logic Tracker HIGH): source-truthful +
+        # import-wall-clock custom props now emitted on every SDO type.
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _actor_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
@@ -665,7 +933,7 @@ class StixExporter:
             description=props.get("description"),
             allow_custom=True,
         )
-        return _to_dict(obj)
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _technique_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         mitre_id = props.get("mitre_id") or props.get("external_id") or ""
@@ -705,7 +973,7 @@ class StixExporter:
         if ext_refs:
             kwargs["external_references"] = ext_refs
         obj = stix2.AttackPattern(**kwargs)
-        return _to_dict(obj)
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _tool_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
@@ -718,7 +986,53 @@ class StixExporter:
             aliases=_listify(props.get("aliases")),
             allow_custom=True,
         )
-        return _to_dict(obj)
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
+
+    def _tactic_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a MITRE ``x-mitre-tactic`` custom SDO.
+
+        PR (S5) commit X (Logic Tracker v2 F1 HIGH): Tactic was
+        missing from ``_node_to_sdo`` so MITRE-derived Tactic nodes
+        either fell through to the ``x-edgeguard-unknown`` bucket OR
+        (after this fix) emit the canonical MITRE custom type.
+
+        STIX 2.1 has no first-class Tactic SDO. MITRE ATT&CK STIX
+        bundles model tactics two ways:
+        1. As ``kill_chain_phases`` on attack-pattern (which our
+           Technique SDO already does — see ``_technique_sdo``).
+        2. As standalone ``x-mitre-tactic`` custom SDOs with their
+           own description, x-mitre-shortname, and external_references.
+
+        We emit (2) here so consumers that want the full tactic-
+        as-entity (description, source-truthful timestamps,
+        cross-references) can resolve them — without disturbing the
+        kill-chain-phase representation embedded on attack-patterns.
+        """
+        mitre_id = props.get("mitre_id") or ""
+        name = props.get("name", mitre_id)
+        stix_id = _deterministic_id("x-mitre-tactic", mitre_id or name)
+        ext_refs = []
+        if mitre_id:
+            ext_refs.append(
+                {
+                    "source_name": "mitre-attack",
+                    "external_id": mitre_id,
+                    "url": f"https://attack.mitre.org/tactics/{mitre_id}",
+                }
+            )
+        sdo: Dict[str, Any] = {
+            "type": "x-mitre-tactic",
+            "spec_version": "2.1",
+            "id": stix_id,
+            "name": name,
+            "description": props.get("description"),
+        }
+        if props.get("shortname"):
+            sdo["x_mitre_shortname"] = props["shortname"]
+        if ext_refs:
+            sdo["external_references"] = ext_refs
+        # Stamp source-truthful + DB-local timestamps via the shared helper.
+        return self._apply_source_truthful_custom_props(sdo, props)
 
     def _campaign_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
@@ -730,7 +1044,7 @@ class StixExporter:
             aliases=_listify(props.get("aliases")),
             allow_custom=True,
         )
-        return _to_dict(obj)
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _vulnerability_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         cve_id = props.get("cve_id") or props.get("name") or ""
@@ -753,7 +1067,7 @@ class StixExporter:
         if ext_refs:
             kwargs["external_references"] = ext_refs
         obj = stix2.Vulnerability(**kwargs)
-        return _to_dict(obj)
+        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _sector_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         # PR #34 round 22 (multi-agent UUID audit, HIGH): the previous

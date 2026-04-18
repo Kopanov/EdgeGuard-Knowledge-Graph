@@ -121,9 +121,6 @@ class CVE:
     first_imported_at: Optional[str] = None
     # PR (S5): source-truthful observation times — populated when the
     # source is on the reliable allowlist (see source_truthful_timestamps.py).
-    # NULL means "we don't know when the world first/last saw this".
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     last_updated: Optional[str] = None
     last_imported_from: Optional[str] = None
     # Linked CVSS nodes (resolved lazily by resolvers)
@@ -164,8 +161,6 @@ class Vulnerability:
     # legacy scalar misp_event_id removed)
     misp_event_ids: Optional[List[str]] = None
     first_imported_at: Optional[str] = None
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     last_imported_from: Optional[str] = None
     # Enrichment fields
     version_constraints: Optional[str] = None  # JSON string
@@ -210,8 +205,6 @@ class Indicator:
     misp_event_urls: Optional[List[str]] = None
     # Import audit trail
     first_imported_at: Optional[str] = None
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     last_imported_from: Optional[str] = None
     # Enrichment fields
     yara_rules: Optional[List[str]] = None
@@ -241,9 +234,6 @@ class ThreatActor:
     # Malware. Populated by ``parse_attribute`` via the
     # source_truthful_timestamps helper; MITRE intrusion-set SDOs carry
     # a canonical ``created`` timestamp (actor first documented by
-    # MITRE) and ``modified`` (last STIX revision).
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     first_imported_at: Optional[str] = None
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
@@ -265,11 +255,6 @@ class Malware:
     # PR (S5) commit X (bugbot MED): source-truthful and
     # import-wall-clock timestamps, matching Indicator / Vulnerability /
     # ThreatActor. Populated by ``parse_attribute`` via the
-    # source_truthful_timestamps helper; MITRE malware SDOs carry a
-    # canonical ``created`` timestamp (first documented by MITRE) and
-    # ``modified`` (last STIX revision).
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     first_imported_at: Optional[str] = None
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
@@ -293,8 +278,6 @@ class Technique:
     # ThreatActor / Malware / Tool. MITRE attack-pattern SDOs carry
     # canonical ``created`` / ``modified`` which the collector maps
     # into item["first_seen"] / item["last_seen"].
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     first_imported_at: Optional[str] = None
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
@@ -316,8 +299,6 @@ class Tactic:
     # PR (S5) commit X (bugbot LOW): source-truthful + import-wall-clock
     # timestamps for API parity. x-mitre-tactic SDOs carry canonical
     # ``created`` / ``modified``.
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     first_imported_at: Optional[str] = None
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
@@ -344,9 +325,6 @@ class Tool:
     first_imported_at: Optional[str] = None
     # PR (S5): source-truthful observation times — populated when the
     # source is on the reliable allowlist (see source_truthful_timestamps.py).
-    # NULL means "we don't know when the world first/last saw this".
-    first_seen_at_source: Optional[str] = None
-    last_seen_at_source: Optional[str] = None
     last_updated: Optional[str] = None
 
 

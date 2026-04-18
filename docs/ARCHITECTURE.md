@@ -239,7 +239,7 @@ When data is pushed to MISP, it gets tagged with:
 
 | Relationship | From → To | How it is created |
 |---|---|---|
-| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at` |
+| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` on malware/tool (MISP **`MITRE_USES_TECHNIQUES:`** round-trip for malware) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
@@ -254,6 +254,19 @@ When data is pushed to MISP, it gets tagged with:
 
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
 `imported_at` is set once on first creation (`ON CREATE SET`) and never overwritten.
+
+**Source-truthful timestamps on `SOURCED_FROM` edges (PR S5, 2026-04):**
+The two new edge properties `r.source_reported_first_at` /
+`r.source_reported_last_at` carry the per-source first/last claim
+("NVD says it published 2013-01-15", "AbuseIPDB says it first reported
+2024-01-15"). Updated via MIN/MAX CASE with NULL short-circuit so
+stale imports cannot regress earlier claims. Node-level
+`n.first_imported_at` (ON CREATE SET only) and `n.last_updated`
+(refreshed every MERGE) carry only DB-local truths — they cannot be
+misread as real-world claims. STIX export aggregates MIN across all
+edges for `valid_from`. See `docs/KNOWLEDGE_GRAPH.md` for the full
+schema and `migrations/2026_04_first_seen_at_source.md` for operator
+verification queries + post-deploy backfill script.
 
 **MISP traceability on edges (2026-04):** every relationship MERGEd by
 `Neo4jClient.create_misp_relationships_batch` (i.e. all `EMPLOYS_TECHNIQUE`,
