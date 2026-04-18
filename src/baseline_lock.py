@@ -178,6 +178,39 @@ def _safe_remove(path: str) -> None:
         logger.warning("Failed to remove baseline lock %s: %s", path, exc)
 
 
+def _is_corrupt_sentinel(path: str) -> bool:
+    """Return True iff the sentinel file at ``path`` is empty or unparseable
+    JSON (i.e. a crash-during-write artifact, not a live lock).
+
+    Used by ``acquire_baseline_lock`` to recover from the SIGKILL-between-
+    O_EXCL-and-write race. Distinct from the empty-string check in
+    ``is_baseline_running`` because that one returns None on the SAME
+    condition (with the implicit interpretation "no live lock"); this one
+    explicitly says "this file is junk, safe to unlink".
+
+    Returns False if the file is missing (the caller's prior FileExistsError
+    must have raced with a competitor's ``release_baseline_lock``), or if
+    it parses as a valid JSON object — that's a real live lock and we
+    must NOT delete it.
+    """
+    try:
+        with open(path) as f:
+            content = f.read().strip()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Can't read at all — leave it alone; caller will see FileExistsError again.
+        return False
+    if not content:
+        return True
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        return True
+    # Valid JSON but not a dict → also corrupt
+    return not isinstance(parsed, dict)
+
+
 def acquire_baseline_lock() -> bool:
     """
     Write the sentinel file. Returns True on success, False if another
@@ -235,19 +268,62 @@ def acquire_baseline_lock() -> bool:
 
     # Atomic create-or-fail. If FileExistsError fires, a competitor slipped
     # in between our ``is_baseline_running`` check and this ``os.open`` —
-    # they win, we abort. If ANY other OSError fires, log + abort to be
-    # safe (we'd rather refuse than start a baseline whose lock state is
-    # unknowable).
+    # OR a previous process was killed AFTER O_EXCL created the sentinel
+    # but BEFORE os.write completed (SIGKILL, power loss). In the latter
+    # case, the file exists but is empty/corrupt — ``is_baseline_running``
+    # returns None (its JSON parse fails silently), the dead-PID/age
+    # pruning never fires, and we'd be permanently locked out until
+    # someone manually deletes the sentinel.
+    #
+    # PR #38 commit X (bugbot MED): on FileExistsError, do a SECOND
+    # corrupt-sentinel probe — try to read+parse the file. If it's
+    # genuinely unparseable (zero-byte, truncated JSON), unlink it and
+    # retry the atomic create exactly once. The old ``os.replace``
+    # pattern tolerated this case by silently overwriting; with O_EXCL
+    # we have to handle it explicitly.
+    def _attempt_atomic_create() -> int:
+        """Single atomic create attempt; returns fd on success, raises
+        OSError (including FileExistsError) on failure. Caller MUST handle
+        the exception — there is no None return path."""
+        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        fd = _attempt_atomic_create()
     except FileExistsError:
-        logger.error(
-            "Refusing to start baseline: lost the lock-acquisition race "
-            "to another baseline that started in the gap between the "
-            "stale-pruning check and the atomic create. Path: %s",
-            path,
-        )
-        return False
+        # Probe whether the existing sentinel is empty/corrupt — if so, treat
+        # as a crash-during-write artifact and retry once.
+        if _is_corrupt_sentinel(path):
+            logger.warning(
+                "Detected empty/corrupt baseline-lock sentinel at %s — "
+                "likely a crash during write; unlinking + retrying once.",
+                path,
+            )
+            try:
+                os.unlink(path)
+            except OSError as unlink_exc:
+                logger.error(
+                    "Failed to unlink corrupt baseline-lock sentinel at %s: %s",
+                    path,
+                    unlink_exc,
+                )
+                return False
+            try:
+                fd = _attempt_atomic_create()
+            except OSError as retry_exc:
+                logger.error(
+                    "Failed to acquire baseline lock at %s after corrupt-sentinel cleanup: %s",
+                    path,
+                    retry_exc,
+                )
+                return False
+        else:
+            logger.error(
+                "Refusing to start baseline: lost the lock-acquisition race "
+                "to another baseline that started in the gap between the "
+                "stale-pruning check and the atomic create. Path: %s",
+                path,
+            )
+            return False
     except OSError as exc:
         logger.error("Failed to acquire baseline lock at %s: %s", path, exc)
         return False

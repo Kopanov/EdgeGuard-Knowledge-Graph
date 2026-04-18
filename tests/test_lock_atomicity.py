@@ -74,16 +74,21 @@ def test_baseline_lock_uses_o_excl_for_sentinel_acquisition():
     # (the file may still be referenced in comments documenting the historical bug; that's OK)
     code_lines = [line for line in src.splitlines() if not line.lstrip().startswith("#")]
     code_only = "\n".join(code_lines)
-    # The acquire function specifically must not use os.replace anymore for the sentinel
+    # The acquire function specifically must not use os.replace anymore for the sentinel.
+    # PR #38 commit X (bugbot LOW): use ``>= 0`` not ``> 0`` — find() returns
+    # -1 when not found and 0 when at the start of the string. The previous
+    # ``> 0`` would silently skip the assertion if the function happened to
+    # be at index 0 (after comment-stripping, that's actually possible if
+    # there are no comments above the def).
     acquire_start = code_only.find("def acquire_baseline_lock")
-    if acquire_start > 0:
-        # Find end of function — next top-level def
-        next_def = code_only.find("\ndef ", acquire_start + 1)
-        acquire_body = code_only[acquire_start:next_def] if next_def > 0 else code_only[acquire_start:]
-        assert "os.replace(tmp_path, path)" not in acquire_body, (
-            "acquire_baseline_lock must no longer use the os.replace(tmp, path) pattern — "
-            "that was the non-atomic acquisition that PR #38 replaced"
-        )
+    assert acquire_start >= 0, "could not locate acquire_baseline_lock in baseline_lock.py source"
+    # Find end of function — next top-level def
+    next_def = code_only.find("\ndef ", acquire_start + 1)
+    acquire_body = code_only[acquire_start:next_def] if next_def >= 0 else code_only[acquire_start:]
+    assert "os.replace(tmp_path, path)" not in acquire_body, (
+        "acquire_baseline_lock must no longer use the os.replace(tmp, path) pattern — "
+        "that was the non-atomic acquisition that PR #38 replaced"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +168,84 @@ def test_acquire_baseline_lock_then_retry_returns_false(tmp_path, monkeypatch):
     assert baseline_lock.acquire_baseline_lock() is False
     # Cleanup: release so other tests don't see a stale sentinel
     baseline_lock.release_baseline_lock()
+
+
+def test_acquire_baseline_lock_recovers_from_corrupt_sentinel(tmp_path, monkeypatch):
+    """PR #38 commit X (bugbot MED) regression pin.
+
+    Background: with O_EXCL atomic create-or-fail, a process killed
+    AFTER ``os.open`` creates the sentinel but BEFORE ``os.write``
+    completes leaves an empty/corrupt file behind. ``is_baseline_running``
+    returns None (its JSON parse silently fails on empty content), the
+    dead-PID/age pruning never fires, and ``os.open`` then hits
+    FileExistsError forever — permanent lock-out until manual cleanup.
+
+    Fix: after FileExistsError, probe the sentinel content via
+    ``_is_corrupt_sentinel``; if it's empty/junk, unlink + retry.
+    """
+    import baseline_lock
+
+    sentinel_path = str(tmp_path / "baseline.lock")
+    monkeypatch.setattr(baseline_lock, "baseline_lock_path", lambda: sentinel_path)
+
+    # Simulate a crash artifact: empty sentinel file
+    with open(sentinel_path, "w") as fh:
+        fh.write("")
+
+    # acquire_baseline_lock must detect the corrupt file, unlink it, retry,
+    # and succeed.
+    assert baseline_lock.acquire_baseline_lock() is True, (
+        "Empty sentinel (crash artifact) must be auto-recovered; if this fails the "
+        "operator is permanently locked out until manual deletion."
+    )
+    baseline_lock.release_baseline_lock()
+
+
+def test_acquire_baseline_lock_recovers_from_truncated_json_sentinel(tmp_path, monkeypatch):
+    """Same recovery path for truncated/malformed JSON content (a power-loss
+    artifact that wrote a few bytes before dying)."""
+    import baseline_lock
+
+    sentinel_path = str(tmp_path / "baseline.lock")
+    monkeypatch.setattr(baseline_lock, "baseline_lock_path", lambda: sentinel_path)
+
+    with open(sentinel_path, "w") as fh:
+        fh.write('{"pid": 12345, "host":')  # truncated mid-JSON
+
+    assert baseline_lock.acquire_baseline_lock() is True
+    baseline_lock.release_baseline_lock()
+
+
+def test_acquire_baseline_lock_does_NOT_unlink_valid_sentinel(tmp_path, monkeypatch):
+    """Negative pin: a VALID JSON sentinel from a real live lock must NOT
+    be auto-unlinked. ``_is_corrupt_sentinel`` must return False on
+    well-formed JSON dicts so the recovery path can't trash a legitimate
+    lock from another process."""
+    import baseline_lock
+
+    sentinel_path = str(tmp_path / "baseline.lock")
+    monkeypatch.setattr(baseline_lock, "baseline_lock_path", lambda: sentinel_path)
+
+    # Write a sentinel that LOOKS like a live lock from a competing process
+    # (with a fake but live PID — this process's own pid will pass os.kill(p, 0))
+    import json as _json
+
+    payload = {
+        "pid": os.getpid(),
+        "host": "competitor.example",
+        "started_at": "2026-04-18T12:00:00+00:00",
+        "monotonic_started": 0.0,
+    }
+    with open(sentinel_path, "w") as fh:
+        _json.dump(payload, fh)
+
+    # is_baseline_running returns the payload (live lock detected); acquire
+    # must REFUSE.
+    assert baseline_lock.acquire_baseline_lock() is False, (
+        "A valid JSON sentinel from a live process must NOT be auto-recovered as 'corrupt'"
+    )
+    # And the sentinel must still exist
+    assert os.path.exists(sentinel_path), "valid sentinel must not be unlinked by recovery path"
 
 
 def test_acquire_baseline_lock_handles_filewrite_failure_cleanly(tmp_path, monkeypatch):

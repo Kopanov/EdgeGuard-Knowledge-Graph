@@ -937,6 +937,14 @@ class EdgeGuardPipeline:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
                 return False
+            except OSError as exc:
+                # PR #38 commit X (bugbot MED): catch the broader OSError too.
+                # PermissionError, ENOSPC (disk full), EROFS (read-only fs) etc.
+                # would otherwise propagate UNCAUGHT through the caller — the
+                # pipeline crashes with a stack trace instead of cleanly
+                # refusing to start. Mirrors the baseline_lock.py pattern.
+                logger.error(f"Failed to acquire pipeline lock at {path}: {exc}")
+                return False
             write_failed = False
             try:
                 os.write(fd, str(os.getpid()).encode("ascii"))
