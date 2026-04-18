@@ -901,10 +901,112 @@ class EdgeGuardPipeline:
         lock_dir = os.path.join(os.path.dirname(__file__), "..", "checkpoints")
         os.makedirs(lock_dir, exist_ok=True)
         lock_path = os.path.join(lock_dir, "pipeline.lock")
-        try:
-            if os.path.exists(lock_path):
+
+        # PR #38 (Bug Hunter Tier S S2): atomic lock acquisition via
+        # ``O_CREAT|O_EXCL|O_WRONLY``. The previous TOCTOU pattern —
+        # ``os.path.exists(lock_path)`` then ``with open(lock_path, "w")`` —
+        # could let two CLI invocations both find no lock and both write
+        # their PID, last writer wins. Two pipelines then ran concurrently,
+        # racing MISP event creation and Neo4j MERGEs (the very condition
+        # the lock was meant to prevent).
+        #
+        # ``O_EXCL`` is POSIX-defined as atomic create-or-fail: if the
+        # file already exists, ``os.open`` raises ``FileExistsError`` AND
+        # does NOT touch the existing file. No window for a racing process
+        # to slip in. Stale-lock recovery (the "PID is gone" case) still
+        # uses the read-then-unlink-then-retry pattern below — but the
+        # final lock acquisition itself is atomic.
+        def _try_atomic_lock_acquire(path: str) -> bool:
+            """Single atomic create-or-fail attempt.
+
+            Returns True iff THIS process now exclusively owns the lock
+            file. Returns False on FileExistsError (someone else holds
+            it). Returns False on write failure too — the partial sentinel
+            is rolled back so a retry can proceed cleanly. Any other
+            OSError on the create itself propagates to the caller.
+
+            PR #38 commit X (bugbot MED): added the write-failure
+            rollback. Previously a write OSError propagated up
+            uncaught while the empty/partial lock file lingered on
+            disk → next CLI invocation would see a "live" lock and
+            refuse to start, even though the prior process never
+            actually held it. Mirrors the baseline_lock.py pattern.
+            """
+            try:
+                # 0o644 — owner rw, others r (matches the previous open(..., "w") default)
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                return False
+            except OSError as exc:
+                # PR #38 commit X (bugbot MED): catch the broader OSError too.
+                # PermissionError, ENOSPC (disk full), EROFS (read-only fs) etc.
+                # would otherwise propagate UNCAUGHT through the caller — the
+                # pipeline crashes with a stack trace instead of cleanly
+                # refusing to start. Mirrors the baseline_lock.py pattern.
+                logger.error(f"Failed to acquire pipeline lock at {path}: {exc}")
+                return False
+            write_failed = False
+            try:
+                os.write(fd, str(os.getpid()).encode("ascii"))
+            except OSError as exc:
+                logger.error(f"Failed to write pipeline-lock PID to {path}: {exc}")
+                write_failed = True
+            finally:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            if write_failed:
+                # Roll back the partial sentinel so the next attempt isn't blocked.
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                return False
+            return True
+
+        if not _try_atomic_lock_acquire(lock_path):
+            # File exists. Read the PID, decide if it's stale, and possibly retry once.
+            try:
                 with open(lock_path) as f:
                     old_pid = int(f.read().strip())
+            except (ValueError, OSError):
+                # Lock file unreadable / malformed.
+                #
+                # PR #38 commit X (bugbot HIGH): age-gate the auto-recovery
+                # to avoid the same TOCTOU race fixed in baseline_lock.py
+                # (see ``_is_corrupt_sentinel`` docstring there for the
+                # full scenario). Without an age check, Process B could
+                # see Process A's mid-write empty file, unlink it, and
+                # retry — both processes end up "holding" the lock.
+                #
+                # Refuse the auto-recovery if the file is fresh (< 5 min);
+                # operator must manually delete a fresh lock that's
+                # genuinely corrupt.
+                _PIPELINE_LOCK_RECOVERY_AGE_SECS = 300
+                try:
+                    age_secs = time.time() - os.stat(lock_path).st_mtime
+                except OSError:
+                    age_secs = 0  # treat unstat-able as fresh → refuse
+                if age_secs < _PIPELINE_LOCK_RECOVERY_AGE_SECS:
+                    logger.error(
+                        f"Lock file {lock_path} is unreadable BUT only {age_secs:.0f}s old — "
+                        f"refusing to auto-recover (could race a competitor mid-write). "
+                        f"Either wait {(_PIPELINE_LOCK_RECOVERY_AGE_SECS - age_secs):.0f}s or "
+                        f"manually delete the file if you're sure it's stale."
+                    )
+                    return False
+                logger.warning(
+                    f"Lock file {lock_path} unreadable + {age_secs:.0f}s old — treating as stale and removing."
+                )
+                try:
+                    os.unlink(lock_path)
+                except OSError:
+                    pass
+                if not _try_atomic_lock_acquire(lock_path):
+                    logger.error("Lost lock-acquisition race after stale-lock cleanup. Aborting.")
+                    return False
+            else:
                 # Check if the process is still alive
                 try:
                     os.kill(old_pid, 0)
@@ -924,10 +1026,17 @@ class EdgeGuardPipeline:
                     return False
                 except ProcessLookupError:
                     logger.info(f"Stale lock file found (PID {old_pid} is gone) — removing.")
-        except (ValueError, IOError):
-            pass
-        with open(lock_path, "w") as f:
-            f.write(str(os.getpid()))
+                    try:
+                        os.unlink(lock_path)
+                    except OSError:
+                        pass
+                    # Single retry; if a competitor grabbed it in the gap, fail loudly.
+                    if not _try_atomic_lock_acquire(lock_path):
+                        logger.error(
+                            "Lost lock-acquisition race after stale-lock cleanup — "
+                            "another process grabbed the lock. Aborting."
+                        )
+                        return False
 
         import atexit
         import signal

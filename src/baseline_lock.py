@@ -178,6 +178,80 @@ def _safe_remove(path: str) -> None:
         logger.warning("Failed to remove baseline lock %s: %s", path, exc)
 
 
+# How long a sentinel must be unchanged before we'll treat "empty or
+# unparseable content" as crash debris vs. an active-write-in-progress
+# by a competitor. 5 minutes is MASSIVELY conservative — a legitimate
+# ``os.open(O_EXCL)`` → ``os.write`` window is sub-millisecond — but it
+# eliminates the window where Process B could mistake Process A's
+# mid-write empty file for a crash artifact and unlink it.
+#
+# See ``_is_corrupt_sentinel`` docstring for the race scenario.
+_CRASH_RECOVERY_AGE_SECS = 300
+
+
+def _is_corrupt_sentinel(path: str) -> bool:
+    """Return True iff the sentinel file at ``path`` is BOTH:
+      * empty or contains unparseable-as-dict content, AND
+      * older than ``_CRASH_RECOVERY_AGE_SECS`` (mtime check).
+
+    The mtime check is CRITICAL for correctness (PR #38 bugbot HIGH).
+    Without it, this recovery path re-introduces the TOCTOU race that
+    atomic ``O_EXCL`` was added to eliminate:
+
+      Process A: os.open(O_EXCL) → succeeds, fd held
+      Process B: os.open(O_EXCL) → FileExistsError
+      Process B: reads file → empty (A hasn't written yet!)
+      Process B: _is_corrupt_sentinel → True (WITHOUT age check)
+      Process B: unlinks file → succeeds
+      Process A: writes to orphaned inode → succeeds
+      Process A: returns True  ┐
+      Process B: os.open(O_EXCL) → succeeds on the re-created file
+      Process B: returns True  ┘  BOTH hold the "lock" — bug returns.
+
+    With the age check, Process B sees file is fresh (mtime seconds ago,
+    not minutes) and refuses rather than unlinking. Only genuinely stale
+    crash debris (5+ minutes old, empty) gets auto-recovered.
+
+    Distinct from the empty-string check in ``is_baseline_running``
+    because that one returns None on the SAME condition (interpretation:
+    "no live lock"); this one explicitly says "this file is junk AND old
+    enough to be safely unlinked".
+
+    Returns False if the file is missing, too young for the age check,
+    or parses as a valid JSON dict (a real live lock — we must NOT
+    delete it).
+    """
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+    age_secs = time.time() - stat.st_mtime
+    if age_secs < _CRASH_RECOVERY_AGE_SECS:
+        # File is fresh — might be a competitor's mid-write O_EXCL. Refuse
+        # to interpret as crash debris regardless of content.
+        return False
+
+    try:
+        with open(path) as f:
+            content = f.read().strip()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Can't read at all — leave it alone; caller will see FileExistsError again.
+        return False
+    if not content:
+        return True
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        return True
+    # Valid JSON but not a dict → also corrupt
+    return not isinstance(parsed, dict)
+
+
 def acquire_baseline_lock() -> bool:
     """
     Write the sentinel file. Returns True on success, False if another
@@ -186,10 +260,32 @@ def acquire_baseline_lock() -> bool:
     The caller is responsible for calling `release_baseline_lock()` on
     exit — both success and failure paths. `_run_pipeline_inner` wraps
     this in a try/finally alongside the existing pipeline.lock cleanup.
+
+    PR #38 (Bug Hunter Tier S S2): the sentinel acquisition is now
+    ATOMIC via ``os.open(path, O_CREAT|O_EXCL|O_WRONLY)``. The previous
+    pattern — ``is_baseline_running()`` (read sentinel) THEN
+    ``os.replace(tmp, path)`` — was non-atomic: two concurrent
+    baselines could both see ``existing is None``, both write to their
+    own tmp file, both rename in (last writer wins), and both proceed
+    thinking they hold the lock. ``release_baseline_lock`` then
+    erroneously deleted the winner's sentinel via the loser's
+    PID-mismatch check. Net: both baselines ran unguarded against
+    scheduled DAGs — the exact race the lock was meant to prevent.
+
+    ``O_EXCL`` is POSIX-defined as atomic create-or-fail: if the
+    sentinel already exists, ``os.open`` raises ``FileExistsError`` AND
+    does not touch the existing file. No window for a racing process.
+    Stale-sentinel pruning (the dead-PID + age-based logic in
+    ``is_baseline_running``) still runs before the atomic acquisition;
+    if THAT detects a stale lock it unlinks first, then we attempt the
+    atomic create.
     """
     path = baseline_lock_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    # Stale-pruning: ``is_baseline_running`` will unlink an obviously-stale
+    # sentinel (dead PID, too old) and return None. If it returns a payload,
+    # there's a live baseline.
     existing = is_baseline_running()
     if existing is not None:
         logger.error(
@@ -209,15 +305,94 @@ def acquire_baseline_lock() -> bool:
         "started_at": datetime.now(timezone.utc).isoformat(),
         "monotonic_started": time.monotonic(),
     }
+    serialized = json.dumps(payload).encode("utf-8")
+
+    # Atomic create-or-fail. If FileExistsError fires, a competitor slipped
+    # in between our ``is_baseline_running`` check and this ``os.open`` —
+    # OR a previous process was killed AFTER O_EXCL created the sentinel
+    # but BEFORE os.write completed (SIGKILL, power loss). In the latter
+    # case, the file exists but is empty/corrupt — ``is_baseline_running``
+    # returns None (its JSON parse fails silently), the dead-PID/age
+    # pruning never fires, and we'd be permanently locked out until
+    # someone manually deletes the sentinel.
+    #
+    # PR #38 commit X (bugbot MED): on FileExistsError, do a SECOND
+    # corrupt-sentinel probe — try to read+parse the file. If it's
+    # genuinely unparseable (zero-byte, truncated JSON), unlink it and
+    # retry the atomic create exactly once. The old ``os.replace``
+    # pattern tolerated this case by silently overwriting; with O_EXCL
+    # we have to handle it explicitly.
+    def _attempt_atomic_create() -> int:
+        """Single atomic create attempt; returns fd on success, raises
+        OSError (including FileExistsError) on failure. Caller MUST handle
+        the exception — there is no None return path."""
+        return os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+
     try:
-        # Atomic-ish write: write to tmp then rename so a reader never sees
-        # a half-written JSON blob.
-        tmp_path = f"{path}.tmp.{os.getpid()}"
-        with open(tmp_path, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp_path, path)
+        fd = _attempt_atomic_create()
+    except FileExistsError:
+        # Probe whether the existing sentinel is empty/corrupt — if so, treat
+        # as a crash-during-write artifact and retry once.
+        if _is_corrupt_sentinel(path):
+            logger.warning(
+                "Detected empty/corrupt baseline-lock sentinel at %s — "
+                "likely a crash during write; unlinking + retrying once.",
+                path,
+            )
+            try:
+                os.unlink(path)
+            except OSError as unlink_exc:
+                logger.error(
+                    "Failed to unlink corrupt baseline-lock sentinel at %s: %s",
+                    path,
+                    unlink_exc,
+                )
+                return False
+            try:
+                fd = _attempt_atomic_create()
+            except OSError as retry_exc:
+                logger.error(
+                    "Failed to acquire baseline lock at %s after corrupt-sentinel cleanup: %s",
+                    path,
+                    retry_exc,
+                )
+                return False
+        else:
+            logger.error(
+                "Refusing to start baseline: lost the lock-acquisition race "
+                "to another baseline that started in the gap between the "
+                "stale-pruning check and the atomic create. Path: %s",
+                path,
+            )
+            return False
     except OSError as exc:
         logger.error("Failed to acquire baseline lock at %s: %s", path, exc)
+        return False
+
+    # PR #38 commit X (bugbot MED): close the fd EXACTLY ONCE. The
+    # previous structure had close inside both the except branch AND
+    # the finally, racing to double-close → EBADF on the second close
+    # (silently swallowed, but ugly). The cleaner pattern: close in
+    # finally only; on write failure, the finally still runs, then
+    # we unlink the partial sentinel AFTER the close completes.
+    write_failed = False
+    try:
+        os.write(fd, serialized)
+    except OSError as exc:
+        logger.error("Failed to write baseline-lock payload to %s: %s", path, exc)
+        write_failed = True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    if write_failed:
+        # Roll back the empty/partial sentinel so the next attempt isn't blocked.
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
         return False
 
     logger.info(
