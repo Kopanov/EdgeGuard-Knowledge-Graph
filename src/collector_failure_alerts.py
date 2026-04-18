@@ -41,6 +41,17 @@ logger = logging.getLogger(__name__)
 # every collector's optional HTTP library — works whether ``requests`` is
 # installed or not, and tolerates third-party libraries (``httpx``,
 # ``urllib3``, ``aiohttp``) that ship parallel exception hierarchies.
+#
+# IMPORTANT (PR #35 commit 3, bugbot HIGH): generic ``HTTPError`` and
+# ``ClientResponseError`` are DELIBERATELY EXCLUDED. Those classes match
+# every 4xx response too — including 401 (expired API key) and 403
+# (revoked), which are NOT transient. Marking them transient would
+# silently drop "skip" events forever instead of surfacing an auth
+# problem. The codebase has ``TransientServerError`` (subclass of
+# requests.HTTPError, in src/collectors/collector_utils.py) specifically
+# scoped to 5xx; we list THAT instead. For collectors that still raise
+# vanilla ``HTTPError``, ``is_transient_external_error`` special-cases
+# them by inspecting ``exc.response.status_code`` (5xx only — see below).
 _TRANSIENT_EXTERNAL_EXCEPTION_NAMES: frozenset = frozenset(
     {
         # stdlib + requests
@@ -54,9 +65,11 @@ _TRANSIENT_EXTERNAL_EXCEPTION_NAMES: frozenset = frozenset(
         "ConnectTimeout",
         "ConnectTimeoutError",
         "ReadTimeoutError",
-        "HTTPError",
         "ChunkedEncodingError",
         "ContentDecodingError",
+        # The project's 5xx-only HTTPError subclass. Collectors that
+        # raise this have already filtered for retry-worthy server errors.
+        "TransientServerError",
         # urllib3 / requests adapters
         "MaxRetryError",
         "NewConnectionError",
@@ -74,7 +87,6 @@ _TRANSIENT_EXTERNAL_EXCEPTION_NAMES: frozenset = frozenset(
         "ClientConnectorError",
         "ClientConnectionError",
         "ClientOSError",
-        "ClientResponseError",
         "ServerDisconnectedError",
         # boto3-style (in case a collector uses S3-backed feeds later)
         "EndpointConnectionError",
@@ -82,14 +94,42 @@ _TRANSIENT_EXTERNAL_EXCEPTION_NAMES: frozenset = frozenset(
 )
 
 
+def _is_transient_http_5xx(exc: BaseException) -> bool:
+    """Special-case for vanilla ``requests.HTTPError`` / aiohttp
+    ``ClientResponseError``: only treat as transient if the response
+    status is 5xx (server error, retry-worthy). 4xx (client error,
+    auth, missing endpoint) is permanent — fail loudly.
+
+    The classes themselves aren't in the transient name-list (see the
+    comment on _TRANSIENT_EXTERNAL_EXCEPTION_NAMES), so this check is
+    the ONLY way generic HTTPError ends up classified as transient.
+    """
+    cls_name = type(exc).__name__
+    if cls_name not in {"HTTPError", "ClientResponseError"}:
+        return False
+    # requests.HTTPError stores the response on .response; aiohttp
+    # ClientResponseError stores .status directly. Try both.
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        # aiohttp shape
+        status = getattr(exc, "status", None)
+    if not isinstance(status, int):
+        return False
+    return 500 <= status < 600
+
+
 def is_transient_external_error(exc: BaseException | None) -> bool:
     """Return True if *exc* looks like a transient external-service failure.
 
-    Match by class name (and walk the MRO + cause chain) so we don't have
-    to import the HTTP library of every collector — works for ``requests``,
-    ``httpx``, ``urllib3``, ``aiohttp``, stdlib socket/ssl errors, and
-    anything else whose class name matches
-    ``_TRANSIENT_EXTERNAL_EXCEPTION_NAMES``.
+    Match by class name (walks the MRO so subclasses match too) plus a
+    special-case for HTTP 5xx (where the class name alone — ``HTTPError``
+    or ``ClientResponseError`` — would also match 4xx auth failures).
+    Walks the explicit ``__cause__`` chain (``raise X from Y``) but
+    NOT the implicit ``__context__`` chain (PR #35 commit 3, bugbot MED:
+    Python auto-sets ``__context__`` on any exception raised inside an
+    ``except`` block, so an AttributeError raised while handling a
+    ConnectionError would otherwise be falsely classified as transient).
 
     Conservative: when in doubt, return False so the exception re-raises
     and a real bug gets surfaced. Better to fail loudly on a TypeError
@@ -97,15 +137,22 @@ def is_transient_external_error(exc: BaseException | None) -> bool:
     """
     if exc is None:
         return False
+    # 5xx HTTPError gate: must be checked BEFORE the generic name walk so
+    # 4xx HTTPError doesn't accidentally match through some MRO ancestor.
+    if _is_transient_http_5xx(exc):
+        return True
     # Walk the MRO of exc's class so subclasses match too (e.g. a
     # custom CyberCureRequestTimeout that subclasses TimeoutError).
     for cls in type(exc).__mro__:
         if cls.__name__ in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES:
             return True
-    # Also walk the cause chain (``raise X from Y`` patterns) — a
-    # collector might wrap a network error in a domain-specific exception
-    # whose name we don't recognize, but the underlying cause is transient.
-    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    # Walk the EXPLICIT cause chain (``raise X from Y`` only — not the
+    # implicit ``__context__`` chain that Python auto-sets when ANY
+    # exception is raised inside an ``except`` block). Using __context__
+    # would misclassify an AttributeError raised while handling a
+    # ConnectionError as "transient" — exactly the opposite of the
+    # conservative design goal.
+    cause = getattr(exc, "__cause__", None)
     if cause is not None and cause is not exc:
         return is_transient_external_error(cause)
     return False

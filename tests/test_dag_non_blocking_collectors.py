@@ -247,10 +247,11 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
     assert result.get("skip_reason_class") == "transient_external_error", (
         f"skip_reason_class wrong: {result.get('skip_reason_class')}"
     )
-    (
-        set_health.assert_called_with("cybercure", "global", False),
-        ("must mark source unhealthy so dashboards show degradation"),
-    )
+    # PR #35 commit 3 (bugbot LOW): the previous tuple-wrapped form
+    # ``(set_health.assert_called_with(...), "msg")`` discarded the
+    # message — assert_called_with's failure already raises with its own
+    # mismatch detail, the docstring above the test explains why.
+    set_health.assert_called_with("cybercure", "global", False)
     # The skip metric must record the reason so operators can see WHY downstream proceeded.
     assert any(call.args[1] == "transient_external_error" for call in record_skip.call_args_list), (
         "must record_collector_skip(..., 'transient_external_error') for visibility"

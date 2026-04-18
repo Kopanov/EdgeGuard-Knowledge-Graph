@@ -94,6 +94,109 @@ def test_classifier_recognizes_third_party_names_without_imports():
         )
 
 
+def test_classifier_does_NOT_treat_generic_HTTPError_as_transient():
+    """PR #35 commit 3 (bugbot HIGH): generic ``HTTPError`` (and aiohttp's
+    ``ClientResponseError``) match all 4xx + 5xx responses. A 401 (expired
+    API key) is NOT transient — silently marking it skipped would hide a
+    persistent credential problem behind a "transient" label.
+
+    The classifier MUST:
+      - Reject HTTPError when status_code is 4xx (or unknown)
+      - Accept HTTPError ONLY when status_code is 5xx (server error)
+    """
+    from collector_failure_alerts import (
+        _TRANSIENT_EXTERNAL_EXCEPTION_NAMES,
+        is_transient_external_error,
+    )
+
+    # Defense: HTTPError / ClientResponseError must NOT be in the name set.
+    assert "HTTPError" not in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES, (
+        "generic HTTPError must NOT be in the transient name list — would swallow 4xx"
+    )
+    assert "ClientResponseError" not in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES, (
+        "generic ClientResponseError must NOT be in the transient name list — would swallow 4xx"
+    )
+
+    # Synthesize HTTPError with response.status_code attribute.
+    HTTPError = type("HTTPError", (Exception,), {})
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    # 401, 403, 404 → NOT transient (real auth/missing-endpoint problems)
+    for code in (400, 401, 403, 404, 405, 422, 429):
+        e = HTTPError(f"HTTP {code}")
+        e.response = _Resp(code)  # type: ignore[attr-defined]
+        assert not is_transient_external_error(e), (
+            f"HTTP {code} (4xx) must NOT be transient — silently skipping would hide a real client/auth problem"
+        )
+
+    # 5xx → transient (server outage, retry-worthy)
+    for code in (500, 502, 503, 504):
+        e = HTTPError(f"HTTP {code}")
+        e.response = _Resp(code)  # type: ignore[attr-defined]
+        assert is_transient_external_error(e), f"HTTP {code} (5xx) must be transient — server outage"
+
+    # No status code attached → conservative: NOT transient
+    e = HTTPError("HTTP error with no response object")
+    assert not is_transient_external_error(e), (
+        "HTTPError without a status_code must NOT be transient — can't verify it's a 5xx"
+    )
+
+    # aiohttp shape: .status (not .status_code) on the exception itself
+    ClientResponseError = type("ClientResponseError", (Exception,), {})
+    e = ClientResponseError("aiohttp 401")
+    e.status = 401  # type: ignore[attr-defined]
+    assert not is_transient_external_error(e), "aiohttp 401 via .status must NOT be transient"
+    e.status = 503  # type: ignore[attr-defined]
+    assert is_transient_external_error(e), "aiohttp 503 via .status must be transient"
+
+
+def test_classifier_does_NOT_walk_implicit_context_chain():
+    """PR #35 commit 3 (bugbot MED): Python auto-sets ``__context__`` on
+    any exception raised inside an ``except`` block. The previous code
+    walked __context__ as a fallback when __cause__ was None — so a real
+    bug (AttributeError) raised while handling a ConnectionError would
+    inherit ConnectionError as its __context__ and be falsely classified
+    as transient.
+
+    The classifier must walk ONLY ``__cause__`` (the explicit
+    ``raise X from Y`` form), NEVER ``__context__``."""
+    from collector_failure_alerts import is_transient_external_error
+
+    # Simulate the dangerous pattern: real bug raised inside an except-block.
+    try:
+        try:
+            raise ConnectionError("upstream 503")  # transient
+        except ConnectionError:
+            # AttributeError raised here — Python auto-sets its __context__
+            # to the ConnectionError above, but it's a REAL BUG, not a
+            # transient external error.
+            x = None
+            x.foo  # noqa: B018  — intentional AttributeError to test __context__ chain
+    except AttributeError as bug:
+        # __context__ is the ConnectionError; __cause__ is None (no `from`).
+        assert bug.__context__ is not None, "precondition: Python set __context__"
+        assert bug.__cause__ is None, "precondition: __cause__ is None (no `raise X from Y`)"
+        # The classifier MUST NOT walk __context__ → MUST return False.
+        assert not is_transient_external_error(bug), (
+            "AttributeError raised inside except-block must NOT be classified transient — "
+            "would silently swallow real bugs caught by the implicit __context__ chain"
+        )
+
+    # Sanity: explicit ``raise X from Y`` still works (walks __cause__).
+    try:
+        try:
+            raise ConnectionError("upstream 503")
+        except ConnectionError as inner:
+            raise RuntimeError("explicit re-raise") from inner
+    except RuntimeError as wrapped:
+        assert wrapped.__cause__ is not None
+        # The cause chain still classifies as transient (correct).
+        assert is_transient_external_error(wrapped), "explicit `raise X from Y` must still be walked via __cause__"
+
+
 # ---------------------------------------------------------------------------
 # Slack helper — opt-in, never raises
 # ---------------------------------------------------------------------------
