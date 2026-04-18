@@ -233,7 +233,19 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.malware_count    = size(malware_list),
                 c.first_seen       = CASE WHEN c.first_seen IS NULL OR first_seen < c.first_seen
                                        THEN first_seen ELSE c.first_seen END,
-                c.last_seen        = last_seen,
+                // PR (S5) commit X (bugbot MED): MAX-guard c.last_seen
+                // symmetrically with c.first_seen. Rationale: the
+                // aggregation now reads ``max(coalesce(i.last_seen_at_source,
+                // i.last_updated))`` — with source-truthful data, an
+                // indicator's ``last_seen_at_source`` can be much OLDER
+                // than its ``last_updated`` (e.g. source claims 2020,
+                // EdgeGuard last sync'd in 2026). Without the MAX-guard,
+                // ``c.last_seen`` would regress backwards on the first
+                // post-deploy enrichment run. The CASE mirrors the
+                // first_seen pattern and is safe against both baseline
+                // and incremental (MAX preserves the newest observation).
+                c.last_seen        = CASE WHEN c.last_seen IS NULL OR last_seen > c.last_seen
+                                       THEN last_seen ELSE c.last_seen END,
                 c.zone             = all_zones,
                 c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
             MERGE (a)-[r_runs:RUNS]->(c)

@@ -355,6 +355,42 @@ def test_cypher_wraps_first_seen_at_source_with_datetime_function():
     )
 
 
+def test_campaign_builder_last_seen_has_max_guard():
+    """PR (S5) commit X (bugbot MED) regression pin.
+
+    The campaign-builder Cypher MUST symmetric-guard ``c.last_seen``
+    with ``CASE WHEN c.last_seen IS NULL OR last_seen > c.last_seen``
+    the same way ``c.first_seen`` is MIN-guarded. Rationale: after
+    switching aggregation to
+    ``max(coalesce(i.last_seen_at_source, i.last_updated))``, the
+    source-truthful ``last_seen_at_source`` can be much OLDER than
+    ``last_updated`` (source observed indicator in 2020; EdgeGuard
+    last sync'd in 2026) — without the MAX-guard, ``c.last_seen``
+    would regress backwards on the first post-deploy enrichment run.
+    """
+    path = os.path.join(_SRC, "enrichment_jobs.py")
+    with open(path) as fh:
+        src = fh.read()
+    # Source-grep pin on the MAX-guard pattern. Stripping comments
+    # keeps the grep against the actual Cypher SET clause.
+    # The pattern must appear in the build_campaign_nodes Cypher block.
+    campaign_block_start = src.find("MERGE (c:Campaign")
+    assert campaign_block_start > 0, "Campaign MERGE block missing from enrichment_jobs.py"
+    campaign_block_end = src.find("MERGE (a)-[r_runs:RUNS]->(c)", campaign_block_start)
+    block = src[campaign_block_start:campaign_block_end]
+    assert "c.last_seen" in block and "last_seen > c.last_seen" in block, (
+        "Campaign builder c.last_seen MUST use a MAX-guard CASE "
+        "(symmetric with c.first_seen) — otherwise source-truthful "
+        "last_seen_at_source (often older than last_updated) can "
+        "cause c.last_seen to regress backwards"
+    )
+    # Also assert the first_seen MIN-guard stayed in place (regression
+    # protection against accidental deletion).
+    assert "first_seen < c.first_seen" in block, (
+        "c.first_seen MIN-guard must remain in place (symmetric with last_seen)"
+    )
+
+
 def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():
     """PR (S5) commit X (bugbot HIGH) regression pin.
 
