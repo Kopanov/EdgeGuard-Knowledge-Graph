@@ -113,8 +113,9 @@ class CVE:
     edgeguard_managed: Optional[bool] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
     source: Optional[List[str]] = None
     zone: Optional[List[str]] = None
@@ -152,8 +153,9 @@ class Vulnerability:
     edgeguard_managed: Optional[bool] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
     source: Optional[List[str]] = None
     last_updated: Optional[str] = None
@@ -194,8 +196,9 @@ class Indicator:
     edgeguard_managed: Optional[bool] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
     # Provenance — MISP back-references (PR #33 round 10: array-only,
     # legacy scalars misp_event_id / misp_attribute_id removed).
@@ -238,8 +241,9 @@ class ThreatActor:
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
 
 
@@ -259,8 +263,9 @@ class Malware:
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
 
 
@@ -282,8 +287,9 @@ class Technique:
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
     # Enrichment fields
     detection: Optional[str] = None
@@ -303,8 +309,9 @@ class Tactic:
     last_updated: Optional[str] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
 
 
@@ -344,8 +351,9 @@ class Campaign:
     edgeguard_managed: Optional[bool] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
-    # corresponding STIX 2.1 SDO id. Populated by every node MERGE post-2026-04;
-    # historical nodes are filled in by the backfill in scripts/backfill_node_uuids.py.
+    # corresponding STIX 2.1 SDO id. Populated by every node MERGE.
+    # Pre-release framework: a fresh baseline rerun stamps every uuid; no
+    # backfill script is shipped.
     uuid: Optional[str] = None
 
 

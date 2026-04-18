@@ -137,7 +137,7 @@ All zone values are validated against `VALID_ZONES` in `config.py` before any wr
 
 **`(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)`**, **`(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`**, and **`(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)`** are built from the **explicit STIX `uses` relationship objects** in the MITRE ATT&CK bundle — **not** from substring / `CONTAINS` matching and **not** from cross-event co-occurrence (which yields 0 for actor/technique pairs).
 
-> **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. See [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) for the rewrite path. The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
+> **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
 
 The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
 
@@ -310,9 +310,9 @@ and every MISP-derived edge carries `r.src_uuid` / `r.trg_uuid`. Same input
 
 The implementation lives in [src/node_identity.py](../src/node_identity.py)
 and is wired into every node MERGE in `Neo4jClient` plus the 12 link
-queries in `build_relationships.py`. Backfill for the existing graph runs
-via [`scripts/backfill_node_uuids.py`](../scripts/backfill_node_uuids.py)
-— operator runbook in [MIGRATIONS.md](MIGRATIONS.md).
+queries in `build_relationships.py`. *Pre-release framework — no backfill
+script ships; a fresh baseline rerun stamps every uuid at write time. See
+[MIGRATIONS.md](MIGRATIONS.md) for the heal-by-rebaseline contract.*
 
 ---
 

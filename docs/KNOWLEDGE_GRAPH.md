@@ -100,7 +100,7 @@ Prior to 2026-04 the three X→Technique edges were a single generic `USES` rela
 | `IMPLEMENTS_TECHNIQUE` | `Malware` or `Tool` | Capability — e.g. *"Mimikatz implements T1059"* |
 | `USES_TECHNIQUE` | `Indicator` | Observation — e.g. *"this IOC was observed executing T1059"* (from OTX `attack_ids`) |
 
-When emitting STIX 2.1, all three collapse back to the standard `relationship_type: "uses"` predicate with the source/target types providing the same disambiguation — see `docs/STIX21_EXPORTER_PROPOSAL.md` (planned). The migration for existing graphs lives at [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher).
+When emitting STIX 2.1, all three collapse back to the standard `relationship_type: "uses"` predicate with the source/target types providing the same disambiguation — see `docs/STIX21_EXPORTER_PROPOSAL.md` (planned). *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.*
 
 ---
 

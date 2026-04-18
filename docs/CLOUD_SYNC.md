@@ -500,19 +500,17 @@ see Recipe 1's "CVE/Vulnerability twin-node design" callout.
 
 ## Operator runbook
 
-After deploying the 2026-04 PR (which adds the `compute_node_uuid` calls and
-indexes), run the backfill once to stamp every existing node and edge:
+EdgeGuard is pre-release — no production graph carries pre-uuid nodes, so no
+backfill script is shipped. Every node MERGE in `src/neo4j_client.py` and
+every edge MERGE in `src/build_relationships.py` already stamps `n.uuid`,
+`r.src_uuid`, and `r.trg_uuid` at write time. A fresh baseline rerun against
+the current code populates uuids on every node and edge in the graph.
 
-```bash
-# Inside the project venv with NEO4J_* env vars set
-python scripts/backfill_node_uuids.py --dry-run     # report counts only
-python scripts/backfill_node_uuids.py               # do it
-```
+If a dev / test graph somehow drifts (e.g. created against a much older
+build), the heal path is the same as for any other schema drift in this
+project: pause ingest, wipe, rebaseline. See `docs/MIGRATIONS.md`.
 
-The script is idempotent and resumable. See `docs/MIGRATIONS.md` for the full
-runbook (pre-flight, snapshot, backfill, post-flight verification).
-
-After backfill:
+Post-baseline verification:
 
 ```cypher
 MATCH (n) WHERE n.uuid IS NULL RETURN labels(n)[0] AS label, count(n) AS missing;
@@ -652,28 +650,25 @@ RETURN sum(dropped);
 // (Adjust drop syntax to match your Neo4j version.)
 ```
 
-### Rollback D — restart the backfill after a partial run
+### Rollback D — re-stamp uuids after a canonicalization change
 
-The backfill is idempotent and resumable — if it crashed halfway, just re-run:
+Pre-release framework — no backfill script ships. If you've changed
+`node_identity.canonicalize_field_value` (e.g. added a new normalization
+rule), the existing nodes' uuids are now stale. The heal path is the
+same as for any schema drift in this project: pause ingest, wipe,
+rebaseline.
 
 ```bash
-python scripts/backfill_node_uuids.py
+# Dev / test only — never on a graph anyone else is reading.
+python scripts/clear_neo4j.py --yes
+edgeguard baseline   # or trigger the edgeguard_baseline DAG
 ```
 
-Already-stamped nodes/edges are skipped (`WHERE n.uuid IS NULL` filter — see
-`tests/test_round26_invariants.py::test_backfill_node_query_only_targets_null_uuid`).
-
-If you want to **re-stamp** existing nodes (e.g. because you changed the
-canonicalization rules in `node_identity.py`), the backfill won't touch them.
-You'd need a custom one-shot:
-
-```cypher
-// CAUTION: this re-computes uuid for every Indicator. Run only if you
-// know you've changed the canonicalization (rare — would invalidate cloud
-// sync until cloud also recomputes).
-MATCH (i:Indicator) SET i.uuid = null;
-// then re-run the backfill
-```
+If you want a label-scoped re-stamp without a full wipe (e.g. only
+Indicators have a new canonicalization), null the property and run a
+one-shot refresh through `merge_indicator` / `merge_indicators_batch`
+from a small driver script — both code paths re-compute the uuid via
+`node_identity.compute_node_uuid` on every call.
 
 ## ⚠️ CVE / Vulnerability twin-node design — read this before writing recipes
 

@@ -364,8 +364,9 @@ def build_relationships():
             # — silently DROPS the Sector identity SDO and the
             # ``targets`` SRO from every bundle. ResilMesh consumers
             # then think the indicator is unscoped (zone metadata
-            # invisible). One-line fix; backfill is a separate
-            # migration (see migrations/2026_04_sector_edgeguard_managed_backfill.cypher).
+            # invisible). One-line fix: stamp the flag on CREATE and
+            # on every SET. Pre-release framework — no production
+            # graph to backfill.
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
             "      sec.edgeguard_managed = true, "

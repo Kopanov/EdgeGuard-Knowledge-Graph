@@ -137,7 +137,6 @@ omit = [
     "src/metrics_server.py",
     "src/metrics.py",
     "src/nats_client.py",
-    "src/migrate_zone_property.py",
     "src/opentelemetry_config.py",
     "src/test_*.py",
     "src/test_enrichment.py",

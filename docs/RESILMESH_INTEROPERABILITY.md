@@ -152,9 +152,9 @@ Graph                                                  → STIX 2.1 SRO
 (Indicator)  -[:USES_TECHNIQUE]->(Technique)           → relationship { source_ref: indicator,      relationship_type: "indicates", target_ref: attack-pattern }
 ```
 
-**Backward compatibility during rollout:** `create_misp_relationships_batch` in `src/neo4j_client.py` still accepts `rel_type="USES"` when `to_type="Technique"` and routes it to the correct specialized type based on `from_type`. Partners with code that emits the legacy value will keep working. The backward-compat branch will be removed in a follow-up PR once the migration has run and no callers remain.
+**Backward compatibility during rollout:** `create_misp_relationships_batch` in `src/neo4j_client.py` still accepts `rel_type="USES"` when `to_type="Technique"` and routes it to the correct specialized type based on `from_type`. Partners with code that emits the legacy value will keep working.
 
-**Migration script:** [`migrations/2026_04_specialize_uses_technique.cypher`](../migrations/2026_04_specialize_uses_technique.cypher) — idempotent APOC-batched rewrite of existing `USES→Technique` edges. Preserves all properties via `SET r2 += properties(r)`. Pre/post sanity-check queries are included inline at the top of the file.
+**Migration:** *Pre-release framework — no production graph exists, so no migration script is shipped.* The first baseline run already writes the specialized edge types (`EMPLOYS_TECHNIQUE` for actor/campaign, `IMPLEMENTS_TECHNIQUE` for malware/tool); a fresh baseline rerun heals any dev/test graph that still carries the legacy generic `USES` edges.
 
 **What to update in your code:**
 

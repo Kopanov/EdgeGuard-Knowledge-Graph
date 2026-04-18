@@ -499,9 +499,8 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     # PR #34 round 19 (bugbot MED): cross-transaction entity safety.
                     # apoc.periodic.iterate runs the inner action in a NEW transaction
                     # per batch — raw entity references from the outer query (``r``)
-                    # cannot safely be used as bound entities in the inner. Same
-                    # pattern as scripts/backfill_node_uuids.py round 11: outer
-                    # returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
+                    # cannot safely be used as bound entities in the inner. Pattern:
+                    # outer returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
                     # ``MATCH ()-[r]->() WHERE id(r) = $rid`` to bind a fresh handle.
                     large_batch_query = (
                         "CALL apoc.periodic.iterate("

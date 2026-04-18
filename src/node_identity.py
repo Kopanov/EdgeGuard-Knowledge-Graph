@@ -396,10 +396,10 @@ def compute_node_uuid(label: str, key_dict: Dict[str, Any]) -> str:
 #   technically case-sensitive per RFC even though usually treated
 #   case-insensitively)
 #
-# Existing graphs need a one-time migration
-# (``migrations/2026_04_canonicalize_case_insensitive_merge_keys.cypher``)
-# to merge already-created case-duplicates. After that runs, this
-# helper prevents new duplicates from forming.
+# Pre-release framework — no production graph carries case-duplicate
+# nodes. The write-time canonicalization below prevents case-duplicates
+# from forming in the first place; if any dev/test graph ever did
+# accumulate them, a fresh baseline rerun (drop + re-ingest) heals.
 
 # Neo4j node labels whose natural-key field is a free-text NAME — case
 # never matters for identity.

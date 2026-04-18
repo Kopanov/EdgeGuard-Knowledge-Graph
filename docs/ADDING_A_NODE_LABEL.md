@@ -15,7 +15,7 @@ times. The fix is twofold:
 
 ---
 
-## TL;DR — the 7 touchpoints
+## TL;DR — the 6 touchpoints
 
 To add a label `Foo` with natural key `(field_a, field_b)`:
 
@@ -26,10 +26,14 @@ To add a label `Foo` with natural key `(field_a, field_b)`:
 [ ] 4. UNIQUE constraint              src/neo4j_client.py — Neo4jClient.create_constraints
 [ ] 5. n.uuid index                   src/neo4j_client.py — Neo4jClient.create_indexes
 [ ] 6. Merge function                 src/neo4j_client.py — merge_foo / create_foo_node
-[ ] 7. Backfill EDGES_TO_BACKFILL     scripts/backfill_node_uuids.py  (only if Foo has edges)
 ```
 
 If any of these are missing, the round-26 invariant tests fail loudly.
+
+> **No backfill step:** EdgeGuard is pre-release; no production graph carries
+> pre-uuid Foo nodes. The `merge_foo` write-time MERGE stamps `n.uuid` and
+> the relevant edge MERGEs stamp `r.src_uuid` / `r.trg_uuid` from the start,
+> so a fresh baseline rerun is the only "migration" needed for a new label.
 
 ---
 
@@ -163,21 +167,14 @@ round-26 invariant):
   silently fall through). The invariant: every node in the graph has a
   valid uuid.
 
-### 7. Add edges to `EDGES_TO_BACKFILL` (only if Foo has edges)
+### (Removed) Step 7 — backfill edges
 
-`scripts/backfill_node_uuids.py`:
-
-```python
-EDGES_TO_BACKFILL: List[Tuple[str, str, str]] = [
-    # ... existing ...
-    ("RELATES_TO", "Foo", "Bar"),     # if Foo→Bar edges exist
-    ("RELATES_TO", "Bar", "Foo"),     # both directions if bidirectional
-]
-```
-
-Without this, pre-existing Foo edges (created before deterministic uuids
-were introduced for Foo) won't have `r.src_uuid` / `r.trg_uuid` stamped
-during the next backfill run.
+Earlier rounds of the n.uuid work shipped a `scripts/backfill_node_uuids.py`
+helper with an `EDGES_TO_BACKFILL` list. That script was deleted in the
+PR #41 cleanup pass — pre-release framework, no production graph to
+migrate, and every edge MERGE in `src/build_relationships.py` /
+`src/neo4j_client.py` now stamps `r.src_uuid` / `r.trg_uuid` at write
+time. A fresh baseline rerun fully populates the new label's edges.
 
 ---
 

@@ -159,23 +159,38 @@ def test_sector_merge_in_7b_stamps_edgeguard_managed():
     assert "edgeguard_managed = true" in section, "7b Sector MERGE must set sec.edgeguard_managed = true"
 
 
-def test_sector_backfill_migration_exists():
-    """The Sector backfill migration must exist for operators to heal
-    pre-PR-#37 graphs."""
-    path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "migrations",
-        "2026_04_sector_edgeguard_managed_backfill.cypher",
-    )
-    assert os.path.exists(path), (
-        "migrations/2026_04_sector_edgeguard_managed_backfill.cypher must ship — "
-        "operators with pre-PR-#37 Sector nodes need it to restore STIX export"
-    )
+def test_sector_edgeguard_managed_set_on_write():
+    """PR (S5) pre-release cleanup: the sector-backfill migration was
+    deleted (no production graph to migrate — pre-release framework,
+    fresh baseline). The write-time guarantee is now enforced in the
+    code itself: ``build_relationships.py`` sets
+    ``<var>.edgeguard_managed = true`` on every Sector MERGE. This
+    test pins the code-path fix directly instead of pinning a
+    migration artifact that is no longer needed.
+
+    The variable name is intentionally not pinned — both ``s:Sector``
+    and ``sec:Sector`` are valid Cypher; we only care that whatever
+    binding name is chosen also receives the ``edgeguard_managed``
+    stamp.
+    """
+    import re
+
+    path = os.path.join(os.path.dirname(__file__), "..", "src", "build_relationships.py")
     with open(path) as fh:
-        body = fh.read()
-    assert "edgeguard_managed = true" in body, "backfill must set the flag"
-    assert "MATCH (s:Sector)" in body, "backfill must target Sector nodes"
+        src = fh.read()
+
+    # Find every Sector MERGE and capture the variable name used.
+    sector_merges = re.findall(r"MERGE \((\w+):Sector", src)
+    assert sector_merges, "build_relationships must MERGE Sector nodes (none found)"
+
+    # Every variable that binds to a Sector MERGE must also receive
+    # the edgeguard_managed = true stamp somewhere in the source —
+    # otherwise the STIX exporter's strict-equality filter drops it.
+    for var in set(sector_merges):
+        assert f"{var}.edgeguard_managed = true" in src, (
+            f"Sector MERGE binds variable '{var}' but '{var}.edgeguard_managed = true' "
+            "is missing — STIX exporter's WHERE filter would silently drop the node"
+        )
 
 
 # ---------------------------------------------------------------------------
