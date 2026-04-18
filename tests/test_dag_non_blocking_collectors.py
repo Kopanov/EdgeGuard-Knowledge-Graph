@@ -83,13 +83,20 @@ def test_transient_error_classifier_recognizes_common_network_errors():
     assert ep._is_transient_external_error(ConnectionResetError())
     assert ep._is_transient_external_error(TimeoutError())
 
-    # Subclass via custom class — MRO walk must catch it.
+    # Subclass via custom class — MRO walk must catch it. After PR #35
+    # commit 7 dropped the __cause__ walk (bugbot MED — was swallowing
+    # wrapped real bugs), MRO is the ONLY way for custom transient
+    # classes. Collectors that need to wrap a transient error should
+    # subclass it directly.
     class CyberCureRequestTimeout(TimeoutError):
         pass
 
     assert ep._is_transient_external_error(CyberCureRequestTimeout())
 
-    # Cause-chain: outer exception name not in list, but __cause__ is.
+    # Negative pin: ``raise X from transient`` (the recommended add-context
+    # pattern) MUST NOT be classified transient. The classifier deliberately
+    # ignores __cause__ — see the canonical pin in
+    # tests/test_collector_failure_alerts.py::test_classifier_does_NOT_walk_explicit_cause_chain.
     class CollectorError(Exception):
         pass
 
@@ -99,7 +106,10 @@ def test_transient_error_classifier_recognizes_common_network_errors():
         except ConnectionError as inner:
             raise CollectorError("collector wrapper") from inner
     except CollectorError as e:
-        assert ep._is_transient_external_error(e), "must walk __cause__ chain"
+        assert not ep._is_transient_external_error(e), (
+            "post-commit-7: __cause__ chain MUST NOT be walked — wrapped errors "
+            "must subclass a known transient class to be classified transient"
+        )
 
 
 def test_transient_error_classifier_does_not_swallow_real_bugs():

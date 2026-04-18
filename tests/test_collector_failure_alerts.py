@@ -41,24 +41,20 @@ def test_classifier_recognizes_stdlib_network_errors():
     assert is_transient_external_error(TimeoutError())
 
 
-def test_classifier_walks_mro_and_cause_chain():
+def test_classifier_walks_mro_for_subclasses():
+    """Custom subclasses of known transient errors must be classified
+    transient via the MRO walk. This is the intended way for collectors
+    to "wrap" a transient error — make the wrapper INHERIT from the
+    underlying class. PR #35 commit 7 dropped the ``__cause__``-chain
+    walk (which would have caught ``raise X from transient`` patterns
+    too), so MRO is now the only path for wrapped errors.
+    """
     from collector_failure_alerts import is_transient_external_error
 
     class CustomTimeout(TimeoutError):
         pass
 
     assert is_transient_external_error(CustomTimeout()), "subclass must match via MRO"
-
-    class WrapperError(Exception):
-        pass
-
-    try:
-        try:
-            raise ConnectionError("upstream 503")
-        except ConnectionError as inner:
-            raise WrapperError("collector wrapped this") from inner
-    except WrapperError as e:
-        assert is_transient_external_error(e), "must walk __cause__ chain"
 
 
 def test_classifier_does_not_swallow_real_bugs():
@@ -155,46 +151,84 @@ def test_classifier_does_NOT_treat_generic_HTTPError_as_transient():
 
 def test_classifier_does_NOT_walk_implicit_context_chain():
     """PR #35 commit 3 (bugbot MED): Python auto-sets ``__context__`` on
-    any exception raised inside an ``except`` block. The previous code
-    walked __context__ as a fallback when __cause__ was None — so a real
-    bug (AttributeError) raised while handling a ConnectionError would
-    inherit ConnectionError as its __context__ and be falsely classified
-    as transient.
-
-    The classifier must walk ONLY ``__cause__`` (the explicit
-    ``raise X from Y`` form), NEVER ``__context__``."""
+    any exception raised inside an ``except`` block. Walking
+    ``__context__`` as a fallback would misclassify real bugs raised
+    inside except-blocks as transient (because their __context__ is the
+    exception they were handling)."""
     from collector_failure_alerts import is_transient_external_error
 
-    # Simulate the dangerous pattern: real bug raised inside an except-block.
     try:
         try:
             raise ConnectionError("upstream 503")  # transient
         except ConnectionError:
             # AttributeError raised here — Python auto-sets its __context__
-            # to the ConnectionError above, but it's a REAL BUG, not a
-            # transient external error.
+            # to the ConnectionError above, but it's a REAL BUG.
             x = None
-            x.foo  # noqa: B018  — intentional AttributeError to test __context__ chain
+            x.foo  # noqa: B018  — intentional AttributeError
     except AttributeError as bug:
-        # __context__ is the ConnectionError; __cause__ is None (no `from`).
         assert bug.__context__ is not None, "precondition: Python set __context__"
         assert bug.__cause__ is None, "precondition: __cause__ is None (no `raise X from Y`)"
-        # The classifier MUST NOT walk __context__ → MUST return False.
         assert not is_transient_external_error(bug), (
             "AttributeError raised inside except-block must NOT be classified transient — "
-            "would silently swallow real bugs caught by the implicit __context__ chain"
+            "would silently swallow real bugs via __context__"
         )
 
-    # Sanity: explicit ``raise X from Y`` still works (walks __cause__).
+
+def test_classifier_does_NOT_walk_explicit_cause_chain():
+    """PR #35 commit 7 (bugbot MED): the classifier USED to walk
+    ``__cause__`` (the explicit ``raise X from Y`` form). Bugbot caught
+    that ``raise X from Y`` is the recommended best-practice for adding
+    context to errors — so a collector doing
+    ``raise ValueError("bad config") from conn_err`` would have its
+    ValueError silently swallowed as "transient" (because __cause__ ==
+    ConnectionError).
+
+    The classifier now walks ONLY the MRO of the OUTER exception. If a
+    collector wants a custom exception class to count as transient, it
+    must subclass an existing transient class (e.g.
+    ``class CyberCureNetworkError(ConnectionError): pass``).
+
+    This test pins the new contract by setting up the dangerous pattern
+    and asserting NO transient classification."""
+    from collector_failure_alerts import is_transient_external_error
+
+    # Pattern: collector wraps a network error in a domain-specific
+    # exception that does NOT subclass any known transient class.
     try:
         try:
-            raise ConnectionError("upstream 503")
+            raise ConnectionError("upstream 503")  # transient
         except ConnectionError as inner:
-            raise RuntimeError("explicit re-raise") from inner
-    except RuntimeError as wrapped:
-        assert wrapped.__cause__ is not None
-        # The cause chain still classifies as transient (correct).
-        assert is_transient_external_error(wrapped), "explicit `raise X from Y` must still be walked via __cause__"
+            # ValueError is a real-bug-shaped class; if walked via
+            # __cause__ it would be (incorrectly) classified transient.
+            raise ValueError("collector got bad data") from inner
+    except ValueError as wrapped:
+        assert wrapped.__cause__ is not None, "precondition: explicit raise...from"
+        assert not is_transient_external_error(wrapped), (
+            "ValueError wrapped via `raise V from conn_err` MUST NOT be classified transient — "
+            "raise...from is the recommended add-context pattern, walking __cause__ would "
+            "silently swallow real config/data bugs that happen to be wrapped in error-handling code"
+        )
+
+    # Same pattern for TypeError / RuntimeError / generic Exception
+    for outer_cls in (TypeError, RuntimeError, Exception):
+        try:
+            try:
+                raise ConnectionError("upstream 503")
+            except ConnectionError as inner:
+                raise outer_cls(f"wrapped via {outer_cls.__name__}") from inner
+        except outer_cls as wrapped:
+            assert not is_transient_external_error(wrapped), (
+                f"{outer_cls.__name__} wrapped via raise-from must NOT be transient"
+            )
+
+    # Sanity: a custom class that DOES subclass a transient class IS
+    # still classified transient (the documented escape hatch).
+    class CyberCureNetworkError(ConnectionError):
+        pass
+
+    assert is_transient_external_error(CyberCureNetworkError("provider down")), (
+        "subclassing a transient class is the documented way to declare a custom transient — must still work"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -537,3 +571,59 @@ def test_dag_path_uses_shared_log_block_helper():
     assert "_format_failure_log_block(" in src, "DAG must call the helper somewhere"
     assert 'classification="transient"' in src, "DAG must classify transient via the helper"
     assert 'classification="catastrophic"' in src, "DAG must classify catastrophic via the helper"
+
+
+def test_extract_url_handles_malformed_for_url_marker_without_crashing():
+    """PR #35 commit 7 (bugbot MED): ``_extract_url`` previously called
+    ``.strip().split()[0]`` on whatever followed ``" for url: "`` in the
+    exception message — which crashes with IndexError if the message
+    ends with ``" for url: "`` followed by whitespace or nothing.
+
+    The DAG path calls ``_format_failure_log_block`` (which calls
+    ``_extract_url``) inside the ``except Exception`` failure handler.
+    A crash there would propagate up and FAIL the task — exactly the
+    pipeline-blocking behavior this PR aims to prevent.
+
+    Pin: feed the malformed forms and assert no crash."""
+    from collector_failure_alerts import _extract_url
+
+    # Trailing marker with nothing after — this used to IndexError
+    class _Exc(Exception):
+        pass
+
+    cases = [
+        # message, expected_url (None for "no extractable url")
+        ("HTTP 503 Server Error for url: ", None),
+        ("HTTP 503 Server Error for url:    ", None),  # trailing whitespace only
+        ("HTTP 503 Server Error for url: \n", None),  # trailing newline only
+        ("HTTP 503 Server Error for url: https://api.example.com/v1", "https://api.example.com/v1"),
+        ("HTTP 503 Server Error for url: https://api.example.com/v1 trailing junk", "https://api.example.com/v1"),
+        ("Plain message with no marker", None),
+    ]
+    for msg, expected in cases:
+        # MUST NOT raise IndexError or any other exception
+        result = _extract_url(_Exc(msg))
+        assert result == expected, f"for {msg!r}: expected {expected!r}, got {result!r}"
+
+
+def test_format_failure_log_block_does_not_crash_on_malformed_url_marker():
+    """End-to-end version of the previous test: the full
+    ``_format_failure_log_block`` MUST NOT raise when the exception
+    message contains a malformed ``for url:`` marker. The block-building
+    path runs inside the failure handler — an exception here cascades
+    into a task FAIL, defeating the PR's whole point."""
+    from collector_failure_alerts import _format_failure_log_block
+
+    class _Exc(Exception):
+        pass
+
+    # MUST NOT raise — this used to IndexError before commit 7
+    block = _format_failure_log_block(
+        "test_src",
+        _Exc("Server returned 503 for url: "),  # malformed: empty after marker
+        classification="transient",
+        duration_s=1.0,
+    )
+    assert "[test_src] SKIPPED" in block
+    # url field MUST be omitted (no extractable URL)
+    assert "url=" not in block, "must omit url field when extraction can't find one"

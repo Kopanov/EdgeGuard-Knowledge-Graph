@@ -122,14 +122,26 @@ def _is_transient_http_5xx(exc: BaseException) -> bool:
 def is_transient_external_error(exc: BaseException | None) -> bool:
     """Return True if *exc* looks like a transient external-service failure.
 
-    Match by class name (walks the MRO so subclasses match too) plus a
-    special-case for HTTP 5xx (where the class name alone — ``HTTPError``
-    or ``ClientResponseError`` — would also match 4xx auth failures).
-    Walks the explicit ``__cause__`` chain (``raise X from Y``) but
-    NOT the implicit ``__context__`` chain (PR #35 commit 3, bugbot MED:
-    Python auto-sets ``__context__`` on any exception raised inside an
-    ``except`` block, so an AttributeError raised while handling a
-    ConnectionError would otherwise be falsely classified as transient).
+    Match by class name only (walks the MRO so subclasses match too)
+    plus a special-case for HTTP 5xx (where the class name alone —
+    ``HTTPError`` or ``ClientResponseError`` — would also match 4xx auth
+    failures).
+
+    PR #35 commit 7 (bugbot MED): the cause-chain walk (``__cause__``)
+    has been DROPPED. ``raise X from transient_err`` is the recommended
+    best-practice pattern for adding context to errors, so wrapped
+    exceptions appear in real production code. If we walked ``__cause__``,
+    a collector doing ``raise ValueError("bad config") from conn_err``
+    would have the ValueError silently classified as transient → real
+    bug swallowed.
+
+    The cost (false positives on wrapped real bugs) is greater than the
+    benefit (catching wrapped network errors that don't subclass the
+    known transient classes). Collectors that need to wrap a transient
+    error should make their wrapper inherit from the underlying
+    transient class (e.g.
+    ``class CyberCureNetworkError(ConnectionError): pass``); the MRO
+    walk above will catch it.
 
     Conservative: when in doubt, return False so the exception re-raises
     and a real bug gets surfaced. Better to fail loudly on a TypeError
@@ -146,15 +158,6 @@ def is_transient_external_error(exc: BaseException | None) -> bool:
     for cls in type(exc).__mro__:
         if cls.__name__ in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES:
             return True
-    # Walk the EXPLICIT cause chain (``raise X from Y`` only — not the
-    # implicit ``__context__`` chain that Python auto-sets when ANY
-    # exception is raised inside an ``except`` block). Using __context__
-    # would misclassify an AttributeError raised while handling a
-    # ConnectionError as "transient" — exactly the opposite of the
-    # conservative design goal.
-    cause = getattr(exc, "__cause__", None)
-    if cause is not None and cause is not exc:
-        return is_transient_external_error(cause)
     return False
 
 
@@ -249,12 +252,23 @@ def _extract_url(exc: BaseException) -> str | None:
     url = getattr(exc, "url", None)
     if url:
         return str(url)
-    # Last resort: parse from the str(exc) form
+    # Last resort: parse from the str(exc) form. Defensive against malformed
+    # input — PR #35 commit 7 (bugbot MED): the previous ``.split()[0]``
+    # crashed with IndexError if the message ended with ``" for url: "``
+    # followed by whitespace (or nothing). A crash inside the
+    # failure-handler would propagate up and FAIL the task — exactly the
+    # pipeline-blocking behavior this PR exists to prevent.
     msg = str(exc)
     marker = " for url: "
     idx = msg.find(marker)
     if idx > 0:
-        return msg[idx + len(marker) :].strip().split()[0]
+        tail = msg[idx + len(marker) :].strip()
+        if not tail:
+            return None
+        parts = tail.split()
+        if not parts:
+            return None
+        return parts[0]
     return None
 
 
