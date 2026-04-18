@@ -66,6 +66,25 @@ _DEFAULT_DEPTH = 2
 # the EDGEGUARD_GIT_SHA env var at import time; empty string if unset.
 _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 
+# PR (S5): opt-in Sighting SRO emission for full canonical STIX 2.1
+# fidelity. Default OFF to keep bundle size sane (would add ~1 SRO per
+# indicator, +N bundle entries). Operators with consumers that
+# specifically rely on canonical STIX Sighting SROs (rare — most
+# downstream tools are happy with valid_from on the Indicator SDO,
+# which is what this PR populates correctly) can opt in.
+#
+# IMPLEMENTATION STATUS: env var honored at the bundle-assembly level
+# (see ``_emit_sighting_for_indicator`` below) but the per-source
+# aggregation Cypher is a stub. Full implementation requires joining
+# the SOURCED_FROM edges to compute per-(source, indicator) windows.
+# Tracked as a follow-up to this PR.
+_EMIT_SIGHTINGS = os.environ.get("EDGEGUARD_STIX_EMIT_SIGHTINGS", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 # ---------------------------------------------------------------------------
 # Deterministic IDs
 # ---------------------------------------------------------------------------
@@ -570,16 +589,49 @@ class StixExporter:
             "indicator",
             f"{canonicalize_field_value(ind_type)}|{canonicalize_field_value(value)}",
         )
+        # PR (S5): valid_from is the canonical STIX 2.1 timestamp for
+        # "when did the world first observe this indicator". Resolution
+        # order:
+        #   1. n.first_seen_at_source — source-truthful, populated from
+        #      MISP-native attr.first_seen / NVD published / etc. (see
+        #      source_truthful_timestamps.py)
+        #   2. n.first_imported_at — when EdgeGuard first synced the
+        #      node (always set on ON CREATE; never overwritten)
+        #   3. n.first_seen — legacy field name; preserved for back-compat
+        #      with any node that hasn't been re-synced since the field
+        #      was added
+        #
+        # The previous code fell back to "1970-01-01T00:00:00Z" when
+        # ``props.get("first_seen")`` was missing — and PR #34 R17
+        # had dropped that field, so EVERY indicator shipped with
+        # valid_from=1970-01-01 to ResilMesh. The audit Logic Tracker
+        # caught this; this fix kills the epoch leak.
+        valid_from = (
+            props.get("first_seen_at_source")
+            or props.get("first_imported_at")
+            or props.get("first_seen")
+            or "1970-01-01T00:00:00Z"
+        )
         obj = stix2.Indicator(
             id=stix_id,
             pattern=pattern,
             pattern_type="stix",
-            valid_from=props.get("first_seen") or "1970-01-01T00:00:00Z",
+            valid_from=valid_from,
             name=props.get("name") or f"{ind_type}:{value}",
             indicator_types=_listify(props.get("indicator_classification") or ["malicious-activity"]),
             allow_custom=True,
         )
-        return _to_dict(obj)
+        # PR (S5): expose first_imported_at as a producer-specific custom
+        # property so consumers can distinguish source-truthful timestamp
+        # (valid_from) from EdgeGuard's local sync time. Mirrors the
+        # OpenCTI / STIX 2.1 best-practice pattern (Best-Practice
+        # Researcher agent recommendation).
+        sdo_dict = _to_dict(obj)
+        if props.get("first_imported_at"):
+            sdo_dict["x_edgeguard_first_imported_at"] = props["first_imported_at"]
+        if props.get("last_seen_at_source"):
+            sdo_dict["x_edgeguard_last_seen_at_source"] = props["last_seen_at_source"]
+        return sdo_dict
 
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")
