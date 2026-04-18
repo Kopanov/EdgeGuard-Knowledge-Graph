@@ -399,7 +399,7 @@ def all_aliases() -> FrozenSet[str]:
     ids + aliases, all lowercased. Used by ``metrics_server`` to
     bound the ``source_id`` Prometheus label cardinality.
     """
-    out = set()
+    out: set[str] = set()
     for src in _REGISTRY:
         out.update(src.all_keys)
     return frozenset(out)
@@ -511,7 +511,7 @@ def reliable_first_seen_aliases() -> FrozenSet[str]:
     ``is_reliable_first_seen_source`` lookup runs against this set
     after lowercasing the input.
     """
-    out = set()
+    out: set[str] = set()
     for src in _REGISTRY:
         if src.reliable_first_seen:
             out.update(src.all_keys)

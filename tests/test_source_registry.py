@@ -389,6 +389,48 @@ def test_get_source_returns_None_for_unknown_or_empty_input():
     assert get_source("totally_unknown_source") is None
 
 
+def test_all_aliases_returns_every_canonical_id_and_alias():
+    """``all_aliases()`` is the cardinality-control surface for the
+    Prometheus ``source_id`` label (PR #42 ``_SOURCE_LABEL_ALLOWLIST``
+    will derive from this once both PRs land). It MUST return every
+    canonical id AND every alias — otherwise a collector emitting an
+    alias would collapse to the ``<other>`` bucket in metrics, hiding
+    per-source signal.
+
+    This test also kills the bugbot "no in-repo callers" finding —
+    the helper is exercised here even before the metrics_server
+    derivation is wired in a follow-up PR.
+    """
+    from source_registry import all_aliases, all_sources
+
+    out = all_aliases()
+    expected = set()
+    for src in all_sources():
+        expected.add(src.canonical_id)
+        expected.update(src.aliases)
+    assert out == expected, f"all_aliases() drift: missing {expected - out}, extra {out - expected}"
+
+
+def test_all_aliases_is_a_frozenset_so_callers_cannot_mutate():
+    """``frozenset`` immutability is a load-bearing invariant: the
+    metrics_server allowlist (future) caches this result at module
+    import; mutation would silently change cardinality control
+    behavior across the process."""
+    from source_registry import all_aliases
+
+    assert isinstance(all_aliases(), frozenset)
+
+
+def test_all_aliases_is_lowercased_for_case_insensitive_lookup():
+    """Every alias / canonical id MUST be lowercased so the
+    Prometheus label normalizer's case-folding lookup works
+    (collectors may emit any casing)."""
+    from source_registry import all_aliases
+
+    for key in all_aliases():
+        assert key == key.lower(), f"non-lowercased key in all_aliases(): {key!r}"
+
+
 def test_misp_tags_are_unique_per_canonical_source():
     """Two different canonical sources MUST NOT share the same MISP
     tag string — that would alias them on round-trip through MISP."""
