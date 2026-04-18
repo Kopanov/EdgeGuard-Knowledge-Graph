@@ -106,6 +106,43 @@ def test_get_neo4j_server_version_returns_none_on_connection_failure():
     assert result is None
 
 
+def test_get_neo4j_server_version_default_path_uses_fast_driver_not_neo4jclient_connect():
+    """PR #36 commit X (bugbot MED) regression pin.
+
+    Background: ``Neo4jClient.connect()`` is decorated with
+    ``@retry_with_backoff(max_retries=5, base_delay=2)`` → up to ~62
+    seconds of exponential backoff when Neo4j is unreachable. When
+    ``get_neo4j_server_version()`` was called WITHOUT a factory (the
+    production path from doctor/validate), it instantiated
+    ``Neo4jClient()`` and called ``connect()``, paying that 62-second
+    retry cycle as a SECOND probe (doctor/validate already did the
+    first probe upstream). Bug report: doctor wall-clock roughly
+    doubled on a Neo4j outage for zero diagnostic value.
+
+    Fix: the default-factory path now goes through
+    ``_get_neo4j_server_version_fast()`` which uses the Neo4j driver
+    DIRECTLY with ``connection_timeout=2.0`` so a probe against a down
+    Neo4j fails in seconds, not minutes.
+
+    Pin: source-grep the production branch routes to the fast helper,
+    and that the fast helper sets a tight ``connection_timeout``.
+    """
+    import inspect
+
+    import version_compatibility
+
+    src = inspect.getsource(version_compatibility.get_neo4j_server_version)
+    assert "_get_neo4j_server_version_fast" in src, (
+        "get_neo4j_server_version's default-factory branch MUST route to the fast driver path "
+        "to avoid the @retry_with_backoff(5, 2) ~62s cycle on a Neo4j outage. "
+        "If this assertion fails, doctor/validate hangs for ~minute on a downed Neo4j."
+    )
+    fast_src = inspect.getsource(version_compatibility._get_neo4j_server_version_fast)
+    assert "connection_timeout" in fast_src, (
+        "_get_neo4j_server_version_fast must set connection_timeout to fail fast on a down Neo4j"
+    )
+
+
 def test_get_neo4j_server_version_returns_none_when_run_raises():
     """Cypher execution raises (e.g. `CALL dbms.components()` not
     available on a non-standard Neo4j fork) → must return None."""

@@ -139,19 +139,29 @@ def get_neo4j_server_version(neo4j_client_factory=None) -> Optional[str]:
     ``[{"versions": ["5.27.0"]}]`` (list-of-strings inside the row).
 
     ``neo4j_client_factory`` lets tests inject a mock client without
-    needing a live Neo4j. In production it defaults to ``Neo4jClient()``.
+    needing a live Neo4j. In production it defaults to a FAST one-shot
+    driver session (see below).
+
     Best-effort; returns ``None`` on any error including connection
     failure (we'd rather degrade silently in doctor than block on Neo4j
     being down — there are other doctor checks that already report that).
+
+    PR #36 commit X (bugbot MED): when no factory is provided, this
+    function used to instantiate ``Neo4jClient()`` and call ``connect()``,
+    which is decorated with ``@retry_with_backoff(max_retries=5,
+    base_delay=2)`` → up to ~62s of exponential backoff when Neo4j is
+    unreachable. Both ``cmd_doctor`` and ``cmd_validate`` already run
+    their own Neo4j connection check earlier in the flow with the same
+    retry behavior, so version capture added a SECOND full retry cycle
+    — wall-clock roughly doubled on a Neo4j outage for zero diagnostic
+    value. The default-factory path now uses the Neo4j driver
+    DIRECTLY with a tight ``connection_timeout`` so the version probe
+    fails fast (a few seconds) instead of retrying. Test paths still go
+    through the factory hook — the contract for ``test_get_neo4j_server_version_*``
+    is unchanged.
     """
     if neo4j_client_factory is None:
-        try:
-            from neo4j_client import Neo4jClient
-
-            neo4j_client_factory = Neo4jClient
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"Neo4jClient import failed: {e}")
-            return None
+        return _get_neo4j_server_version_fast()
 
     client = None
     try:
@@ -173,6 +183,58 @@ def get_neo4j_server_version(neo4j_client_factory=None) -> Optional[str]:
         if client is not None and hasattr(client, "close"):
             try:
                 client.close()
+            except Exception:
+                pass
+
+
+def _get_neo4j_server_version_fast() -> Optional[str]:
+    """Production path for ``get_neo4j_server_version``: bypass
+    ``Neo4jClient.connect()``'s retry decorator.
+
+    Uses the official Neo4j Python driver directly with a 2-second
+    ``connection_timeout`` so a probe against a down Neo4j fails in
+    seconds rather than the ~62 seconds that the retry-decorated
+    ``Neo4jClient.connect()`` takes.
+
+    Test paths must call ``get_neo4j_server_version(neo4j_client_factory=...)``
+    instead — that branch keeps the existing test contract.
+    """
+    try:
+        from config import NEO4J_PASSWORD, NEO4J_URI, NEO4J_USER  # noqa: WPS433
+        from neo4j import GraphDatabase  # noqa: WPS433
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"neo4j driver / config import failed: {e}")
+        return None
+
+    driver = None
+    try:
+        # ``connection_timeout`` is the per-connection acquisition timeout;
+        # ``max_connection_lifetime`` keeps the pooled connection short-lived
+        # since this driver is single-shot. Both keep us from hanging on a
+        # half-up Neo4j (TCP accept but no Bolt response).
+        driver = GraphDatabase.driver(
+            NEO4J_URI,
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            connection_timeout=2.0,
+            max_connection_lifetime=10,
+        )
+        with driver.session(default_access_mode="READ") as session:
+            result = session.run("CALL dbms.components() YIELD versions RETURN versions")
+            rows = list(result)
+        if rows:
+            row = rows[0]
+            versions = row.get("versions") if hasattr(row, "get") else None
+            if isinstance(versions, list) and versions:
+                return str(versions[0])
+        return None
+    except Exception as e:  # noqa: BLE001
+        # Includes ServiceUnavailable, AuthError, etc. — all best-effort failures.
+        logger.debug(f"neo4j server version fast probe failed: {e}")
+        return None
+    finally:
+        if driver is not None:
+            try:
+                driver.close()
             except Exception:
                 pass
 
