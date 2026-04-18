@@ -1179,11 +1179,26 @@ class Neo4jClient:
         return self.merge_node_with_source("Vulnerability", key_props, data, source_id, extra_props=extra_props or None)
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
-        """MERGE an Indicator node with source tracking."""
-        key_props = {
-            "indicator_type": data.get("indicator_type"),
-            "value": data.get("value"),
-        }
+        """MERGE an Indicator node with source tracking.
+
+        PR #37 commit X (bugbot HIGH): the natural-key value is canonicalized
+        via ``canonicalize_merge_key`` BEFORE the MERGE, matching the
+        treatment in ``merge_indicators_batch`` and ``merge_malware``/
+        ``merge_actor``. Without this, indicators arriving through the
+        single-item path (VirusTotal enrichment, STIX pipeline import,
+        ``_sync_single_item`` fallback) retained original casing in the
+        Cypher MERGE while UUID was computed case-insensitively → two
+        Neo4j nodes sharing ONE uuid. The audit-driven batch fix was
+        applied in PR #37 commit 3 but the single-item path was missed
+        — bugbot caught it.
+        """
+        key_props = canonicalize_merge_key(
+            "Indicator",
+            {
+                "indicator_type": data.get("indicator_type"),
+                "value": data.get("value"),
+            },
+        )
         # Promote enrichment fields to queryable node properties
         extra_props: Dict = {}
         if data.get("attack_ids"):

@@ -302,6 +302,30 @@ def test_merge_actor_routes_through_canonicalize():
     assert "canonicalize_merge_key" in body, "merge_actor MUST call canonicalize_merge_key"
 
 
+def test_merge_indicator_single_item_routes_through_canonicalize():
+    """PR #37 commit X (bugbot HIGH) regression pin.
+
+    The single-item ``merge_indicator`` path was missed in the original
+    PR #37 sweep — only the batch ``merge_indicators_batch`` was patched.
+    But VirusTotal enrichment, STIX pipeline import, and the
+    ``_sync_single_item`` fallback ALL go through the single-item path.
+    Without canonicalization there, the same case-duplicate-with-shared-
+    uuid bug returns silently for those code paths.
+    """
+    path = os.path.join(_SRC, "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    start = src.find("def merge_indicator(self")
+    end = src.find("\n    def ", start + 1)
+    body = src[start:end]
+    assert "canonicalize_merge_key" in body, (
+        "merge_indicator (single-item path) MUST call canonicalize_merge_key — "
+        "VirusTotal enrichment, STIX pipeline import, and _sync_single_item "
+        "fallback all use this path; without canonicalization they re-introduce "
+        "the same TrickBot/trickbot bug fixed in the batch path"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 4. Null-key MERGE refusal
 # ---------------------------------------------------------------------------
