@@ -315,7 +315,9 @@ def test_report_collector_failure_catastrophic_emits_failed_metrics(monkeypatch)
 
     assert classification == "catastrophic"
     metrics["record_collection"].assert_called_once_with("buggy_collector", "global", 0, "failed")
-    metrics["record_collector_skip"].assert_not_called()  # catastrophic errors must NOT be counted as skipped — confuses on-call
+    metrics[
+        "record_collector_skip"
+    ].assert_not_called()  # catastrophic errors must NOT be counted as skipped — confuses on-call
     metrics["set_source_health"].assert_called_once_with("buggy_collector", "global", False)
     metrics["record_pipeline_error"].assert_called_once_with("collect_buggy_collector", "TypeError", "buggy_collector")
 
