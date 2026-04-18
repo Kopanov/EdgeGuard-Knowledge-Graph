@@ -436,11 +436,17 @@ def report_collector_failure(
 
     # Best-effort metrics emission — never let a metric failure mask the
     # underlying collector failure.
+    #
+    # PR #35 commit 10 (bugbot LOW): use ``getattr(fn, '__name__', fn)``
+    # instead of ``fn.__name__`` so callers can pass a ``functools.partial``,
+    # bound method, or anything else without ``__name__`` and the EXCEPT
+    # handler doesn't itself crash with AttributeError — defeating the
+    # whole point of ``_safe``. Mirrors the DAG-path helper.
     def _safe(fn: Any, *args: Any) -> None:
         try:
             fn(*args)
         except Exception as me:
-            logger.debug(f"metric emit failed ({fn.__name__}): {me}")
+            logger.debug(f"metric emit failed ({getattr(fn, '__name__', fn)}): {me}")
 
     # source_health degrades for BOTH classifications — operators want to
     # see "currently failing" regardless of expected auto-recovery.

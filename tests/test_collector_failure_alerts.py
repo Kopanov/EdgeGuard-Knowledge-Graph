@@ -690,3 +690,54 @@ def test_dag_path_does_not_increment_pipeline_errors_on_transient_skip():
         "pre-split executable block MUST NOT call record_pipeline_error — "
         "would fire for transient skips before the classifier branches."
     )
+
+
+# ---------------------------------------------------------------------------
+# Bugbot LOW (PR #35 commit 10) — _safe must not crash on functools.partial
+# ---------------------------------------------------------------------------
+
+
+def test_safe_helper_does_not_crash_on_callable_without_dunder_name(monkeypatch):
+    """The shared module's ``_safe`` wrapper used to format the failed
+    metric's name with bare ``fn.__name__``. ``functools.partial``,
+    ``functools.partialmethod``, lambdas-with-attribute-stripping, and
+    custom callables don't have ``__name__`` — accessing it raises
+    ``AttributeError`` from inside the EXCEPT handler, defeating the
+    entire purpose of ``_safe`` and re-raising into the caller.
+
+    PR #35 commit 10 switched to ``getattr(fn, '__name__', fn)`` so the
+    fallback is the callable's repr — never crashes. This test pins
+    that contract by patching one of the metrics on the metrics_server
+    module to a ``functools.partial`` that bombs, then asserting
+    ``report_collector_failure`` returns its classification string
+    without re-raising.
+    """
+    import functools
+
+    monkeypatch.delenv("EDGEGUARD_ENABLE_SLACK_ALERTS", raising=False)
+
+    # Build a partial that raises when called — no __name__ attribute on it.
+    def _real(*_a, **_kw):
+        raise RuntimeError("simulated registry failure inside no-name callable")
+
+    bomb_partial = functools.partial(_real, "extra")
+    assert not hasattr(bomb_partial, "__name__"), (
+        "test premise: functools.partial must lack __name__ for this regression to bite"
+    )
+
+    import metrics_server
+
+    # Replace ONE metric helper with the no-name bomb. The other helpers
+    # we patch as benign MagicMocks so we isolate the _safe behavior on
+    # the bomb call without affecting anything else.
+    monkeypatch.setattr(metrics_server, "set_source_health", bomb_partial)
+    monkeypatch.setattr(metrics_server, "record_collector_skip", MagicMock())
+    monkeypatch.setattr(metrics_server, "record_collection", MagicMock())
+    monkeypatch.setattr(metrics_server, "record_pipeline_error", MagicMock())
+
+    from collector_failure_alerts import report_collector_failure
+
+    # Must NOT raise. If _safe accesses .__name__ directly, the partial
+    # has no __name__ → AttributeError escapes → re-raised → test fails.
+    classification = report_collector_failure("cybercure", ConnectionError("upstream 503"))
+    assert classification == "transient", "transient classification must succeed despite metric bomb"
