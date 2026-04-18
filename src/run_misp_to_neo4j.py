@@ -412,6 +412,45 @@ _RELATIONSHIP_BATCH_DEFAULT = 500
 _MAX_RETRY_FAILED_EVENTS = 20
 
 
+def _read_max_attr_value_bytes() -> int:
+    """Resolve ``EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES`` once at module load.
+
+    PR #40 commit X (bugbot MED): the previous code called
+    ``int(os.getenv("EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES", "4096"))`` INSIDE
+    ``parse_attribute`` — invoked per attribute, i.e. millions of times per
+    baseline run. Trivially cheap per call (low-microsecond) but cumulatively
+    measurable, and any malformed env value would re-raise on every row
+    instead of failing fast at startup.
+
+    Reading once at import time also gives operators a clear startup error
+    if they typo the value, instead of silent per-row spam.
+    """
+    raw = os.getenv("EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES", "4096").strip()
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        # Defensive: don't crash sync on a bad env value — fall back to default
+        # and log so the operator sees it once.
+        logger.warning(
+            "EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES=%r is not an integer; using default 4096",
+            raw,
+        )
+        return 4096
+    # Clamp to a sane range — operator who sets 0 or negative would refuse all
+    # attributes; operator who sets billions defeats the protection. Keep it
+    # at "what an actual MISP value could plausibly be".
+    if parsed < 64:
+        logger.warning(
+            "EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES=%d is below 64 (would refuse most legitimate values); using 64 floor",
+            parsed,
+        )
+        return 64
+    return parsed
+
+
+_MAX_ATTR_VALUE_BYTES = _read_max_attr_value_bytes()
+
+
 class MispTransientServerError(TransientServerError):
     """Raised manually for HTTP 5xx from MISP so @retry_with_backoff can catch
     it selectively. Inherits from ``collector_utils.TransientServerError`` so
@@ -1966,13 +2005,19 @@ class MISPToNeo4jSync:
         # 4096 chars is well above the 99.9th percentile.
         # Operators with genuine large-value use cases (rare) can override
         # via EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES.
-        _max_value_bytes = int(os.getenv("EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES", "4096"))
-        if len(value.encode("utf-8")) > _max_value_bytes:
+        #
+        # PR #40 commit X (bugbot MED): cap is read ONCE at module load
+        # (see ``_read_max_attr_value_bytes`` above), not per row. The
+        # previous form re-parsed the env var on every call → measurable
+        # CPU on million-attribute baselines, plus malformed env values
+        # would re-raise per-row instead of failing fast at startup.
+        encoded_len = len(value.encode("utf-8"))
+        if encoded_len > _MAX_ATTR_VALUE_BYTES:
             logger.warning(
                 "Refusing oversized MISP attribute value (%d bytes > cap %d) — "
                 "type=%s event=%s. Set EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES to override.",
-                len(value.encode("utf-8")),
-                _max_value_bytes,
+                encoded_len,
+                _MAX_ATTR_VALUE_BYTES,
                 attr_type,
                 event_info.get("id", "?"),
             )

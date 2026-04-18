@@ -326,6 +326,35 @@ def test_parse_attribute_rejects_oversized_value(monkeypatch):
     assert rels == [], "oversized attribute must produce no relationships"
 
 
+def test_max_attr_value_bytes_is_read_once_at_module_load():
+    """PR #40 commit X (bugbot MED) regression pin.
+
+    The cap MUST be resolved at module-import time, not on every call to
+    ``parse_attribute``. Previously ``int(os.getenv(...))`` was inside
+    the per-attribute hot loop, parsed millions of times per baseline
+    run. Pin: source-grep that the assignment is at module top level
+    (the marker constant) and that ``parse_attribute`` references it
+    rather than re-reading the env var.
+    """
+    path = os.path.join(_SRC, "run_misp_to_neo4j.py")
+    with open(path) as fh:
+        src = fh.read()
+    # Module-level constant must exist
+    assert "_MAX_ATTR_VALUE_BYTES = _read_max_attr_value_bytes()" in src, (
+        "run_misp_to_neo4j.py must define _MAX_ATTR_VALUE_BYTES at module load — "
+        "without this the env var is parsed in the per-attribute hot loop"
+    )
+    # parse_attribute must NOT re-read the env var (negative pin: the
+    # specific bad pattern)
+    parse_start = src.find("def parse_attribute")
+    parse_end = src.find("\n    def ", parse_start + 1)
+    parse_body = src[parse_start:parse_end]
+    assert 'os.getenv("EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES"' not in parse_body, (
+        "parse_attribute MUST NOT call os.getenv on the cap — use _MAX_ATTR_VALUE_BYTES "
+        "(the module-level constant resolved once at import)"
+    )
+
+
 def test_parse_attribute_accepts_normal_value():
     """Negative pin: a normal-sized value (well under 4KB default) must
     parse normally — the cap must not break the happy path."""
