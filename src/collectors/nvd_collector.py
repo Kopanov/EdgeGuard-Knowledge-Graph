@@ -835,11 +835,18 @@ class NVDCollector:
                         # ``first_seen`` / ``last_seen`` flow into the
                         # source-truthful extractor → SOURCED_FROM edge as
                         # ``r.source_reported_first_at`` / ``r.source_reported_last_at``.
-                        # ``last_updated`` (the ITEM key, not the node prop) is
-                        # actually unused on the consumer side now — the node's
-                        # ``n.last_updated`` is set server-side from datetime().
                         "first_seen": published_str or None,
                         "last_seen": cve_data.get("lastModified") or None,
+                        # PR (S5) commit X (bugbot 6543da4 LOW): keep the
+                        # ``last_updated`` key — ``parse_attribute`` for
+                        # the Vulnerability path reads it via
+                        # ``_coerce_to_iso(nvd_meta.get("last_modified")
+                        # or attr.get("timestamp"))`` and downstream MISP
+                        # push paths may reference it. The previous
+                        # removal was premature — keep the field as
+                        # NVD's ``lastModified`` (same value as
+                        # ``last_seen``; both are downstream keys).
+                        "last_updated": cve_data.get("lastModified") or None,
                         "confidence_score": 0.9 if cisa_exploit_add else 0.6,
                         "severity": severity.upper(),
                         "cvss_score": cvss_score,

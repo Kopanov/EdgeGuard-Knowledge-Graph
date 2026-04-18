@@ -4876,7 +4876,14 @@ class Neo4jClient:
             "value": indicator_value,
             "tag": f"{zone_array[0]}_{normalized_type}",
             "zone": zone_array,
-            "first_seen": now,
+            # PR (S5) commit X (bugbot 6543da4 LOW): dropped the stale
+            # ``"first_seen": now`` key — the Cypher no longer references
+            # ``$first_seen`` (the legacy node field write was removed
+            # in the Bug Hunter v2 #1 fix earlier in this PR). Neo4j
+            # silently ignored the extra parameter but keeping the dead
+            # key was confusing dead code that contradicted the
+            # architecture's "node carries only DB-local timestamps
+            # set server-side via datetime()" contract.
             "last_updated": now,
             "source": ["resilmesh"],
             "confidence_score": 0.8 if alert_data else 0.5,
