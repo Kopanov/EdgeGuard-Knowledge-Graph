@@ -119,6 +119,11 @@ class CVE:
     source: Optional[List[str]] = None
     zone: Optional[List[str]] = None
     first_imported_at: Optional[str] = None
+    # PR (S5): source-truthful observation times — populated when the
+    # source is on the reliable allowlist (see source_truthful_timestamps.py).
+    # NULL means "we don't know when the world first/last saw this".
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
     last_updated: Optional[str] = None
     last_imported_from: Optional[str] = None
     # Linked CVSS nodes (resolved lazily by resolvers)
@@ -159,6 +164,8 @@ class Vulnerability:
     # legacy scalar misp_event_id removed)
     misp_event_ids: Optional[List[str]] = None
     first_imported_at: Optional[str] = None
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
     last_imported_from: Optional[str] = None
     # Enrichment fields
     version_constraints: Optional[str] = None  # JSON string
@@ -203,6 +210,8 @@ class Indicator:
     misp_event_urls: Optional[List[str]] = None
     # Import audit trail
     first_imported_at: Optional[str] = None
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
     last_imported_from: Optional[str] = None
     # Enrichment fields
     yara_rules: Optional[List[str]] = None
@@ -297,6 +306,11 @@ class Tool:
     # Deterministic per-node UUID — see other types for details.
     uuid: Optional[str] = None
     first_imported_at: Optional[str] = None
+    # PR (S5): source-truthful observation times — populated when the
+    # source is on the reliable allowlist (see source_truthful_timestamps.py).
+    # NULL means "we don't know when the world first/last saw this".
+    first_seen_at_source: Optional[str] = None
+    last_seen_at_source: Optional[str] = None
     last_updated: Optional[str] = None
 
 
