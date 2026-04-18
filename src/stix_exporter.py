@@ -86,37 +86,10 @@ _EMIT_SIGHTINGS = os.environ.get("EDGEGUARD_STIX_EMIT_SIGHTINGS", "").strip().lo
 )
 
 
-def _iso_str(val: Any) -> Optional[str]:
-    """Coerce a Neo4j-driver temporal value (or anything date-like) into
-    a plain ISO-8601 string.
-
-    The neo4j Python driver returns ``neo4j.time.DateTime`` objects when
-    you read a node's DateTime property. Those don't round-trip through
-    ``stix2.utils.parse_into_datetime()`` (it raises) or through
-    ``json.dumps`` (no default serializer). The fix is to convert to a
-    plain ISO string at every read site that hands the value to a
-    third-party serializer.
-
-    Both ``neo4j.time.DateTime`` and Python's ``datetime.datetime``
-    expose ``.isoformat()``; for any other type we fall back to ``str()``
-    which is correct for already-string values and harmless for None.
-    """
-    if val is None:
-        return None
-    if hasattr(val, "isoformat"):
-        try:
-            return val.isoformat()
-        except (TypeError, ValueError):
-            pass
-    if isinstance(val, str):
-        return val if val.strip() else None
-    # Last resort: stringify
-    try:
-        s = str(val).strip()
-        return s or None
-    except Exception:
-        return None
-
+# PR (S5) commit X (bugbot LOW): consolidated to a shared module to
+# kill the duplication with ``alert_processor._iso_str``. Single source
+# of truth — bug fix in one place propagates to all callers.
+from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Deterministic IDs

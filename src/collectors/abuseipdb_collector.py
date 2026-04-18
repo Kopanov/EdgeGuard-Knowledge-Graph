@@ -413,12 +413,19 @@ class AbuseIPDBCollector:
         # the MOST RECENT report (= last_seen), not the FIRST report.
         # The check endpoint (``_format_check_data`` above) correctly
         # uses ``firstSeen``; the blacklist endpoint doesn't expose that
-        # field, so we map ``lastReportedAt`` to ``last_seen`` (which IS
-        # its semantic) and leave ``first_seen`` empty. parse_attribute's
-        # source-truthful extractor will then put ``last_seen`` on
-        # ``n.last_seen_at_source`` and skip ``first_seen_at_source`` (NULL
-        # = "we don't know when AbuseIPDB first saw this IP via blacklist
-        # endpoint" — honest signal).
+        # field, so we leave ``first_seen`` UNSET entirely. parse_attribute's
+        # source-truthful extractor will then see ``attr.first_seen=None``
+        # and skip ``first_seen_at_source`` (NULL = "we don't know when
+        # AbuseIPDB first saw this IP via blacklist endpoint" — honest
+        # signal).
+        #
+        # PR (S5) commit X (bugbot HIGH) follow-up: the previous attempt
+        # set ``first_seen`` to wall-clock NOW "for back-compat". That was
+        # wrong — it leaks through MISPWriter:664 → MISP attribute → the
+        # extractor reads it back → AbuseIPDB IS on the reliable allowlist
+        # → wall-clock NOW gets stored as first_seen_at_source. Today's
+        # date masquerading as world-truth on every blacklist IP.
+        # Fix: omit first_seen entirely. Honest NULL > misleading wall-clock.
         last_reported = data.get("lastReportedAt", "")
         return {
             "indicator_type": "ipv4" if "." in ip else "ipv6",
@@ -426,11 +433,7 @@ class AbuseIPDBCollector:
             "zone": zones,
             "tag": "abuseipdb",
             "source": ["abuseipdb"],
-            # NOTE: blacklist endpoint provides no first-seen field; leave
-            # the legacy first_seen as the wall-clock to avoid breaking any
-            # consumer that reads it, but the SOURCE-TRUTHFUL channel uses
-            # last_seen below for n.last_seen_at_source.
-            "first_seen": datetime.now(timezone.utc).isoformat(),
+            # first_seen INTENTIONALLY OMITTED — see comment above.
             "last_seen": last_reported,
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "confidence_score": abuse_score / 100.0,

@@ -604,6 +604,12 @@ class MISPWriter:
 
         # Add first seen date if available
         first_seen = indicator.get("first_seen")
+        # PR (S5) commit X (bugbot MED): also pass through last_seen so
+        # the source-truthful extractor on the sync side can populate
+        # n.last_seen_at_source. Previously last_seen was silently dropped
+        # at MISPWriter — collectors that mapped a real upstream value
+        # (e.g. AbuseIPDB blacklist's lastReportedAt) had it lost here.
+        last_seen = indicator.get("last_seen")
 
         # Encode rich metadata as JSON comment for sources with structured data
         # (same pattern as NVD_META for vulnerabilities).
@@ -664,6 +670,13 @@ class MISPWriter:
                     attribute["first_seen"] = first_seen
             except (ValueError, TypeError, KeyError):
                 pass
+
+        # PR (S5) commit X (bugbot MED): also pass through last_seen.
+        # MISP 2.4.120+ supports the native last_seen attribute field;
+        # the source-truthful extractor reads it back into
+        # n.last_seen_at_source.
+        if last_seen and isinstance(last_seen, str):
+            attribute["last_seen"] = last_seen
 
         return attribute
 

@@ -210,6 +210,42 @@ def _coerce_iso(val: Any) -> Optional[str]:
     return None
 
 
+def iso_str(val: Any) -> Optional[str]:
+    """Public utility: coerce a Neo4j-driver temporal value (or anything
+    date-like) into a plain ISO-8601 string for JSON / STIX serialization.
+
+    PR (S5) commit X (bugbot LOW): consolidated here from the previously-
+    duplicated copies in ``stix_exporter._iso_str`` and
+    ``alert_processor._iso_str``. Single source of truth — bug fix in
+    one place propagates to all callers.
+
+    The neo4j Python driver returns ``neo4j.time.DateTime`` objects when
+    reading a node's DateTime property. Those don't round-trip through
+    ``stix2.utils.parse_into_datetime()`` (it raises) or through
+    ``json.dumps`` (no default serializer). The fix is to convert to a
+    plain ISO string at every read site that hands the value to a
+    third-party serializer.
+
+    Both ``neo4j.time.DateTime`` and Python's ``datetime.datetime``
+    expose ``.isoformat()``; for any other type we fall back to ``str()``
+    which is correct for already-string values and harmless for None.
+    """
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        try:
+            return val.isoformat()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(val, str):
+        return val if val.strip() else None
+    try:
+        s = str(val).strip()
+        return s or None
+    except Exception:
+        return None
+
+
 def extract_source_truthful_timestamps(
     attr: Dict[str, Any],
     source_id: Optional[str],

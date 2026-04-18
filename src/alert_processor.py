@@ -27,30 +27,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _iso_str(val: Any) -> Optional[str]:
-    """Coerce a Neo4j-driver temporal value (or anything date-like) into
-    a plain ISO-8601 string for JSON serialization.
-
-    PR (S5) commit X (bugbot MED): the neo4j Python driver returns
-    ``neo4j.time.DateTime`` objects when reading a node's DateTime
-    property. Those are NOT JSON-serializable for the NATS alert
-    payload. Centralize the conversion here so every enrichment field
-    that surfaces a temporal value goes through the same coercion.
-    """
-    if val is None:
-        return None
-    if hasattr(val, "isoformat"):
-        try:
-            return val.isoformat()
-        except (TypeError, ValueError):
-            pass
-    if isinstance(val, str):
-        return val if val.strip() else None
-    try:
-        s = str(val).strip()
-        return s or None
-    except Exception:
-        return None
+# PR (S5) commit X (bugbot LOW): consolidated to source_truthful_timestamps.iso_str
+# to kill the duplication with stix_exporter. Single source of truth.
+from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 
 
 @dataclass
