@@ -101,9 +101,17 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import unicodedata
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+# Strict UUID format: 8-4-4-4-12 hex digits with hyphens. Anchored at
+# both ends so a string like "abc-123-def" or accidentally-pasted
+# whitespace doesn't sneak through.
+_UUID_REGEX = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 # ---------------------------------------------------------------------------
@@ -125,23 +133,103 @@ logger = logging.getLogger(__name__)
 # rejections at 100%, which is the signal they need to fix the env.
 
 
-def _parse_csv_env(name: str) -> FrozenSet[str]:
-    """Parse a comma-separated env var into a normalized frozenset.
+def _parse_csv_env_uuids(name: str) -> FrozenSet[str]:
+    """Parse a comma-separated UUID env var into a validated frozenset.
 
-    Empty / unset → empty frozenset. Each entry is stripped + lowercased
-    so the comparison is case-insensitive (org names) / canonicalized
-    (UUIDs). UUID format is NOT validated — operators can paste raw
-    output from MISP's UI and we'll match string-equality after lower.
+    PR #44 audit H2 (Red Team / Bug Hunter): each entry MUST match the
+    canonical 8-4-4-4-12 UUID shape. Misconfigured entries (e.g. a
+    name accidentally pasted into the UUID env var) get logged at
+    WARNING and dropped — they would otherwise become a spoofing vector
+    if a federated MISP peer's ``Orgc.uuid`` happened to equal the
+    misconfigured string.
+
+    Empty / unset → empty frozenset. Whitespace-tolerant.
     """
     raw = os.getenv(name, "")
     if not raw:
         return frozenset()
-    parts = [p.strip().lower() for p in raw.split(",")]
+    parts = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    valid: set[str] = set()
+    invalid: list[str] = []
+    for p in parts:
+        if _UUID_REGEX.match(p):
+            valid.add(p)
+        else:
+            invalid.append(p)
+    if invalid:
+        logger.warning(
+            "EDGEGUARD_TRUSTED_MISP_ORG_UUIDS: %d entries dropped — not a "
+            "valid 8-4-4-4-12 UUID. Misconfigured entries are dangerous "
+            "(could match a federated peer's Orgc.uuid by coincidence). "
+            "Examples (truncated): %s",
+            len(invalid),
+            ", ".join(repr(p[:40]) for p in invalid[:5]),
+        )
+    return frozenset(valid)
+
+
+def _parse_csv_env_names(name: str) -> FrozenSet[str]:
+    """Parse a comma-separated NAME env var into a normalized frozenset.
+
+    PR #44 audit H1 (Red Team): apply Unicode NFKC normalization +
+    ``casefold`` (not just ``lower``) so homoglyph attacks
+    ("EdgеGuard" with Cyrillic ``е``) and fullwidth-Latin variants
+    are folded to the same byte sequence as the canonical name. Note
+    that NFKC won't catch every homoglyph (e.g. Greek lookalikes that
+    aren't in NFKC compatibility decompositions) — operators are
+    advised in ``.env.example`` to prefer the UUID allowlist.
+
+    Empty / unset → empty frozenset. Comma-in-name is unsupported
+    (split character collision); documented in ``.env.example``.
+    """
+    raw = os.getenv(name, "")
+    if not raw:
+        return frozenset()
+    parts = [_normalize_name(p) for p in raw.split(",")]
     return frozenset(p for p in parts if p)
 
 
-_TRUSTED_CREATOR_ORG_UUIDS: FrozenSet[str] = _parse_csv_env("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS")
-_TRUSTED_CREATOR_ORG_NAMES: FrozenSet[str] = _parse_csv_env("EDGEGUARD_TRUSTED_MISP_ORG_NAMES")
+def _normalize_name(value: Optional[str]) -> Optional[str]:
+    """NFKC + casefold + strip — case-insensitive comparison key for org
+    names. Returns ``None`` for None / empty / whitespace-only.
+
+    PR #44 audit H1 (Red Team): NFKC catches Unicode compatibility
+    homoglyphs (fullwidth Latin, ligatures, etc.); ``casefold`` is
+    stronger than ``lower`` for Unicode case folding (e.g. German ß
+    folds to ``ss``, Turkish dotless-i is handled).
+    """
+    if not value:
+        return None
+    s = unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    return s or None
+
+
+_TRUSTED_CREATOR_ORG_UUIDS: FrozenSet[str] = _parse_csv_env_uuids("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS")
+_TRUSTED_CREATOR_ORG_NAMES: FrozenSet[str] = _parse_csv_env_names("EDGEGUARD_TRUSTED_MISP_ORG_NAMES")
+
+
+# PR #44 audit M1 (Devil's Advocate / Prod Readiness): when the
+# defense is disabled in a production-like environment, log a
+# WARNING at module import so the misconfiguration is loud, not
+# silent. Operators who deliberately want the bypass in dev/staging
+# / EDGEGUARD_ENV unset see nothing.
+def _warn_if_disabled_in_prod() -> None:
+    env = os.getenv("EDGEGUARD_ENV", "").strip().lower()
+    prod_envs = {"prod", "production", "staging", "stage"}
+    if env in prod_envs and not (_TRUSTED_CREATOR_ORG_UUIDS or _TRUSTED_CREATOR_ORG_NAMES):
+        logger.warning(
+            "EDGEGUARD_ENV=%r BUT MISP tag-impersonation defense is DISABLED — "
+            "set EDGEGUARD_TRUSTED_MISP_ORG_UUIDS (recommended) and/or "
+            "EDGEGUARD_TRUSTED_MISP_ORG_NAMES to your EdgeGuard collector "
+            "org's identifier(s). Without the allowlist, any MISP user / "
+            "federated peer can spoof source_id='nvd' and silently corrupt "
+            "MIN(r.source_reported_first_at). See src/source_trust.py and "
+            ".env.example for details.",
+            env,
+        )
+
+
+_warn_if_disabled_in_prod()
 
 
 # Trust-check decision reasons (also appears as the ``reason`` Prometheus
@@ -175,12 +263,22 @@ def _trust_check_configured() -> bool:
     return bool(_TRUSTED_CREATOR_ORG_UUIDS or _TRUSTED_CREATOR_ORG_NAMES)
 
 
-def _normalize(value: Optional[str]) -> Optional[str]:
-    """Lowercased + stripped lookup key. ``None`` / empty → ``None``."""
+def _normalize_uuid(value: Optional[str]) -> Optional[str]:
+    """Strict UUID lookup key. ``None`` / empty / non-UUID → ``None``.
+
+    PR #44 audit H2 (Red Team): only accept canonical 8-4-4-4-12
+    hex+hyphen UUID strings. An attacker-controlled MISP event whose
+    ``Orgc.uuid`` is a free-text string (e.g. ``"edgeguard collectors"``)
+    must NOT compare-equal to a misconfigured allowlist entry — return
+    None so the lookup misses and the event REJECTs at the
+    creator_org_missing path.
+    """
     if not value:
         return None
     s = str(value).strip().lower()
-    return s or None
+    if not s or not _UUID_REGEX.match(s):
+        return None
+    return s
 
 
 def is_attribute_creator_trusted(event_info: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
@@ -225,8 +323,14 @@ def is_attribute_creator_trusted(event_info: Optional[Dict[str, Any]]) -> Tuple[
     if not isinstance(orgc, dict):
         return False, TRUST_REASON_CREATOR_MISSING
 
-    creator_uuid = _normalize(orgc.get("uuid"))
-    creator_name = _normalize(orgc.get("name"))
+    # PR #44 audit H2: UUIDs go through strict format validation —
+    # a non-UUID value (e.g. attacker-controlled free-text) returns
+    # None and falls through to the name check or REJECT.
+    creator_uuid = _normalize_uuid(orgc.get("uuid"))
+    # PR #44 audit H1: names go through NFKC + casefold to defeat
+    # Unicode confusables (homoglyphs / fullwidth Latin / German ß /
+    # Turkish dotless-i).
+    creator_name = _normalize_name(orgc.get("name"))
 
     if not creator_uuid and not creator_name:
         return False, TRUST_REASON_CREATOR_MISSING
@@ -238,6 +342,32 @@ def is_attribute_creator_trusted(event_info: Optional[Dict[str, Any]]) -> Tuple[
         return True, TRUST_REASON_NAME_MATCH
 
     return False, TRUST_REASON_NOT_ALLOWLISTED
+
+
+def safe_orgc_for_log(orgc: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Sanitize an MISP ``Orgc`` dict for safe inclusion in WARNING logs.
+
+    PR #44 audit H3 (Red Team / Cross-Checker): ``Orgc.name`` is
+    attacker-controllable (federated MISP peer). Logged verbatim it
+    can carry CR/LF for log injection or excessive length to flood
+    the SIEM. This helper:
+
+    * Strips newlines / carriage returns / tabs (escaped to literal
+      ``\\n`` / ``\\r`` / ``\\t`` so the log line stays one line).
+    * Truncates each field to 80 chars.
+    * Returns a fresh dict (not a reference into the caller's dict).
+    """
+    if not isinstance(orgc, dict):
+        return {"uuid": "", "name": ""}
+
+    def _safe_field(value: Any) -> str:
+        s = str(value or "")[:80]
+        return s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+    return {
+        "uuid": _safe_field(orgc.get("uuid")),
+        "name": _safe_field(orgc.get("name")),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -252,10 +382,13 @@ def _reload_env() -> None:
     immutable for the lifetime of the process (see the comment block
     above on why). Tests use this helper to flip the allowlist
     between cases via ``monkeypatch.setenv`` + ``_reload_env``.
+
+    Uses the validated parsers (``_parse_csv_env_uuids`` rejects
+    non-UUID entries; ``_parse_csv_env_names`` applies NFKC + casefold).
     """
     global _TRUSTED_CREATOR_ORG_UUIDS, _TRUSTED_CREATOR_ORG_NAMES
-    _TRUSTED_CREATOR_ORG_UUIDS = _parse_csv_env("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS")
-    _TRUSTED_CREATOR_ORG_NAMES = _parse_csv_env("EDGEGUARD_TRUSTED_MISP_ORG_NAMES")
+    _TRUSTED_CREATOR_ORG_UUIDS = _parse_csv_env_uuids("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS")
+    _TRUSTED_CREATOR_ORG_NAMES = _parse_csv_env_names("EDGEGUARD_TRUSTED_MISP_ORG_NAMES")
 
 
 def trusted_uuids_snapshot() -> FrozenSet[str]:

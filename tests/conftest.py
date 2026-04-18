@@ -31,3 +31,23 @@ def _edgeguard_required_env(monkeypatch):
         monkeypatch.setenv("NEO4J_PASSWORD", "pytest-dummy-neo4j-password")
     if not os.getenv("MISP_API_KEY"):
         monkeypatch.setenv("MISP_API_KEY", "pytest-dummy-misp-key")
+
+
+@pytest.fixture(autouse=True)
+def _reset_source_trust_env(monkeypatch):
+    """PR #44 audit M4 (Bug Hunter / Maintainer Dev): reset
+    ``source_trust`` module-level allowlists after every test so a
+    test that monkeypatches the env vars + calls ``_reload_env``
+    doesn't leak state into the next test.
+
+    Tests that don't import ``source_trust`` pay nothing —
+    ``sys.modules.get(...)`` returns None and the fixture short-circuits.
+    """
+    yield
+    src_mod = sys.modules.get("source_trust")
+    if src_mod is None:
+        return
+    monkeypatch.delenv("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS", raising=False)
+    monkeypatch.delenv("EDGEGUARD_TRUSTED_MISP_ORG_NAMES", raising=False)
+    if hasattr(src_mod, "_reload_env"):
+        src_mod._reload_env()

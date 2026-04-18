@@ -536,9 +536,26 @@ def record_source_truthful_creator_rejected(source_id: str | None, reason: str) 
     allowlisted source — that signal is either an active spoofing
     attempt OR a misconfigured allowlist (e.g. forgot to register a
     new EdgeGuard collector org's UUID after a MISP migration).
+
+    PR #44 audit M6 (Maintainer Dev): clamp ``reason`` to the bounded
+    rejection enum from ``source_trust``. Unknown reason values
+    collapse to ``<other>`` rather than create new Prometheus cells —
+    catches a future TRUST_REASON_* rename that forgets to update
+    this counter's label semantics.
     """
+    # Lazy import to avoid the module-load circular (source_trust
+    # itself does NOT depend on metrics_server, but keeping the
+    # import lazy is defensive against future changes).
+    try:
+        from source_trust import TRUST_REASON_CREATOR_MISSING, TRUST_REASON_NOT_ALLOWLISTED
+
+        valid_rejection_reasons = frozenset({TRUST_REASON_NOT_ALLOWLISTED, TRUST_REASON_CREATOR_MISSING})
+    except ImportError:  # pragma: no cover — defensive
+        valid_rejection_reasons = frozenset({"creator_org_not_allowlisted", "creator_org_missing"})
+
     safe_source = (source_id or "<unknown>").strip().lower()[:80] or "<unknown>"
-    safe_reason = (reason or "unknown").replace('"', "")[:80]
+    norm_reason = (reason or "").strip().lower()[:80].replace('"', "")
+    safe_reason = norm_reason if norm_reason in valid_rejection_reasons else "<other>"
     SOURCE_TRUTHFUL_CREATOR_REJECTED.labels(source_id=safe_source, reason=safe_reason).inc()
 
 

@@ -153,16 +153,23 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prometheus counter wiring (defensive import)
+# Prometheus counter wiring (defensive imports)
 # ---------------------------------------------------------------------------
 # Imported defensively so this module stays importable in test contexts
 # that don't bring up prometheus_client (or that monkey-patch the
-# metrics registry between tests). The four ``_metric_*`` shims are
+# metrics registry between tests). The ``_metric_*`` shims are
 # unconditionally callable; they no-op when the import fails.
 #
-# Counter design and label-cardinality budget live in
+# Counter design and label-cardinality budgets live in
 # ``src/metrics_server.py`` next to the ``SOURCE_TRUTHFUL_*`` Counter
-# definitions. Spawned-task chip 5b from the PR #41 audit.
+# definitions.
+#
+# - Chip 5b (PR #42): the four claim/drop/coerce/clamp metrics for the
+#   per-source first_seen/last_seen pipeline.
+# - Chip 5e (PR #44): the creator-rejected metric for the MISP
+#   tag-impersonation defense; eager-imported (M5 audit fix —
+#   parse_attribute is in the hot loop, lazy import added measurable
+#   per-call cost even with Python's import cache).
 try:
     from metrics_server import (
         record_source_truthful_claim_accepted as _metric_accept,
@@ -175,6 +182,9 @@ try:
     )
     from metrics_server import (
         record_source_truthful_future_clamp as _metric_future_clamp,
+    )
+    from metrics_server import (
+        record_source_truthful_creator_rejected as _metric_creator_rejected,
     )
 except ImportError:  # pragma: no cover — defensive
     # Mypy enforces "all conditional function variants must have
@@ -192,6 +202,15 @@ except ImportError:  # pragma: no cover — defensive
 
     def _metric_future_clamp() -> None:
         return None
+
+    def _metric_creator_rejected(source_id: Optional[str], reason: str) -> None:
+        return None
+
+
+# Chip 5e helper imports (eager — parse_attribute hot loop). source_trust is
+# always present in production; an ImportError here would indicate a broken
+# install, not a test-context issue, so no defensive fallback.
+from source_trust import is_attribute_creator_trusted, safe_orgc_for_log  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -605,30 +624,33 @@ def extract_source_truthful_timestamps(
     # the trust check is SKIPPED. Production parse_attribute always
     # passes it.
     if event_info is not None:
-        # Local import: source_trust depends on env vars that some test
-        # contexts don't set up; lazy-import keeps module import cheap
-        # and avoids a hard dependency for non-MISP callers.
-        from source_trust import is_attribute_creator_trusted
-
+        # Imports hoisted to module top (PR #44 audit M5) — see import
+        # block at the top of this module. is_attribute_creator_trusted
+        # and _metric_creator_rejected are pre-resolved.
         trusted, reason = is_attribute_creator_trusted(event_info)
         if not trusted:
-            try:
-                from metrics_server import record_source_truthful_creator_rejected
-
-                record_source_truthful_creator_rejected(source_id, reason)
-            except ImportError:  # pragma: no cover — defensive
-                pass
+            _metric_creator_rejected(source_id, reason)
+            # PR #44 audit H3 (Red Team / Cross-Checker): Orgc.name is
+            # attacker-controllable (federated MISP peer can register
+            # any name). Sanitize CR/LF/tabs to defeat log-injection
+            # attacks that would split the WARNING line into multiple
+            # forged log entries in a SIEM. Truncation also bounds
+            # the per-event log payload.
+            safe_orgc = safe_orgc_for_log(event_info.get("Orgc"))
             logger.warning(
                 "Refusing source-truthful timestamp claim from source_id=%r — "
-                "creator org check failed (reason=%s, event_id=%r, orgc=%r). "
-                "Likely tag impersonation: a MISP user / federated peer is "
-                "claiming to be %r but is not in EDGEGUARD_TRUSTED_MISP_ORG_UUIDS / "
-                "EDGEGUARD_TRUSTED_MISP_ORG_NAMES. The IOC was still ingested; "
-                "only the source-truthful timestamp claim was dropped.",
+                "creator org check failed (reason=%s, event_id=%r, "
+                "orgc_uuid=%r, orgc_name=%r). Likely tag impersonation: "
+                "a MISP user / federated peer is claiming to be %r but is "
+                "not in EDGEGUARD_TRUSTED_MISP_ORG_UUIDS / "
+                "EDGEGUARD_TRUSTED_MISP_ORG_NAMES. The IOC was still "
+                "ingested; only the source-truthful timestamp claim was "
+                "dropped.",
                 source_id,
                 reason,
                 event_info.get("id"),
-                event_info.get("Orgc"),
+                safe_orgc["uuid"],
+                safe_orgc["name"],
                 source_id,
             )
             return (None, None)
