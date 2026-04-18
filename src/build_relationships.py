@@ -352,8 +352,19 @@ def build_relationships():
             'WHERE zone_name IS NOT NULL AND zone_name <> "" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
-            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
-            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
+            # PR #37 (Devil's Advocate Tier S): stamp ``edgeguard_managed=true``
+            # on auto-created Sector nodes. Without it, ``stix_exporter`` —
+            # which filters every Sector lookup with
+            # ``WHERE s.edgeguard_managed = true`` (src/stix_exporter.py:203,254,473)
+            # — silently DROPS the Sector identity SDO and the
+            # ``targets`` SRO from every bundle. ResilMesh consumers
+            # then think the indicator is unscoped (zone metadata
+            # invisible). One-line fix; backfill is a separate
+            # migration (see migrations/2026_04_sector_edgeguard_managed_backfill.cypher).
+            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
+            "      sec.edgeguard_managed = true, "
+            "      sec.last_updated = datetime() "
             "MERGE (i)-[r:TARGETS]->(sec) "
             "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
             "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
@@ -374,8 +385,12 @@ def build_relationships():
             'WHERE zone_name IS NOT NULL AND zone_name <> "" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
-            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE} "
-            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}) "
+            # PR #37: same edgeguard_managed stamp as 7a — keeps STIX export
+            # from silently dropping AFFECTS/TARGETS Sector edges.
+            f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+            f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
+            "      sec.edgeguard_managed = true, "
+            "      sec.last_updated = datetime() "
             "MERGE (v)-[r:AFFECTS]->(sec) "
             "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
             "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
