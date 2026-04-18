@@ -44,7 +44,7 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     ``last_modified``) into the MISP attribute dict via the MISP
     2.4.120+ native fields.
 
-    PR (S5) commit X (bugbot HIGH): consolidated here to fix the
+    PR (S5) (bugbot HIGH): consolidated here to fix the
     bug where only 2 of 7 ``create_*_attribute`` methods honored the
     passthrough. Previously indicators (``87d3529``) and vulnerabilities
     (``ac25b07``) got the fix; malware, threat actors, techniques,
@@ -54,7 +54,7 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     ``created`` timestamp, which the collector mapped into
     ``item["first_seen"]`` but which was then discarded here.
 
-    PR (S5) commit X (post-merge audit — converged finding from
+    PR (S5) (post-merge audit — converged finding from
     bugbot MED / Cross-Checker F5 / Red Team #6 / Bug Hunter #1/#5 /
     Logic Tracker #6): the previous ``isinstance(str)`` gate silently
     dropped THREE real-world scenarios:
@@ -654,7 +654,7 @@ class MISPWriter:
         else:
             tags.append("confidence:low")
 
-        # PR (S5) commit X (bugbot HIGH): the first_seen / last_seen
+        # PR (S5) (bugbot HIGH): the first_seen / last_seen
         # passthrough previously inlined here has been consolidated into
         # the ``_apply_source_truthful_timestamps`` helper below
         # (applied uniformly across all 7 create_*_attribute methods).
@@ -710,7 +710,7 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
-        # PR (S5) commit X (bugbot HIGH): consolidated via helper so
+        # PR (S5) (bugbot HIGH): consolidated via helper so
         # the passthrough lives in ONE place — previously five of the
         # seven create_*_attribute methods silently dropped these fields.
         _apply_source_truthful_timestamps(attribute, indicator)
@@ -919,7 +919,7 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
-        # PR (S5) commit X (bugbot HIGH): MITRE malware SDOs carry the
+        # PR (S5) (bugbot HIGH): MITRE malware SDOs carry the
         # canonical ``created`` / ``modified`` as first_seen / last_seen.
         _apply_source_truthful_timestamps(attribute, malware)
         return attribute
@@ -992,7 +992,7 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
-        # PR (S5) commit X (bugbot HIGH): MITRE intrusion-set SDOs carry
+        # PR (S5) (bugbot HIGH): MITRE intrusion-set SDOs carry
         # the canonical ``created`` / ``modified`` as first_seen / last_seen.
         _apply_source_truthful_timestamps(attribute, actor)
         return attribute
@@ -1071,7 +1071,7 @@ class MISPWriter:
             "Tag": [{"name": tag} for tag in tags],
         }
 
-        # PR (S5) commit X (bugbot HIGH): attack-pattern SDOs carry
+        # PR (S5) (bugbot HIGH): attack-pattern SDOs carry
         # canonical ``created`` / ``modified`` as first_seen / last_seen.
         _apply_source_truthful_timestamps(attribute, technique)
         return attribute
@@ -1117,7 +1117,7 @@ class MISPWriter:
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
         }
-        # PR (S5) commit X (bugbot HIGH): x-mitre-tactic SDOs carry
+        # PR (S5) (bugbot HIGH): x-mitre-tactic SDOs carry
         # canonical ``created`` / ``modified`` as first_seen / last_seen.
         _apply_source_truthful_timestamps(attribute, tactic)
         return attribute
@@ -1177,7 +1177,7 @@ class MISPWriter:
             "to_ids": False,
             "Tag": [{"name": tag} for tag in tags],
         }
-        # PR (S5) commit X (bugbot HIGH): MITRE tool SDOs carry
+        # PR (S5) (bugbot HIGH): MITRE tool SDOs carry
         # canonical ``created`` / ``modified`` as first_seen / last_seen.
         _apply_source_truthful_timestamps(attribute, tool)
         return attribute

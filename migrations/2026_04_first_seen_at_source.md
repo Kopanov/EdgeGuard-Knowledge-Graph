@@ -152,12 +152,28 @@ RETURN v.cve_id,
        min(r.source_reported_first_at) AS valid_from;  // 2013 (correct)
 ```
 
-## What's NOT backfilled
+## No migration / backfill needed
 
-The 350k-node baseline keeps its existing `first_imported_at` / `last_updated`
-values. Existing `SOURCED_FROM` edges have NULL `r.source_reported_first_at` /
-`r.source_reported_last_at` until the next incremental sync touches them.
-Within ~3 days of incremental cycles every active edge is repopulated.
+EdgeGuard is **pre-release**: no production graph carries the
+deprecated node-level `n.first_seen_at_source` / `n.last_seen_at_source`
+properties. Every Indicator/Vulnerability/etc. node MERGEd by the new
+code stamps the per-source claim on the `SOURCED_FROM` edge from the
+first sync onward.
+
+For dev / staging environments that experimented with the pre-PR
+node-level shape: a one-off migration is **NOT** provided because
+the old node value was an aggregate (MIN across sources) — copying
+it onto every edge would fabricate uniform per-source claims that
+never existed (Bug Hunter v3 #1). The honest behavior is **NULL on
+the edge until a real source-truthful claim arrives via the next
+incremental sync**. NULL means "we don't know what this source
+specifically claimed"; that is the correct semantic, not a bug to
+paper over.
+
+If you have an experimental dev graph with orphan node properties
+and want to reset, drop the database (`MATCH (n) DETACH DELETE n`)
+and let the baseline DAG repopulate from MISP — every node will
+arrive through the new code path with correct edge claims.
 
 ## Operator FAQ
 
@@ -166,9 +182,16 @@ Update queries to traverse `SOURCED_FROM` instead. Or rely on the STIX
 exporter / alert processor to do the aggregation.
 
 **Q: STIX `valid_from` is wall-clock NOW for an old CVE I just imported.**
-This means no source on the SOURCED_FROM edges has a `source_reported_first_at`
-populated yet (incremental hasn't touched the node since the deploy).
-Wait one sync cycle.
+This means the source's first-reported timestamp wasn't extracted —
+either the source isn't on the reliable allowlist (e.g. OTX,
+CyberCure), the upstream feed didn't ship a `published` /
+`dateAdded` / equivalent field for this entry, OR the value failed
+calendar validation in `coerce_iso`. The fallback to
+``i.first_imported_at`` (then to current wall-clock) is intentional —
+NULL on the edge means "we don't have a source claim", and we
+cannot honestly fabricate one. Check the source's actual response
+for the entry; if it should have shipped a timestamp, file a
+collector-side bug report.
 
 **Q: Can a stale MISP export regress my edge timestamps?**
 No. MIN-with-AND-guard on `r.source_reported_first_at` only accepts strictly-

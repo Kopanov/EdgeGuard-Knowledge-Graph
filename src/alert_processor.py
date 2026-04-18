@@ -27,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# PR (S5) commit X (bugbot LOW): consolidated to source_truthful_timestamps.iso_str
+# PR (S5) (bugbot LOW): consolidated to source_truthful_timestamps.iso_str
 # to kill the duplication with stix_exporter. Single source of truth.
 from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 
@@ -295,7 +295,7 @@ class AlertProcessor:
 
         try:
             with self.neo4j.driver.session() as session:
-                # PR (S5) commit X (architecture redesign): per-source
+                # PR (S5) (architecture redesign): per-source
                 # timestamps live on ``(i)-[r:SOURCED_FROM]->(:Source)``
                 # edges, NOT on the node. For the alert enrichment
                 # payload we still want a single value per indicator —
@@ -326,7 +326,7 @@ class AlertProcessor:
                     ind_data = indicator_record["indicator"]
                     metadata["indicator_found"] = True
                     enrichment["confidence"] = ind_data.get("confidence_score", 0.0)
-                    # PR (S5) commit X: prefer source-claimed first/last
+                    # PR (S5): prefer source-claimed first/last
                     # (aggregated across edges); fall back to DB-local
                     # ``first_imported_at`` / ``last_updated`` when no
                     # source claim is on file. ``_iso_str`` wraps each

@@ -203,7 +203,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, collect(DISTINCT m) AS malware_list
             OPTIONAL MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
             WHERE i.active = true
-            // PR (S5) commit X (bugbot c9bb277 MED + architecture redesign):
+            // PR (S5) (bugbot c9bb277 MED + architecture redesign):
             // per-source timestamps live on SOURCED_FROM edges, not on
             // the node. We want "earliest claim across ALL sources for
             // this indicator" per indicator, THEN aggregate across
@@ -248,7 +248,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.last_updated     = datetime(),
                 c.indicator_count  = indicator_total,
                 c.malware_count    = size(malware_list),
-                // PR (S5) commit X (bugbot LOW): the AND-guard on the
+                // PR (S5) (bugbot LOW): the AND-guard on the
                 // incoming aggregate prevents a transient NULL aggregate
                 // (e.g. brand-new campaign with zero active indicators)
                 // from overwriting an existing non-NULL c.first_seen.
@@ -256,7 +256,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.first_seen       = CASE WHEN first_seen IS NOT NULL
                                        AND (c.first_seen IS NULL OR first_seen < c.first_seen)
                                        THEN first_seen ELSE c.first_seen END,
-                // PR (S5) commit X (bugbot MED): MAX-guard c.last_seen
+                // PR (S5) (bugbot MED): MAX-guard c.last_seen
                 // symmetrically with c.first_seen. Rationale: the
                 // aggregation now reads ``max(coalesce(i.last_seen_at_source,
                 // i.last_updated))`` — with source-truthful data, an

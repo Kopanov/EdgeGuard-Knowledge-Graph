@@ -477,7 +477,7 @@ class Query:
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
-                # PR (S5) commit X (bugbot MED): source-truthful + import
+                # PR (S5) (bugbot MED): source-truthful + import
                 # wall-clock timestamps, matching Indicator / Vulnerability /
                 # Malware resolvers.
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,

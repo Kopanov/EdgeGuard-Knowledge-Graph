@@ -261,7 +261,7 @@ class CISACollector:
                         "zone": sectors,  # zone is now an array
                         "tag": self.tag,
                         "source": [self.tag],
-                        # PR (S5) commit X (bugbot MED follow-on): kill the
+                        # PR (S5) (bugbot MED follow-on): kill the
                         # wall-clock fallback for first_seen. CISA's
                         # ``dateAdded`` is the source-truthful field — when
                         # it's empty we'd rather emit None and let the

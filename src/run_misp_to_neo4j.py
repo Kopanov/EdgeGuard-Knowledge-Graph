@@ -125,7 +125,7 @@ except (ValueError, TypeError):
     MISP_EVENTS_INDEX_MAX_PAGES = 100
 
 
-# PR (S5) commit X (bugbot LOW): the local ``_coerce_to_iso`` helper was
+# PR (S5) (bugbot LOW): the local ``_coerce_to_iso`` helper was
 # deleted; the canonical implementation now lives in
 # ``source_truthful_timestamps.coerce_iso`` (imported above as
 # ``_coerce_to_iso`` to keep the existing call-site spelling). Single
@@ -699,7 +699,7 @@ class MISPToNeo4jSync:
 
     # Source mapping from MISP event/tag names to Neo4j source_ids.
     # Every entry must map to the *actual* originating source, not a proxy.
-    # PR (S5) commit X (Logic Tracker MED): the canonical Neo4j source_id
+    # PR (S5) (Logic Tracker MED): the canonical Neo4j source_id
     # MUST match the value the collector emits (config.SOURCE_TAGS).
     # CISA collector emits ``cisa_kev`` (via SOURCE_TAGS["cisa"]) — the
     # mapping target here MUST be ``cisa_kev`` to keep all the per-source
@@ -2167,7 +2167,7 @@ class MISPToNeo4jSync:
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
-                # PR (S5) commit X (user-surfaced semantic gap):
+                # PR (S5) (user-surfaced semantic gap):
                 # the legacy ``item["first_seen"]`` field was polluted
                 # by MISP event_info.date (= "when EdgeGuard wrote the
                 # MISP event"), not "when the source first observed
@@ -2266,7 +2266,7 @@ class MISPToNeo4jSync:
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
-                # PR (S5) commit X: legacy first_seen removed —
+                # PR (S5): legacy first_seen removed —
                 # was polluted by MISP event_info.date. Read
                 # first_seen_at_source (source-truth) OR
                 # first_imported_at (DB-local) instead.
@@ -2333,7 +2333,7 @@ class MISPToNeo4jSync:
                 "zone": zones,  # zone is now an array
                 "tag": source_id,
                 "source": [source_id],
-                # PR (S5) commit X: legacy first_seen removed —
+                # PR (S5): legacy first_seen removed —
                 # was polluted by MISP event_info.date. Read
                 # first_seen_at_source (source-truth) OR
                 # first_imported_at (DB-local) instead.
@@ -2397,7 +2397,7 @@ class MISPToNeo4jSync:
                 "tag": source_id,
                 "source": [source_id],
                 "platforms": platforms,
-                # PR (S5) commit X: legacy first_seen removed —
+                # PR (S5): legacy first_seen removed —
                 # was polluted by MISP event_info.date. Read
                 # first_seen_at_source (source-truth) OR
                 # first_imported_at (DB-local) instead.
@@ -2436,7 +2436,7 @@ class MISPToNeo4jSync:
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
-                # PR (S5) commit X: legacy first_seen removed —
+                # PR (S5): legacy first_seen removed —
                 # was polluted by MISP event_info.date. Read
                 # first_seen_at_source (source-truth) OR
                 # first_imported_at (DB-local) instead.
@@ -2511,7 +2511,7 @@ class MISPToNeo4jSync:
                 "source": [source_id],
                 "tool_types": tool_types,
                 "uses_techniques": uses_techniques,
-                # PR (S5) commit X: legacy first_seen removed (see
+                # PR (S5): legacy first_seen removed (see
                 # vulnerability site for the rationale).
                 "first_seen_at_source": _fs_at_source_tool,
                 "last_seen_at_source": _ls_at_source_tool,
@@ -2609,7 +2609,7 @@ class MISPToNeo4jSync:
                 "zone": zones,  # zone is now an array
                 "tag": source_id,
                 "source": [source_id],
-                # PR (S5) commit X: legacy first_seen removed (see
+                # PR (S5): legacy first_seen removed (see
                 # vulnerability site for the rationale).
                 "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,

@@ -66,7 +66,7 @@ _DEFAULT_DEPTH = 2
 # the EDGEGUARD_GIT_SHA env var at import time; empty string if unset.
 _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 
-# PR (S5) commit X (bugbot LOW): the previously-defined ``_EMIT_SIGHTINGS``
+# PR (S5) (bugbot LOW): the previously-defined ``_EMIT_SIGHTINGS``
 # env-var hook for opt-in Sighting SRO emission was removed — it was
 # evaluated on import but never read by any function (no consumer
 # existed; the implementation was deferred to a follow-up PR). Will
@@ -76,16 +76,43 @@ _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 # but has no effect today.
 
 
-# PR (S5) commit X (bugbot LOW): consolidated to a shared module to
+# PR (S5) (bugbot LOW): consolidated to a shared module to
 # kill the duplication with ``alert_processor._iso_str``. Single source
 # of truth — bug fix in one place propagates to all callers.
 from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 
 
+def _producer_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
+    """Return ``{created, modified}`` kwargs for stix2 SDK constructors,
+    sourced from EdgeGuard's DB-local timestamps when present.
+
+    PR (S5) (Cross-Checker v3 F3 MED): STIX 2.1 §3.2 says
+    ``created`` = "when the producer created this version of the
+    object". For EdgeGuard re-exporting threat-intel data, the
+    closest analogue is ``n.first_imported_at`` (when EdgeGuard
+    first MERGEd the node). Without this override, stix2 SDK
+    auto-stamps ``created = now()`` — every SDO emitted today says
+    "created today" even for entities EdgeGuard has tracked for
+    months. Same fix for ``modified`` from ``n.last_updated``.
+
+    ``_tactic_sdo`` already does this manually (it's a custom dict,
+    not via stix2 SDK). This helper brings the 6 SDK-built SDOs
+    (Malware/IntrusionSet/AttackPattern/Tool/Campaign/Vulnerability)
+    into the same convention.
+
+    Falls back to "now" when the node lacks the corresponding field.
+    Z-suffix-normalized for stix2 validator compatibility.
+    """
+    now_iso = _stix_ts(_dt.datetime.now(_dt.timezone.utc).isoformat()) or ""
+    created = _stix_ts(_iso_str(props.get("first_imported_at"))) or now_iso
+    modified = _stix_ts(_iso_str(props.get("last_updated"))) or now_iso
+    return {"created": created, "modified": modified}
+
+
 def _stix_ts(s: Optional[str]) -> Optional[str]:
     """Normalize an ISO-8601 timestamp string for stix2 SDK acceptance.
 
-    PR (S5) commit X (post-redesign): stix2's `valid_from` validator
+    PR (S5) (post-redesign): stix2's `valid_from` validator
     rejects the ``+00:00`` UTC offset form ("not in a recognizable
     format"); it requires the ``Z`` short form. Both ``coerce_iso``
     output and Python's ``datetime.isoformat()`` produce ``+00:00`` —
@@ -93,7 +120,7 @@ def _stix_ts(s: Optional[str]) -> Optional[str]:
     helpers (Neo4j and OpenCTI both accept either form, so the rest
     of the codebase stays in the more-explicit ``+00:00`` form).
 
-    PR (S5) commit X (Bug Hunter v2 #5 MED): also handle non-UTC
+    PR (S5) (Bug Hunter v2 #5 MED): also handle non-UTC
     offsets. A future collector that emits an Eastern-time-stamped
     value like ``"2024-03-15T14:00:00-04:00"`` would have previously
     flowed through unchanged → stix2 rejects it ("not a recognizable
@@ -219,7 +246,7 @@ class StixExporter:
     def __init__(self, neo4j_client: Any) -> None:
         """Wrap a connected Neo4jClient (or any object exposing ``.driver``)."""
         self.client = neo4j_client
-        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1 — triple-converged
+        # PR (S5) (Red Team H1 + Prod #1 + Perf F1 — triple-converged
         # HIGH): per-call cache for the source-truthful edge aggregate.
         # Without it, ``_node_to_sdo`` runs one Cypher round-trip PER node
         # in the bundle — depth=2 with 20 nodes = 21 RTTs ≈ 100-200 ms
@@ -248,7 +275,7 @@ class StixExporter:
         query time. A future optimisation would push the filter into
         the query itself.
         """
-        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
@@ -354,7 +381,7 @@ class StixExporter:
         latency. Aggregating at each step keeps the row count bounded
         by the size of one collection at a time.
         """
-        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
@@ -475,7 +502,7 @@ class StixExporter:
         each step bounds the row count by the size of one collection at
         a time.
         """
-        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
@@ -543,7 +570,7 @@ class StixExporter:
         (primary relation). ``depth=2`` (default) also includes affected
         sectors. See ``export_indicator`` for the general semantics.
         """
-        # PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1): clear
+        # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
@@ -599,7 +626,7 @@ class StixExporter:
         the per-type SDO builders find them under the same keys they
         used to read from the node.
 
-        PR (S5) commit X (architecture redesign): per-source timestamps
+        PR (S5) (architecture redesign): per-source timestamps
         live on edges (``r.source_reported_first_at`` /
         ``r.source_reported_last_at``), not on the node. The STIX
         ``valid_from`` semantics still want a single value per
@@ -608,7 +635,7 @@ class StixExporter:
         about when this entity was first observed". MAX symmetric for
         last_seen.
 
-        PR (S5) commit X (Bug Hunter v2 #3 MED): for ``Campaign`` the
+        PR (S5) (Bug Hunter v2 #3 MED): for ``Campaign`` the
         SOURCED_FROM edges don't carry source claims (Campaign is a
         derived aggregate built by enrichment_jobs). We instead read
         the campaign's own ``first_seen`` / ``last_seen`` properties —
@@ -617,10 +644,10 @@ class StixExporter:
         ``x_edgeguard_*`` extensions, just sourced from a different
         place than other entity types.
 
-        PR (S5) commit X (Red Team H1 + Prod #1 + Perf F1 HIGH ×3):
+        PR (S5) (Red Team H1 + Prod #1 + Perf F1 HIGH ×3):
         cached per-export-call to eliminate the N+1 query problem.
 
-        PR (S5) commit X (Bug Hunter v2 #4 + Logic Tracker v2 F8 MED):
+        PR (S5) (Bug Hunter v2 #4 + Logic Tracker v2 F8 MED):
         previously the silent-bail paths returned props with NO log
         — operator could not see why ``x_edgeguard_*`` extensions were
         missing from a bundle. Now both bail paths emit a WARNING.
@@ -629,7 +656,7 @@ class StixExporter:
         labels without a SOURCED_FROM edge — props is returned
         unchanged when no edges exist.
         """
-        # PR (S5) commit X (bugbot c136baf LOW): validate ``label``
+        # PR (S5) (bugbot c136baf LOW): validate ``label``
         # before f-string interpolation per project rule. Today's
         # callers all pass hardcoded labels via _node_to_sdo, but
         # the import boundary is the right place to defend against
@@ -717,7 +744,7 @@ class StixExporter:
     def _reset_export_cache(self) -> None:
         """Clear the per-export-call source-aggregate cache.
 
-        PR (S5) commit X: called at the start of every public ``export_*``
+        PR (S5): called at the start of every public ``export_*``
         method so subsequent exports don't see stale aggregates from
         prior calls. The cache is bundle-scoped — eliminates N+1
         within one bundle without leaking state across bundles.
@@ -739,7 +766,7 @@ class StixExporter:
         question §7.4 of the proposal doc: ResilMesh can filter bundles
         by sector without traversing the graph itself.
 
-        PR (S5) commit X (architecture redesign): the source-truthful
+        PR (S5) (architecture redesign): the source-truthful
         first_seen / last_seen used to live on the node; they're now
         on the per-source ``SOURCED_FROM`` edges. We aggregate across
         edges (MIN/MAX) here before passing to the per-type builder
@@ -762,7 +789,7 @@ class StixExporter:
         elif label == "tool":
             sdo = self._tool_sdo(props)
         elif label == "tactic":
-            # PR (S5) commit X (Logic Tracker v2 F1 HIGH): Tactic was
+            # PR (S5) (Logic Tracker v2 F1 HIGH): Tactic was
             # missing from the dispatcher and silently routed to
             # ``x-edgeguard-unknown``, so MITRE x-mitre-tactic SDOs
             # never received the source-truthful x_edgeguard_*
@@ -794,7 +821,7 @@ class StixExporter:
         """Attach the EdgeGuard source-truthful / import-wall-clock
         timestamp custom properties to any STIX 2.1 SDO dict.
 
-        PR (S5) commit X (Logic Tracker + Cross-Checker HIGH): originally
+        PR (S5) (Logic Tracker + Cross-Checker HIGH): originally
         these `x_edgeguard_*` fields were only added to the Indicator
         SDO. Vulnerability / Malware / ThreatActor / Technique / Tactic /
         Tool / Campaign SDOs shipped to ResilMesh without the
@@ -865,12 +892,12 @@ class StixExporter:
         # valid_from=1970-01-01 to ResilMesh. The audit Logic Tracker
         # caught this; this fix kills the epoch leak.
         #
-        # PR (S5) commit X (bugbot HIGH): explicitly cast each candidate
+        # PR (S5) (bugbot HIGH): explicitly cast each candidate
         # via ``_iso_str`` so a ``neo4j.time.DateTime`` returned by the
         # driver becomes a plain ISO-8601 string before stix2 sees it.
         # Without the cast, ``stix2.utils.parse_into_datetime()`` raises
         # because it doesn't recognize the neo4j driver type.
-        # PR (S5) commit X (Cross-Checker F1 — MEDIUM): replace the
+        # PR (S5) (Cross-Checker F1 — MEDIUM): replace the
         # ``"1970-01-01T00:00:00Z"`` tail-of-chain fallback with the
         # CURRENT wall-clock. STIX 2.1 §4.8 `valid_from` semantic is
         # "time from which this Indicator is considered valid". A
@@ -879,7 +906,7 @@ class StixExporter:
         # use the object's ``created`` timestamp when no source first-
         # seen exists — we mirror that here via ``now()`` (our ``created``
         # is auto-stamped by stix2 at this same instant).
-        # PR (S5) commit X (Bug Hunter v2 #1 HIGH): dropped the back-compat
+        # PR (S5) (Bug Hunter v2 #1 HIGH): dropped the back-compat
         # ``props.get("first_seen")`` step in the chain. The legacy node
         # field was being written by the alert-path Indicator merge (see
         # neo4j_client.py:merge_resilmesh_indicator BEFORE this commit) —
@@ -926,8 +953,9 @@ class StixExporter:
             aliases=_listify(props.get("aliases")),
             description=props.get("description"),
             allow_custom=True,
+            **_producer_created_modified(props),
         )
-        # PR (S5) commit X (Logic Tracker HIGH): source-truthful +
+        # PR (S5) (Logic Tracker HIGH): source-truthful +
         # import-wall-clock custom props now emitted on every SDO type.
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
@@ -941,6 +969,7 @@ class StixExporter:
             aliases=_listify(props.get("aliases")),
             description=props.get("description"),
             allow_custom=True,
+            **_producer_created_modified(props),
         )
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
@@ -981,6 +1010,7 @@ class StixExporter:
             kwargs["kill_chain_phases"] = kcp
         if ext_refs:
             kwargs["external_references"] = ext_refs
+        kwargs.update(_producer_created_modified(props))
         obj = stix2.AttackPattern(**kwargs)
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
@@ -994,13 +1024,14 @@ class StixExporter:
             description=props.get("description"),
             aliases=_listify(props.get("aliases")),
             allow_custom=True,
+            **_producer_created_modified(props),
         )
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
     def _tactic_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         """Build a MITRE ``x-mitre-tactic`` custom SDO.
 
-        PR (S5) commit X (Logic Tracker v2 F1 HIGH): Tactic was
+        PR (S5) (Logic Tracker v2 F1 HIGH): Tactic was
         missing from ``_node_to_sdo`` so MITRE-derived Tactic nodes
         either fell through to the ``x-edgeguard-unknown`` bucket OR
         (after this fix) emit the canonical MITRE custom type.
@@ -1029,7 +1060,7 @@ class StixExporter:
                     "url": f"https://attack.mitre.org/tactics/{mitre_id}",
                 }
             )
-        # PR (S5) commit X (bugbot c136baf MED): STIX 2.1 §3.2 + §11.2
+        # PR (S5) (bugbot c136baf MED): STIX 2.1 §3.2 + §11.2
         # require ``created`` + ``modified`` on EVERY SDO including
         # custom types. Every other SDO builder uses the stix2 SDK
         # which auto-stamps these. Since x-mitre-tactic is a custom
@@ -1068,6 +1099,7 @@ class StixExporter:
             description=props.get("description"),
             aliases=_listify(props.get("aliases")),
             allow_custom=True,
+            **_producer_created_modified(props),
         )
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 
@@ -1091,6 +1123,7 @@ class StixExporter:
         }
         if ext_refs:
             kwargs["external_references"] = ext_refs
+        kwargs.update(_producer_created_modified(props))
         obj = stix2.Vulnerability(**kwargs)
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)
 

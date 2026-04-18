@@ -822,7 +822,7 @@ class NVDCollector:
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
-                        # PR (S5) commit X: source-truthful first/last claim
+                        # PR (S5): source-truthful first/last claim
                         # come from NVD's ``published`` and ``lastModified``.
                         # Both fields fall back to None (NOT wall-clock NOW)
                         # so the SOURCED_FROM edge MIN/MAX CASE logic preserves
@@ -837,16 +837,17 @@ class NVDCollector:
                         # ``r.source_reported_first_at`` / ``r.source_reported_last_at``.
                         "first_seen": published_str or None,
                         "last_seen": cve_data.get("lastModified") or None,
-                        # PR (S5) commit X (bugbot 6543da4 LOW): keep the
-                        # ``last_updated`` key — ``parse_attribute`` for
-                        # the Vulnerability path reads it via
-                        # ``_coerce_to_iso(nvd_meta.get("last_modified")
-                        # or attr.get("timestamp"))`` and downstream MISP
-                        # push paths may reference it. The previous
-                        # removal was premature — keep the field as
-                        # NVD's ``lastModified`` (same value as
-                        # ``last_seen``; both are downstream keys).
-                        "last_updated": cve_data.get("lastModified") or None,
+                        # PR (S5) (Logic Tracker v3 LOW + Bug
+                        # Hunter v3 #6): the previously-restored
+                        # ``"last_updated"`` key was based on a misleading
+                        # bugbot premise — ``parse_attribute`` reads
+                        # MISP-side data (``nvd_meta.get("last_modified")``
+                        # / ``attr.get("timestamp")``), NEVER the
+                        # collector's item dict. The key has zero
+                        # consumers. Dropped to keep one source-of-truth
+                        # per concept (last_seen for the source claim;
+                        # n.last_updated is set server-side from
+                        # ``datetime()``).
                         "confidence_score": 0.9 if cisa_exploit_add else 0.6,
                         "severity": severity.upper(),
                         "cvss_score": cvss_score,

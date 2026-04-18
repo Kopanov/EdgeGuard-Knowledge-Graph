@@ -86,7 +86,7 @@ class VirusTotalCollector:
             limit = 10
 
         # Optional source: no key → skip Airflow task success + metrics (same contract as AbuseIPDB).
-        # PR (S5) commit X: the non-Airflow path previously returned
+        # PR (S5): the non-Airflow path previously returned
         # ``_collect_demo_data()`` — synthetic hashes tagged ``virustotal``
         # with wall-clock-NOW first_seen. The VT pipeline is a real,
         # production-ready collector (``_collect_from_files`` via the v3
@@ -243,7 +243,7 @@ class VirusTotalCollector:
 
                     zones = self._detect_zones_from_names(attrs)
 
-                    # PR (S5) commit X (Logic Tracker v2 F3 MED): map
+                    # PR (S5) (Logic Tracker v2 F3 MED): map
                     # ``last_analysis_date`` (epoch int) to item["last_seen"]
                     # so ``r.source_reported_last_at`` gets populated on
                     # the SOURCED_FROM edge for VT-sourced indicators.
@@ -325,7 +325,7 @@ class VirusTotalCollector:
         names = str(attrs.get("meaningful_name", "")) + str(attrs.get("names", ""))
         return detect_zones_from_text(names)
 
-    # PR (S5) commit X: ``_collect_demo_data`` was deleted. The VT
+    # PR (S5): ``_collect_demo_data`` was deleted. The VT
     # pipeline (``_collect_from_files`` via the v3 Intelligence API) is
     # the real, production collector; the previous demo method returned
     # 3 hardcoded hashes (EICAR + known demo SHAs) tagged ``virustotal``

@@ -419,7 +419,7 @@ class AbuseIPDBCollector:
         # AbuseIPDB first saw this IP via blacklist endpoint" — honest
         # signal).
         #
-        # PR (S5) commit X (bugbot HIGH) follow-up: the previous attempt
+        # PR (S5) (bugbot HIGH) follow-up: the previous attempt
         # set ``first_seen`` to wall-clock NOW "for back-compat". That was
         # wrong — it leaks through MISPWriter:664 → MISP attribute → the
         # extractor reads it back → AbuseIPDB IS on the reliable allowlist

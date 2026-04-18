@@ -229,7 +229,7 @@ class ThreatActor:
     confidence_score: Optional[float] = None
     source: Optional[List[str]] = None
     edgeguard_managed: Optional[bool] = None
-    # PR (S5) commit X (bugbot MED): source-truthful and
+    # PR (S5) (bugbot MED): source-truthful and
     # import-wall-clock timestamps, matching Indicator / Vulnerability /
     # Malware. Populated by ``parse_attribute`` via the
     # source_truthful_timestamps helper; MITRE intrusion-set SDOs carry
@@ -252,7 +252,7 @@ class Malware:
     confidence_score: Optional[float] = None
     source: Optional[List[str]] = None
     edgeguard_managed: Optional[bool] = None
-    # PR (S5) commit X (bugbot MED): source-truthful and
+    # PR (S5) (bugbot MED): source-truthful and
     # import-wall-clock timestamps, matching Indicator / Vulnerability /
     # ThreatActor. Populated by ``parse_attribute`` via the
     first_imported_at: Optional[str] = None
@@ -273,7 +273,7 @@ class Technique:
     zone: Optional[List[str]] = None
     confidence_score: Optional[float] = None
     edgeguard_managed: Optional[bool] = None
-    # PR (S5) commit X (bugbot LOW): source-truthful + import-wall-clock
+    # PR (S5) (bugbot LOW): source-truthful + import-wall-clock
     # timestamps for API parity with Indicator / Vulnerability /
     # ThreatActor / Malware / Tool. MITRE attack-pattern SDOs carry
     # canonical ``created`` / ``modified`` which the collector maps
@@ -296,7 +296,7 @@ class Tactic:
     name: str
     description: Optional[str] = None
     edgeguard_managed: Optional[bool] = None
-    # PR (S5) commit X (bugbot LOW): source-truthful + import-wall-clock
+    # PR (S5) (bugbot LOW): source-truthful + import-wall-clock
     # timestamps for API parity. x-mitre-tactic SDOs carry canonical
     # ``created`` / ``modified``.
     first_imported_at: Optional[str] = None

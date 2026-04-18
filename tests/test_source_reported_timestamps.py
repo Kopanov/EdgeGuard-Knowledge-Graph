@@ -74,7 +74,7 @@ def test_reliable_source_allowlist_includes_all_canonical_sources():
 
 
 def test_collector_emitted_tags_match_allowlist():
-    """PR (S5) commit X (bugbot MED): every tag a collector actually
+    """PR (S5) (bugbot MED): every tag a collector actually
     emits MUST be on the reliable-first-seen allowlist (or be on the
     intentional-exclude list). Bugbot caught the
     ``SOURCE_TAGS["cisa"] == "cisa_kev"`` mismatch in commit
@@ -253,7 +253,7 @@ def test_extractor_passes_through_past_dates():
     assert fs == past, "past dates must pass through unchanged"
 
 
-# PR (S5) commit X (bugbot LOW): the `extract_from_attribute_json`
+# PR (S5) (bugbot LOW): the `extract_from_attribute_json`
 # convenience wrapper was unused in production and only exercised by
 # these two tests — bugbot flagged it as dead code. The wrapper +
 # its tests are removed in the same commit; if a future caller
@@ -294,7 +294,7 @@ def test_stix_indicator_adds_x_edgeguard_first_imported_at_extension():
 
 
 def test_stix_iso_str_helper_handles_neo4j_datetime_objects():
-    """PR (S5) commit X (bugbot HIGH) regression pin.
+    """PR (S5) (bugbot HIGH) regression pin.
 
     The neo4j Python driver returns ``neo4j.time.DateTime`` objects when
     reading a node's DateTime property. ``stix2.utils.parse_into_datetime()``
@@ -328,7 +328,7 @@ def test_stix_iso_str_helper_handles_neo4j_datetime_objects():
 
 
 def test_edge_cypher_wraps_source_reported_with_datetime_and_min_max_case():
-    """PR (S5) commit X (architecture redesign) regression pin.
+    """PR (S5) (architecture redesign) regression pin.
 
     Per-source timestamps live on ``(n)-[r:SOURCED_FROM]->(s)`` edges,
     not on the node. The edge MERGE Cypher MUST:
@@ -366,7 +366,7 @@ def test_edge_cypher_wraps_source_reported_with_datetime_and_min_max_case():
 
 
 def test_campaign_builder_aggregates_per_source_edges_via_traversal():
-    """PR (S5) commit X (Bug Hunter v2 #2 MED) regression pin.
+    """PR (S5) (Bug Hunter v2 #2 MED) regression pin.
 
     The Campaign builder Cypher must aggregate per-source claims
     by TRAVERSING the SOURCED_FROM edges of each indicator, not
@@ -406,7 +406,7 @@ def test_campaign_builder_aggregates_per_source_edges_via_traversal():
         "per-source provenance — regressing to node-level reads loses the "
         "per-source detail we built the edge architecture to capture"
     )
-    # PR (S5) commit X (bugbot c9bb277 MED): the aggregation MUST be
+    # PR (S5) (bugbot c9bb277 MED): the aggregation MUST be
     # two-stage — per-indicator across edges FIRST (native MIN/MAX
     # ignores NULLs), THEN per-campaign across indicators with the
     # node-level DB-local coalesce fallback. The previous single-stage
@@ -426,7 +426,7 @@ def test_campaign_builder_aggregates_per_source_edges_via_traversal():
 
 
 def test_campaign_builder_last_seen_has_max_guard():
-    """PR (S5) commit X (bugbot MED) regression pin.
+    """PR (S5) (bugbot MED) regression pin.
 
     The campaign-builder Cypher MUST symmetric-guard ``c.last_seen``
     with ``CASE WHEN c.last_seen IS NULL OR last_seen > c.last_seen``
@@ -459,7 +459,7 @@ def test_campaign_builder_last_seen_has_max_guard():
     assert "first_seen < c.first_seen" in block, (
         "c.first_seen MIN-guard must remain in place (symmetric with last_seen)"
     )
-    # PR (S5) commit X (bugbot LOW): defensive NULL-aggregate guards on
+    # PR (S5) (bugbot LOW): defensive NULL-aggregate guards on
     # both CASE clauses prevent a transient NULL aggregate (brand-new
     # campaign with zero active indicators in this run) from
     # overwriting an existing non-NULL value.
@@ -467,33 +467,54 @@ def test_campaign_builder_last_seen_has_max_guard():
     assert "last_seen IS NOT NULL" in block, "c.last_seen CASE must guard against NULL aggregate (bugbot LOW)"
 
 
-def test_coerce_iso_rejects_int_epoch_below_1990_floor():
-    """PR (S5) commit X (Bug Hunter v2 #7 HIGH) regression pin.
+def test_coerce_iso_int_epoch_bounds_reject_only_sentinels_and_overflow():
+    """PR (S5) (Devil's Advocate v3 #3 + user-driven design):
+    **Honest NULL > arbitrary floor**.
 
-    A bare ``1700000`` (year 1970-Jan-20) is almost certainly a
-    misencoded field — but the original ``0 <= val`` bound let it
-    sail through, anchoring MIN aggregates to 1970 and reintroducing
-    the original "1970-leak" bug through a different door. Sanity
-    floor: 1990-01-01 (``631_152_000``). Anything earlier returns
-    None so the MIN/MAX CASE logic preserves any prior value.
+    Earlier we used a 1990-01-01 floor — Devil's Advocate flagged
+    that this silently drops legitimate pre-1990 timestamps (CVE-1999
+    series exists; CVE-1988 Morris worm is referenced in NVD; some
+    CVE records reference earlier-discovered vulnerabilities). Per
+    user's principle "if we can't identify the date of the origin,
+    we don't use ambiguous naming" — silently dropping real data
+    is exactly the ambiguous fabrication the principle forbids.
+
+    What we now reject (epoch sentinels + overflow):
+    - 0 (epoch sentinel — almost certainly missing/zeroed-out value)
+    - negative ints (sentinel like -1)
+    - ints > year-9999 (datetime.fromtimestamp overflow)
+
+    What we now accept (any legitimate timestamp):
+    - 1 second (1970-01-01T00:00:01) → real
+    - Pre-1990 dates like Morris worm (1988) → real
+    - Modern epochs → real
     """
     from source_truthful_timestamps import coerce_iso
 
-    # Garbage: pre-1990 epoch → None
-    assert coerce_iso(1700000) is None  # ~1970-01-20
-    assert coerce_iso(0) is None  # 1970-01-01 itself
-    assert coerce_iso(631_151_999) is None  # 1989-12-31
-    # Legit modern epochs pass
+    # Sentinel rejections
+    assert coerce_iso(0) is None  # epoch zero — almost certainly missing-data sentinel
+    assert coerce_iso(-1) is None  # negative sentinel
+    assert coerce_iso(-1700000) is None  # pre-1970 epoch (negative)
+    # Overflow rejections (datetime.fromtimestamp can't represent these)
+    assert coerce_iso(2**63) is None
+    assert coerce_iso(253_402_300_800) is None  # year 10000 (above ceil)
+
+    # Legitimate timestamps pass through — INCLUDING pre-1990
+    assert coerce_iso(1) == "1970-01-01T00:00:01+00:00"  # epoch + 1 sec
+    assert coerce_iso(1700000) is not None  # 1970-01-20 — accepted (no longer dropped)
     assert coerce_iso(631_152_000) == "1990-01-01T00:00:00+00:00"
     assert coerce_iso(1700000000) is not None  # ~2023-11
-    # Negative / overflow: None (bounded gracefully, no crash)
-    assert coerce_iso(-1) is None
-    assert coerce_iso(2**63) is None
-    assert coerce_iso(253402300800) is None  # year 10000 (above ceil)
+
+    # Pre-1990 specifically — these used to fail under the old floor
+    morris_worm_epoch = 596_668_800  # 1988-11-02 UTC
+    assert coerce_iso(morris_worm_epoch) is not None, (
+        "Pre-1990 timestamps must be accepted (Devil's Advocate v3 #3) — "
+        "honest NULL principle says we don't silently drop real data"
+    )
 
 
 def test_coerce_iso_rejects_invalid_full_iso_strings():
-    """PR (S5) commit X (Red Team v2 H3 HIGH) regression pin.
+    """PR (S5) (Red Team v2 H3 HIGH) regression pin.
 
     Previously the FULL-STRING branch (anything not exactly 10 chars)
     just passed the value through unchecked. So
@@ -519,7 +540,7 @@ def test_coerce_iso_rejects_invalid_full_iso_strings():
 
 
 def test_coerce_iso_normalizes_date_only_strings_to_full_iso():
-    """PR (S5) commit X (bugbot MED) regression pin.
+    """PR (S5) (bugbot MED) regression pin.
 
     CISA KEV's ``dateAdded`` is universally date-only (e.g.
     ``"2026-04-16"``). Neo4j's Cypher ``datetime()`` function rejects
@@ -538,7 +559,7 @@ def test_coerce_iso_normalizes_date_only_strings_to_full_iso():
     # Already-full ISO strings pass through untouched
     assert coerce_iso("2024-03-15T12:34:56Z") == "2024-03-15T12:34:56Z"
     assert coerce_iso("2024-03-15T00:00:00+00:00") == "2024-03-15T00:00:00+00:00"
-    # PR (S5) commit X (Red Team v2 H3): garbage strings now return
+    # PR (S5) (Red Team v2 H3): garbage strings now return
     # None (was passthrough). Validating ALL strings prevents Cypher
     # ``datetime()`` from crashing on bad input mid-batch.
     assert coerce_iso("not-a-date") is None
@@ -550,7 +571,7 @@ def test_coerce_iso_normalizes_date_only_strings_to_full_iso():
 
 
 def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():
-    """PR (S5) commit X (bugbot HIGH) regression pin.
+    """PR (S5) (bugbot HIGH) regression pin.
 
     ALL SEVEN ``create_*_attribute`` methods MUST forward
     ``first_seen`` / ``last_seen`` into the MISP attribute dict — not
@@ -632,7 +653,7 @@ def test_mispwriter_all_entity_paths_forward_first_seen_and_last_seen():
 
 
 def test_graphql_node_types_do_not_expose_source_truthful_fields_anymore():
-    """PR (S5) commit X (architecture redesign) regression pin.
+    """PR (S5) (architecture redesign) regression pin.
 
     Per-source timestamps live on the SOURCED_FROM edge — they are NO
     LONGER node properties. The 7 GraphQL types (CVE / Vulnerability /
@@ -675,7 +696,7 @@ def test_graphql_node_types_do_not_expose_source_truthful_fields_anymore():
 
 
 def test_mispwriter_vulnerability_path_passes_first_seen_and_last_seen():
-    """PR (S5) commit X (bugbot MED) regression pin.
+    """PR (S5) (bugbot MED) regression pin.
 
     ``create_vulnerability_attribute`` MUST forward the collector's
     ``first_seen`` / ``last_seen`` (or ``last_modified``) into the
@@ -721,7 +742,7 @@ def test_mispwriter_vulnerability_path_passes_first_seen_and_last_seen():
 
 
 def test_virustotal_demo_mode_is_deleted():
-    """PR (S5) commit X regression pin.
+    """PR (S5) regression pin.
 
     The VirusTotal collector previously shipped ``_collect_demo_data`` —
     a fallback that returned 3 hardcoded hashes (EICAR + demo SHAs)
@@ -756,7 +777,7 @@ def test_virustotal_demo_mode_is_deleted():
 
 
 def test_nvd_collector_does_not_inject_wall_clock_first_seen():
-    """PR (S5) commit X regression pin.
+    """PR (S5) regression pin.
 
     Same bug class as the AbuseIPDB + CISA wall-clock-NOW fallbacks —
     NVD's ``"first_seen": published_str or datetime.now(...).isoformat()``
@@ -776,7 +797,7 @@ def test_nvd_collector_does_not_inject_wall_clock_first_seen():
 
 
 def test_cisa_collector_does_not_inject_wall_clock_first_seen():
-    """PR (S5) commit X (bugbot MED follow-on) regression pin.
+    """PR (S5) (bugbot MED follow-on) regression pin.
 
     The CISA collector previously had
     ``"first_seen": date_added or datetime.now(...).isoformat()`` —
@@ -803,7 +824,7 @@ def test_cisa_collector_does_not_inject_wall_clock_first_seen():
 
 
 def test_coerce_iso_is_single_source_of_truth():
-    """PR (S5) commit X (bugbot LOW) regression pin.
+    """PR (S5) (bugbot LOW) regression pin.
 
     ``run_misp_to_neo4j`` previously had a private ``_coerce_to_iso``
     that was a character-for-character copy of
@@ -838,7 +859,7 @@ def test_stix_sighting_emission_env_var_name_is_documented():
     reserved name, even though the variable itself is not assigned
     today (follow-up PR will reintroduce + implement the consumer).
 
-    PR (S5) commit X (bugbot LOW): the previously-defined
+    PR (S5) (bugbot LOW): the previously-defined
     ``_EMIT_SIGHTINGS = os.environ.get(...)`` was unused at module
     level — bugbot correctly flagged it as dead code. The env-var
     name stays in a comment so it isn't accidentally re-used for
@@ -860,7 +881,7 @@ def test_stix_sighting_emission_env_var_name_is_documented():
 
 
 def test_merge_indicators_batch_writes_source_reported_to_edge():
-    """PR (S5) commit X (architecture redesign) regression pin.
+    """PR (S5) (architecture redesign) regression pin.
 
     The Indicator batch UNWIND writes per-source timestamps to the
     SOURCED_FROM edge (not to the node). MIN/MAX CASE with AND-guard +
@@ -1009,7 +1030,7 @@ def test_extraction_returns_none_for_otx_even_with_first_seen():
 
 
 def test_graphql_schema_does_not_expose_node_level_source_truthful_fields():
-    """PR (S5) commit X (architecture redesign): no GraphQL type may
+    """PR (S5) (architecture redesign): no GraphQL type may
     expose ``first_seen_at_source`` / ``last_seen_at_source`` as a
     node property — they live on the SOURCED_FROM edge now."""
     path = os.path.join(_SRC, "graphql_schema.py")
@@ -1023,7 +1044,7 @@ def test_graphql_schema_does_not_expose_node_level_source_truthful_fields():
 
 
 def test_graphql_resolvers_no_longer_populate_node_level_source_truthful():
-    """PR (S5) commit X (architecture redesign): no resolver may read
+    """PR (S5) (architecture redesign): no resolver may read
     ``n.first_seen_at_source`` / ``n.last_seen_at_source`` from a node
     Cypher result — those fields no longer exist on nodes."""
     path = os.path.join(_SRC, "graphql_api.py")
@@ -1044,7 +1065,7 @@ def test_graphql_resolvers_no_longer_populate_node_level_source_truthful():
 def test_migration_doc_exists():
     """Operators need the migration runbook to verify their deploy.
 
-    PR (S5) commit X (architecture redesign): doc was rewritten for
+    PR (S5) (architecture redesign): doc was rewritten for
     the edge model. Assertions updated to match the new content
     sections.
     """
@@ -1055,13 +1076,17 @@ def test_migration_doc_exists():
     # Key sections must be present
     assert "reliable-source allowlist" in body
     assert "verification queries" in body
-    # The new doc uses "what's not backfilled" instead of "no bulk backfill"
-    assert "backfill" in body, "doc must address the backfill story"
+    # PR (S5) (user-driven): pre-release framework — no
+    # migration script. Doc explicitly says "no migration / backfill
+    # needed" because the deprecated node-level fields never shipped
+    # to any production graph and the honest behavior on dev / staging
+    # is NULL on the edge until a real source claim arrives.
+    assert "no migration" in body or "no backfill" in body, (
+        "doc must explicitly state that no migration is needed (pre-release)"
+    )
     # Edge-model specifics
     assert "sourced_from" in body, "edge label must be referenced"
     assert "source_reported_first_at" in body, "new edge property must be documented"
     assert "first_imported_at" in body
     # Operator FAQ section + consumer migration table
     assert "operator faq" in body
-    # Backfill script is referenced
-    assert "backfill" in body

@@ -444,7 +444,7 @@ class URLhausCollector:
                         zones = get_zones_from_malware(tags) if tags else ["global"]
 
                     if url_value and url_value.startswith("http"):
-                        # PR (S5) commit X (Logic Tracker MED): also forward
+                        # PR (S5) (Logic Tracker MED): also forward
                         # the source's ``last_online`` field as ``last_seen``
                         # so the SOURCED_FROM edge captures URLhaus's own
                         # last-reported claim. Previously ``last_online`` was

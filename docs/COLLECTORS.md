@@ -783,7 +783,7 @@ python -m collectors.energy_feed_collector
 
 ## Adding a new reliable source — checklist
 
-When adding a 10th+ collector that has a **canonical first-reported / last-reported timestamp** that should flow into the source-truthful timestamp pipeline (PR S5, 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`), follow this 5-step checklist:
+When adding a new collector that has a **canonical first-reported / last-reported timestamp** that should flow into the source-truthful timestamp pipeline (PR S5, 2026-04 — see `docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`), follow this **8-step checklist**:
 
 ### 1. Add to `_RELIABLE_FIRST_SEEN_SOURCES` allowlist
 
@@ -797,7 +797,11 @@ In `src/run_misp_to_neo4j.py::SOURCE_MAPPING`, map the human label (e.g. `"My-Ne
 
 In `src/config.py::SOURCE_TAGS`, add the human-readable label → tag mapping. This is what MISPWriter uses to tag attributes and what `extract_source_from_tags` reads back.
 
-### 4. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
+### 4. Add to `SOURCES` dict in `neo4j_client.py`
+
+In `src/neo4j_client.py::SOURCES`, add an entry for your tag (canonical + any aliases). `ensure_sources()` MERGEs a `:Source` node per entry; the SOURCED_FROM edge MERGE then matches on `source_id`. **A missing entry causes the merge_indicators_batch / merge_vulnerabilities_batch defensive check to refuse the entire batch** with a clear error log (Red Team v3 H1 protection).
+
+### 5. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
 
 In your new `collectors/<name>_collector.py`, populate the source-truthful timestamps directly from upstream:
 
@@ -817,9 +821,15 @@ processed.append({
 })
 ```
 
-The `_apply_source_truthful_timestamps` helper in `src/collectors/misp_writer.py` calls `coerce_iso` to handle int epochs, datetime objects, and date-only strings — so any of these formats are accepted.
+### 6. Verify MISPWriter passthrough fires for your entity type
 
-### 5. Update `tests/test_first_seen_at_source.py`
+The `_apply_source_truthful_timestamps` helper in `src/collectors/misp_writer.py` is called from all 7 `create_*_attribute` methods (indicator, vulnerability, malware, actor, technique, tactic, tool) AS THE LAST STATEMENT before `return attribute`. If you add a NEW entity type, you must add the helper call to its `create_*_attribute` method too — the bugbot fix in commit `9a414ac` had to do exactly this for 5 entity types after they were missed. The helper uses `coerce_iso` to accept int epochs, datetime objects, and date-only strings.
+
+### 7. Add Layer-2 META JSON parser if your source ships structured metadata
+
+If your source ships a structured-metadata JSON blob (like NVD_META, TF_META, CISA_META) that needs to round-trip through the MISP attribute comment field, add a Layer-2 fallback branch in `src/source_truthful_timestamps.py::extract_source_truthful_timestamps`. Most sources only need Layer-1 (MISP-native attribute fields).
+
+### 8. Update `tests/test_source_reported_timestamps.py`
 
 Add your tag to the static enumeration in `test_collector_emitted_tags_match_allowlist` so the test catches future tag drift.
 
@@ -828,10 +838,10 @@ Add your tag to the static enumeration in `test_collector_emitted_tags_match_all
 After adding a new source, run:
 
 ```bash
-.venv/bin/python -m pytest tests/test_first_seen_at_source.py -v
+.venv/bin/python -m pytest tests/test_source_reported_timestamps.py -v
 ```
 
-All 38 tests should pass. If any fail, the new source isn't wired through correctly.
+The full suite should pass. If any test fails, the new source isn't wired through correctly — the assertion message names the exact symbol you missed.
 
 For an end-to-end smoke test:
 

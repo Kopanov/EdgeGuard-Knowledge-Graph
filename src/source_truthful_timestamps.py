@@ -137,16 +137,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Sanity bounds for int/float Unix epoch parsing in coerce_iso
 # ---------------------------------------------------------------------------
-# Floor: 1990-01-01 UTC (631152000). EdgeGuard is a threat-intel platform;
-# no legitimate source-truth claim predates this. A bare ``1700000`` (year
-# 1970-Jan-20, almost certainly a misencoded field) would otherwise sail
-# through the wide ``0 <= val`` bound and permanently anchor MIN aggregates
-# to 1970 — reintroducing the original "1970-leak" bug through a different
-# door (Bug Hunter v2 #7).
-# Ceil: 9999-12-31 UTC (253402300799). Beyond this, datetime.fromtimestamp
-# raises OverflowError on most platforms.
-_INT_EPOCH_FLOOR = 631_152_000  # 1990-01-01 UTC
-_INT_EPOCH_CEIL = 253_402_300_799  # 9999-12-31 UTC
+# PR (S5) (Devil's Advocate v3 #3 + user-driven design principle):
+# **Honest NULL > arbitrary floor**. Earlier we used a 1990-01-01 floor on
+# the rationale that "no legitimate threat-intel timestamp predates this".
+# Devil's Advocate correctly pointed out that CVE-1999-XXXX series exists
+# (and CVE-1988 Morris worm reference), and NVD does occasionally publish
+# CVE records that legitimately reference earlier-discovered vulnerabilities.
+# Silently dropping those (returning None, letting MIN preserve a NEWER
+# value) loses real data — the kind of ambiguous fabrication the user's
+# principle explicitly forbids: "if we can't identify the date of the
+# origin, we don't use ambiguous naming".
+#
+# What we DO reject: epoch sentinels (0, -1) and overflow-causing values.
+# What we ACCEPT: any int/float in (0, 253402300799] that
+# ``datetime.fromtimestamp`` can parse — including pre-1990 dates.
+# An entry that says "first observed 1985-12-15" is honest data, not a
+# bug; we let it through and the consumer can decide how to interpret it.
+_INT_EPOCH_FLOOR = 1  # 1970-01-01T00:00:01 UTC (rejects 0 + negative sentinels)
+_INT_EPOCH_CEIL = 253_402_300_799  # 9999-12-31 UTC (datetime.fromtimestamp limit)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +259,7 @@ def coerce_iso(val: Any) -> Optional[str]:
     """Canonical ISO-8601 coercion helper for source-truthful timestamp
     values arriving from collectors / MISP / NVD JSON.
 
-    PR (S5) commit X (bugbot LOW): consolidated here as the **single
+    PR (S5) (bugbot LOW): consolidated here as the **single
     source of truth**. Previously this logic existed both as a
     private ``_coerce_iso`` in this module AND as a private
     ``_coerce_to_iso`` in ``run_misp_to_neo4j``. Bugbot correctly
@@ -266,7 +274,7 @@ def coerce_iso(val: Any) -> Optional[str]:
     passthrough strings. Returns ``None`` for unparseable / empty inputs
     so the caller can distinguish "missing" from "set to wall-clock now".
 
-    PR (S5) commit X (bugbot MED): date-only strings (e.g. CISA KEV's
+    PR (S5) (bugbot MED): date-only strings (e.g. CISA KEV's
     ``"2026-04-16"``) are now normalized to a full ISO-8601 datetime
     by appending ``T00:00:00+00:00``. Without this, downstream Neo4j
     Cypher ``datetime(item.first_seen_at_source)`` calls would crash
@@ -281,7 +289,7 @@ def coerce_iso(val: Any) -> Optional[str]:
     if isinstance(val, str) and not val.strip():
         return None
     if isinstance(val, (int, float)):
-        # PR (S5) commit X (Red Team #4 HIGH + Bug Hunter v2 #7 HIGH):
+        # PR (S5) (Red Team #4 HIGH + Bug Hunter v2 #7 HIGH):
         # bound the int/float epoch to a SANITY range, not just the
         # raw datetime.fromtimestamp range. Two failure modes:
         #
@@ -309,7 +317,7 @@ def coerce_iso(val: Any) -> Optional[str]:
     if isinstance(val, datetime):
         return val.isoformat()
     if isinstance(val, str):
-        # PR (S5) commit X (Red Team HIGH ×2 + Red Team v2 H3 HIGH):
+        # PR (S5) (Red Team HIGH ×2 + Red Team v2 H3 HIGH):
         # defensive input validation on string parsing.
         # - Red Team #1: ``str.isdigit()`` returns True for fullwidth
         #   Unicode digits (e.g. "２０２４"). Without an ASCII gate,
@@ -369,7 +377,7 @@ def iso_str(val: Any) -> Optional[str]:
     """Public utility: coerce a Neo4j-driver temporal value (or anything
     date-like) into a plain ISO-8601 string for JSON / STIX serialization.
 
-    PR (S5) commit X (bugbot LOW): consolidated here from the previously-
+    PR (S5) (bugbot LOW): consolidated here from the previously-
     duplicated copies in ``stix_exporter._iso_str`` and
     ``alert_processor._iso_str``. Single source of truth — bug fix in
     one place propagates to all callers.
@@ -469,7 +477,7 @@ def extract_source_truthful_timestamps(
     contains — their first_seen field is semantically wrong for our
     purpose (pulse-publish-date, not IOC first-seen).
 
-    PR (S5) commit X (bugbot LOW): removed the dead ``otx_meta``
+    PR (S5) (bugbot LOW): removed the dead ``otx_meta``
     parameter + the corresponding unreachable ``elif src in
     {"otx", ...}`` branch. OTX is excluded from the allowlist so
     the branch could never fire. If OTX ever exposes a reliable
@@ -508,7 +516,7 @@ def extract_source_truthful_timestamps(
     return (_clamp_future_to_now(first_seen), _clamp_future_to_now(last_seen))
 
 
-# PR (S5) commit X (bugbot LOW): removed the unused
+# PR (S5) (bugbot LOW): removed the unused
 # ``extract_from_attribute_json`` convenience wrapper. The audit caught
 # that no production code path called it — the only callers were tests.
 # Production parse_attribute already has the META dicts pre-parsed for

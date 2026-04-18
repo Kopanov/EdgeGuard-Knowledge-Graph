@@ -30,7 +30,7 @@ class _FakeSession:
         self._rows = rows
         self.last_cypher: str = ""
         self.last_params: Dict[str, Any] = {}
-        # PR (S5) commit X (architecture redesign): the StixExporter now
+        # PR (S5) (architecture redesign): the StixExporter now
         # also runs short per-node aggregate queries against the
         # SOURCED_FROM edges (``_enrich_props_with_source_aggregates``)
         # AFTER the main export query. Without history tracking,
