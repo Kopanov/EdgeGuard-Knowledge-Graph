@@ -156,7 +156,7 @@ RETURN i.value, i.zone
 
 ---
 
-## Neo4j 5 Constraints & Indexes
+## Neo4j Constraints & Indexes
 
 ### UNIQUE Constraints (Composite Keys)
 
@@ -397,4 +397,4 @@ ORDER BY i.last_updated DESC
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the USES→specialized-edge "migration script" pointer with the heal-by-rebaseline contract (pre-release framework)._

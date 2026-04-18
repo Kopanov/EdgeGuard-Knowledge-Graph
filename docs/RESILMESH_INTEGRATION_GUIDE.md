@@ -626,12 +626,29 @@ tag = "test"  # Non-descriptive
 ```
 
 ### 2. Temporal Tracking
-Always set first_seen and last_updated:
+Per the **PR #41 source-truthful architecture** (see
+[`migrations/2026_04_first_seen_at_source.md`](../migrations/2026_04_first_seen_at_source.md)),
+the node carries only DB-local timestamps; per-source observation
+claims live on the `SOURCED_FROM` edge. Do NOT write `first_seen` on
+the node — that field was retired because it conflated DB-local
+import time with source-claimed first-observation time.
+
 ```python
-now = datetime.now().isoformat()
-data = {
-    "first_seen": now,  # Only on creation
-    "last_updated": now  # Updated on every merge
+now = datetime.now(timezone.utc).isoformat()
+node_data = {
+    "first_imported_at": now,   # ON CREATE only — never overwritten
+    "last_updated":      now,   # SET on every MERGE — DB-local refresh
+}
+
+# Per-source observation timestamps (when the source actually claims
+# first/last observation) go on the SOURCED_FROM edge, NOT on the node.
+# Honest-NULL: only set if the source genuinely reported the value;
+# do not synthesize from the import wall clock.
+edge_data = {
+    "imported_at":               now,            # set every merge
+    "updated_at":                now,            # set every merge
+    "source_reported_first_at":  source_first,   # MIN-CASE; may be None
+    "source_reported_last_at":   source_last,    # MAX-CASE; may be None
 }
 ```
 
@@ -676,11 +693,10 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-*Integration Guide Version: 2.0*  
-*Last Updated: 2026-03-07*  
+*Integration Guide Version: 2.1*  
 *For ResilMesh and EdgeGuard Engineers*
 
 
 ---
 
-_Last updated: 2026-03-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the deprecated `n.first_seen` write example with the source-truthful node + edge model (see `migrations/2026_04_first_seen_at_source.md`)._

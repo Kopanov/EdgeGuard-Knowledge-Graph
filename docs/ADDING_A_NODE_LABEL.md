@@ -273,4 +273,4 @@ tests if the same anti-pattern recurs.
 
 ---
 
-_Last updated: 2026-04-17 (PR #34 round 27)_
+_Last updated: 2026-04-18 — PR #41 cleanup pass dropped Step 7 (no backfill script); the 6-touchpoint contract is enforced entirely by write-time invariants pinned in `tests/test_round26_invariants.py`._

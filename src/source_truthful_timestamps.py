@@ -290,24 +290,31 @@ def coerce_iso(val: Any) -> Optional[str]:
         return None
     if isinstance(val, (int, float)):
         # PR (S5) (Red Team #4 HIGH + Bug Hunter v2 #7 HIGH):
-        # bound the int/float epoch to a SANITY range, not just the
-        # raw datetime.fromtimestamp range. Two failure modes:
+        # bound the int/float epoch to reject SENTINELS and OVERFLOW
+        # values only — see _INT_EPOCH_FLOOR / _INT_EPOCH_CEIL above
+        # and the comment block immediately preceding them for the
+        # full reasoning.
         #
+        # Failure modes the bounds defend against:
         # - Without ANY bound: malformed JSON ints (``2**63``, negative
         #   sentinels like ``-1``, millisecond-encoded epochs
         #   misinterpreted as seconds) raise ``OverflowError`` / ``OSError``,
         #   crashing the entire ``parse_attribute`` call.
-        # - With only the wide ``0 <= val <= 253402300799`` bound:
-        #   a malformed ``1700000`` (year 1970-Jan-20, almost certainly
-        #   a misencoded field) sails through — and that 1970 date then
-        #   anchors ``MIN(r.source_reported_first_at)`` permanently,
-        #   reintroducing the original "1970-leak" bug through a
-        #   different door (Bug Hunter v2 #7).
+        # - 0 / negative sentinels would anchor MIN(source_reported_first_at)
+        #   permanently at the Unix epoch, reintroducing the original
+        #   "1970-leak" bug through a different door.
         #
-        # Sanity floor: year 1990 (``631152000``). EdgeGuard is a
-        # threat-intel platform; pre-1990 timestamps are not legitimate
-        # source-truth claims. Anything earlier is a parse error / data
-        # corruption — return None so MIN preserves any prior value.
+        # What we do NOT do: add a synthetic "year 1990" sanity floor.
+        # An earlier draft of this PR rejected anything before
+        # 631152000 (1990-01-01 UTC) on the theory that pre-1990
+        # timestamps are not legitimate threat-intel claims. The
+        # Devil's Advocate / pre-release review reversed that: a
+        # source genuinely reporting "first observed 1985-12-15" is
+        # honest data, not a parse error, and EdgeGuard's posture is
+        # honest-NULL (we let the source claim through and let the
+        # consumer interpret). The floor is 1 (rejects only 0 and
+        # negative sentinels) and the ceil is the datetime.fromtimestamp
+        # limit (rejects overflow). Anything between is accepted.
         try:
             if not (_INT_EPOCH_FLOOR <= val <= _INT_EPOCH_CEIL):
                 return None

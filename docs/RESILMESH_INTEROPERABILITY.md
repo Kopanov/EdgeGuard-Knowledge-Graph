@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-04-17**
+**Last updated: 2026-04-18** — PR #41 cleanup pass replaced the USES→specialized-edge "migration script" pointer with the heal-by-rebaseline contract (pre-release framework, no migration script ships).
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 

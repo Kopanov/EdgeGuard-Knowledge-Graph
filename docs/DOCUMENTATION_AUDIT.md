@@ -113,4 +113,4 @@ Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules)
 
 ---
 
-_Last updated: 2026-04-06_
+_Last updated: 2026-04-18 — PR #41 cleanup pass marked the historical PR #32 "Backfill migration" reference as deleted (no production graph) and updated the PR #33 "deferred / follow-up" entry to reflect that topology mergers + Campaign uuid stamping have since shipped._

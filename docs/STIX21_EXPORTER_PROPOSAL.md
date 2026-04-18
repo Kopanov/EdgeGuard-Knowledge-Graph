@@ -3,8 +3,10 @@
 Status: DRAFT — prototype implementation in `src/stix_exporter.py` and
 `GET /stix/export/{object_type}/{identifier}` in `src/query_api.py`.
 
-Depends on: PR #24 (`refactor/specialize-uses-technique-relationships`),
-which introduced the specialised rel types used below.
+History: the specialised `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE`
+/ `USES_TECHNIQUE` rel types this proposal exports were introduced in
+the 2026-04 USES specialisation work and have shipped on `main`. No
+external dependency remains.
 
 ## 1. Problem
 
@@ -222,7 +224,7 @@ so no pagination is required in the prototype. Hot spots:
 
 **The prototype reuses the existing `X-API-Key` header** (dependency
 `_verify_api_key`). This is not suitable for partner integration long
-term. TODO before production:
+term. TODO before production (still open as of 2026-04-18):
 
 1. Issue per-partner API keys (separate from the internal read key) and
    record the partner in the audit log.
@@ -279,7 +281,7 @@ intentionally does not add Docker fixtures.
 
 ## 12. Rollout
 
-1. Merge PR #24 (USES specialisation) — dependency.
+1. ~~Merge PR #24 (USES specialisation)~~ — **already shipped** on `main`.
 2. Merge this PR (prototype + doc) as DRAFT. Stays behind the
    default read API key.
 3. ResilMesh tries the four endpoints against staging. Capture
@@ -289,4 +291,4 @@ intentionally does not add Docker fixtures.
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass marked PR #24 as shipped (no longer a pending dependency) and date-stamped the §9 TODO list to make its open-vs-closed status legible at a glance._

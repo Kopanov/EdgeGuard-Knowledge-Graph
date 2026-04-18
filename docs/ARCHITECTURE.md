@@ -450,4 +450,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the n.uuid backfill-script pointer with the heal-by-rebaseline contract (pre-release framework, no production graph) and reframed the USES→specialized-edge history as "fresh baseline writes the specialized edge type directly"._

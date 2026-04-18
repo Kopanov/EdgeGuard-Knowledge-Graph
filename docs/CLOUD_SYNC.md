@@ -530,13 +530,14 @@ spin up an **empty** cloud Neo4j as a sync target. Recipe 1 (delta push) only
 covers incremental updates — for the initial population you need a full
 snapshot. Steps:
 
-1. **Deploy the round-25+ EdgeGuard code on the cloud-side worker** (or sync
+1. **Deploy EdgeGuard ≥ 2026.4.x on the cloud-side worker** (or sync
    service) so it has access to `compute_node_uuid` and the Neo4j client.
    The cloud RECEIVER does not run any collectors — it only consumes deltas.
 
-2. **Provision the cloud Neo4j** (Neo4j 5.0+ recommended; APOC plugin
-   installed). Recommended cluster sizing: ≥ 8GB heap, ≥ 16GB page cache for
-   a 500K-node / 1M-edge graph.
+2. **Provision the cloud Neo4j** (`neo4j:2026.03+` to match the production
+   pin in the top-level `docker-compose.yml`; APOC plugin installed).
+   Recommended cluster sizing: ≥ 8GB heap, ≥ 16GB page cache for a
+   500K-node / 1M-edge graph.
 
 3. **Initialize the cloud schema** by running the standard EdgeGuard startup
    sequence — this creates the 25 UNIQUE constraints + 43 uuid indexes
@@ -552,9 +553,13 @@ snapshot. Steps:
    Index creation is online (non-blocking) but populating them on a fresh
    empty graph is instant.
 
-4. **Confirm BACKFILL ran on the LOCAL side first.** This is critical: if any
-   local node has `n.uuid IS NULL`, the delta query in Recipe 1 EXCLUDES it
-   from the export → it never reaches cloud → silent data loss. Verify:
+4. **Confirm the LOCAL side was populated by a fresh baseline against the
+   current code** (so every node carries a non-NULL `n.uuid`). This is
+   critical: if any local node has `n.uuid IS NULL`, the delta query in
+   Recipe 1 EXCLUDES it from the export → it never reaches cloud → silent
+   data loss. Pre-release framework: a fresh baseline rerun is the
+   canonical way to populate uuids; no separate backfill script ships
+   (see [MIGRATIONS.md](MIGRATIONS.md)). Verify:
    ```cypher
    // On LOCAL Neo4j
    MATCH (n) WHERE n.uuid IS NULL RETURN labels(n)[0] AS label, count(n) AS missing;
@@ -622,9 +627,9 @@ neo4j-admin database load neo4j --from-path=/backups/cloud-pre-sync-2026-04-17-1
 systemctl start neo4j
 ```
 
-### Rollback B — revert PR #34 deploy
+### Rollback B — revert the n.uuid / edge-endpoint deploy
 
-If the PR itself is the problem (rare — code is backward-compatible):
+If the n.uuid feature itself is the problem (rare — code is backward-compatible):
 
 - Old code DOESN'T read `n.uuid` / `r.src_uuid` / `r.trg_uuid`, so reverting
   the deploy leaves the new fields in place but unused. Graph stays
@@ -729,4 +734,4 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass rewrote the operator runbook and Rollback D recipe to reflect the no-backfill-script posture (pre-release framework; fresh baseline rerun stamps every uuid at write time)._

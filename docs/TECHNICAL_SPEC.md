@@ -812,4 +812,4 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the EMPLOYS_TECHNIQUE migration-script pointer with the heal-by-rebaseline contract (pre-release framework)._
