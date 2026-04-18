@@ -365,6 +365,57 @@ def test_edge_cypher_wraps_source_reported_with_datetime_and_min_max_case():
     assert "item.last_seen_at_source IS NULL" in block
 
 
+def test_campaign_builder_aggregates_per_source_edges_via_traversal():
+    """PR (S5) commit X (Bug Hunter v2 #2 MED) regression pin.
+
+    The Campaign builder Cypher must aggregate per-source claims
+    by TRAVERSING the SOURCED_FROM edges of each indicator, not
+    by reading a node property. The expected pattern (post-edge-
+    refactor):
+
+        OPTIONAL MATCH (i)-[r:SOURCED_FROM]->(:Source)
+        WITH a, malware_list, i, r
+        WITH a, malware_list,
+             count(DISTINCT i) AS indicator_total,
+             collect(DISTINCT i)[0..100] AS indicator_sample,
+             min(coalesce(r.source_reported_first_at, i.first_imported_at)) AS first_seen,
+             max(coalesce(r.source_reported_last_at, i.last_updated))       AS last_seen
+
+    For an indicator with N sources, the OPTIONAL MATCH expands to
+    N rows; the outer aggregation correctly de-dupes via DISTINCT.
+    Coalescing with the indicator-level `first_imported_at` /
+    `last_updated` ensures indicators with NO SOURCED_FROM edges
+    (legacy data, edge-case bugs) still contribute SOMETHING to
+    the campaign timeline rather than silently dropping out.
+
+    This test source-greps for the specific Cypher pattern so a
+    future refactor that reverts to node-level reads or breaks the
+    coalesce fallback fails this assertion.
+    """
+    path = os.path.join(_SRC, "enrichment_jobs.py")
+    with open(path) as fh:
+        src = fh.read()
+    campaign_block_start = src.find("MERGE (c:Campaign")
+    assert campaign_block_start > 0
+    # Look BEFORE the MERGE for the aggregation block — that's where
+    # the Cypher pulls per-source timestamps from edges.
+    pre_merge = src[:campaign_block_start]
+    # The OPTIONAL MATCH for SOURCED_FROM edges
+    assert "OPTIONAL MATCH (i)-[r:SOURCED_FROM]->" in pre_merge, (
+        "Campaign builder MUST aggregate via SOURCED_FROM edges to preserve "
+        "per-source provenance — regressing to node-level reads loses the "
+        "per-source detail we built the edge architecture to capture"
+    )
+    # MIN aggregation with coalesce fallback
+    assert "min(coalesce(r.source_reported_first_at, i.first_imported_at))" in pre_merge, (
+        "Campaign first_seen MUST be MIN(coalesce(edge_claim, node_db_local)) "
+        "so indicators with no SOURCED_FROM edges still contribute their "
+        "first_imported_at to the campaign timeline"
+    )
+    # MAX aggregation with coalesce fallback
+    assert "max(coalesce(r.source_reported_last_at, i.last_updated))" in pre_merge
+
+
 def test_campaign_builder_last_seen_has_max_guard():
     """PR (S5) commit X (bugbot MED) regression pin.
 

@@ -98,3 +98,6 @@ data/processed/
 # =============================================================================
 *.tmp
 pip-audit.json
+
+# Claude Code worktrees (spawned task isolation)
+.claude/
