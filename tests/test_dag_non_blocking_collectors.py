@@ -310,3 +310,140 @@ def test_run_collector_with_metrics_still_raises_on_real_bugs():
                 fake_writer,
                 limit=10,
             )
+
+
+# ---------------------------------------------------------------------------
+# Bugbot MED (PR #35 commit 9) — metric-emission failures must not block
+# ---------------------------------------------------------------------------
+
+
+def test_metric_emission_failure_does_not_break_transient_skip_path():
+    """PR #35 bugbot MED regression pin.
+
+    Background: ``record_collection``, ``record_collection_duration``,
+    ``record_collector_skip``, and ``set_source_health`` are called inside
+    the same ``except Exception as e:`` handler that's trying to GRACEFULLY
+    skip a transient failure. If a metric call itself raises (Prometheus
+    label cardinality blow-up, registry contention, double-registration
+    Counter bug — all observed in production), without ``_safe()`` wrapping
+    that metric exception would propagate UP through the same except,
+    the function would re-raise, the Airflow task would FAIL, and the
+    pipeline would block — defeating the entire purpose of PR #35.
+
+    Contract: every metric call in the DAG handler is wrapped in a local
+    ``_safe()`` that swallows + debug-logs metric exceptions, mirroring
+    the pattern in ``src.collector_failure_alerts.report_collector_failure``.
+
+    This test injects a bomb into ``record_collection`` and verifies the
+    transient path STILL returns the success-skipped status dict instead
+    of re-raising the bomb.
+    """
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env")
+
+    from unittest.mock import MagicMock, patch
+
+    class _FailingCollector:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def collect(self, *_a, **_kw):
+            raise ConnectionError("simulated transient outage")
+
+    fake_writer = MagicMock()
+
+    def _bomb(*_a, **_kw):
+        # Simulates prometheus_client raising on a label cardinality issue
+        # or a duplicated Counter registration — both real production errors.
+        raise RuntimeError("simulated metric registry failure")
+
+    with (
+        patch.object(ep, "ensure_metrics_server", lambda: None),
+        patch.object(ep, "log_circuit_breaker_status", lambda: None),
+        patch.object(ep, "is_collector_enabled_by_allowlist", lambda _: True),
+        patch.object(ep, "send_slack_alert", lambda *_a, **_kw: None),
+        # The four metric calls in the transient branch — each made to bomb.
+        patch.object(ep, "set_source_health", side_effect=_bomb),
+        patch.object(ep, "record_dag_run", side_effect=_bomb),
+        patch.object(ep, "record_collection", side_effect=_bomb),
+        patch.object(ep, "record_collection_duration", side_effect=_bomb),
+        patch.object(ep, "record_collector_skip", side_effect=_bomb),
+        # Catastrophic-branch metrics aren't reached on this path but
+        # patched to bomb anyway so we'd notice if a refactor sent
+        # control through there by mistake.
+        patch.object(ep, "record_pipeline_error", side_effect=_bomb),
+        patch.object(ep, "record_error", side_effect=_bomb),
+        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+    ):
+        # Must NOT raise. If the bomb propagates, the task FAILS and PR #35 is dead.
+        result = ep.run_collector_with_metrics(
+            "cybercure",
+            _FailingCollector,
+            fake_writer,
+            limit=10,
+        )
+
+    assert isinstance(result, dict), (
+        "metric failure inside transient branch must NOT escape the handler — "
+        "PR #35 explicitly exists to keep the task GREEN on transient failures"
+    )
+    assert result.get("success") is True
+    assert result.get("skipped") is True
+    assert result.get("skip_reason_class") == "transient_external_error"
+
+
+def test_metric_emission_failure_does_not_mask_catastrophic_exception():
+    """Negative pin: when a metric call bombs inside the catastrophic branch,
+    the ORIGINAL catastrophic exception (e.g. TypeError from a real bug)
+    must still propagate — NOT the metric's RuntimeError. Otherwise an
+    operator paged on the Slack alert would chase a misleading
+    'metric registry failure' instead of the actual TypeError that broke
+    the collector."""
+    try:
+        ep = _import_dag_module()
+    except Exception:
+        import pytest
+
+        pytest.skip("Airflow not installed in this test env")
+
+    from unittest.mock import MagicMock, patch
+
+    import pytest
+
+    class _BuggyCollector:
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def collect(self, *_a, **_kw):
+            raise TypeError("argument 'foo' missing — real bug")
+
+    fake_writer = MagicMock()
+
+    def _bomb(*_a, **_kw):
+        raise RuntimeError("metric registry simulated failure — must not mask TypeError")
+
+    with (
+        patch.object(ep, "ensure_metrics_server", lambda: None),
+        patch.object(ep, "log_circuit_breaker_status", lambda: None),
+        patch.object(ep, "is_collector_enabled_by_allowlist", lambda _: True),
+        patch.object(ep, "send_slack_alert", lambda *_a, **_kw: None),
+        patch.object(ep, "set_source_health", side_effect=_bomb),
+        patch.object(ep, "record_dag_run", side_effect=_bomb),
+        patch.object(ep, "record_collection", side_effect=_bomb),
+        patch.object(ep, "record_collection_duration", side_effect=_bomb),
+        patch.object(ep, "record_pipeline_error", side_effect=_bomb),
+        patch.object(ep, "record_error", side_effect=_bomb),
+        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+    ):
+        # Must propagate the TypeError, NOT the RuntimeError from the metric bomb.
+        with pytest.raises(TypeError, match="real bug"):
+            ep.run_collector_with_metrics(
+                "buggy",
+                _BuggyCollector,
+                fake_writer,
+                limit=10,
+            )

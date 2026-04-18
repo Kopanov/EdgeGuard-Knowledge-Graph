@@ -97,7 +97,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import pendulum
 from airflow import DAG
@@ -850,6 +850,7 @@ def run_collector_with_metrics(
         # Catastrophic errors → re-raise as before. A missing module or
         # type error indicates a real bug we want to surface loudly.
         duration = time.time() - start_time
+
         # PR #35 commit 8 (bugbot MED): ``record_error`` and
         # ``record_pipeline_error`` USED to fire here, BEFORE the
         # transient/catastrophic split. That meant a transient network
@@ -864,7 +865,21 @@ def run_collector_with_metrics(
         # regardless of classification (operators always want to know a
         # source is currently failing, even if "transient + auto-recovers
         # next run").
-        set_source_health(collector_name, "global", False)
+        #
+        # PR #35 commit 9 (bugbot MED): every metric call in this handler
+        # is now wrapped in ``_safe()``. Without this, a Prometheus client
+        # error (e.g. label cardinality blow-up, registry contention) raised
+        # from inside ``record_collection`` would propagate UP through the
+        # ``except Exception as e:`` and the Airflow task would FAIL —
+        # exactly the outcome PR #35 exists to prevent. Mirrors the
+        # ``_safe`` wrapper in ``src.collector_failure_alerts.report_collector_failure``.
+        def _safe(fn: Any, *args: Any) -> None:
+            try:
+                fn(*args)
+            except Exception as me:
+                logger.debug(f"metric emit failed ({getattr(fn, '__name__', fn)}): {me}")
+
+        _safe(set_source_health, collector_name, "global", False)
 
         # PR #35 commit 6: route through the shared structured-log helper
         # so the operator-facing message is identical to the CLI path
@@ -876,17 +891,20 @@ def run_collector_with_metrics(
         if _is_transient_external_error(e):
             from collectors.collector_utils import make_skipped_optional_source
 
-            record_dag_run("edgeguard_pipeline", "success")
+            _safe(record_dag_run, "edgeguard_pipeline", "success")
             if METRICS_SERVER_AVAILABLE:
-                record_collection(collector_name, "global", 0, "skipped")
-                record_collection_duration(collector_name, "global", duration)
-                record_collector_skip(collector_name, "transient_external_error")
+                _safe(record_collection, collector_name, "global", 0, "skipped")
+                _safe(record_collection_duration, collector_name, "global", duration)
+                _safe(record_collector_skip, collector_name, "transient_external_error")
             log_block = _format_failure_log_block(collector_name, e, classification="transient", duration_s=duration)
             logger.warning(log_block)
-            send_slack_alert(
-                f"Collector {collector_name} SKIPPED (transient: {type(e).__name__}). "
-                f"Pipeline continued. Full triage in Airflow logs (grep '[{collector_name}] SKIPPED')."
-            )
+            try:
+                send_slack_alert(
+                    f"Collector {collector_name} SKIPPED (transient: {type(e).__name__}). "
+                    f"Pipeline continued. Full triage in Airflow logs (grep '[{collector_name}] SKIPPED')."
+                )
+            except Exception as se:  # noqa: BLE001 - alerter must never block the skip path
+                logger.debug(f"slack alert emit failed (transient skip): {se}")
             return make_skipped_optional_source(
                 collector_name,
                 skip_reason=f"transient external error: {type(e).__name__}: {e}",
@@ -895,17 +913,22 @@ def run_collector_with_metrics(
 
         # Catastrophic — fail loudly. NOW emit the error counters (post-split,
         # so transient-skipped tasks no longer false-positive these metrics).
-        record_error(collector_name, type(e).__name__)
-        record_dag_run("edgeguard_pipeline", "failure")
+        # Same _safe() wrapping: a metric-emission error MUST NOT mask the
+        # original catastrophic exception that we want to surface to operators.
+        _safe(record_error, collector_name, type(e).__name__)
+        _safe(record_dag_run, "edgeguard_pipeline", "failure")
         if METRICS_SERVER_AVAILABLE:
-            record_pipeline_error(f"collect_{collector_name}", type(e).__name__, collector_name)
-            record_collection(collector_name, "global", 0, "failed")
+            _safe(record_pipeline_error, f"collect_{collector_name}", type(e).__name__, collector_name)
+            _safe(record_collection, collector_name, "global", 0, "failed")
         log_block = _format_failure_log_block(collector_name, e, classification="catastrophic", duration_s=duration)
         logger.error(log_block)
-        send_slack_alert(
-            f"[CRITICAL] Collector {collector_name} HARD-FAILED ({type(e).__name__}). "
-            f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{collector_name}] FAILED')."
-        )
+        try:
+            send_slack_alert(
+                f"[CRITICAL] Collector {collector_name} HARD-FAILED ({type(e).__name__}). "
+                f"Downstream tasks blocked. Full triage in Airflow logs (grep '[{collector_name}] FAILED')."
+            )
+        except Exception as se:  # noqa: BLE001 - alerter must never mask the original exception
+            logger.debug(f"slack alert emit failed (catastrophic): {se}")
         raise
 
 
