@@ -407,13 +407,31 @@ class AbuseIPDBCollector:
         zone_text = " ".join(p for p in zone_parts if p)
         zones = detect_zones_from_text(zone_text) if zone_text else ["global"]
 
+        # PR (S5) — Source-Truth Investigator audit: this branch
+        # (blacklist endpoint) used to set ``first_seen = lastReportedAt``,
+        # which is SEMANTICALLY WRONG — ``lastReportedAt`` is the date of
+        # the MOST RECENT report (= last_seen), not the FIRST report.
+        # The check endpoint (``_format_check_data`` above) correctly
+        # uses ``firstSeen``; the blacklist endpoint doesn't expose that
+        # field, so we map ``lastReportedAt`` to ``last_seen`` (which IS
+        # its semantic) and leave ``first_seen`` empty. parse_attribute's
+        # source-truthful extractor will then put ``last_seen`` on
+        # ``n.last_seen_at_source`` and skip ``first_seen_at_source`` (NULL
+        # = "we don't know when AbuseIPDB first saw this IP via blacklist
+        # endpoint" — honest signal).
+        last_reported = data.get("lastReportedAt", "")
         return {
             "indicator_type": "ipv4" if "." in ip else "ipv6",
             "value": ip,
             "zone": zones,
             "tag": "abuseipdb",
             "source": ["abuseipdb"],
-            "first_seen": data.get("lastReportedAt", datetime.now(timezone.utc).isoformat()),
+            # NOTE: blacklist endpoint provides no first-seen field; leave
+            # the legacy first_seen as the wall-clock to avoid breaking any
+            # consumer that reads it, but the SOURCE-TRUTHFUL channel uses
+            # last_seen below for n.last_seen_at_source.
+            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "last_seen": last_reported,
             "last_updated": datetime.now(timezone.utc).isoformat(),
             "confidence_score": abuse_score / 100.0,
             "abuse_score": abuse_score,
