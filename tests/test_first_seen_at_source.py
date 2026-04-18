@@ -194,28 +194,11 @@ def test_extractor_passes_through_past_dates():
     assert fs == past, "past dates must pass through unchanged"
 
 
-def test_extract_from_attribute_json_parses_meta_from_comment():
-    """Convenience wrapper auto-parses META JSON from the attribute
-    comment field. Useful for callers without pre-parsed dicts."""
-    import json as _json
-
-    from source_truthful_timestamps import extract_from_attribute_json
-
-    attr = {
-        "comment": "NVD_META:" + _json.dumps({"published": "2019-01-15T00:00:00+00:00"}),
-    }
-    fs, _ = extract_from_attribute_json(attr, "nvd")
-    assert fs == "2019-01-15T00:00:00+00:00"
-
-
-def test_extract_from_attribute_json_tolerates_malformed_meta():
-    """Malformed META JSON must not raise — fall back to layer 1 (None
-    here since MISP-native fields aren't set)."""
-    from source_truthful_timestamps import extract_from_attribute_json
-
-    attr = {"comment": "NVD_META:{this is not valid json"}
-    fs, ls = extract_from_attribute_json(attr, "nvd")
-    assert fs is None and ls is None  # silent fallback to layer 1, which is empty
+# PR (S5) commit X (bugbot LOW): the `extract_from_attribute_json`
+# convenience wrapper was unused in production and only exercised by
+# these two tests — bugbot flagged it as dead code. The wrapper +
+# its tests are removed in the same commit; if a future caller
+# needs JSON-comment auto-parsing they can re-add the helper.
 
 
 # ===========================================================================
@@ -251,6 +234,68 @@ def test_stix_indicator_adds_x_edgeguard_first_imported_at_extension():
     assert "x_edgeguard_last_seen_at_source" in src
 
 
+def test_stix_iso_str_helper_handles_neo4j_datetime_objects():
+    """PR (S5) commit X (bugbot HIGH) regression pin.
+
+    The neo4j Python driver returns ``neo4j.time.DateTime`` objects when
+    reading a node's DateTime property. ``stix2.utils.parse_into_datetime()``
+    doesn't recognize that type, so passing one as ``valid_from`` would
+    crash. The fix is the ``_iso_str`` helper that coerces any date-like
+    value (including neo4j DateTime + Python datetime + bare strings)
+    to a plain ISO-8601 string.
+    """
+    from datetime import datetime, timezone
+
+    from stix_exporter import _iso_str
+
+    # Plain ISO string passes through
+    assert _iso_str("2019-01-15T00:00:00+00:00") == "2019-01-15T00:00:00+00:00"
+    # Python datetime gets isoformat()'d
+    dt = datetime(2019, 1, 15, tzinfo=timezone.utc)
+    assert _iso_str(dt) == "2019-01-15T00:00:00+00:00"
+    # None passes through
+    assert _iso_str(None) is None
+    # Empty string returns None (treated as "absent")
+    assert _iso_str("") is None
+    assert _iso_str("   ") is None
+
+    # Anything with isoformat() works (simulates neo4j.time.DateTime
+    # which exposes isoformat())
+    class _FakeNeo4jDateTime:
+        def isoformat(self) -> str:
+            return "2019-01-15T00:00:00+00:00"
+
+    assert _iso_str(_FakeNeo4jDateTime()) == "2019-01-15T00:00:00+00:00"
+
+
+def test_cypher_wraps_first_seen_at_source_with_datetime_function():
+    """PR (S5) commit X (bugbot HIGH) regression pin.
+
+    The Cypher SET clauses MUST wrap the incoming ISO string with
+    Neo4j's ``datetime()`` function so the stored type is native
+    DateTime, matching ``first_imported_at`` and ``last_updated``.
+    Without this wrapper, the comparison ``$item.first_seen_at_source <
+    n.first_seen_at_source`` mixes String + DateTime types and either
+    crashes or produces wrong results.
+    """
+    path = os.path.join(_SRC, "neo4j_client.py")
+    with open(path) as fh:
+        src = fh.read()
+    # The MIN/MAX comparisons must use datetime() on the param side.
+    # Search for the pattern in the indicator batch.
+    indicator_start = src.find("MERGE (n:Indicator {{indicator_type")
+    assert indicator_start > 0
+    indicator_end = src.find("MATCH (s:Source", indicator_start)
+    block = src[indicator_start:indicator_end]
+    assert "datetime(item.first_seen_at_source) < n.first_seen_at_source" in block, (
+        "Indicator batch MIN comparison MUST wrap incoming ISO string with datetime() — "
+        "otherwise mixes String and Neo4j DateTime types"
+    )
+    assert "datetime(item.last_seen_at_source) > n.last_seen_at_source" in block, (
+        "MAX comparison MUST also use datetime() wrapper for type-safety"
+    )
+
+
 def test_stix_sighting_emission_env_var_hook_present():
     """The opt-in Sighting SRO emission env var must be honored at
     module level (full implementation is a follow-up; the hook is
@@ -279,18 +324,22 @@ def test_merge_indicators_batch_has_min_case_for_first_seen_at_source():
     end = src.find("MATCH (s:Source", start)
     block = src[start:end]
     assert "first_seen_at_source" in block, "indicator batch UNWIND must SET n.first_seen_at_source"
-    # The CASE clause MUST have:
-    #   item.first_seen_at_source IS NOT NULL
-    #   AND item.first_seen_at_source < n.first_seen_at_source
-    assert "item.first_seen_at_source < n.first_seen_at_source" in block, (
-        "MIN logic missing — refactor must preserve the < comparison so older value wins"
+    # PR (S5) commit X (bugbot HIGH): the comparison MUST wrap the param
+    # side with ``datetime()`` so types match (n.first_seen_at_source is
+    # a Neo4j DateTime; the param is an ISO string). Without the wrapper
+    # the comparison mixes String + DateTime types and either crashes
+    # or produces wrong results.
+    assert "datetime(item.first_seen_at_source) < n.first_seen_at_source" in block, (
+        "MIN logic missing or datetime() wrapper dropped — refactor must preserve "
+        "BOTH the < comparison AND the datetime() type-safety wrapper"
     )
-    # And MAX for last_seen
-    assert "item.last_seen_at_source > n.last_seen_at_source" in block, "MAX logic missing for last_seen_at_source"
+    assert "datetime(item.last_seen_at_source) > n.last_seen_at_source" in block, (
+        "MAX logic missing or datetime() wrapper dropped"
+    )
 
 
 def test_merge_vulnerabilities_batch_has_min_case_for_first_seen_at_source():
-    """Same contract for the Vulnerability batch."""
+    """Same contract for the Vulnerability batch (with datetime() wrapper)."""
     path = os.path.join(_SRC, "neo4j_client.py")
     with open(path) as fh:
         src = fh.read()
@@ -298,13 +347,15 @@ def test_merge_vulnerabilities_batch_has_min_case_for_first_seen_at_source():
     end = src.find("MATCH (s:Source", start)
     block = src[start:end]
     assert "first_seen_at_source" in block
-    assert "item.first_seen_at_source < n.first_seen_at_source" in block
-    assert "item.last_seen_at_source > n.last_seen_at_source" in block
+    assert "datetime(item.first_seen_at_source) < n.first_seen_at_source" in block
+    assert "datetime(item.last_seen_at_source) > n.last_seen_at_source" in block
 
 
 def test_merge_node_with_source_has_min_case_for_first_seen_at_source():
     """Standalone MERGE helper used by Malware/Actor/Technique/etc.
-    must have the same MIN/MAX pattern."""
+    must have the same MIN/MAX pattern with datetime() wrapper.
+    Standalone form uses ``$first_seen_at_source`` (parameter binding)
+    instead of ``item.field`` (UNWIND row binding)."""
     path = os.path.join(_SRC, "neo4j_client.py")
     with open(path) as fh:
         src = fh.read()
@@ -312,8 +363,8 @@ def test_merge_node_with_source_has_min_case_for_first_seen_at_source():
     end = src.find("\n    def ", start + 1)
     block = src[start:end]
     assert "first_seen_at_source" in block
-    assert "$first_seen_at_source < n.first_seen_at_source" in block
-    assert "$last_seen_at_source > n.last_seen_at_source" in block
+    assert "datetime($first_seen_at_source) < n.first_seen_at_source" in block
+    assert "datetime($last_seen_at_source) > n.last_seen_at_source" in block
 
 
 def test_first_imported_at_only_set_on_create():

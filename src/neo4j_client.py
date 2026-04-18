@@ -956,8 +956,13 @@ class Neo4jClient:
             MERGE (n:{label} {{{key_set}}})
             ON CREATE SET n.first_imported_at = datetime(),
                           n.uuid = $node_uuid,
-                          n.first_seen_at_source = $first_seen_at_source,
-                          n.last_seen_at_source = $last_seen_at_source
+                          // PR (S5) commit X (bugbot HIGH): wrap with datetime()
+                          // so the stored type is Neo4j native DateTime (matches
+                          // first_imported_at / last_updated). Otherwise the
+                          // CASE comparisons below mix String and DateTime types
+                          // and produce wrong results or crash.
+                          n.first_seen_at_source = CASE WHEN $first_seen_at_source IS NULL THEN NULL ELSE datetime($first_seen_at_source) END,
+                          n.last_seen_at_source = CASE WHEN $last_seen_at_source IS NULL THEN NULL ELSE datetime($last_seen_at_source) END
 
             // Always accumulate sources and zones — provenance is never overwritten.
             // Use APOC to deduplicate the merged arrays in one step.
@@ -980,15 +985,16 @@ class Neo4jClient:
                 n.uuid = coalesce(n.uuid, $node_uuid),
                 // PR (S5): source-truthful timestamps — MIN for first, MAX for last.
                 // NULL never overwrites a populated value (defended at the AND clause).
+                // datetime() wrapper keeps the type comparison String->DateTime safe.
                 n.first_seen_at_source = CASE
                     WHEN $first_seen_at_source IS NOT NULL
-                     AND (n.first_seen_at_source IS NULL OR $first_seen_at_source < n.first_seen_at_source)
-                    THEN $first_seen_at_source
+                     AND (n.first_seen_at_source IS NULL OR datetime($first_seen_at_source) < n.first_seen_at_source)
+                    THEN datetime($first_seen_at_source)
                     ELSE n.first_seen_at_source END,
                 n.last_seen_at_source = CASE
                     WHEN $last_seen_at_source IS NOT NULL
-                     AND (n.last_seen_at_source IS NULL OR $last_seen_at_source > n.last_seen_at_source)
-                    THEN $last_seen_at_source
+                     AND (n.last_seen_at_source IS NULL OR datetime($last_seen_at_source) > n.last_seen_at_source)
+                    THEN datetime($last_seen_at_source)
                     ELSE n.last_seen_at_source END
             """
 
@@ -1747,8 +1753,15 @@ class Neo4jClient:
                 MERGE (n:Indicator {{indicator_type: item.indicator_type, value: item.value}})
                 ON CREATE SET n.first_imported_at = datetime(),
                               n.uuid = item.node_uuid,
-                              n.first_seen_at_source = item.first_seen_at_source,
-                              n.last_seen_at_source = item.last_seen_at_source
+                              // PR (S5) commit X (bugbot HIGH): wrap incoming
+                              // ISO string in datetime() so the stored type is
+                              // Neo4j native DateTime — matches first_imported_at
+                              // and last_updated. Without the wrapper, the SET
+                              // CASE comparisons mix String and DateTime and
+                              // either crash or produce wrong results depending
+                              // on Neo4j version (see bugbot finding HIGH).
+                              n.first_seen_at_source = CASE WHEN item.first_seen_at_source IS NULL THEN NULL ELSE datetime(item.first_seen_at_source) END,
+                              n.last_seen_at_source = CASE WHEN item.last_seen_at_source IS NULL THEN NULL ELSE datetime(item.last_seen_at_source) END
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
@@ -1763,13 +1776,13 @@ class Neo4jClient:
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.first_seen_at_source = CASE
                         WHEN item.first_seen_at_source IS NOT NULL
-                         AND (n.first_seen_at_source IS NULL OR item.first_seen_at_source < n.first_seen_at_source)
-                        THEN item.first_seen_at_source
+                         AND (n.first_seen_at_source IS NULL OR datetime(item.first_seen_at_source) < n.first_seen_at_source)
+                        THEN datetime(item.first_seen_at_source)
                         ELSE n.first_seen_at_source END,
                     n.last_seen_at_source = CASE
                         WHEN item.last_seen_at_source IS NOT NULL
-                         AND (n.last_seen_at_source IS NULL OR item.last_seen_at_source > n.last_seen_at_source)
-                        THEN item.last_seen_at_source
+                         AND (n.last_seen_at_source IS NULL OR datetime(item.last_seen_at_source) > n.last_seen_at_source)
+                        THEN datetime(item.last_seen_at_source)
                         ELSE n.last_seen_at_source END,
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
@@ -1912,8 +1925,11 @@ class Neo4jClient:
                 ON CREATE SET n.first_imported_at = datetime(),
                     n.status = item.status,
                     n.uuid = item.node_uuid,
-                    n.first_seen_at_source = item.first_seen_at_source,
-                    n.last_seen_at_source = item.last_seen_at_source
+                    // PR (S5) commit X (bugbot HIGH): wrap with datetime()
+                    // so stored type is Neo4j native DateTime — see indicator
+                    // batch above for the full type-mismatch rationale.
+                    n.first_seen_at_source = CASE WHEN item.first_seen_at_source IS NULL THEN NULL ELSE datetime(item.first_seen_at_source) END,
+                    n.last_seen_at_source = CASE WHEN item.last_seen_at_source IS NULL THEN NULL ELSE datetime(item.last_seen_at_source) END
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
@@ -1929,13 +1945,13 @@ class Neo4jClient:
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.first_seen_at_source = CASE
                         WHEN item.first_seen_at_source IS NOT NULL
-                         AND (n.first_seen_at_source IS NULL OR item.first_seen_at_source < n.first_seen_at_source)
-                        THEN item.first_seen_at_source
+                         AND (n.first_seen_at_source IS NULL OR datetime(item.first_seen_at_source) < n.first_seen_at_source)
+                        THEN datetime(item.first_seen_at_source)
                         ELSE n.first_seen_at_source END,
                     n.last_seen_at_source = CASE
                         WHEN item.last_seen_at_source IS NOT NULL
-                         AND (n.last_seen_at_source IS NULL OR item.last_seen_at_source > n.last_seen_at_source)
-                        THEN item.last_seen_at_source
+                         AND (n.last_seen_at_source IS NULL OR datetime(item.last_seen_at_source) > n.last_seen_at_source)
+                        THEN datetime(item.last_seen_at_source)
                         ELSE n.last_seen_at_source END,
                     n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
                     n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),

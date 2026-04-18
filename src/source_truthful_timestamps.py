@@ -95,7 +95,6 @@ Scenarios this handles correctly:
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -281,38 +280,11 @@ def extract_source_truthful_timestamps(
     return (_clamp_future_to_now(first_seen), _clamp_future_to_now(last_seen))
 
 
-def extract_from_attribute_json(
-    attr: Dict[str, Any],
-    source_id: Optional[str],
-) -> Tuple[Optional[str], Optional[str]]:
-    """Convenience: parse the META JSON from the attribute comment
-    automatically and delegate to ``extract_source_truthful_timestamps``.
-
-    Useful for callers that don't already have the parsed META dicts
-    in hand. Tolerates malformed META silently — falls back to
-    Layer 1 (MISP-native fields) only.
-    """
-    raw_comment = attr.get("comment") or ""
-    nvd_meta: Optional[Dict[str, Any]] = None
-    tf_meta: Optional[Dict[str, Any]] = None
-    otx_meta: Optional[Dict[str, Any]] = None
-
-    if isinstance(raw_comment, str):
-        try:
-            if raw_comment.startswith("NVD_META:"):
-                nvd_meta = json.loads(raw_comment[len("NVD_META:") :])
-            elif raw_comment.startswith("TF_META:"):
-                tf_meta = json.loads(raw_comment[len("TF_META:") :])
-            elif raw_comment.startswith("OTX_META:"):
-                otx_meta = json.loads(raw_comment[len("OTX_META:") :])
-        except (json.JSONDecodeError, ValueError):
-            # Malformed META — skip, fall back to Layer 1 only
-            pass
-
-    return extract_source_truthful_timestamps(
-        attr,
-        source_id,
-        nvd_meta=nvd_meta,
-        tf_meta=tf_meta,
-        otx_meta=otx_meta,
-    )
+# PR (S5) commit X (bugbot LOW): removed the unused
+# ``extract_from_attribute_json`` convenience wrapper. The audit caught
+# that no production code path called it — the only callers were tests.
+# Production parse_attribute already has the META dicts pre-parsed for
+# other purposes (NVD_META scoring, TF_META reference URLs, etc.) and
+# passes them directly to ``extract_source_truthful_timestamps`` via
+# kwargs. If a future caller genuinely needs comment-auto-parsing they
+# can re-add the helper or do the JSON parse inline.

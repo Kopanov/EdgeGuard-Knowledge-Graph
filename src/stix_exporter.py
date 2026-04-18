@@ -85,6 +85,39 @@ _EMIT_SIGHTINGS = os.environ.get("EDGEGUARD_STIX_EMIT_SIGHTINGS", "").strip().lo
     "on",
 )
 
+
+def _iso_str(val: Any) -> Optional[str]:
+    """Coerce a Neo4j-driver temporal value (or anything date-like) into
+    a plain ISO-8601 string.
+
+    The neo4j Python driver returns ``neo4j.time.DateTime`` objects when
+    you read a node's DateTime property. Those don't round-trip through
+    ``stix2.utils.parse_into_datetime()`` (it raises) or through
+    ``json.dumps`` (no default serializer). The fix is to convert to a
+    plain ISO string at every read site that hands the value to a
+    third-party serializer.
+
+    Both ``neo4j.time.DateTime`` and Python's ``datetime.datetime``
+    expose ``.isoformat()``; for any other type we fall back to ``str()``
+    which is correct for already-string values and harmless for None.
+    """
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        try:
+            return val.isoformat()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(val, str):
+        return val if val.strip() else None
+    # Last resort: stringify
+    try:
+        s = str(val).strip()
+        return s or None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Deterministic IDs
 # ---------------------------------------------------------------------------
@@ -606,10 +639,16 @@ class StixExporter:
         # had dropped that field, so EVERY indicator shipped with
         # valid_from=1970-01-01 to ResilMesh. The audit Logic Tracker
         # caught this; this fix kills the epoch leak.
+        #
+        # PR (S5) commit X (bugbot HIGH): explicitly cast each candidate
+        # via ``_iso_str`` so a ``neo4j.time.DateTime`` returned by the
+        # driver becomes a plain ISO-8601 string before stix2 sees it.
+        # Without the cast, ``stix2.utils.parse_into_datetime()`` raises
+        # because it doesn't recognize the neo4j driver type.
         valid_from = (
-            props.get("first_seen_at_source")
-            or props.get("first_imported_at")
-            or props.get("first_seen")
+            _iso_str(props.get("first_seen_at_source"))
+            or _iso_str(props.get("first_imported_at"))
+            or _iso_str(props.get("first_seen"))
             or "1970-01-01T00:00:00Z"
         )
         obj = stix2.Indicator(
@@ -625,12 +664,13 @@ class StixExporter:
         # property so consumers can distinguish source-truthful timestamp
         # (valid_from) from EdgeGuard's local sync time. Mirrors the
         # OpenCTI / STIX 2.1 best-practice pattern (Best-Practice
-        # Researcher agent recommendation).
+        # Researcher agent recommendation). _iso_str cast also applied
+        # so neo4j DateTime values serialize as JSON-safe strings.
         sdo_dict = _to_dict(obj)
         if props.get("first_imported_at"):
-            sdo_dict["x_edgeguard_first_imported_at"] = props["first_imported_at"]
+            sdo_dict["x_edgeguard_first_imported_at"] = _iso_str(props["first_imported_at"])
         if props.get("last_seen_at_source"):
-            sdo_dict["x_edgeguard_last_seen_at_source"] = props["last_seen_at_source"]
+            sdo_dict["x_edgeguard_last_seen_at_source"] = _iso_str(props["last_seen_at_source"])
         return sdo_dict
 
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:

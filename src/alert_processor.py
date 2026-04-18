@@ -27,6 +27,32 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _iso_str(val: Any) -> Optional[str]:
+    """Coerce a Neo4j-driver temporal value (or anything date-like) into
+    a plain ISO-8601 string for JSON serialization.
+
+    PR (S5) commit X (bugbot MED): the neo4j Python driver returns
+    ``neo4j.time.DateTime`` objects when reading a node's DateTime
+    property. Those are NOT JSON-serializable for the NATS alert
+    payload. Centralize the conversion here so every enrichment field
+    that surfaces a temporal value goes through the same coercion.
+    """
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        try:
+            return val.isoformat()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(val, str):
+        return val if val.strip() else None
+    try:
+        s = str(val).strip()
+        return s or None
+    except Exception:
+        return None
+
+
 @dataclass
 class ResilMeshAlert:
     """
@@ -321,12 +347,21 @@ class AlertProcessor:
                     # legacy fields when source-truth isn't populated. Same
                     # resolution chain the STIX exporter uses for
                     # ``valid_from``.
+                    #
+                    # PR (S5) commit X (bugbot MED): the values can be
+                    # ``neo4j.time.DateTime`` objects (the driver returns
+                    # those for node DateTime properties) which are NOT
+                    # JSON-serializable for the NATS alert payload. Wrap
+                    # each candidate in ``_iso_str()`` so the enrichment
+                    # dict carries plain ISO-8601 strings only.
                     enrichment["first_seen"] = (
-                        ind_data.get("first_seen_at_source")
-                        or ind_data.get("first_imported_at")
-                        or ind_data.get("first_seen")
+                        _iso_str(ind_data.get("first_seen_at_source"))
+                        or _iso_str(ind_data.get("first_imported_at"))
+                        or _iso_str(ind_data.get("first_seen"))
                     )
-                    enrichment["last_updated"] = ind_data.get("last_seen_at_source") or ind_data.get("last_updated")
+                    enrichment["last_updated"] = _iso_str(ind_data.get("last_seen_at_source")) or _iso_str(
+                        ind_data.get("last_updated")
+                    )
 
                     # Add zone from indicator if different from alert
                     ind_zone = ind_data.get("zone")
