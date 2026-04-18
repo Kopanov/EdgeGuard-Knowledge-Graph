@@ -291,12 +291,22 @@ class AlertProcessor:
         try:
             with self.neo4j.driver.session() as session:
                 # Query 1: Find indicator and direct properties
+                # PR (S5): pull source-truthful first/last_seen on the
+                # Indicator node so the alert enrichment ResilMesh receives
+                # carries world-truth observation times rather than
+                # EdgeGuard's local sync clock. The legacy ``first_seen`` /
+                # ``last_updated`` fields are kept in the projection for
+                # back-compat with older nodes that haven't been re-touched
+                # since PR (S5) commits 1-3 landed.
                 indicator_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
                     RETURN i {
                         .value, .indicator_type, .zone, .source,
-                        .confidence_score, .first_seen, .last_updated
+                        .confidence_score,
+                        .first_seen_at_source, .last_seen_at_source,
+                        .first_imported_at,
+                        .first_seen, .last_updated
                     } as indicator
                 """,
                     indicator=indicator,
@@ -307,8 +317,16 @@ class AlertProcessor:
                     ind_data = indicator_record["indicator"]
                     metadata["indicator_found"] = True
                     enrichment["confidence"] = ind_data.get("confidence_score", 0.0)
-                    enrichment["first_seen"] = ind_data.get("first_seen")
-                    enrichment["last_updated"] = ind_data.get("last_updated")
+                    # PR (S5): prefer source-truthful values; fall back to
+                    # legacy fields when source-truth isn't populated. Same
+                    # resolution chain the STIX exporter uses for
+                    # ``valid_from``.
+                    enrichment["first_seen"] = (
+                        ind_data.get("first_seen_at_source")
+                        or ind_data.get("first_imported_at")
+                        or ind_data.get("first_seen")
+                    )
+                    enrichment["last_updated"] = ind_data.get("last_seen_at_source") or ind_data.get("last_updated")
 
                     # Add zone from indicator if different from alert
                     ind_zone = ind_data.get("zone")

@@ -143,8 +143,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       actor_name      — source actor name
       indicator_count — number of indicators at last update
       malware_count   — number of malware families at last update
-      first_seen      — earliest indicator.first_imported_at
-      last_seen       — latest indicator.last_updated
+      first_seen      — earliest world-truthful indicator first observation
+                        (from coalesce(i.first_seen_at_source,
+                        i.first_imported_at) — see PR (S5) for the
+                        source-truthful timestamps design)
+      last_seen       — latest world-truthful indicator last observation
+                        (from coalesce(i.last_seen_at_source,
+                        i.last_updated))
       zone            — union of all indicator zones
       tag             — actor tag (for UNIQUE constraint key)
     """
@@ -201,8 +206,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
                  collect(DISTINCT i)[0..100] AS indicator_sample,
-                 min(i.first_imported_at) AS first_seen,
-                 max(i.last_updated)      AS last_seen
+                 // PR (S5): use source-truthful first_seen_at_source when
+                 // available, falling back to first_imported_at for nodes
+                 // without source-truth (legacy data + unreliable-source
+                 // indicators). Same fallback chain as the STIX exporter
+                 // ``valid_from``. Previously this read first_imported_at
+                 // unconditionally — the docstring "earliest indicator
+                 // sighting" lied; it actually meant "earliest EdgeGuard
+                 // sync time" (semantic gap caught by Logic Tracker audit).
+                 min(coalesce(i.first_seen_at_source, i.first_imported_at)) AS first_seen,
+                 max(coalesce(i.last_seen_at_source, i.last_updated))       AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
             WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
                  apoc.coll.toSet(
