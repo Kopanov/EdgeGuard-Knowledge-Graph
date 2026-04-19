@@ -1068,18 +1068,15 @@ class EdgeGuardPipeline:
 
             if not acquire_baseline_lock():
                 # Another baseline is already running — refuse to start.
-                # Bugbot LOW (PR-A audit on bbe02cd): apply the SAME PID
-                # check here that ``_cleanup_lock`` (defined a few lines
-                # below) uses. Otherwise the abort path would unlink the
-                # OTHER process's lock — exactly the race the
-                # ``_read_lock_pid`` helper was added to prevent. The
-                # helper is defined later in the same method, so we
-                # inline the same check here.
-                try:
-                    with open(lock_path) as fh:
-                        existing_pid = int(fh.read().strip())
-                except (OSError, ValueError):
-                    existing_pid = None
+                # Bugbot LOW (PR-A audit on f60e213 + 329559e): use the
+                # ``_read_lock_pid`` helper rather than re-inlining the
+                # PID-check logic. Despite its definition appearing
+                # earlier-in-source than ``_cleanup_lock``, ``_read_lock_pid``
+                # IS in scope here — both inner functions and the
+                # ``acquire_baseline_lock`` failure path are in the same
+                # ``run()`` body, and Python resolves nested-function names
+                # via the enclosing scope at call time.
+                existing_pid = _read_lock_pid(lock_path)
                 if existing_pid == os.getpid():
                     try:
                         os.remove(lock_path)
