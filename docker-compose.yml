@@ -89,6 +89,13 @@ services:
       - "127.0.0.1:7687:7687"   # Bolt protocol — loopback only
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
+      # PR-A audit fix (Prod Readiness HIGH): expose user+password as separate
+      # env vars for the writability healthcheck (the Neo4j entrypoint only
+      # consumes NEO4J_AUTH; the healthcheck command needs the parts directly,
+      # and bash parameter expansion (${NEO4J_AUTH%%/*}) is /bin/sh-fragile in
+      # the Neo4j container).
+      EG_NEO4J_USER: ${NEO4J_USER:-neo4j}
+      EG_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_dbms_security_procedures_allowlist: "apoc.*"
@@ -105,15 +112,32 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${NEO4J_CONTAINER_MEMORY_LIMIT:-4g}
+          # PR-A audit fix (Prod Readiness HIGH): default bumped 4g→8g. The
+          # 4g default was too small for any baseline run (the per-tx max alone
+          # is 4g per ${NEO4J_TX_MEMORY_MAX:-4g} above, leaving zero headroom
+          # for heap+pagecache+OS); fresh-clone deployments would OOM on the
+          # first ``docker compose up`` baseline. 8g matches the JVM-default
+          # math (heap_max 2g + pagecache 1g + tx_max 4g + ~1g OS = 8g floor).
+          # Production deployments should still set NEO4J_CONTAINER_MEMORY_LIMIT
+          # explicitly per docs/DOCKER_SETUP_GUIDE.md (recommended 32g for the
+          # 730d baseline workload).
+          memory: ${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}
     networks:
       - edgeguard_net
     healthcheck:
-      test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:7474"]
+      # PR-A audit fix (Prod Readiness HIGH): the previous ``wget --spider`` test
+      # checked HTTP port 7474 was OPEN — but a Neo4j in disk-full read-only
+      # mode keeps the HTTP listener up while refusing all writes, so the
+      # service shows ``healthy`` while every Cypher write fails. Replace with
+      # cypher-shell that creates+deletes a sentinel node — proves writability
+      # AND auth in one round-trip. The sentinel is _HC label (no schema
+      # collision) and DELETE is idempotent.
+      test: ["CMD-SHELL",
+             "cypher-shell -u $$EG_NEO4J_USER -p $$EG_NEO4J_PASSWORD 'CREATE (n:_HC) DELETE n' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s
+      start_period: 90s
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Airflow metadata DB — PostgreSQL (required for LocalExecutor)
@@ -144,7 +168,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512m
+          # PR-A audit fix (Prod Readiness MED): default bumped 512m→2g. Airflow
+          # 3.x emits per-task heartbeats every 30s × 11 collectors during a
+          # baseline running 24h+; a 512m metadata DB is undersized for that
+          # write load and leads to slow scheduler queries (visible as DAG
+          # task scheduling latency). 2g matches typical Airflow 3.x guidance
+          # for a single-node LocalExecutor stack.
+          memory: ${AIRFLOW_POSTGRES_MEMORY_LIMIT:-2g}
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Airflow — DAG orchestration (standalone: webserver + scheduler + triggerer)
@@ -263,12 +293,23 @@ services:
     image: edgeguard-kg:latest
     container_name: edgeguard_api
     restart: unless-stopped
-    command: ["python", "-m", "uvicorn", "src.query_api:app",
-              "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+    # PR-A audit fix (Red Team HIGH): use the ``__main__`` block in
+    # src/query_api.py instead of the uvicorn CLI flags, so the EDGEGUARD_API_HOST
+    # / EDGEGUARD_API_KEY safety check (lines 88-102 of src/query_api.py) actually
+    # gates the bind. The previous ``--host 0.0.0.0`` CLI flag bypassed the env-var
+    # check: the Python module saw EDGEGUARD_API_HOST=127.0.0.1 (default), the A6
+    # check passed, then uvicorn bound 0.0.0.0 anyway — making the API reachable
+    # from any other container on edgeguard_net WITHOUT auth. Now: the module
+    # reads EDGEGUARD_API_HOST at startup, the safety check refuses to start
+    # unless either EDGEGUARD_API_KEY is set OR the host is loopback OR the
+    # operator opts in via EDGEGUARD_ALLOW_UNAUTH=1.
+    command: ["python", "-m", "src.query_api"]
     ports:
       - "127.0.0.1:8000:8000"   # REST API — loopback only; use reverse proxy for external access
     environment:
       <<: *common-env
+      EDGEGUARD_API_HOST: ${EDGEGUARD_API_HOST:-0.0.0.0}
+      EDGEGUARD_API_PORT: "8000"
       EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
       EDGEGUARD_ADMIN_TOKEN: ${EDGEGUARD_ADMIN_TOKEN:-}
       PYTHONPATH: /app/src
@@ -305,14 +346,18 @@ services:
     image: edgeguard-kg:latest
     container_name: edgeguard_graphql
     restart: unless-stopped
-    command: ["python", "-m", "uvicorn", "src.graphql_api:app",
-              "--host", "0.0.0.0", "--port", "4001", "--workers", "2"]
+    # PR-A audit fix (Red Team HIGH): symmetric with ``api`` above — invoke the
+    # Python module directly so the EDGEGUARD_GRAPHQL_HOST env-var safety check
+    # actually gates the bind. The previous ``--host 0.0.0.0`` CLI flag bypassed
+    # the env check.
+    command: ["python", "-m", "src.graphql_api"]
     ports:
       - "127.0.0.1:4001:4001"   # GraphQL API — loopback only
     environment:
       <<: *common-env
       EDGEGUARD_GRAPHQL_PORT: "4001"
-      EDGEGUARD_GRAPHQL_HOST: "0.0.0.0"
+      EDGEGUARD_GRAPHQL_HOST: ${EDGEGUARD_GRAPHQL_HOST:-0.0.0.0}
+      EDGEGUARD_GRAPHQL_WORKERS: "2"
       # Set to "false" in production to disable the interactive GraphiQL explorer
       EDGEGUARD_GRAPHQL_PLAYGROUND: ${EDGEGUARD_GRAPHQL_PLAYGROUND:-false}
       PYTHONPATH: /app/src

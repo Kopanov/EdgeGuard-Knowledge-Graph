@@ -453,6 +453,14 @@ class Neo4jClient:
         except neo4j_exceptions.AuthError as e:
             logger.error(f"Neo4j authentication failed: {e}")
             self._connection_healthy = False
+            # PR-A audit fix (Bug Hunter HIGH H1): close + null-out the driver
+            # before returning. ``self.driver = GraphDatabase.driver(...)`` at
+            # line 435 ALREADY assigned a live driver before the verify
+            # ``session.run`` raised. Returning False without closing leaks the
+            # driver's connection pool. Operationally certain to bite during
+            # MISP password rotation: every retry creates a fresh driver,
+            # exhausting fds within the 5h baseline timeout.
+            self._safe_close_driver()
             return False
         except (
             neo4j_exceptions.ServiceUnavailable,
@@ -461,11 +469,33 @@ class Neo4jClient:
             TimeoutError,
         ):
             self._connection_healthy = False
+            # Same leak shape as AuthError above — even though the retry
+            # decorator will re-call ``connect()`` and overwrite ``self.driver``,
+            # the previous driver instance leaks unless we explicitly close it
+            # here before re-raising.
+            self._safe_close_driver()
             raise  # let @retry_with_backoff handle transient errors
         except Exception as e:
             logger.error(f"Neo4j connection failed: {type(e).__name__}: {e}")
             self._connection_healthy = False
+            self._safe_close_driver()
             return False
+
+    def _safe_close_driver(self) -> None:
+        """Close the driver if alive and null it out. No-raise.
+
+        Used by ``connect()``'s exception branches (PR-A audit fix; Bug Hunter
+        HIGH H1). The neo4j-python-driver's ``Driver.close()`` is idempotent
+        but can raise on a half-initialised driver, so we wrap defensively.
+        """
+        drv = self.driver
+        self.driver = None  # null first so a re-call to connect() doesn't see a half-closed driver
+        if drv is None:
+            return
+        try:
+            drv.close()
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("Best-effort close on failed-connect driver raised: %s", exc)
 
     def close(self) -> None:
         """Close connection safely."""

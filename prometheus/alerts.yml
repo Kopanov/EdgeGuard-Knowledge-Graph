@@ -303,7 +303,7 @@ groups:
 
       - alert: EdgeGuardNeo4jQuerySlow
         expr: |
-          histogram_quantile(0.95, 
+          histogram_quantile(0.95,
             sum(rate(edgeguard_neo4j_query_duration_seconds_bucket[5m])) by (le, query_type)
           ) > 5
         for: 5m
@@ -313,3 +313,71 @@ groups:
         annotations:
           summary: "Neo4j queries are slow"
           description: "{{ $labels.query_type }} queries 95th percentile is over 5 seconds."
+
+  # ================================================================================
+  # Host / Infrastructure Alerts
+  # ================================================================================
+  # PR-A audit fix (Prod Readiness HIGH): node-exporter is scraped by
+  # prometheus.yml (see job ``node-exporter``) but no rule consumed its
+  # output. A 730d baseline can fill 100GB of MISP attachments + airflow
+  # logs unmonitored — Vanko's overnight ran ~8h and was already eating
+  # several GB. Three rules cover the typical disk-full failure modes:
+  # imminent (5%), warning (15%), and inode exhaustion (which can hit
+  # before bytes-free does on filesystems with many small files like
+  # airflow_logs).
+  - name: edgeguard_host_disk
+    rules:
+      - alert: EdgeGuardDiskFree15Pct
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|devtmpfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|devtmpfs"}
+          ) < 0.15
+        for: 10m
+        labels:
+          severity: warning
+          component: host
+        annotations:
+          summary: "Disk free below 15% on {{ $labels.mountpoint }}"
+          description: |
+            {{ $labels.mountpoint }} on {{ $labels.instance }} is at
+            {{ $value | humanizePercentage }} free. The next baseline run
+            (~50-100GB across MISP + Neo4j + airflow_logs) will likely
+            trigger DiskFree5Pct. Action: prune airflow_logs older than 30d
+            or expand the volume.
+
+      - alert: EdgeGuardDiskFree5Pct
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|devtmpfs"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|devtmpfs"}
+          ) < 0.05
+        for: 2m
+        labels:
+          severity: critical
+          component: host
+        annotations:
+          summary: "Disk free CRITICAL: below 5% on {{ $labels.mountpoint }}"
+          description: |
+            {{ $labels.mountpoint }} on {{ $labels.instance }} is at
+            {{ $value | humanizePercentage }} free. Neo4j will enter
+            read-only mode soon (which the writability healthcheck will
+            detect — but writes already fail). Pause all collectors:
+            ``edgeguard dag pause``. Then prune or expand.
+
+      - alert: EdgeGuardInodesFree10Pct
+        expr: |
+          (
+            node_filesystem_files_free{fstype!~"tmpfs|overlay|devtmpfs"}
+            / node_filesystem_files{fstype!~"tmpfs|overlay|devtmpfs"}
+          ) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          component: host
+        annotations:
+          summary: "Inodes free below 10% on {{ $labels.mountpoint }}"
+          description: |
+            {{ $labels.mountpoint }} has {{ $value | humanizePercentage }}
+            inodes free. airflow_logs creates many small files; ext4
+            volumes can exhaust inodes well before bytes. Prune logs.

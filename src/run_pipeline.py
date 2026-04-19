@@ -916,6 +916,22 @@ class EdgeGuardPipeline:
         # to slip in. Stale-lock recovery (the "PID is gone" case) still
         # uses the read-then-unlink-then-retry pattern below — but the
         # final lock acquisition itself is atomic.
+        def _read_lock_pid(path: str) -> Optional[int]:
+            """Read the PID stored in the pipeline lock file, or None on any error.
+
+            PR-A audit fix (Bug Hunter HIGH H2): used by ``_cleanup_lock``
+            to verify the lock still belongs to THIS process before
+            unlinking. Mirrors the read-then-compare-pid pattern in
+            ``baseline_lock.release_baseline_lock``. Returns None for
+            any read or parse error — caller treats None as "don't
+            unlink" (safer than treating it as match).
+            """
+            try:
+                with open(path) as fh:
+                    return int(fh.read().strip())
+            except (OSError, ValueError):
+                return None
+
         def _try_atomic_lock_acquire(path: str) -> bool:
             """Single atomic create-or-fail attempt.
 
@@ -1060,9 +1076,25 @@ class EdgeGuardPipeline:
             baseline_lock_held = True
 
         def _cleanup_lock(*_args):
+            # PR-A audit fix (Bug Hunter HIGH H2): only remove the lock file
+            # if it still belongs to THIS process. Earlier code did a blind
+            # ``os.remove(lock_path)`` — but the stale-PID recovery path
+            # (lines 1027-1032) lets a competing process unlink-and-re-acquire
+            # the same lock. Without the PID check, this process's atexit
+            # handler then unlinks the OTHER process's freshly-acquired lock,
+            # opening a window where a third invocation can also acquire.
+            # Two pipelines run concurrently, racing MERGE. Mirrors the
+            # release_baseline_lock pattern in src/baseline_lock.py.
             try:
-                if os.path.exists(lock_path):
+                pid = _read_lock_pid(lock_path)
+                if pid is not None and pid == os.getpid():
                     os.remove(lock_path)
+                elif pid is not None:
+                    logger.warning(
+                        "Not removing pipeline lock: sentinel pid=%s != current pid=%s",
+                        pid,
+                        os.getpid(),
+                    )
             except OSError:
                 pass
             if baseline_lock_held:
