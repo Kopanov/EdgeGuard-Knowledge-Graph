@@ -56,4 +56,7 @@ opentelemetry-exporter-otlp~=1.41
 # privilege escalation). Override to 1.83.0 which has the fix. When
 # apache/airflow refreshes the base with a patched litellm, this pin can
 # be removed.
+# TODO(issue #52): remove this override once the upstream Trivy watch
+# (see .github/workflows/ci.yml:131) confirms apache/airflow ships a
+# base image with litellm>=1.83.0.
 litellm>=1.83.0

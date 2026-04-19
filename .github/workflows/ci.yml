@@ -128,6 +128,14 @@ jobs:
       # Strict CRITICAL-only gate: still fail on litellm-class issues but
       # surface HIGHs as informational only. When apache/airflow refreshes
       # the base, tighten back to HIGH+CRITICAL.
+      #
+      # TODO(issue #52): re-tighten this gate to ``--severity HIGH,CRITICAL``
+      # once (1) ``apt-get remove --purge openssh-client`` lands in
+      # Dockerfile.airflow, (2) the apache-airflow-providers-* allowlist is
+      # documented + enforced, (3) the upstream watch action confirms HIGH
+      # debt has been resolved. Tracking: 3-agent corroborated finding from
+      # the comprehensive 7-agent audit (Red Team M4, Devil's Advocate,
+      # Prod Readiness B6).
       - name: Trivy scan — edgeguard-airflow image (CRITICAL fails; HIGH informational)
         run: |
           trivy image \
