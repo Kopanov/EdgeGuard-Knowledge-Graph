@@ -215,6 +215,15 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
     sess = _req.Session()
     sess.headers.update({"Authorization": misp_api_key, "Accept": "application/json"})
 
+    # PR-C v2 audit fix (Red Team H1, comprehensive 7-agent audit): disable
+    # automatic redirect-following on the MISP probe session. ``requests``
+    # follows 3xx by default and PRESERVES the Authorization header — a
+    # compromised MISP host or a hijacked DNS for ``MISP_URL`` could return
+    # ``302 → http://attacker/...`` and we'd happily ship the API key in
+    # the follow-up GET. With ``max_redirects=0``, any 3xx becomes a
+    # ``TooManyRedirects`` exception that we surface as an error.
+    sess.max_redirects = 0
+
     # Bugbot HIGH on PR-C commit 890d61a: apply the MISP Host-header
     # transform. When MISP_URL points at a Docker DNS name (e.g.
     # ``https://misp_misp_1:443``) but Apache's ServerName / SNI cert is
@@ -250,6 +259,7 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
                     params={"searchall": "EdgeGuard", "limit": 500, "page": page},
                     verify=ssl_verify,
                     timeout=(10, 30),
+                    allow_redirects=False,  # Red Team H1 — defense-in-depth
                 )
         except Exception as e:
             logger.debug("probe_misp GET failed", exc_info=True)
@@ -430,9 +440,17 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
 
     sess = _req.Session()
     sess.headers.update({"Authorization": misp_api_key, "Accept": "application/json"})
+
+    # PR-C v2 audit fix (Red Team H1): same redirect-disable as the probe
+    # session. ``DELETE`` requests following a 302 with the Authorization
+    # header attached is the worst case — the API key reaches whatever URL
+    # the redirect points at.
+    sess.max_redirects = 0
+
     apply_misp_http_host_header(sess)
 
     deleted = 0
+    saw_302_count = 0  # PR-C v2 audit fix (Bug Hunter B4): see end-of-loop check
     for round_idx in range(max_pages):
         with warnings.catch_warnings():
             if not ssl_verify:
@@ -442,6 +460,7 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
                 params={"searchall": "EdgeGuard", "limit": 500},
                 verify=ssl_verify,
                 timeout=(15, 60),
+                allow_redirects=False,  # Red Team H1
             )
         if resp.status_code != 200:
             raise RuntimeError(f"MISP /events/index returned HTTP {resp.status_code} on round {round_idx}")
@@ -474,16 +493,47 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
                     f"{misp_url}/events/{eid}",
                     verify=ssl_verify,
                     timeout=(15, 30),
+                    allow_redirects=False,  # Red Team H1 — defense-in-depth
                 )
             if del_resp.status_code == 200:
                 deleted += 1
             elif del_resp.status_code in (302,):
-                # 302 is typically a MISP auth redirect — surface but keep going
-                logger.warning("MISP event %s delete returned 302 (likely auth redirect) — skipping", eid)
+                # PR-C v2 audit fix (Bug Hunter B4 + Red Team H1): a 302
+                # on DELETE is suspicious — most likely an auth redirect
+                # (operator missing purge-permission on the MISP role) but
+                # could also be a hijack attempt. Track the count; if NO
+                # events get deleted but we saw 302s, that's a permission
+                # error masquerading as success. The previous "log warning
+                # and continue" produced a misleading ``✓ MISP cleared
+                # (0 events deleted)`` log line that operators read as
+                # success while the verify-poll silently failed 60s later.
+                saw_302_count += 1
+                logger.warning(
+                    "MISP event %s delete returned 302 (likely auth redirect "
+                    "or hijacked endpoint — re-issued requests are blocked by "
+                    "max_redirects=0). Continuing this round but tracking.",
+                    eid,
+                )
             else:
                 # 4xx/5xx on a delete is a real error — abort the wipe so the verify
                 # loop sees the half-clean state and the helper raises.
                 raise RuntimeError(f"MISP DELETE /events/{eid} returned HTTP {del_resp.status_code} — aborting wipe")
+
+    # PR-C v2 audit fix (Bug Hunter B4): after the loop, if we saw 302s
+    # AND deleted nothing, raise an actionable error instead of silently
+    # returning 0. The verify-poll would catch the empty-state failure
+    # 60s later; surfacing it here gives operators a meaningful message
+    # ("check your MISP role's purge permission") rather than a generic
+    # verify-timeout.
+    if deleted == 0 and saw_302_count > 0:
+        raise RuntimeError(
+            f"MISP wipe deleted 0 events but {saw_302_count} DELETE requests returned 302. "
+            "Likely cause: the MISP API key lacks purge permission for EdgeGuard events, "
+            "OR the MISP_URL host is being intercepted (DNS hijack / wrong vhost). "
+            "Verify: (1) the user/role attached to MISP_API_KEY can delete events; "
+            "(2) curl -k -H 'Authorization: $MISP_API_KEY' $MISP_URL/events/index returns 200."
+        )
+
     return deleted
 
 

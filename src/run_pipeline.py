@@ -139,6 +139,12 @@ class EdgeGuardPipeline:
         # Create shared MISPWriter instance for collectors that push to MISP
         self.misp_writer = MISPWriter()
 
+        # PR-C v2 audit fix (Cross-Checker B2): track build_relationships
+        # degraded-mode for Step 5b. The CLI deliberately does NOT raise on
+        # build_relationships exit != 0 (it would lose Step 5c); instead it
+        # marks here so a downstream caller / test can detect.
+        self._build_relationships_degraded: bool = False
+
         self.collectors = {
             "misp": MISPCollector(),
             "otx": OTXCollector(misp_writer=self.misp_writer),
@@ -878,7 +884,7 @@ class EdgeGuardPipeline:
         stix_event_id: str = None,
         use_stix_flow: bool = False,
         baseline: bool = False,
-        baseline_days: int = 730,
+        baseline_days: int | None = None,
         fresh_baseline: bool = False,
     ):
         """
@@ -890,11 +896,21 @@ class EdgeGuardPipeline:
             stix_event_id: If provided, export only this specific event to STIX 2.1
             use_stix_flow: If True, use STIX 2.1 as intermediate format (MISP → STIX → Neo4j)
             baseline: If True, collect historical data (all available, not just latest)
-            baseline_days: How many days back to collect in baseline mode (default: 365)
+            baseline_days: How many days back to collect in baseline mode. ``None``
+                defers to ``baseline_config.resolve_baseline_days(explicit=None)`` —
+                respects ``EDGEGUARD_BASELINE_DAYS`` env, then falls back to the
+                shipped ``DEFAULT_BASELINE_DAYS`` (730). PR-C v2 audit fix
+                (Maintainer H1 + Cross-Checker B1): the previous hardcoded 730
+                literal was the very pattern ``baseline_config`` was meant to
+                consolidate.
             fresh_baseline: If True with baseline, perform a true clean slate: clear Neo4j
                 graph data, delete MISP EdgeGuard events, and discard checkpoints before
                 re-collecting. Default False preserves existing data and checkpoints for resume.
         """
+        if baseline_days is None:
+            from baseline_config import resolve_baseline_days
+
+            baseline_days = resolve_baseline_days(explicit=None)
         # ── Pipeline lock: prevent concurrent CLI runs ──
         # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
         # Airflow DAGs use max_active_runs=1 for concurrency control instead.
@@ -1101,10 +1117,18 @@ class EdgeGuardPipeline:
         stix_event_id=None,
         use_stix_flow=False,
         baseline=False,
-        baseline_days=730,
+        baseline_days=None,
         fresh_baseline=False,
     ):
-        """Inner pipeline logic, separated so the lock is always cleaned up."""
+        """Inner pipeline logic, separated so the lock is always cleaned up.
+
+        ``baseline_days=None`` defers to ``baseline_config.resolve_baseline_days``
+        — same SSoT as the public ``run()`` method.
+        """
+        if baseline_days is None:
+            from baseline_config import resolve_baseline_days
+
+            baseline_days = resolve_baseline_days(explicit=None)
         # Import baseline checkpoint utilities. ``clear_checkpoint`` is still
         # used by the resume-completed-baseline branch below (line ~1152).
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
@@ -1481,16 +1505,38 @@ class EdgeGuardPipeline:
                 if br_result.returncode == 0:
                     logger.info("   [OK] build_relationships complete")
                 else:
-                    # Log but DON'T fail the pipeline — same behavior as the DAG
-                    # (build_relationships failure is a degraded-graph signal,
-                    # not a pipeline-blocking error).
+                    # PR-C v2 audit fix (Cross-Checker B2, comprehensive
+                    # 7-agent audit): the previous comment claimed "same
+                    # behavior as the DAG", but the DAG actually raises
+                    # ``AirflowException`` on non-zero exit (see
+                    # ``dags/edgeguard_pipeline.py``: ``run_build_relationships``
+                    # at lines 1618-1633). The CLI deliberately diverges —
+                    # local operators want a "degraded-mode finish" rather
+                    # than a hard abort that loses Step 5c enrichment too.
+                    # Acknowledge the asymmetry explicitly so the parity
+                    # claim isn't a lie.
+                    #
+                    # Operator hint: the graph edges from build_relationships
+                    # (12 link queries: IMPLEMENTS_TECHNIQUE, TARGETS,
+                    # AFFECTS, ...) will be MISSING. Re-run
+                    # ``python src/build_relationships.py`` standalone to
+                    # complete the graph.
                     logger.warning(
-                        "   [WARN] build_relationships exited with code %d. stderr (last 500 chars): %s",
+                        "   [WARN] build_relationships exited with code %d. "
+                        "Graph is in DEGRADED MODE (link edges missing). "
+                        "DAG would have raised AirflowException; CLI continues "
+                        "to allow Step 5c enrichment to run. "
+                        "Re-run ``python src/build_relationships.py`` standalone to repair. "
+                        "stderr (last 500 chars): %s",
                         br_result.returncode,
                         (br_result.stderr or "")[-500:],
                     )
+                    # Mark on the pipeline instance so a downstream caller /
+                    # test can detect degraded-mode without parsing logs.
+                    self._build_relationships_degraded = True
             except Exception as e:
                 logger.warning(f"   [WARN] build_relationships skipped: {e}")
+                self._build_relationships_degraded = True
 
             # Step 5c: post-sync enrichment_jobs (4 jobs: decay, campaigns,
             # calibrate, bridge_vuln_cve). In-process because each job is
@@ -1626,18 +1672,27 @@ def main():
         default=False,
         help="Collect available, historical data (all not just latest). Default: False (latest updates only)",
     )
-    _bd_default = 730  # Match Airflow DAG default (2 years)
-    _bd_env = os.environ.get("EDGEGUARD_BASELINE_DAYS", "").strip()
-    if _bd_env:
-        try:
-            _bd_default = int(_bd_env)
-        except ValueError:
-            pass
+    # PR-C v2 audit fix (Maintainer H1 + Cross-Checker B1, comprehensive
+    # 7-agent audit): the SSoT module ``baseline_config.resolve_baseline_days``
+    # was created in PR-C but only the new ``edgeguard.cmd_*`` callers used
+    # it — the legacy CLI parser here, ``run_pipeline.run(baseline_days=730)``,
+    # ``_run_pipeline_inner(baseline_days=730)``, and the DAG's
+    # ``get_baseline_config`` all kept hardcoded 730 literals. Wire the SSoT
+    # in here so the docstring's "single source of truth" claim is real.
+    #
+    # Cross-Checker D4: the previous help text said "default: 365" while
+    # ``_bd_default = 730`` — corrected below.
+    from baseline_config import DEFAULT_BASELINE_DAYS, resolve_baseline_days
+
+    _bd_default = resolve_baseline_days(explicit=None)  # respects env, falls back to default
     parser.add_argument(
         "--baseline-days",
         type=int,
         default=_bd_default,
-        help="How many days back for baseline mode (default: 365, or EDGEGUARD_BASELINE_DAYS if set)",
+        help=(
+            f"How many days back for baseline mode (default: {DEFAULT_BASELINE_DAYS}, "
+            "or EDGEGUARD_BASELINE_DAYS env var if set)"
+        ),
     )
     parser.add_argument(
         "--fresh-baseline",

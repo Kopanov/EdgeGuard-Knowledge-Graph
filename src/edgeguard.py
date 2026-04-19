@@ -1963,6 +1963,88 @@ def _fetch_misp_event_summary() -> dict:
 #   - The destructive path requires typed confirmation (informed consent).
 
 
+# PR-C v2 audit fix (Maintainer M3 + Bug Hunter B2 + F2, comprehensive
+# 7-agent audit): extract the docker-compose-airflow-trigger boilerplate
+# from cmd_fresh_baseline / cmd_baseline. Both call sites had ~50 LOC of
+# identical subprocess.run + run_id parser. Centralizing also gives us
+# ONE place to:
+#   - catch ``subprocess.TimeoutExpired`` (Bug Hunter B2 — was uncaught;
+#     a busy airflow container produced a bare traceback to the operator)
+#   - use a regex for the run_id parser (Bug Hunter F2 — the previous
+#     ``line.split("run_id", 1)[1].strip().split()[0]`` would return
+#     ``="manual__..."`` if Airflow ever changes to ``run_id=...`` format)
+#   - inject auth, retry, or a ``--dry-run`` flag in the future.
+def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, str]:
+    """Invoke ``docker compose exec airflow airflow dags trigger
+    edgeguard_baseline --conf <conf_json>``.
+
+    Returns ``(exit_code, run_id_or_error)``:
+      - exit_code 0 + run_id like ``"manual__2026-04-19T..."`` on success
+        (or ``"<unknown>"`` if the parser couldn't extract it but the
+        trigger succeeded — operator can find it in Airflow UI)
+      - exit_code 2 + error message on docker-not-found, timeout, or
+        non-zero airflow exit
+    """
+    import re
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "exec",
+                "-T",
+                "airflow",
+                "airflow",
+                "dags",
+                "trigger",
+                "edgeguard_baseline",
+                "--conf",
+                conf_json,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return 2, (
+            "docker compose not found on PATH. Trigger manually via Airflow UI:\n"
+            f"  Airflow UI → edgeguard_baseline → Trigger DAG w/ Config: {conf_json}"
+        )
+    except subprocess.TimeoutExpired:
+        # Bug Hunter B2: was uncaught. A busy or unresponsive ``airflow``
+        # container raises this with timeout=60 → bare traceback to the
+        # operator's terminal. Caller already saw a successful preflight
+        # 60s earlier; the right next step is to check airflow's health.
+        return 2, (
+            f"Airflow CLI did not respond within {timeout}s. Check:\n"
+            "  docker compose ps airflow\n"
+            "  docker compose logs --tail 50 airflow\n"
+            "Then re-trigger when airflow is responsive."
+        )
+    except OSError as e:
+        return 2, f"docker compose exec failed: {e}"
+
+    if result.returncode != 0:
+        return 2, (f"Airflow trigger failed (exit {result.returncode}):\n{result.stderr or '(no stderr)'}")
+
+    # Parse the run_id from Airflow CLI output. Examples seen so far:
+    #   "Triggered DAG <DAG: edgeguard_baseline> at 2026-04-19T12:34:56+00:00, run_id manual__2026-..."
+    #   "... run_id=manual__..."  (Airflow may use ``=`` in future versions)
+    # Use a regex tolerant of ``run_id <whitespace>``, ``run_id=``, and
+    # ``run_id:`` separators.
+    run_id = "<unknown>"
+    for line in (result.stdout or "").splitlines():
+        match = re.search(r"run_id[=:\s]+(\S+)", line)
+        if match:
+            run_id = match.group(1).rstrip(",")
+            break
+
+    return 0, run_id
+
+
 def cmd_fresh_baseline(args) -> int:
     """edgeguard fresh-baseline --days N
 
@@ -2032,56 +2114,16 @@ def cmd_fresh_baseline(args) -> int:
     # Trigger the DAG via gh-style airflow CLI invocation.
     # Conf carries fresh_baseline=true (gates the new baseline_clean task)
     # AND baseline_days=N (resolved by the DAG's get_baseline_config).
-    import subprocess
-
     conf_json = json.dumps({"fresh_baseline": True, "baseline_days": days})
     info("Triggering edgeguard_baseline DAG with conf:")
     info(f"  {conf_json}")
 
-    # Use the Airflow CLI inside the airflow container (matches existing
-    # `edgeguard dag` command pattern at src/edgeguard.py:1204+).
-    try:
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "exec",
-                "-T",
-                "airflow",
-                "airflow",
-                "dags",
-                "trigger",
-                "edgeguard_baseline",
-                "--conf",
-                conf_json,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except FileNotFoundError:
-        err("docker compose not found on PATH. Trigger manually via Airflow UI:")
-        print(f"  Airflow UI → edgeguard_baseline → Trigger DAG w/ Config: {conf_json}", file=sys.stderr)
-        return 2
+    exit_code, run_id_or_error = _trigger_baseline_dag(conf_json)
+    if exit_code != 0:
+        err(run_id_or_error)
+        return exit_code
 
-    if result.returncode != 0:
-        err(f"Airflow trigger failed (exit {result.returncode}):")
-        print(result.stderr or "(no stderr)", file=sys.stderr)
-        return 2
-
-    # Parse out the run_id for the printout (matches Bravo's UX request).
-    # Airflow CLI output format example:
-    #   "Triggered DAG <DAG: edgeguard_baseline> at 2026-04-19T12:34:56+00:00, run_id manual__2026-..."
-    run_id = "<unknown>"
-    for line in (result.stdout or "").splitlines():
-        if "run_id" in line:
-            parts = line.split("run_id", 1)[1].strip().split()
-            if parts:
-                run_id = parts[0]
-                break
-
-    ok(f"Triggered: edgeguard_baseline [{run_id}]")
+    ok(f"Triggered: edgeguard_baseline [{run_id_or_error}]")
     info("Track: edgeguard dag status --dag-id edgeguard_baseline")
     info("Or via Airflow UI: http://localhost:8082/dags/edgeguard_baseline/grid")
     return 0
@@ -2102,48 +2144,13 @@ def cmd_baseline(args) -> int:
     info(f"Triggering edgeguard_baseline DAG (additive mode, {days} days history)")
     info("Existing Neo4j nodes + MISP events PRESERVED — new data layered on top.")
 
-    import subprocess
-
     conf_json = json.dumps({"baseline_days": days})  # NO fresh_baseline → DAG runs additive
-    try:
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "exec",
-                "-T",
-                "airflow",
-                "airflow",
-                "dags",
-                "trigger",
-                "edgeguard_baseline",
-                "--conf",
-                conf_json,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except FileNotFoundError:
-        err("docker compose not found on PATH. Trigger manually via Airflow UI:")
-        print(f"  Airflow UI → edgeguard_baseline → Trigger DAG w/ Config: {conf_json}", file=sys.stderr)
-        return 2
+    exit_code, run_id_or_error = _trigger_baseline_dag(conf_json)
+    if exit_code != 0:
+        err(run_id_or_error)
+        return exit_code
 
-    if result.returncode != 0:
-        err(f"Airflow trigger failed (exit {result.returncode}):")
-        print(result.stderr or "(no stderr)", file=sys.stderr)
-        return 2
-
-    run_id = "<unknown>"
-    for line in (result.stdout or "").splitlines():
-        if "run_id" in line:
-            parts = line.split("run_id", 1)[1].strip().split()
-            if parts:
-                run_id = parts[0]
-                break
-
-    ok(f"Triggered: edgeguard_baseline [{run_id}]")
+    ok(f"Triggered: edgeguard_baseline [{run_id_or_error}]")
     info("Track: edgeguard dag status --dag-id edgeguard_baseline")
     return 0
 
