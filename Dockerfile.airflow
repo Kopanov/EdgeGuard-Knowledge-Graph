@@ -20,9 +20,17 @@
 FROM apache/airflow:3.2.0-python3.12
 
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        tini \
-    && rm -rf /var/lib/apt/lists/*
+# PR-B audit fix (Dependency MED-4 + Trivy run): the apache/airflow:3.2.0-python3.12
+# base ships openssl 3.5.5-1~deb13u1 which is vulnerable to CVE-2026-28390
+# (HIGH; OpenSSL DoS via NULL pointer in CMS handling). Force the upgrade
+# so Trivy passes and the runtime image has the patched library. Same fix
+# is applied in the main Dockerfile. When apache/airflow refreshes the
+# base with patched openssl, the --only-upgrade lines below can be removed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && apt-get install -y --no-install-recommends --only-upgrade \
+        openssl libssl3t64 openssl-provider-legacy \
+ && rm -rf /var/lib/apt/lists/*
 
 USER airflow
 

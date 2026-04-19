@@ -23,6 +23,22 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ── Stage 2: runtime image ─────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
+# PR-B audit fix (Dependency MED-4 + first Trivy run): the python:3.12-slim
+# base ships openssl 3.5.5-1~deb13u1 which is vulnerable to CVE-2026-28390
+# (HIGH; OpenSSL DoS via NULL pointer dereference in CMS handling). The
+# fixed version 3.5.5-1~deb13u2 is in the Debian security archive. Force
+# the upgrade in the runtime stage so Trivy passes and the runtime image
+# has the patched library. The same upgrade is applied in Dockerfile.airflow.
+#
+# This ``apt-get upgrade`` is narrowly scoped (-y --only-upgrade openssl
+# libssl3t64 openssl-provider-legacy) — it does NOT do a full image upgrade,
+# which could destabilize other packages. When the python:3.12-slim base
+# itself is refreshed upstream with patched openssl, this RUN can be removed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --only-upgrade \
+        openssl libssl3t64 openssl-provider-legacy \
+ && rm -rf /var/lib/apt/lists/*
+
 # Security: run as a non-root user.
 RUN groupadd --gid 1001 edgeguard \
  && useradd  --uid 1001 --gid edgeguard --no-create-home --shell /sbin/nologin edgeguard
