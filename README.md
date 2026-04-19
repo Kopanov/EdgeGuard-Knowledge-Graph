@@ -683,7 +683,7 @@ A full 730-day baseline processes ~99K CVEs + ~115K indicators + CVSS sub-nodes.
 | **`NEO4J_HEAP_MAX`** | `12g` | `.env` | Neo4j JVM heap — handles 350K+ nodes and relationship building |
 | **`NEO4J_PAGECACHE`** | `8g` | `.env` | Graph data caching for fast queries |
 | **`NEO4J_TX_MEMORY_MAX`** | `8g` | `.env` | Per-transaction cap for `apoc.periodic.iterate` batches in `build_relationships` (the 2026-04-19 baseline regression hit OOM at the previous 4g default — see [DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles)) |
-| **`NEO4J_CONTAINER_MEMORY_LIMIT`** | `36g` | `.env` or `docker-compose.yml` | Must exceed working set + off-heap (Bolt buffers, thread stacks, Lucene mmap, metaspace). 12+8+8=28g working set + 8g headroom. |
+| **`NEO4J_CONTAINER_MEMORY_LIMIT`** | `32g` | `.env` or `docker-compose.yml` | cgroup ceiling. Typical RSS during baseline is ~25g (12g heap + 8g pagecache + ~5g off-heap for Bolt buffers, thread stacks, Lucene mmap, metaspace, transaction off-heap); 32g gives ~7g headroom — comfortable, no OOM risk. NOTE: `tx_memory` is a CAP, not additive to heap+pagecache. |
 
 Run `python src/edgeguard.py doctor` to verify settings before triggering a baseline. Full tuning guide: [docs/DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md).
 
@@ -883,5 +883,5 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-19 — Recommended-memory table bumped after the 2026-04-19 baseline regression: `NEO4J_TX_MEMORY_MAX` 4g→8g (build_relationships needs the bigger per-tx cap on a populated graph), `NEO4J_HEAP_INITIAL` 4g→12g (= MAX, eliminates GC pauses from heap resizing per Neo4j Operations Manual), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). `tx_memory` is a CAP on transaction allocations, NOT additive to heap+pagecache — see DOCKER_SETUP_GUIDE.md memory-math note._
 
