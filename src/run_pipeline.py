@@ -1105,97 +1105,39 @@ class EdgeGuardPipeline:
         fresh_baseline=False,
     ):
         """Inner pipeline logic, separated so the lock is always cleaned up."""
-        # Import baseline checkpoint utilities
+        # Import baseline checkpoint utilities. ``clear_checkpoint`` is still
+        # used by the resume-completed-baseline branch below (line ~1152).
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
 
         # Log baseline mode
         if baseline:
             logger.info(f"BASELINE MODE: Collecting historical data (last {baseline_days} days)")
             if fresh_baseline:
-                logger.info("=== FRESH BASELINE: clearing all data for clean start ===")
+                # PR-C audit fix (Cross-Checker H3 + Prod Readiness HIGH): the
+                # previous inline 3-step clean (checkpoints, Neo4j, MISP) lived
+                # here as 80 LOC of paginated DELETE loops. It silently logged
+                # warnings on partial failures (the ``except Exception`` blocks
+                # at the previous lines 1134/1196), leaving operators with a
+                # half-cleaned state that was harder to debug than a clean
+                # failure. Replaced by the shared helper that wipes + settles
+                # + verifies + raises BaselineCleanError on any step failure.
+                # Same code path is now used by the new ``baseline_clean``
+                # Airflow task (PR-C wires it in dags/edgeguard_pipeline.py).
+                from baseline_clean import BaselineCleanError, reset_baseline_data
 
-                # 1. Clear checkpoints (preserves incremental by default)
-                clear_checkpoint()
-                logger.info("  [1/3] Cleared checkpoints")
-
-                # 2. Clear Neo4j graph data
                 try:
-                    from neo4j_client import Neo4jClient
-
-                    _neo4j = Neo4jClient()
-                    if _neo4j.connect():
-                        try:
-                            _neo4j.clear_all()
-                            logger.info("  [2/3] Cleared Neo4j graph data")
-                        finally:
-                            _neo4j.close()
-                    else:
-                        logger.warning("  [2/3] Could not connect to Neo4j — skipping clear")
-                except Exception as e:
-                    logger.warning(f"  [2/3] Could not clear Neo4j: {e}")
-
-                # 3. Clear MISP EdgeGuard events
-                try:
-                    import warnings
-
-                    import requests as _req
-                    import urllib3
-
-                    from config import MISP_API_KEY as _misp_key
-                    from config import MISP_URL as _misp_url
-                    from config import SSL_VERIFY as _verify
-                    from config import apply_misp_http_host_header
-
-                    _sess = _req.Session()
-                    _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
-                    apply_misp_http_host_header(_sess)
-
-                    # Delete all EdgeGuard events. Always re-fetch page 1 (deleted events
-                    # disappear, shifting remaining events to page 1). Safety cap: 20 iterations.
-                    _deleted = 0
-                    for _round in range(20):
-                        with warnings.catch_warnings():
-                            if not _verify:
-                                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-                            _resp = _sess.get(
-                                f"{_misp_url}/events/index",
-                                params={"searchall": "EdgeGuard", "limit": 500},
-                                verify=_verify,
-                                timeout=(15, 60),
-                            )
-                        if _resp.status_code != 200:
-                            break
-
-                        _json = _resp.json()
-                        if isinstance(_json, list):
-                            _events = _json
-                        elif isinstance(_json, dict):
-                            _events = _json.get("response", _json.get("Event", []))
-                            if isinstance(_events, dict):
-                                _events = [_events]
-                        else:
-                            _events = []
-
-                        if not _events:
-                            break  # No more events
-
-                        for ev in _events:
-                            eid = ev.get("id") or ev.get("Event", {}).get("id")
-                            if eid:
-                                with warnings.catch_warnings():
-                                    if not _verify:
-                                        warnings.filterwarnings(
-                                            "ignore", category=urllib3.exceptions.InsecureRequestWarning
-                                        )
-                                    _del_resp = _sess.delete(
-                                        f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30)
-                                    )
-                                if _del_resp.status_code == 200:
-                                    _deleted += 1
-
-                    logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
-                except Exception as e:
-                    logger.warning(f"  [3/3] Could not clear MISP events: {e}")
+                    clean_result = reset_baseline_data()
+                    logger.info(
+                        "Fresh-baseline clean complete: deleted %d Neo4j nodes, "
+                        "%d MISP events, %d checkpoint entries (%.1fs)",
+                        clean_result.before.neo4j_count,
+                        clean_result.before.misp_count,
+                        clean_result.before.checkpoint_count,
+                        clean_result.duration_seconds,
+                    )
+                except BaselineCleanError as e:
+                    logger.error("Fresh-baseline clean FAILED: %s", e)
+                    return False  # Refuse to run collectors on a half-cleaned state.
 
                 logger.info("=== Fresh baseline ready — collecting from scratch ===")
             else:
@@ -1511,6 +1453,56 @@ class EdgeGuardPipeline:
             logger.info(f"   [OK] Enriched {enriched} indicators with additional sources")
         except Exception as e:
             logger.warning(f"   [WARN] Enrichment skipped: {e}")
+
+        # PR-C audit fix (Cross-Checker HIGH H1 + H2): CLI ↔ DAG parity.
+        # The Airflow DAG runs ``build_relationships.py`` and
+        # ``enrichment_jobs.run_all_enrichment_jobs`` after the sync — but
+        # the CLI never invoked either. Operators running
+        # ``python run_pipeline.py --baseline`` got a broken graph: no
+        # IMPLEMENTS_TECHNIQUE / TARGETS / AFFECTS edges (the 12 link
+        # queries in build_relationships.py were skipped), no Campaign
+        # nodes, no IOC decay, no Vulnerability↔CVE bridges. Fixed by
+        # invoking both here, gated to ``baseline=True`` to avoid
+        # surprising incremental-mode CLI users with extra latency.
+        if baseline:
+            # Step 5b: build_relationships (12 cross-entity link queries).
+            # Subprocess-isolated to match the DAG's invocation shape.
+            logger.info("\n[TARGET] Step 5b: build_relationships (CLI parity with DAG)...")
+            try:
+                import subprocess
+
+                br_result = subprocess.run(
+                    [sys.executable, os.path.join(os.path.dirname(__file__), "build_relationships.py")],
+                    capture_output=True,
+                    text=True,
+                    timeout=18000,  # 5h, matches DAG's run_build_relationships
+                    check=False,
+                )
+                if br_result.returncode == 0:
+                    logger.info("   [OK] build_relationships complete")
+                else:
+                    # Log but DON'T fail the pipeline — same behavior as the DAG
+                    # (build_relationships failure is a degraded-graph signal,
+                    # not a pipeline-blocking error).
+                    logger.warning(
+                        "   [WARN] build_relationships exited with code %d. stderr (last 500 chars): %s",
+                        br_result.returncode,
+                        (br_result.stderr or "")[-500:],
+                    )
+            except Exception as e:
+                logger.warning(f"   [WARN] build_relationships skipped: {e}")
+
+            # Step 5c: post-sync enrichment_jobs (4 jobs: decay, campaigns,
+            # calibrate, bridge_vuln_cve). In-process because each job is
+            # short-running and shares the existing Neo4jClient.
+            logger.info("\n[TARGET] Step 5c: post-sync enrichment_jobs (CLI parity with DAG)...")
+            try:
+                from enrichment_jobs import run_all_enrichment_jobs
+
+                summary = run_all_enrichment_jobs(self.neo4j)
+                logger.info("   [OK] Enrichment jobs complete: %s", summary)
+            except Exception as e:
+                logger.warning(f"   [WARN] Enrichment jobs skipped: {e}")
 
         # Step 6: Get final stats
         logger.info("\n[STATS] Step 6: Final Statistics...")

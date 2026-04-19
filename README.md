@@ -873,6 +873,11 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 - **Circuit Breakers + Retry**: Fixed HALF_OPEN deadlock, monotonic time, resilience patterns for all external service calls
 - **UTC-aware timestamps**: All 70+ datetime instances across 24 files use `timezone.utc` (Python 3.12 compatible)
 
+### 🛠️ Operator commands (added 2026-04-19, see PR-C)
+
+- **`edgeguard fresh-baseline --days N`** — destructive baseline trigger. Probes Neo4j + MISP for blast radius, shows counts ("you will permanently delete 347,197 nodes / 8,247 events / 12 checkpoints"), asks for typed confirmation (`FRESH-BASELINE`), then triggers the Airflow `edgeguard_baseline` DAG with `dag_run.conf={"fresh_baseline": true, "baseline_days": N}`. Refuses to proceed if Neo4j or MISP is unreachable (exit 2 = preflight failed; informed-consent principle).
+- **`edgeguard baseline --days N`** — additive baseline trigger. Existing data preserved. No confirmation prompt. Triggers the same DAG with `dag_run.conf={"baseline_days": N}` (no `fresh_baseline` key → DAG runs in additive mode).
+
 ### 🚧 In Progress / Planned
 
 - **SoftwareVersion bridge**: `(Vulnerability)-[:IN]->(SoftwareVersion)-[:ON]->(Host)` — NVD `version_constraints` are now collected and stored; CPE-to-SoftwareVersion mapping pending (see [`docs/RESILMESH_INTEROPERABILITY.md`](docs/RESILMESH_INTEROPERABILITY.md) §4.4)
@@ -885,5 +890,5 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-19 — `apoc.coll.toSet` Phase-2 refactor: 47+ scattered list-accumulator SET clauses now route through two helpers in `src/neo4j_client.py` (`_dedup_concat_clause` / `_dedup_concat_optional_clause`); zero behavior change. New Prometheus histogram `edgeguard_neo4j_list_dedup_size` measures live list-size distribution to size the eventual native-Cypher flip (Phase 3, separate PR). Recommended-memory table also bumped after the 2026-04-19 baseline regression: `NEO4J_TX_MEMORY_MAX` 4g→8g (build_relationships needs the bigger per-tx cap on a populated graph), `NEO4J_HEAP_INITIAL` 4g→12g (= MAX, eliminates GC pauses from heap resizing per Neo4j Operations Manual), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). `tx_memory` is a CAP on transaction allocations, NOT additive to heap+pagecache — see DOCKER_SETUP_GUIDE.md memory-math note._
+_Last updated: 2026-04-19 — PR-C: CLI ↔ DAG parity + fresh-baseline. Closed 3 distinct CLI/DAG drift gaps (CLI baseline now invokes `enrichment_jobs` + `build_relationships` via subprocess to match DAG; new `baseline_clean` Airflow task gated on `dag_run.conf={"fresh_baseline": true}`). Added shared `src/baseline_clean.py` helper (atomic 3-step wipe + settle + verify-poll + fail-fast on partial failure) used by BOTH the CLI's existing `--fresh-baseline` flag AND the new DAG task. New `edgeguard fresh-baseline` and `edgeguard baseline` CLI commands. Consolidated `730` baseline-default into `src/baseline_config.py:DEFAULT_BASELINE_DAYS`. Earlier today: `apoc.coll.toSet` Phase-2 refactor (47+ scattered list-accumulator SET clauses through two helpers; zero behavior change). Recommended-memory table bumped after the 2026-04-19 baseline regression: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g, `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g._
 

@@ -1972,6 +1972,76 @@ baseline_start = PythonOperator(
     dag=baseline_dag,
 )
 
+
+def _baseline_clean(**context):
+    """Optional baseline_clean step — runs the destructive 3-step wipe
+    (Neo4j + MISP + checkpoints) IFF ``dag_run.conf={"fresh_baseline": true}``.
+
+    Default behavior: no-op + log "baseline mode is additive (fresh_baseline
+    not set)". This preserves the existing baseline DAG semantics for
+    operators who trigger via the Airflow UI without a conf — the previous
+    behavior (only checkpoints cleared) becomes the explicit "additive
+    baseline" path.
+
+    To trigger a true fresh baseline:
+        airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true}'
+        # OR via Airflow UI → Trigger DAG w/ Config → paste the JSON above
+
+    The CLI wrapper ``edgeguard fresh-baseline`` (added in PR-C) sets this
+    conf automatically so operators don't have to remember the JSON.
+
+    PR-C audit fix (Cross-Checker HIGH H3): closes the CLI ↔ DAG drift
+    where ``--fresh-baseline`` on the CLI did the destructive clean but
+    the DAG had no equivalent. The shared helper ``baseline_clean.reset_baseline_data``
+    is the SAME code path the CLI now uses (so any future improvement
+    benefits both).
+    """
+    conf = context.get("dag_run").conf if context.get("dag_run") else {}
+    fresh_baseline = bool(conf.get("fresh_baseline", False))
+
+    if not fresh_baseline:
+        logger.info("=" * 70)
+        logger.info("BASELINE_CLEAN: skipped (fresh_baseline conf not set — additive mode).")
+        logger.info("To trigger a destructive clean: dag_run.conf = {\"fresh_baseline\": true}")
+        logger.info("Or via the CLI wrapper: edgeguard fresh-baseline --days <N>")
+        logger.info("=" * 70)
+        return
+
+    # Lazy import — keep DAG-parse-time minimal, only load the destructive
+    # helper when actually used.
+    try:
+        from baseline_clean import BaselineCleanError, reset_baseline_data
+    except ImportError as e:
+        raise AirflowException(f"baseline_clean module unavailable: {e}") from e
+
+    try:
+        result = reset_baseline_data()
+        logger.info(
+            "BASELINE_CLEAN: deleted %d Neo4j nodes, %d MISP events, %d checkpoint entries (%.1fs)",
+            result.before.neo4j_count,
+            result.before.misp_count,
+            result.before.checkpoint_count,
+            result.duration_seconds,
+        )
+    except BaselineCleanError as e:
+        # Fail the DAG hard — collectors MUST NOT run on a half-cleaned state.
+        # The downstream tasks (baseline_start + tier1_core onward) will be
+        # marked upstream_failed by Airflow's default trigger rule. Operator
+        # sees one red task with the actual error.
+        raise AirflowException(f"BASELINE_CLEAN failed: {e}") from e
+
+
+baseline_clean_task = PythonOperator(
+    task_id="baseline_clean",
+    python_callable=_baseline_clean,
+    # Generous timeout: a 730-day baseline can have ~8K MISP events; deletes
+    # are paginated 500/round at ~50ms/delete → ~7-10 min worst case + ~1 min
+    # Neo4j clear_all + ~1 min verify-poll = ~12-15 min ceiling.
+    execution_timeout=timedelta(minutes=20),
+    dag=baseline_dag,
+)
+
+
 # Tier 1 — Core intelligence (rate-limited APIs). ALL_DONE: one failure doesn't block others.
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
@@ -2116,10 +2186,12 @@ baseline_complete = BashOperator(
     dag=baseline_dag,
 )
 
-# Dependency chain:
-# health → start → tier1 (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done
+# Dependency chain (PR-C audit fix Cross-Checker HIGH H3):
+# health → clean (no-op unless fresh_baseline=true conf) → start → tier1
+# (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done
 (
     baseline_misp_health
+    >> baseline_clean_task
     >> baseline_start
     >> baseline_tier1
     >> baseline_tier2
