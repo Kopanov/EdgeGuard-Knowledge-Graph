@@ -2088,7 +2088,7 @@ def _baseline_clean(**context):
     try:
         result = reset_baseline_data()
         logger.info(
-            "BASELINE_CLEAN: deleted %d Neo4j nodes, %d MISP events, %d checkpoint entries (%.1fs)",
+            "BASELINE_CLEAN: complete (pre-wipe snapshot: %d Neo4j nodes, %d MISP events, %d checkpoint entries; %.1fs)",
             result.before.neo4j_count,
             result.before.misp_count,
             result.before.checkpoint_count,

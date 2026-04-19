@@ -1152,7 +1152,7 @@ class EdgeGuardPipeline:
                 try:
                     clean_result = reset_baseline_data()
                     logger.info(
-                        "Fresh-baseline clean complete: deleted %d Neo4j nodes, "
+                        "Fresh-baseline clean complete: pre-wipe snapshot had %d Neo4j nodes, "
                         "%d MISP events, %d checkpoint entries (%.1fs)",
                         clean_result.before.neo4j_count,
                         clean_result.before.misp_count,
