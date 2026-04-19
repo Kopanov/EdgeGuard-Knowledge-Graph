@@ -235,37 +235,29 @@ def cmd_doctor(args):
         err(msg)
         all_ok = False
 
-    # Check MISP event count — useful to confirm clean/populated state
+    # Check MISP event count — useful to confirm clean/populated state.
+    # PR (datastore-probes refactor): the inline ``requests.get`` + JSON
+    # filter that used to live here moved to ``datastore_probes.probe_misp_event_count``.
+    # SSL_VERIFY is still honoured (Red Team Tier S — was hardcoded
+    # ``verify=False`` pre-S7); see datastore_probes._resolve_ssl_verify_env.
+    # The probe returns one ProbeResult — failure is non-fatal here (diagnostic),
+    # so a probe error is rendered as info() not err().
     if ok_flag:
-        try:
-            import requests as _req
+        from datastore_probes import probe_misp_event_count
 
-            misp_url = os.getenv("MISP_URL", "https://localhost:8443")
-            misp_key = os.getenv("MISP_API_KEY", "")
-            # PR (security S7) — Red Team Tier S: was hardcoded ``verify=False``,
-            # which sent the API key over MITM-able TLS regardless of operator
-            # config. Now respects ``SSL_VERIFY`` (the same flag every other
-            # outbound HTTP call in EdgeGuard already honors). An on-path
-            # attacker can no longer silently downgrade this probe to
-            # plaintext-equivalent.
-            resp = _req.get(
-                f"{misp_url}/events/index",
-                headers={"Authorization": misp_key, "Accept": "application/json"},
-                verify=SSL_VERIFY,
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                events = resp.json()
-                event_list = events if isinstance(events, list) else []
-                eg_events = [
-                    e for e in event_list if "EdgeGuard" in str(e.get("info", "") or e.get("Event", {}).get("info", ""))
-                ]
-                if len(event_list) == 0:
-                    info("MISP has 0 events — ready for baseline")
-                else:
-                    ok(f"MISP has {len(event_list)} events ({len(eg_events)} EdgeGuard)")
-        except Exception:
-            pass  # Non-critical diagnostic
+        # Get total + EdgeGuard-only counts for the legacy "X events (Y EdgeGuard)"
+        # output format. Two probes (cheap; both are one HTTP call each) keeps the
+        # output identical to the pre-refactor text — pinned by tests.
+        all_events_probe = probe_misp_event_count(edgeguard_only=False)
+        eg_events_probe = probe_misp_event_count(edgeguard_only=True)
+        if all_events_probe.ok:
+            if all_events_probe.count == 0:
+                info("MISP has 0 events — ready for baseline")
+            else:
+                eg_count = eg_events_probe.count if eg_events_probe.ok else 0
+                ok(f"MISP has {all_events_probe.count} events ({eg_count} EdgeGuard)")
+        # Probe failure is intentionally silent here (diagnostic only — the MISP
+        # connection test above already covers the reachability case).
 
     # Check MISP version compatibility
     # PR #36 commit X (bugbot LOW): captured here once and threaded to
@@ -319,20 +311,36 @@ def cmd_doctor(args):
                 else:
                     warn(f"Neo4j has only {constraint_count} constraints (expected 5+). Run ensure_constraints().")
 
-                # Check Neo4j data state — useful before baseline to confirm clean/populated
-                try:
-                    counts = client.run(
-                        "MATCH (n) WHERE n.edgeguard_managed = true "
-                        "RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY cnt DESC LIMIT 10"
-                    )
-                    total = sum(r.get("cnt", 0) for r in counts) if counts else 0
-                    if total == 0:
+                # Check Neo4j data state — useful before baseline to confirm
+                # clean/populated. PR (datastore-probes refactor): inline cypher
+                # moved to ``datastore_probes.probe_neo4j_node_count``. We pass
+                # the already-open ``client`` to avoid a second connect/close
+                # round-trip (the probe accepts an external client). Output text
+                # is pinned by tests — the format below MUST stay byte-equivalent
+                # to the pre-refactor version (top-5 labels, comma-separated).
+                from datastore_probes import probe_neo4j_node_count
+
+                neo4j_probe = probe_neo4j_node_count(client=client, with_breakdown=True, top_n=10)
+                if neo4j_probe.ok:
+                    # Cross-checker audit DRIFT-2: pre-refactor displayed
+                    # ``sum(top-10 labels)`` as the total — anything beyond
+                    # the top 10 labels was silently dropped from the count.
+                    # The probe's own ``count`` field is now the *accurate*
+                    # ``count(n)`` from a separate query (good for PR2's
+                    # post-clean verify which needs "is total ZERO?"), but
+                    # we deliberately sum the breakdown here to keep the
+                    # doctor's user-visible number byte-equivalent to the
+                    # pre-refactor output. Any "doctor's number is now
+                    # different" PR is a behavior change and belongs in a
+                    # separate commit, not this refactor PR.
+                    top10_total = sum(cnt for _, cnt in neo4j_probe.breakdown)
+                    if top10_total == 0:
                         info("Neo4j graph is empty (0 EdgeGuard nodes) — ready for baseline")
                     else:
-                        top = ", ".join(f"{r['label']}={r['cnt']}" for r in counts[:5]) if counts else ""
-                        ok(f"Neo4j has {total} EdgeGuard nodes ({top})")
-                except Exception:
-                    pass
+                        top = ", ".join(f"{lbl}={cnt}" for lbl, cnt in neo4j_probe.breakdown[:5])
+                        ok(f"Neo4j has {top10_total} EdgeGuard nodes ({top})")
+                # Probe failure is intentionally silent here (diagnostic only —
+                # the Neo4j reachability test above already covers connection issues).
 
                 client.close()
         except Exception as e:
