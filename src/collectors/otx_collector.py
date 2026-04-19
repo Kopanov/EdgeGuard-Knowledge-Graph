@@ -535,11 +535,24 @@ class OTXCollector:
                 Args:
                     successful_pulses: The pulses that were successfully pushed.
                         When None (non-MISP mode or no failures), falls back to
-                        all fetched pulses.
+                        the truncated ``to_process`` list — NOT the full fetched
+                        ``pulses`` list.
+
+                Production-test audit fix (Bug Hunter HIGH BH-H1, post-PR-C-merge):
+                the previous fallback used ``pulses`` (the FULL fetched list)
+                rather than ``to_process`` (after the EDGEGUARD_INCREMENTAL_LIMIT
+                truncation at line 357 above). When the limit bit (e.g., 250
+                modified pulses but limit=200, the default), only the first 200
+                were pushed but the cursor advanced to the latest-modified
+                timestamp of ALL 250. The 50 truncated pulses were lost
+                forever — next run's modified_since filter skipped them
+                (silent data loss in normal operation with default settings).
+                Fall back to ``to_process`` so the cursor only advances over
+                pulses we actually attempted.
                 """
                 if baseline:
                     return
-                source = successful_pulses if successful_pulses is not None else pulses
+                source = successful_pulses if successful_pulses is not None else to_process
                 if not source:
                     return
                 mx = self._max_pulse_modified_iso(source)

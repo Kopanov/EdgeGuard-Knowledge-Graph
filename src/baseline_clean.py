@@ -595,7 +595,7 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
 def reset_baseline_data(
     *,
     settle_seconds: float = 5.0,
-    verify_timeout_seconds: float = 60.0,
+    verify_timeout_seconds: Optional[float] = None,
     verify_poll_interval_seconds: float = 2.0,
     misp_max_pages: int = 20,
 ) -> CleanResult:
@@ -619,8 +619,17 @@ def reset_baseline_data(
             first verify probe. Default 5s — enough for Neo4j transaction
             commits + MISP database flushes to settle.
         verify_timeout_seconds: max time to spend in the verify poll
-            before raising. Default 60s — if anything's still non-zero
-            after a minute, something's wrong.
+            before raising. ``None`` (default) derives from the pre-wipe
+            ``before.neo4j_count`` — ``max(60, neo4j_count / 5000)``.
+            On a small dev graph (~10K nodes) this is the original 60s;
+            on a 350K-node baseline it's ~70s; on extreme 1M-node graphs
+            ~200s. Production-test audit fix (Prod Readiness BLOCK 1.3,
+            post-PR-C-merge): the previous static 60s default would fail
+            on 350K+ node baselines (Neo4j ``clear_all`` + APOC batched
+            delete + transaction commit + page-cache flush regularly takes
+            30-90s on graphs that size). Operator saw "verify failed" on a
+            wipe that succeeded → re-triggered → lost confidence in the
+            tool. Pass an explicit value to override the derivation.
         verify_poll_interval_seconds: how often to re-probe during verify.
             Default 2s.
         misp_max_pages: safety cap on the MISP delete loop (max events
@@ -652,6 +661,18 @@ def reset_baseline_data(
     try:
         # 1. Pre-wipe state — for blast-radius display + audit log
         before = probe_baseline_state(client=client)
+
+        # Derive verify_timeout from pre-wipe count if caller didn't override.
+        # Math: max(60s, count / 5000) — 60s floor for small graphs;
+        # 350K-node baseline → 70s; 1M-node graph → 200s.
+        # See ``verify_timeout_seconds`` argument doc for rationale.
+        if verify_timeout_seconds is None:
+            verify_timeout_seconds = max(60.0, before.neo4j_count / 5000.0)
+            logger.info(
+                "Derived verify_timeout_seconds=%.1fs from pre-wipe Neo4j count=%d",
+                verify_timeout_seconds,
+                before.neo4j_count,
+            )
         logger.info("Pre-wipe state:")
         for line in before.render_summary().splitlines():
             logger.info(line)

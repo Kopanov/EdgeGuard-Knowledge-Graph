@@ -27,7 +27,17 @@ _raw_dir = os.getenv("EDGEGUARD_CHECKPOINT_DIR", str(_default_checkpoint_dir))
 _candidate = Path(_raw_dir).resolve()
 
 # Guard against path-traversal via env var.
-if not str(_candidate).startswith(str(_PROJECT_ROOT)):
+#
+# Production-test audit fix (Bug Hunter HIGH BH2-HIGH, post-PR-C-merge):
+# the previous ``str(_candidate).startswith(str(_PROJECT_ROOT))`` check was a
+# substring-prefix check, not a directory-prefix check. With
+# ``_PROJECT_ROOT="/opt/edgeguard"``, an env var ``EDGEGUARD_CHECKPOINT_DIR=
+# /opt/edgeguard-evil/state`` would PASS the guard because
+# ``"/opt/edgeguard-evil/state".startswith("/opt/edgeguard")`` is True. The
+# docstring above advertised "stays inside the project root" — it didn't.
+# ``Path.is_relative_to`` (Python 3.9+; project requires 3.12+) is the correct
+# directory-prefix check. Equality-with-root is also accepted.
+if _candidate != _PROJECT_ROOT and not _candidate.is_relative_to(_PROJECT_ROOT):
     logger.warning(
         "EDGEGUARD_CHECKPOINT_DIR=%r is outside project root; reverting to default.",
         _raw_dir,
