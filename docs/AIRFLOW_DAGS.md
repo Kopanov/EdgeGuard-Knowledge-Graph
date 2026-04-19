@@ -168,6 +168,28 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 
 **Baseline note:** `edgeguard_baseline` uses `is_paused_upon_creation=False` so manual triggers execute immediately without needing to unpause first.
 
+#### `edgeguard_baseline` task chain — additive vs destructive
+
+The `edgeguard_baseline` DAG has two operational modes determined by
+the `dag_run.conf` JSON when triggered:
+
+| Mode | Trigger | Effect | When to use |
+|------|---------|--------|-------------|
+| **Additive** (default) | `airflow dags trigger edgeguard_baseline` (no conf) OR Airflow UI Trigger DAG with empty conf | `baseline_clean` task is a **no-op**; collectors run on top of existing graph + MISP state | Adding historical depth to an existing baseline; first-time setup on an empty graph |
+| **Destructive (fresh-baseline)** | `airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true, "baseline_days": 730}'` OR Airflow UI Trigger DAG with config `{"fresh_baseline": true}` | `baseline_clean` task **wipes Neo4j + MISP EdgeGuard events + checkpoints** before collectors run | Schema migration; recovering from a corrupted baseline; clean-slate re-collection |
+
+**Task chain:** `baseline_misp_health` → `baseline_clean` (no-op or wipe) → `baseline_start` → `tier1_core` → `tier2_extended` → `tier3_low_freq` → `baseline_full_neo4j_sync` → `baseline_build_relationships` → `baseline_enrichment` → `baseline_complete`.
+
+**`baseline_clean` task semantics (introduced in PR-C):**
+
+- Reads `dag_run.conf.fresh_baseline`. Accepts Python `True`, integer `1`, or strings `"true"`/`"True"`/`"1"`/`"yes"`/`"on"` (case- and whitespace-insensitive). Anything else (including the explicit-falsy strings `"false"`/`"0"`) is treated as additive — a typo in the JSON config does NOT trigger destruction.
+- Calls `src.baseline_clean.reset_baseline_data()` — atomic 3-step wipe (checkpoints → Neo4j `clear_all` → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero.
+- Has `retries=0` and `trigger_rule=ALL_SUCCESS` — destructive task does NOT auto-retry on failure (would re-execute the wipe), and ONLY runs after `baseline_misp_health` has fully succeeded.
+
+**CLI vs DAG equivalence (PR-C parity):** the operator commands `edgeguard fresh-baseline --days <N>` and `edgeguard baseline --days <N>` shell out to the Airflow CLI to trigger this DAG with the appropriate `dag_run.conf` — they do NOT run a local pipeline. The destructive command (`edgeguard fresh-baseline`) prompts for typed `FRESH-BASELINE` confirmation before triggering; the additive command (`edgeguard baseline`) does not.
+
+**CLI-only `python src/run_pipeline.py --baseline` direct execution:** this legacy path runs the pipeline IN-PROCESS rather than triggering the DAG. It has one operator-visible asymmetry — `build_relationships` failures log a `WARN` and continue (so Step 5c enrichment still runs); the DAG raises `AirflowException` on the same failure. The CLI's degraded-mode behavior is documented in source comments at `src/run_pipeline.py:1565+`. Operators running the legacy CLI path should grep logs for `DEGRADED MODE` to detect missing link edges. The `edgeguard fresh-baseline` and `edgeguard baseline` wrappers (PR-C) inherit DAG semantics — no asymmetry there.
+
 **Metrics (optional):** `edgeguard_metrics_server` (+ `…_scheduled`) and **`edgeguard_metrics_helpers`** in `dags/edgeguard_metrics_server.py` — default scrape URL `http://127.0.0.1:8001/metrics` (`EDGEGUARD_METRICS_HOST` / `EDGEGUARD_METRICS_PORT`).
 
 **Note:** “Items/Run” figures below are **order-of-magnitude defaults**; effective limits come from `get_effective_limit()` (`EDGEGUARD_INCREMENTAL_LIMIT`, `EDGEGUARD_MAX_ENTRIES`, baseline Airflow Variables).

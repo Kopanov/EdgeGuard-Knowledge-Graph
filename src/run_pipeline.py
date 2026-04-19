@@ -139,12 +139,6 @@ class EdgeGuardPipeline:
         # Create shared MISPWriter instance for collectors that push to MISP
         self.misp_writer = MISPWriter()
 
-        # PR-C v2 audit fix (Cross-Checker B2): track build_relationships
-        # degraded-mode for Step 5b. The CLI deliberately does NOT raise on
-        # build_relationships exit != 0 (it would lose Step 5c); instead it
-        # marks here so a downstream caller / test can detect.
-        self._build_relationships_degraded: bool = False
-
         self.collectors = {
             "misp": MISPCollector(),
             "otx": OTXCollector(misp_writer=self.misp_writer),
@@ -1578,6 +1572,15 @@ class EdgeGuardPipeline:
                     # AFFECTS, ...) will be MISSING. Re-run
                     # ``python src/build_relationships.py`` standalone to
                     # complete the graph.
+                    # Production-test audit fix (Devil's Advocate + Maintainer
+                    # corroborated, post-PR-C-merge): emit structured log with
+                    # ``extra={"degraded": True}`` instead of setting an
+                    # instance-attribute marker that no caller actually read.
+                    # The previous ``self._build_relationships_degraded`` attr
+                    # was write-only — only test-framework grep referenced it,
+                    # zero production callers. Structured logs are cloud-
+                    # portable (Datadog/CloudWatch/etc. can route on the
+                    # ``degraded`` extra field), the attribute was not.
                     logger.warning(
                         "   [WARN] build_relationships exited with code %d. "
                         "Graph is in DEGRADED MODE (link edges missing). "
@@ -1587,13 +1590,14 @@ class EdgeGuardPipeline:
                         "stderr (last 500 chars): %s",
                         br_result.returncode,
                         (br_result.stderr or "")[-500:],
+                        extra={"degraded": True, "step": "build_relationships"},
                     )
-                    # Mark on the pipeline instance so a downstream caller /
-                    # test can detect degraded-mode without parsing logs.
-                    self._build_relationships_degraded = True
             except Exception as e:
-                logger.warning(f"   [WARN] build_relationships skipped: {e}")
-                self._build_relationships_degraded = True
+                logger.warning(
+                    "   [WARN] build_relationships skipped: %s",
+                    e,
+                    extra={"degraded": True, "step": "build_relationships"},
+                )
 
             # Step 5c: post-sync enrichment_jobs (4 jobs: decay, campaigns,
             # calibrate, bridge_vuln_cve). In-process because each job is
