@@ -2267,6 +2267,33 @@ baseline_complete = BashOperator(
     dag=baseline_dag,
 )
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Note on the missing baseline-lock task pair (BH-H2 from the 2026-04-19
+# production-readiness audit): an earlier draft of PR-F2 added
+# ``baseline_lock_task`` + ``baseline_unlock_task`` PythonOperators wrapping
+# ``acquire_baseline_lock()`` / ``release_baseline_lock()`` to close the
+# Bug-Hunter gap (incremental DAGs racing the baseline because no Airflow
+# task was acquiring the legacy sentinel lock). Bugbot caught two HIGH-
+# severity flaws on consecutive review rounds, both rooted in the same
+# architectural mismatch: the legacy ``baseline_lock`` module's PID-based
+# primitive was designed for the in-process CLI case; in Airflow's multi-
+# process model, the subprocess that wrote the PID exits seconds later
+# while the LOGICAL lock-holder (the DAG run) continues for hours. The
+# XCom-PID-handoff patch only fixed the unlock symptom; incremental DAGs
+# still saw the dead lock-task PID and treated the sentinel as stale.
+#
+# Per the global ``pr-bot-review`` Skill stop-and-ask rule, PR-F2 was
+# de-scoped to ship only the backup-gate work (BACKUP.md + the
+# EDGEGUARD_LAST_BACKUP_AT gate). The proper Airflow-aware lock primitive
+# requires real design (see Issue #57 for constraints + options).
+# Until that lands, operators MUST NOT trigger ``edgeguard fresh-baseline``
+# while incremental DAGs are running. The BH-H2 race was real before
+# PR-F2 too — we've been running for months without an Airflow-side
+# lock — so this is a "no-regression" de-scope, not a new gap.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 # Dependency chain (PR-C audit fix Cross-Checker HIGH H3):
 # health → clean (no-op unless fresh_baseline=true conf) → start → tier1
 # (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done

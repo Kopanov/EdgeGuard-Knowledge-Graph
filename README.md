@@ -117,7 +117,7 @@ EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo
 ### 🚧 In Progress
 
 - **Local operational hardening** — see [Issue #53](../../issues/53) (PR-E backlog) and post-merge audit follow-ups:
-  - Backup + recovery procedure documentation (`docs/BACKUP.md`) — required before responsibly running `fresh-baseline` against production data
+  - ~~Backup + recovery procedure documentation~~ ✅ shipped in PR-F2 — see [docs/BACKUP.md](docs/BACKUP.md). `edgeguard fresh-baseline` now refuses to run unless `EDGEGUARD_LAST_BACKUP_AT` records a backup within 24h.
   - Audit-trail JSONL for destructive operations
   - Prometheus counters for the destructive code path
   - MISP session helper consolidation (10 sites → single helper)
@@ -127,7 +127,7 @@ EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo
 - **Trivy supply-chain gate re-tightening** — see [Issue #52](../../issues/52) (re-tighten airflow image scan to HIGH+CRITICAL once apache/airflow upstream catches up)
 - **Wipe loop simplification** — see [Issue #54](../../issues/54) (replace string-match + page-advancement state machine with tag-based filter)
 
-The phased plan: **PR-F1** lands the easy + fast audit fixes (this PR), **PR-F2** lands the most-critical fixes (baseline DAG sentinel lock, BACKUP.md + backup-timestamp gate), then we work through the In-Progress items above. The README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once the local-operational hardening lands and we shift focus to those scopes.
+The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — proper redesign tracked in [Issue #57](../../issues/57)). Next we work through the remaining In-Progress items above. The README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once the local-operational hardening lands and we shift focus to those scopes.
 
 ---
 

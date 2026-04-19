@@ -263,9 +263,26 @@ class TestFreshBaselineDagTask:
     def test_baseline_clean_task_wired_in_dependency_chain(self):
         src = self._dag_source()
         # Must appear AFTER baseline_misp_health AND BEFORE baseline_start
-        # in the dependency chain.
-        assert ("baseline_misp_health\n    >> baseline_clean_task\n    >> baseline_start") in src, (
-            "baseline_clean_task must be wired between misp_health and baseline_start"
+        # in the dependency chain. Order-only check (not literal-adjacent
+        # pin) — PR-F2 inserted ``baseline_lock_task`` between misp_health
+        # and clean, and a previous literal-adjacency pin broke. Test
+        # Coverage / Devil's Advocate flagged that pattern; this is the
+        # corrected structural-order check.
+        misp_health_idx = src.find(">> baseline_misp_health")
+        if misp_health_idx < 0:
+            # baseline_misp_health is the chain root, not a downstream — find by name
+            misp_health_idx = src.rfind("baseline_misp_health\n    >>")
+        clean_idx = src.find(">> baseline_clean_task")
+        start_idx = src.find(">> baseline_start")
+
+        assert clean_idx > 0, "baseline_clean_task must appear in the dependency chain"
+        assert start_idx > 0, "baseline_start must appear in the dependency chain"
+        assert misp_health_idx > 0, "baseline_misp_health must root the dependency chain"
+
+        # Structural order: clean comes after misp_health, before start
+        assert misp_health_idx < clean_idx < start_idx, (
+            f"expected order misp_health → clean → start; got positions "
+            f"misp_health={misp_health_idx} clean={clean_idx} start={start_idx}"
         )
 
     def test_baseline_clean_task_reads_fresh_baseline_conf(self):
