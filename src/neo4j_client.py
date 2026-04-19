@@ -181,9 +181,137 @@ def _zone_override_global_clause(node_var: str, source_expr: str) -> str:
     # but a typo could still produce broken Cypher; better to fail loudly.)
     if not _PROP_NAME_RE.match(node_var):
         raise ValueError(f"_zone_override_global_clause: invalid node_var {node_var!r}")
-    union = f"apoc.coll.toSet(coalesce({node_var}.zone, []) + {source_expr})"
+    # Route through the canonical dedup helper so the eventual native-Cypher
+    # flip (Phase 3 of the apoc.coll.toSet migration plan) changes one function
+    # instead of 47+ sites. The literal substring
+    # "apoc.coll.toSet(coalesce(n.zone, []) + $zone)" is still produced — see
+    # ``_dedup_concat_clause`` and tests/test_pr33_bugbot_fixes.py:2430.
+    union = _dedup_concat_clause(f"{node_var}.zone", source_expr)
     specifics = f"[z IN {union} WHERE z <> 'global']"
     return f"{node_var}.zone = CASE WHEN size({specifics}) > 0 THEN {specifics} ELSE {union} END"
+
+
+# --------------------------------------------------------------------------- #
+# Canonical dedup-concat helpers
+# --------------------------------------------------------------------------- #
+#
+# The codebase has 47+ ``SET <prop> = apoc.coll.toSet(coalesce(<prop>, []) + …)``
+# fragments scattered across MERGE/SET clauses. Two problems:
+#
+#   1. ``apoc.coll.toSet`` is deprecated in Neo4j 2026.x (warns; will be
+#      removed in a future major). When we eventually have to flip every
+#      site to native Cypher, doing it in 47 places is a recipe for
+#      partial-rollout bugs (a single missed site = silent unbounded list
+#      growth, since Cypher does NOT auto-dedupe on SET despite a recent
+#      reviewer claim to the contrary — verified, see the migration audit
+#      in PR description).
+#   2. There is currently no single place to instrument list sizes. The
+#      worst-case lists in production (``n.misp_event_ids``,
+#      ``r.misp_event_ids``) accumulate to 100–500+ entries on hot OTX
+#      indicators across the 2-year baseline. We need observability before
+#      we can decide whether the eventual replacement (``reduce()`` is
+#      O(n²) and would add ~22 min to ``build_relationships`` at p99=500
+#      per the perf audit; ``CASE WHEN $x IN coalesce(…)`` is O(n) but
+#      semantically equivalent ONLY for append-of-one) is safe.
+#
+# These two helpers are the chokepoint for both concerns. Phase 2 of the
+# migration (this PR): all 47+ sites route through these helpers, but the
+# helpers internally still emit ``apoc.coll.toSet(...)`` — zero behavior
+# change. Phase 3 (a follow-up PR, gated on the integration tests landed
+# alongside these helpers): change ONLY the helper internals to native
+# Cypher; every callsite picks up the new pattern automatically.
+def _dedup_concat_clause(prop_ref: str, addition_expr: str) -> str:
+    """Return the canonical Cypher fragment for dedup-concatenating *addition_expr* into *prop_ref*.
+
+    Emits::
+
+        apoc.coll.toSet(coalesce(<prop_ref>, []) + <addition_expr>)
+
+    Used by every list-accumulator SET clause that adds new elements to an
+    existing list property (``n.source[]``, ``r.sources[]``, ``n.tags[]``,
+    ``r.misp_event_ids[]``, …).
+
+    Args:
+        prop_ref: A dotted property reference of the form ``<var>.<name>``
+            (e.g. ``"n.source"``, ``"r.sources"``). Both halves are validated
+            with ``_PROP_NAME_RE`` to defend against Cypher-injection via
+            caller bugs (the inputs are always constructed by EdgeGuard code,
+            never from user input — this is belt-and-braces).
+        addition_expr: ANY Cypher expression that evaluates to a list to
+            merge into ``prop_ref``. Examples::
+
+                "$source_array"
+                "[$id]"
+                "[item.tag]"
+                "coalesce(item.tags, [])"
+
+            Validation is the caller's responsibility; this helper just
+            splices it verbatim.
+
+    Returns:
+        The set-union Cypher fragment, suitable for use as the right-hand
+        side of a ``SET <prop_ref> = ...`` clause.
+
+    Raises:
+        ValueError: if ``prop_ref`` is not a well-formed ``<var>.<name>`` pair.
+    """
+    var, sep, name = prop_ref.partition(".")
+    if not sep or not var or not name or "." in name:
+        raise ValueError(f"_dedup_concat_clause: prop_ref must be of the form '<var>.<name>', got {prop_ref!r}")
+    if not _PROP_NAME_RE.match(var):
+        raise ValueError(f"_dedup_concat_clause: invalid var {var!r} in prop_ref {prop_ref!r}")
+    if not _PROP_NAME_RE.match(name):
+        raise ValueError(f"_dedup_concat_clause: invalid prop name {name!r} in prop_ref {prop_ref!r}")
+    return f"apoc.coll.toSet(coalesce({prop_ref}, []) + {addition_expr})"
+
+
+def _dedup_concat_optional_clause(
+    prop_ref: str,
+    value_expr: str,
+    *,
+    require_nonempty_string: bool = False,
+) -> str:
+    """Return the dedup-concat fragment that appends ``value_expr`` only when non-null.
+
+    Emits (with ``require_nonempty_string=False``)::
+
+        apoc.coll.toSet(coalesce(<prop_ref>, []) + CASE WHEN <value_expr> IS NOT NULL THEN [<value_expr>] ELSE [] END)
+
+    Or, with ``require_nonempty_string=True``::
+
+        apoc.coll.toSet(coalesce(<prop_ref>, []) + CASE WHEN <value_expr> IS NOT NULL AND <value_expr> <> '' THEN [<value_expr>] ELSE [] END)
+
+    This is the "Pattern B" CASE-gated variant used by every
+    ``r.misp_event_ids`` / ``n.misp_event_ids`` SET clause where the
+    incoming row may legitimately omit the field (UNWIND batch rows where
+    not every row carries a MISP event id). Sharing one helper guarantees
+    the gating predicate stays in lockstep across all 11 batch-relationship
+    queries.
+
+    Args:
+        prop_ref: dotted property reference (see ``_dedup_concat_clause``).
+        value_expr: scalar Cypher expression to append when the predicate
+            holds (e.g. ``"row.misp_event_id"``, ``"$misp_event_id"``,
+            ``"item.misp_attribute_id"``). Spliced verbatim into the
+            predicate and the array-of-one literal — no validation.
+        require_nonempty_string: if True, the predicate also requires
+            ``value_expr <> ''``. The original batch-relationship templates
+            in ``create_misp_relationships_batch`` used this guard for
+            ``row.misp_event_id`` because some upstream paths produced
+            empty strings rather than nulls; the node-side templates do
+            not (those paths pre-filter to non-empty). Defaults to False.
+
+    Returns:
+        The set-union Cypher fragment as a single line (no embedded
+        newlines), suitable for use as the right-hand side of a
+        ``SET <prop_ref> = ...`` clause.
+    """
+    if require_nonempty_string:
+        guard = f"{value_expr} IS NOT NULL AND {value_expr} <> ''"
+    else:
+        guard = f"{value_expr} IS NOT NULL"
+    case_expr = f"CASE WHEN {guard} THEN [{value_expr}] ELSE [] END"
+    return _dedup_concat_clause(prop_ref, case_expr)
 
 
 def nonempty_graph_string(value: Any) -> Optional[str]:
@@ -990,9 +1118,9 @@ class Neo4jClient:
                     WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score
                     THEN $confidence
                     ELSE n.confidence_score END,
-                n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_array),
+                n.source = {_dedup_concat_clause("n.source", "$source_array")},
                 {_zone_clause},
-                n.tags = apoc.coll.toSet(coalesce(n.tags, []) + $tag_array),
+                n.tags = {_dedup_concat_clause("n.tags", "$tag_array")},
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
@@ -1011,13 +1139,13 @@ class Neo4jClient:
             # via apoc.coll.toSet so duplicates within an array are de-duped.
             misp_event_id = data.get("misp_event_id")
             if misp_event_id:
-                query += """,
-                n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + [$misp_event_id])"""
+                query += f""",
+                n.misp_event_ids = {_dedup_concat_clause("n.misp_event_ids", "[$misp_event_id]")}"""
 
             misp_attribute_id = data.get("misp_attribute_id")
             if misp_attribute_id:
-                query += """,
-                n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + [$misp_attribute_id])"""
+                query += f""",
+                n.misp_attribute_ids = {_dedup_concat_clause("n.misp_attribute_ids", "[$misp_attribute_id]")}"""
 
             # PR #34 round 17: deleted ``n.original_published_date`` and
             # ``n.original_modified_date`` SET clauses. They were intended to
@@ -1057,7 +1185,7 @@ class Neo4jClient:
                 _validate_prop_name(prop_name)
                 if prop_value is not None and prop_value != "":
                     if prop_name in _ARRAY_ACCUMULATE_PROPS and isinstance(prop_value, list):
-                        query += f", n.{prop_name} = apoc.coll.toSet(coalesce(n.{prop_name}, []) + ${prop_name})"
+                        query += f", n.{prop_name} = {_dedup_concat_clause(f'n.{prop_name}', f'${prop_name}')}"
                     else:
                         query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
@@ -1918,22 +2046,22 @@ class Neo4jClient:
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
                         ELSE n.confidence_score END,
-                    n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
+                    n.source = {_dedup_concat_clause("n.source", "item.source_array")},
                     {_zone_clause},
-                    n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
+                    n.tags = {_dedup_concat_clause("n.tags", "[item.tag]")},
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
-                    n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
-                    n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
+                    n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
+                    n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
                     n.url_status = coalesce(item.url_status, n.url_status),
                     n.last_online = coalesce(item.last_online, n.last_online),
-                    n.abuse_categories = apoc.coll.toSet(coalesce(n.abuse_categories, []) + coalesce(item.abuse_categories, [])),
-                    n.yara_rules = apoc.coll.toSet(coalesce(n.yara_rules, []) + coalesce(item.yara_rules, [])),
-                    n.sigma_rules = apoc.coll.toSet(coalesce(n.sigma_rules, []) + coalesce(item.sigma_rules, [])),
+                    n.abuse_categories = {_dedup_concat_clause("n.abuse_categories", "coalesce(item.abuse_categories, [])")},
+                    n.yara_rules = {_dedup_concat_clause("n.yara_rules", "coalesce(item.yara_rules, [])")},
+                    n.sigma_rules = {_dedup_concat_clause("n.sigma_rules", "coalesce(item.sigma_rules, [])")},
                     n.threat_label = coalesce(item.threat_label, n.threat_label)
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
@@ -2114,19 +2242,19 @@ class Neo4jClient:
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
                         ELSE n.confidence_score END,
-                    n.source = apoc.coll.toSet(coalesce(n.source, []) + item.source_array),
+                    n.source = {_dedup_concat_clause("n.source", "item.source_array")},
                     {_zone_clause},
-                    n.tags = apoc.coll.toSet(coalesce(n.tags, []) + [item.tag]),
+                    n.tags = {_dedup_concat_clause("n.tags", "[item.tag]")},
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
-                    n.misp_event_ids = apoc.coll.toSet(coalesce(n.misp_event_ids, []) + CASE WHEN item.misp_event_id IS NOT NULL THEN [item.misp_event_id] ELSE [] END),
-                    n.misp_attribute_ids = apoc.coll.toSet(coalesce(n.misp_attribute_ids, []) + CASE WHEN item.misp_attribute_id IS NOT NULL THEN [item.misp_attribute_id] ELSE [] END),
+                    n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
+                    n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
                     n.version_constraints = coalesce(item.version_constraints, n.version_constraints),
-                    n.cisa_cwes = apoc.coll.toSet(coalesce(n.cisa_cwes, []) + coalesce(item.cisa_cwes, [])),
+                    n.cisa_cwes = {_dedup_concat_clause("n.cisa_cwes", "coalesce(item.cisa_cwes, [])")},
                     n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes)
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
@@ -2228,12 +2356,12 @@ class Neo4jClient:
 
         logger.debug(f"Creating actor-technique relationship: {an} -> {tid}")
 
-        query = """
+        query = f"""
         MATCH (a:ThreatActor)
         WHERE a.name = $actor_name OR $actor_name IN coalesce(a.aliases, [])
-        MATCH (t:Technique {mitre_id: $technique_mitre_id})
+        MATCH (t:Technique {{mitre_id: $technique_mitre_id}})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2277,13 +2405,13 @@ class Neo4jClient:
 
         logger.debug(f"Creating malware-actor relationship: {mn} -> {an}")
 
-        query = """
+        query = f"""
         MATCH (m:Malware)
         WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
         MATCH (a:ThreatActor)
         WHERE (a.name = $actor_name OR $actor_name IN coalesce(a.aliases, []))
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.7,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2326,11 +2454,11 @@ class Neo4jClient:
         logger.debug(f"Creating indicator-vulnerability relationship: {ind} -> {cve}")
 
         # Link to Vulnerability nodes (MISP-sourced)
-        query_vuln = """
-        MATCH (i:Indicator {value: $value})
-        MATCH (v:Vulnerability {cve_id: $cve_id})
+        query_vuln = f"""
+        MATCH (i:Indicator {{value: $value}})
+        MATCH (v:Vulnerability {{cve_id: $cve_id}})
         MERGE (i)-[r:INDICATES]->(v)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2339,11 +2467,11 @@ class Neo4jClient:
             r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
         # Link to CVE nodes (NVD-sourced, ResilMesh schema)
-        query_cve = """
-        MATCH (i:Indicator {value: $value})
-        MATCH (v:CVE {cve_id: $cve_id})
+        query_cve = f"""
+        MATCH (i:Indicator {{value: $value}})
+        MATCH (v:CVE {{cve_id: $cve_id}})
         MERGE (i)-[r:INDICATES]->(v)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2379,12 +2507,12 @@ class Neo4jClient:
 
         logger.debug(f"Creating indicator-malware relationship: {iv} -> {mn}")
 
-        query = """
-        MATCH (i:Indicator {value: $indicator_value})
+        query = f"""
+        MATCH (i:Indicator {{value: $indicator_value}})
         MATCH (m:Malware)
         WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.6,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2435,11 +2563,11 @@ class Neo4jClient:
         """
 
         # Create the relationship
-        rel_query = """
-        MATCH (i:Indicator {value: $indicator_value})
-        MATCH (s:Sector {name: $sector_name})
+        rel_query = f"""
+        MATCH (i:Indicator {{value: $indicator_value}})
+        MATCH (s:Sector {{name: $sector_name}})
         MERGE (i)-[r:TARGETS]->(s)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2502,8 +2630,8 @@ class Neo4jClient:
             s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
-        rel_props = """
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [$source_id]),
+        rel_props = f"""
+        SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
             r.confidence_score = 0.5,
             r.imported_at = coalesce(r.imported_at, datetime()),
@@ -2809,72 +2937,62 @@ class Neo4jClient:
 
         total = 0
 
+        # Canonical SET clause shared by every batch-relationship template
+        # below. Eleven queries used to duplicate the same r.sources /
+        # r.misp_event_ids / timestamp / src_uuid / trg_uuid block — they now
+        # splice this helper. The dedup-concat fragments come from
+        # _dedup_concat_clause / _dedup_concat_optional_clause so the eventual
+        # native-Cypher migration changes those two functions only.
+        def _set_clause(src_var: str, trg_var: str, extra_set: str = "") -> str:
+            sources_dedup = _dedup_concat_clause("r.sources", "[row.source_id]")
+            misp_dedup = _dedup_concat_optional_clause(
+                "r.misp_event_ids", "row.misp_event_id", require_nonempty_string=True
+            )
+            extra = f"\n            {extra_set}," if extra_set else ""
+            return (
+                f"SET r.sources = {sources_dedup},\n"
+                f"            r.source_id = row.source_id,\n"
+                f"            r.confidence_score = row.confidence,{extra}\n"
+                f"            r.misp_event_ids = {misp_dedup},\n"
+                f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
+                f"            r.updated_at = datetime(),\n"
+                f"            r.src_uuid = coalesce(r.src_uuid, {src_var}.uuid),\n"
+                f"            r.trg_uuid = coalesce(r.trg_uuid, {trg_var}.uuid)"
+            )
+
         # Attribution edge: ThreatActor → Technique
-        q_actor_employs = """
+        q_actor_employs = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor)
         WHERE a.name = row.actor OR row.actor IN coalesce(a.aliases, [])
-        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, a.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
+        {_set_clause("a", "t")}
         """
         # Attribution edge: Campaign → Technique. Separate from the
         # ThreatActor query so the planner hits a single label index.
         # (Merging both into one query via OR or UNION fragments the plan
         # and was the root cause of the silent 0-row bug caught by bugbot
         # on PR #24 — Campaign rows routed to a ThreatActor-only query.)
-        q_campaign_employs = """
+        q_campaign_employs = f"""
         UNWIND $rows AS row
         MATCH (c:Campaign)
         WHERE c.name = row.campaign OR row.campaign IN coalesce(c.aliases, [])
-        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (c)-[r:EMPLOYS_TECHNIQUE]->(t)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, c.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
+        {_set_clause("c", "t")}
         """
         # Capability edge: Malware or Tool → Technique. Single query handles
         # both labels via CALL ... apoc.do.case-style branching; we run one
         # UNWIND per from_type inside the caller so planner can use label
         # lookups efficiently (see _run_rows calls below).
-        q_malware_implements = """
+        q_malware_implements = f"""
         UNWIND $rows AS row
         MATCH (m:Malware)
         WHERE (m.name = row.entity OR row.entity IN coalesce(m.aliases, []))
-        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, m.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
+        {_set_clause("m", "t")}
         """
         # Tool's natural key (and UNIQUE constraint) is mitre_id, NOT name —
         # the dispatch loop above puts the Tool's mitre_id into row.entity for
@@ -2882,173 +3000,83 @@ class Neo4jClient:
         # canonical id is the MITRE id). Pre-2026-04 this query MATCHed by
         # tool.name, which silently dropped every Tool row sent through this
         # path because parse_attribute correctly sends from_key={"mitre_id": …}.
-        q_tool_implements = """
+        q_tool_implements = f"""
         UNWIND $rows AS row
-        MATCH (tool:Tool {mitre_id: row.entity})
-        MATCH (t:Technique {mitre_id: row.mitre_id})
+        MATCH (tool:Tool {{mitre_id: row.entity}})
+        MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, tool.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, t.uuid)
+        {_set_clause("tool", "t")}
         """
-        q_attr = """
+        q_attr = f"""
         UNWIND $rows AS row
         MATCH (m:Malware)
         WHERE (m.name = row.malware OR row.malware IN coalesce(m.aliases, []))
         MATCH (a:ThreatActor)
         WHERE (a.name = row.actor OR row.actor IN coalesce(a.aliases, []))
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, m.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, a.uuid)
+        {_set_clause("m", "a")}
         """
-        q_ind_mal = """
+        q_ind_mal = f"""
         UNWIND $rows AS row
-        MATCH (i:Indicator {value: row.value})
+        MATCH (i:Indicator {{value: row.value}})
         MATCH (m:Malware)
         WHERE (m.name = row.malware OR row.malware IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, i.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, m.uuid)
+        {_set_clause("i", "m")}
         """
-        q_tgt_ind = """
+        q_tgt_ind = f"""
         UNWIND $rows AS row
-        MERGE (s:Sector {name: row.sector})
+        MERGE (s:Sector {{name: row.sector}})
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = row.sector_uuid
         SET s.updated_at = datetime(),
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
-        MATCH (i:Indicator {value: row.value})
+        MATCH (i:Indicator {{value: row.value}})
         MERGE (i)-[r:TARGETS]->(s)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, i.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
+        {_set_clause("i", "s")}
         """
         # PR #33 round 11 (bugbot LOW): Vulnerability/CVE → Sector edges use
         # AFFECTS, not TARGETS. TARGETS is reserved for Indicator → Sector
         # (see q_tgt_ind below + build_relationships.py 7a). Vuln/CVE → Sector
         # is AFFECTS (build_relationships.py 7b + ARCHITECTURE.md edges table).
-        q_aff_vuln = """
+        q_aff_vuln = f"""
         UNWIND $rows AS row
-        MERGE (s:Sector {name: row.sector})
+        MERGE (s:Sector {{name: row.sector}})
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = row.sector_uuid
         SET s.updated_at = datetime(),
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
-        MATCH (v:Vulnerability {cve_id: row.cve_id})
+        MATCH (v:Vulnerability {{cve_id: row.cve_id}})
         MERGE (v)-[r:AFFECTS]->(s)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, v.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
+        {_set_clause("v", "s")}
         """
-        q_aff_cve = """
+        q_aff_cve = f"""
         UNWIND $rows AS row
-        MERGE (s:Sector {name: row.sector})
+        MERGE (s:Sector {{name: row.sector}})
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = row.sector_uuid
         SET s.updated_at = datetime(),
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
-        MATCH (v:CVE {cve_id: row.cve_id})
+        MATCH (v:CVE {{cve_id: row.cve_id}})
         MERGE (v)-[r:AFFECTS]->(s)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, v.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, s.uuid)
+        {_set_clause("v", "s")}
         """
-        q_expl_vuln = """
+        q_expl_vuln = f"""
         UNWIND $rows AS row
-        MATCH (i:Indicator {value: row.value})
-        MATCH (v:Vulnerability {cve_id: row.cve_id})
+        MATCH (i:Indicator {{value: row.value}})
+        MATCH (v:Vulnerability {{cve_id: row.cve_id}})
         MERGE (i)-[r:EXPLOITS]->(v)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.match_type = 'cve_tag',
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, i.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
+        {_set_clause("i", "v", extra_set="r.match_type = 'cve_tag'")}
         """
-        q_expl_cve = """
+        q_expl_cve = f"""
         UNWIND $rows AS row
-        MATCH (i:Indicator {value: row.value})
-        MATCH (v:CVE {cve_id: row.cve_id})
+        MATCH (i:Indicator {{value: row.value}})
+        MATCH (v:CVE {{cve_id: row.cve_id}})
         MERGE (i)-[r:EXPLOITS]->(v)
-        SET r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source_id]),
-            r.source_id = row.source_id,
-            r.confidence_score = row.confidence,
-            r.match_type = 'cve_tag',
-            r.misp_event_ids = apoc.coll.toSet(
-                coalesce(r.misp_event_ids, []) +
-                CASE WHEN row.misp_event_id IS NOT NULL AND row.misp_event_id <> ''
-                     THEN [row.misp_event_id] ELSE [] END
-            ),
-            r.imported_at = coalesce(r.imported_at, datetime()),
-            r.updated_at = datetime(),
-            r.src_uuid = coalesce(r.src_uuid, i.uuid),
-            r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
+        {_set_clause("i", "v", extra_set="r.match_type = 'cve_tag'")}
         """
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
@@ -3448,12 +3476,12 @@ class Neo4jClient:
         # they have no upstream "source" claiming a first observation.
         # Same convention as the threat-intel nodes after the edge
         # refactor — node has only DB-local timestamps.
-        query = """
-        MERGE (i:IP {address: $address})
+        query = f"""
+        MERGE (i:IP {{address: $address}})
         ON CREATE SET i.uuid = $ip_uuid,
                       i.first_imported_at = datetime()
         SET i.status = $status,
-            i.tag = apoc.coll.toSet(coalesce(i.tag, []) + $tag_list),
+            i.tag = {_dedup_concat_clause("i.tag", "$tag_list")},
             i.version = $version,
             i.edgeguard_managed = true,
             i.last_updated = datetime(),
@@ -3883,8 +3911,8 @@ class Neo4jClient:
         """
         cve_id = data.get("cve_id")
         cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
-        query = """
-        MERGE (c:CVE {cve_id: $cve_id})
+        query = f"""
+        MERGE (c:CVE {{cve_id: $cve_id}})
         ON CREATE SET c.uuid = $cve_uuid
         SET c.description = $description,
             c.published = $published,
@@ -3894,7 +3922,7 @@ class Neo4jClient:
             c.ref_tags = $ref_tags,
             c.cwe = $cwe,
             c.edgeguard_managed = true,
-            c.tags = apoc.coll.toSet(coalesce(c.tags, []) + [$tag]),
+            c.tags = {_dedup_concat_clause("c.tags", "[$tag]")},
             c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
             c.last_updated = datetime(),
@@ -4961,13 +4989,13 @@ class Neo4jClient:
         MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
         ON CREATE SET i.first_imported_at = datetime()
         SET i.last_updated = datetime(),
-            i.source = apoc.coll.toSet(coalesce(i.source, []) + $source),
+            i.source = {_dedup_concat_clause("i.source", "$source")},
             i.confidence_score = CASE
                 WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                 THEN $confidence_score
                 ELSE i.confidence_score END,
             {_zone_clause_i},
-            i.tags = apoc.coll.toSet(coalesce(i.tags, []) + ['resilmesh']),
+            i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
             i.edgeguard_managed = true,
             i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
         """
@@ -5075,6 +5103,128 @@ def test_connection():
         return True
 
     return False
+
+
+# --------------------------------------------------------------------------- #
+# Periodic list-size scrape (Prometheus instrumentation for Phase-3 sizing)
+# --------------------------------------------------------------------------- #
+def scrape_list_dedup_sizes(client: "Neo4jClient", *, sample_size: int = 200) -> int:
+    """Sample list-size distribution on dedup-accumulator properties and
+    record observations to ``NEO4J_LIST_DEDUP_SIZE``.
+
+    Why this exists:
+        ``_dedup_concat_clause`` and ``_dedup_concat_optional_clause`` are
+        the chokepoint for every list-accumulator SET in the codebase.
+        Phase 3 of the apoc.coll.toSet → native-Cypher migration plan
+        flips those helpers' internals — and the safe replacement
+        depends on the live distribution of list sizes (the prod-readiness
+        audit measured ``reduce()`` at 120× regression at n=500). This
+        helper exposes that distribution as a Prometheus histogram so we
+        can decide *before* shipping Phase 3 whether the cheap O(n)
+        ``CASE WHEN $x IN coalesce(...)`` form is sufficient or whether
+        we need the O(n log n) ``UNWIND … collect(DISTINCT)`` subquery
+        for the long-tail nodes.
+
+    Sampling strategy:
+        Returns the TOP-K largest sizes per (label_or_type, prop) — not
+        the median. The Phase-3 sizing decision is governed by the
+        worst-case, not the average; sampling the head of the
+        distribution is the right shape for that decision.
+
+    Cardinality:
+        7 (label_or_type, prop) pairs × ``sample_size`` observations per
+        scrape → bounded ≤ 1400 observations per call. Designed to be
+        invoked every 5–15 min from a metrics-update task; per-write
+        instrumentation would add a round-trip per batch and is not
+        worth the cost for distributional data.
+
+    Args:
+        client: an open ``Neo4jClient`` (its ``driver`` must be alive).
+        sample_size: per-(label, prop) row cap. Defaults to 200.
+
+    Returns:
+        Total number of observations recorded (across all targets).
+    """
+    if not client.driver:
+        return 0
+    try:
+        from metrics_server import record_neo4j_list_dedup_size
+    except ImportError:
+        logger.debug("scrape_list_dedup_sizes: metrics_server unavailable, no-op")
+        return 0
+
+    targets = [
+        # Threat-intel node accumulators (the lists that grow with cross-source
+        # observation count — most likely to hit the long tail).
+        (
+            "Indicator",
+            "source",
+            "MATCH (n:Indicator) WHERE n.source IS NOT NULL RETURN size(n.source) AS sz ORDER BY sz DESC LIMIT $k",
+        ),
+        (
+            "Indicator",
+            "tags",
+            "MATCH (n:Indicator) WHERE n.tags IS NOT NULL RETURN size(n.tags) AS sz ORDER BY sz DESC LIMIT $k",
+        ),
+        (
+            "Indicator",
+            "misp_event_ids",
+            "MATCH (n:Indicator) WHERE n.misp_event_ids IS NOT NULL "
+            "RETURN size(n.misp_event_ids) AS sz ORDER BY sz DESC LIMIT $k",
+        ),
+        (
+            "Vulnerability",
+            "misp_event_ids",
+            "MATCH (n:Vulnerability) WHERE n.misp_event_ids IS NOT NULL "
+            "RETURN size(n.misp_event_ids) AS sz ORDER BY sz DESC LIMIT $k",
+        ),
+        # Edge accumulators on the BATCH-RELATIONSHIP edges only — these are
+        # the ones produced by create_misp_relationships_batch and they all
+        # carry r.sources[] + r.misp_event_ids[] via the canonical
+        # _set_clause helper.
+        #
+        # NOT included: SOURCED_FROM. That edge has only the SCALAR
+        # ``r.source = item.source_id`` (singular, not a list) — see
+        # ``_upsert_sourced_relationship`` and the SET clauses in
+        # ``merge_indicators_batch`` / ``merge_vulnerabilities_batch``. A
+        # ``size(r.sources)`` query on SOURCED_FROM would silently return
+        # zero observations because the WHERE filter excludes every edge
+        # (bugbot LOW on PR #46 caught this — was a copy-paste from the
+        # batch-rel template). SOURCED_FROM also carries no other list
+        # property, so there is nothing to sample on it.
+        (
+            "INDICATES",
+            "sources",
+            "MATCH ()-[r:INDICATES]->() WHERE r.sources IS NOT NULL "
+            "RETURN size(r.sources) AS sz ORDER BY sz DESC LIMIT $k",
+        ),
+        (
+            "INDICATES",
+            "misp_event_ids",
+            "MATCH ()-[r:INDICATES]->() WHERE r.misp_event_ids IS NOT NULL "
+            "RETURN size(r.misp_event_ids) AS sz ORDER BY sz DESC LIMIT $k",
+        ),
+    ]
+
+    observed = 0
+    try:
+        with client.driver.session() as session:
+            for label_or_type, prop, query in targets:
+                try:
+                    result = session.run(query, k=sample_size, timeout=NEO4J_READ_TIMEOUT)
+                    for row in result:
+                        sz = row.get("sz") if hasattr(row, "get") else row["sz"]
+                        if isinstance(sz, int):
+                            record_neo4j_list_dedup_size(label_or_type, prop, sz)
+                            observed += 1
+                except Exception as e:
+                    logger.warning("scrape_list_dedup_sizes: %s.%s failed: %s", label_or_type, prop, e)
+    except Exception as e:
+        logger.warning("scrape_list_dedup_sizes: session open failed: %s", e)
+        return observed
+
+    logger.info("scrape_list_dedup_sizes: observed %d list-size samples", observed)
+    return observed
 
 
 if __name__ == "__main__":

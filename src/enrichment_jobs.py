@@ -21,7 +21,7 @@ from typing import Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from neo4j_client import NEO4J_READ_TIMEOUT  # noqa: E402
+from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause  # noqa: E402
 from node_identity import compute_node_uuid  # noqa: E402
 from query_pause import query_pause
 
@@ -194,7 +194,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # whose deterministic uuid was precomputed; new actors are
             # picked up on the next run when they're included in the
             # pre-fetch.
-            create_cypher = """
+            create_cypher = f"""
             MATCH (a:ThreatActor)
             WHERE EXISTS((a)<-[:ATTRIBUTED_TO]-(:Malware))
               AND a.name IN keys($campaign_uuids)
@@ -238,11 +238,11 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                  apoc.coll.toSet(
                      reduce(z=[], ind IN indicator_sample | z + coalesce(ind.zone, []))
                  ) AS all_zones
-            MERGE (c:Campaign {name: a.name + ' Campaign'})
+            MERGE (c:Campaign {{name: a.name + ' Campaign'}})
             ON CREATE SET c.created_at = datetime(),
                           c.actor_name = a.name,
                           c.uuid = $campaign_uuids[a.name]
-            SET c.tags = apoc.coll.toSet(coalesce(c.tags, []) + coalesce(a.tags, [])),
+            SET c.tags = {_dedup_concat_clause("c.tags", "coalesce(a.tags, [])")},
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.active           = CASE WHEN indicator_total > 0 THEN true ELSE c.active END,
                 c.last_updated     = datetime(),

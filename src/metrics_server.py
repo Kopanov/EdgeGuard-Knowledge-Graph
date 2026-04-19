@@ -155,6 +155,36 @@ NEO4J_SYNC_DURATION = Histogram(
     buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
 )
 
+# Distribution of accumulator-list sizes on Neo4j nodes/relationships.
+# Sampled periodically (NOT per-write) — see ``record_neo4j_list_dedup_size``
+# in this module and the ``scrape_list_dedup_sizes`` helper in neo4j_client.
+#
+# Why we measure: the apoc.coll.toSet → native-Cypher migration plan
+# includes Phase 3, which flips ``_dedup_concat_clause`` internals from
+# ``apoc.coll.toSet(...)`` to a native ``CASE WHEN $x IN coalesce(...)``
+# pattern. The pure-``reduce()`` alternative is O(n²) — at p99=500 list
+# size on a 350K-relationship build_relationships pass that adds ~22 min
+# (per the prod-readiness audit). To know whether we can ship Phase 3
+# safely we need the live distribution: if our actual p99 is 20, the
+# perf concern is moot; if it's 500+, we must use the O(n) CASE form
+# (which is exact only for append-of-one — most callsites — but breaks
+# subtly for two-list merges).
+#
+# Buckets are tuned for the threat-intel list shapes:
+#   1, 5, 10 — typical n.source / r.sources
+#   25, 50   — typical n.tags / n.misp_event_ids on cold indicators
+#   100, 250 — hot indicators across many MISP events
+#   500, 1000, 2500 — worst-case OTX hot-IPs across the 2-year baseline
+NEO4J_LIST_DEDUP_SIZE = Histogram(
+    "edgeguard_neo4j_list_dedup_size",
+    "Sampled distribution of list sizes on dedup-accumulator properties "
+    "(n.source, n.misp_event_ids, r.sources, r.misp_event_ids, etc). "
+    "Periodic sample, not per-write. Used to size the eventual native-Cypher "
+    "replacement for apoc.coll.toSet (see neo4j_client._dedup_concat_clause).",
+    ["label_or_type", "prop"],
+    buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500],
+)
+
 # Per-run sync accounting. Gauges (not counters) so they reset each run
 # and alerts can fire on the CURRENT run's damage, not cumulative history.
 # Added after the 2026-04-14 NVD regression where a single MISP 500 dropped
@@ -600,6 +630,26 @@ def record_neo4j_relationships(rel_counts: Dict[str, int]):
     """Record Neo4j relationship counts."""
     for rel_type, count in rel_counts.items():
         NEO4J_RELATIONSHIPS.labels(rel_type=rel_type).set(count)
+
+
+def record_neo4j_list_dedup_size(label_or_type: str, prop: str, size: int) -> None:
+    """Observe one sample of a dedup-accumulator list size.
+
+    See ``NEO4J_LIST_DEDUP_SIZE`` for rationale. ``label_or_type`` is the
+    node label (``"Indicator"``) or relationship type (``"INDICATES"``)
+    that owns the property; both are normalized to bounded short strings
+    to keep Prometheus cardinality finite. ``prop`` is the property name
+    (``"misp_event_ids"``, ``"sources"``, etc).
+
+    Negative or non-int sizes are silently dropped — the scrape helper
+    in neo4j_client filters NULLs upstream, so a non-int here would be a
+    programming error rather than data quality.
+    """
+    if not isinstance(size, int) or size < 0:
+        return
+    safe_lt = (label_or_type or "<unknown>").strip()[:80] or "<unknown>"
+    safe_prop = (prop or "<unknown>").strip()[:80] or "<unknown>"
+    NEO4J_LIST_DEDUP_SIZE.labels(label_or_type=safe_lt, prop=safe_prop).observe(size)
 
 
 def record_pipeline_duration(pipeline_type: str, duration: float):
