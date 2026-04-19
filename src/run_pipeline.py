@@ -1076,18 +1076,27 @@ class EdgeGuardPipeline:
                 # ``acquire_baseline_lock`` failure path are in the same
                 # ``run()`` body, and Python resolves nested-function names
                 # via the enclosing scope at call time.
+                # PR-A audit fix (Bugbot LOW on commit 8ab02ac): the previous
+                # ``if existing_pid == os.getpid()`` else-branch fired with
+                # ``existing_pid=None`` (lock missing/unreadable) and logged
+                # a misleading "sentinel pid=None != current pid=X" — implying
+                # a PID mismatch when the real cause was a missing/corrupt
+                # file. Mirror ``_cleanup_lock``'s explicit None-guard so
+                # the only warning fires on a genuine PID mismatch.
                 existing_pid = _read_lock_pid(lock_path)
-                if existing_pid == os.getpid():
+                if existing_pid is not None and existing_pid == os.getpid():
                     try:
                         os.remove(lock_path)
                     except OSError:
                         pass
-                else:
+                elif existing_pid is not None:
                     logger.warning(
                         "Not removing pipeline lock on baseline-acquire failure: sentinel pid=%s != current pid=%s",
                         existing_pid,
                         os.getpid(),
                     )
+                # else: existing_pid is None — lock missing/unreadable;
+                # don't remove and don't warn (no actionable information).
                 return False
             baseline_lock_held = True
 

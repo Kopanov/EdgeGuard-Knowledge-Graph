@@ -89,13 +89,6 @@ services:
       - "127.0.0.1:7687:7687"   # Bolt protocol — loopback only
     environment:
       NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
-      # PR-A audit fix (Prod Readiness HIGH): expose user+password as separate
-      # env vars for the writability healthcheck (the Neo4j entrypoint only
-      # consumes NEO4J_AUTH; the healthcheck command needs the parts directly,
-      # and bash parameter expansion (${NEO4J_AUTH%%/*}) is /bin/sh-fragile in
-      # the Neo4j container).
-      EG_NEO4J_USER: ${NEO4J_USER:-neo4j}
-      EG_NEO4J_PASSWORD: ${NEO4J_PASSWORD:?NEO4J_PASSWORD is required}
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_dbms_security_procedures_allowlist: "apoc.*"
@@ -137,8 +130,18 @@ services:
       # don't break the healthcheck. Without quoting, e.g. NEO4J_PASSWORD="a&b"
       # would split mid-arg and the healthcheck would fail with a confusing
       # auth error rather than the actual writability test.
+      #
+      # PR-A audit fix (Bugbot LOW on commit 8ab02ac): drop the
+      # EG_NEO4J_USER / EG_NEO4J_PASSWORD aliases that duplicated the
+      # credentials already in NEO4J_AUTH as separate env vars (visible
+      # to every process in the container). Parse NEO4J_AUTH directly
+      # using POSIX shell parameter expansion (``${VAR%%/*}`` =
+      # everything before first ``/``; ``${VAR#*/}`` = everything after
+      # first ``/``). dash supports both per POSIX spec — the prior
+      # comment claiming this was "/bin/sh-fragile" was incorrect.
+      # Result: one fewer copy of the password on disk + in process env.
       test: ["CMD-SHELL",
-             "cypher-shell -u \"$$EG_NEO4J_USER\" -p \"$$EG_NEO4J_PASSWORD\" 'CREATE (n:_HC) DELETE n' || exit 1"]
+             "cypher-shell -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'CREATE (n:_HC) DELETE n' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -335,6 +338,15 @@ services:
       EDGEGUARD_API_WORKERS: "2"
       EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
       EDGEGUARD_ADMIN_TOKEN: ${EDGEGUARD_ADMIN_TOKEN:-}
+      # PR-A audit fix (Bugbot MED on commit b2c0479): the .env.example
+      # documents EDGEGUARD_ALLOW_UNAUTH=1 as the "LAST RESORT" escape
+      # hatch when an operator wants to bypass the api/graphql safety
+      # check (src/query_api.py:96 + src/graphql_api.py:101). But Compose
+      # only forwards explicitly listed env vars to containers — without
+      # this line, setting EDGEGUARD_ALLOW_UNAUTH=1 in .env had NO effect
+      # and the container kept crashing with the documented RuntimeError.
+      # Forward it explicitly so the documented escape hatch works.
+      EDGEGUARD_ALLOW_UNAUTH: ${EDGEGUARD_ALLOW_UNAUTH:-}
       PYTHONPATH: /app/src
     depends_on:
       neo4j:
@@ -383,6 +395,10 @@ services:
       EDGEGUARD_GRAPHQL_WORKERS: "2"
       # Set to "false" in production to disable the interactive GraphiQL explorer
       EDGEGUARD_GRAPHQL_PLAYGROUND: ${EDGEGUARD_GRAPHQL_PLAYGROUND:-false}
+      # PR-A audit fix (Bugbot MED on commit b2c0479): symmetric with the
+      # api service above — forward EDGEGUARD_ALLOW_UNAUTH so the .env.example
+      # escape hatch documentation actually works for graphql too.
+      EDGEGUARD_ALLOW_UNAUTH: ${EDGEGUARD_ALLOW_UNAUTH:-}
       PYTHONPATH: /app/src
     depends_on:
       neo4j:
