@@ -2297,7 +2297,16 @@ baseline_complete = BashOperator(
 def _baseline_lock(**context):
     """Acquire the baseline sentinel lock; fail the DAG fast if another
     baseline is already running. Mirrors the legacy CLI lock-acquire
-    semantics from ``src/run_pipeline.py:_run_with_lock``."""
+    semantics from ``src/run_pipeline.py:_run_with_lock``.
+
+    PR-F2 audit fix (Bugbot HIGH on commit 3122821): pushes ``os.getpid()``
+    via XCom so the downstream ``_baseline_unlock`` task — which may run
+    in a different Airflow worker with a different PID — can pass the
+    correct PID to ``release_baseline_lock(expected_pid=...)``. Without
+    this XCom hand-off, the unlock task's PID never matches the sentinel's
+    recorded PID → release is a silent no-op → lock persists forever →
+    blocks all future baselines + scheduled DAGs.
+    """
     try:
         from baseline_lock import acquire_baseline_lock
     except ImportError as e:
@@ -2312,14 +2321,33 @@ def _baseline_lock(**context):
             "See logs for the live PID/host. If the sentinel is stale, "
             "delete it manually (path is in the log line above)."
         )
-    logger.info("BASELINE_LOCK: acquired sentinel; scheduled DAGs will skip until release.")
+
+    # Hand off the lock-holder PID to baseline_unlock_task via XCom.
+    lock_pid = os.getpid()
+    context["ti"].xcom_push(key="baseline_lock_pid", value=lock_pid)
+    logger.info(
+        "BASELINE_LOCK: acquired sentinel (pid=%s pushed to XCom); scheduled DAGs will skip until release.",
+        lock_pid,
+    )
 
 
 def _baseline_unlock(**context):
     """Release the baseline sentinel lock. Always runs (``trigger_rule=
     ALL_DONE``) so the lock is released even when upstream tasks fail.
-    Safe to call when we never acquired (PID-check inside
-    ``release_baseline_lock`` makes it a no-op)."""
+
+    Reads the lock-holder PID from XCom (pushed by ``_baseline_lock``)
+    and passes it to ``release_baseline_lock(expected_pid=...)`` so the
+    PID-check inside the helper passes even when this task runs in a
+    different Airflow worker process. Safe to call when we never acquired
+    (xcom_pull returns None → release_baseline_lock falls back to
+    ``os.getpid()`` and the PID-mismatch path correctly logs + skips).
+
+    PR-F2 audit fix (Bugbot HIGH on commit 3122821): see ``_baseline_lock``
+    docstring above for the root-cause analysis. Without the XCom-routed
+    PID, the lock would never release in any Airflow deployment where
+    workers fork separate processes per task (CeleryExecutor,
+    KubernetesExecutor, LocalExecutor under non-trivial concurrency).
+    """
     try:
         from baseline_lock import release_baseline_lock
     except ImportError as e:
@@ -2328,14 +2356,27 @@ def _baseline_unlock(**context):
         logger.error("BASELINE_UNLOCK: cannot import baseline_lock module: %s", e)
         return
 
+    # Pull the lock-holder PID from XCom. xcom_pull returns None if the
+    # upstream task never ran (e.g. the lock task itself failed before
+    # pushing); in that case there's nothing to release.
+    lock_pid = context["ti"].xcom_pull(task_ids="baseline_lock", key="baseline_lock_pid")
+    if lock_pid is None:
+        logger.info(
+            "BASELINE_UNLOCK: no lock_pid in XCom (lock task may have failed before acquiring); nothing to release."
+        )
+        return
+
     try:
-        release_baseline_lock()
-        logger.info("BASELINE_UNLOCK: released sentinel; scheduled DAGs free to resume.")
+        release_baseline_lock(expected_pid=int(lock_pid))
+        logger.info(
+            "BASELINE_UNLOCK: released sentinel (lock pid=%s); scheduled DAGs free to resume.",
+            lock_pid,
+        )
     except Exception as e:
-        # Same reasoning — log + continue. The PID-check inside
-        # ``release_baseline_lock`` ensures we don't silently delete
-        # someone else's sentinel; any exception here is operator-visible
-        # via the log but doesn't block the DAG.
+        # Same reasoning as the ImportError above — log + continue. The
+        # PID-check inside ``release_baseline_lock`` ensures we don't
+        # silently delete someone else's sentinel; any exception here is
+        # operator-visible via the log but doesn't block the DAG.
         logger.error("BASELINE_UNLOCK: release_baseline_lock raised %s: %s", type(e).__name__, e)
 
 
