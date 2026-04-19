@@ -57,4 +57,14 @@ EXPOSE 8000
 
 # Default command: start the query API.
 # Override with "python src/run_pipeline.py" to run the pipeline instead.
-CMD ["python", "-m", "uvicorn", "src.query_api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+#
+# PR-A audit fix (Bugbot HIGH on commit ce37238): the previous CMD was
+# ``["python", "-m", "uvicorn", "src.query_api:app", "--host", "0.0.0.0", ...]``
+# which bypassed the module-level safety check at ``src/query_api.py:88-102``.
+# Anyone running ``docker run edgeguard-kg:latest`` directly (without
+# compose) hit the uvicorn CLI flag and bound 0.0.0.0 unauthenticated —
+# defeating the whole point of A6. Match the compose command shape so the
+# Python module's safety check actually gates the bind for both invocation
+# paths. Operators who want a non-loopback bind via ``docker run`` must
+# set EDGEGUARD_API_HOST + EDGEGUARD_API_KEY (or EDGEGUARD_ALLOW_UNAUTH=1).
+CMD ["python", "-m", "src.query_api"]

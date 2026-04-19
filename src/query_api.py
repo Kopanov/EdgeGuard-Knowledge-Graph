@@ -1150,7 +1150,31 @@ if __name__ == "__main__":
     except (ValueError, TypeError):
         port = 8000
     reload = os.getenv("EDGEGUARD_API_RELOAD", "false").lower() == "true"
+    # PR-A audit fix (Red Team HIGH): the docker-compose ``api`` service now
+    # invokes ``python -m src.query_api`` (instead of ``python -m uvicorn ...
+    # --host 0.0.0.0 --workers 2``) so the EDGEGUARD_API_HOST env-var safety
+    # check at lines 88-102 actually gates the bind. ``EDGEGUARD_API_WORKERS``
+    # restores the multi-worker config (default 1 to match the prior reload-safe
+    # default; compose sets =2 for production posture). Reload mode forces 1
+    # worker because uvicorn's reload + workers are mutually exclusive.
+    try:
+        workers = int(os.getenv("EDGEGUARD_API_WORKERS", "1"))
+    except (ValueError, TypeError):
+        workers = 1
+    if reload and workers > 1:
+        logger.warning("EDGEGUARD_API_RELOAD=true forces EDGEGUARD_API_WORKERS=1 (uvicorn limitation)")
+        workers = 1
 
-    logger.info(f"[START] Starting EdgeGuard Query API on {host}:{port}")
+    logger.info(f"[START] Starting EdgeGuard Query API on {host}:{port} (workers={workers})")
 
-    uvicorn.run("query_api:app", host=host, port=port, reload=reload, log_level="info")
+    # PR-A audit fix (Bugbot MED on commit ce37238): the previous
+    # ``uvicorn.run("query_api:app", ...)`` import string relied on
+    # ``PYTHONPATH=/app/src`` being set so uvicorn's worker reimport could
+    # resolve the bare module name. Compose + the Docker image both set
+    # PYTHONPATH, but if this module is invoked via ``python -m
+    # src.query_api`` from a context without that PYTHONPATH (local dev
+    # without venv activate, ad-hoc test harness), uvicorn's worker
+    # reimport raises ``ModuleNotFoundError: query_api``. ``"src.query_api:app"``
+    # works regardless of PYTHONPATH because it matches the actual module
+    # path under the project root.
+    uvicorn.run("src.query_api:app", host=host, port=port, reload=reload, workers=workers, log_level="info")

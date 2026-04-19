@@ -743,4 +743,16 @@ if __name__ == "__main__":
     except (ValueError, TypeError):
         port = 4001
     host = os.getenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1")
-    uvicorn.run("graphql_api:app", host=host, port=port, reload=False)
+    # PR-A audit fix (Red Team HIGH): docker-compose's ``graphql`` service now
+    # invokes ``python -m src.graphql_api`` so the EDGEGUARD_GRAPHQL_HOST env-var
+    # safety check actually gates the bind (parity with the REST API). Multi-worker
+    # config moves to EDGEGUARD_GRAPHQL_WORKERS so production posture matches.
+    try:
+        workers = int(os.getenv("EDGEGUARD_GRAPHQL_WORKERS", "1"))
+    except (ValueError, TypeError):
+        workers = 1
+    # PR-A audit fix (Bugbot MED on commit ce37238): use ``"src.graphql_api:app"``
+    # so uvicorn's worker reimport resolves regardless of PYTHONPATH. Same
+    # reasoning as src/query_api.py:1170 — the bare ``"graphql_api:app"``
+    # only works when PYTHONPATH includes /app/src.
+    uvicorn.run("src.graphql_api:app", host=host, port=port, reload=False, workers=workers)
