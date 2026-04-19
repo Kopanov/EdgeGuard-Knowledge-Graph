@@ -133,6 +133,47 @@ from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Prometheus counter wiring (defensive import)
+# ---------------------------------------------------------------------------
+# Imported defensively so this module stays importable in test contexts
+# that don't bring up prometheus_client (or that monkey-patch the
+# metrics registry between tests). The four ``_metric_*`` shims are
+# unconditionally callable; they no-op when the import fails.
+#
+# Counter design and label-cardinality budget live in
+# ``src/metrics_server.py`` next to the ``SOURCE_TRUTHFUL_*`` Counter
+# definitions. Spawned-task chip 5b from the PR #41 audit.
+try:
+    from metrics_server import (
+        record_source_truthful_claim_accepted as _metric_accept,
+    )
+    from metrics_server import (
+        record_source_truthful_claim_dropped as _metric_drop,
+    )
+    from metrics_server import (
+        record_source_truthful_coerce_rejected as _metric_coerce_reject,
+    )
+    from metrics_server import (
+        record_source_truthful_future_clamp as _metric_future_clamp,
+    )
+except ImportError:  # pragma: no cover — defensive
+    # Mypy enforces "all conditional function variants must have
+    # identical signatures" — keep these no-ops in lock-step with
+    # the metrics_server helpers they shadow. If you change a helper
+    # signature, change BOTH places.
+    def _metric_accept(source_id: Optional[str], field: str) -> None:
+        return None
+
+    def _metric_drop(source_id: Optional[str], reason: str, field: str) -> None:
+        return None
+
+    def _metric_coerce_reject(reason: str) -> None:
+        return None
+
+    def _metric_future_clamp() -> None:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Sanity bounds for int/float Unix epoch parsing in coerce_iso
@@ -246,6 +287,7 @@ def _clamp_future_to_now(iso: Optional[str]) -> Optional[str]:
             iso,
             now.isoformat(),
         )
+        _metric_future_clamp()
         return now.isoformat()
     return iso
 
@@ -317,9 +359,14 @@ def coerce_iso(val: Any) -> Optional[str]:
         # limit (rejects overflow). Anything between is accepted.
         try:
             if not (_INT_EPOCH_FLOOR <= val <= _INT_EPOCH_CEIL):
+                # Counter (PR follow-up): operators can see the sentinel-vs-overflow
+                # distribution to spot a misbehaving collector dumping 0 / -1 vs.
+                # one accidentally feeding millisecond epochs as seconds.
+                _metric_coerce_reject("sentinel_epoch")
                 return None
             return datetime.fromtimestamp(val, tz=timezone.utc).isoformat()
         except (ValueError, OSError, OverflowError):
+            _metric_coerce_reject("overflow")
             return None
     if isinstance(val, datetime):
         return val.isoformat()
@@ -357,6 +404,7 @@ def coerce_iso(val: Any) -> Optional[str]:
             try:
                 datetime.fromisoformat(s)
             except ValueError:
+                _metric_coerce_reject("malformed_string")
                 return None
             return s + "T00:00:00+00:00"
         # 2. Full-string branch: validate via fromisoformat (with the
@@ -370,6 +418,7 @@ def coerce_iso(val: Any) -> Optional[str]:
             # downstream Cypher ``datetime()`` call. Logged at the
             # caller layer (extract_source_truthful_timestamps) where
             # source_id context is available for better triage.
+            _metric_coerce_reject("malformed_string")
             return None
         return s
     return None
@@ -505,6 +554,17 @@ def extract_source_truthful_timestamps(
         the comment field.
     """
     if not is_reliable_first_seen_source(source_id):
+        # PR #42 audit M3 (Logic Tracker): emit per-field — symmetric
+        # with the no_data_from_source path below — so the documented
+        # PromQL acceptance-rate query
+        # ``accepted{field=X} / sum without(reason)(accepted+dropped){field=X}``
+        # gives correct denominators. Earlier draft emitted once with
+        # ``field="both"`` which broke per-field aggregation for
+        # relays like OTX (every OTX hit collapsed into a third
+        # ``field`` value not visible in the per-first_seen / per-last_seen
+        # operator queries).
+        _metric_drop(source_id, "source_not_in_allowlist", "first_seen")
+        _metric_drop(source_id, "source_not_in_allowlist", "last_seen")
         return (None, None)
 
     # Layer 1: MISP-native attribute fields (the lossless round-trip path)
@@ -520,7 +580,23 @@ def extract_source_truthful_timestamps(
         first_seen = first_seen or _coerce_iso(tf_meta.get("first_seen"))
         last_seen = last_seen or _coerce_iso(tf_meta.get("last_seen"))
 
-    return (_clamp_future_to_now(first_seen), _clamp_future_to_now(last_seen))
+    # Final accept/drop accounting per field. Counter is emitted AFTER
+    # both layers run (so a Layer-2 fallback that fills in a missing
+    # Layer-1 value counts as accepted, not dropped). Honest-NULL drops
+    # — source on the allowlist but neither layer supplied a value —
+    # are counted under reason=no_data_from_source so operators can
+    # see the per-source baseline rate.
+    final_first = _clamp_future_to_now(first_seen)
+    final_last = _clamp_future_to_now(last_seen)
+    if final_first is not None:
+        _metric_accept(source_id, "first_seen")
+    else:
+        _metric_drop(source_id, "no_data_from_source", "first_seen")
+    if final_last is not None:
+        _metric_accept(source_id, "last_seen")
+    else:
+        _metric_drop(source_id, "no_data_from_source", "last_seen")
+    return (final_first, final_last)
 
 
 # PR (S5) (bugbot LOW): removed the unused
