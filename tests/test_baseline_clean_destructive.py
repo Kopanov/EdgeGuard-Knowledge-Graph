@@ -923,6 +923,14 @@ class TestDagFreshBaselineTruthyParse:
         )
         assert "isinstance(raw_fresh, str)" in code_only, 'string parsing branch required to handle "true" / "1" / etc.'
 
+        # Bugbot MED on commit fdf14c1 — symmetric int 1 acceptance:
+        # int 1 must be accepted along with string "1", and bool guard
+        # prevents accidental matching of False (Python bool subclass of int).
+        assert "isinstance(raw_fresh, int)" in code_only, "int 1 acceptance branch required"
+        assert "not isinstance(raw_fresh, bool)" in code_only, (
+            "bool guard required so False doesn't accidentally match the int branch"
+        )
+
     def test_dag_baseline_clean_task_guards_against_none_conf(self):
         """Bugbot HIGH on commit 951b163: ``dag_run.conf`` can be ``None``
         in Airflow 3.x when triggered without configuration. The previous

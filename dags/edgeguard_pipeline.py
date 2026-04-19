@@ -2054,8 +2054,16 @@ def _baseline_clean(**context):
     # ``"true"`` / ``"1"`` / ``"yes"`` / ``"on"`` (case- and whitespace-
     # insensitive) are accepted. Everything else — including the
     # explicit-falsy strings — is treated as additive.
+    # PR-C v3.6 audit fix (Bugbot MED on commit fdf14c1, type-symmetry):
+    # the previous parse accepted string ``"1"`` but rejected integer
+    # ``1`` because ``1 is True`` evaluates to False in Python (identity
+    # vs equality). The asymmetry was surprising — operators using the
+    # Airflow REST API to trigger with ``{"fresh_baseline": 1}`` got
+    # silent additive mode instead of the expected destructive wipe.
+    # Accept ``1`` (int) symmetric with ``"1"`` (str) by checking for
+    # ``True`` OR ``int 1`` explicitly.
     raw_fresh = conf.get("fresh_baseline", False)
-    if raw_fresh is True:
+    if raw_fresh is True or (isinstance(raw_fresh, int) and not isinstance(raw_fresh, bool) and raw_fresh == 1):
         fresh_baseline = True
     elif isinstance(raw_fresh, str) and raw_fresh.strip().lower() in ("true", "1", "yes", "on"):
         fresh_baseline = True

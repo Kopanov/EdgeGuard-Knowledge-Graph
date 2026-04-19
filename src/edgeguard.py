@@ -2097,7 +2097,8 @@ def cmd_fresh_baseline(args) -> int:
         print("  docker compose ps", file=sys.stderr)
         return 2  # exit code 2 = preflight failed (system unhealthy)
 
-    # Show blast radius
+    # Show blast radius (always — operator wants the audit trail in stdout
+    # whether they pass --force or not; the destructive counts go in the log).
     print()
     print(f"{Colors.BOLD}{Colors.YELLOW}⚠️  FRESH BASELINE — DESTRUCTIVE OPERATION{Colors.END}")
     print()
@@ -2108,11 +2109,19 @@ def cmd_fresh_baseline(args) -> int:
     print(f"Then collect {days} days of historical data from scratch.")
     print("ETA: ~6-8 hours (per recent baseline runs).")
     print()
-    print(f"{Colors.RED}This cannot be undone.{Colors.END} Type FRESH-BASELINE to confirm:")
 
+    # PR-C v3.6 audit fix (Bugbot LOW on commit fdf14c1): the previous
+    # version printed the "Type FRESH-BASELINE to confirm:" prompt
+    # UNCONDITIONALLY, then immediately followed with "--force passed;
+    # skipping interactive confirmation." That's confusing in CI/CD
+    # logs — the prompt instructs the operator to type a token that
+    # the next line says was skipped. Branch on --force first so the
+    # output makes sense in both paths.
     if getattr(args, "force", False):
         info("--force passed; skipping interactive confirmation.")
+        print(f"{Colors.RED}Proceeding without interactive confirmation.{Colors.END}")
     else:
+        print(f"{Colors.RED}This cannot be undone.{Colors.END} Type FRESH-BASELINE to confirm:")
         try:
             confirm = input("> ").strip()
         except EOFError:
