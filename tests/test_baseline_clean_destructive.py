@@ -240,6 +240,92 @@ class TestWipeMispEvents4xxAborts:
         assert "aborting" in str(exc_info.value).lower()
 
 
+class TestWipeMispEventsClientSideFilter:
+    """Bugbot MED on commit 951b163 (post-PR-C-v2 audit): MISP's
+    ``searchall=EdgeGuard`` is best-effort — it can return events that
+    match across info / tags / attributes / comments without being
+    EdgeGuard-managed. The probe applies a client-side ``"EdgeGuard"
+    in info`` filter for exactly this reason; the wipe must mirror the
+    same filter or it could silently delete unrelated MISP events on a
+    fresh-baseline trigger.
+
+    These tests pin the new defensive behavior."""
+
+    def test_wipe_skips_event_without_edgeguard_in_info(self):
+        """An event returned by searchall but without "EdgeGuard" in
+        its info field must NOT be DELETE'd."""
+        from baseline_clean import _wipe_misp_events
+
+        # Event 1 is a legitimate EdgeGuard event; event 2 is a false-
+        # positive (matched some other field but info doesn't contain
+        # "EdgeGuard"). Only event 1 should be DELETE'd.
+        events_round1 = [
+            {"id": "1", "info": "EdgeGuard collector — OTX nightly"},
+            {"id": "2", "info": "Discussion of ransomware (no EG)"},  # false positive
+            {"id": "3", "info": "EdgeGuard NVD baseline"},
+        ]
+
+        sess = MagicMock()
+        sess.get = MagicMock(
+            side_effect=[
+                _make_response(200, events_round1),
+                _make_response(200, []),
+            ]
+        )
+        sess.delete = MagicMock(return_value=_make_response(200, {"saved": True}))
+
+        with patch("requests.Session", return_value=sess):
+            deleted = _wipe_misp_events(
+                misp_url="https://misp.test",
+                misp_api_key="k" * 40,
+                ssl_verify=True,
+                max_pages=5,
+            )
+
+        # Only events 1 and 3 should have been DELETE'd; event 2 skipped
+        assert deleted == 2
+        assert sess.delete.call_count == 2
+        # Verify the URL of each DELETE call references id 1 or 3, NOT 2
+        delete_urls = [call.args[0] for call in sess.delete.call_args_list]
+        assert any("/events/1" in url for url in delete_urls)
+        assert any("/events/3" in url for url in delete_urls)
+        assert not any("/events/2" in url for url in delete_urls), "False-positive event id=2 must NOT be deleted"
+
+    def test_wipe_handles_event_with_nested_info(self):
+        """Some MISP responses nest the info inside an ``Event`` key.
+        The filter must check both shapes (flat and nested)."""
+        from baseline_clean import _wipe_misp_events
+
+        events_round1 = [
+            # Nested-Event shape — info inside ``Event``
+            {"id": "10", "Event": {"id": "10", "info": "EdgeGuard CISA KEV"}},
+            # Nested without EdgeGuard — must skip
+            {"id": "11", "Event": {"id": "11", "info": "Random non-EG event"}},
+        ]
+
+        sess = MagicMock()
+        sess.get = MagicMock(
+            side_effect=[
+                _make_response(200, events_round1),
+                _make_response(200, []),
+            ]
+        )
+        sess.delete = MagicMock(return_value=_make_response(200, {"saved": True}))
+
+        with patch("requests.Session", return_value=sess):
+            deleted = _wipe_misp_events(
+                misp_url="https://misp.test",
+                misp_api_key="k" * 40,
+                ssl_verify=True,
+                max_pages=5,
+            )
+
+        assert deleted == 1  # only event 10
+        delete_urls = [call.args[0] for call in sess.delete.call_args_list]
+        assert any("/events/10" in url for url in delete_urls)
+        assert not any("/events/11" in url for url in delete_urls)
+
+
 # ---------------------------------------------------------------------------
 # Red Team H1 — redirect-following must be disabled
 # ---------------------------------------------------------------------------
@@ -737,6 +823,32 @@ class TestDagFreshBaselineTruthyParse:
             "expected explicit truthy parse with `raw_fresh = ...; if raw_fresh is True:`"
         )
         assert "isinstance(raw_fresh, str)" in code_only, 'string parsing branch required to handle "true" / "1" / etc.'
+
+    def test_dag_baseline_clean_task_guards_against_none_conf(self):
+        """Bugbot HIGH on commit 951b163: ``dag_run.conf`` can be ``None``
+        in Airflow 3.x when triggered without configuration. The previous
+        ``context.get("dag_run").conf if context.get("dag_run") else {}``
+        evaluated ``.conf`` even when it was None, then ``conf.get(...)``
+        crashed with AttributeError. The fix coalesces ``None`` to ``{}``."""
+        src = self._read_dag_source()
+
+        # Find the _baseline_clean function body
+        idx = src.find("def _baseline_clean(")
+        assert idx > 0
+        end = src.find("\nbaseline_clean_task =", idx)
+        body = src[idx:end]
+
+        # Strip comment lines
+        code_only = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+
+        # Negative: the buggy pattern must NOT be in code (only in comments
+        # explaining why we don't use it)
+        assert 'context.get("dag_run").conf if context.get("dag_run") else {}' not in code_only, (
+            "Bugbot HIGH: must not evaluate .conf when dag_run.conf may be None"
+        )
+
+        # Positive: the safe pattern must be present
+        assert "isinstance(raw_conf, dict)" in code_only, "expected defensive coercion to handle dag_run.conf == None"
 
     def test_dag_baseline_clean_task_has_retries_zero(self):
         """Prod Readiness F1: baseline_dag's default_args have retries=1

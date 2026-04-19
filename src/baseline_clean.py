@@ -429,14 +429,21 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
     try:
         from config import apply_misp_http_host_header
     except ImportError:
-        # Defensive fallback: just don't apply the host header. The import
-        # branch defines the canonical signature ``(session: _SessionLike) -> None``;
-        # this fallback's ``(session: Any) -> None`` mypy considers
-        # incompatible (error code "misc"). At runtime they're called the
-        # same way, so the type-ignore is correct — we're explicitly opting
-        # out of the variant-signature check.
-        def apply_misp_http_host_header(session: Any) -> None:  # type: ignore[misc]  # noqa: ARG001
-            return
+        # PR-C v2 audit fix (Bugbot HIGH on commit 951b163): the previous
+        # fallback was a no-op ``def apply_misp_http_host_header(session): return``,
+        # while the equivalent fallback in ``_probe_misp`` correctly read
+        # ``EDGEGUARD_MISP_HTTP_HOST`` and pinned ``Host:`` on the session.
+        # That asymmetry meant: in the rare ``config`` ImportError path,
+        # the WIPE session lost host-header support and would 302-loop on
+        # any deployment with a ServerName mismatch (Docker DNS hostname
+        # vs Apache vhost) — exactly the configuration the host-header
+        # transform exists to fix. Mirror the probe fallback's contract.
+        # The mypy variant-signature check is intentionally suppressed —
+        # at runtime both paths are called the same way.
+        def apply_misp_http_host_header(session: Any) -> None:  # type: ignore[misc]
+            host_override = os.getenv("EDGEGUARD_MISP_HTTP_HOST", "").strip()
+            if host_override:
+                session.headers["Host"] = host_override
 
     sess = _req.Session()
     sess.headers.update({"Authorization": misp_api_key, "Accept": "application/json"})
@@ -485,6 +492,28 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
         for ev in events:
             eid = ev.get("id") or ev.get("Event", {}).get("id")
             if not eid:
+                continue
+
+            # PR-C v2 audit fix (Bugbot MED on commit 951b163, destructive
+            # path correctness): MISP's ``searchall=EdgeGuard`` is a
+            # best-effort match across info / tags / attributes / comments
+            # AND can return false positives — e.g. an event titled
+            # "Discussion of EdgeGuard incident" from a different team
+            # would match the searchall but is NOT EdgeGuard-managed.
+            # The probe (``_probe_misp`` line 290-293) applies a
+            # client-side ``"EdgeGuard" in info`` filter for exactly this
+            # reason; the wipe didn't, which meant ``fresh-baseline``
+            # could silently delete unrelated MISP events. Apply the same
+            # filter here so the wipe is conservative.
+            event_info = str(ev.get("info", "") or ev.get("Event", {}).get("info", ""))
+            if "EdgeGuard" not in event_info:
+                logger.warning(
+                    "Skipping MISP event id=%s — info=%r does not contain "
+                    "'EdgeGuard' (server-side searchall false positive). "
+                    "If this event SHOULD be wiped, rename its info field.",
+                    eid,
+                    event_info[:80],
+                )
                 continue
             with warnings.catch_warnings():
                 if not ssl_verify:

@@ -278,10 +278,19 @@ class TestFreshBaselineDagTask:
         # path (no-op + log explanation). Pin via source scan: the
         # `if not fresh_baseline:` block must contain a `return` statement
         # within its first ~10 lines (before the destructive path runs).
+        #
+        # PR-C v3 audit fix: previous slice was ``src[idx:idx+3000]``, which
+        # broke when the dag_run.conf=None guard added ~250 chars of code+
+        # comments above the ``if not fresh_baseline:`` line. Walk the
+        # function body via the next ``def`` / ``baseline_clean_task =``
+        # marker so the slice is bounded by structure, not magic numbers.
         src = self._dag_source()
         clean_fn_idx = src.find("def _baseline_clean(")
         assert clean_fn_idx > 0
-        clean_body = src[clean_fn_idx : clean_fn_idx + 3000]
+        # End at the next module-level binding after _baseline_clean
+        next_def_idx = src.find("\nbaseline_clean_task =", clean_fn_idx)
+        assert next_def_idx > clean_fn_idx
+        clean_body = src[clean_fn_idx:next_def_idx]
         assert "if not fresh_baseline:" in clean_body
         # Slice the body of the `if not fresh_baseline:` block (next ~10 lines)
         block_start = clean_body.index("if not fresh_baseline:")

@@ -1952,7 +1952,12 @@ def _baseline_start_summary(**context):
     # Clear baseline checkpoints so collectors start fresh (page 1, not stale page 80)
     from baseline_checkpoint import clear_checkpoint
 
-    conf = context.get("dag_run").conf if context.get("dag_run") else {}
+    # PR-C v2 audit fix (Bugbot HIGH on commit 951b163, same-pattern as
+    # _baseline_clean below): ``dag_run.conf`` can be ``None`` in Airflow 3.x
+    # when triggered without config. Coalesce defensively.
+    dag_run = context.get("dag_run")
+    raw_conf = getattr(dag_run, "conf", None) if dag_run else None
+    conf = raw_conf if isinstance(raw_conf, dict) else {}
     include_incremental = str(conf.get("clear_checkpoints", "")).lower() == "all"
     clear_checkpoint(include_incremental=include_incremental)
     if include_incremental:
@@ -2014,7 +2019,19 @@ def _baseline_clean(**context):
     is the SAME code path the CLI now uses (so any future improvement
     benefits both).
     """
-    conf = context.get("dag_run").conf if context.get("dag_run") else {}
+    # PR-C v2 audit fix (Bugbot HIGH on commit 951b163): ``dag_run.conf``
+    # can be ``None`` in Airflow 3.x when the DAG is triggered via the UI
+    # without providing configuration (the common additive-mode path).
+    # The previous expression
+    #   ``context.get("dag_run").conf if context.get("dag_run") else {}``
+    # evaluated ``.conf`` even when ``.conf is None`` — which is a valid
+    # value for an unconfigured trigger — and then ``conf.get("fresh_baseline")``
+    # raised ``AttributeError: 'NoneType' object has no attribute 'get'``,
+    # crashing the baseline_clean task on every additive-mode invocation.
+    # Coalesce ``None`` to ``{}`` so the additive-mode path returns cleanly.
+    dag_run = context.get("dag_run")
+    raw_conf = getattr(dag_run, "conf", None) if dag_run else None
+    conf = raw_conf if isinstance(raw_conf, dict) else {}
 
     # PR-C v2 audit fix (Bug Hunter B1, comprehensive 7-agent audit):
     # ``bool(conf.get("fresh_baseline", False))`` is wrong for the Airflow
