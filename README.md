@@ -669,6 +669,105 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | MISP→Neo4j sync: events exceeding this attribute count are **deferred** to the end of the sync run (smaller events process first). Prevents large events from OOM-killing the worker before critical data lands. Set to `0` to disable. | `50000` |
 | `EDGEGUARD_DEV_MODE` | Enable console trace output (dev only) | *(unset)* |
 
+#### REST + GraphQL API hardening (added to env table 2026-04-19, see PR-D)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EDGEGUARD_API_HOST` | REST API bind address. Compose default `0.0.0.0` triggers the A6 safety check (refuses to start without `EDGEGUARD_API_KEY` unless `EDGEGUARD_ALLOW_UNAUTH=1`); host scripts default to loopback. | `127.0.0.1` (host) / `0.0.0.0` (Compose) |
+| `EDGEGUARD_API_PORT` | REST API port | `8000` |
+| `EDGEGUARD_API_WORKERS` | Uvicorn worker count for REST API. Compose sets `2` for production posture; `1` is reload-safe. | `1` (host) / `2` (Compose) |
+| `EDGEGUARD_API_RELOAD` | Auto-reload on code change (dev only). Forces workers=1. | `false` |
+| `EDGEGUARD_GRAPHQL_HOST` | GraphQL API bind address (parity with `EDGEGUARD_API_HOST`) | `127.0.0.1` (host) / `0.0.0.0` (Compose) |
+| `EDGEGUARD_GRAPHQL_WORKERS` | Uvicorn worker count for GraphQL API | `1` (host) / `2` (Compose) |
+| `EDGEGUARD_ALLOW_UNAUTH` | **Opt-in escape hatch** — set to `1` to start an unauthenticated API/GraphQL bound to non-loopback. **Not recommended for any environment**; documented for completeness. | *(unset)* |
+| `EDGEGUARD_ENV` | Deployment environment label (`dev`, `stage`, `prod`, `edge`). When `prod`, the API/GraphQL refuse to start without `EDGEGUARD_API_KEY`. | `dev` |
+| `EDGEGUARD_MAX_BODY_BYTES` | Max HTTP request body size (DoS defense; `413 Payload Too Large` above) | `1048576` (1 MiB) |
+| `EDGEGUARD_GRAPHQL_MAX_DEPTH` | Max nesting depth for GraphQL queries (DoS defense) | `8` |
+
+#### Neo4j memory tuning (added to env table 2026-04-19)
+
+These were previously documented only in the "Recommended Memory Settings" table below. Adding to the env-vars table here so operators auditing `docker-compose.yml`'s `x-common-env` can find them in one place.
+
+| Variable | Description | Compose default | Recommended (baseline) |
+|----------|-------------|-----------------|------------------------|
+| `NEO4J_HEAP_INITIAL` | JVM heap initial size — set EQUAL to MAX per Neo4j Operations Manual to eliminate GC pauses from mid-run resizing | `512m` | `12g` |
+| `NEO4J_HEAP_MAX` | JVM heap max size | `2g` | `12g` |
+| `NEO4J_PAGECACHE` | Off-heap graph data cache | `1g` | `8g` |
+| `NEO4J_TX_MEMORY_MAX` | Per-transaction memory CAP (heap + off-heap combined; **NOT additive** to heap+pagecache — see DOCKER_SETUP_GUIDE.md memory-math note) | `4g` | `8g` |
+| `NEO4J_CONTAINER_MEMORY_LIMIT` | Docker cgroup ceiling for the `neo4j` service. Compose default bumped from 4g → 8g in PR-A (4g was below `tx_memory` and OOM'd on first baseline). | `8g` | `32g` |
+| `NEO4J_HTTP` | HTTP endpoint for Neo4j Browser / transactional API (separate from Bolt URI; used by some DAG diagnostic curls) | `http://neo4j:7474` (Compose) | — |
+| `EG_NEO4J_USER` / `EG_NEO4J_PASSWORD` | **Compose-only** duplicates of `NEO4J_USER` / `NEO4J_PASSWORD` exposed to the `neo4j` service so the writability healthcheck (PR-A) can `cypher-shell -u $$EG_NEO4J_USER -p $$EG_NEO4J_PASSWORD` without bash parameter expansion (which is `/bin/sh`-fragile in the Neo4j container). Set indirectly via `NEO4J_USER` / `NEO4J_PASSWORD`. | from `NEO4J_USER` / `NEO4J_PASSWORD` | — |
+| `AIRFLOW_POSTGRES_MEMORY_LIMIT` | Docker cgroup ceiling for the `airflow_postgres` service. Compose default bumped 512m → 2g in PR-A (Airflow 3.x heartbeat load on 24h+ baselines overruns 512m). | `2g` | `2g` |
+
+#### Operator UX, runtime paths, alerting (added 2026-04-19)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EDGEGUARD_BASELINE_LOCK_PATH` | Cross-process baseline mutex lock file | `<EDGEGUARD_BASE_DIR>/checkpoints/baseline_in_progress.lock` |
+| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | Stale-lock auto-clear timeout. After this, a leftover lock from a crashed baseline is treated as releasable. | `86400` (24h) |
+| `EDGEGUARD_CHECKPOINT_DIR` | Override default checkpoint directory (path-traversal guarded — must stay inside project root) | `<project_root>/checkpoints/` |
+| `EDGEGUARD_STATE_DIR` | Override default state directory | `<project_root>/state/` |
+| `EDGEGUARD_BASE_DIR` | Override project root directory (used by DAGs for path resolution) | `<directory containing dags/>` |
+| `EDGEGUARD_VERSION` | Release version (CalVer; surfaced in metrics + log lines) | from `package_meta.package_version()` |
+| `EDGEGUARD_ENABLE_SLACK_ALERTS` | Enable Slack notifications on collector failure | *(unset)* |
+| `SLACK_WEBHOOK_URL` / `AIRFLOW__SLACK__WEBHOOK_URL` | Slack incoming webhook URL for collector-failure alerts | *(unset)* |
+| `NATS_URL` | NATS server URL (real-time alert publishing; ResilMesh integration) | *(unset)* |
+| `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` | Comma-separated MISP org UUIDs trusted to set source-truthful timestamp claims (PR #44 chip 5e — tag-impersonation defense) | *(unset)* |
+| `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | Comma-separated MISP org names trusted (case-insensitive + NFKC; fallback when UUID allowlist isn't set) | *(unset)* |
+
+#### Airflow service-side env vars (Compose only — `x-common-env` block)
+
+These are typically set by `docker-compose.yml`; bare-metal Airflow operators set them in their Airflow installation. Documented here so operators auditing the running container know what's wired up.
+
+| Variable | Description | Compose default |
+|----------|-------------|-----------------|
+| `AIRFLOW__CORE__EXECUTOR` | Airflow task executor type | `LocalExecutor` |
+| `AIRFLOW__CORE__LOAD_EXAMPLES` | Load Airflow example DAGs (always `false` in production) | `false` |
+| `AIRFLOW__CORE__DAGS_FOLDER` | DAGs folder path inside the container | `/opt/airflow/dags` |
+| `AIRFLOW__CORE__FERNET_KEY` (alias `AIRFLOW_FERNET_KEY`) | Airflow secrets encryption key. **Generate once and keep stable** — rotating breaks all stored Connections / Variables. | *(required for production; unset is dev-only)* |
+| `AIRFLOW__API__PORT` | Airflow API server port (Airflow 3.x replacement for `AIRFLOW__WEBSERVER__WEB_SERVER_PORT`) | `8082` |
+| `AIRFLOW__API__BASE_URL` | Airflow API base URL (used by Airflow's internal task↔API communication) | `http://localhost:8082` |
+| `AIRFLOW__API_AUTH__JWT_SECRET` | JWT secret for Airflow API auth (Airflow 3.x FabAuthManager requirement) | *(required when API exposed)* |
+| `AIRFLOW__LOGGING__LOGGING_LEVEL` | Airflow logging verbosity | `INFO` |
+| `AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD` | Task zombie detection threshold (seconds) | `3600` |
+| `AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC` | Heartbeat interval for local task monitoring | `30` |
+| `AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL` | How often to check for zombies (seconds) | `60` |
+| `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` | Airflow API basic-auth credentials (used by `edgeguard dag` CLI) | `airflow` / *(unset, required to call API)* |
+| `AIRFLOW_WEBSERVER_URL` | Airflow web base URL (for CLI/script access from outside the container) | `http://edgeguard_airflow:8082` (Compose) / `http://localhost:8082` (host) |
+
+#### Monitoring stack (Grafana / Prometheus — `docker-compose.monitoring.yml`)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `GRAFANA_ADMIN_USER` (alias `GF_SECURITY_ADMIN_USER`) | Grafana admin username | `admin` |
+| `GRAFANA_ADMIN_PASSWORD` (alias `GF_SECURITY_ADMIN_PASSWORD`) | Grafana admin password — **required**, no insecure fallback in production | *(required)* |
+| `GRAFANA_ROOT_URL` (alias `GF_SERVER_ROOT_URL`) | Grafana root URL for back-links + alert payloads | `http://localhost:3000` |
+| `GF_USERS_ALLOW_SIGN_UP` | Allow user self-signup in Grafana | `false` |
+| `GF_INSTALL_PLUGINS` | Grafana plugins to install on startup. PR-B dropped `grafana-simple-json-datasource` — Grafana 11 blocks Angular plugins by default. | `grafana-clock-panel` |
+| `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` | Default home dashboard | `/var/lib/grafana/dashboards/edgeguard-overview.json` |
+| `PROMETHEUS_ADMIN_PASSWORD` | Prometheus basic-auth password (optional; only needed if `--web.enable-admin-api` is enabled, which compose disables by default) | *(unset)* |
+
+#### MISP advanced sync (added to env table 2026-04-19)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EDGEGUARD_MISP_PAGE_SIZE` | MISP `/events/index` page size for sync | `500` |
+| `EDGEGUARD_MISP_MAX_PAGES` | Max pages to fetch from MISP event index per sync run (caps total events) | `100` |
+| `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` | Max attribute value length before truncation | `4096` |
+| `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | Attributes per batch when pushing to MISP | `1000` |
+| `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | Cool-off between retries on MISP push failures | `15.0` |
+
+#### MITRE ATT&CK collector
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EDGEGUARD_MITRE_MAX_RELATIONSHIPS` | Max relationship edges per MITRE ATT&CK sync (`0` = unlimited) | `0` |
+| `MITRE_FORCE_REFETCH` | Bypass cache on MITRE STIX bundle fetch (debug only) | *(unset)* |
+
+#### SSL_VERIFY env-var resolution
+
+`EDGEGUARD_SSL_VERIFY` is the canonical knob. As a fallback, `SSL_VERIFY` is read with the same semantics — **only the literal string `"true"` (after `.strip().lower()`) enables verification; anything else disables**. This strict allow-list is intentional: a typo like `EDGEGUARD_SSL_VERIFY=tru` defaults to disabled, so the operator notices the misconfiguration when the probe fails on a self-signed cert.
+
 ### Recommended Memory Settings (730-day baseline)
 
 A full 730-day baseline processes ~99K CVEs + ~115K indicators + CVSS sub-nodes. These settings are tested on a 32 GB Mac Mini and Ratio1 infrastructure:
@@ -885,5 +984,5 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-19 — `apoc.coll.toSet` Phase-2 refactor: 47+ scattered list-accumulator SET clauses now route through two helpers in `src/neo4j_client.py` (`_dedup_concat_clause` / `_dedup_concat_optional_clause`); zero behavior change. New Prometheus histogram `edgeguard_neo4j_list_dedup_size` measures live list-size distribution to size the eventual native-Cypher flip (Phase 3, separate PR). Recommended-memory table also bumped after the 2026-04-19 baseline regression: `NEO4J_TX_MEMORY_MAX` 4g→8g (build_relationships needs the bigger per-tx cap on a populated graph), `NEO4J_HEAP_INITIAL` 4g→12g (= MAX, eliminates GC pauses from heap resizing per Neo4j Operations Manual), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). `tx_memory` is a CAP on transaction allocations, NOT additive to heap+pagecache — see DOCKER_SETUP_GUIDE.md memory-math note._
+_Last updated: 2026-04-19 — PR-D: documentation sync. Bravo's audit found that the README env-vars table was significantly incomplete (~40 missing variables that ARE configured in `docker-compose.yml`'s `x-common-env` block + `.env.example`). Added supplementary subtables for: REST + GraphQL API hardening (host/port/workers/auth-bypass-checks added in PR-A), Neo4j memory tuning (heap/pagecache/tx_memory/container — previously documented only in the Recommended Memory Settings section), operator UX & runtime paths, alerting (Slack/NATS/MISP-trusted-org allowlists), Airflow service-side env vars (Compose-only), monitoring stack (Grafana/Prometheus), MISP advanced sync, and the MITRE collector. `.env.example` synced so `cp .env.example .env` produces a fully-documented starting point. Earlier today: PR-A (P0 ship-blockers), PR-B (supply-chain refresh), PR-C (CLI ↔ DAG parity + fresh-baseline). The 2026-04-19 baseline regression bumps that landed in PR #45 are reflected throughout: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g. `tx_memory` is a CAP, NOT additive to heap+pagecache — see DOCKER_SETUP_GUIDE.md._
 
