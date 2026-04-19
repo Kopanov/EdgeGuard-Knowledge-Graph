@@ -1,23 +1,22 @@
 """
-Regression tests for PR-F2 — most-critical audit fixes.
+Regression tests for PR-F2 — backup-timestamp gate + BACKUP.md procedure.
 
-Two ship-blocking findings from the 8-agent production-readiness audit:
+PR-F2 was originally scoped to ship two ship-blocking fixes from the 8-agent
+production-readiness audit. The first (BH-H2: Airflow-side baseline lock)
+was de-scoped after Bugbot caught two HIGH-severity flaws across consecutive
+review rounds — both rooted in the same architectural mismatch (the legacy
+PID-based primitive doesn't work in Airflow's multi-process model). Per the
+global ``pr-bot-review`` Skill stop-and-ask rule, the lock-task pair was
+reverted; the proper Airflow-aware lock primitive is tracked in Issue #57.
 
-  - **Bug Hunter HIGH BH-H2 + BH2-HIGH** (corroborated by 2 independent
-    Bug Hunter agents): the baseline sentinel lock was only acquired by
-    the legacy CLI-runs-baseline-in-process path. PR-C made operators
-    trigger via Airflow, at which point NO task in the DAG acquired the
-    lock — scheduled incremental DAGs ran in parallel with the multi-hour
-    baseline, racing MISP writes and Neo4j MERGEs. Fix: add
-    ``baseline_lock_task`` (after misp_health, before clean) and
-    ``baseline_unlock_task`` (after baseline_complete, ``ALL_DONE``).
+What this file pins:
 
   - **Devil's Advocate #1 + Prod Readiness BLOCK 1.1** (corroborated):
     ``edgeguard fresh-baseline`` shipped without any documented backup
     procedure or backup-timestamp gate. Fix: refuse to run unless
     ``EDGEGUARD_LAST_BACKUP_AT`` records a backup within
-    ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` (default 24h). ``--skip-backup-check``
-    is the dev/test escape hatch.
+    ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` (default 240h = 10 days).
+    ``--skip-backup-check`` is the dev/test escape hatch.
 
 Naming convention: per the global Skill recommendation, future test additions
 should adopt ``test_<module>_<aspect>.py``. The ``test_pr_f2_*`` name is
@@ -30,202 +29,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, "src")
-
-
-# ---------------------------------------------------------------------------
-# Bug Hunter HIGH BH-H2 + BH2-HIGH — baseline DAG sentinel lock
-# ---------------------------------------------------------------------------
-
-
-class TestBaselineDagAcquireSentinelLock:
-    """The DAG must acquire the lock before destructive ops + release it
-    after baseline_complete (with ``trigger_rule=ALL_DONE`` so it fires
-    even on failure). Without this, scheduled incremental DAGs race the
-    baseline — exactly the bug PR-A's lock work was meant to prevent."""
-
-    def _read_dag_source(self) -> str:
-        with open("dags/edgeguard_pipeline.py") as fh:
-            return fh.read()
-
-    def test_dag_defines_baseline_lock_task(self):
-        src = self._read_dag_source()
-        assert 'task_id="baseline_lock"' in src, "expected baseline_lock PythonOperator"
-        assert "baseline_lock_task = PythonOperator(" in src
-        assert "python_callable=_baseline_lock" in src
-
-    def test_dag_defines_baseline_unlock_task_with_all_done_trigger(self):
-        src = self._read_dag_source()
-        assert 'task_id="baseline_unlock"' in src, "expected baseline_unlock PythonOperator"
-        # Find the unlock-task block and assert ALL_DONE trigger inside it
-        idx = src.find("baseline_unlock_task = PythonOperator(")
-        assert idx > 0
-        # Walk to matching close-paren via depth-tracking
-        depth = 0
-        end = idx
-        for i in range(idx, len(src)):
-            if src[i] == "(":
-                depth += 1
-            elif src[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        block = src[idx:end]
-        assert "trigger_rule=TriggerRule.ALL_DONE" in block, (
-            "unlock MUST be ALL_DONE so it fires even when upstream tasks failed"
-        )
-
-    def test_lock_task_calls_acquire_baseline_lock(self):
-        src = self._read_dag_source()
-        idx = src.find("def _baseline_lock(")
-        assert idx > 0
-        end = src.find("\ndef ", idx + 10)
-        body = src[idx:end]
-        assert "from baseline_lock import acquire_baseline_lock" in body
-        assert "acquire_baseline_lock()" in body
-        assert "AirflowException" in body, "must fail-fast when another baseline holds the lock"
-
-    def test_unlock_task_calls_release_baseline_lock_safely(self):
-        src = self._read_dag_source()
-        idx = src.find("def _baseline_unlock(")
-        assert idx > 0
-        end = src.find("\nbaseline_lock_task", idx)
-        body = src[idx:end]
-        assert "from baseline_lock import release_baseline_lock" in body
-        assert "release_baseline_lock(expected_pid=" in body, (
-            "must pass expected_pid (from XCom) so the PID-check in release_baseline_lock "
-            "passes across worker boundaries — Bugbot HIGH on commit 3122821"
-        )
-        # Must NOT raise on release failure — would otherwise block re-runs
-        assert "except Exception" in body or "try:" in body, "release must be exception-safe"
-
-    def test_lock_task_pushes_pid_to_xcom_for_unlock(self):
-        """Bugbot HIGH on commit 3122821: ``_baseline_lock`` and
-        ``_baseline_unlock`` run in DIFFERENT Airflow worker processes
-        with DIFFERENT PIDs. The unlock task's PID can't match the
-        sentinel's recorded PID, so ``release_baseline_lock()`` always
-        no-op'd — lock persisted forever, blocking all future baselines.
-        Fix: lock task pushes its PID via XCom; unlock task pulls it and
-        passes via ``expected_pid=`` to bypass the same-process check
-        while preserving safety (unlock must know the right PID)."""
-        src = self._read_dag_source()
-        idx = src.find("def _baseline_lock(")
-        assert idx > 0
-        end = src.find("\ndef _baseline_unlock(", idx)
-        body = src[idx:end]
-        assert 'xcom_push(key="baseline_lock_pid"' in body, "lock task must push its PID via XCom for the unlock task"
-        # And unlock must pull it
-        idx = src.find("def _baseline_unlock(")
-        end = src.find("\nbaseline_lock_task", idx)
-        body = src[idx:end]
-        assert 'xcom_pull(task_ids="baseline_lock", key="baseline_lock_pid"' in body, (
-            "unlock task must pull the lock-PID from XCom"
-        )
-
-    def test_release_baseline_lock_accepts_expected_pid_parameter(self):
-        """The helper must accept ``expected_pid`` so the cross-process
-        case (Airflow workers) works. Default None preserves legacy
-        single-process semantics."""
-        import inspect
-
-        from baseline_lock import release_baseline_lock
-
-        sig = inspect.signature(release_baseline_lock)
-        assert "expected_pid" in sig.parameters, "release_baseline_lock must accept expected_pid parameter"
-        # Default must be None so legacy callers keep working
-        assert sig.parameters["expected_pid"].default is None
-
-    def test_release_baseline_lock_uses_expected_pid_when_provided(self, tmp_path, monkeypatch):
-        """Behavioural test: write a sentinel with PID X, call release
-        from a process with PID Y, pass expected_pid=X — release MUST
-        succeed."""
-        import json
-
-        from baseline_lock import release_baseline_lock
-
-        # Point baseline_lock at a tmp dir
-        sentinel_path = tmp_path / "baseline_in_progress.lock"
-        monkeypatch.setenv("EDGEGUARD_BASELINE_LOCK_PATH", str(sentinel_path))
-
-        # Write a sentinel with a fake PID (simulating "lock task wrote it")
-        fake_lock_pid = 99999  # arbitrary, NOT our PID
-        sentinel_path.write_text(
-            json.dumps({"pid": fake_lock_pid, "host": "test", "started_at": "2026-04-19T00:00:00Z"})
-        )
-        assert sentinel_path.exists()
-
-        # Call release WITHOUT expected_pid — should NOT delete (PID mismatch)
-        release_baseline_lock()
-        assert sentinel_path.exists(), "release without expected_pid should refuse to delete (PID mismatch)"
-
-        # Call release WITH expected_pid=99999 — MUST delete
-        release_baseline_lock(expected_pid=fake_lock_pid)
-        assert not sentinel_path.exists(), "release with expected_pid matching the sentinel MUST delete the lock file"
-
-    def test_release_baseline_lock_refuses_wrong_expected_pid(self, tmp_path, monkeypatch):
-        """Safety: passing a wrong ``expected_pid`` must NOT delete the
-        lock — the safety property (don't delete someone else's lock)
-        is preserved across processes."""
-        import json
-
-        from baseline_lock import release_baseline_lock
-
-        sentinel_path = tmp_path / "baseline_in_progress.lock"
-        monkeypatch.setenv("EDGEGUARD_BASELINE_LOCK_PATH", str(sentinel_path))
-
-        sentinel_path.write_text(json.dumps({"pid": 12345, "host": "test", "started_at": "2026-04-19T00:00:00Z"}))
-        # Pass the WRONG expected PID
-        release_baseline_lock(expected_pid=99999)
-        assert sentinel_path.exists(), "wrong expected_pid must still refuse to delete"
-
-    def test_dag_dependency_chain_includes_lock_before_clean_and_unlock_last(self):
-        """The dependency chain MUST place lock BEFORE the destructive
-        clean and unlock AFTER baseline_complete."""
-        src = self._read_dag_source()
-        # Find the chain definition
-        idx = src.find("baseline_misp_health\n    >> baseline_lock_task")
-        assert idx > 0, "expected baseline_misp_health → baseline_lock_task"
-        # Verify unlock comes after baseline_complete
-        chain_end_idx = src.find(">> baseline_unlock_task")
-        complete_idx = src.find(">> baseline_complete")
-        assert chain_end_idx > complete_idx > 0, "baseline_unlock_task must come after baseline_complete"
-
-    def test_lock_task_has_retries_zero(self):
-        """No retry on lock — if acquire fails, another baseline is
-        genuinely running; retry won't help, just delays the operator's
-        'this conflict needs attention' signal."""
-        src = self._read_dag_source()
-        idx = src.find("baseline_lock_task = PythonOperator(")
-        depth = 0
-        end = idx
-        for i in range(idx, len(src)):
-            if src[i] == "(":
-                depth += 1
-            elif src[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        block = src[idx:end]
-        assert "retries=0" in block
-
-    def test_unlock_task_has_retries_zero(self):
-        """release_baseline_lock has internal PID-check that makes it
-        idempotent; transient exceptions are logged and skipped, not retried."""
-        src = self._read_dag_source()
-        idx = src.find("baseline_unlock_task = PythonOperator(")
-        depth = 0
-        end = idx
-        for i in range(idx, len(src)):
-            if src[i] == "(":
-                depth += 1
-            elif src[i] == ")":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        block = src[idx:end]
-        assert "retries=0" in block
 
 
 # ---------------------------------------------------------------------------

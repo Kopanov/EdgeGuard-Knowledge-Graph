@@ -127,7 +127,7 @@ EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo
 - **Trivy supply-chain gate re-tightening** — see [Issue #52](../../issues/52) (re-tighten airflow image scan to HIGH+CRITICAL once apache/airflow upstream catches up)
 - **Wipe loop simplification** — see [Issue #54](../../issues/54) (replace string-match + page-advancement state machine with tag-based filter)
 
-The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands the most-critical (baseline DAG sentinel lock + BACKUP.md + backup-timestamp gate). Next we work through the remaining In-Progress items above. The README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once the local-operational hardening lands and we shift focus to those scopes.
+The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — proper redesign tracked in [Issue #57](../../issues/57)). Next we work through the remaining In-Progress items above. The README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once the local-operational hardening lands and we shift focus to those scopes.
 
 ---
 

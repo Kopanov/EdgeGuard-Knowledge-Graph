@@ -404,35 +404,11 @@ def acquire_baseline_lock() -> bool:
     return True
 
 
-def release_baseline_lock(expected_pid: Optional[int] = None) -> None:
-    """Remove the sentinel. Safe to call even if never acquired (idempotent).
-
-    Args:
-        expected_pid: PID that wrote the sentinel. ``None`` (default) means
-            "use ``os.getpid()``" — the legacy single-process semantics
-            where the same Python process acquires + releases. Pass an
-            explicit value when the acquire and release happen in
-            **different processes** (e.g. Airflow worker tasks: the
-            ``baseline_lock`` task writes its PID to the sentinel; the
-            ``baseline_unlock`` task — possibly in a different worker
-            with a different PID — must pass that recorded PID via XCom
-            so the safety check passes).
-
-    PR-F2 audit fix (Bugbot HIGH on commit 3122821): the previous
-    implementation always compared against ``os.getpid()``. In Airflow
-    deployments where ``_baseline_lock`` and ``_baseline_unlock`` run in
-    different worker processes, the unlock task's PID never matched the
-    sentinel's recorded PID → ``release_baseline_lock`` always no-op'd
-    and silently logged "released sentinel" while the lock persisted
-    forever — blocking all future baselines + scheduled DAGs.
-
-    The safety property (can't delete someone else's lock) is preserved:
-    callers must pass the PID they recorded at acquire-time. A caller
-    that passes a wrong PID still gets refused.
-    """
+def release_baseline_lock() -> None:
+    """Remove the sentinel. Safe to call even if never acquired (idempotent)."""
     path = baseline_lock_path()
-    # Only remove if the sentinel belongs to the expected process — prevents
-    # a crash-and-restart race where we'd delete someone else's lock.
+    # Only remove if the sentinel belongs to this process — prevents a
+    # crash-and-restart race where we'd delete someone else's lock.
     data = _read_sentinel(path)
     if data is None:
         return
@@ -440,17 +416,15 @@ def release_baseline_lock(expected_pid: Optional[int] = None) -> None:
         pid_val = int(data.get("pid", 0))
     except (TypeError, ValueError):
         pid_val = 0
-    check_against = expected_pid if expected_pid is not None else os.getpid()
-    if pid_val != check_against:
+    if pid_val != os.getpid():
         logger.warning(
-            "Not removing baseline lock: sentinel pid=%s != expected pid=%s (current pid=%s)",
+            "Not removing baseline lock: sentinel pid=%s != current pid=%s",
             pid_val,
-            check_against,
             os.getpid(),
         )
         return
     _safe_remove(path)
-    logger.info("Released baseline lock at %s (held by pid=%s)", path, pid_val)
+    logger.info("Released baseline lock at %s", path)
 
 
 def baseline_skip_reason() -> Optional[str]:
