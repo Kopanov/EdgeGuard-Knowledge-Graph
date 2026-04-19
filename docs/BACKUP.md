@@ -74,6 +74,32 @@ edgeguard fresh-baseline --skip-backup-check    # logs WARNING; not for prod
 The gate logs the bypass at WARNING level so audit-trail readers can see
 when production safety was disabled.
 
+### Auto-skip on clean installs (PR-F3, Issue #58)
+
+The gate also auto-skips when **both data stores are empty** (Neo4j
+EdgeGuard nodes = 0 AND MISP EdgeGuard events = 0). This covers the
+first-time / dev-laptop / CI-bringup workflow: there is nothing to back
+up on a fresh install, so requiring `EDGEGUARD_LAST_BACKUP_AT` for the
+very first `fresh-baseline` would be friction-without-safety.
+
+The auto-skip is logged at **INFO** (not WARNING):
+
+```
+INFO  edgeguard: Backup-timestamp gate auto-skipped on clean install
+      (neo4j_count=0, misp_count=0); EDGEGUARD_LAST_BACKUP_AT not required.
+```
+
+This is deliberately distinct from the WARNING-level `--skip-backup-check`
+audit log: "no data exists" is a different state than "operator chose to
+disable safety". As soon as either store has any EdgeGuard-managed data,
+the gate enforces normally on the next `fresh-baseline` run — the auto-skip
+is a one-time bootstrap, not an ongoing posture.
+
+Checkpoint state is **intentionally excluded** from the auto-skip
+predicate: a leftover `checkpoints/baseline_checkpoint.json` from a prior
+run on a now-emptied graph is exactly the case we want to allow without
+ceremony, and per-collector cursor state is not user-meaningful data.
+
 ## Backup procedures by deployment shape
 
 ### Self-hosted Neo4j (Docker Compose, the default)
