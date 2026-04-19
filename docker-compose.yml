@@ -310,6 +310,13 @@ services:
       <<: *common-env
       EDGEGUARD_API_HOST: ${EDGEGUARD_API_HOST:-0.0.0.0}
       EDGEGUARD_API_PORT: "8000"
+      # PR-A audit fix (Bugbot MED on commit 8dde4de): the symmetric
+      # EDGEGUARD_GRAPHQL_WORKERS=2 was set on the graphql service below,
+      # but EDGEGUARD_API_WORKERS was forgotten — the api service would
+      # fall back to the __main__ default of 1, halving the production
+      # throughput posture compared to the pre-refactor ``--workers 2``
+      # CLI flag we removed. Restore parity.
+      EDGEGUARD_API_WORKERS: "2"
       EDGEGUARD_ENABLE_ADMIN_QUERY: ${EDGEGUARD_ENABLE_ADMIN_QUERY:-false}
       EDGEGUARD_ADMIN_TOKEN: ${EDGEGUARD_ADMIN_TOKEN:-}
       PYTHONPATH: /app/src
