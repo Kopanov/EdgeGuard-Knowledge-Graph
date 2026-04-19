@@ -308,9 +308,20 @@ services:
     # reads EDGEGUARD_API_HOST at startup, the safety check refuses to start
     # unless either EDGEGUARD_API_KEY is set OR the host is loopback OR the
     # operator opts in via EDGEGUARD_ALLOW_UNAUTH=1.
+    #
+    # PR-A audit fix (Red Team CRITICAL C1, follow-up): the safety check has
+    # to remain at 0.0.0.0 in compose because Docker port-forwarding from
+    # ``ports: 127.0.0.1:8000:8000`` requires the container app to bind to
+    # 0.0.0.0 (binding to the container's own 127.0.0.1 makes the docker
+    # bridge unable to deliver traffic). To keep ``./install.sh && docker
+    # compose up`` from crashlooping on the safety check, install.sh now
+    # auto-generates a strong EDGEGUARD_API_KEY in .env on first creation
+    # (see ``install.sh:71-100`` and the comment block in .env.example).
+    # Operators who clone + ``docker compose up`` without install.sh hit
+    # the safety check's RuntimeError with an actionable message.
     command: ["python", "-m", "src.query_api"]
     ports:
-      - "127.0.0.1:8000:8000"   # REST API — loopback only; use reverse proxy for external access
+      - "127.0.0.1:8000:8000"   # REST API — host loopback only; use a reverse proxy for external access
     environment:
       <<: *common-env
       EDGEGUARD_API_HOST: ${EDGEGUARD_API_HOST:-0.0.0.0}

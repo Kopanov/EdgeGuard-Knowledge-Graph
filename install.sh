@@ -71,6 +71,56 @@ section "Environment configuration"
 if [ ! -f ".env" ]; then
     cp .env.example .env
     warn ".env created from .env.example — fill in NEO4J_PASSWORD, MISP_URL, MISP_API_KEY before starting"
+
+    # PR-A audit fix (Red Team CRITICAL C1): without an EDGEGUARD_API_KEY, the
+    # api / graphql containers refuse to start (the security check at
+    # src/query_api.py:96 rejects an unauthenticated bind on 0.0.0.0). Auto-
+    # generate a strong key on first .env creation so ``./install.sh && docker
+    # compose up`` does not crashloop. Operators who clone + ``docker compose
+    # up`` without install.sh will see the actionable RuntimeError and can set
+    # EDGEGUARD_API_KEY by hand. We do NOT silently set EDGEGUARD_ALLOW_UNAUTH
+    # — that would defeat the safety check entirely.
+    if grep -q "^EDGEGUARD_API_KEY=$" .env 2>/dev/null; then
+        if command -v openssl &>/dev/null; then
+            generated_key="$(openssl rand -hex 32)"
+        elif command -v python3 &>/dev/null; then
+            generated_key="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+        else
+            generated_key=""
+        fi
+        if [ -n "$generated_key" ]; then
+            # Portable in-place sed: explicit -i'' (BSD/mac) and -i (GNU) handled by tmp-file rewrite
+            tmp_env="$(mktemp)"
+            awk -v key="$generated_key" '
+                /^EDGEGUARD_API_KEY=$/ { print "EDGEGUARD_API_KEY=" key; next }
+                { print }
+            ' .env > "$tmp_env" && mv "$tmp_env" .env
+            info "Generated random EDGEGUARD_API_KEY (32 bytes hex) — stored in .env"
+        else
+            warn "Neither openssl nor python3 available — leaving EDGEGUARD_API_KEY blank."
+            warn "  api / graphql containers will refuse to start; set EDGEGUARD_API_KEY in .env first."
+        fi
+    fi
+
+    # Same logic for GRAFANA_ADMIN_PASSWORD — compose default is "changeme"
+    # which is a credential-stuffing target. Auto-generate on first .env.
+    if grep -q "^GRAFANA_ADMIN_PASSWORD=changeme$" .env 2>/dev/null; then
+        if command -v openssl &>/dev/null; then
+            generated_grafana="$(openssl rand -base64 24 | tr -d '=+/')"
+        elif command -v python3 &>/dev/null; then
+            generated_grafana="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+        else
+            generated_grafana=""
+        fi
+        if [ -n "$generated_grafana" ]; then
+            tmp_env="$(mktemp)"
+            awk -v pw="$generated_grafana" '
+                /^GRAFANA_ADMIN_PASSWORD=changeme$/ { print "GRAFANA_ADMIN_PASSWORD=" pw; next }
+                { print }
+            ' .env > "$tmp_env" && mv "$tmp_env" .env
+            info "Generated random GRAFANA_ADMIN_PASSWORD — stored in .env (visible only in this file)"
+        fi
+    fi
 else
     info ".env already exists"
 fi

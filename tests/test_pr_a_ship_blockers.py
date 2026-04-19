@@ -22,6 +22,15 @@ Coverage:
       Process C also acquire — two pipelines run concurrently, racing
       MERGE. Mirrors the PID-check pattern in
       ``baseline_lock.release_baseline_lock``.
+    - **Red Team CRITICAL C1** (round-2 follow-up): ``install.sh`` must
+      auto-generate ``EDGEGUARD_API_KEY`` when .env is created from
+      .env.example with an empty key. Without this the api / graphql
+      containers crashloop on first ``docker compose up`` (the safety
+      check at ``src/query_api.py:96`` refuses to bind 0.0.0.0 without
+      either an API key or an explicit ``EDGEGUARD_ALLOW_UNAUTH=1`` opt-
+      in). Auto-gen keeps the safety check intact while making the
+      install path frictionless. Same logic for ``GRAFANA_ADMIN_PASSWORD``
+      to avoid shipping the literal ``changeme`` default.
 
 Other PR-A fixes (compose auth bypass, healthchecks, memory defaults,
 requirements alias, GHA SHA pins, disk-free alerts) are config/yaml
@@ -240,3 +249,106 @@ class TestPipelineLockPidCheck:
         good = tmp_path / "good.lock"
         good.write_text(f"{os.getpid()}\n")
         assert _read_lock_pid(str(good)) == os.getpid()
+
+
+# ---------------------------------------------------------------------------
+# Red Team CRITICAL C1 — install.sh auto-generates EDGEGUARD_API_KEY so
+# fresh ``./install.sh && docker compose up`` does not crashloop on the
+# query_api.py safety check.
+# ---------------------------------------------------------------------------
+
+
+class TestInstallShAutogeneratesApiKey:
+    """install.sh must populate EDGEGUARD_API_KEY (and rotate
+    GRAFANA_ADMIN_PASSWORD off the literal "changeme") when creating
+    .env from .env.example. Otherwise the api / graphql containers
+    crashloop and the operator copy-pastes ``EDGEGUARD_ALLOW_UNAUTH=1``
+    out of the error message — defeating the safety check entirely.
+    """
+
+    @staticmethod
+    def _project_root() -> str:
+        # tests/ lives one level under project root
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+    def test_install_sh_contains_api_key_autogen_block(self):
+        """The install.sh source must contain the .env-edit block that
+        replaces the empty EDGEGUARD_API_KEY with a generated value.
+        Pinned via source-grep because the alternative — actually running
+        install.sh in a tmpdir — pulls in the docker stage."""
+        path = os.path.join(self._project_root(), "install.sh")
+        with open(path) as fh:
+            src = fh.read()
+        # The grep that detects the empty default
+        assert 'grep -q "^EDGEGUARD_API_KEY=$" .env' in src, (
+            "install.sh must detect an empty EDGEGUARD_API_KEY before substituting"
+        )
+        # At least one of the two key generators (must accept either ordering)
+        assert "openssl rand -hex 32" in src or "secrets.token_hex(32)" in src, (
+            "install.sh must offer openssl OR python3 fallback for key generation"
+        )
+        # The actual replacement must rewrite the empty assignment
+        assert 'print "EDGEGUARD_API_KEY=" key' in src, (
+            "install.sh must print the substituted EDGEGUARD_API_KEY=<value> line"
+        )
+
+    def test_install_sh_rotates_default_grafana_password(self):
+        """``changeme`` is a credential-stuffing target — install.sh must
+        replace it with a generated value when creating .env."""
+        path = os.path.join(self._project_root(), "install.sh")
+        with open(path) as fh:
+            src = fh.read()
+        assert "GRAFANA_ADMIN_PASSWORD=changeme" in src, (
+            "install.sh must explicitly target the literal default to substitute"
+        )
+        assert "GRAFANA_ADMIN_PASSWORD=" in src
+
+    def test_env_example_documents_api_key_requirement(self):
+        """The .env.example comment block must tell manual-install
+        operators (those who skip install.sh) that the api/graphql
+        containers will refuse to start with an empty key."""
+        path = os.path.join(self._project_root(), ".env.example")
+        with open(path) as fh:
+            content = fh.read()
+        assert "REFUSE TO START" in content, ".env.example must warn that empty EDGEGUARD_API_KEY blocks startup"
+        # The three fix paths must all be documented
+        assert "install.sh" in content
+        assert "openssl rand -hex 32" in content
+        assert "EDGEGUARD_ALLOW_UNAUTH" in content
+
+    def test_awk_substitution_actually_replaces_the_key(self, tmp_path):
+        """Behavioural test: feed an .env-shaped string with an empty
+        EDGEGUARD_API_KEY through the same awk command install.sh uses,
+        and assert the output has the generated value substituted."""
+        import subprocess
+
+        env_input = (
+            "# leading comment\n"
+            "NEO4J_PASSWORD=changeme\n"
+            "EDGEGUARD_API_KEY=\n"
+            "GRAFANA_ADMIN_PASSWORD=changeme\n"
+            "TRAILING=value\n"
+        )
+        env_file = tmp_path / ".env"
+        env_file.write_text(env_input)
+
+        result = subprocess.run(
+            [
+                "awk",
+                "-v",
+                "key=GENERATED_KEY_VALUE",
+                '/^EDGEGUARD_API_KEY=$/ { print "EDGEGUARD_API_KEY=" key; next } { print }',
+                str(env_file),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        out = result.stdout
+        assert "EDGEGUARD_API_KEY=GENERATED_KEY_VALUE" in out
+        # Other lines untouched
+        assert "NEO4J_PASSWORD=changeme" in out
+        assert "GRAFANA_ADMIN_PASSWORD=changeme" in out
+        assert "TRAILING=value" in out
+        # No accidental duplicate / empty key line
+        assert out.count("EDGEGUARD_API_KEY=") == 1
