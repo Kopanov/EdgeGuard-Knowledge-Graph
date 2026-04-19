@@ -66,7 +66,17 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
-      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      # PR-B audit fix (Bugbot HIGH on commit 1f3f46d): dropped
+      # grafana-simple-json-datasource. It's an Angular-based plugin; Grafana
+      # 11 disabled the Angular runtime by default (the plugin loads as
+      # ``signed=false`` and is blocked at startup). EdgeGuard's dashboards
+      # all use the Prometheus datasource (provisioned via
+      # grafana/provisioning/datasources/), so simple-json was never actually
+      # consumed in this stack. If a future dashboard genuinely needs JSON-API
+      # data, the Grafana 11+ replacements are
+      # ``grafana-simplejson-datasource`` (different plugin id, signed) or
+      # ``yesoreyeram-infinity-datasource`` (more capable, also signed).
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/edgeguard-overview.json
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
