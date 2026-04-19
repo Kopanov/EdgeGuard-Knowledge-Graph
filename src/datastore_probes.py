@@ -222,9 +222,18 @@ def probe_neo4j_node_count(
             from neo4j_client import Neo4jClient
 
             client = Neo4jClient()
+            # Bugbot LOW (PR #47 audit): set ``own_client = True`` BEFORE
+            # the connect attempt so the ``finally`` block always closes
+            # any client we instantiated, even when ``connect()`` returned
+            # False. Earlier code set ``own_client`` only after a
+            # successful connect — the early return below (line 226)
+            # then bypassed the finally and leaked the Neo4jClient
+            # instance + its underlying driver. ``Neo4jClient.close()``
+            # is safe to call even when never-connected (driver is None
+            # or already torn down).
+            own_client = True
             if not client.connect():
                 return ProbeResult(label=label_text, count=0, error="Cannot connect to Neo4j")
-            own_client = True
 
         count_query = _NEO4J_COUNT_QUERY_MANAGED if edgeguard_managed_only else _NEO4J_COUNT_QUERY_ALL
         count_rows = client.run(count_query)
@@ -275,7 +284,12 @@ def probe_neo4j_node_count(
 
 
 _MISP_DEFAULT_TIMEOUT = (10, 30)  # (connect_timeout, read_timeout) in seconds
-_MISP_COUNT_PAGE_LIMIT = 500
+# (No page-limit constant. Bugbot MED on PR #47 noted that the pre-refactor
+# inline code in cmd_doctor sent NO ``params`` to ``/events/index`` — the
+# response is bounded by MISP's default page size. The probe matches that
+# exactly. PR2's post-clean verify queries with ``count == 0`` semantics
+# anyway, so the page bound is irrelevant there. PR3's preflight blast-radius
+# UI will use the dedicated count endpoint instead, when it ships.)
 
 
 def probe_misp_event_count(
@@ -340,18 +354,18 @@ def probe_misp_event_count(
         with warnings.catch_warnings():
             if not ssl_verify:
                 warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-            # Cross-checker audit DRIFT-1: do NOT add ``searchall=EdgeGuard``
-            # server-side. The pre-refactor inline code in cmd_doctor only
-            # filtered client-side via the ``info`` substring; adding
-            # ``searchall`` server-side would change which events the page
-            # returns (matches across info/tags/attributes/comments — broader
-            # than the client filter), causing count drift between the
-            # pre/post-refactor doctor outputs. Pure client-side filter
-            # below preserves the pre-refactor semantics exactly.
+            # Cross-checker audit DRIFT-1 + Bugbot MED on PR #47: send NO
+            # ``params`` at all to match the pre-refactor inline code in
+            # ``cmd_doctor`` exactly. The earlier draft sent
+            # ``params={"limit": 500}`` and ``params={"searchall": ...}``
+            # — both ABSENT from the pre-refactor code. The pre-refactor
+            # response was bounded by MISP's default page size; this probe
+            # now produces the same bound for true zero-behavior-change.
+            # Filtering to EdgeGuard-tagged events is done client-side
+            # below (info-substring match), matching the pre-refactor.
             resp = _req.get(
                 f"{misp_url}/events/index",
                 headers={"Authorization": misp_api_key, "Accept": "application/json"},
-                params={"limit": _MISP_COUNT_PAGE_LIMIT},
                 verify=ssl_verify,
                 timeout=timeout,
             )

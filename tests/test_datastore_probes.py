@@ -327,6 +327,23 @@ class TestProbeNeo4jNodeCount:
         # Even on probe failure, the own-client must be closed (no leaks).
         client.close.assert_called_once()
 
+    def test_own_client_is_closed_when_connect_returns_false(self):
+        # Bugbot LOW (PR #47 audit): if the probe instantiates its own
+        # Neo4jClient and ``connect()`` returns False, the early-return
+        # used to skip the ``finally`` block (because ``own_client`` was
+        # set AFTER the connect check). Result: leaked Neo4jClient
+        # instance + driver. Fix: ``own_client = True`` is now set BEFORE
+        # the connect attempt so finally always runs. Pin via assertion.
+        client = MagicMock()
+        client.connect = MagicMock(return_value=False)
+        client.close = MagicMock()
+        with patch("neo4j_client.Neo4jClient", return_value=client):
+            r = probe_neo4j_node_count(client=None)
+        assert not r.ok
+        assert "Cannot connect" in (r.error or "")
+        # The leak guard: close must run even though connect failed.
+        client.close.assert_called_once()
+
     def test_label_changes_when_not_managed_only(self):
         client = _make_neo4j_client_mock({"count(n)": [{"cnt": 99}]})
         r = probe_neo4j_node_count(client=client, edgeguard_managed_only=False)
@@ -449,6 +466,22 @@ class TestProbeMispEventCount:
             r = probe_misp_event_count(misp_api_key="abc")
         assert not r.ok
         assert "ValueError" in (r.error or "")
+
+    def test_no_params_sent_to_misp_match_pre_refactor(self):
+        # Bugbot MED (PR #47 audit): the pre-refactor inline code in
+        # cmd_doctor sent NO ``params`` to /events/index. The earlier
+        # draft of this probe sent ``params={"limit": 500}`` (and earlier,
+        # also ``params={"searchall": ...}``) — both real behavior changes.
+        # Pin the corrected contract: NO params at all.
+        with patch("requests.get", return_value=_mock_misp_response(200, [])) as mock_get:
+            probe_misp_event_count(misp_api_key="abc")
+        # Inspect the call: requests.get(url, headers=..., verify=..., timeout=...)
+        # Should NOT have a ``params`` kwarg.
+        call_kwargs = mock_get.call_args.kwargs
+        assert "params" not in call_kwargs, (
+            f"probe_misp_event_count must not send 'params' to /events/index "
+            f"(pre-refactor sent none). Got: {list(call_kwargs.keys())}"
+        )
 
     def test_event_with_nested_event_dict(self):
         # The actual MISP /events/index sometimes nests as
