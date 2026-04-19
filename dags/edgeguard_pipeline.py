@@ -2002,7 +2002,7 @@ def _baseline_clean(**context):
     if not fresh_baseline:
         logger.info("=" * 70)
         logger.info("BASELINE_CLEAN: skipped (fresh_baseline conf not set — additive mode).")
-        logger.info("To trigger a destructive clean: dag_run.conf = {\"fresh_baseline\": true}")
+        logger.info('To trigger a destructive clean: dag_run.conf = {"fresh_baseline": true}')
         logger.info("Or via the CLI wrapper: edgeguard fresh-baseline --days <N>")
         logger.info("=" * 70)
         return
