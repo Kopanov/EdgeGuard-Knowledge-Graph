@@ -1938,6 +1938,243 @@ def _fetch_misp_event_summary() -> dict:
 
 
 # ================================================================================
+# BASELINE TRIGGERS — operator entry points for the baseline_dag
+# ================================================================================
+#
+# PR-C audit fix (Cross-Checker HIGH H1/H2/H3 + Bravo's "consolidate via CLI
+# wrapper" recommendation): the previous workflow forked into two divergent
+# entry points:
+#
+#   - ``python src/run_pipeline.py --baseline [--fresh-baseline] [--baseline-days N]``
+#     → runs in-process, holds the lock for the entire 8h+ baseline duration,
+#     CLI session must stay alive.
+#
+#   - Operator clicks "Trigger DAG" in Airflow UI on edgeguard_baseline →
+#     runs in Airflow workers, but had no ``fresh_baseline`` knob (audit
+#     Cross-Checker HIGH H3) so the run name ``fresh__730d__...`` was
+#     misleading: only checkpoints got cleared.
+#
+# These two CLI commands consolidate: ``edgeguard fresh-baseline`` and
+# ``edgeguard baseline`` both delegate to the Airflow DAG via
+# ``airflow dags trigger`` with the right conf, so:
+#
+#   - Operators have ONE entry point to remember.
+#   - The Airflow worker holds state (CLI exits in seconds).
+#   - The destructive path requires typed confirmation (informed consent).
+
+
+# PR-C v2 audit fix (Maintainer M3 + Bug Hunter B2 + F2, comprehensive
+# 7-agent audit): extract the docker-compose-airflow-trigger boilerplate
+# from cmd_fresh_baseline / cmd_baseline. Both call sites had ~50 LOC of
+# identical subprocess.run + run_id parser. Centralizing also gives us
+# ONE place to:
+#   - catch ``subprocess.TimeoutExpired`` (Bug Hunter B2 — was uncaught;
+#     a busy airflow container produced a bare traceback to the operator)
+#   - use a regex for the run_id parser (Bug Hunter F2 — the previous
+#     ``line.split("run_id", 1)[1].strip().split()[0]`` would return
+#     ``="manual__..."`` if Airflow ever changes to ``run_id=...`` format)
+#   - inject auth, retry, or a ``--dry-run`` flag in the future.
+def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, str]:
+    """Invoke ``docker compose exec airflow airflow dags trigger
+    edgeguard_baseline --conf <conf_json>``.
+
+    Returns ``(exit_code, run_id_or_error)``:
+      - exit_code 0 + run_id like ``"manual__2026-04-19T..."`` on success
+        (or ``"<unknown>"`` if the parser couldn't extract it but the
+        trigger succeeded — operator can find it in Airflow UI)
+      - exit_code 2 + error message on docker-not-found, timeout, or
+        non-zero airflow exit
+    """
+    import re
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "exec",
+                "-T",
+                "airflow",
+                "airflow",
+                "dags",
+                "trigger",
+                "edgeguard_baseline",
+                "--conf",
+                conf_json,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError:
+        return 2, (
+            "docker compose not found on PATH. Trigger manually via Airflow UI:\n"
+            f"  Airflow UI → edgeguard_baseline → Trigger DAG w/ Config: {conf_json}"
+        )
+    except subprocess.TimeoutExpired:
+        # Bug Hunter B2: was uncaught. A busy or unresponsive ``airflow``
+        # container raises this with timeout=60 → bare traceback to the
+        # operator's terminal. Caller already saw a successful preflight
+        # 60s earlier; the right next step is to check airflow's health.
+        return 2, (
+            f"Airflow CLI did not respond within {timeout}s. Check:\n"
+            "  docker compose ps airflow\n"
+            "  docker compose logs --tail 50 airflow\n"
+            "Then re-trigger when airflow is responsive."
+        )
+    except OSError as e:
+        return 2, f"docker compose exec failed: {e}"
+
+    if result.returncode != 0:
+        return 2, (f"Airflow trigger failed (exit {result.returncode}):\n{result.stderr or '(no stderr)'}")
+
+    # Parse the run_id from Airflow CLI output. Examples seen so far:
+    #   "Triggered DAG <DAG: edgeguard_baseline> at 2026-04-19T12:34:56+00:00, run_id manual__2026-..."
+    #   "... run_id=manual__..."  (Airflow may use ``=`` in future versions)
+    #
+    # Bug Hunter H1 (post-PR-C-v2 audit): the previous loose pattern
+    # ``run_id[=:\s]+(\S+)`` matched noise lines like ``"warning: run_id is
+    # missing"`` → captured ``"is"``. The trigger had already succeeded
+    # (returncode==0 was checked above), so no data corruption — but
+    # operators would see ``[is]`` in the success output and copy a junk
+    # run_id into ``edgeguard dag status --run-id <id>``. Anchor to
+    # Airflow's standard run_id prefixes (``manual__``, ``scheduled__``,
+    # ``backfill__``, ``dataset_triggered__``) to reject false positives.
+    run_id = "<unknown>"
+    for line in (result.stdout or "").splitlines():
+        match = re.search(
+            r"run_id[=:\s]+((?:manual|scheduled|backfill|dataset_triggered)__\S+)",
+            line,
+        )
+        if match:
+            run_id = match.group(1).rstrip(",")
+            break
+
+    return 0, run_id
+
+
+def cmd_fresh_baseline(args) -> int:
+    """edgeguard fresh-baseline --days N
+
+    Trigger a destructive baseline: probe Neo4j+MISP for blast radius, show
+    counts, ask for typed confirmation, then trigger the Airflow
+    edgeguard_baseline DAG with ``dag_run.conf={"fresh_baseline": true,
+    "baseline_days": N}``.
+    """
+    from baseline_clean import probe_baseline_state
+    from baseline_config import resolve_baseline_days
+
+    section("Fresh Baseline (DESTRUCTIVE)")
+
+    days = resolve_baseline_days(explicit=getattr(args, "days", None))
+
+    # Preflight: probe both datastores. If EITHER is unreachable, refuse to
+    # proceed — operator can't give informed consent without seeing counts.
+    info("Probing Neo4j + MISP for blast radius...")
+    state = probe_baseline_state()
+
+    if not state.all_reachable:
+        # Audit Devil's Advocate + the user's "informed consent not theater"
+        # principle: refuse to ask for confirmation without live counts.
+        print(file=sys.stderr)
+        err("FRESH BASELINE — PRE-FLIGHT FAILED")
+        print(file=sys.stderr)
+        print("Cannot probe one or more datastores:", file=sys.stderr)
+        if not state.neo4j_ok:
+            print(f"  Neo4j: {state.neo4j_error}", file=sys.stderr)
+        if not state.misp_ok:
+            print(f"  MISP:  {state.misp_error}", file=sys.stderr)
+        if not state.checkpoint_ok:
+            print(f"  Checkpoint: {state.checkpoint_error}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Refusing to proceed without live counts — that would be blind consent.", file=sys.stderr)
+        print("No data was changed.", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Diagnose:", file=sys.stderr)
+        print("  edgeguard doctor", file=sys.stderr)
+        print("  docker compose ps", file=sys.stderr)
+        return 2  # exit code 2 = preflight failed (system unhealthy)
+
+    # Show blast radius (always — operator wants the audit trail in stdout
+    # whether they pass --force or not; the destructive counts go in the log).
+    print()
+    print(f"{Colors.BOLD}{Colors.YELLOW}⚠️  FRESH BASELINE — DESTRUCTIVE OPERATION{Colors.END}")
+    print()
+    print("You are about to permanently delete:")
+    for line in state.render_summary().splitlines():
+        print(line)
+    print()
+    print(f"Then collect {days} days of historical data from scratch.")
+    print("ETA: ~6-8 hours (per recent baseline runs).")
+    print()
+
+    # PR-C v3.6 audit fix (Bugbot LOW on commit fdf14c1): the previous
+    # version printed the "Type FRESH-BASELINE to confirm:" prompt
+    # UNCONDITIONALLY, then immediately followed with "--force passed;
+    # skipping interactive confirmation." That's confusing in CI/CD
+    # logs — the prompt instructs the operator to type a token that
+    # the next line says was skipped. Branch on --force first so the
+    # output makes sense in both paths.
+    if getattr(args, "force", False):
+        info("--force passed; skipping interactive confirmation.")
+        print(f"{Colors.RED}Proceeding without interactive confirmation.{Colors.END}")
+    else:
+        print(f"{Colors.RED}This cannot be undone.{Colors.END} Type FRESH-BASELINE to confirm:")
+        try:
+            confirm = input("> ").strip()
+        except EOFError:
+            confirm = ""
+        if confirm != "FRESH-BASELINE":
+            info("Aborted. (Confirmation token did not match.)")
+            return 1  # exit code 1 = user declined
+
+    # Trigger the DAG via gh-style airflow CLI invocation.
+    # Conf carries fresh_baseline=true (gates the new baseline_clean task)
+    # AND baseline_days=N (resolved by the DAG's get_baseline_config).
+    conf_json = json.dumps({"fresh_baseline": True, "baseline_days": days})
+    info("Triggering edgeguard_baseline DAG with conf:")
+    info(f"  {conf_json}")
+
+    exit_code, run_id_or_error = _trigger_baseline_dag(conf_json)
+    if exit_code != 0:
+        err(run_id_or_error)
+        return exit_code
+
+    ok(f"Triggered: edgeguard_baseline [{run_id_or_error}]")
+    info("Track: edgeguard dag status --dag-id edgeguard_baseline")
+    info("Or via Airflow UI: http://localhost:8082/dags/edgeguard_baseline/grid")
+    return 0
+
+
+def cmd_baseline(args) -> int:
+    """edgeguard baseline --days N
+
+    Trigger an additive baseline (no destruction). Existing data preserved.
+    No confirmation prompt — this is a safe operation.
+    """
+    from baseline_config import resolve_baseline_days
+
+    section("Baseline (additive)")
+
+    days = resolve_baseline_days(explicit=getattr(args, "days", None))
+
+    info(f"Triggering edgeguard_baseline DAG (additive mode, {days} days history)")
+    info("Existing Neo4j nodes + MISP events PRESERVED — new data layered on top.")
+
+    conf_json = json.dumps({"baseline_days": days})  # NO fresh_baseline → DAG runs additive
+    exit_code, run_id_or_error = _trigger_baseline_dag(conf_json)
+    if exit_code != 0:
+        err(run_id_or_error)
+        return exit_code
+
+    ok(f"Triggered: edgeguard_baseline [{run_id_or_error}]")
+    info("Track: edgeguard dag status --dag-id edgeguard_baseline")
+    return 0
+
+
+# ================================================================================
 # PREFLIGHT
 # ================================================================================
 
@@ -2302,6 +2539,35 @@ Examples:
     stats_parser.add_argument("--misp", action="store_true", help="Show MISP event summary")
     stats_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    # Baseline triggers (PR-C audit fix Cross-Checker H1/H2/H3)
+    baseline_p = subparsers.add_parser(
+        "baseline",
+        help="Trigger additive baseline DAG (preserves existing data)",
+    )
+    baseline_p.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Historical window in days (default 730; resolves via baseline_config)",
+    )
+
+    fresh_baseline_p = subparsers.add_parser(
+        "fresh-baseline",
+        help="Trigger DESTRUCTIVE baseline DAG (wipes Neo4j + MISP + checkpoints)",
+    )
+    fresh_baseline_p.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="Historical window in days (default 730; resolves via baseline_config)",
+    )
+    fresh_baseline_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the typed-confirmation prompt (use only in non-interactive contexts; "
+        "the preflight probes still run and refuse on unreachable datastores)",
+    )
+
     # Preflight
     preflight_parser = subparsers.add_parser("preflight", help="Comprehensive pre-run readiness check")
     preflight_parser.add_argument("--json", action="store_true", help="Output as JSON")
@@ -2427,6 +2693,10 @@ Examples:
         return cmd_stats(args)
     elif args.command == "preflight":
         return cmd_preflight(args)
+    elif args.command == "baseline":
+        return cmd_baseline(args)
+    elif args.command == "fresh-baseline":
+        return cmd_fresh_baseline(args)
     else:
         parser.print_help()
         return 1

@@ -1708,6 +1708,13 @@ def get_baseline_config(context=None) -> tuple:
     Read baseline collection settings from Airflow Variables, then apply optional
     environment overrides (handy for Docker Compose / .env smoke tests).
 
+    PR-C v2 audit fix (Maintainer H1 + Cross-Checker B1, comprehensive
+    7-agent audit): the precedence math (explicit > dag_run.conf > env >
+    Airflow Variable > default) used to be re-implemented inline here.
+    Now delegates to ``baseline_config.resolve_baseline_days`` /
+    ``resolve_baseline_collection_limit`` — the SSoT this DAG was
+    bypassing despite the PR description's claim to consolidate.
+
     Airflow Variables
     -----------------
     BASELINE_COLLECTION_LIMIT : int  (default 0)
@@ -1719,56 +1726,72 @@ def get_baseline_config(context=None) -> tuple:
 
     Environment overrides (optional, applied after Variables)
     ---------------------------------------------------------
-    EDGEGUARD_BASELINE_DAYS
-        If set and non-empty, overrides ``BASELINE_DAYS`` (e.g. ``7`` for a quick test).
-    EDGEGUARD_BASELINE_COLLECTION_LIMIT
-        If set and non-empty, overrides ``BASELINE_COLLECTION_LIMIT`` (e.g. ``1000``).
+    EDGEGUARD_BASELINE_DAYS / EDGEGUARD_BASELINE_COLLECTION_LIMIT — see
+    ``src/baseline_config.py`` for the full precedence ladder.
 
     Returns
     -------
     (limit, baseline_days) where limit is None (unlimited) or an int.
     """
-    limit = 0
-    baseline_days = 730
+    # SSoT: import the resolver helpers. Wrapped in try/except so a
+    # missing import (shouldn't happen — lives next door in src/) doesn't
+    # take the DAG down; we'd fall back to documented defaults.
     try:
-        raw = Variable.get("BASELINE_COLLECTION_LIMIT", "0")
-        limit = int(raw)
-    except Exception as e:
-        logger.debug("Could not read BASELINE_COLLECTION_LIMIT Variable: %s", e)
-        limit = 0
+        from baseline_config import (
+            DEFAULT_BASELINE_COLLECTION_LIMIT,
+            DEFAULT_BASELINE_DAYS,
+            resolve_baseline_collection_limit,
+            resolve_baseline_days,
+        )
+    except ImportError as e:
+        logger.warning("baseline_config import failed (%s) — using local fallbacks 730 / 0", e)
+        return (None, 730)
 
+    # Read Airflow Variables; the resolver does the precedence math.
+    var_days_raw: object = None
     try:
-        baseline_days = int(Variable.get("BASELINE_DAYS", "730"))
+        var_days_raw = Variable.get("BASELINE_DAYS", default_var=None)
     except Exception as e:
         logger.debug("Could not read BASELINE_DAYS Variable: %s", e)
-        baseline_days = 730
 
-    env_limit = os.environ.get("EDGEGUARD_BASELINE_COLLECTION_LIMIT", "").strip()
-    if env_limit:
-        try:
-            limit = int(env_limit)
-            logger.info(f"[BASELINE] EDGEGUARD_BASELINE_COLLECTION_LIMIT override → {limit}")
-        except ValueError:
-            logger.warning(f"[BASELINE] Ignoring invalid EDGEGUARD_BASELINE_COLLECTION_LIMIT={env_limit!r}")
+    var_limit_raw: object = None
+    try:
+        var_limit_raw = Variable.get("BASELINE_COLLECTION_LIMIT", default_var=None)
+    except Exception as e:
+        logger.debug("Could not read BASELINE_COLLECTION_LIMIT Variable: %s", e)
 
-    env_days = os.environ.get("EDGEGUARD_BASELINE_DAYS", "").strip()
-    if env_days:
-        try:
-            baseline_days = int(env_days)
-            logger.info(f"[BASELINE] EDGEGUARD_BASELINE_DAYS override → {baseline_days}")
-        except ValueError:
-            logger.warning(f"[BASELINE] Ignoring invalid EDGEGUARD_BASELINE_DAYS={env_days!r}")
+    # Pull dag_run.conf for per-trigger overrides.
+    # PR-C v3 audit fix (Bugbot MED on commit 500b823, operator-precedence
+    # bug): the previous ``getattr(dag_run, "conf", None) or {} if dag_run
+    # else {}`` parses as ``getattr(...) or ({} if dag_run else {})``, not
+    # ``(getattr(...) or {}) if dag_run else {}`` — when ``dag_run`` is
+    # None, ``getattr(None, "conf", None)`` runs unnecessarily before
+    # returning ``None or {}``. Output happened to be correct due to
+    # truthiness, but the logic diverged from the safe ``isinstance``
+    # idiom used in ``_baseline_clean`` and ``baseline_start_summary``
+    # below. Mirror that pattern so all 3 dag_run.conf reads in this
+    # file use the same defensive shape.
+    dag_run = context.get("dag_run") if context else None
+    raw_conf = getattr(dag_run, "conf", None) if dag_run else None
+    dag_conf: dict = raw_conf if isinstance(raw_conf, dict) else {}
 
-    # DAG trigger conf override (highest priority — from Airflow UI or API)
-    if context:
-        dag_run = context.get("dag_run")
-        dag_conf = getattr(dag_run, "conf", None) or {} if dag_run else {}
-        if "baseline_days" in dag_conf:
-            try:
-                baseline_days = int(dag_conf["baseline_days"])
-                logger.info(f"[BASELINE] dag_run.conf override → baseline_days={baseline_days}")
-            except (ValueError, TypeError):
-                logger.warning(f"[BASELINE] Invalid dag_run.conf baseline_days={dag_conf['baseline_days']!r}")
+    # Resolve via SSoT — handles env > variable > default and validation
+    baseline_days = resolve_baseline_days(
+        dag_run_conf=dag_conf,
+        airflow_variable_value=var_days_raw,
+    )
+    limit_int = resolve_baseline_collection_limit(
+        dag_run_conf=dag_conf,
+        airflow_variable_value=var_limit_raw,
+    )
+
+    # Convert "0 = unlimited" sentinel back to None for the legacy caller
+    limit = None if limit_int == 0 else limit_int
+
+    # The remaining inline DAG-conf handling that's NOT in the SSoT:
+    # (only one extra: legacy ``baseline_collection_limit`` key — kept
+    # for back-compat; the SSoT uses ``collection_limit``.)
+    if dag_conf:
         if "baseline_collection_limit" in dag_conf:
             try:
                 limit = int(dag_conf["baseline_collection_limit"])
@@ -1778,8 +1801,12 @@ def get_baseline_config(context=None) -> tuple:
                     f"[BASELINE] Invalid dag_run.conf baseline_collection_limit={dag_conf['baseline_collection_limit']!r}"
                 )
 
-    # 0 or negative → no cap (pass None to collectors)
-    effective_limit = None if limit <= 0 else limit
+    # 0 or negative → no cap (pass None to collectors). ``limit`` may already
+    # be None from the SSoT; coerce defensively.
+    if limit is None or (isinstance(limit, int) and limit <= 0):
+        effective_limit = None
+    else:
+        effective_limit = limit
     logger.info(f"[BASELINE] Config — limit={effective_limit or 'unlimited'}, baseline_days={baseline_days}")
     return effective_limit, baseline_days
 
@@ -1934,7 +1961,12 @@ def _baseline_start_summary(**context):
     # Clear baseline checkpoints so collectors start fresh (page 1, not stale page 80)
     from baseline_checkpoint import clear_checkpoint
 
-    conf = context.get("dag_run").conf if context.get("dag_run") else {}
+    # PR-C v2 audit fix (Bugbot HIGH on commit 951b163, same-pattern as
+    # _baseline_clean below): ``dag_run.conf`` can be ``None`` in Airflow 3.x
+    # when triggered without config. Coalesce defensively.
+    dag_run = context.get("dag_run")
+    raw_conf = getattr(dag_run, "conf", None) if dag_run else None
+    conf = raw_conf if isinstance(raw_conf, dict) else {}
     include_incremental = str(conf.get("clear_checkpoints", "")).lower() == "all"
     clear_checkpoint(include_incremental=include_incremental)
     if include_incremental:
@@ -1971,6 +2003,125 @@ baseline_start = PythonOperator(
     execution_timeout=timedelta(minutes=2),
     dag=baseline_dag,
 )
+
+
+def _baseline_clean(**context):
+    """Optional baseline_clean step — runs the destructive 3-step wipe
+    (Neo4j + MISP + checkpoints) IFF ``dag_run.conf={"fresh_baseline": true}``.
+
+    Default behavior: no-op + log "baseline mode is additive (fresh_baseline
+    not set)". This preserves the existing baseline DAG semantics for
+    operators who trigger via the Airflow UI without a conf — the previous
+    behavior (only checkpoints cleared) becomes the explicit "additive
+    baseline" path.
+
+    To trigger a true fresh baseline:
+        airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true}'
+        # OR via Airflow UI → Trigger DAG w/ Config → paste the JSON above
+
+    The CLI wrapper ``edgeguard fresh-baseline`` (added in PR-C) sets this
+    conf automatically so operators don't have to remember the JSON.
+
+    PR-C audit fix (Cross-Checker HIGH H3): closes the CLI ↔ DAG drift
+    where ``--fresh-baseline`` on the CLI did the destructive clean but
+    the DAG had no equivalent. The shared helper ``baseline_clean.reset_baseline_data``
+    is the SAME code path the CLI now uses (so any future improvement
+    benefits both).
+    """
+    # PR-C v2 audit fix (Bugbot HIGH on commit 951b163): ``dag_run.conf``
+    # can be ``None`` in Airflow 3.x when the DAG is triggered via the UI
+    # without providing configuration (the common additive-mode path).
+    # The previous expression
+    #   ``context.get("dag_run").conf if context.get("dag_run") else {}``
+    # evaluated ``.conf`` even when ``.conf is None`` — which is a valid
+    # value for an unconfigured trigger — and then ``conf.get("fresh_baseline")``
+    # raised ``AttributeError: 'NoneType' object has no attribute 'get'``,
+    # crashing the baseline_clean task on every additive-mode invocation.
+    # Coalesce ``None`` to ``{}`` so the additive-mode path returns cleanly.
+    dag_run = context.get("dag_run")
+    raw_conf = getattr(dag_run, "conf", None) if dag_run else None
+    conf = raw_conf if isinstance(raw_conf, dict) else {}
+
+    # PR-C v2 audit fix (Bug Hunter B1, comprehensive 7-agent audit):
+    # ``bool(conf.get("fresh_baseline", False))`` is wrong for the Airflow
+    # Trigger-DAG-with-Config UI — operators commonly type quoted bools
+    # like ``{"fresh_baseline": "false"}`` or ``{"fresh_baseline": "0"}``,
+    # both of which are truthy under Python's ``bool(str)``. That would
+    # silently perform a destructive Neo4j+MISP wipe on a single typo,
+    # nuking ~350K nodes on a baseline-loaded graph.
+    #
+    # Explicit parse: only Python ``True`` or the string forms
+    # ``"true"`` / ``"1"`` / ``"yes"`` / ``"on"`` (case- and whitespace-
+    # insensitive) are accepted. Everything else — including the
+    # explicit-falsy strings — is treated as additive.
+    # PR-C v3.6 audit fix (Bugbot MED on commit fdf14c1, type-symmetry):
+    # the previous parse accepted string ``"1"`` but rejected integer
+    # ``1`` because ``1 is True`` evaluates to False in Python (identity
+    # vs equality). The asymmetry was surprising — operators using the
+    # Airflow REST API to trigger with ``{"fresh_baseline": 1}`` got
+    # silent additive mode instead of the expected destructive wipe.
+    # Accept ``1`` (int) symmetric with ``"1"`` (str) by checking for
+    # ``True`` OR ``int 1`` explicitly.
+    raw_fresh = conf.get("fresh_baseline", False)
+    if raw_fresh is True or (isinstance(raw_fresh, int) and not isinstance(raw_fresh, bool) and raw_fresh == 1):
+        fresh_baseline = True
+    elif isinstance(raw_fresh, str) and raw_fresh.strip().lower() in ("true", "1", "yes", "on"):
+        fresh_baseline = True
+    else:
+        fresh_baseline = False
+
+    if not fresh_baseline:
+        logger.info("=" * 70)
+        logger.info("BASELINE_CLEAN: skipped (fresh_baseline conf not set — additive mode).")
+        logger.info('To trigger a destructive clean: dag_run.conf = {"fresh_baseline": true}')
+        logger.info("Or via the CLI wrapper: edgeguard fresh-baseline --days <N>")
+        logger.info("=" * 70)
+        return
+
+    # Lazy import — keep DAG-parse-time minimal, only load the destructive
+    # helper when actually used.
+    try:
+        from baseline_clean import BaselineCleanError, reset_baseline_data
+    except ImportError as e:
+        raise AirflowException(f"baseline_clean module unavailable: {e}") from e
+
+    try:
+        result = reset_baseline_data()
+        logger.info(
+            "BASELINE_CLEAN: deleted %d Neo4j nodes, %d MISP events, %d checkpoint entries (%.1fs)",
+            result.before.neo4j_count,
+            result.before.misp_count,
+            result.before.checkpoint_count,
+            result.duration_seconds,
+        )
+    except BaselineCleanError as e:
+        # Fail the DAG hard — collectors MUST NOT run on a half-cleaned state.
+        # The downstream tasks (baseline_start + tier1_core onward) will be
+        # marked upstream_failed by Airflow's default trigger rule. Operator
+        # sees one red task with the actual error.
+        raise AirflowException(f"BASELINE_CLEAN failed: {e}") from e
+
+
+baseline_clean_task = PythonOperator(
+    task_id="baseline_clean",
+    python_callable=_baseline_clean,
+    # Generous timeout: a 730-day baseline can have ~8K MISP events; deletes
+    # are paginated 500/round at ~50ms/delete → ~7-10 min worst case + ~1 min
+    # Neo4j clear_all + ~1 min verify-poll = ~12-15 min ceiling.
+    execution_timeout=timedelta(minutes=20),
+    # PR-C v2 audit fix (Prod Readiness F1, comprehensive 7-agent audit):
+    # baseline_dag's default_args set retries=1, which would re-execute the
+    # destructive wipe on a verify-poll timeout. The wipe is idempotent
+    # (re-wiping an empty graph is a no-op), but burns ~12-15 min and
+    # obscures the original failure in the log. Override to 0 — operators
+    # who need a re-wipe should re-trigger the DAG explicitly.
+    retries=0,
+    # Explicit trigger rule: do not race a flaky baseline_misp_health retry.
+    # Only run after misp_health has fully succeeded.
+    trigger_rule=TriggerRule.ALL_SUCCESS,
+    dag=baseline_dag,
+)
+
 
 # Tier 1 — Core intelligence (rate-limited APIs). ALL_DONE: one failure doesn't block others.
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
@@ -2116,10 +2267,12 @@ baseline_complete = BashOperator(
     dag=baseline_dag,
 )
 
-# Dependency chain:
-# health → start → tier1 (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done
+# Dependency chain (PR-C audit fix Cross-Checker HIGH H3):
+# health → clean (no-op unless fresh_baseline=true conf) → start → tier1
+# (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done
 (
     baseline_misp_health
+    >> baseline_clean_task
     >> baseline_start
     >> baseline_tier1
     >> baseline_tier2

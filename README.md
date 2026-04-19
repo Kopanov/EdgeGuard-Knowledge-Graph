@@ -972,6 +972,11 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 - **Circuit Breakers + Retry**: Fixed HALF_OPEN deadlock, monotonic time, resilience patterns for all external service calls
 - **UTC-aware timestamps**: All 70+ datetime instances across 24 files use `timezone.utc` (Python 3.12 compatible)
 
+### 🛠️ Operator commands (added 2026-04-19, see PR-C)
+
+- **`edgeguard fresh-baseline --days N`** — destructive baseline trigger. Probes Neo4j + MISP for blast radius, shows counts ("you will permanently delete 347,197 nodes / 8,247 events / 12 checkpoints"), asks for typed confirmation (`FRESH-BASELINE`), then triggers the Airflow `edgeguard_baseline` DAG with `dag_run.conf={"fresh_baseline": true, "baseline_days": N}`. Refuses to proceed if Neo4j or MISP is unreachable (exit 2 = preflight failed; informed-consent principle).
+- **`edgeguard baseline --days N`** — additive baseline trigger. Existing data preserved. No confirmation prompt. Triggers the same DAG with `dag_run.conf={"baseline_days": N}` (no `fresh_baseline` key → DAG runs in additive mode).
+
 ### 🚧 In Progress / Planned
 
 - **SoftwareVersion bridge**: `(Vulnerability)-[:IN]->(SoftwareVersion)-[:ON]->(Host)` — NVD `version_constraints` are now collected and stored; CPE-to-SoftwareVersion mapping pending (see [`docs/RESILMESH_INTEROPERABILITY.md`](docs/RESILMESH_INTEROPERABILITY.md) §4.4)
@@ -984,5 +989,5 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-19 — PR-D: documentation sync. Bravo's audit found that the README env-vars table was significantly incomplete (~40 missing variables that ARE configured in `docker-compose.yml`'s `x-common-env` block + `.env.example`). Added supplementary subtables for: REST + GraphQL API hardening (host/port/workers/auth-bypass-checks added in PR-A), Neo4j memory tuning (heap/pagecache/tx_memory/container — previously documented only in the Recommended Memory Settings section), operator UX & runtime paths, alerting (Slack/NATS/MISP-trusted-org allowlists), Airflow service-side env vars (Compose-only), monitoring stack (Grafana/Prometheus), MISP advanced sync, and the MITRE collector. `.env.example` synced so `cp .env.example .env` produces a fully-documented starting point. Earlier today: PR-A (P0 ship-blockers), PR-B (supply-chain refresh), PR-C (CLI ↔ DAG parity + fresh-baseline). The 2026-04-19 baseline regression bumps that landed in PR #45 are reflected throughout: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g. `tx_memory` is a CAP, NOT additive to heap+pagecache — see DOCKER_SETUP_GUIDE.md._
+_Last updated: 2026-04-19 — PR-C (CLI ↔ DAG parity + fresh-baseline): closed 3 CLI/DAG drift gaps; CLI baseline now invokes `enrichment_jobs` + `build_relationships` via subprocess to match DAG; new `baseline_clean` Airflow task gated on `dag_run.conf={"fresh_baseline": true}`; new `edgeguard fresh-baseline` and `edgeguard baseline` CLI commands; shared `src/baseline_clean.py` helper (atomic 3-step wipe + settle + verify-poll + fail-fast); 35 behavioural tests bring `baseline_clean.py` coverage from 21% → 72%. PR-D landed earlier the same day (env-vars documentation sync — ~40 vars added to README from `docker-compose.yml`'s `x-common-env` block + `.env.example`). PR-A: install.sh auto-generates `EDGEGUARD_API_KEY` so `docker compose up` succeeds out of the box. PR-B: supply-chain refresh; Trivy gate weakening tracked in issue #52. Recommended-memory bumps from PR #45 reflected throughout: `NEO4J_TX_MEMORY_MAX` 4g→8g (CAP, not additive), `NEO4J_HEAP_INITIAL` 4g→12g (= MAX), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g — see DOCKER_SETUP_GUIDE.md._
 

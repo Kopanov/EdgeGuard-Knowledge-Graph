@@ -139,6 +139,12 @@ class EdgeGuardPipeline:
         # Create shared MISPWriter instance for collectors that push to MISP
         self.misp_writer = MISPWriter()
 
+        # PR-C v2 audit fix (Cross-Checker B2): track build_relationships
+        # degraded-mode for Step 5b. The CLI deliberately does NOT raise on
+        # build_relationships exit != 0 (it would lose Step 5c); instead it
+        # marks here so a downstream caller / test can detect.
+        self._build_relationships_degraded: bool = False
+
         self.collectors = {
             "misp": MISPCollector(),
             "otx": OTXCollector(misp_writer=self.misp_writer),
@@ -878,7 +884,7 @@ class EdgeGuardPipeline:
         stix_event_id: str = None,
         use_stix_flow: bool = False,
         baseline: bool = False,
-        baseline_days: int = 730,
+        baseline_days: int | None = None,
         fresh_baseline: bool = False,
     ):
         """
@@ -890,11 +896,21 @@ class EdgeGuardPipeline:
             stix_event_id: If provided, export only this specific event to STIX 2.1
             use_stix_flow: If True, use STIX 2.1 as intermediate format (MISP → STIX → Neo4j)
             baseline: If True, collect historical data (all available, not just latest)
-            baseline_days: How many days back to collect in baseline mode (default: 365)
+            baseline_days: How many days back to collect in baseline mode. ``None``
+                defers to ``baseline_config.resolve_baseline_days(explicit=None)`` —
+                respects ``EDGEGUARD_BASELINE_DAYS`` env, then falls back to the
+                shipped ``DEFAULT_BASELINE_DAYS`` (730). PR-C v2 audit fix
+                (Maintainer H1 + Cross-Checker B1): the previous hardcoded 730
+                literal was the very pattern ``baseline_config`` was meant to
+                consolidate.
             fresh_baseline: If True with baseline, perform a true clean slate: clear Neo4j
                 graph data, delete MISP EdgeGuard events, and discard checkpoints before
                 re-collecting. Default False preserves existing data and checkpoints for resume.
         """
+        if baseline_days is None:
+            from baseline_config import resolve_baseline_days
+
+            baseline_days = resolve_baseline_days(explicit=None)
         # ── Pipeline lock: prevent concurrent CLI runs ──
         # NOTE: This lock only protects CLI invocations (python run_pipeline.py).
         # Airflow DAGs use max_active_runs=1 for concurrency control instead.
@@ -1158,101 +1174,51 @@ class EdgeGuardPipeline:
         stix_event_id=None,
         use_stix_flow=False,
         baseline=False,
-        baseline_days=730,
+        baseline_days=None,
         fresh_baseline=False,
     ):
-        """Inner pipeline logic, separated so the lock is always cleaned up."""
-        # Import baseline checkpoint utilities
+        """Inner pipeline logic, separated so the lock is always cleaned up.
+
+        ``baseline_days=None`` defers to ``baseline_config.resolve_baseline_days``
+        — same SSoT as the public ``run()`` method.
+        """
+        if baseline_days is None:
+            from baseline_config import resolve_baseline_days
+
+            baseline_days = resolve_baseline_days(explicit=None)
+        # Import baseline checkpoint utilities. ``clear_checkpoint`` is still
+        # used by the resume-completed-baseline branch below (line ~1152).
         from baseline_checkpoint import clear_checkpoint, get_baseline_status
 
         # Log baseline mode
         if baseline:
             logger.info(f"BASELINE MODE: Collecting historical data (last {baseline_days} days)")
             if fresh_baseline:
-                logger.info("=== FRESH BASELINE: clearing all data for clean start ===")
+                # PR-C audit fix (Cross-Checker H3 + Prod Readiness HIGH): the
+                # previous inline 3-step clean (checkpoints, Neo4j, MISP) lived
+                # here as 80 LOC of paginated DELETE loops. It silently logged
+                # warnings on partial failures (the ``except Exception`` blocks
+                # at the previous lines 1134/1196), leaving operators with a
+                # half-cleaned state that was harder to debug than a clean
+                # failure. Replaced by the shared helper that wipes + settles
+                # + verifies + raises BaselineCleanError on any step failure.
+                # Same code path is now used by the new ``baseline_clean``
+                # Airflow task (PR-C wires it in dags/edgeguard_pipeline.py).
+                from baseline_clean import BaselineCleanError, reset_baseline_data
 
-                # 1. Clear checkpoints (preserves incremental by default)
-                clear_checkpoint()
-                logger.info("  [1/3] Cleared checkpoints")
-
-                # 2. Clear Neo4j graph data
                 try:
-                    from neo4j_client import Neo4jClient
-
-                    _neo4j = Neo4jClient()
-                    if _neo4j.connect():
-                        try:
-                            _neo4j.clear_all()
-                            logger.info("  [2/3] Cleared Neo4j graph data")
-                        finally:
-                            _neo4j.close()
-                    else:
-                        logger.warning("  [2/3] Could not connect to Neo4j — skipping clear")
-                except Exception as e:
-                    logger.warning(f"  [2/3] Could not clear Neo4j: {e}")
-
-                # 3. Clear MISP EdgeGuard events
-                try:
-                    import warnings
-
-                    import requests as _req
-                    import urllib3
-
-                    from config import MISP_API_KEY as _misp_key
-                    from config import MISP_URL as _misp_url
-                    from config import SSL_VERIFY as _verify
-                    from config import apply_misp_http_host_header
-
-                    _sess = _req.Session()
-                    _sess.headers.update({"Authorization": _misp_key, "Accept": "application/json"})
-                    apply_misp_http_host_header(_sess)
-
-                    # Delete all EdgeGuard events. Always re-fetch page 1 (deleted events
-                    # disappear, shifting remaining events to page 1). Safety cap: 20 iterations.
-                    _deleted = 0
-                    for _round in range(20):
-                        with warnings.catch_warnings():
-                            if not _verify:
-                                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-                            _resp = _sess.get(
-                                f"{_misp_url}/events/index",
-                                params={"searchall": "EdgeGuard", "limit": 500},
-                                verify=_verify,
-                                timeout=(15, 60),
-                            )
-                        if _resp.status_code != 200:
-                            break
-
-                        _json = _resp.json()
-                        if isinstance(_json, list):
-                            _events = _json
-                        elif isinstance(_json, dict):
-                            _events = _json.get("response", _json.get("Event", []))
-                            if isinstance(_events, dict):
-                                _events = [_events]
-                        else:
-                            _events = []
-
-                        if not _events:
-                            break  # No more events
-
-                        for ev in _events:
-                            eid = ev.get("id") or ev.get("Event", {}).get("id")
-                            if eid:
-                                with warnings.catch_warnings():
-                                    if not _verify:
-                                        warnings.filterwarnings(
-                                            "ignore", category=urllib3.exceptions.InsecureRequestWarning
-                                        )
-                                    _del_resp = _sess.delete(
-                                        f"{_misp_url}/events/{eid}", verify=_verify, timeout=(15, 30)
-                                    )
-                                if _del_resp.status_code == 200:
-                                    _deleted += 1
-
-                    logger.info(f"  [3/3] Cleared {_deleted} MISP EdgeGuard events")
-                except Exception as e:
-                    logger.warning(f"  [3/3] Could not clear MISP events: {e}")
+                    clean_result = reset_baseline_data()
+                    logger.info(
+                        "Fresh-baseline clean complete: deleted %d Neo4j nodes, "
+                        "%d MISP events, %d checkpoint entries (%.1fs)",
+                        clean_result.before.neo4j_count,
+                        clean_result.before.misp_count,
+                        clean_result.before.checkpoint_count,
+                        clean_result.duration_seconds,
+                    )
+                except BaselineCleanError as e:
+                    logger.error("Fresh-baseline clean FAILED: %s", e)
+                    return False  # Refuse to run collectors on a half-cleaned state.
 
                 logger.info("=== Fresh baseline ready — collecting from scratch ===")
             else:
@@ -1569,6 +1535,78 @@ class EdgeGuardPipeline:
         except Exception as e:
             logger.warning(f"   [WARN] Enrichment skipped: {e}")
 
+        # PR-C audit fix (Cross-Checker HIGH H1 + H2): CLI ↔ DAG parity.
+        # The Airflow DAG runs ``build_relationships.py`` and
+        # ``enrichment_jobs.run_all_enrichment_jobs`` after the sync — but
+        # the CLI never invoked either. Operators running
+        # ``python run_pipeline.py --baseline`` got a broken graph: no
+        # IMPLEMENTS_TECHNIQUE / TARGETS / AFFECTS edges (the 12 link
+        # queries in build_relationships.py were skipped), no Campaign
+        # nodes, no IOC decay, no Vulnerability↔CVE bridges. Fixed by
+        # invoking both here, gated to ``baseline=True`` to avoid
+        # surprising incremental-mode CLI users with extra latency.
+        if baseline:
+            # Step 5b: build_relationships (12 cross-entity link queries).
+            # Subprocess-isolated to match the DAG's invocation shape.
+            logger.info("\n[TARGET] Step 5b: build_relationships (CLI parity with DAG)...")
+            try:
+                import subprocess
+
+                br_result = subprocess.run(
+                    [sys.executable, os.path.join(os.path.dirname(__file__), "build_relationships.py")],
+                    capture_output=True,
+                    text=True,
+                    timeout=18000,  # 5h, matches DAG's run_build_relationships
+                    check=False,
+                )
+                if br_result.returncode == 0:
+                    logger.info("   [OK] build_relationships complete")
+                else:
+                    # PR-C v2 audit fix (Cross-Checker B2, comprehensive
+                    # 7-agent audit): the previous comment claimed "same
+                    # behavior as the DAG", but the DAG actually raises
+                    # ``AirflowException`` on non-zero exit (see
+                    # ``dags/edgeguard_pipeline.py``: ``run_build_relationships``
+                    # at lines 1618-1633). The CLI deliberately diverges —
+                    # local operators want a "degraded-mode finish" rather
+                    # than a hard abort that loses Step 5c enrichment too.
+                    # Acknowledge the asymmetry explicitly so the parity
+                    # claim isn't a lie.
+                    #
+                    # Operator hint: the graph edges from build_relationships
+                    # (12 link queries: IMPLEMENTS_TECHNIQUE, TARGETS,
+                    # AFFECTS, ...) will be MISSING. Re-run
+                    # ``python src/build_relationships.py`` standalone to
+                    # complete the graph.
+                    logger.warning(
+                        "   [WARN] build_relationships exited with code %d. "
+                        "Graph is in DEGRADED MODE (link edges missing). "
+                        "DAG would have raised AirflowException; CLI continues "
+                        "to allow Step 5c enrichment to run. "
+                        "Re-run ``python src/build_relationships.py`` standalone to repair. "
+                        "stderr (last 500 chars): %s",
+                        br_result.returncode,
+                        (br_result.stderr or "")[-500:],
+                    )
+                    # Mark on the pipeline instance so a downstream caller /
+                    # test can detect degraded-mode without parsing logs.
+                    self._build_relationships_degraded = True
+            except Exception as e:
+                logger.warning(f"   [WARN] build_relationships skipped: {e}")
+                self._build_relationships_degraded = True
+
+            # Step 5c: post-sync enrichment_jobs (4 jobs: decay, campaigns,
+            # calibrate, bridge_vuln_cve). In-process because each job is
+            # short-running and shares the existing Neo4jClient.
+            logger.info("\n[TARGET] Step 5c: post-sync enrichment_jobs (CLI parity with DAG)...")
+            try:
+                from enrichment_jobs import run_all_enrichment_jobs
+
+                summary = run_all_enrichment_jobs(self.neo4j)
+                logger.info("   [OK] Enrichment jobs complete: %s", summary)
+            except Exception as e:
+                logger.warning(f"   [WARN] Enrichment jobs skipped: {e}")
+
         # Step 6: Get final stats
         logger.info("\n[STATS] Step 6: Final Statistics...")
         stats = self.neo4j.get_stats()
@@ -1691,18 +1729,27 @@ def main():
         default=False,
         help="Collect available, historical data (all not just latest). Default: False (latest updates only)",
     )
-    _bd_default = 730  # Match Airflow DAG default (2 years)
-    _bd_env = os.environ.get("EDGEGUARD_BASELINE_DAYS", "").strip()
-    if _bd_env:
-        try:
-            _bd_default = int(_bd_env)
-        except ValueError:
-            pass
+    # PR-C v2 audit fix (Maintainer H1 + Cross-Checker B1, comprehensive
+    # 7-agent audit): the SSoT module ``baseline_config.resolve_baseline_days``
+    # was created in PR-C but only the new ``edgeguard.cmd_*`` callers used
+    # it — the legacy CLI parser here, ``run_pipeline.run(baseline_days=730)``,
+    # ``_run_pipeline_inner(baseline_days=730)``, and the DAG's
+    # ``get_baseline_config`` all kept hardcoded 730 literals. Wire the SSoT
+    # in here so the docstring's "single source of truth" claim is real.
+    #
+    # Cross-Checker D4: the previous help text said "default: 365" while
+    # ``_bd_default = 730`` — corrected below.
+    from baseline_config import DEFAULT_BASELINE_DAYS, resolve_baseline_days
+
+    _bd_default = resolve_baseline_days(explicit=None)  # respects env, falls back to default
     parser.add_argument(
         "--baseline-days",
         type=int,
         default=_bd_default,
-        help="How many days back for baseline mode (default: 365, or EDGEGUARD_BASELINE_DAYS if set)",
+        help=(
+            f"How many days back for baseline mode (default: {DEFAULT_BASELINE_DAYS}, "
+            "or EDGEGUARD_BASELINE_DAYS env var if set)"
+        ),
     )
     parser.add_argument(
         "--fresh-baseline",
