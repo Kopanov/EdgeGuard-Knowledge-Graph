@@ -1760,11 +1760,20 @@ def get_baseline_config(context=None) -> tuple:
     except Exception as e:
         logger.debug("Could not read BASELINE_COLLECTION_LIMIT Variable: %s", e)
 
-    # Pull dag_run.conf for per-trigger overrides
-    dag_conf: dict = {}
-    if context:
-        dag_run = context.get("dag_run")
-        dag_conf = getattr(dag_run, "conf", None) or {} if dag_run else {}
+    # Pull dag_run.conf for per-trigger overrides.
+    # PR-C v3 audit fix (Bugbot MED on commit 500b823, operator-precedence
+    # bug): the previous ``getattr(dag_run, "conf", None) or {} if dag_run
+    # else {}`` parses as ``getattr(...) or ({} if dag_run else {})``, not
+    # ``(getattr(...) or {}) if dag_run else {}`` — when ``dag_run`` is
+    # None, ``getattr(None, "conf", None)`` runs unnecessarily before
+    # returning ``None or {}``. Output happened to be correct due to
+    # truthiness, but the logic diverged from the safe ``isinstance``
+    # idiom used in ``_baseline_clean`` and ``baseline_start_summary``
+    # below. Mirror that pattern so all 3 dag_run.conf reads in this
+    # file use the same defensive shape.
+    dag_run = context.get("dag_run") if context else None
+    raw_conf = getattr(dag_run, "conf", None) if dag_run else None
+    dag_conf: dict = raw_conf if isinstance(raw_conf, dict) else {}
 
     # Resolve via SSoT — handles env > variable > default and validation
     baseline_days = resolve_baseline_days(

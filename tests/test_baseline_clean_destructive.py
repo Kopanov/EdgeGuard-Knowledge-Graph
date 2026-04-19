@@ -326,6 +326,105 @@ class TestWipeMispEventsClientSideFilter:
         assert not any("/events/11" in url for url in delete_urls)
 
 
+class TestWipeMispEventsPageAdvancement:
+    """Bugbot MED on commit 500b823 (post-PR-C-v3 audit): the previous
+    wipe loop always fetched page 1, relying on the rotation pattern
+    (deleted events shift remaining ones up). When the v2 client-side
+    filter started SKIPPING false-positive events, a page of only
+    false positives caused the loop to stall — same false positives
+    re-fetched every round, no progress, ``max_pages`` iterations
+    burned (~20+ minutes of GET timeouts), then silent ``deleted=0``
+    return even when real EdgeGuard events existed on later pages.
+
+    Fix: when ``deleted_this_round == 0``, advance to the next page.
+    When deletions happened, reset to page 1 (rotation pattern)."""
+
+    def test_page_advances_when_only_false_positives(self):
+        """Round 1 page=1 returns 2 false positives → no deletion → next
+        round must fetch page=2 and find the real EdgeGuard event."""
+        from baseline_clean import _wipe_misp_events
+
+        # Page 1: 2 false positives (no EdgeGuard in info) → 0 deletions
+        # Page 2: 1 real EdgeGuard event → 1 deletion → reset to page 1
+        # Page 1 round 3: empty (we deleted everything reachable) → break
+        page1_round1 = [
+            {"id": "fp1", "info": "Discussion of EdgeGuard incident"},  # FP — searchall hit but info has it
+            {"id": "fp2", "info": "Random non-EG event"},
+        ]
+        page1_round1_filtered_only_fp = [
+            {"id": "fp2", "info": "Random non-EG event"},  # only FP remains
+        ]
+        page2 = [{"id": "real1", "info": "EdgeGuard NVD baseline"}]
+
+        # Wait — fp1's info contains "EdgeGuard" → it would NOT be filtered.
+        # Adjust: both FPs must lack "EdgeGuard" in info.
+        page1_round1 = [
+            {"id": "fp1", "info": "Random non-EG event A"},
+            {"id": "fp2", "info": "Random non-EG event B"},
+        ]
+        # Round 1 page=1 → 2 FPs → 0 deletions → page advances to 2
+        # Round 2 page=2 → 1 real → 1 deletion → page resets to 1
+        # Round 3 page=1 → still 2 FPs (they didn't shift, weren't deleted) → 0 deletions → page advances to 2
+        # Round 4 page=2 → empty → break
+        get_responses = [
+            _make_response(200, page1_round1),  # round 1 page 1: only FPs
+            _make_response(200, page2),  # round 2 page 2: real
+            _make_response(200, page1_round1),  # round 3 page 1: still FPs (never deleted)
+            _make_response(200, []),  # round 4 page 2: empty → break
+        ]
+
+        sess = MagicMock()
+        sess.get = MagicMock(side_effect=get_responses)
+        sess.delete = MagicMock(return_value=_make_response(200, {"saved": True}))
+
+        with patch("requests.Session", return_value=sess):
+            deleted = _wipe_misp_events(
+                misp_url="https://misp.test",
+                misp_api_key="k" * 40,
+                ssl_verify=True,
+                max_pages=10,
+            )
+
+        # 1 real event deleted; 0 FPs touched
+        assert deleted == 1
+
+        # Verify the page param progression
+        get_pages = [call.kwargs["params"]["page"] for call in sess.get.call_args_list]
+        assert get_pages == [1, 2, 1, 2], f"unexpected page progression: {get_pages}"
+
+        # Only the real event was DELETE'd
+        delete_urls = [call.args[0] for call in sess.delete.call_args_list]
+        assert all("/events/real1" in url for url in delete_urls)
+
+    def test_page_stays_at_1_when_deletions_made_progress(self):
+        """The rotation pattern still applies when deletions happened —
+        page must reset to 1 so the wipe sees the shifted-up content."""
+        from baseline_clean import _wipe_misp_events
+
+        # Round 1 page=1: 2 real events → both deleted → page stays at 1
+        # Round 2 page=1: 0 events (rotation done) → break
+        get_responses = [
+            _make_response(200, _make_event_payload(["real1", "real2"])),
+            _make_response(200, []),
+        ]
+        sess = MagicMock()
+        sess.get = MagicMock(side_effect=get_responses)
+        sess.delete = MagicMock(return_value=_make_response(200, {"saved": True}))
+
+        with patch("requests.Session", return_value=sess):
+            deleted = _wipe_misp_events(
+                misp_url="https://misp.test",
+                misp_api_key="k" * 40,
+                ssl_verify=True,
+                max_pages=5,
+            )
+
+        assert deleted == 2
+        # Both GETs were page=1 (deletion → reset → no advancement needed)
+        get_pages = [call.kwargs["params"]["page"] for call in sess.get.call_args_list]
+        assert get_pages == [1, 1]
+
+
 # ---------------------------------------------------------------------------
 # Red Team H1 — redirect-following must be disabled
 # ---------------------------------------------------------------------------
@@ -1081,6 +1180,32 @@ class TestBaselineConfigSsotIsWired:
         assert "resolve_baseline_collection_limit(" in body, (
             "Cross-Checker B1: same SSoT for the collection_limit field"
         )
+
+    def test_dag_get_baseline_config_uses_safe_dag_conf_pattern(self):
+        """Bugbot MED on commit 500b823 (post-PR-C-v3): the previous
+        ``getattr(dag_run, "conf", None) or {} if dag_run else {}``
+        had an operator-precedence bug — parsed as
+        ``getattr(...) or ({} if dag_run else {})``, not
+        ``(getattr(...) or {}) if dag_run else {}``. Output happened to
+        be correct due to truthiness, but logic diverged from the safe
+        ``isinstance`` idiom used in ``_baseline_clean``. All 3
+        dag_run.conf reads in this file must use the same shape."""
+        with open("dags/edgeguard_pipeline.py") as fh:
+            src = fh.read()
+        idx = src.find("def get_baseline_config(")
+        assert idx > 0
+        end = src.find("\ndef ", idx + 10)
+        body = src[idx:end]
+
+        # Strip comment lines so the rationale comment doesn't false-fail
+        code_only = "\n".join(ln for ln in body.splitlines() if not ln.lstrip().startswith("#"))
+
+        # Negative: the buggy precedence pattern must be absent
+        assert 'getattr(dag_run, "conf", None) or {} if dag_run' not in code_only, (
+            "Bugbot MED: operator-precedence bug — use isinstance idiom instead"
+        )
+        # Positive: the safe isinstance idiom must be present
+        assert "isinstance(raw_conf, dict)" in code_only, "expected safe isinstance check for dag_run.conf"
 
     def test_run_pipeline_help_text_no_longer_says_default_365(self):
         """Cross-Checker D4: the ``--baseline-days`` help text said

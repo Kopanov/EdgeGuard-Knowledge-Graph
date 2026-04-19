@@ -458,13 +458,14 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
 
     deleted = 0
     saw_302_count = 0  # PR-C v2 audit fix (Bug Hunter B4): see end-of-loop check
+    page = 1  # PR-C v3 (Bugbot MED on commit 500b823): see deleted_this_round logic below
     for round_idx in range(max_pages):
         with warnings.catch_warnings():
             if not ssl_verify:
                 warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
             resp = sess.get(
                 f"{misp_url}/events/index",
-                params={"searchall": "EdgeGuard", "limit": 500},
+                params={"searchall": "EdgeGuard", "limit": 500, "page": page},
                 verify=ssl_verify,
                 timeout=(15, 60),
                 allow_redirects=False,  # Red Team H1
@@ -489,6 +490,7 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
         if not events:
             break  # Done — no more events to delete.
 
+        deleted_this_round = 0
         for ev in events:
             eid = ev.get("id") or ev.get("Event", {}).get("id")
             if not eid:
@@ -526,6 +528,7 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
                 )
             if del_resp.status_code == 200:
                 deleted += 1
+                deleted_this_round += 1
             elif del_resp.status_code in (302,):
                 # PR-C v2 audit fix (Bug Hunter B4 + Red Team H1): a 302
                 # on DELETE is suspicious — most likely an auth redirect
@@ -547,6 +550,24 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
                 # 4xx/5xx on a delete is a real error — abort the wipe so the verify
                 # loop sees the half-clean state and the helper raises.
                 raise RuntimeError(f"MISP DELETE /events/{eid} returned HTTP {del_resp.status_code} — aborting wipe")
+
+        # PR-C v3 audit fix (Bugbot MED on commit 500b823): when the wipe
+        # uses a client-side EdgeGuard filter (the v2 fix above), a page
+        # of ONLY false positives produces ``deleted_this_round == 0``
+        # — and the previous always-fetch-page-1 logic would re-fetch
+        # the same page next round, getting the same false positives,
+        # stalling the loop until ``max_pages`` iterations burned ~20+
+        # minutes of GET timeouts before silently returning ``deleted=0``
+        # (even when real EdgeGuard events existed on later pages).
+        #
+        # Fix: when nothing was deleted this round, advance to the next
+        # page so the false positives don't trap us. When deletions
+        # happened, reset to page 1 (the rotation pattern — deleted
+        # events shifted everything up, so page 1 has fresh content).
+        if deleted_this_round == 0:
+            page += 1
+        else:
+            page = 1
 
     # PR-C v2 audit fix (Bug Hunter B4): after the loop, if we saw 302s
     # AND deleted nothing, raise an actionable error instead of silently
