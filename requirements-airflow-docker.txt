@@ -49,3 +49,11 @@ opentelemetry-api~=1.41
 opentelemetry-sdk~=1.41
 opentelemetry-instrumentation-fastapi~=0.62b0
 opentelemetry-exporter-otlp~=1.41
+
+# PR-B audit fix (Trivy CRITICAL on commit 3ed83be): litellm 1.82.6 is a
+# transitive dep pulled by apache/airflow:3.2.0's bundled providers. It's
+# vulnerable to CVE-2026-35030 (CRITICAL — authentication bypass and
+# privilege escalation). Override to 1.83.0 which has the fix. When
+# apache/airflow refreshes the base with a patched litellm, this pin can
+# be removed.
+litellm>=1.83.0
