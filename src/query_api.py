@@ -1167,4 +1167,14 @@ if __name__ == "__main__":
 
     logger.info(f"[START] Starting EdgeGuard Query API on {host}:{port} (workers={workers})")
 
-    uvicorn.run("query_api:app", host=host, port=port, reload=reload, workers=workers, log_level="info")
+    # PR-A audit fix (Bugbot MED on commit ce37238): the previous
+    # ``uvicorn.run("query_api:app", ...)`` import string relied on
+    # ``PYTHONPATH=/app/src`` being set so uvicorn's worker reimport could
+    # resolve the bare module name. Compose + the Docker image both set
+    # PYTHONPATH, but if this module is invoked via ``python -m
+    # src.query_api`` from a context without that PYTHONPATH (local dev
+    # without venv activate, ad-hoc test harness), uvicorn's worker
+    # reimport raises ``ModuleNotFoundError: query_api``. ``"src.query_api:app"``
+    # works regardless of PYTHONPATH because it matches the actual module
+    # path under the project root.
+    uvicorn.run("src.query_api:app", host=host, port=port, reload=reload, workers=workers, log_level="info")
