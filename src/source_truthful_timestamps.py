@@ -102,6 +102,25 @@ is missing, the extractor returns (None, None).** The edge MIN/MAX
 CASE with AND-guard then preserves any prior value — NULL never
 overwrites a populated claim.
 
+Defense-in-depth — MISP tag impersonation (chip 5e)
+---------------------------------------------------
+The reliable-source allowlist above trusts the source identity
+carried in MISP attribute tags. That trust is binary: a forged
+``original_source: "nvd"`` tag stamped by a compromised MISP user
+or a hostile federated peer would otherwise corrupt
+``MIN(r.source_reported_first_at)`` permanently.
+
+When ``event_info`` is plumbed in (production parse_attribute always
+does so as of chip 5e) AND the operator has configured at least one
+of ``EDGEGUARD_TRUSTED_MISP_ORG_UUIDS`` / ``EDGEGUARD_TRUSTED_MISP_ORG_NAMES``,
+the parent event's creator org (``event_info["Orgc"]``) MUST be on
+the allowlist for the claim to be honored. Rejections fire a WARNING
+log + the ``edgeguard_source_truthful_creator_rejected_total``
+Prometheus counter and return ``(None, None)`` — the IOC ingest
+itself is unaffected; only the source-truthful TIMESTAMPS are
+refused. See ``src/source_trust.py`` for the full threat model and
+the BYPASS semantics for unconfigured operators.
+
 Stale-import + regression protection
 ------------------------------------
 The MIN/MAX CASE pattern on the edge (applied in 3 Cypher sites:
@@ -134,16 +153,23 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Prometheus counter wiring (defensive import)
+# Prometheus counter wiring (defensive imports)
 # ---------------------------------------------------------------------------
 # Imported defensively so this module stays importable in test contexts
 # that don't bring up prometheus_client (or that monkey-patch the
-# metrics registry between tests). The four ``_metric_*`` shims are
+# metrics registry between tests). The ``_metric_*`` shims are
 # unconditionally callable; they no-op when the import fails.
 #
-# Counter design and label-cardinality budget live in
+# Counter design and label-cardinality budgets live in
 # ``src/metrics_server.py`` next to the ``SOURCE_TRUTHFUL_*`` Counter
-# definitions. Spawned-task chip 5b from the PR #41 audit.
+# definitions.
+#
+# - Chip 5b (PR #42): the four claim/drop/coerce/clamp metrics for the
+#   per-source first_seen/last_seen pipeline.
+# - Chip 5e (PR #44): the creator-rejected metric for the MISP
+#   tag-impersonation defense; eager-imported (M5 audit fix —
+#   parse_attribute is in the hot loop, lazy import added measurable
+#   per-call cost even with Python's import cache).
 try:
     from metrics_server import (
         record_source_truthful_claim_accepted as _metric_accept,
@@ -153,6 +179,9 @@ try:
     )
     from metrics_server import (
         record_source_truthful_coerce_rejected as _metric_coerce_reject,
+    )
+    from metrics_server import (
+        record_source_truthful_creator_rejected as _metric_creator_rejected,
     )
     from metrics_server import (
         record_source_truthful_future_clamp as _metric_future_clamp,
@@ -174,6 +203,14 @@ except ImportError:  # pragma: no cover — defensive
     def _metric_future_clamp() -> None:
         return None
 
+    def _metric_creator_rejected(source_id: Optional[str], reason: str) -> None:
+        return None
+
+
+# Chip 5e helper imports (eager — parse_attribute hot loop). source_trust is
+# always present in production; an ImportError here would indicate a broken
+# install, not a test-context issue, so no defensive fallback.
+from source_trust import is_attribute_creator_trusted, safe_orgc_for_log  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Sanity bounds for int/float Unix epoch parsing in coerce_iso
@@ -460,6 +497,7 @@ def extract_source_truthful_timestamps(
     *,
     nvd_meta: Optional[Dict[str, Any]] = None,
     tf_meta: Optional[Dict[str, Any]] = None,
+    event_info: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Extract ``(first_seen_at_source, last_seen_at_source)`` for one
     MISP attribute, returning ``(None, None)`` when the source is not
@@ -529,6 +567,17 @@ def extract_source_truthful_timestamps(
     per-IOC first-seen field, add it back to the allowlist + add
     the ``otx_meta`` parameter back here.
 
+    Defense-in-depth — MISP tag-impersonation check (chip 5e)
+    ---------------------------------------------------------
+    When ``event_info`` is supplied AND the operator has configured
+    ``EDGEGUARD_TRUSTED_MISP_ORG_UUIDS`` / ``EDGEGUARD_TRUSTED_MISP_ORG_NAMES``,
+    the parent event's creator org (``event_info["Orgc"]``) MUST be
+    on the allowlist for the source-truthful claim to be honored.
+    See ``src/source_trust.py`` for the threat model and the bypass
+    semantics. Rejection emits a WARNING log + Prometheus counter
+    and returns ``(None, None)`` — the IOC itself is still ingested
+    by the caller, only the source-truthful TIMESTAMPS are refused.
+
     Parameters
     ----------
     attr:
@@ -541,6 +590,12 @@ def extract_source_truthful_timestamps(
         Pre-parsed source-specific META JSON dicts (when the parser
         already extracted them for other purposes). Avoids re-parsing
         the comment field.
+    event_info:
+        The parent MISP event dict. When non-None, drives the
+        defense-in-depth tag-impersonation check (see above). When
+        omitted (CLI / synthetic-test paths), the trust check is
+        SKIPPED — same as backward-compat for callers that haven't
+        yet plumbed the parent event through.
     """
     if not is_reliable_first_seen_source(source_id):
         # PR #42 audit M3 (Logic Tracker): emit per-field — symmetric
@@ -555,6 +610,49 @@ def extract_source_truthful_timestamps(
         _metric_drop(source_id, "source_not_in_allowlist", "first_seen")
         _metric_drop(source_id, "source_not_in_allowlist", "last_seen")
         return (None, None)
+
+    # Defense-in-depth (chip 5e): if the parent event was created by
+    # a MISP organization that is NOT on the EdgeGuard trust
+    # allowlist, refuse the source-truthful claim. The IOC ingest
+    # itself is unaffected — only the timestamps are dropped, and
+    # the SOURCED_FROM edge MIN/MAX CASE preserves any prior
+    # legitimate value.
+    #
+    # event_info is optional for backward-compat with callers that
+    # haven't yet plumbed the parent event through; when it is None
+    # the trust check is SKIPPED. Production parse_attribute always
+    # passes it.
+    if event_info is not None:
+        # Imports hoisted to module top (PR #44 audit M5) — see import
+        # block at the top of this module. is_attribute_creator_trusted
+        # and _metric_creator_rejected are pre-resolved.
+        trusted, reason = is_attribute_creator_trusted(event_info)
+        if not trusted:
+            _metric_creator_rejected(source_id, reason)
+            # PR #44 audit H3 (Red Team / Cross-Checker): Orgc.name is
+            # attacker-controllable (federated MISP peer can register
+            # any name). Sanitize CR/LF/tabs to defeat log-injection
+            # attacks that would split the WARNING line into multiple
+            # forged log entries in a SIEM. Truncation also bounds
+            # the per-event log payload.
+            safe_orgc = safe_orgc_for_log(event_info.get("Orgc"))
+            logger.warning(
+                "Refusing source-truthful timestamp claim from source_id=%r — "
+                "creator org check failed (reason=%s, event_id=%r, "
+                "orgc_uuid=%r, orgc_name=%r). Likely tag impersonation: "
+                "a MISP user / federated peer is claiming to be %r but is "
+                "not in EDGEGUARD_TRUSTED_MISP_ORG_UUIDS / "
+                "EDGEGUARD_TRUSTED_MISP_ORG_NAMES. The IOC was still "
+                "ingested; only the source-truthful timestamp claim was "
+                "dropped.",
+                source_id,
+                reason,
+                event_info.get("id"),
+                safe_orgc["uuid"],
+                safe_orgc["name"],
+                source_id,
+            )
+            return (None, None)
 
     # Layer 1: MISP-native attribute fields (the lossless round-trip path)
     first_seen = _coerce_iso(attr.get("first_seen"))
