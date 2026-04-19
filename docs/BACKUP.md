@@ -41,12 +41,29 @@ environment. The gate accepts:
 - ISO 8601 with explicit offset: `2026-04-19T14:30:00+00:00`
 - Unix epoch seconds: `1745074200`
 
-The default freshness window is **24 hours**. Override with:
+The default freshness window is **240 hours (10 days)**. This reflects the
+typical operator cadence: take a backup once per ~10 days, then `fresh-baseline`
+can be re-triggered freely within that window without re-backing-up. Override
+with:
 
 ```bash
-EDGEGUARD_BACKUP_MAX_AGE_HOURS=4   # tighter RPO for production
-EDGEGUARD_BACKUP_MAX_AGE_HOURS=72  # looser for low-stakes dev environments
+EDGEGUARD_BACKUP_MAX_AGE_HOURS=24    # strict-RPO: daily backup posture (production)
+EDGEGUARD_BACKUP_MAX_AGE_HOURS=4     # very strict: 4-hour RPO
+EDGEGUARD_BACKUP_MAX_AGE_HOURS=720   # very loose: 30-day window (dev only)
 ```
+
+**Trade-off note for 240h default:** a `fresh-baseline` triggered on day 10
+of the window with NO interim backup, if it fails, would require restoring
+to a 10-day-old state + losing 10 days of incremental ingest. If losing 10
+days of incremental work would be unacceptable for your environment, tighten
+the window. The strict-RPO production posture is `EDGEGUARD_BACKUP_MAX_AGE_HOURS=24`.
+
+**Operator visibility:** when the gate accepts, both the structured log AND a
+brief stdout line confirm the freshness state — operators see e.g.
+`Backup-timestamp gate passed: backup is 6.2h old (max 240.0h via
+EDGEGUARD_BACKUP_MAX_AGE_HOURS; 233.8h remaining before next backup required)`.
+Useful when wondering "why isn't fresh-baseline running" (gate failure messages
+also explicitly state the max + the actual age).
 
 Bypass for dev/test scenarios where data loss is acceptable:
 

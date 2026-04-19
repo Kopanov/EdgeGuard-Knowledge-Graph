@@ -257,13 +257,27 @@ class TestBackupTimestampGate:
     def test_gate_fails_for_stale_backup(self, monkeypatch):
         from edgeguard import _check_recent_backup_timestamp
 
-        # 25h ago — outside the 24h default window
-        stale = (datetime.now(timezone.utc) - timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # 250h ago — outside the 240h default window (10 days)
+        stale = (datetime.now(timezone.utc) - timedelta(hours=250)).strftime("%Y-%m-%dT%H:%M:%SZ")
         monkeypatch.setenv("EDGEGUARD_LAST_BACKUP_AT", stale)
+        # Make sure no test-level override is leaking
+        monkeypatch.delenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", raising=False)
         result = _check_recent_backup_timestamp()
         assert result is not None
-        assert "is 25" in result and "h old" in result, f"expected age in error: {result!r}"
-        assert "max allowed: 24" in result
+        assert "is 250" in result and "h old" in result, f"expected age in error: {result!r}"
+        assert "max allowed: 240" in result, f"expected default 240h in error: {result!r}"
+
+    def test_gate_default_window_is_240_hours(self, monkeypatch):
+        """Bumping the default to 240h (10 days) is the operator-preferred
+        cadence — take a backup once per ~10 days. Tighten via env var
+        for production-strict-RPO."""
+        from edgeguard import _check_recent_backup_timestamp
+
+        # 200h-old backup, no override → must pass under 240h default
+        ts_200h = (datetime.now(timezone.utc) - timedelta(hours=200)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setenv("EDGEGUARD_LAST_BACKUP_AT", ts_200h)
+        monkeypatch.delenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", raising=False)
+        assert _check_recent_backup_timestamp() is None, "200h within 240h default should pass"
 
     def test_gate_respects_max_age_hours_override(self, monkeypatch):
         from edgeguard import _check_recent_backup_timestamp
@@ -313,6 +327,31 @@ class TestBackupTimestampGate:
         result = _check_recent_backup_timestamp()
         assert result is not None
         assert "in the future" in result
+
+    def test_gate_logs_freshness_state_on_pass(self, monkeypatch, caplog):
+        """When the gate accepts, an INFO log line must surface the
+        backup age + max window + remaining time so operators can see
+        WHY the gate accepted (and how much window is left). Useful for
+        debugging 'why isn't fresh-baseline running' (when stale) and
+        'how many days until I need to backup again' (when passing)."""
+        import logging
+
+        from edgeguard import _check_recent_backup_timestamp
+
+        # 6h-old backup, default 240h window
+        recent = (datetime.now(timezone.utc) - timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setenv("EDGEGUARD_LAST_BACKUP_AT", recent)
+        monkeypatch.delenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", raising=False)
+
+        with caplog.at_level(logging.INFO, logger="edgeguard"):
+            result = _check_recent_backup_timestamp()
+        assert result is None
+        # The freshness-info log MUST be present
+        msg = " ".join(rec.message for rec in caplog.records)
+        assert "Backup-timestamp gate passed" in msg
+        assert "6.0h old" in msg or "6.1h old" in msg, f"expected age in log: {msg!r}"
+        assert "max 240" in msg
+        assert "remaining" in msg
 
     def test_gate_treats_naive_datetime_as_utc(self, monkeypatch):
         """Operators may forget the trailing Z; assume UTC + still check

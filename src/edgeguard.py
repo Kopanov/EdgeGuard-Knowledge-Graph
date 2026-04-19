@@ -2023,11 +2023,16 @@ def _check_recent_backup_timestamp() -> Optional[str]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
 
-    # Default 24h freshness window; operators can tighten via env var
+    # Default freshness window: 240h = 10 days. Operators can tighten via
+    # ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` env var (e.g. 24h for strict-RPO
+    # production). 240h reflects the typical operator cadence: take a
+    # backup once per ~10 days during which fresh-baseline can be
+    # re-triggered freely without re-backing-up. See docs/BACKUP.md for
+    # the operator workflow + RPO trade-off discussion.
     try:
-        max_age_hours = float(os.getenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", "24"))
+        max_age_hours = float(os.getenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", "240"))
     except (ValueError, TypeError):
-        max_age_hours = 24.0
+        max_age_hours = 240.0
 
     age = datetime.now(timezone.utc) - parsed
     age_hours = age.total_seconds() / 3600.0
@@ -2040,11 +2045,24 @@ def _check_recent_backup_timestamp() -> Optional[str]:
     if age_hours > max_age_hours:
         return (
             f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is {age_hours:.1f}h old "
-            f"(max allowed: {max_age_hours:.1f}h via EDGEGUARD_BACKUP_MAX_AGE_HOURS).\n"
+            f"(max allowed: {max_age_hours:.1f}h via EDGEGUARD_BACKUP_MAX_AGE_HOURS, "
+            f"default 240h = 10 days).\n"
             "Take a fresh backup and update the env var before proceeding."
         )
 
-    # Gate passes
+    # Gate passes — log the freshness state so operators can see WHY the
+    # gate accepted (and how much window is left before the next backup
+    # is required). Also helps debug "I just took a backup but the gate
+    # is rejecting" → the parsed/now math is exposed.
+    remaining_hours = max_age_hours - age_hours
+    logger.info(
+        "Backup-timestamp gate passed: backup is %.1fh old "
+        "(max %.1fh via EDGEGUARD_BACKUP_MAX_AGE_HOURS; %.1fh remaining "
+        "before next backup required).",
+        age_hours,
+        max_age_hours,
+        remaining_hours,
+    )
     return None
 
 
@@ -2190,7 +2208,10 @@ def cmd_fresh_baseline(args) -> int:
             print(file=sys.stderr)
             print(backup_check_result, file=sys.stderr)
             print(file=sys.stderr)
-            print("Refusing to wipe production data without a recent backup.", file=sys.stderr)
+            print(
+                "Refusing to wipe production data without a recent backup.",
+                file=sys.stderr,
+            )
             print("This protects you from the 'fresh-baseline failed at step 4 with no", file=sys.stderr)
             print("recovery story' scenario.", file=sys.stderr)
             print(file=sys.stderr)
@@ -2209,6 +2230,11 @@ def cmd_fresh_baseline(args) -> int:
             print("  edgeguard fresh-baseline --skip-backup-check", file=sys.stderr)
             print(file=sys.stderr)
             return 2  # exit code 2 — preflight failed (no backup)
+        # Gate passed — surface a brief operator-facing confirmation in
+        # addition to the structured logger.info inside the helper.
+        # Helps operators see WHY the gate accepted (and how much window
+        # is left) without having to grep the log file.
+        info("Backup-timestamp gate passed (see log for age + remaining window).")
     else:
         warn("--skip-backup-check passed; bypassing the backup-timestamp gate.")
         warn("This is intended for dev/test only — production runs MUST take a backup first.")
