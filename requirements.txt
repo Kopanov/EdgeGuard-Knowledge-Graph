@@ -51,6 +51,15 @@ stix2~=3.0
 # compatible auth manager. See docs/AIRFLOW_DAGS.md § "Flask on Airflow
 # 3.2 — reality check" for the full explanation.
 #
+# PR-B audit fix (Dependency HIGH-6): tracking. The mitigation above
+# (loopback-only Airflow API binding) is fragile — anyone who later
+# exposes port 8082 via a reverse proxy inherits CVE-2026-27205. Watch
+# for the apache-airflow-providers-fab 2.x release (drops the flask<2.3
+# pin) OR migrate to apache-airflow-providers-keycloak-auth-manager /
+# Simple Auth Manager. Re-evaluate at every Airflow point release.
+# Tracking issue: file via ``gh issue create`` after PR-B merges so the
+# issue number references this PR.
+#
 # Breaking changes we handled in this repo when bumping from 2.11:
 #   - BashOperator, PythonOperator, ShortCircuitOperator moved out of
 #     airflow-core into apache-airflow-providers-standard — imports updated

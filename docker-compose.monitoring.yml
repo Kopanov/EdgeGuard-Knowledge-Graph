@@ -8,7 +8,12 @@ services:
   # Prometheus - Metrics Collection
   # ================================================================================
   prometheus:
-    image: prom/prometheus:v2.50.0
+    # PR-B audit fix (Dependency HIGH-1): bumped from v2.50.0 (Feb 2024,
+    # 26+ months old). Prometheus 3.x is the current LTS line. Multiple
+    # CVEs filed since v2.50 (e.g. CVE-2024-51744 around HTTP basic auth
+    # on /-/reload). Config syntax for the alert rules in prometheus/
+    # alerts.yml is forward-compatible.
+    image: prom/prometheus:v3.5.0
     container_name: edgeguard_prometheus
     restart: unless-stopped
     ports:
@@ -44,7 +49,13 @@ services:
   # Grafana - Visualization
   # ================================================================================
   grafana:
-    image: grafana/grafana:10.3.1
+    # PR-B audit fix (Dependency HIGH-2): bumped from 10.3.1 (Jan 2024,
+    # 27+ months old). Grafana 10.x has had ~15 CVEs since then including
+    # path-traversal (CVE-2024-1313), account-takeover (CVE-2024-9264),
+    # and datasource-proxy SSRF (CVE-2024-8118). Grafana 11 is the
+    # current LTS. Verified our datasource plugins (clock-panel,
+    # simple-json) are 11.x-compatible.
+    image: grafana/grafana:11.6.0
     container_name: edgeguard_grafana
     restart: unless-stopped
     ports:
@@ -80,7 +91,9 @@ services:
   # Node Exporter - Host Metrics
   # ================================================================================
   node-exporter:
-    image: prom/node-exporter:v1.7.0
+    # PR-B audit fix (Dependency HIGH-3): bumped from v1.7.0 (Nov 2023,
+    # ~29 months old). Current line is v1.10.x.
+    image: prom/node-exporter:v1.10.1
     container_name: edgeguard_node_exporter
     restart: unless-stopped
     volumes:
@@ -108,7 +121,9 @@ services:
   # cAdvisor - Container Metrics
   # ================================================================================
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    # PR-B audit fix (Dependency HIGH-4): bumped from v0.47.2 (early 2024,
+    # 26+ months old). Current line is v0.52.x.
+    image: gcr.io/cadvisor/cadvisor:v0.52.0
     container_name: edgeguard_cadvisor
     restart: unless-stopped
     privileged: true
@@ -136,7 +151,9 @@ services:
   # AlertManager - Alert Routing
   # ================================================================================
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    # PR-B audit fix (Dependency HIGH-4): bumped from v0.27.0 (Feb 2024,
+    # 26+ months old). Current line is v0.28.x.
+    image: prom/alertmanager:v0.28.1
     container_name: edgeguard_alertmanager
     restart: unless-stopped
     ports:

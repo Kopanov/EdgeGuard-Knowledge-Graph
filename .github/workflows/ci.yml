@@ -74,7 +74,7 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-  # ── Docker build check ────────────────────────────────────────────────────
+  # ── Docker build + image vulnerability scan ───────────────────────────────
   docker:
     name: Docker build
     runs-on: ubuntu-latest
@@ -86,6 +86,57 @@ jobs:
 
       - name: Build Airflow worker image
         run: docker build -f Dockerfile.airflow -t edgeguard-airflow:ci .
+
+      # PR-B audit fix (Dependency MED-4): pip-audit (in the security job)
+      # only sees what's in requirements.txt — it MISSES OS-package CVEs in
+      # the Docker base image AND transitive Python deps that the runtime
+      # image picks up (e.g. Flask 2.2.5 / FAB / aiohttp / cryptography
+      # bundled by the apache/airflow base image but not declared in our
+      # requirements.txt). Trivy scans the actual built image's filesystem,
+      # closing that blind spot.
+      #
+      # Severity gate: HIGH+CRITICAL fail the job; MED/LOW are reported as
+      # warnings (not yet failing — we'd need to triage the airflow base
+      # image's existing MED debt before turning that on). The
+      # ``--ignore-unfixed`` flag skips findings with no upstream patch
+      # available, so the job doesn't fire on un-actionable noise.
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      - name: Trivy scan — edgeguard-kg image (HIGH+CRITICAL fails)
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --no-progress \
+            --format table \
+            edgeguard-kg:ci
+
+      - name: Trivy scan — edgeguard-airflow image (HIGH+CRITICAL fails)
+        run: |
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --no-progress \
+            --format table \
+            edgeguard-airflow:ci
+
+      # Informational MED/LOW report — does NOT fail the job, just surfaces
+      # the airflow base image's existing debt for triage.
+      - name: Trivy scan — MED/LOW informational (continue-on-error)
+        continue-on-error: true
+        run: |
+          echo "=== edgeguard-kg MED/LOW ==="
+          trivy image --severity MEDIUM,LOW --ignore-unfixed --no-progress --format table edgeguard-kg:ci || true
+          echo "=== edgeguard-airflow MED/LOW ==="
+          trivy image --severity MEDIUM,LOW --ignore-unfixed --no-progress --format table edgeguard-airflow:ci || true
 
   # ── Security scanning ─────────────────────────────────────────────────────
   security:
