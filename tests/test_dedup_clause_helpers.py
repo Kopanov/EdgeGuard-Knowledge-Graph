@@ -350,3 +350,98 @@ class TestRefactorCoverage:
         # via the helper, but the source of merge_node_with_source itself
         # must be free of inline literals.
         assert "apoc.coll.toSet(coalesce(" not in src
+
+
+# ---------------------------------------------------------------------------
+# 7. scrape_list_dedup_sizes — only target properties that actually exist
+# ---------------------------------------------------------------------------
+
+
+class TestScrapeListDedupSizesTargets:
+    """``scrape_list_dedup_sizes`` queries Neo4j for the top-K largest
+    list sizes per (label_or_type, prop). Each target MUST point to a
+    property that the codebase actually writes as a list — otherwise the
+    WHERE-IS-NOT-NULL filter silently excludes every row and the target
+    produces zero observations (so we'd think the lists are small when
+    really we never measured them).
+
+    Bugbot LOW on PR #46 (commit 51e6dc1) caught this: a SOURCED_FROM
+    target queried ``size(r.sources)`` but SOURCED_FROM edges only carry
+    ``r.source`` (singular scalar from ``_upsert_sourced_relationship`` and
+    the SOURCED_FROM blocks of merge_indicators_batch /
+    merge_vulnerabilities_batch). The target was a copy-paste from the
+    batch-relationship template. Removed in the bugbot-fix commit; this
+    test pins the absence so the same mistake can't recur."""
+
+    def test_sourced_from_is_not_a_scrape_target(self):
+        # SOURCED_FROM has only the scalar r.source — no list properties
+        # to sample. If a future change adds a SOURCED_FROM list property
+        # (e.g. r.tags), feel free to add a target — but verify with a
+        # real Neo4j first that the WHERE-IS-NOT-NULL filter actually
+        # matches rows.
+        import inspect
+
+        import neo4j_client
+
+        src = inspect.getsource(neo4j_client.scrape_list_dedup_sizes)
+        # The Cypher fragment ``[r:SOURCED_FROM]`` (with the matching
+        # MATCH brackets) must NOT appear in the targets list.
+        assert "[r:SOURCED_FROM]" not in src, (
+            "scrape_list_dedup_sizes must not target SOURCED_FROM — "
+            "that edge has only the scalar r.source, not r.sources. "
+            "See the bug-fix comment in src/neo4j_client.py."
+        )
+
+    def test_targets_only_reference_known_list_properties(self):
+        # Whitelist of (label_or_type, prop) the codebase actually writes
+        # as a list. Sourced from the batch SET clauses + merge_node_with_source
+        # SET clauses + merge_resilmesh_indicator SET clauses.
+        # Update this set when adding a new accumulator property.
+        import inspect
+
+        import neo4j_client
+
+        ALLOWED_LIST_PROPS = {
+            ("Indicator", "source"),
+            ("Indicator", "tags"),
+            ("Indicator", "misp_event_ids"),
+            ("Indicator", "misp_attribute_ids"),
+            ("Indicator", "abuse_categories"),
+            ("Indicator", "yara_rules"),
+            ("Indicator", "sigma_rules"),
+            ("Vulnerability", "source"),
+            ("Vulnerability", "tags"),
+            ("Vulnerability", "misp_event_ids"),
+            ("Vulnerability", "misp_attribute_ids"),
+            ("Vulnerability", "cisa_cwes"),
+            # Batch relationships — every type produced by
+            # create_misp_relationships_batch's _set_clause helper
+            ("INDICATES", "sources"),
+            ("INDICATES", "misp_event_ids"),
+            ("EMPLOYS_TECHNIQUE", "sources"),
+            ("EMPLOYS_TECHNIQUE", "misp_event_ids"),
+            ("IMPLEMENTS_TECHNIQUE", "sources"),
+            ("IMPLEMENTS_TECHNIQUE", "misp_event_ids"),
+            ("ATTRIBUTED_TO", "sources"),
+            ("ATTRIBUTED_TO", "misp_event_ids"),
+            ("TARGETS", "sources"),
+            ("TARGETS", "misp_event_ids"),
+            ("AFFECTS", "sources"),
+            ("AFFECTS", "misp_event_ids"),
+            ("EXPLOITS", "sources"),
+            ("EXPLOITS", "misp_event_ids"),
+        }
+        # Extract the targets tuple from the function source via a
+        # source-string scan (avoids actually invoking the function with
+        # a mock driver).
+        src = inspect.getsource(neo4j_client.scrape_list_dedup_sizes)
+        # Match patterns like ``("LABEL", "prop", ...)``
+        # followed by a Cypher MATCH that references the same prop.
+        actual = set(re.findall(r'\(\s*"([A-Za-z_]+)"\s*,\s*"([a-z_]+)"\s*,', src))
+        assert actual, "scrape_list_dedup_sizes targets list could not be parsed"
+        unknown = actual - ALLOWED_LIST_PROPS
+        assert not unknown, (
+            f"scrape_list_dedup_sizes targets unknown list props {unknown}. "
+            f"Either add them to the whitelist (after verifying the codebase "
+            f"writes them as lists) or remove the target."
+        )

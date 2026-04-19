@@ -5178,15 +5178,20 @@ def scrape_list_dedup_sizes(client: "Neo4jClient", *, sample_size: int = 200) ->
             "MATCH (n:Vulnerability) WHERE n.misp_event_ids IS NOT NULL "
             "RETURN size(n.misp_event_ids) AS sz ORDER BY sz DESC LIMIT $k",
         ),
-        # Edge accumulators (one r.sources / r.misp_event_ids per relationship —
-        # these are the ones that touch every batch query in
-        # create_misp_relationships_batch).
-        (
-            "SOURCED_FROM",
-            "sources",
-            "MATCH ()-[r:SOURCED_FROM]->() WHERE r.sources IS NOT NULL "
-            "RETURN size(r.sources) AS sz ORDER BY sz DESC LIMIT $k",
-        ),
+        # Edge accumulators on the BATCH-RELATIONSHIP edges only — these are
+        # the ones produced by create_misp_relationships_batch and they all
+        # carry r.sources[] + r.misp_event_ids[] via the canonical
+        # _set_clause helper.
+        #
+        # NOT included: SOURCED_FROM. That edge has only the SCALAR
+        # ``r.source = item.source_id`` (singular, not a list) — see
+        # ``_upsert_sourced_relationship`` and the SET clauses in
+        # ``merge_indicators_batch`` / ``merge_vulnerabilities_batch``. A
+        # ``size(r.sources)`` query on SOURCED_FROM would silently return
+        # zero observations because the WHERE filter excludes every edge
+        # (bugbot LOW on PR #46 caught this — was a copy-paste from the
+        # batch-rel template). SOURCED_FROM also carries no other list
+        # property, so there is nothing to sample on it.
         (
             "INDICATES",
             "sources",
