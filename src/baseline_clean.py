@@ -215,6 +215,28 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
     sess = _req.Session()
     sess.headers.update({"Authorization": misp_api_key, "Accept": "application/json"})
 
+    # Bugbot HIGH on PR-C commit 890d61a: apply the MISP Host-header
+    # transform. When MISP_URL points at a Docker DNS name (e.g.
+    # ``https://misp_misp_1:443``) but Apache's ServerName / SNI cert is
+    # different (commonly ``localhost`` or ``misp.local``), MISP returns
+    # a 302 redirect to the canonical hostname — the verify loop then
+    # sees status 302, treats it as failure, and the post-clean verify
+    # never reaches all-zero. ``apply_misp_http_host_header`` reads
+    # ``EDGEGUARD_MISP_HTTP_HOST`` and pins ``Host:`` on the session so
+    # MISP's vhost matcher hits the right server block. Same pattern as
+    # the wipe-events session below.
+    try:
+        from config import apply_misp_http_host_header
+
+        apply_misp_http_host_header(sess)
+    except ImportError:
+        # Defensive fallback: read EDGEGUARD_MISP_HTTP_HOST directly.
+        # Matches the contract config.py provides (no host-header transform
+        # if env var unset).
+        host_override = os.getenv("EDGEGUARD_MISP_HTTP_HOST", "").strip()
+        if host_override:
+            sess.headers["Host"] = host_override
+
     total_eg_events = 0
     max_rounds = 50  # 50 × 500 = 25K events; far above any realistic deployment
     page = 1
