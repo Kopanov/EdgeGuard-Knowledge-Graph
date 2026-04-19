@@ -2033,11 +2033,21 @@ def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, st
     # Parse the run_id from Airflow CLI output. Examples seen so far:
     #   "Triggered DAG <DAG: edgeguard_baseline> at 2026-04-19T12:34:56+00:00, run_id manual__2026-..."
     #   "... run_id=manual__..."  (Airflow may use ``=`` in future versions)
-    # Use a regex tolerant of ``run_id <whitespace>``, ``run_id=``, and
-    # ``run_id:`` separators.
+    #
+    # Bug Hunter H1 (post-PR-C-v2 audit): the previous loose pattern
+    # ``run_id[=:\s]+(\S+)`` matched noise lines like ``"warning: run_id is
+    # missing"`` → captured ``"is"``. The trigger had already succeeded
+    # (returncode==0 was checked above), so no data corruption — but
+    # operators would see ``[is]`` in the success output and copy a junk
+    # run_id into ``edgeguard dag status --run-id <id>``. Anchor to
+    # Airflow's standard run_id prefixes (``manual__``, ``scheduled__``,
+    # ``backfill__``, ``dataset_triggered__``) to reject false positives.
     run_id = "<unknown>"
     for line in (result.stdout or "").splitlines():
-        match = re.search(r"run_id[=:\s]+(\S+)", line)
+        match = re.search(
+            r"run_id[=:\s]+((?:manual|scheduled|backfill|dataset_triggered)__\S+)",
+            line,
+        )
         if match:
             run_id = match.group(1).rstrip(",")
             break

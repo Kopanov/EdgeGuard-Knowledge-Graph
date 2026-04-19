@@ -868,6 +868,68 @@ class TestTriggerBaselineDagHelper:
         assert exit_code == 0
         assert run_id == "<unknown>"
 
+    def test_helper_rejects_run_id_false_positives(self):
+        """Bug Hunter H1 (post-PR-C-v2 audit): the loose pattern
+        ``run_id[=:\\s]+(\\S+)`` matched noise lines like
+        ``"warning: run_id is missing"`` and captured ``"is"``. The
+        trigger had succeeded (returncode==0), so no data corruption
+        — but operators saw ``[is]`` in the success message and copied
+        a junk run_id into ``edgeguard dag status --run-id <id>``.
+
+        Anchored regex now requires Airflow's standard run_id prefixes
+        (``manual__``, ``scheduled__``, ``backfill__``,
+        ``dataset_triggered__``). Noise lines must produce
+        ``<unknown>`` instead of false positives."""
+        import subprocess as sp
+
+        from edgeguard import _trigger_baseline_dag
+
+        false_positive_outputs = [
+            "warning: run_id is missing in the response\n",
+            "INFO: run_id check: no existing matches found\n",
+            "DEBUG: run_id will be auto-generated\n",
+            "[2026-04-19] run_id field absent — that's fine for first triggers\n",
+        ]
+        for stdout in false_positive_outputs:
+            fake_completed = MagicMock()
+            fake_completed.returncode = 0
+            fake_completed.stdout = stdout
+            fake_completed.stderr = ""
+
+            with patch.object(sp, "run", return_value=fake_completed):
+                exit_code, run_id = _trigger_baseline_dag("{}")
+
+            assert exit_code == 0
+            assert run_id == "<unknown>", (
+                f"Bug Hunter H1: noise line {stdout!r} must NOT match the run_id regex; got run_id={run_id!r}"
+            )
+
+    def test_helper_accepts_all_airflow_run_id_prefixes(self):
+        """Defensive: the regex must accept all 4 standard Airflow
+        run_id prefixes (manual__, scheduled__, backfill__,
+        dataset_triggered__)."""
+        import subprocess as sp
+
+        from edgeguard import _trigger_baseline_dag
+
+        prefixes = ["manual", "scheduled", "backfill", "dataset_triggered"]
+        for prefix in prefixes:
+            fake_completed = MagicMock()
+            fake_completed.returncode = 0
+            fake_completed.stdout = (
+                f"Triggered DAG <DAG: edgeguard_baseline> at "
+                f"2026-04-19T12:34:56+00:00, run_id {prefix}__2026-04-19T12:34:56\n"
+            )
+            fake_completed.stderr = ""
+
+            with patch.object(sp, "run", return_value=fake_completed):
+                exit_code, run_id = _trigger_baseline_dag("{}")
+
+            assert exit_code == 0
+            assert run_id == f"{prefix}__2026-04-19T12:34:56", (
+                f"prefix {prefix!r} should be accepted; got run_id={run_id!r}"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Maintainer/Cross-Checker H1/B1 — baseline_config SSoT actually used
