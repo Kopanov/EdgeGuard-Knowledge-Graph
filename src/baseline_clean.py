@@ -191,10 +191,18 @@ def _probe_neo4j(client: Any) -> tuple[int, tuple[tuple[str, int], ...], Optiona
 def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int, Optional[str]]:
     """Probe MISP for EdgeGuard-tagged event count via /events/index.
 
-    Returns ``(count, error)``. Bounded by MISP's default page size; for
-    >page-size deployments the count is approximate (the verify loop only
-    needs to confirm == 0, so the cap doesn't matter for the post-clean
-    path; the pre-wipe display rounds-down).
+    Returns ``(count, error)``. PAGINATED — walks all pages with
+    ``searchall=EdgeGuard&limit=500`` until exhausted (capped at 50 rounds
+    = 25K events). The post-clean verify-poll relies on this returning
+    the TRUE count, not just the first page; without pagination, a MISP
+    holding >page-size EdgeGuard events would let verify succeed even
+    though stale events remain past page 1 (Bugbot MED on PR #50 commit
+    1b0f91e).
+
+    Server-side ``searchall=EdgeGuard`` filters MISP-side so we don't
+    paginate the entire MISP event corpus on the verify path. Client-side
+    ``info`` substring filter still applies (defense-in-depth: the
+    server filter is best-effort across info/tags/attrs/comments).
     """
     if not misp_api_key:
         return 0, "MISP_API_KEY env var not set"
@@ -204,42 +212,57 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
     except ImportError as e:
         return 0, f"{type(e).__name__}: {e}"
 
-    try:
-        with warnings.catch_warnings():
-            if not ssl_verify:
-                warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-            resp = _req.get(
-                f"{misp_url}/events/index",
-                headers={"Authorization": misp_api_key, "Accept": "application/json"},
-                verify=ssl_verify,
-                timeout=(10, 30),
-            )
-    except Exception as e:
-        logger.debug("probe_misp GET failed", exc_info=True)
-        return 0, f"{type(e).__name__}: {str(e)[:160]}"
+    sess = _req.Session()
+    sess.headers.update({"Authorization": misp_api_key, "Accept": "application/json"})
 
-    if resp.status_code != 200:
-        return 0, f"MISP returned HTTP {resp.status_code}"
+    total_eg_events = 0
+    max_rounds = 50  # 50 × 500 = 25K events; far above any realistic deployment
+    page = 1
+    for _ in range(max_rounds):
+        try:
+            with warnings.catch_warnings():
+                if not ssl_verify:
+                    warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                resp = sess.get(
+                    f"{misp_url}/events/index",
+                    params={"searchall": "EdgeGuard", "limit": 500, "page": page},
+                    verify=ssl_verify,
+                    timeout=(10, 30),
+                )
+        except Exception as e:
+            logger.debug("probe_misp GET failed", exc_info=True)
+            return 0, f"{type(e).__name__}: {str(e)[:160]}"
 
-    try:
-        body = resp.json()
-    except ValueError as e:
-        return 0, f"{type(e).__name__}: {e}"
+        if resp.status_code != 200:
+            return 0, f"MISP returned HTTP {resp.status_code}"
 
-    events: list[Any] = []
-    if isinstance(body, list):
-        events = body
-    elif isinstance(body, dict):
-        raw = body.get("response", body.get("Event", []))
-        if isinstance(raw, dict):
-            events = [raw]
-        elif isinstance(raw, list):
-            events = raw
+        try:
+            body = resp.json()
+        except ValueError as e:
+            return 0, f"{type(e).__name__}: {e}"
 
-    # Client-side filter: events whose `info` contains "EdgeGuard". Matches
-    # the MISP-writer event-naming convention (EdgeGuard-{source}-{date}).
-    eg_events = [e for e in events if "EdgeGuard" in str(e.get("info", "") or e.get("Event", {}).get("info", ""))]
-    return len(eg_events), None
+        events: list[Any] = []
+        if isinstance(body, list):
+            events = body
+        elif isinstance(body, dict):
+            raw = body.get("response", body.get("Event", []))
+            if isinstance(raw, dict):
+                events = [raw]
+            elif isinstance(raw, list):
+                events = raw
+
+        if not events:
+            break  # Done — no more events on this page = pagination exhausted.
+
+        # Client-side filter: events whose `info` contains "EdgeGuard"
+        # (defense-in-depth; server's searchall is best-effort).
+        eg_on_page = sum(
+            1 for e in events if "EdgeGuard" in str(e.get("info", "") or e.get("Event", {}).get("info", ""))
+        )
+        total_eg_events += eg_on_page
+        page += 1
+
+    return total_eg_events, None
 
 
 def _probe_checkpoint() -> tuple[int, Optional[str]]:
