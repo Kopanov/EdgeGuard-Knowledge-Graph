@@ -26,8 +26,13 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=15d'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
+      # PR-B audit fix (Bugbot HIGH on commit 58f2f63): the
+      # ``--web.console.libraries`` and ``--web.console.templates`` flags
+      # were REMOVED in Prometheus 3.0 (and the corresponding directories
+      # are no longer in the container image). Keeping them on a v3.x
+      # image causes the container to crash-loop on startup with an
+      # unknown-flag error. Prometheus 3.x ships only the API + UI; the
+      # legacy console-template feature is gone. Removed here.
       - '--web.enable-lifecycle'
       # SECURITY: admin API allows metric deletion and server shutdown.
       # Remove or gate behind an auth proxy (e.g. nginx basic-auth) in production.
