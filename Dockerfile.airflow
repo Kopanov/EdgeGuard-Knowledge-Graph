@@ -20,9 +20,31 @@
 FROM apache/airflow:3.2.0-python3.12
 
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        tini \
-    && rm -rf /var/lib/apt/lists/*
+# PR-B audit fix (Dependency MED-4 + Trivy run): the apache/airflow:3.2.0-python3.12
+# base is Debian 12 (bookworm), NOT 13 (trixie) like python:3.12-slim. The
+# openssl packages have different names across Debian releases (no
+# ``libssl3t64`` / ``openssl-provider-legacy`` in bookworm). Use the generic
+# bookworm names ``openssl`` + ``libssl3``.
+#
+# PR-B audit fix follow-up (Red Team HIGH H2 + Maintainer L1 from the
+# comprehensive 7-agent audit): the previous version of this RUN had
+# ``(... || true)`` swallowing apt-get failures with the rationale "Trivy
+# is the authoritative gate." That's not strictly true — Trivy uses
+# ``--ignore-unfixed``, which can hide CVEs whose Debian advisory hasn't
+# shipped a ``fixed_version`` matching what's installed. So a network
+# blip or a future Debian package rename would silently leave the image
+# with the unpatched openssl AND let CI pass.
+#
+# Tightened: ``--only-upgrade`` returns exit 0 when the package is already
+# at latest, so removing ``|| true`` does not break the no-op case. If
+# apt-get exits non-zero (package not found, network failure, mirror
+# down), the build now fails loudly — operator can re-run or pin a
+# specific bookworm point release. TODO(issue #52): drop this entire
+# RUN once Debian backports CVE-2026-28390 into the airflow base.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tini \
+ && apt-get install -y --no-install-recommends --only-upgrade openssl libssl3 \
+ && rm -rf /var/lib/apt/lists/*
 
 USER airflow
 

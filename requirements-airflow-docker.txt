@@ -37,7 +37,26 @@ uvicorn~=0.34
 slowapi~=0.1
 strawberry-graphql~=0.283
 
-opentelemetry-api~=1.29
-opentelemetry-sdk~=1.29
-opentelemetry-instrumentation-fastapi~=0.50b0
-opentelemetry-exporter-otlp~=1.29
+# PR-B audit fix (Dependency MED-2): align with root requirements.txt
+# (which pins ~=1.41 / ~=0.62b0 for Airflow 3.2 compatibility — see the
+# comment block at requirements.txt:97-101 for the full rationale on why
+# 1.41 is required). Previous values (~=1.29 / ~=0.50b0) drifted; the
+# Airflow worker may have shipped working only because the airflow base
+# image's constraints overrode the older pins, but having one version of
+# truth across both files prevents a future image rebuild from picking up
+# the older transitively-pinned 1.29.
+opentelemetry-api~=1.41
+opentelemetry-sdk~=1.41
+opentelemetry-instrumentation-fastapi~=0.62b0
+opentelemetry-exporter-otlp~=1.41
+
+# PR-B audit fix (Trivy CRITICAL on commit 3ed83be): litellm 1.82.6 is a
+# transitive dep pulled by apache/airflow:3.2.0's bundled providers. It's
+# vulnerable to CVE-2026-35030 (CRITICAL — authentication bypass and
+# privilege escalation). Override to 1.83.0 which has the fix. When
+# apache/airflow refreshes the base with a patched litellm, this pin can
+# be removed.
+# TODO(issue #52): remove this override once the upstream Trivy watch
+# (see .github/workflows/ci.yml:131) confirms apache/airflow ships a
+# base image with litellm>=1.83.0.
+litellm>=1.83.0

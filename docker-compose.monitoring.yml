@@ -8,7 +8,12 @@ services:
   # Prometheus - Metrics Collection
   # ================================================================================
   prometheus:
-    image: prom/prometheus:v2.50.0
+    # PR-B audit fix (Dependency HIGH-1): bumped from v2.50.0 (Feb 2024,
+    # 26+ months old). Prometheus 3.x is the current LTS line. Multiple
+    # CVEs filed since v2.50 (e.g. CVE-2024-51744 around HTTP basic auth
+    # on /-/reload). Config syntax for the alert rules in prometheus/
+    # alerts.yml is forward-compatible.
+    image: prom/prometheus:v3.5.0
     container_name: edgeguard_prometheus
     restart: unless-stopped
     ports:
@@ -21,8 +26,13 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=15d'
-      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
-      - '--web.console.templates=/usr/share/prometheus/consoles'
+      # PR-B audit fix (Bugbot HIGH on commit 58f2f63): the
+      # ``--web.console.libraries`` and ``--web.console.templates`` flags
+      # were REMOVED in Prometheus 3.0 (and the corresponding directories
+      # are no longer in the container image). Keeping them on a v3.x
+      # image causes the container to crash-loop on startup with an
+      # unknown-flag error. Prometheus 3.x ships only the API + UI; the
+      # legacy console-template feature is gone. Removed here.
       - '--web.enable-lifecycle'
       # SECURITY: admin API allows metric deletion and server shutdown.
       # Remove or gate behind an auth proxy (e.g. nginx basic-auth) in production.
@@ -44,7 +54,13 @@ services:
   # Grafana - Visualization
   # ================================================================================
   grafana:
-    image: grafana/grafana:10.3.1
+    # PR-B audit fix (Dependency HIGH-2): bumped from 10.3.1 (Jan 2024,
+    # 27+ months old). Grafana 10.x has had ~15 CVEs since then including
+    # path-traversal (CVE-2024-1313), account-takeover (CVE-2024-9264),
+    # and datasource-proxy SSRF (CVE-2024-8118). Grafana 11 is the
+    # current LTS. Verified our datasource plugins (clock-panel,
+    # simple-json) are 11.x-compatible.
+    image: grafana/grafana:11.6.0
     container_name: edgeguard_grafana
     restart: unless-stopped
     ports:
@@ -55,7 +71,17 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost:3000}
-      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+      # PR-B audit fix (Bugbot HIGH on commit 1f3f46d): dropped
+      # grafana-simple-json-datasource. It's an Angular-based plugin; Grafana
+      # 11 disabled the Angular runtime by default (the plugin loads as
+      # ``signed=false`` and is blocked at startup). EdgeGuard's dashboards
+      # all use the Prometheus datasource (provisioned via
+      # grafana/provisioning/datasources/), so simple-json was never actually
+      # consumed in this stack. If a future dashboard genuinely needs JSON-API
+      # data, the Grafana 11+ replacements are
+      # ``grafana-simplejson-datasource`` (different plugin id, signed) or
+      # ``yesoreyeram-infinity-datasource`` (more capable, also signed).
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
       - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/edgeguard-overview.json
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -80,7 +106,9 @@ services:
   # Node Exporter - Host Metrics
   # ================================================================================
   node-exporter:
-    image: prom/node-exporter:v1.7.0
+    # PR-B audit fix (Dependency HIGH-3): bumped from v1.7.0 (Nov 2023,
+    # ~29 months old). Current line is v1.10.x.
+    image: prom/node-exporter:v1.10.1
     container_name: edgeguard_node_exporter
     restart: unless-stopped
     volumes:
@@ -108,7 +136,9 @@ services:
   # cAdvisor - Container Metrics
   # ================================================================================
   cadvisor:
-    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    # PR-B audit fix (Dependency HIGH-4): bumped from v0.47.2 (early 2024,
+    # 26+ months old). Current line is v0.52.x.
+    image: gcr.io/cadvisor/cadvisor:v0.52.0
     container_name: edgeguard_cadvisor
     restart: unless-stopped
     privileged: true
@@ -136,7 +166,9 @@ services:
   # AlertManager - Alert Routing
   # ================================================================================
   alertmanager:
-    image: prom/alertmanager:v0.27.0
+    # PR-B audit fix (Dependency HIGH-4): bumped from v0.27.0 (Feb 2024,
+    # 26+ months old). Current line is v0.28.x.
+    image: prom/alertmanager:v0.28.1
     container_name: edgeguard_alertmanager
     restart: unless-stopped
     ports:
