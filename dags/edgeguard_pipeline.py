@@ -2055,7 +2055,22 @@ baseline_full_sync_task = PythonOperator(
 baseline_build_rels_task = PythonOperator(
     task_id="build_relationships",
     python_callable=run_build_relationships,
-    execution_timeout=timedelta(minutes=45),
+    # 2026-04-19 (Vanko's overnight baseline regression):
+    # 45min was way too short for the 730-day baseline against an
+    # already-populated graph (344K nodes + 555K edges). Both the
+    # primary attempt AND the retry were killed by Airflow at exactly
+    # 45min while Neo4j was simultaneously hitting
+    # MemoryLimitExceededException — the subprocess never made
+    # progress past the first batches.
+    # Bump to 5h to MATCH the incremental-DAG build_relationships
+    # timeout (line 1655). Baseline has MORE work than incremental,
+    # so it must have at least the same headroom; the 5h ceiling
+    # also aligns with the subprocess's internal ``timeout=18000``
+    # at line 1626 so neither layer kills the other prematurely.
+    # Pair this bump with the NEO4J_TX_MEMORY_MAX 4g→8g default
+    # bump in this same PR — without both, build_relationships
+    # would still stall on transaction-memory exhaustion.
+    execution_timeout=timedelta(hours=5),
     # PR #35: NONE_FAILED_MIN_ONE_SUCCESS — run if the upstream
     # full_neo4j_sync didn't crash (success OR skipped, but not failed).
     # Default ALL_SUCCESS would block this task even when the sync

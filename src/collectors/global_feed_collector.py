@@ -585,10 +585,30 @@ class CyberCureCollector:
             logger.info("📜 Baseline mode: Collecting all CyberCure data...")
 
         # Check circuit breaker
+        # 2026-04-19 (Vanko's overnight baseline regression): CyberCure
+        # was returning HTTP 503 across all 3 feeds (ip / url / hash);
+        # circuit breaker tripped open and the task FAILED, contributing
+        # noise to a baseline that was already failing on
+        # build_relationships timeout. CyberCure is intentionally on the
+        # ``_REJECTED_ON_PURPOSE`` list in source_truthful_timestamps
+        # (synthetic ``now()`` first_seen — not authoritative); failing
+        # the entire baseline DAG over an outage in this LOW-VALUE source
+        # is operator noise. Promote to soft-skip so the pipeline keeps
+        # going and Prometheus tracks the rejection rate via the
+        # ``edgeguard_collector_skips_total{reason_class="cybercure_circuit_breaker_open"}``
+        # counter.
         if not CYBERCURE_CIRCUIT_BREAKER.can_execute():
-            logger.warning("CyberCure circuit breaker open - skipping")
+            logger.warning(
+                "CyberCure circuit breaker open — skipping as soft-skip "
+                "(CyberCure is a low-value optional feed; outages must not "
+                "fail the baseline DAG)"
+            )
             if push_to_misp:
-                return make_status("cybercure", False, count=0, error="Circuit breaker open")
+                return make_skipped_optional_source(
+                    "cybercure",
+                    skip_reason="CyberCure circuit breaker open (likely upstream 5xx outage)",
+                    skip_reason_class="cybercure_circuit_breaker_open",
+                )
             return []
 
         limit = resolve_collection_limit(limit, "cybercure", baseline=baseline)
@@ -683,15 +703,25 @@ class CyberCureCollector:
         if not results:
             logger.warning("CyberCure returned 0 indicators — check feed availability")
 
-        # All feeds failed → report collector failure instead of silent
-        # zero-count success. Raise for the non-MISP caller so failures
-        # are visible to enrichment workflows (same pattern as URLhaus
-        # above and AbuseIPDB in its own collect()).
+        # All feeds failed → soft-skip. Same rationale as the
+        # circuit-breaker-open branch above (2026-04-19): CyberCure is
+        # intentionally a low-value optional feed; an upstream outage
+        # must not fail the baseline DAG. The non-MISP caller (which
+        # has no Airflow soft-skip semantics) still gets a RuntimeError
+        # so legacy enrichment workflows see the failure. The
+        # circuit-breaker-open path above + this all-feeds-down path
+        # use distinct ``skip_reason_class`` labels so Prometheus can
+        # distinguish "we hit the breaker" from "every feed 5xx'd in
+        # one run".
         if feed_success_count == 0 and feed_failures >= len(self.feeds) and self.feeds:
             err = f"CyberCure: all {feed_failures} feed(s) failed"
-            logger.error(err)
+            logger.warning(err + " — soft-skipping; CyberCure is a low-value optional feed")
             if push_to_misp:
-                return make_status("cybercure", False, count=0, failed=0, error=err)
+                return make_skipped_optional_source(
+                    "cybercure",
+                    skip_reason=err,
+                    skip_reason_class="cybercure_all_feeds_unreachable",
+                )
             raise RuntimeError(err)
 
         if push_to_misp:

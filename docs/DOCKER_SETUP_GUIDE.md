@@ -28,12 +28,24 @@ NEO4J_URI=bolt://neo4j:7687
 MISP_URL=https://your-misp-hostname:443
 MISP_API_KEY=your-misp-api-key-here
 
-# Large Neo4j (example — must fit Docker VM RAM)
-NEO4J_HEAP_INITIAL=4g
+# Large Neo4j — RECOMMENDED for baseline-capable workstation (730-day
+# historical window, ~350K nodes, ~600K edges). Working-set math:
+#   heap (12g) + pagecache (8g) + tx_memory (8g) = 28g
+#   + ~3-5g off-heap (Bolt buffers, thread stacks, Lucene mmap, metaspace)
+#   container_limit (36g) leaves 8g headroom — comfortable, no OOM risk.
+# HEAP_INITIAL is EQUAL to HEAP_MAX per Neo4j Operations Manual ("set
+# initial and max to the same value to avoid GC pauses caused by heap
+# resizing").
+# 2026-04-19 (Vanko's overnight regression): bumped tx_memory 4g→8g
+# (was hitting MemoryLimitExceededException during build_relationships
+# on a 344K-node graph), container 22g→36g (eliminates the
+# 22g+overcommit math; gives 8g headroom over the working set), and
+# heap_initial 4g→12g (= MAX; no mid-run heap resizing).
+NEO4J_HEAP_INITIAL=12g
 NEO4J_HEAP_MAX=12g
 NEO4J_PAGECACHE=8g
-NEO4J_TX_MEMORY_MAX=4g              # Per-transaction cap (all queries use apoc.periodic.iterate batching)
-NEO4J_CONTAINER_MEMORY_LIMIT=22g
+NEO4J_TX_MEMORY_MAX=8g              # Per-transaction cap (all queries use apoc.periodic.iterate batching)
+NEO4J_CONTAINER_MEMORY_LIMIT=36g
 
 # Baseline DAG (optional env overrides — see BASELINE_SMOKE_TEST.md)
 EDGEGUARD_BASELINE_DAYS=730
@@ -69,6 +81,26 @@ EDGEGUARD_BASELINE_COLLECTION_LIMIT=0
 - **Commenting out** entire `deploy.resources.limits` blocks (if you choose to edit YAML) removes caps — the JVM can still be bounded by **`NEO4J_HEAP_MAX`** / **`NEO4J_PAGECACHE`**, but the container may use more RSS and **swap/thrash** on an undersized host. That is a tradeoff, not a free win.
 
 On some setups, Compose **ignores** `deploy` unless you use Swarm or a compatible backend; still treat documented limits as the intended contract for local dev.
+
+### Recommended Neo4j memory profiles
+
+| Profile | Heap initial | Heap max | Pagecache | TX max | Container | Working-set | Headroom | Use case |
+|---------|-------------|----------|-----------|--------|-----------|-------------|----------|----------|
+| **Tiny dev** (compose defaults) | 512m | 2g | 1g | 4g | 4g | 7g overcommit | -3g (relies on overcommit / no concurrent peaks) | Smoke tests, an empty container |
+| **Mid box** | 4g | 4g | 4g | 4g | 16g | 12g | 4g | Single-source incremental syncs |
+| **Baseline-capable** (recommended; `.env.example` has these uncommented as the default) | **12g** | 12g | 8g | 8g | **36g** | 28g | 8g | Full 730-day baseline + 350K-node graph |
+
+**The Baseline-capable profile is what landed after the 2026-04-19 overnight regression** (Vanko's run of `edgeguard_baseline`):
+
+- Old `NEO4J_TX_MEMORY_MAX=4g` was hit during `build_relationships` against a 344K-node graph — Neo4j logged `MemoryLimitExceededException` and the subprocess got stuck before Airflow's (separately-too-short) 45min timeout fired. Bumped to `8g`.
+- Old `NEO4J_CONTAINER_MEMORY_LIMIT=22g` was tight: 12+8+4=24g of working set on a 22g cgroup limit. Bumped to `36g` so 12+8+8=28g of working set has 8g of headroom — covers off-heap allocations (Bolt protocol buffers, JVM thread stacks, Lucene memory-mapped index files, JVM metaspace, APOC off-heap allocators) without flirting with cgroup OOM.
+- Old `NEO4J_HEAP_INITIAL=4g` (with `HEAP_MAX=12g`) caused multiple stop-the-world JVM heap resizes during a baseline run as the heap grew from 4g to 12g. Bumped to `12g` (= MAX) per Neo4j's own [Operations Manual](https://neo4j.com/docs/operations-manual/current/performance/memory-configuration/) recommendation: *"set the initial heap size and the maximum heap size to the same value to avoid GC pauses caused by heap resizing."*
+
+**If your host has < 36g RAM** for the Neo4j container alone, drop the working set. Lossless options:
+- `NEO4J_HEAP_INITIAL=NEO4J_HEAP_MAX=8g` + everything else the same → 8+8+8=24g working set, 8g headroom inside a 32g container. Slightly worse query performance under heavy concurrent load, no OOM.
+- Or `NEO4J_PAGECACHE=4g` → 12+4+8=24g working set, 8g headroom. Pagecache helps repeat-query latency but is already 16× the typical graph size (~500MB raw); reducing it slows index-heavy scans but is acceptable on small test graphs.
+- Going below `NEO4J_TX_MEMORY_MAX=8g` is NOT recommended — that's the cap the 2026-04-19 baseline hit and is what `build_relationships` needs for the `apoc.periodic.iterate` batches over a populated graph.
+- Going below `NEO4J_HEAP_INITIAL=NEO4J_HEAP_MAX` (e.g. initial=4g, max=8g) is operational-debt-only — under steady load, the heap will quickly grow to max anyway, but you'll pay multiple GC pauses to get there. Prefer setting both to the same value.
 
 ---
 
