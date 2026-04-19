@@ -1974,6 +1974,80 @@ def _fetch_misp_event_summary() -> dict:
 #     ``line.split("run_id", 1)[1].strip().split()[0]`` would return
 #     ``="manual__..."`` if Airflow ever changes to ``run_id=...`` format)
 #   - inject auth, retry, or a ``--dry-run`` flag in the future.
+def _check_recent_backup_timestamp() -> Optional[str]:
+    """Verify ``EDGEGUARD_LAST_BACKUP_AT`` is set and within the freshness
+    window (default 24h, override via ``EDGEGUARD_BACKUP_MAX_AGE_HOURS``).
+
+    Returns:
+        ``None`` if the gate passes (operator has a recent backup);
+        a human-readable error message string if the gate fails.
+
+    PR-F2 audit fix (Devil's Advocate #1 + Prod Readiness BLOCK 1.1,
+    post-PR-C-merge): refuse to run ``edgeguard fresh-baseline`` against
+    production data unless a recent backup is recorded. See
+    ``docs/BACKUP.md`` for the operator procedure.
+
+    Accepted timestamp formats:
+      - ISO 8601 ``YYYY-MM-DDTHH:MM:SSZ`` (recommended; UTC)
+      - ISO 8601 with ``+HH:MM`` timezone offset
+      - Unix epoch (integer seconds; treated as UTC)
+    """
+    from datetime import datetime, timezone
+
+    raw = os.getenv("EDGEGUARD_LAST_BACKUP_AT", "").strip()
+    if not raw:
+        return (
+            "EDGEGUARD_LAST_BACKUP_AT is not set in the environment.\n"
+            "This must be set to the ISO timestamp (UTC) of your most recent\n"
+            "Neo4j + MISP backup before fresh-baseline will proceed."
+        )
+
+    # Try ISO 8601 first (the documented format)
+    parsed: Optional[datetime] = None
+    try:
+        # Accept "Z" suffix as +00:00 alias (per ISO 8601-1:2019)
+        normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        # Fall back to unix epoch (integer seconds)
+        try:
+            parsed = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (ValueError, OSError):
+            return (
+                f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is not parseable.\n"
+                "Expected ISO 8601 (e.g. ``2026-04-19T14:30:00Z``) or unix epoch seconds.\n"
+                'Set with: ``echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env``'
+            )
+
+    # Naive datetime → assume UTC (operators may forget the trailing Z)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    # Default 24h freshness window; operators can tighten via env var
+    try:
+        max_age_hours = float(os.getenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", "24"))
+    except (ValueError, TypeError):
+        max_age_hours = 24.0
+
+    age = datetime.now(timezone.utc) - parsed
+    age_hours = age.total_seconds() / 3600.0
+
+    if age_hours < 0:
+        return (
+            f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is in the future "
+            f"(by {-age_hours:.1f}h). Check your system clock or the env var value."
+        )
+    if age_hours > max_age_hours:
+        return (
+            f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is {age_hours:.1f}h old "
+            f"(max allowed: {max_age_hours:.1f}h via EDGEGUARD_BACKUP_MAX_AGE_HOURS).\n"
+            "Take a fresh backup and update the env var before proceeding."
+        )
+
+    # Gate passes
+    return None
+
+
 def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, str]:
     """Invoke ``docker compose exec airflow airflow dags trigger
     edgeguard_baseline --conf <conf_json>``.
@@ -2096,6 +2170,48 @@ def cmd_fresh_baseline(args) -> int:
         print("  edgeguard doctor", file=sys.stderr)
         print("  docker compose ps", file=sys.stderr)
         return 2  # exit code 2 = preflight failed (system unhealthy)
+
+    # PR-F2 audit fix (Devil's Advocate #1 + Prod Readiness BLOCK 1.1,
+    # post-PR-C-merge): refuse to wipe production data unless a recent
+    # backup is recorded. The operator must take a snapshot per
+    # ``docs/BACKUP.md`` and update ``EDGEGUARD_LAST_BACKUP_AT`` (ISO
+    # timestamp) before the gate accepts. The 24h window is a default;
+    # operators with stricter RTO/RPO should set
+    # ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` to a smaller value.
+    #
+    # ``--skip-backup-check`` is the dev/test escape hatch — emits a
+    # WARNING in the log so the bypass is auditable. Production
+    # operators should NEVER use this flag.
+    if not getattr(args, "skip_backup_check", False):
+        backup_check_result = _check_recent_backup_timestamp()
+        if backup_check_result is not None:  # check failed
+            print(file=sys.stderr)
+            err("FRESH BASELINE — BACKUP GATE FAILED")
+            print(file=sys.stderr)
+            print(backup_check_result, file=sys.stderr)
+            print(file=sys.stderr)
+            print("Refusing to wipe production data without a recent backup.", file=sys.stderr)
+            print("This protects you from the 'fresh-baseline failed at step 4 with no", file=sys.stderr)
+            print("recovery story' scenario.", file=sys.stderr)
+            print(file=sys.stderr)
+            print("Take a backup:", file=sys.stderr)
+            print("  See docs/BACKUP.md for the full procedure.", file=sys.stderr)
+            print("  Quick command (self-hosted Neo4j):", file=sys.stderr)
+            print("    docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups", file=sys.stderr)
+            print("  Then update .env:", file=sys.stderr)
+            print(
+                '    echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env',
+                file=sys.stderr,
+            )
+            print("    docker compose restart api graphql airflow", file=sys.stderr)
+            print(file=sys.stderr)
+            print("Or bypass for dev/test ONLY (data loss acceptable):", file=sys.stderr)
+            print("  edgeguard fresh-baseline --skip-backup-check", file=sys.stderr)
+            print(file=sys.stderr)
+            return 2  # exit code 2 — preflight failed (no backup)
+    else:
+        warn("--skip-backup-check passed; bypassing the backup-timestamp gate.")
+        warn("This is intended for dev/test only — production runs MUST take a backup first.")
 
     # Show blast radius (always — operator wants the audit trail in stdout
     # whether they pass --force or not; the destructive counts go in the log).
@@ -2566,6 +2682,13 @@ Examples:
         action="store_true",
         help="Skip the typed-confirmation prompt (use only in non-interactive contexts; "
         "the preflight probes still run and refuse on unreachable datastores)",
+    )
+    fresh_baseline_p.add_argument(
+        "--skip-backup-check",
+        action="store_true",
+        help="Bypass the backup-timestamp gate (EDGEGUARD_LAST_BACKUP_AT must be < 24h "
+        "old, OR pass this flag). Use ONLY for dev/test where data loss is acceptable; "
+        "production runs MUST take a backup first (see docs/BACKUP.md)",
     )
 
     # Preflight

@@ -2267,11 +2267,111 @@ baseline_complete = BashOperator(
     dag=baseline_dag,
 )
 
-# Dependency chain (PR-C audit fix Cross-Checker HIGH H3):
-# health → clean (no-op unless fresh_baseline=true conf) → start → tier1
-# (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PR-F2 audit fix (Bug Hunter HIGH BH-H2 + BH2-HIGH, post-PR-C-merge):
+#
+# The baseline sentinel lock (``src/baseline_lock.py``) was historically
+# acquired only by the legacy CLI-runs-baseline-in-process path
+# (``src/run_pipeline.py:_run_with_lock``). PR-C made operators trigger
+# baselines via Airflow (``edgeguard fresh-baseline`` / ``edgeguard baseline``
+# both shell out to ``airflow dags trigger``), at which point NO task in
+# this DAG was acquiring the lock — so the scheduled incremental DAGs
+# (``edgeguard_pipeline``, ``edgeguard_daily``, ``edgeguard_neo4j_sync``)
+# would happily run in parallel with the multi-hour baseline, racing MISP
+# writes and Neo4j MERGEs the lock was specifically designed to prevent.
+#
+# Two independent Bug Hunter agents flagged this as the highest-impact
+# day-1-failure-mode finding in the production-readiness audit. PR-F2
+# closes the gap by acquiring the lock as the FIRST DAG step (after the
+# health probe but before the destructive wipe + ingest) and releasing
+# it as the LAST step with ``trigger_rule=ALL_DONE`` so the unlock fires
+# even if any upstream task failed.
+#
+# The ``release_baseline_lock`` helper is PID-checked (per its docstring),
+# so calling it from a context where we don't actually hold the lock
+# (e.g., the acquire failed) is a safe no-op.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _baseline_lock(**context):
+    """Acquire the baseline sentinel lock; fail the DAG fast if another
+    baseline is already running. Mirrors the legacy CLI lock-acquire
+    semantics from ``src/run_pipeline.py:_run_with_lock``."""
+    try:
+        from baseline_lock import acquire_baseline_lock
+    except ImportError as e:
+        raise AirflowException(f"baseline_lock module unavailable: {e}") from e
+
+    if not acquire_baseline_lock():
+        # ``acquire_baseline_lock`` already logged the offending PID/host
+        # and the sentinel-file path. Fail fast so the DAG goes red and
+        # operators see one clear error rather than a corrupted half-run.
+        raise AirflowException(
+            "Refusing to run baseline: another baseline is already running. "
+            "See logs for the live PID/host. If the sentinel is stale, "
+            "delete it manually (path is in the log line above)."
+        )
+    logger.info("BASELINE_LOCK: acquired sentinel; scheduled DAGs will skip until release.")
+
+
+def _baseline_unlock(**context):
+    """Release the baseline sentinel lock. Always runs (``trigger_rule=
+    ALL_DONE``) so the lock is released even when upstream tasks fail.
+    Safe to call when we never acquired (PID-check inside
+    ``release_baseline_lock`` makes it a no-op)."""
+    try:
+        from baseline_lock import release_baseline_lock
+    except ImportError as e:
+        # Don't raise — that would mark the unlock task as failed and
+        # potentially block re-triggering. Log loudly instead.
+        logger.error("BASELINE_UNLOCK: cannot import baseline_lock module: %s", e)
+        return
+
+    try:
+        release_baseline_lock()
+        logger.info("BASELINE_UNLOCK: released sentinel; scheduled DAGs free to resume.")
+    except Exception as e:
+        # Same reasoning — log + continue. The PID-check inside
+        # ``release_baseline_lock`` ensures we don't silently delete
+        # someone else's sentinel; any exception here is operator-visible
+        # via the log but doesn't block the DAG.
+        logger.error("BASELINE_UNLOCK: release_baseline_lock raised %s: %s", type(e).__name__, e)
+
+
+baseline_lock_task = PythonOperator(
+    task_id="baseline_lock",
+    python_callable=_baseline_lock,
+    execution_timeout=timedelta(minutes=2),
+    # No retry — if acquire_baseline_lock fails it's because another
+    # baseline is genuinely running; retry won't help and would just
+    # delay the operator's "this conflict needs attention" signal.
+    retries=0,
+    trigger_rule=TriggerRule.ALL_SUCCESS,
+    dag=baseline_dag,
+)
+
+baseline_unlock_task = PythonOperator(
+    task_id="baseline_unlock",
+    python_callable=_baseline_unlock,
+    execution_timeout=timedelta(minutes=2),
+    # ALL_DONE — release MUST run on success AND failure, otherwise a
+    # failed baseline would leave the sentinel in place and block all
+    # future baselines + scheduled incrementals.
+    trigger_rule=TriggerRule.ALL_DONE,
+    # No retry on the unlock either — the PID-check inside the helper
+    # makes it idempotent; a transient exception once is OK to log + skip.
+    retries=0,
+    dag=baseline_dag,
+)
+
+
+# Dependency chain (PR-C audit fix Cross-Checker HIGH H3 + PR-F2 lock fix):
+# health → lock → clean (no-op unless fresh_baseline=true conf) → start → tier1
+# (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done → unlock
 (
     baseline_misp_health
+    >> baseline_lock_task
     >> baseline_clean_task
     >> baseline_start
     >> baseline_tier1
@@ -2280,4 +2380,5 @@ baseline_complete = BashOperator(
     >> baseline_build_rels_task
     >> baseline_enrichment_task
     >> baseline_complete
+    >> baseline_unlock_task
 )
