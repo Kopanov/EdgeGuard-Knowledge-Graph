@@ -128,22 +128,35 @@ def test_tool_branch_uses_mitre_id_not_name():
 def test_q_tool_implements_matches_by_mitre_id():
     """Pre-fix the q_tool_implements MATCH was ``tool.name = row.entity``.
     Now Tool rows put mitre_id in ``row.entity``, so the MATCH must be by
-    ``mitre_id``."""
+    ``mitre_id``.
+
+    PR (apoc.coll.toSet refactor): the batch-rel templates were converted
+    from plain triple-quoted strings to f-strings (so they can splice the
+    dedup helper), which means the single ``{mitre_id: row.entity}`` brace
+    pair becomes ``{{mitre_id: row.entity}}`` in the source. We accept
+    either form so this test is robust to that mechanical conversion.
+    """
     import neo4j_client
 
     with open(neo4j_client.__file__) as fh:
         source = fh.read()
 
     # Locate the q_tool_implements TEMPLATE ASSIGNMENT (not the comment
-    # mentioning it earlier in the dispatch loop).
+    # mentioning it earlier in the dispatch loop). Accept either plain
+    # or f-string form.
     idx = source.find('q_tool_implements = """')
+    if idx < 0:
+        idx = source.find('q_tool_implements = f"""')
     assert idx > 0, "q_tool_implements template assignment not found"
     # Look at the next ~800 chars (the query string)
     chunk = source[idx : idx + 800]
 
-    assert "MATCH (tool:Tool {mitre_id: row.entity})" in chunk, (
-        "q_tool_implements must MATCH by tool.mitre_id, not tool.name (Tool's natural key is mitre_id)"
+    # Accept either the plain ``{mitre_id: row.entity}`` form or the
+    # f-string-escaped ``{{mitre_id: row.entity}}`` form.
+    matches = (
+        "MATCH (tool:Tool {mitre_id: row.entity})" in chunk or "MATCH (tool:Tool {{mitre_id: row.entity}})" in chunk
     )
+    assert matches, "q_tool_implements must MATCH by tool.mitre_id, not tool.name (Tool's natural key is mitre_id)"
     # Negative: the legacy name-based MATCH must be gone.
     assert "tool.name = row.entity" not in chunk, "legacy tool.name MATCH must be removed"
 
@@ -366,12 +379,31 @@ def test_create_misp_relationships_batch_uses_bound_var_uuids_not_row():
     )
 
     # Positive: each of the 11 templates uses bound-var .uuid for src/trg.
-    # Spot-check a few representative ones.
-    assert "coalesce(r.src_uuid, a.uuid)" in block, "actor_employs / attr templates"
-    assert "coalesce(r.src_uuid, m.uuid)" in block, "malware_implements / attr / ind_mal templates"
-    assert "coalesce(r.src_uuid, i.uuid)" in block, "ind_mal / tgt_ind / expl templates"
-    assert "coalesce(r.trg_uuid, t.uuid)" in block, "*_employs / *_implements / use_technique templates"
-    assert "coalesce(r.trg_uuid, s.uuid)" in block, "tgt_ind / tgt_vuln / tgt_cve templates"
+    # PR (apoc.coll.toSet refactor): the SET-clause was extracted into a
+    # local ``_set_clause(src_var, trg_var, ...)`` helper inside
+    # create_misp_relationships_batch, so the literal
+    # ``coalesce(r.src_uuid, a.uuid)`` strings no longer appear in the
+    # function source — they're built at runtime from f-string templates.
+    # We assert the template form instead, plus the per-call-site var
+    # arguments that prove each of the 11 templates routes the right
+    # endpoint variable.
+    assert "coalesce(r.src_uuid, {src_var}.uuid)" in block, (
+        "_set_clause helper template must build src_uuid from bound var"
+    )
+    assert "coalesce(r.trg_uuid, {trg_var}.uuid)" in block, (
+        "_set_clause helper template must build trg_uuid from bound var"
+    )
+    # Spot-check that the 11 _set_clause call sites pass the expected
+    # endpoint variable names — these match the bound vars in each MATCH.
+    assert '_set_clause("a", "t")' in block, "actor_employs template (a:ThreatActor → t:Technique)"
+    assert '_set_clause("c", "t")' in block, "campaign_employs template (c:Campaign → t:Technique)"
+    assert '_set_clause("m", "t")' in block, "malware_implements template (m:Malware → t:Technique)"
+    assert '_set_clause("tool", "t")' in block, "tool_implements template (tool:Tool → t:Technique)"
+    assert '_set_clause("m", "a")' in block, "attr template (m:Malware → a:ThreatActor)"
+    assert '_set_clause("i", "m")' in block, "ind_mal template (i:Indicator → m:Malware)"
+    assert '_set_clause("i", "s")' in block, "tgt_ind template (i:Indicator → s:Sector)"
+    assert '_set_clause("v", "s")' in block, "aff_vuln / aff_cve template (v:Vulnerability/CVE → s:Sector)"
+    assert '_set_clause("i", "v"' in block, "expl_vuln / expl_cve template (i:Indicator → v:Vulnerability/CVE)"
 
 
 def test_dispatch_loop_no_longer_precomputes_endpoint_uuids():
