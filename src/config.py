@@ -686,16 +686,16 @@ _SECTOR_PATTERNS: dict = {
     for zone, kws in SECTOR_KEYWORDS.items()
 }
 
-# Tags for sources
-SOURCE_TAGS = {
-    "misp": "misp",
-    "otx": "alienvault_otx",
-    "nvd": "nvd",
-    "cisa": "cisa_kev",
-    "mitre": "mitre_attck",
-    "virustotal": "virustotal",
-    "abuseipdb": "abuseipdb",
-}
+# Tags for sources — maps CLI shortname → canonical collector-emitted tag.
+# Single-source-of-truth derivation from src/source_registry.py (chip 5a).
+# Restricted to the legacy 7-key shape so existing callers that do
+# ``SOURCE_TAGS["X"]`` and rely on KeyError-on-typo for missing keys
+# don't suddenly start resolving keys that previously failed. The full
+# registry-derived map (~12 keys) is available via
+# ``source_registry.cli_to_canonical_tag_map()`` for new callers.
+import source_registry as _source_registry  # noqa: E402
+
+SOURCE_TAGS = _source_registry.cli_to_canonical_tag_map_legacy_subset()
 
 # Pipeline Intervals (hours)
 # Phase 1: Source → MISP refresh interval

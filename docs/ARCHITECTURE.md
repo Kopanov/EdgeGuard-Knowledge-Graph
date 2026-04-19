@@ -318,6 +318,15 @@ script ships; a fresh baseline rerun stamps every uuid at write time. See
 
 ## Data Sources (13 Total)
 
+> **Single source of truth — `src/source_registry.py`.** Adding a new
+> data source is a one-line `Source(...)` entry there. Five legacy
+> registries (`neo4j_client.SOURCES`, `edgeguard.DEFAULT_SOURCES`,
+> `config.SOURCE_TAGS`, `source_truthful_timestamps._RELIABLE_FIRST_SEEN_SOURCES`,
+> `MISPWriter.SOURCE_TAGS`) all derive from it; before the chip-5a
+> refactor each was hand-maintained and forgetting any one produced
+> a different silent-failure mode (see the module docstring for the
+> full failure-mode catalog).
+
 | Code | Full Name | Type | Collector Module |
 |------|-----------|------|------------------|
 | alienvault_otx | AlienVault OTX | Threat Intel | otx_collector.py |
@@ -450,4 +459,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the n.uuid backfill-script pointer with the heal-by-rebaseline contract (pre-release framework, no production graph) and reframed the USES→specialized-edge history as "fresh baseline writes the specialized edge type directly"._
+_Last updated: 2026-04-18 — chip 5a refactor added the "single source of truth — `src/source_registry.py`" callout to the Data Sources section. PR #41 cleanup pass earlier the same day replaced the n.uuid backfill-script pointer with the heal-by-rebaseline contract (pre-release framework, no production graph) and reframed the USES→specialized-edge history as "fresh baseline writes the specialized edge type directly"._

@@ -772,92 +772,16 @@ def check_production_issues():
 
 SOURCES_FILE = os.path.join(os.path.dirname(__file__), "..", "credentials", "sources.yaml")
 
-DEFAULT_SOURCES = {
-    "otx": {
-        "name": "AlienVault OTX",
-        "api_key_env": "OTX_API_KEY",
-        "rate_limit": "30/min",
-        "enabled": True,
-        "description": "Threat intelligence pulses",
-    },
-    "nvd": {
-        "name": "National Vulnerability Database",
-        "api_key_env": "NVD_API_KEY",
-        "rate_limit": "30/30sec",
-        "enabled": True,
-        "description": "CVE vulnerabilities",
-    },
-    "virustotal": {
-        "name": "VirusTotal",
-        "api_key_env": "VIRUSTOTAL_API_KEY",
-        "rate_limit": "4/min",
-        "enabled": True,
-        "description": "File and URL reputation",
-    },
-    "cisa": {
-        "name": "CISA KEV",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Known exploited vulnerabilities",
-    },
-    "mitre": {
-        "name": "MITRE ATT&CK",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Threat techniques and tactics",
-    },
-    "abuseipdb": {
-        "name": "AbuseIPDB",
-        "api_key_env": "ABUSEIPDB_API_KEY",
-        "rate_limit": "1000/day",
-        "enabled": False,
-        "description": "IP reputation",
-    },
-    "urlhaus": {
-        "name": "URLhaus",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Malware URLs",
-    },
-    "cybercure": {
-        "name": "CyberCure",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Threat intelligence feeds",
-    },
-    "feodo": {
-        "name": "Feodo Tracker",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Banking trojan C&C servers",
-    },
-    "sslbl": {
-        "name": "SSL Blacklist",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Malicious SSL certificates",
-    },
-    "threatfox": {
-        "name": "ThreatFox",
-        "api_key_env": "THREATFOX_API_KEY",
-        "rate_limit": "unlimited",
-        "enabled": False,
-        "description": "Threat actor indicators",
-    },
-    "misp": {
-        "name": "MISP",
-        "api_key_env": "MISP_API_KEY",
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Central threat intelligence hub",
-    },
-}
+# Single-source-of-truth: derived from src/source_registry.py (chip 5a).
+# Adding a new source is now a one-line edit in the registry; this dict
+# (and the four other parallel registries that previously needed
+# hand-syncing — neo4j_client.SOURCES, config.SOURCE_TAGS,
+# source_truthful_timestamps._RELIABLE_FIRST_SEEN_SOURCES,
+# misp_writer.MISPWriter.SOURCE_TAGS) all derive from the same source.
+# Shape and key set are pinned by tests/test_source_registry.py.
+import source_registry as _source_registry  # noqa: E402
+
+DEFAULT_SOURCES = _source_registry.to_cli_sources_dict()
 
 
 def load_sources():

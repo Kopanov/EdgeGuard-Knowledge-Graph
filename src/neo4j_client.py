@@ -33,6 +33,7 @@ except ImportError:
 # Deterministic per-node UUIDs for cross-environment traceability — see
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
+import source_registry  # noqa: E402  — single-source-of-truth for SOURCES dict (chip 5a refactor)
 from node_identity import canonicalize_merge_key, compute_node_uuid, edge_endpoint_uuids  # noqa: E402
 from query_pause import query_pause  # noqa: E402
 
@@ -232,28 +233,16 @@ def resolve_vulnerability_cve_id(item: Dict[str, Any]) -> Optional[str]:
 # the LEGACY short names (``feodo`` / ``sslbl``) while the collectors
 # emit ``feodo_tracker`` / ``ssl_blacklist`` (config.SOURCE_TAGS +
 # finance_feed_collector); those two paths were silently dropping
-# edge writes. Fixed by adding the canonical collector-tag entries
-# below (keeping legacy short-names for back-compat with any
-# pre-existing Source nodes — ensure_sources is idempotent).
-SOURCES = {
-    "alienvault_otx": {"name": "AlienVault OTX", "type": "threat_intel", "reliability": 0.7},
-    "virustotal": {"name": "VirusTotal", "type": "threat_intel", "reliability": 0.8},
-    "abuseipdb": {"name": "AbuseIPDB", "type": "threat_intel", "reliability": 0.65},
-    "mitre_attck": {"name": "MITRE ATT&CK", "type": "framework", "reliability": 0.95},
-    "nvd": {"name": "NVD", "type": "vulnerability_db", "reliability": 0.9},
-    "misp": {"name": "MISP", "type": "threat_intel", "reliability": 0.75},
-    "cisa": {"name": "CISA KEV", "type": "advisory", "reliability": 0.9},
-    "cisa_kev": {"name": "CISA KEV", "type": "advisory", "reliability": 0.9},
-    # Both short-names AND canonical collector-emitted tags MUST exist:
-    "feodo": {"name": "Feodo Tracker", "type": "threat_intel", "reliability": 0.7},
-    "feodo_tracker": {"name": "Feodo Tracker", "type": "threat_intel", "reliability": 0.7},
-    "sslbl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
-    "ssl_blacklist": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
-    "abusech_ssl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
-    "urlhaus": {"name": "URLhaus", "type": "threat_intel", "reliability": 0.7},
-    "cybercure": {"name": "CyberCure", "type": "threat_intel", "reliability": 0.6},
-    "threatfox": {"name": "ThreatFox", "type": "threat_intel", "reliability": 0.7},
-}
+# edge writes. PR #41 added the canonical collector-tag entries.
+#
+# The unified registry refactor (chip 5a follow-up) MOVES this dict's
+# definition to ``src/source_registry.py`` so adding a new source is
+# a single declarative edit there. Three additional aliases (``otx``,
+# ``vt``, ``mitre``) are now ALSO covered — same gap the PR #41
+# round added ``feodo_tracker`` / ``ssl_blacklist`` for. The shape of
+# this dict is unchanged for every legacy 16-entry id (parity pinned
+# in tests/test_source_registry.py).
+SOURCES = source_registry.to_neo4j_sources_dict()
 
 
 def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY_DELAY_BASE):

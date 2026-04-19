@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import urllib3
 
+import source_registry  # noqa: E402  — single source of truth for source→MISP-tag mapping (chip 5a)
 from collectors.collector_utils import TransientServerError, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
@@ -281,24 +282,13 @@ class MISPWriter:
         "unknown": "text",
     }
 
-    # Source to MISP tag mapping
-    SOURCE_TAGS = {
-        "misp": "source:MISP",
-        "otx": "source:AlienVault-OTX",
-        "alienvault_otx": "source:AlienVault-OTX",
-        "nvd": "source:NVD",
-        "cisa": "source:CISA-KEV",
-        "cisa_kev": "source:CISA-KEV",
-        "mitre": "source:MITRE-ATT&CK",
-        "mitre_attck": "source:MITRE-ATT&CK",
-        "virustotal": "source:VirusTotal",
-        "abuseipdb": "source:AbuseIPDB",
-        "feodo": "source:Feodo-Tracker",
-        "sslbl": "source:SSL-Blacklist",
-        "urlhaus": "source:URLhaus",
-        "cybercure": "source:CyberCure",
-        "threatfox": "source:ThreatFox",
-    }
+    # Source to MISP tag mapping. Single-source-of-truth derivation from
+    # src/source_registry.py (chip 5a) — adding a new source is now a
+    # one-line edit there. The derived map covers every alias (so the
+    # writer resolves a lookup by either canonical id OR legacy short
+    # name to the same MISP tag), which extends the historical key set
+    # but does not change behavior for any existing input.
+    SOURCE_TAGS = source_registry.source_to_misp_tag_map()
 
     def __init__(self, url: str = None, api_key: str = None, verify_ssl: bool = None):
         """
