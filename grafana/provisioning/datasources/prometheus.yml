@@ -16,7 +16,12 @@ datasources:
       httpMethod: POST
       manageAlerts: true
       prometheusType: Prometheus
-      prometheusVersion: 2.50.0
+      # PR-B audit fix (Bugbot MED on commit 18499dc): match the image
+      # version pinned in docker-compose.monitoring.yml. Grafana uses this
+      # hint to enable version-specific query features (e.g. PromQL @
+      # modifier, native histograms in Prom 3.x). Stale 2.50.0 hint
+      # would disable Prom 3.x features Grafana 11+ knows how to use.
+      prometheusVersion: 3.5.0
       cacheLevel: 'High'
       incrementalQuerying: true
 
