@@ -181,10 +181,10 @@ try:
         record_source_truthful_coerce_rejected as _metric_coerce_reject,
     )
     from metrics_server import (
-        record_source_truthful_future_clamp as _metric_future_clamp,
+        record_source_truthful_creator_rejected as _metric_creator_rejected,
     )
     from metrics_server import (
-        record_source_truthful_creator_rejected as _metric_creator_rejected,
+        record_source_truthful_future_clamp as _metric_future_clamp,
     )
 except ImportError:  # pragma: no cover — defensive
     # Mypy enforces "all conditional function variants must have
@@ -211,7 +211,6 @@ except ImportError:  # pragma: no cover — defensive
 # always present in production; an ImportError here would indicate a broken
 # install, not a test-context issue, so no defensive fallback.
 from source_trust import is_attribute_creator_trusted, safe_orgc_for_log  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Sanity bounds for int/float Unix epoch parsing in coerce_iso

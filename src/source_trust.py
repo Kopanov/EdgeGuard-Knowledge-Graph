@@ -241,15 +241,13 @@ TRUST_REASON_NAME_MATCH = "creator_org_in_name_allowlist"
 TRUST_REASON_NOT_ALLOWLISTED = "creator_org_not_allowlisted"
 TRUST_REASON_CREATOR_MISSING = "creator_org_missing"
 
-_VALID_TRUST_REASONS: FrozenSet[str] = frozenset(
-    {
-        TRUST_REASON_DISABLED,
-        TRUST_REASON_UUID_MATCH,
-        TRUST_REASON_NAME_MATCH,
-        TRUST_REASON_NOT_ALLOWLISTED,
-        TRUST_REASON_CREATOR_MISSING,
-    }
-)
+# Bugbot LOW (2026-04-19): the ``_VALID_TRUST_REASONS`` frozenset that
+# previously aggregated all five constants was unused — the metrics
+# counter (M6 from the original audit) imports the two REJECTION
+# constants directly via
+# ``frozenset({TRUST_REASON_NOT_ALLOWLISTED, TRUST_REASON_CREATOR_MISSING})``.
+# Removed to avoid carrying dead surface area; if a caller ever needs
+# the full set, build it inline at the call site.
 
 
 def _trust_check_configured() -> bool:

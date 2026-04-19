@@ -233,6 +233,40 @@ def test_csv_env_handles_whitespace_and_empty_segments(monkeypatch):
     )
 
 
+def test_trusted_names_snapshot_returns_normalized_allowlist(monkeypatch):
+    """Bugbot LOW (2026-04-19): the ``trusted_names_snapshot()``
+    introspection helper had no in-repo callers, flagged as dead
+    code. Symmetric with ``trusted_uuids_snapshot()`` (already
+    exercised above) — both are part of the public surface for
+    operator monitoring / debugging tooling. This test pins the
+    NFKC-normalized + casefolded behavior so the helper stays
+    correct when callers (Prometheus exporter, doctor command,
+    etc.) consume it.
+    """
+    # Mix casing + a fullwidth-Latin variant + whitespace — verify
+    # all three normalize to the same casefolded ASCII equivalents.
+    _reload_trust_env(
+        monkeypatch,
+        names="EdgeGuard Collectors,  STRASSE CYBER ,\uff21\uff23\uff2d\uff25",
+    )
+    from source_trust import trusted_names_snapshot
+
+    snapshot = trusted_names_snapshot()
+    # All three normalized to lowercase ASCII; fullwidth ＡＣＭＥ → "acme"
+    assert snapshot == frozenset({"edgeguard collectors", "strasse cyber", "acme"})
+
+
+def test_trusted_names_snapshot_is_empty_when_env_unset(monkeypatch):
+    """When the env var is empty, the snapshot returns an empty
+    frozenset (not None). Pins the type contract for callers."""
+    _reload_trust_env(monkeypatch, names="")
+    from source_trust import trusted_names_snapshot
+
+    snap = trusted_names_snapshot()
+    assert isinstance(snap, frozenset)
+    assert len(snap) == 0
+
+
 # ---------------------------------------------------------------------------
 # B. End-to-end via extract_source_truthful_timestamps
 # ---------------------------------------------------------------------------
