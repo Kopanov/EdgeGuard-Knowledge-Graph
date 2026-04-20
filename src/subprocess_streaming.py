@@ -140,10 +140,18 @@ def _drain_output(
         try:
             if proc.stdout is not None:
                 proc.stdout.close()
-        except Exception:
-            # Stdout already closed by the subprocess module on
-            # process exit — harmless.
-            pass
+        except (ValueError, OSError) as exc:
+            # Expected: stdout already closed by subprocess module on
+            # process exit (``ValueError: I/O operation on closed file``)
+            # or pipe already torn down (``OSError``). Log at DEBUG so
+            # operators who need traceability still see it but normal
+            # runs don't get noise.
+            #
+            # PR-K3 Bugbot round-2 (Low): the prior ``except Exception: pass``
+            # violated the project's bare-except-with-pass review rule.
+            # Narrowing + DEBUG log preserves the close-is-harmless
+            # invariant while meeting the audit contract.
+            logging.getLogger(__name__).debug("stdout close on exiting child: %s", exc, exc_info=True)
 
 
 def run_with_streaming_output(
