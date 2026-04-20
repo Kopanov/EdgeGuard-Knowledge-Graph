@@ -132,10 +132,22 @@ EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo
 Staged defense-in-depth for untrusted MISP inputs. Full design + threat model in [`docs/SECURITY_ROADMAP.md`](docs/SECURITY_ROADMAP.md).
 
 - ✅ **Tier 1 — Defense machinery (PR #44).** Creator-org allowlist check with Unicode-aware name normalization (NFKC + casefold), strict UUID validation, and log-injection-safe rejection logging. Rejections increment `edgeguard_source_truthful_creator_rejected_total`.
-- 🚧 **Tier 2 — Observability for the disabled state (PR-I, this cycle).** Defense-disabled state is now always visible: startup WARNING log fires in **all** envs (previously prod/staging only, which silently accepted the default `EDGEGUARD_ENV=dev`) + Prometheus gauge `edgeguard_misp_tag_impersonation_defense_disabled` exposes the state to alert rules. See [`docs/PROMETHEUS_SETUP.md`](docs/PROMETHEUS_SETUP.md) for the suggested alert rule.
+- ✅ **Tier 2 — Observability for the disabled state (PR-I, #71).** Defense-disabled state is now always visible: startup WARNING log fires in **all** envs (previously prod/staging only, which silently accepted the default `EDGEGUARD_ENV=dev`) + Prometheus gauge `edgeguard_misp_tag_impersonation_defense_disabled` exposes the state to alert rules. See [`docs/PROMETHEUS_SETUP.md`](docs/PROMETHEUS_SETUP.md) for the suggested alert rule.
 - 📋 **Tier 3 — Fail-closed boot refusal (planned, post-Tier 2).** After operators have had a deployment cycle to configure the allowlists, `EDGEGUARD_ENV ∈ {prod, staging}` will flip to boot-refusal: the process refuses to start unless an allowlist is configured OR `EDGEGUARD_ALLOW_UNTRUSTED_MISP=1` is set explicitly. Closes the "forgot to configure" footgun at deploy time.
 
-The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — proper redesign tracked in [Issue #57](../../issues/57)). Next we work through the remaining In-Progress items above. The README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once the local-operational hardening lands and we shift focus to those scopes.
+#### 📋 Queued audit follow-ups (post-PR-I)
+
+Driven by the 2026-04-20 comprehensive multi-agent audit. Four merged PRs (F9 #69, G1 #70, I #71, plus earlier F-series) closed 7 P0 findings; three queued items remain:
+
+- **PR-G2 — OOM-safe streaming reads for large MISP events.** `src/collectors/misp_writer.py` and `src/run_misp_to_neo4j.py` currently read full event payloads into memory; events with tens of thousands of attributes can balloon to multi-GB objects. Refactor hot paths to generator-based streaming so peak memory stays bounded during the 2-year historical baseline.
+- **PR-H — Observability polish.** (a) Clamp `task_id` Prometheus label cardinality (currently unbounded → Prometheus performance degrades over months of uptime). (b) Rewrite `EdgeGuardDAGRunStuck` alert rule from duration-based (false-positives on legit long-running baselines) to heartbeat-based per-DAG thresholds.
+- **Architecture flow diagrams (PR-J).** Staged Mermaid-based system flows in [`docs/ARCHITECTURE_FLOW.md`](docs/ARCHITECTURE_FLOW.md) — eight diagrams covering baseline sequence, checkpoint state machine, collector→MISP→Neo4j data flow, MISP↔Neo4j traceability, incremental sync, deployment topology, STIX export, and zone detection. Each diagram is symbol-validated via `tests/test_architecture_flow_pins.py` so the docs can't silently drift from the code. Prioritized for **730-day baseline production-test readiness**.
+
+#### 🏗️ Separate architectural tracks
+
+- **Airflow-aware baseline lock** — [Issue #57](../../issues/57). The legacy PID-based baseline lock fails in Airflow's multi-process model (the lock-task subprocess dies immediately; later incrementals treat the sentinel as stale). Needs a design spike, not a patch. Four candidate designs documented in the issue; interim operator discipline is "don't trigger fresh-baseline while incremental DAGs are running."
+
+The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — proper redesign tracked in [Issue #57](../../issues/57)). The 2026-04-20 multi-agent audit triggered **PR-F9 / G1 / I** (merged) addressing the highest-severity findings; **PR-G2 / H / J / Tier-3** are the queued follow-ups above. Next we work through the remaining In-Progress items + queued follow-ups, then the README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once local-operational hardening lands.
 
 ---
 
