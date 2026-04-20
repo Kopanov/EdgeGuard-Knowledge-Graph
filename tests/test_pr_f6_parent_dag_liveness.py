@@ -253,6 +253,108 @@ class TestExceptionMessage:
 
 
 # ---------------------------------------------------------------------------
+# Bugbot LOW fixes (commit 2159292) — pin the regressions so they don't
+# come back: (a) first probe must fire on freshly-booted hosts, (b) the
+# callback must NOT make a redundant second API call on parent-death.
+# ---------------------------------------------------------------------------
+
+
+class TestBugbotLOWRegressions:
+    """Pin the three Bugbot LOW findings on PR-F6 commit 2159292:
+    1. First probe skipped on hosts where time.monotonic() < throttle
+       (boot-time bug — initialize last_probe_at to -inf, not 0.0).
+    2. Silent ``except Exception: pass`` — eliminated by single-probe
+       refactor (no second API call → no second except block to mishandle).
+    3. Redundant API re-fetch on death — eliminated by single-probe
+       refactor; ``_probe_dag_run_state`` returns state once.
+    """
+
+    def test_first_probe_fires_on_freshly_booted_host(self, monkeypatch):
+        """``last_probe_at`` initializer MUST be -inf (or equivalent),
+        not 0.0. On Linux ``time.monotonic()`` returns seconds-since-boot;
+        with init=0.0 and a 60s throttle, the first probe was skipped
+        for the first 60s of system uptime — leaving the safeguard
+        inactive on early boot."""
+        from parent_dag_liveness import make_liveness_callback
+
+        monkeypatch.setenv("EDGEGUARD_PARENT_DAG_LIVENESS_CHECK", "true")
+        # Big throttle so a buggy 0.0 initializer would skip the first probe
+        cb = make_liveness_callback("dag_x", "run_y", throttle_sec=10_000)
+
+        call_count = {"n": 0}
+
+        def fake_get(*args, **kwargs):
+            call_count["n"] += 1
+            return {"state": "running"}
+
+        with patch("airflow_client._get", side_effect=fake_get):
+            cb()  # MUST probe on first call regardless of system uptime
+
+        assert call_count["n"] == 1, (
+            "first callback invocation must always probe (Bugbot LOW: "
+            "init=0.0 + monotonic-since-boot caused first-N-seconds skip)"
+        )
+
+    def test_no_redundant_api_call_on_parent_death(self, monkeypatch):
+        """The pre-fix design called Airflow twice on death: once via
+        ``is_dag_run_alive`` for the bool, then again from the callback
+        to fetch the state for the exception message. The refactor uses
+        a single ``_probe_dag_run_state`` call. Pin one-call-per-death."""
+        from parent_dag_liveness import AbortedByDagFailureException, make_liveness_callback
+
+        monkeypatch.setenv("EDGEGUARD_PARENT_DAG_LIVENESS_CHECK", "true")
+        cb = make_liveness_callback("dag_x", "run_y", throttle_sec=0)
+
+        call_count = {"n": 0}
+
+        def fake_get(*args, **kwargs):
+            call_count["n"] += 1
+            return {"state": "failed"}
+
+        with patch("airflow_client._get", side_effect=fake_get):
+            with pytest.raises(AbortedByDagFailureException) as excinfo:
+                cb()
+
+        # CRITICAL: exactly ONE API call per probe-and-die, not two.
+        # Doubling the API load on every death detection — and the
+        # TOCTOU gap that came with it — was the third Bugbot LOW.
+        assert call_count["n"] == 1, f"callback must make exactly ONE API call per probe-and-die; got {call_count['n']}"
+        # Exception's observed state matches the single-probe result
+        assert excinfo.value.state == "failed"
+
+    def test_probe_dag_run_state_returns_state_string(self, monkeypatch):
+        """``_probe_dag_run_state`` is the new single-probe primitive.
+        Returns the raw state string on success, None on any failure."""
+        from parent_dag_liveness import _probe_dag_run_state
+
+        with patch("airflow_client._get", return_value={"state": "failed"}):
+            assert _probe_dag_run_state("d", "r") == "failed"
+
+        with patch("airflow_client._get", return_value={"state": "running"}):
+            assert _probe_dag_run_state("d", "r") == "running"
+
+    def test_probe_dag_run_state_returns_none_on_failure(self, monkeypatch):
+        """Probe failure → None (callers MUST treat as fail-OPEN)."""
+        from parent_dag_liveness import _probe_dag_run_state
+
+        # Empty identifiers
+        assert _probe_dag_run_state("", "r") is None
+        assert _probe_dag_run_state("d", "") is None
+        # API error envelope
+        with patch("airflow_client._get", return_value={"error": "Cannot connect"}):
+            assert _probe_dag_run_state("d", "r") is None
+        # Unexpected exception
+        with patch("airflow_client._get", side_effect=RuntimeError("boom")):
+            assert _probe_dag_run_state("d", "r") is None
+        # Non-dict response
+        with patch("airflow_client._get", return_value="not-a-dict"):
+            assert _probe_dag_run_state("d", "r") is None
+        # Missing state field
+        with patch("airflow_client._get", return_value={"other": "data"}):
+            assert _probe_dag_run_state("d", "r") is None
+
+
+# ---------------------------------------------------------------------------
 # MISPWriter integration — the callback fires between batches
 # ---------------------------------------------------------------------------
 

@@ -169,9 +169,73 @@ def _throttle_seconds() -> float:
         return _DEFAULT_THROTTLE_SEC
 
 
+def _probe_dag_run_state(dag_id: str, run_id: str) -> Optional[str]:
+    """Return the raw Airflow ``dag_run`` state string, or ``None`` on
+    any probe failure.
+
+    Bugbot LOW (PR-F6 commit 2159292): the previous design called
+    Airflow twice on parent-death (once via ``is_dag_run_alive`` for the
+    bool, once again from the callback for the message text). That
+    doubled the API load on death detection AND introduced a TOCTOU
+    gap — if state flipped between the two calls, the exception's
+    ``observed_state`` could contradict the trigger. Refactored: a
+    single probe returns the state, both ``is_dag_run_alive`` and the
+    callback consume that one result.
+
+    Returns
+    -------
+    str
+        The raw state from Airflow (e.g., ``"running"``, ``"queued"``,
+        ``"success"``, ``"failed"``, ``"upstream_failed"``).
+    None
+        Probe failed for any reason (missing identifiers, API
+        unreachable, non-dict response, error envelope from
+        ``airflow_client._get``, unexpected exception). Callers MUST
+        treat ``None`` as fail-OPEN — a transient API blip should NOT
+        false-kill an in-flight collector.
+
+    Notes
+    -----
+    Imports ``airflow_client._get`` lazily to avoid a hard dependency at
+    module-import time (the parent_dag_liveness module is loaded by
+    collectors that may not have ``requests`` installed in some test
+    environments).
+    """
+    if not dag_id or not run_id:
+        # Defensive: can't probe without identifiers. Treat as
+        # fail-OPEN at the caller (return None signals "unknown").
+        return None
+    try:
+        from airflow_client import _get  # lazy
+    except ImportError as e:
+        logger.debug("airflow_client not importable (%s) — probe returns None", e)
+        return None
+    try:
+        result = _get(f"/dags/{dag_id}/dagRuns/{run_id}")
+    except Exception as e:
+        # Belt-and-suspenders: _get already catches everything and
+        # returns ``{"error": ...}``, but defend against future changes
+        # to its contract.
+        logger.debug("Liveness probe raised unexpectedly (%s) — probe returns None", e)
+        return None
+    if not isinstance(result, dict):
+        logger.debug("Liveness probe non-dict response (%r) — probe returns None", type(result))
+        return None
+    if "error" in result:
+        # API unreachable / 4xx / 5xx
+        logger.debug("Liveness probe API error: %s — probe returns None", result.get("error"))
+        return None
+    state = result.get("state")
+    return str(state) if state else None
+
+
 def is_dag_run_alive(dag_id: str, run_id: str) -> bool:
     """Probe the Airflow REST API: is ``dag_id/run_id`` still in a
     runnable state (``running`` or ``queued``)?
+
+    Thin wrapper around :func:`_probe_dag_run_state` that collapses
+    the state string to a bool. Fail-OPEN preserved (``None`` from
+    the probe → ``True`` here).
 
     Returns
     -------
@@ -182,35 +246,10 @@ def is_dag_run_alive(dag_id: str, run_id: str) -> bool:
     False
         Run is in a terminal state (``success``, ``failed``,
         ``upstream_failed``, etc.) per the Airflow API response.
-
-    Notes
-    -----
-    Imports ``airflow_client._get`` lazily to avoid a hard dependency at
-    module-import time (the parent_dag_liveness module is loaded by
-    collectors that may not have ``requests`` installed in some test
-    environments).
     """
-    if not dag_id or not run_id:
-        # Defensive: can't probe without identifiers. Fail-OPEN.
-        return True
-    try:
-        from airflow_client import _get  # lazy
-    except ImportError as e:
-        logger.debug("airflow_client not importable (%s) — fail-OPEN", e)
-        return True
-    try:
-        result = _get(f"/dags/{dag_id}/dagRuns/{run_id}")
-    except Exception as e:
-        # Belt-and-suspenders: _get already catches everything and
-        # returns ``{"error": ...}``, but defend against future changes
-        # to its contract. Fail-OPEN on any unexpected exception.
-        logger.debug("Liveness probe raised unexpectedly (%s) — fail-OPEN", e)
-        return True
-    if "error" in result:
-        # API unreachable / 4xx / 5xx — fail-OPEN.
-        logger.debug("Liveness probe API error: %s — fail-OPEN", result.get("error"))
-        return True
-    state = result.get("state")
+    state = _probe_dag_run_state(dag_id, run_id)
+    if state is None:
+        return True  # fail-OPEN
     return state in _ALIVE_STATES
 
 
@@ -264,38 +303,45 @@ def make_liveness_callback(
         throttle,
     )
 
-    # Closure state — separate variables (single-element lists) so mypy
-    # can keep distinct types per slot. ``time.monotonic`` is the right
-    # clock here (immune to wall-clock jumps from NTP / DST).
-    last_probe_at: list[float] = [0.0]
+    # Closure state — ``time.monotonic`` is the right clock here
+    # (immune to wall-clock jumps from NTP / DST). Initialize to
+    # ``-inf`` so the FIRST callback invocation always probes
+    # regardless of system uptime.
+    #
+    # Bugbot LOW (PR-F6 commit 2159292): the previous initializer
+    # ``0.0`` interacted badly with ``time.monotonic()`` returning
+    # seconds-since-boot on Linux. On a freshly-booted host where
+    # uptime < throttle (default 60s), ``now - 0.0 < throttle`` was
+    # ``True`` so the FIRST probe was silently skipped — leaving the
+    # safeguard inactive during early system uptime. ``-inf`` makes
+    # the first probe always fire.
+    last_probe_at: list[float] = [float("-inf")]
 
     def _callback() -> None:
         now = time.monotonic()
         if now - last_probe_at[0] < throttle:
             return  # within rate limit, skip
         last_probe_at[0] = now
-        if is_dag_run_alive(dag_id, run_id):
+        # Single probe — get the raw state once. Bugbot LOW
+        # (PR-F6 commit 2159292): the previous design called Airflow
+        # twice on death (is_dag_run_alive for the bool, then again
+        # for the message text), doubling API load AND introducing
+        # a TOCTOU gap. Now we consume one probe result for both
+        # the alive/dead decision and the exception's state field.
+        state = _probe_dag_run_state(dag_id, run_id)
+        if state is None:
+            # Fail-OPEN — transient API blip, assume alive
             return
-        # Probe came back as terminal — fetch the actual state for the
-        # exception message. is_dag_run_alive returned False, so the
-        # API call succeeded AND the state is not in _ALIVE_STATES.
-        # Re-fetch defensively (cheap; happens once per run, on death).
-        observed_state: Optional[str] = None
-        try:
-            from airflow_client import _get  # lazy
-
-            result = _get(f"/dags/{dag_id}/dagRuns/{run_id}")
-            if isinstance(result, dict) and "error" not in result:
-                observed_state = result.get("state")
-        except Exception:
-            pass
+        if state in _ALIVE_STATES:
+            return  # alive
+        # Confirmed terminal state — abort the collector cleanly
         logger.warning(
             "[PARENT_DAG_DEAD] dag_run=%s/%s observed state=%r — aborting collector cleanly. "
             "Orphan-process safeguard (PR-F6) prevented late writes to MISP/Neo4j.",
             dag_id,
             run_id,
-            observed_state,
+            state,
         )
-        raise AbortedByDagFailureException(dag_id, run_id, observed_state)
+        raise AbortedByDagFailureException(dag_id, run_id, state)
 
     return _callback
