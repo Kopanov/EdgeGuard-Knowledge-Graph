@@ -97,12 +97,13 @@ preset (commented).
 
 ### Neo4j (Docker Compose, the default)
 
-Add to `.env`:
+Add to `.env` using the **operator-facing wrapper variables** (what
+`docker-compose.yml` reads and forwards to Neo4j's internal config keys):
 
 ```bash
-NEO4J_server_memory_heap_max_size=8G
-NEO4J_server_memory_pagecache_size=4G
-NEO4J_server_memory_transaction_total_max=8G
+NEO4J_HEAP_MAX=8g
+NEO4J_PAGECACHE=4g
+NEO4J_TX_MEMORY_MAX=8g
 ```
 
 Then restart the Neo4j container:
@@ -113,6 +114,27 @@ docker compose restart neo4j
 
 The values are read at container startup; they cannot be changed at
 runtime.
+
+### A note on env-var names (Cross-Checker audit HIGH — fixed in PR-F8)
+
+Neo4j's Docker image maps environment variables to internal config keys
+by a specific convention:
+
+  - `__` (double underscore) → literal underscore in the config key
+  - `_` (single underscore) → dot separator
+  - So `NEO4J_server_memory_heap_max__size` → `server.memory.heap.max_size`
+
+Our `docker-compose.yml` sets **`NEO4J_server_memory_heap_max__size`**
+(double underscore before `size`), **`NEO4J_server_memory_pagecache_size`**
+(single underscore — `pagecache` is one word in the config key), and
+**`NEO4J_dbms_memory_transaction_total_max`** (`dbms.` prefix, NOT
+`server.`, per Neo4j 5.x's split between `dbms.*` and `server.*`
+namespaces).
+
+**Operators should set the short wrapper variables above in `.env`**;
+compose substitutes them into the Neo4j-internal names at container
+startup. `edgeguard doctor --memory` accepts either form when probing,
+so it works both from the host shell and from inside the container.
 
 ### MISP PHP settings
 
