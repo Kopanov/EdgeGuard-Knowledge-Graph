@@ -252,12 +252,21 @@ class TestRationaleIsDiscoverable:
         src = _read_dag_source()
         # The comment block above the final ``baseline_misp_health >> ...``
         # chain must reference PR-F4 and the sequential ordering.
+        #
+        # Bugbot LOW (commit 4dff17c): the previous version computed an
+        # ``end`` variable via ``src.find("(", ...)`` but never used it
+        # — dead code with a magic-number ``idx + 600`` slice instead.
+        # Fixed by anchoring on the actual chain-block start
+        # (``\n(\n    baseline_misp_health``) so the snippet covers the
+        # full comment block but not unrelated downstream content.
         idx = src.find("# Dependency chain")
         assert idx > 0
-        end = src.find("(", idx + len("# Dependency chain"))
-        # The PR reference + ordering note are within ~6 comment lines
-        # of the start of the dependency-chain block.
-        snippet = src[idx : idx + 600]
+        # The chain expression starts with ``(\n    baseline_misp_health``
+        # on its own line, after the comment block. Anchor on that to
+        # bound the snippet honestly (no magic numbers).
+        end = src.find("(\n    baseline_misp_health", idx)
+        assert end > idx, "could not find the end of the dependency-chain comment block"
+        snippet = src[idx:end]
         assert "PR-F4" in snippet, "dependency-chain comment must reference PR-F4"
         assert "sequential" in snippet.lower() or "serial" in snippet.lower(), (
             "dependency-chain comment must call out the sequential ordering"
