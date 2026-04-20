@@ -583,9 +583,30 @@ class VTCollector:
             List of processed items or status dict
         """
         limit = resolve_collection_limit(limit, "virustotal", baseline=baseline)
-        # VT is heavily rate-limited; uncapped runs use a modest per-run ceiling.
+        # PR-M1 §7-H6: bumped from 20 to 100 (still well inside the free-tier
+        # daily cap).
+        #
+        # VirusTotal public API quota (documented at
+        # https://docs.virustotal.com/reference/public-vs-premium-api):
+        #   * 4 requests / minute
+        #   * 500 requests / day
+        #
+        # At ``limit=100`` the collector makes ~50 file lookups + ~50 URL
+        # lookups + a couple of search/fallback calls ≈ 100-105 API calls.
+        # That is:
+        #   * ~26 min wall-clock at 4 req/min (acceptable for a baseline run)
+        #   * well under the 500/day daily quota with headroom for
+        #     incremental runs throughout the rest of the day
+        #
+        # The previous default of 20 dated from the initial proof-of-concept
+        # wiring where we deliberately kept the ceiling tiny.  Bumping to
+        # 100 gives a useful enrichment sample while staying safely
+        # ``free-tier-compatible``.  For genuine bulk / historical depth
+        # the Premium API (no 4 req/min cap, per-step daily quotas) is
+        # required — documented in docs/COLLECTORS.md under "VT is
+        # enrichment-only on the free tier".
         if limit is None:
-            limit = 20
+            limit = 100
 
         # Optional source: no key → DAG succeeds with skipped + skip metrics (see run_collector_with_metrics)
         # Re-check at collect() time (handles post-init assignment + placeholders)
@@ -609,9 +630,16 @@ class VTCollector:
         try:
             processed = []
 
-            # Fetch recent files (consumes 1 API call)
-            # Due to rate limits, we fetch small batches
-            files_limit = min(limit // 2, 10)  # Half for files, max 10
+            # PR-M1 §7-H6: the inner per-batch caps were hard-coded at 10
+            # which silently bound ``limit`` to 20 (10 files + 10 URLs)
+            # regardless of the caller's ask.  Raised to 50 so the new
+            # default of ``limit=100`` actually flows through to the
+            # fetchers; the per-minute rate limit (4 req/min) and the
+            # daily quota (500/day) are the real ceilings and are
+            # comfortably respected even at 50+50.
+            # ~(50 files + 50 URLs) × 1 call each ≈ 100 API calls per
+            # baseline run; 500/day quota keeps 4 headroom runs/day.
+            files_limit = min(limit // 2, 50)  # Half for files, capped at 50
             if files_limit > 0:
                 try:
                     files = self._fetch_recent_files(files_limit)
@@ -628,7 +656,7 @@ class VTCollector:
                 processed = self._fetch_known_malware(limit)
 
             # Fetch recent URLs (consumes 1 API call)
-            urls_limit = min(limit - len(processed), 10)  # Remaining for URLs, max 10
+            urls_limit = min(limit - len(processed), 50)  # Remaining for URLs, capped at 50
             if urls_limit > 0:
                 try:
                     urls = self._fetch_recent_urls(urls_limit)

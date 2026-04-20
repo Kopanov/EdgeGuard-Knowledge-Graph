@@ -615,7 +615,36 @@ class NVDCollector:
                         extra={"nvd_window_idx": wi + 1, "nvd_start_index": 0},
                     )
 
-                vulnerabilities = all_cves if limit is None else all_cves[:limit]
+                # PR-M1 §7-H3: defensive guard against a run-level ``limit``
+                # leaking from an incremental-style config into the baseline
+                # path. The NVD baseline iterates 120-day windows across
+                # ``baseline_days`` (default 365, often 730 in production),
+                # accumulating potentially millions of CVEs in ``all_cves``.
+                # The previous line ``all_cves if limit is None else all_cves[:limit]``
+                # would silently truncate the entire accumulation to a
+                # small number if an operator had set (e.g.)
+                # ``EDGEGUARD_BASELINE_COLLECTION_LIMIT=200`` — we've seen
+                # this copy-pasted from incremental configs. In baseline
+                # mode the run-level ``limit`` is the wrong ceiling; the
+                # correct per-baseline cap is a separate concept.
+                #
+                # New behaviour: in baseline we IGNORE ``limit`` and return
+                # the full windowed collection, emitting a WARNING if a
+                # non-None ``limit`` was supplied so the operator can see
+                # that their env value had no effect and remove it.
+                if limit is not None:
+                    logger.warning(
+                        "NVD baseline: ignoring run-level limit=%d — it would truncate "
+                        "the full %d-day windowed collection of %d CVEs. In baseline mode "
+                        "this run-level cap is almost always a copy-paste from an "
+                        "incremental config. If you genuinely need a baseline ceiling, "
+                        "raise an issue and we'll add EDGEGUARD_NVD_BASELINE_MAX as a "
+                        "dedicated knob.",
+                        limit,
+                        baseline_days,
+                        len(all_cves),
+                    )
+                vulnerabilities = all_cves
                 if not vulnerabilities:
                     logger.warning(
                         "NVD baseline returned 0 CVEs for %s-day window — verify API key and connectivity",
@@ -644,7 +673,12 @@ class NVDCollector:
             processed = []
             skipped_old = 0
 
-            to_process = vulnerabilities if limit is None else vulnerabilities[:limit]
+            # PR-M1 §7-H3: same defensive stance as the accumulation-side
+            # guard above — in baseline mode the run-level ``limit`` is
+            # ignored so the windowed collection reaches the processing
+            # loop in full. In incremental mode the limit acts as normal
+            # (it was applied upstream by ``_fetch_cves`` as well).
+            to_process = vulnerabilities if (baseline or limit is None) else vulnerabilities[:limit]
             for vuln in to_process:
                 cve_data = vuln.get("cve", {})
                 cve_id = cve_data.get("id", "")

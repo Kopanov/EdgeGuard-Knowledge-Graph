@@ -135,6 +135,20 @@ Staged defense-in-depth for untrusted MISP inputs. Full design + threat model in
 - ✅ **Tier 2 — Observability for the disabled state (PR-I, #71).** Defense-disabled state is now always visible: startup WARNING log fires in **all** envs (previously prod/staging only, which silently accepted the default `EDGEGUARD_ENV=dev`) + Prometheus gauge `edgeguard_misp_tag_impersonation_defense_disabled` exposes the state to alert rules. See [`docs/PROMETHEUS_SETUP.md`](docs/PROMETHEUS_SETUP.md) for the suggested alert rule.
 - 📋 **Tier 3 — Fail-closed boot refusal (planned, post-Tier 2).** After operators have had a deployment cycle to configure the allowlists, `EDGEGUARD_ENV ∈ {prod, staging}` will flip to boot-refusal: the process refuses to start unless an allowlist is configured OR `EDGEGUARD_ALLOW_UNTRUSTED_MISP=1` is set explicitly. Closes the "forgot to configure" footgun at deploy time.
 
+#### 📊 Collector baseline limits — current & planned
+
+Each collector's 730-day baseline is bounded by the upstream API's
+documented quotas, not by artificial EdgeGuard caps. The full current
+state plus planned follow-ups is tracked in
+[**docs/COLLECTORS.md § Baseline collection limits**](docs/COLLECTORS.md#baseline-collection-limits--current--planned).
+Highlights:
+
+- **NVD** — full 120-day-window iteration, no artificial cap (PR-M1 adds a defensive guard that ignores incremental-style `limit` envs in baseline mode).
+- **OTX** — `max_pages = 200` × `50/page` ≈ 10k pulses (produces ~100k graph nodes + relationships on a 730d run). Raising the ceiling is a planned env knob for paid-tier operators.
+- **VirusTotal** — baseline default raised from 20 to 100 (PR-M1); still comfortably inside the free-tier 500 req/day quota. VT is **enrichment-only** on the free tier; true bulk/historical depth requires the Premium API (future option).
+- **ThreatFox** — API hard-caps `days` at 7 (abuse.ch doc); PR-M1 clamps + logs a pointer to the [ThreatFox JSON/CSV bulk export](https://threatfox.abuse.ch/export/). **Planned:** a dedicated bulk-import collector for >7d historical depth.
+- **Energy & Healthcare sector feeds** — currently placeholders; PR-M1 makes them return `skipped=True` with `skip_reason_class="placeholder"` so they surface on the skip dashboard instead of silent zero-count. **Planned:** ENTSO-E / HC3 / FDA / national CERT integrations.
+
 #### 📋 Queued audit follow-ups (post-PR-I)
 
 Driven by the 2026-04-20 comprehensive multi-agent audit. Four merged PRs (F9 #69, G1 #70, I #71, plus earlier F-series) closed 7 P0 findings; three queued items remain:

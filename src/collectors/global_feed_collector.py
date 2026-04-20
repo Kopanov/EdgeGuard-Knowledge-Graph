@@ -132,9 +132,36 @@ class ThreatFoxCollector:
         """
         limit = resolve_collection_limit(limit, "threatfox", baseline=baseline)
 
-        # Use more days in baseline mode
+        # PR-M1 §7-H8: respect the abuse.ch ThreatFox API hard cap.
+        # Documented at https://threatfox.abuse.ch/api/ — the ``days``
+        # parameter for ``get_iocs`` is ``Min: 1, Max: 7``.  For any
+        # historical depth >7 days the documented path is the bulk JSON/
+        # CSV export (https://threatfox.abuse.ch/export/), NOT this
+        # endpoint.
+        #
+        # Previous behaviour: ``days = baseline_days`` (typically 365 or
+        # 730) was sent verbatim; the API either silently clamped or
+        # returned ``query_status`` != ``ok`` for out-of-range values,
+        # making baseline runs non-obviously short on data.
+        #
+        # New behaviour:
+        #   * clamp ``days`` to [1, 7] unconditionally (the API ceiling)
+        #   * if a baseline with >7d was requested, emit an INFO log
+        #     pointing the operator at the documented bulk-export path
+        #   * a bulk-import collector for the ThreatFox JSON/CSV export
+        #     is planned (see docs/COLLECTORS.md "Planned improvements")
         if baseline:
             days = baseline_days
+        days_requested = days
+        days = max(1, min(7, int(days)))
+        if baseline and days_requested > 7:
+            logger.info(
+                "ThreatFox: baseline_days=%d clamped to days=%d (abuse.ch API max). "
+                "For historical IOCs >7 days use the ThreatFox bulk export: "
+                "https://threatfox.abuse.ch/export/ (a bulk-import collector is planned).",
+                days_requested,
+                days,
+            )
 
         results = []
 

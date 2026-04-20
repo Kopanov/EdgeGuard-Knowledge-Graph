@@ -54,6 +54,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 # Import MISP writer
+from collectors.collector_utils import make_skipped_optional_source
 from collectors.misp_writer import MISPWriter
 from config import resolve_collection_limit
 
@@ -97,19 +98,35 @@ class EnergyPlaceholderCollector:
         self.last_collection_time = None
         self.collection_stats = {"total_attempts": 0, "successful_collections": 0, "last_error": None}
 
-    def collect(self, limit=None, push_to_misp=True) -> List[Dict[str, Any]]:
+    def collect(self, limit=None, push_to_misp=True, baseline=False, baseline_days=365):
         """
         Placeholder collection method.
-        Returns empty list until actual feeds are implemented.
+
+        PR-M1 §7-H7: returns a ``make_skipped_optional_source`` status
+        (``skipped=True``, ``skip_reason_class="placeholder"``) instead of
+        silent ``count=0`` so the collector surfaces on the skip dashboard
+        with a clear "not_implemented" reason rather than looking like a
+        failed/empty real run.  Operators scanning Airflow or Grafana
+        panels can now distinguish "placeholder, safe to ignore" from
+        "real collector that returned zero items (investigate)".
 
         Args:
-            limit: Maximum number of items to collect
-            push_to_misp: Whether to push to MISP (no-op for placeholder)
+            limit:         Maximum number of items to collect (ignored —
+                           placeholder returns nothing).
+            push_to_misp:  Ignored for the placeholder path.
+            baseline:      Parity with other collectors — the DAG signature-
+                           inspect uses this to route; accepting it avoids
+                           falling into the ``limit=X`` else branch.
+            baseline_days: Parity parameter (ignored).
 
         Returns:
-            Empty list (placeholder)
+            ``make_skipped_optional_source`` status dict when pushing to
+            MISP (the standard pipeline path), else an empty list for
+            manual/test harnesses that expect the old return shape.
         """
-        limit = resolve_collection_limit(limit, "energy", baseline=False)
+        # ``limit`` is accepted for API parity but unused — the placeholder
+        # never collects anything regardless of baseline vs. incremental.
+        resolve_collection_limit(limit, "energy", baseline=baseline)
         self.collection_stats["total_attempts"] += 1
 
         logger.info("⚡ Energy collector: Placeholder - no active feeds configured")
@@ -127,23 +144,21 @@ class EnergyPlaceholderCollector:
         # # 2. Fetch ENISA publications
         # enisa_results = self._fetch_enisa_energy_reports(limit=limit//2)
         # results.extend(enisa_results)
-        #
-        # # 3. Push to MISP if requested
-        # if push_to_misp and results:
-        #     success, failed = self.misp_writer.push_indicators(results, self.source_name)
-        #     logger.info(f"[PUSH] Energy: Pushed {success} to MISP ({failed} failed)")
-
-        results = []  # Placeholder - no data yet
-
-        if push_to_misp and results:
-            # This won't execute for empty results but maintains the pattern
-            success, failed = self.misp_writer.push_indicators(results, self.source_name)
-            logger.info(f"[PUSH] Energy collector: Pushed {success} to MISP ({failed} failed)")
-        elif push_to_misp:
-            logger.info("⚡ Energy collector: Placeholder - no active feeds to push")
 
         self.last_collection_time = datetime.now(timezone.utc).isoformat()
-        return results
+
+        if push_to_misp:
+            return make_skipped_optional_source(
+                self.source_name,
+                skip_reason=(
+                    "Energy sector feed is a placeholder — no active feeds are wired yet. "
+                    "See src/collectors/energy_feed_collector.py docstring for planned sources "
+                    "(ENTSO-E, EU-CERT, E-ISAC, national CERTs). "
+                    "Public energy/ICS advisories are already collected via cisa_collector."
+                ),
+                skip_reason_class="placeholder",
+            )
+        return []
 
     def health_check(self) -> Dict[str, Any]:
         """
