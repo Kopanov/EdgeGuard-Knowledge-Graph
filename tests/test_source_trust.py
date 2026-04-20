@@ -548,40 +548,217 @@ def test_h3_log_injection_handles_none_orgc():
 
 
 def test_m1_prod_env_without_allowlist_logs_warning(monkeypatch, caplog):
-    """PR #44 audit M1 (Devil's Advocate / Prod Readiness): when
-    EDGEGUARD_ENV is prod-like AND neither allowlist is configured,
+    """PR #44 audit M1 (Devil's Advocate / Prod Readiness) +
+    PR-I (2026-04-20 Red Team): when an allowlist is NOT configured,
     a WARNING MUST be logged at module-import time so the silent
-    misconfiguration is loud."""
+    misconfiguration is loud. PR-I widened this from prod-only to
+    every env (see ``TestDefenseStateLogging`` below) so the default
+    EDGEGUARD_ENV=dev does not silently bypass the signal."""
     import logging
 
     caplog.set_level(logging.WARNING, logger="source_trust")
     monkeypatch.setenv("EDGEGUARD_ENV", "production")
     monkeypatch.delenv("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS", raising=False)
     monkeypatch.delenv("EDGEGUARD_TRUSTED_MISP_ORG_NAMES", raising=False)
-    # _reload_env does NOT re-trigger the warn; call it explicitly.
+    # _reload_env does NOT re-trigger the log; call it explicitly.
     import source_trust
 
     source_trust._reload_env()
-    source_trust._warn_if_disabled_in_prod()
+    source_trust._log_defense_state()
     assert any("DISABLED" in rec.message and "production" in rec.message.lower() for rec in caplog.records), (
         f"Expected WARNING when EDGEGUARD_ENV=production + no allowlist; got: {[r.message for r in caplog.records]}"
     )
 
 
-def test_m1_dev_env_without_allowlist_does_not_log_warning(monkeypatch, caplog):
-    """The opposite: in dev/test/no-env, the warning MUST stay quiet
-    so operators on local laptops aren't spammed."""
-    import logging
+# ---------------------------------------------------------------------------
+# PR-I — Option A + Prometheus observability for the tag-impersonation
+# defense.  The old prod-only warning gate meant the default
+# ``EDGEGUARD_ENV=dev`` shipped with the defense DISABLED and zero log
+# signal — every new deployment silently inherited the gap until an
+# operator remembered to set the env var.  PR-I widens the warning to
+# fire in all envs (human-facing signal) AND exposes the state via the
+# ``edgeguard_misp_tag_impersonation_defense_disabled`` Prometheus
+# gauge (machine-facing signal for alert rules).
+# ---------------------------------------------------------------------------
 
-    caplog.set_level(logging.WARNING, logger="source_trust")
-    monkeypatch.setenv("EDGEGUARD_ENV", "dev")
-    monkeypatch.delenv("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS", raising=False)
-    monkeypatch.delenv("EDGEGUARD_TRUSTED_MISP_ORG_NAMES", raising=False)
-    import source_trust
 
-    source_trust._reload_env()
-    source_trust._warn_if_disabled_in_prod()
-    assert not any("DISABLED" in rec.message for rec in caplog.records)
+class TestDefenseStateLogging:
+    """Every env-value × allowlist-state combination MUST land on the
+    right log level.  The test matrix:
+
+      | env        | allowlist | expected  |
+      |------------|-----------|-----------|
+      | dev        | empty     | WARNING   |
+      | prod       | empty     | WARNING   |
+      | (unset)    | empty     | WARNING   |
+      | dev        | populated | INFO      |
+      | prod       | populated | INFO      |
+    """
+
+    @staticmethod
+    def _reload_and_log(monkeypatch, *, env: str, uuids: str = "", names: str = "") -> None:
+        monkeypatch.setenv("EDGEGUARD_ENV", env)
+        monkeypatch.setenv("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS", uuids)
+        monkeypatch.setenv("EDGEGUARD_TRUSTED_MISP_ORG_NAMES", names)
+        import source_trust
+
+        source_trust._reload_env()
+        source_trust._log_defense_state()
+
+    def test_dev_env_empty_allowlist_logs_warning(self, monkeypatch, caplog):
+        """The PR-I regression pin: ``EDGEGUARD_ENV=dev`` (the default)
+        with no allowlist used to be silent — which meant every new
+        deployment shipped with the defense off and no log telling
+        the operator so. Must now log a WARNING."""
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="source_trust")
+        self._reload_and_log(monkeypatch, env="dev")
+        assert any("DISABLED" in rec.message for rec in caplog.records if rec.levelno == logging.WARNING), (
+            f"PR-I: dev + empty allowlist MUST emit a WARNING. "
+            f"Got: {[(r.levelname, r.message) for r in caplog.records]}"
+        )
+
+    def test_unset_env_empty_allowlist_logs_warning(self, monkeypatch, caplog):
+        """``EDGEGUARD_ENV`` not set at all — still must warn."""
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="source_trust")
+        monkeypatch.delenv("EDGEGUARD_ENV", raising=False)
+        monkeypatch.setenv("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS", "")
+        monkeypatch.setenv("EDGEGUARD_TRUSTED_MISP_ORG_NAMES", "")
+        import source_trust
+
+        source_trust._reload_env()
+        source_trust._log_defense_state()
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING and "DISABLED" in r.message]
+        assert warns, f"unset env + empty allowlist MUST emit WARNING; got: {[r.message for r in caplog.records]}"
+        # And the message must report the env as ``unset`` (not as the empty string, which is unreadable).
+        assert "unset" in warns[0].message.lower()
+
+    def test_prod_env_populated_uuid_logs_info_not_warning(self, monkeypatch, caplog):
+        """Defense ACTIVE → INFO log, never WARNING. Captures the
+        positive-case confirmation signal operators want to see."""
+        import logging
+
+        caplog.set_level(logging.INFO, logger="source_trust")
+        self._reload_and_log(
+            monkeypatch,
+            env="production",
+            uuids="11111111-1111-1111-1111-111111111111",
+        )
+        infos = [r for r in caplog.records if r.levelno == logging.INFO and "ACTIVE" in r.message]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert infos, f"prod + configured allowlist MUST emit INFO 'ACTIVE'; got: {[r.message for r in caplog.records]}"
+        assert not warns, (
+            f"prod + configured allowlist MUST NOT emit WARNING; got WARNINGs: {[r.message for r in warns]}"
+        )
+        # And the INFO line must carry the count of trusted uuids/names so
+        # operators can sanity-check their config from the log.
+        assert "trusted_uuids=1" in infos[0].message
+        assert "trusted_names=0" in infos[0].message
+
+    def test_dev_env_populated_name_logs_info_not_warning(self, monkeypatch, caplog):
+        """Same positive-case check but for name-based allowlist in dev
+        — PR-I doesn't change this path, just verifies it still works."""
+        import logging
+
+        caplog.set_level(logging.INFO, logger="source_trust")
+        self._reload_and_log(monkeypatch, env="dev", names="EdgeGuard Collectors")
+        infos = [r for r in caplog.records if r.levelno == logging.INFO and "ACTIVE" in r.message]
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert infos, f"dev + configured allowlist MUST emit INFO; got: {[r.message for r in caplog.records]}"
+        assert not warns
+
+    def test_is_trust_check_configured_public_api_exists(self):
+        """PR-I exposed ``_trust_check_configured`` as a public
+        ``is_trust_check_configured`` helper so ``metrics_server``
+        doesn't need to reach into private names when wiring up the
+        Prometheus gauge.  Must exist + must agree with the private
+        implementation."""
+        import source_trust
+
+        assert hasattr(source_trust, "is_trust_check_configured"), (
+            "PR-I expected public helper ``is_trust_check_configured`` on source_trust"
+        )
+        # Parity with the private implementation — both should agree.
+        assert source_trust.is_trust_check_configured() == source_trust._trust_check_configured()
+
+
+class TestMispTagImpersonationDefenseGauge:
+    """PR-I (2026-04-20): ``edgeguard_misp_tag_impersonation_defense_disabled``
+    is the alert-rule-facing observable for the defense state. Gauge
+    semantics: 1 = disabled (fail-open), 0 = enabled. Labelless by
+    design — alert rules only need the boolean.
+    """
+
+    @staticmethod
+    def _reinit_gauge(monkeypatch, *, uuids: str = "", names: str = "") -> None:
+        """Set the allowlist env vars, reload ``source_trust``, then
+        call ``metrics_server._initialize_misp_defense_gauge`` to
+        refresh the gauge cell from the new state."""
+        monkeypatch.setenv("EDGEGUARD_TRUSTED_MISP_ORG_UUIDS", uuids)
+        monkeypatch.setenv("EDGEGUARD_TRUSTED_MISP_ORG_NAMES", names)
+        import source_trust
+
+        source_trust._reload_env()
+        import metrics_server
+
+        metrics_server._initialize_misp_defense_gauge()
+
+    def test_gauge_is_one_when_defense_disabled(self, monkeypatch):
+        """Empty allowlist → gauge reports 1 (disabled). This is the
+        state an alert rule like ``defense_disabled == 1 FOR 5m``
+        fires on."""
+        self._reinit_gauge(monkeypatch)
+        from metrics_server import MISP_TAG_IMPERSONATION_DEFENSE_DISABLED
+
+        assert _counter_value(MISP_TAG_IMPERSONATION_DEFENSE_DISABLED) == 1.0
+
+    def test_gauge_is_zero_when_defense_enabled_by_uuid(self, monkeypatch):
+        """Populated UUID allowlist → gauge reports 0 (enabled)."""
+        self._reinit_gauge(monkeypatch, uuids="11111111-1111-1111-1111-111111111111")
+        from metrics_server import MISP_TAG_IMPERSONATION_DEFENSE_DISABLED
+
+        assert _counter_value(MISP_TAG_IMPERSONATION_DEFENSE_DISABLED) == 0.0
+
+    def test_gauge_is_zero_when_defense_enabled_by_name(self, monkeypatch):
+        """Populated NAME allowlist (no UUID) → gauge reports 0."""
+        self._reinit_gauge(monkeypatch, names="EdgeGuard Collectors")
+        from metrics_server import MISP_TAG_IMPERSONATION_DEFENSE_DISABLED
+
+        assert _counter_value(MISP_TAG_IMPERSONATION_DEFENSE_DISABLED) == 0.0
+
+    def test_gauge_is_labelless(self):
+        """Alert-rule simplicity is a feature: gauge MUST be labelless
+        so rules can be written as ``metric == 1`` not ``metric{...}
+        == 1``. Guards against well-intentioned future diffs that
+        add a ``state`` label and break existing alert rules."""
+        from metrics_server import MISP_TAG_IMPERSONATION_DEFENSE_DISABLED
+
+        # prometheus_client Gauge exposes labelnames; empty tuple means
+        # no labels.
+        assert MISP_TAG_IMPERSONATION_DEFENSE_DISABLED._labelnames == ()
+
+    def test_gauge_name_follows_edgeguard_prefix_convention(self):
+        """All EdgeGuard metrics use the ``edgeguard_`` prefix. Guards
+        against accidental naming drift (``misp_*``, ``trust_*``, etc.)."""
+        from metrics_server import MISP_TAG_IMPERSONATION_DEFENSE_DISABLED
+
+        # prometheus_client Gauge stores the full name in ``_name``.
+        assert MISP_TAG_IMPERSONATION_DEFENSE_DISABLED._name.startswith("edgeguard_")
+        assert MISP_TAG_IMPERSONATION_DEFENSE_DISABLED._name == "edgeguard_misp_tag_impersonation_defense_disabled"
+
+    def test_gauge_appears_in_generate_latest_output(self, monkeypatch):
+        """End-to-end: after initialization, the gauge must appear in
+        the ``/metrics`` endpoint output so Prometheus can scrape it.
+        Mirrors the pattern at
+        ``test_creator_rejected_counter_appears_in_generate_latest_output``."""
+        self._reinit_gauge(monkeypatch)
+        from prometheus_client import REGISTRY, generate_latest
+
+        payload = generate_latest(REGISTRY).decode()
+        assert "edgeguard_misp_tag_impersonation_defense_disabled" in payload
 
 
 def test_m2_no_extract_callsite_in_src_omits_event_info():
