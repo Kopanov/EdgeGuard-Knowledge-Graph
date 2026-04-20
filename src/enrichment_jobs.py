@@ -407,12 +407,18 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # with ``r.updated_at < $run_start_at`` OR ``r.updated_at IS
             # NULL`` (from pre-fix edges) is stale and gets deleted.
             #
+            # Type note: ``$run_start_at`` is passed as an ISO-8601 string
+            # from Python (``datetime.now(timezone.utc).isoformat()``).
+            # Neo4j returns NULL when comparing a DateTime to a String, so
+            # we parse it to a temporal via ``datetime($run_start_at)``.
+            # Same pattern as merge_indicators_batch in neo4j_client.py.
+            #
             # Edge case: if Step 3a failed mid-run (transaction abort), some
             # edges may have stale timestamps. Idempotent — next successful
             # run reconciles.
             prune_indicators = """
             MATCH (i:Indicator)-[r:PART_OF]->(c:Campaign)
-            WHERE r.updated_at IS NULL OR r.updated_at < $run_start_at
+            WHERE r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)
             DELETE r
             RETURN count(r) AS pruned
             """
@@ -431,12 +437,26 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_pruned"] = pruned
             query_pause()
 
-            # Step 4: Deactivate campaigns whose indicators are all retired
+            # Step 4: Deactivate campaigns whose indicators are all retired.
+            #
+            # PR-M3d: must use OPTIONAL MATCH. The old inner-MATCH
+            # (``MATCH (c:Campaign)<-[:PART_OF]-(i:Indicator)``) relied on
+            # stale PART_OF edges to now-retired indicators to detect
+            # all-retired campaigns. After Step 3b prunes those stale
+            # edges, a campaign whose indicators have ALL become inactive
+            # ends up with ZERO PART_OF edges (Step 3a only (re)creates
+            # edges for ``i.active = true``) — the inner MATCH would miss
+            # it entirely and the campaign would remain ``active = true``
+            # as a zombie. OPTIONAL MATCH includes campaigns with no
+            # PART_OF edges, and the explicit check on ``c.active`` avoids
+            # re-setting campaigns already marked inactive.
             logger.info("[DECAY] Deactivating campaigns with no active indicators...")
             cleanup_query = """
-                MATCH (c:Campaign)<-[:PART_OF]-(i:Indicator)
-                WITH c, collect(i.active) AS statuses
-                WHERE NOT any(s IN statuses WHERE s = true)
+                MATCH (c:Campaign)
+                WHERE c.active IS NULL OR c.active = true
+                OPTIONAL MATCH (c)<-[:PART_OF]-(i:Indicator {active: true})
+                WITH c, count(i) AS active_links
+                WHERE active_links = 0
                 SET c.active = false
                 RETURN count(c) as count
             """

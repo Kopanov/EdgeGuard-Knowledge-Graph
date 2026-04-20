@@ -153,19 +153,89 @@ class TestPartOfEdgesDeterministic:
 
     def test_step3b_prune_query_exists(self, source: str) -> None:
         """Step 3b MUST delete PART_OF edges whose ``r.updated_at``
-        predates ``$run_start_at`` (or is NULL for pre-fix edges)."""
+        predates ``$run_start_at`` (or is NULL for pre-fix edges).
+
+        Regression pin (Bugbot commit 27965ebf): ``$run_start_at`` is a
+        Python ISO string but ``r.updated_at`` is a Neo4j DateTime (set
+        via ``datetime()`` in Step 3a). Comparing DateTime to String in
+        Cypher returns NULL — so the parameter MUST be wrapped as
+        ``datetime($run_start_at)`` to coerce it to a temporal. Without
+        the wrap, only the ``IS NULL`` branch fires → post-fix stale
+        edges NEVER pruned → bug reappears in silent form."""
         start = source.find("def build_campaign_nodes")
         end = source.find("\ndef ", start + 1)
         body = source[start:end]
         assert "prune_indicators = " in body, "Step 3b prune query must be defined"
         pi_idx = body.find("prune_indicators = ")
         prune_block = body[pi_idx : pi_idx + 1000]
-        # WHERE clause with the freshness marker check
-        assert "r.updated_at IS NULL OR r.updated_at < $run_start_at" in prune_block, (
-            "prune must gate on r.updated_at < $run_start_at (with NULL-tolerant branch for pre-fix edges)"
+        # WHERE clause with the freshness marker check — DateTime-typed
+        # parameter via ``datetime($run_start_at)``, not bare string
+        assert "r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)" in prune_block, (
+            "prune must gate on ``r.updated_at < datetime($run_start_at)`` so the parameter "
+            "is coerced to DateTime (matches ``r.updated_at`` set via ``datetime()`` in Step 3a). "
+            "Without the datetime() wrap, DateTime < String returns NULL → only the IS NULL "
+            "branch fires → post-fix stale edges are never pruned."
         )
         # DELETE keyword
         assert "DELETE r" in prune_block
+
+    def test_step3b_does_not_use_bare_string_run_start_at(self, source: str) -> None:
+        """Negative pin for Bugbot finding (commit 27965ebf). The
+        bare form ``r.updated_at < $run_start_at`` (no ``datetime()``
+        wrap) compares DateTime to String and silently always returns
+        NULL, leaving every post-fix stale edge in place. This test
+        fails loudly if the regression returns."""
+        start = source.find("def build_campaign_nodes")
+        end = source.find("\ndef ", start + 1)
+        body = source[start:end]
+        pi_idx = body.find("prune_indicators = ")
+        prune_block = body[pi_idx : pi_idx + 1000]
+        # Heuristic: the bare form must not appear as an active
+        # expression in the Cypher.  We check for the exact substring
+        # ``< $run_start_at`` without a preceding ``datetime(``.
+        # The only allowed instance is inside ``datetime($run_start_at)``.
+        for line in prune_block.splitlines():
+            stripped = line.strip()
+            # Skip comment lines (# or //) and non-active text
+            if stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            if "< $run_start_at" in stripped:
+                raise AssertionError(
+                    f"Regression: bare ``< $run_start_at`` without ``datetime()`` wrap "
+                    f"found in active Cypher line: {stripped!r}. "
+                    f"This compares DateTime to String → always NULL → prune silently fails. "
+                    f"Use ``< datetime($run_start_at)`` instead."
+                )
+
+    def test_step4_uses_optional_match_to_catch_zombie_campaigns(self, source: str) -> None:
+        """Regression pin (Bugbot commit 27965ebf, finding 2): after
+        Step 3b prunes stale edges, a campaign whose indicators have
+        ALL gone inactive ends up with ZERO ``PART_OF`` edges (Step 3a
+        only (re)creates edges for active indicators).
+
+        The old Step 4 used ``MATCH (c:Campaign)<-[:PART_OF]-(i:Indicator)``
+        which would find zero rows for such campaigns → they stayed
+        ``active = true`` as zombies forever.
+
+        Step 4 MUST use ``OPTIONAL MATCH`` with an explicit
+        ``c.active = true`` gate so campaigns with zero linked active
+        indicators still get deactivated."""
+        start = source.find("def build_campaign_nodes")
+        end = source.find("\ndef ", start + 1)
+        body = source[start:end]
+        assert "cleanup_query = " in body, "Step 4 cleanup query must exist"
+        cq_idx = body.find("cleanup_query = ")
+        cleanup_block = body[cq_idx : cq_idx + 1000]
+        assert "OPTIONAL MATCH" in cleanup_block, (
+            "Step 4 must use OPTIONAL MATCH — inner MATCH misses campaigns with "
+            "zero PART_OF edges post-prune (all-retired → zombie campaigns)"
+        )
+        # Must filter on active campaigns to avoid re-setting already-inactive
+        assert "c.active IS NULL OR c.active = true" in cleanup_block, (
+            "Step 4 must scope to currently-active campaigns (c.active = true OR NULL) "
+            "to avoid re-setting already-retired campaigns"
+        )
+        assert "SET c.active = false" in cleanup_block
 
     def test_function_captures_run_start_at(self, source: str) -> None:
         """The Python function MUST capture ``run_start_at`` before
