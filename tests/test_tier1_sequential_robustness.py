@@ -278,19 +278,28 @@ class TestIncrementalDagsNoTier1Parallel:
     ``collect_otx``, ``collect_nvd``.
     """
 
-    TIER1_TASK_IDS = {"collect_cisa", "collect_mitre", "collect_otx", "collect_nvd"}
-
     @pytest.fixture(scope="class")
     def dag_source(self) -> str:
         return _read(DAG_PATH)
 
     def test_baseline_dag_tier1_is_serial(self, dag_source: str) -> None:
         """Sanity: the existing baseline-DAG test already covers this,
-        but we re-assert here under the robustness-suite framing."""
+        but we re-assert here under the robustness-suite framing.
+
+        PR-L Bugbot round-1 (Low): the boundary marker ``# Tier 2``
+        MUST exist — if it's removed or renamed, ``find`` returns
+        ``-1`` and the regex matches anywhere downstream, making
+        the test pass vacuously. The boundary assertion mirrors the
+        pattern used in ``test_pr_f4_tier1_sequential.py``."""
         # Find the tier1_core block.
         start = dag_source.find('with TaskGroup("tier1_core"')
-        assert start > 0
+        assert start > 0, "tier1_core TaskGroup not found in DAG source"
         end = dag_source.find("# Tier 2", start)
+        assert end > start, (
+            "could not find '# Tier 2' boundary after tier1_core — without "
+            "a valid end boundary, the regex below would match anywhere in "
+            "the rest of the file and pass vacuously"
+        )
         block = dag_source[start:end]
         normalized = re.sub(r"\s+", " ", block)
         assert re.search(
