@@ -125,6 +125,31 @@ class TestVerdictForMemory:
 
 
 # ---------------------------------------------------------------------------
+# Pure helpers — _verdict_glyph (extracted in Bugbot LOW fix, was duplicated)
+# ---------------------------------------------------------------------------
+
+
+class TestVerdictGlyph:
+    """``_verdict_glyph`` was extracted from ``_doctor_memory_check`` in the
+    Bugbot LOW fix on commit 17ba876 — originally the dict mapping was
+    inlined twice. Pin the contract so the colors / wording can't drift."""
+
+    def test_each_known_verdict_returns_a_glyph_string(self):
+        from edgeguard import _verdict_glyph
+
+        for verdict in ("ok", "warn", "fail", "unknown"):
+            glyph = _verdict_glyph(verdict)
+            assert isinstance(glyph, str) and glyph, f"verdict {verdict!r} must map to a non-empty glyph"
+
+    def test_unknown_verdict_falls_back_to_input_string(self):
+        """Defensive: an unexpected verdict (programmer error) shouldn't
+        crash the doctor render — fall through to the raw verdict text."""
+        from edgeguard import _verdict_glyph
+
+        assert _verdict_glyph("totally-made-up") == "totally-made-up"
+
+
+# ---------------------------------------------------------------------------
 # Recommendations table — surfaces the incident-driven thresholds
 # ---------------------------------------------------------------------------
 
@@ -222,6 +247,35 @@ class TestProbesDegradeGracefully:
             ram_gb = _probe_host_ram_gb()
         assert ram_gb is not None
         assert abs(ram_gb - 16.0) < 0.1, f"expected ~16G; got {ram_gb}"
+
+    def test_host_ram_probe_returns_none_on_malformed_meminfo(self):
+        """Bugbot LOW (PR-F5 commit 17ba876): the /proc/meminfo path
+        catches FileNotFoundError + OSError but originally NOT
+        ValueError, even though ``float(parts[1])`` can raise it on
+        malformed content (e.g. ``MemTotal: garbage kB``). Pin the
+        contract: malformed meminfo must return None, not raise.
+
+        Also covers the macOS sysctl path, which already caught
+        ValueError correctly (parity check)."""
+        import subprocess
+        from io import StringIO
+
+        from edgeguard import _probe_host_ram_gb
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/proc/meminfo":
+                # Malformed content — float("garbage") raises ValueError
+                return StringIO("MemTotal:       garbage kB\nMemFree: also-garbage kB\n")
+            raise FileNotFoundError(path)
+
+        # Linux path raises ValueError → must be caught + sysctl fallback
+        # also has to fail (TimeoutExpired) so we end up at None.
+        with (
+            patch("builtins.open", side_effect=fake_open),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("sysctl", 5)),
+        ):
+            # Must NOT raise; must return None
+            assert _probe_host_ram_gb() is None
 
 
 # ---------------------------------------------------------------------------

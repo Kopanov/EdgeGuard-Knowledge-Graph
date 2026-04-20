@@ -712,7 +712,12 @@ def _probe_host_ram_gb() -> Optional[float]:
                     if len(parts) >= 2:
                         kb = float(parts[1])
                         return round(kb / (1024**2), 1)
-    except (FileNotFoundError, OSError):
+    # Bugbot LOW (PR-F5 commit 17ba876): include ValueError so
+    # malformed meminfo content (``MemTotal: garbage``) returns None
+    # rather than raising — matches the macOS path AND the
+    # function's "MUST return None / empty dict on any failure"
+    # contract pinned in tests/test_pr_f5_doctor_memory.py.
+    except (FileNotFoundError, OSError, ValueError):
         pass
     # macOS fallback
     try:
@@ -729,6 +734,23 @@ def _probe_host_ram_gb() -> Optional[float]:
     except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, OSError):
         pass
     return None
+
+
+def _verdict_glyph(verdict: str) -> str:
+    """Map a verdict string to its colored glyph for the doctor table.
+
+    Bugbot LOW (PR-F5 commit 17ba876): originally inlined twice inside
+    ``_doctor_memory_check`` — once for the Neo4j-settings loop and once
+    for the host-RAM section. Extracting prevents the colors / wording
+    from drifting between the two sections on a future edit. Pure
+    function (no side effects) — testable + dependency-free.
+    """
+    return {
+        "ok": f"{Colors.GREEN}✓ ok{Colors.END}",
+        "warn": f"{Colors.YELLOW}⚠ low{Colors.END}",
+        "fail": f"{Colors.RED}✗ too low{Colors.END}",
+        "unknown": f"{Colors.YELLOW}? unknown{Colors.END}",
+    }.get(verdict, verdict)
 
 
 def _doctor_memory_check() -> None:
@@ -754,12 +776,7 @@ def _doctor_memory_check() -> None:
         raw = neo4j_env.get(env_var) or os.environ.get(env_var)
         current_gb = _parse_memory_value_to_gb(raw)
         verdict = _verdict_for_memory(current_gb, rec["min_gb"], rec["rec_gb"])
-        verdict_glyph = {
-            "ok": f"{Colors.GREEN}✓ ok{Colors.END}",
-            "warn": f"{Colors.YELLOW}⚠ low{Colors.END}",
-            "fail": f"{Colors.RED}✗ too low{Colors.END}",
-            "unknown": f"{Colors.YELLOW}? unknown{Colors.END}",
-        }[verdict]
+        verdict_glyph = _verdict_glyph(verdict)
         current_str = f"{current_gb:.1f}G" if current_gb is not None else "—"
         print(
             f"  {rec['label']:<32}  {current_str:>10}  {rec['min_gb']:.0f}G    {rec['rec_gb']:.0f}G    {verdict_glyph}"
@@ -778,12 +795,7 @@ def _doctor_memory_check() -> None:
         rec_host_gb = 16.0
         min_host_gb = 8.0
         verdict = _verdict_for_memory(host_ram_gb, min_host_gb, rec_host_gb)
-        verdict_glyph = {
-            "ok": f"{Colors.GREEN}✓ ok{Colors.END}",
-            "warn": f"{Colors.YELLOW}⚠ low{Colors.END}",
-            "fail": f"{Colors.RED}✗ too low{Colors.END}",
-            "unknown": f"{Colors.YELLOW}? unknown{Colors.END}",
-        }[verdict]
+        verdict_glyph = _verdict_glyph(verdict)
         print(f"  {'Host RAM':<32}  {host_ram_gb:>9.1f}G  {min_host_gb:.0f}G    {rec_host_gb:.0f}G    {verdict_glyph}")
         if verdict in ("warn", "fail"):
             print(f"  {' ' * 32}  → Self-hosted (Neo4j 8G + MISP 4G + Airflow 2G + overhead) needs 16G+")
