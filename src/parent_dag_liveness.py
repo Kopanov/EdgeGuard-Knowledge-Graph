@@ -45,11 +45,6 @@ Public API
   - :class:`AbortedByDagFailureException` — raised by the callback
     when the parent dag_run is no longer runnable. Catchable by
     callers that want to log + clean up before re-raising.
-  - :func:`is_dag_run_alive(dag_id, run_id)` — pure probe; returns
-    ``True`` when the run is in ``running`` or ``queued`` state,
-    ``False`` for terminal states (``success``, ``failed``,
-    ``upstream_failed``, ``skipped``, ``removed``). Fail-OPEN: returns
-    ``True`` on any probe error so transient API blips don't false-kill.
   - :func:`make_liveness_callback(dag_id, run_id, *, throttle_sec)` —
     returns a closure ``() -> None`` that raises
     ``AbortedByDagFailureException`` if the parent is dead. Suitable
@@ -229,28 +224,13 @@ def _probe_dag_run_state(dag_id: str, run_id: str) -> Optional[str]:
     return str(state) if state else None
 
 
-def is_dag_run_alive(dag_id: str, run_id: str) -> bool:
-    """Probe the Airflow REST API: is ``dag_id/run_id`` still in a
-    runnable state (``running`` or ``queued``)?
-
-    Thin wrapper around :func:`_probe_dag_run_state` that collapses
-    the state string to a bool. Fail-OPEN preserved (``None`` from
-    the probe → ``True`` here).
-
-    Returns
-    -------
-    True
-        Run is in ``running`` or ``queued`` state, OR the probe failed
-        (fail-OPEN — a transient API blip should NOT cause us to
-        false-kill an in-flight collector).
-    False
-        Run is in a terminal state (``success``, ``failed``,
-        ``upstream_failed``, etc.) per the Airflow API response.
-    """
-    state = _probe_dag_run_state(dag_id, run_id)
-    if state is None:
-        return True  # fail-OPEN
-    return state in _ALIVE_STATES
+# Bugbot LOW (PR-F6 commit 5f1f44d): the public ``is_dag_run_alive``
+# bool wrapper was removed — it had no production callers after the
+# single-probe refactor (the callback uses ``_probe_dag_run_state``
+# directly to get the raw state string for the exception). External
+# consumers wanting a bool can still call ``_probe_dag_run_state``
+# and check ``state in _ALIVE_STATES`` themselves; per YAGNI we don't
+# carry a speculative public API.
 
 
 def make_liveness_callback(

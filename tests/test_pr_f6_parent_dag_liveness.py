@@ -21,8 +21,8 @@ false-kill in-flight collectors.
 What these tests pin
 --------------------
 
-  - ``is_dag_run_alive`` returns True for ``running``/``queued``,
-    False for terminal states, True (fail-OPEN) on any probe error
+  - ``_probe_dag_run_state`` returns the raw state string on success,
+    None on any probe failure (fail-OPEN — caller treats None as alive)
   - ``make_liveness_callback`` returns None when disabled by env flag
     OR when dag_id/run_id are empty (degrades gracefully)
   - The returned callback raises ``AbortedByDagFailureException`` when
@@ -47,75 +47,12 @@ sys.path.insert(0, "dags")
 
 
 # ---------------------------------------------------------------------------
-# is_dag_run_alive — the API probe
-# ---------------------------------------------------------------------------
-
-
-class TestIsDagRunAlive:
-    """The pure probe: True for runnable states, False for terminal,
-    True (fail-OPEN) on any error."""
-
-    def test_running_state_is_alive(self):
-        from parent_dag_liveness import is_dag_run_alive
-
-        with patch("airflow_client._get", return_value={"state": "running"}):
-            assert is_dag_run_alive("dag_x", "run_y") is True
-
-    def test_queued_state_is_alive(self):
-        from parent_dag_liveness import is_dag_run_alive
-
-        with patch("airflow_client._get", return_value={"state": "queued"}):
-            assert is_dag_run_alive("dag_x", "run_y") is True
-
-    @pytest.mark.parametrize(
-        "terminal_state",
-        ["success", "failed", "upstream_failed", "skipped", "removed", "shutdown", "no_status"],
-    )
-    def test_terminal_states_are_dead(self, terminal_state):
-        """Anything not in {running, queued} is treated as dead. Be
-        deliberately conservative — Airflow's state vocabulary may
-        grow; we'd rather mis-classify a new state as dead than as
-        alive (a false-dead just exits cleanly; a false-alive is the
-        original bug we're fixing)."""
-        from parent_dag_liveness import is_dag_run_alive
-
-        with patch("airflow_client._get", return_value={"state": terminal_state}):
-            assert is_dag_run_alive("dag_x", "run_y") is False, f"state {terminal_state!r} should be considered dead"
-
-    def test_api_error_is_fail_open(self):
-        """Bravo's 2026-04-19 incident: the collector ran for 12h after
-        DAG death. We want orphan detection — but a transient Airflow
-        API blip should NOT cause us to false-kill an actively-running
-        collector. Fail-OPEN: probe failure → assume alive."""
-        from parent_dag_liveness import is_dag_run_alive
-
-        with patch("airflow_client._get", return_value={"error": "Cannot connect to Airflow"}):
-            assert is_dag_run_alive("dag_x", "run_y") is True
-
-    def test_api_exception_is_fail_open(self):
-        """Even if airflow_client._get itself raises (defensive: its
-        contract is to never raise, but defend against future changes)."""
-        from parent_dag_liveness import is_dag_run_alive
-
-        with patch("airflow_client._get", side_effect=RuntimeError("unexpected")):
-            assert is_dag_run_alive("dag_x", "run_y") is True
-
-    def test_empty_dag_id_or_run_id_is_fail_open(self):
-        """Degrade gracefully when the caller can't supply identifiers
-        (e.g., direct CLI invocation outside Airflow). No probe should
-        be made; return True so the legacy path keeps working."""
-        from parent_dag_liveness import is_dag_run_alive
-
-        # Should not even attempt the probe
-        with patch("airflow_client._get", side_effect=AssertionError("should not be called")):
-            assert is_dag_run_alive("", "run_y") is True
-            assert is_dag_run_alive("dag_x", "") is True
-            assert is_dag_run_alive("", "") is True
-
-
-# ---------------------------------------------------------------------------
 # make_liveness_callback — the closure factory
 # ---------------------------------------------------------------------------
+# (The previous TestIsDagRunAlive class was deleted in the Bugbot LOW fix
+# — ``is_dag_run_alive`` had no production callers after the single-probe
+# refactor and was removed per YAGNI. The probe-result matrix is now
+# tested via ``TestBugbotLOWRegressions::test_probe_dag_run_state_*``.)
 
 
 class TestMakeLivenessCallback:
@@ -427,6 +364,83 @@ class TestMISPWriterCallbackIntegration:
 # ---------------------------------------------------------------------------
 # DAG wiring — run_baseline_collector installs the callback
 # ---------------------------------------------------------------------------
+
+
+class TestRunCollectorWithMetricsCleanSkipPath:
+    """Bugbot Medium (PR-F6 commit 5f1f44d): ``AbortedByDagFailureException``
+    must NOT be classified as catastrophic by ``run_collector_with_metrics``.
+
+    Without the fix, the orphan-process safeguard's clean-exit signal
+    propagated into the generic ``except Exception`` handler → emitted
+    a ``[CRITICAL] HARD-FAILED`` Slack alert + bumped
+    ``pipeline_errors_total`` — the OPPOSITE of "clean exit". Operators
+    would see a CRITICAL alert exactly when the safeguard worked correctly.
+
+    Fix: catch the exception at the same level as ``AirflowException``
+    in ``run_collector_with_metrics`` and translate to a clean
+    skipped-source result.
+    """
+
+    def test_run_collector_with_metrics_catches_abort_exception(self):
+        """Source-pin: ``run_collector_with_metrics`` MUST have a
+        dedicated except branch for ``AbortedByDagFailureException``
+        BEFORE the generic ``except Exception`` block — otherwise the
+        catastrophic classification fires."""
+        with open("dags/edgeguard_pipeline.py") as fh:
+            src = fh.read()
+        idx = src.find("def run_collector_with_metrics(")
+        assert idx > 0
+        end = src.find("\ndef ", idx + 1)
+        body = src[idx:end]
+        assert "AbortedByDagFailureException" in body, (
+            "run_collector_with_metrics must reference AbortedByDagFailureException"
+        )
+        # The handling MUST appear BEFORE the generic catastrophic split.
+        # Specifically: the abort must be checked inside the except Exception
+        # handler at the TOP (before the transient/catastrophic split).
+        abort_idx = body.find("AbortedByDagFailureException")
+        catastrophic_idx = body.find("HARD-FAILED")
+        assert abort_idx < catastrophic_idx, (
+            "AbortedByDagFailureException handling must precede the catastrophic alert path"
+        )
+
+    def test_run_collector_with_metrics_returns_skipped_for_abort(self):
+        """The abort branch must return a ``make_skipped_optional_source``
+        result so the Airflow task stays GREEN (no upstream_failed
+        propagation) and downstream tier-1 collectors aren't blocked."""
+        with open("dags/edgeguard_pipeline.py") as fh:
+            src = fh.read()
+        idx = src.find("def run_collector_with_metrics(")
+        assert idx > 0
+        end = src.find("\ndef ", idx + 1)
+        body = src[idx:end]
+        assert "make_skipped_optional_source" in body
+        assert "parent_dag_aborted" in body, (
+            "skip_reason_class must be 'parent_dag_aborted' so operators can grep / "
+            "Prometheus can label the skip reason distinctly from transient_external_error"
+        )
+
+    def test_no_critical_slack_alert_on_abort_path(self):
+        """Defensive: the abort branch MUST NOT call ``send_slack_alert``
+        for the [CRITICAL] HARD-FAILED message. The whole point of the
+        Bugbot fix is to suppress that misleading alert."""
+        with open("dags/edgeguard_pipeline.py") as fh:
+            src = fh.read()
+        idx = src.find("def run_collector_with_metrics(")
+        assert idx > 0
+        end = src.find("\ndef ", idx + 1)
+        body = src[idx:end]
+        # Find the abort handling block
+        abort_branch_start = body.find("AbortedByDagFailureException is not None and isinstance")
+        assert abort_branch_start > 0
+        # The abort branch should end before "PR #35: distinguish TRANSIENT"
+        abort_branch_end = body.find("PR #35: distinguish TRANSIENT", abort_branch_start)
+        assert abort_branch_end > abort_branch_start
+        abort_block = body[abort_branch_start:abort_branch_end]
+        assert "HARD-FAILED" not in abort_block, (
+            "abort branch must NOT emit the [CRITICAL] HARD-FAILED alert — that "
+            "would defeat the entire 'clean exit' design"
+        )
 
 
 class TestDagWiring:

@@ -835,6 +835,58 @@ def run_collector_with_metrics(
         # Already logged and metrics updated above (collector success=false path).
         raise
     except Exception as e:
+        # PR-F6 follow-up (Bugbot Medium on commit 5f1f44d): the
+        # orphan-process safeguard's clean-exit signal
+        # (``AbortedByDagFailureException``) MUST NOT be classified
+        # as catastrophic by the generic handler below — that would
+        # emit a ``[CRITICAL] HARD-FAILED`` Slack alert + bump
+        # ``pipeline_errors_total``, the OPPOSITE of "clean exit".
+        # Caught here at the same level as AirflowException so the
+        # orchestration short-circuits BEFORE the transient /
+        # catastrophic split runs.
+        #
+        # Lazy import to avoid creating a hard dependency at module
+        # load time — the parent_dag_liveness module is loaded lazily
+        # inside run_baseline_collector for the same reason.
+        try:
+            from parent_dag_liveness import AbortedByDagFailureException
+        except ImportError:
+            AbortedByDagFailureException = None  # type: ignore[assignment,misc]
+
+        if AbortedByDagFailureException is not None and isinstance(e, AbortedByDagFailureException):
+            duration = time.time() - start_time
+            from collectors.collector_utils import make_skipped_optional_source
+
+            logger.info(
+                "[%s] Aborted by parent-DAG safeguard (state=%r) after %.2fs: %s. "
+                "Clean exit between batches per PR-F6 design — no half-write to MISP/Neo4j. "
+                "Treating as task-success-skipped so downstream tier-1 collectors "
+                "are not blocked by ALL_DONE; the parent DAG run is already terminal "
+                "regardless.",
+                collector_name,
+                e.state,
+                duration,
+                e,
+            )
+            if METRICS_SERVER_AVAILABLE:
+                try:
+                    record_collection(collector_name, "global", 0, "skipped")
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted skip): {me}")
+                try:
+                    record_collection_duration(collector_name, "global", duration)
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted duration): {me}")
+                try:
+                    record_collector_skip(collector_name, "parent_dag_aborted")
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted skip-reason): {me}")
+            return make_skipped_optional_source(
+                collector_name,
+                skip_reason=f"parent dag_run state={e.state!r} — orphan-process safeguard aborted cleanly (PR-F6)",
+                skip_reason_class="parent_dag_aborted",
+            )
+
         # PR #35: distinguish TRANSIENT external errors (network, upstream
         # 5xx, DNS, SSL handshake, timeout) from CATASTROPHIC bugs
         # (TypeError, ImportError, programming mistakes). The user policy
