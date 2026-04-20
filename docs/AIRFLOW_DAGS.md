@@ -335,19 +335,32 @@ MISP search/index responses are normalized in code (see **`normalize_misp_event_
 | ThreatActor | ~100 | name, aliases, description |
 | Technique | ~300 | mitre_id, name, description |
 | Malware | ~100 | name, family, type |
-| Source | 13 | source_id, name |
+| Source | ~12 logical sources (~19 rows with registry aliases) | source_id, name |
 
 ### Deduplication
-Neo4j uses unique constraints:
-- `Indicator`: value + source
-- `Vulnerability`: cve_id + source
-- `ThreatActor`: name + source
-- `Technique`: mitre_id + source
-- `Malware`: name + source
+Neo4j uses UNIQUE constraints on the **natural key** per node label —
+source / provenance lives on the `SOURCED_FROM` edge, NOT in the node key.
+This is the source-truthful architecture (PR #41): a CVE reported by both
+NVD and MISP merges to ONE `Vulnerability` node, with separate edges
+carrying per-source attribution + `source_reported_first_at` timestamps.
 
-**Running again does NOT create duplicates** — MERGE updates existing nodes.
+Constraints (from `src/neo4j_client.py:749-792`):
 
-**MISP vs Neo4j:** The graph deduplication above is **independent** of MISP. The same logical IOC may still appear on **more than one** EdgeGuard MISP event (e.g. different dates); **`MISPWriter`** prefetch + source cursors reduce **re-pushes** to the **current** target event — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance*.
+| Label | UNIQUE on |
+|---|---|
+| `Indicator` | `(indicator_type, value)` |
+| `Vulnerability` / `CVE` / `CVSSv2` / `CVSSv30` / `CVSSv31` / `CVSSv40` | `cve_id` |
+| `Malware` / `ThreatActor` / `Campaign` | `name` |
+| `Technique` / `Tactic` / `Tool` | `mitre_id` |
+| `Sector` | `name` |
+| `Source` | `source_id` |
+| `IP` | `address` |
+| `Host` | `hostname` |
+| (topology nodes — see `src/neo4j_client.py:781-788`) | (per-label natural keys) |
+
+**Running again does NOT create duplicates** — MERGE on the natural key updates existing nodes, attaches a new `SOURCED_FROM` edge when a new source reports the same entity.
+
+**MISP vs Neo4j:** The graph deduplication above is **independent** of MISP. The same logical IOC may still appear on **more than one** EdgeGuard MISP event (e.g., different dates); **`MISPWriter`** prefetch + cross-event-source dedup (PR-F7) reduce **re-pushes** to MISP itself — see [COLLECTORS.md](COLLECTORS.md) § *Duplicate avoidance* and [Issue #61](../../issues/61) for the architectural event-partitioning fix.
 
 ---
 
@@ -384,13 +397,22 @@ edgeguard_dag_runs_total{status, dag_id}
 
 ### Manual Run
 ```bash
-# Start Airflow
-airflow webserver -p 8080
-airflow scheduler
+# Start Airflow 3.x (from the compose stack — the canonical path)
+docker compose up -d airflow
+# The airflow service runs ``airflow standalone`` internally (scheduler +
+# api-server + dag-processor + triggerer in one process). The API lives
+# on the port set by ``AIRFLOW__API__PORT`` (default 8082 in this repo to
+# avoid the ResilMesh Temporal collision — see docker-compose.yml).
+# Airflow 3.x removed the ``webserver`` subcommand; ``api-server`` /
+# ``standalone`` are the replacements.
 
-# Trigger specific DAG
-airflow dags trigger edgeguard_pipeline
-airflow dags trigger edgeguard_daily
+# Trigger specific DAG (via CLI, inside the container)
+docker compose exec airflow airflow dags trigger edgeguard_pipeline
+docker compose exec airflow airflow dags trigger edgeguard_daily
+
+# Or via the operator-facing CLI (PR-C wrappers — trigger the DAG with the right conf):
+edgeguard baseline --days 730           # additive baseline
+edgeguard fresh-baseline --days 730     # destructive (typed confirmation + backup gate)
 ```
 
 ### Check Status
@@ -441,7 +463,7 @@ airflow logs <task_id> <dag_run_id>
 |---------|----------|
 | DAG runs stuck in "queued" | Check if DAG is paused: `edgeguard dag status`. Kill stuck runs: `edgeguard dag kill` |
 | Collectors failing repeatedly | Reset circuit breakers + retry: `edgeguard heal` |
-| Need a completely fresh start | `python src/run_pipeline.py --baseline --fresh-baseline --baseline-days N` (clears Neo4j + MISP + checkpoints) |
+| Need a completely fresh start | `edgeguard fresh-baseline --days N` — enforces the PR-F2 backup-timestamp gate + requires typed `FRESH-BASELINE` confirmation. See [`docs/BACKUP.md`](BACKUP.md) for the backup prerequisite. (The legacy `python src/run_pipeline.py --baseline --fresh-baseline` path has NO backup gate and NO typed confirmation — **do not use** unless you understand you're bypassing both.) |
 | Airflow not reachable | `edgeguard doctor` retries after 10s; check container: `docker compose ps airflow` |
 | Pipeline already running (lock error) | Wait for it to finish, or delete `checkpoints/pipeline.lock` if stale |
 | Need to clear just Neo4j or MISP | `edgeguard clear neo4j` / `edgeguard clear misp` / `edgeguard clear all` |

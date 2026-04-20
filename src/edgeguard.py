@@ -2282,7 +2282,9 @@ def _fetch_misp_event_summary() -> dict:
 #   - inject auth, retry, or a ``--dry-run`` flag in the future.
 def _check_recent_backup_timestamp() -> Optional[str]:
     """Verify ``EDGEGUARD_LAST_BACKUP_AT`` is set and within the freshness
-    window (default 24h, override via ``EDGEGUARD_BACKUP_MAX_AGE_HOURS``).
+    window (default 240h / 10 days, override via
+    ``EDGEGUARD_BACKUP_MAX_AGE_HOURS``). See ``docs/BACKUP.md`` for the
+    rationale on the 240h default (operator cadence vs strict-RPO).
 
     Returns:
         ``None`` if the gate passes (operator has a recent backup);
@@ -2499,7 +2501,8 @@ def cmd_fresh_baseline(args) -> int:
     # post-PR-C-merge): refuse to wipe production data unless a recent
     # backup is recorded. The operator must take a snapshot per
     # ``docs/BACKUP.md`` and update ``EDGEGUARD_LAST_BACKUP_AT`` (ISO
-    # timestamp) before the gate accepts. The 24h window is a default;
+    # timestamp) before the gate accepts. The 240h (10-day) window is
+    # the default (PR-F2 operator-cadence bump from the original 24h);
     # operators with stricter RTO/RPO should set
     # ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` to a smaller value.
     #

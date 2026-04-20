@@ -1097,16 +1097,16 @@ def run_sslblacklist_collection(**context):
     return run_collector_with_metrics("sslbl", SSLBlacklistCollector, MISPWriter(), limit=limit)
 
 
-def run_energy_placeholder(**context):
-    """Placeholder for energy sector collector."""
-    logger.info("Energy sector collector - placeholder (no active feeds configured)")
-    return {"success": True, "count": 0, "message": "Energy collector placeholder"}
-
-
-def run_healthcare_placeholder(**context):
-    """Placeholder for healthcare sector collector."""
-    logger.info("Healthcare sector collector - placeholder (no active feeds configured)")
-    return {"success": True, "count": 0, "message": "Healthcare collector placeholder"}
+# PR-F9 / multi-agent audit (Maintainer Medium): the old
+# ``run_energy_placeholder`` and ``run_healthcare_placeholder`` functions
+# lived here as no-op stubs — never wired into any PythonOperator task,
+# never imported by any caller, always returned ``{"count": 0}``. Deleted
+# to remove the "is this supposed to be called somewhere?" trap for new
+# contributors. The zone-weighting logic for energy/healthcare lives in
+# ``src/config.py::detect_zones_from_text`` and flows through every
+# collector's attribute tags — no per-sector DAG task is needed (or
+# was ever invoked). If a future PR wants per-sector collection, add a
+# real collector class; don't reintroduce the empty stub pattern.
 
 
 # ================================================================================
@@ -1637,19 +1637,44 @@ run_neo4j_sync_task = PythonOperator(
 
 check_neo4j_quality_task = BashOperator(
     task_id="check_neo4j_quality",
+    # PR-F9 Red Team audit (HIGH): the original implementation used
+    # ``curl -s -u "$NEO4J_USER:$NEO4J_PWD" ...`` which writes the
+    # password into the process argv (visible in ``/proc/<pid>/cmdline``
+    # and ``ps auxw`` to any co-resident process for the lifetime of
+    # the curl call). Replaced with ``curl --netrc-file`` reading
+    # creds from a file opened 0600 and deleted immediately after —
+    # the password never appears in argv. ``trap`` ensures cleanup
+    # even if the pipeline crashes mid-run.
     bash_command="""
+        set -euo pipefail
         echo "Neo4j Sync Complete - $(date)"
         NEO4J_USER="${NEO4J_USER:-neo4j}"
         NEO4J_PWD="${NEO4J_PASSWORD:-}"
-        NEO4J_HTTP="${NEO4J_HTTP:-http://localhost:7474}"
-        if [ -n "$NEO4J_PWD" ]; then
-            curl -s -u "${NEO4J_USER}:${NEO4J_PWD}" "${NEO4J_HTTP}/db/neo4j/tx/commit" \
-                -H "Content-Type: application/json" \
-                -d '{"statements": [{"statement": "MATCH (n) WHERE n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Tactic OR n:Campaign RETURN labels(n)[0] as type, count(*) as cnt ORDER BY cnt DESC"}]}' 2>/dev/null | \
-                python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'{r[\\"row\\"][0]}: {r[\\"row\\"][1]}') for r in d.get('results',[{}])[0].get('data',[])]" || echo "Quality check skipped"
-        else
+        NEO4J_HTTP="${NEO4J_HTTP:-http://neo4j:7474}"
+        if [ -z "$NEO4J_PWD" ]; then
             echo "Quality check skipped (NEO4J_PASSWORD not set)"
+            exit 0
         fi
+
+        # Write creds to a 0600 netrc file the curl process reads directly.
+        # $$ = this shell's PID, unique per invocation; trap cleans up on
+        # any exit path (success, error, signal).
+        NETRC_TMP="$(mktemp -t edgeguard-netrc.XXXXXXXX)"
+        chmod 600 "$NETRC_TMP"
+        trap 'rm -f "$NETRC_TMP"' EXIT HUP INT TERM
+
+        # Extract host + port from NEO4J_HTTP for the netrc ``machine`` entry.
+        NEO4J_HOST=$(echo "$NEO4J_HTTP" | sed -E 's|^https?://||; s|/.*$||; s|:.*$||')
+        cat > "$NETRC_TMP" <<NETRC
+machine $NEO4J_HOST
+login $NEO4J_USER
+password $NEO4J_PWD
+NETRC
+
+        curl -s --netrc-file "$NETRC_TMP" "${NEO4J_HTTP}/db/neo4j/tx/commit" \
+            -H "Content-Type: application/json" \
+            -d '{"statements": [{"statement": "MATCH (n) WHERE n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Tactic OR n:Campaign RETURN labels(n)[0] as type, count(*) as cnt ORDER BY cnt DESC"}]}' 2>/dev/null | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'{r[\\"row\\"][0]}: {r[\\"row\\"][1]}') for r in d.get('results',[{}])[0].get('data',[])]" || echo "Quality check skipped"
     """,
     execution_timeout=timedelta(minutes=15),
     dag=neo4j_sync_dag,

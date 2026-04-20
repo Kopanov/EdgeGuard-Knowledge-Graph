@@ -591,7 +591,14 @@ class Query:
     ) -> List[Tool]:
         client = _get_client()
         conditions = ["n.edgeguard_managed = true"]
-        params: dict = {"limit": limit}
+        # PR-F9 Red Team audit (HIGH): ``limit`` was bound directly into
+        # Cypher without the ``_MAX_GRAPHQL_LIMIT=500`` cap that EVERY
+        # other resolver applies (vulnerabilities / malwares / actors
+        # etc.). A caller requesting ``tools(limit: 100000000)``
+        # exhausts the Neo4j heap + Bolt-pool + FastAPI worker before
+        # the read timeout fires — trivial DoS on a public-ish surface.
+        # Clamp identically to the sibling resolvers.
+        params: dict = {"limit": min(max(limit, 1), _MAX_GRAPHQL_LIMIT)}
 
         f = filter if (filter is not strawberry.UNSET and filter is not None) else ToolFilter()
         if f.name is not strawberry.UNSET and f.name:

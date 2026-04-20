@@ -14,9 +14,22 @@ echo "📦 Docker Containers:"
 docker ps --filter "name=edgeguard" --filter "name=misp" --format "table {{.Names}}\t{{.Status}}"
 
 # Check Neo4j
+# PR-F9 Red Team audit (HIGH): ``curl -u user:password`` exposes the
+# password in ``/proc/<pid>/cmdline`` + ``ps auxw`` for the curl call's
+# duration. Use --netrc-file (0600 + trap-cleaned) so the creds never
+# enter argv.
 echo ""
 echo "🧠 Neo4j Status:"
-if curl -s -u "neo4j:${NEO4J_PASSWORD:-changeme}" http://localhost:7474 > /dev/null 2>&1; then
+NEO4J_PWD="${NEO4J_PASSWORD:-changeme}"
+NETRC_TMP="$(mktemp -t edgeguard-netrc.XXXXXXXX)"
+chmod 600 "$NETRC_TMP"
+trap 'rm -f "$NETRC_TMP"' EXIT HUP INT TERM
+cat > "$NETRC_TMP" <<NETRC
+machine localhost
+login neo4j
+password $NEO4J_PWD
+NETRC
+if curl -s --netrc-file "$NETRC_TMP" http://localhost:7474 > /dev/null 2>&1; then
     echo "✅ Neo4j is running"
 else
     echo "❌ Neo4j is NOT reachable"
