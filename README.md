@@ -127,6 +127,14 @@ EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo
 - **Trivy supply-chain gate re-tightening** — see [Issue #52](../../issues/52) (re-tighten airflow image scan to HIGH+CRITICAL once apache/airflow upstream catches up)
 - **Wipe loop simplification** — see [Issue #54](../../issues/54) (replace string-match + page-advancement state machine with tag-based filter)
 
+#### 🛡️ Security roadmap — MISP trust boundary
+
+Staged defense-in-depth for untrusted MISP inputs. Full design + threat model in [`docs/SECURITY_ROADMAP.md`](docs/SECURITY_ROADMAP.md).
+
+- ✅ **Tier 1 — Defense machinery (PR #44).** Creator-org allowlist check with Unicode-aware name normalization (NFKC + casefold), strict UUID validation, and log-injection-safe rejection logging. Rejections increment `edgeguard_source_truthful_creator_rejected_total`.
+- 🚧 **Tier 2 — Observability for the disabled state (PR-I, this cycle).** Defense-disabled state is now always visible: startup WARNING log fires in **all** envs (previously prod/staging only, which silently accepted the default `EDGEGUARD_ENV=dev`) + Prometheus gauge `edgeguard_misp_tag_impersonation_defense_disabled` exposes the state to alert rules. See [`docs/PROMETHEUS_SETUP.md`](docs/PROMETHEUS_SETUP.md) for the suggested alert rule.
+- 📋 **Tier 3 — Fail-closed boot refusal (planned, post-Tier 2).** After operators have had a deployment cycle to configure the allowlists, `EDGEGUARD_ENV ∈ {prod, staging}` will flip to boot-refusal: the process refuses to start unless an allowlist is configured OR `EDGEGUARD_ALLOW_UNTRUSTED_MISP=1` is set explicitly. Closes the "forgot to configure" footgun at deploy time.
+
 The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — proper redesign tracked in [Issue #57](../../issues/57)). Next we work through the remaining In-Progress items above. The README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once the local-operational hardening lands and we shift focus to those scopes.
 
 ---

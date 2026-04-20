@@ -207,6 +207,57 @@ SYNC_EVENTS_INDEX_TOTAL = Gauge(
     "Total events returned by MISP events index for the most recent sync run",
 )
 
+# PR-I (2026-04-20 multi-agent audit Red Team #4): MISP tag-impersonation
+# defense can be configured OFF (both allowlists empty). Prior to PR-I,
+# that state was signalled only by a startup log line that fired ONLY in
+# prod/staging — which silently accepted the default dev env.  This
+# gauge mirrors the defense's configured state at metrics-server boot:
+#
+#   value 0 → defense ENABLED (at least one allowlist populated)
+#   value 1 → defense DISABLED (all source-truthful claims accepted)
+#
+# Suggested alert rule (see docs/PROMETHEUS_SETUP.md):
+#
+#   ALERT EdgeGuardMispTagImpersonationDefenseDisabled
+#     IF edgeguard_misp_tag_impersonation_defense_disabled == 1
+#     FOR 5m
+#     LABELS { severity="warning" }
+#
+# Labelless by design: alert rules care about "is it on?", not
+# "what kind of allowlist?". If operators later need config-audit
+# gauges (count of trusted uuids / names, per-env breakdown), those
+# land as separate metrics — one gauge per question.
+MISP_TAG_IMPERSONATION_DEFENSE_DISABLED = Gauge(
+    "edgeguard_misp_tag_impersonation_defense_disabled",
+    "MISP tag-impersonation defense: 1 = disabled (all source claims accepted "
+    "without creator-org verification), 0 = enabled. Set EDGEGUARD_TRUSTED_MISP_ORG_UUIDS "
+    "and/or EDGEGUARD_TRUSTED_MISP_ORG_NAMES to enable. See docs/SECURITY_ROADMAP.md.",
+)
+
+
+def _initialize_misp_defense_gauge() -> None:
+    """Populate the MISP_TAG_IMPERSONATION_DEFENSE_DISABLED gauge from
+    source_trust's current state. Called once at module load.
+
+    The gauge reflects env-var state AT METRICS-SERVER BOOT; an operator
+    who changes the env vars must restart the metrics-server process
+    for the gauge to update. This matches the semantics of every other
+    config-derived gauge in this file (e.g. NEO4J_POOL_SIZE, which is
+    also read-once-at-boot). Documented in docs/SECURITY_ROADMAP.md.
+    """
+    try:
+        from source_trust import is_trust_check_configured
+    except ImportError:  # pragma: no cover — defensive; source_trust is always present
+        # source_trust module not available in the environment metrics
+        # is running in — safer to report ``disabled`` so operators
+        # notice that something is off than to stay silent.
+        MISP_TAG_IMPERSONATION_DEFENSE_DISABLED.set(1)
+        return
+    MISP_TAG_IMPERSONATION_DEFENSE_DISABLED.set(0 if is_trust_check_configured() else 1)
+
+
+_initialize_misp_defense_gauge()
+
 NEO4J_QUERIES = Counter("edgeguard_neo4j_queries_total", "Total Neo4j queries executed", ["query_type", "status"])
 
 NEO4J_QUERY_DURATION = Histogram(

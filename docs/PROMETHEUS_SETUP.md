@@ -258,6 +258,34 @@ sum by (reason) (
 
 **When neither allowlist env var is configured (the default), the trust check is BYPASSED and this counter never increments.** Pre-release / dev environments see no behavior change.
 
+### Defense-disabled state gauge (PR-I, 2026-04)
+
+Added to make the "defense configured OFF" state observable to alert rules, not just to the startup log. See [`SECURITY_ROADMAP.md`](SECURITY_ROADMAP.md) for the full threat-model background and the Tier 3 fail-closed plan.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `edgeguard_misp_tag_impersonation_defense_disabled` | Gauge | — | `1` when both allowlist env vars are empty (defense BYPASSED, all source-truthful claims accepted); `0` when at least one allowlist is populated (defense ACTIVE). Read once at metrics-server boot; operators must restart the metrics server to pick up an env-var change. |
+
+**Suggested alert rule:**
+
+```yaml
+- alert: EdgeGuardMispTagImpersonationDefenseDisabled
+  expr: edgeguard_misp_tag_impersonation_defense_disabled == 1
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: MISP tag-impersonation defense is disabled
+    description: |
+      EdgeGuard is accepting source-truthful claims from MISP attributes
+      without verifying the creator organization. Configure
+      EDGEGUARD_TRUSTED_MISP_ORG_UUIDS and/or
+      EDGEGUARD_TRUSTED_MISP_ORG_NAMES to enable the defense, then
+      restart the metrics server. See docs/SECURITY_ROADMAP.md.
+```
+
+This alert is a **backstop** for the startup `WARNING` log that fires on every process boot when the defense is disabled — catches cases where operators have filtered / suppressed the log aggregator.
+
 ## Using Metrics in Code
 
 ### Recording Collection

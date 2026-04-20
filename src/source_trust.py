@@ -209,27 +209,68 @@ _TRUSTED_CREATOR_ORG_NAMES: FrozenSet[str] = _parse_csv_env_names("EDGEGUARD_TRU
 
 
 # PR #44 audit M1 (Devil's Advocate / Prod Readiness): when the
-# defense is disabled in a production-like environment, log a
-# WARNING at module import so the misconfiguration is loud, not
-# silent. Operators who deliberately want the bypass in dev/staging
-# / EDGEGUARD_ENV unset see nothing.
-def _warn_if_disabled_in_prod() -> None:
-    env = os.getenv("EDGEGUARD_ENV", "").strip().lower()
-    prod_envs = {"prod", "production", "staging", "stage"}
-    if env in prod_envs and not (_TRUSTED_CREATOR_ORG_UUIDS or _TRUSTED_CREATOR_ORG_NAMES):
+# defense is disabled, log a WARNING at module import so the
+# misconfiguration is loud, not silent.
+#
+# PR-I (2026-04-20 multi-agent audit Red Team #4): the original
+# implementation gated the warning on ``EDGEGUARD_ENV ∈ {prod,
+# staging}``. That meant dev — which is ``EDGEGUARD_ENV``'s default
+# in ``config.py`` — silently accepted the disabled-defense state
+# without any log signal at all. Every new deployment inherited
+# "defense off + no warning" until an operator remembered to flip
+# the env var. Widen the warning to fire in ALL envs: humans see
+# the WARNING once per process in the log, and the companion
+# Prometheus gauge ``edgeguard_misp_tag_impersonation_defense_disabled``
+# (set in ``src/metrics_server.py``) exposes the state to alert
+# rules so a missed log line can't mask a production gap.
+#
+# An accompanying planned change (see docs/SECURITY_ROADMAP.md) will
+# flip the ``prod``/``staging`` default to fail-closed — refuse to
+# boot unless the allowlists are configured OR
+# ``EDGEGUARD_ALLOW_UNTRUSTED_MISP=1`` is set explicitly. That
+# requires an operator-migration window which this observability
+# layer provides.
+def _log_defense_state() -> None:
+    env = os.getenv("EDGEGUARD_ENV", "").strip().lower() or "unset"
+    uuid_count = len(_TRUSTED_CREATOR_ORG_UUIDS)
+    name_count = len(_TRUSTED_CREATOR_ORG_NAMES)
+    if _TRUSTED_CREATOR_ORG_UUIDS or _TRUSTED_CREATOR_ORG_NAMES:
+        logger.info(
+            "MISP tag-impersonation defense ACTIVE (EDGEGUARD_ENV=%s, trusted_uuids=%d, trusted_names=%d).",
+            env,
+            uuid_count,
+            name_count,
+        )
+    else:
         logger.warning(
-            "EDGEGUARD_ENV=%r BUT MISP tag-impersonation defense is DISABLED — "
-            "set EDGEGUARD_TRUSTED_MISP_ORG_UUIDS (recommended) and/or "
-            "EDGEGUARD_TRUSTED_MISP_ORG_NAMES to your EdgeGuard collector "
-            "org's identifier(s). Without the allowlist, any MISP user / "
-            "federated peer can spoof source_id='nvd' and silently corrupt "
-            "MIN(r.source_reported_first_at). See src/source_trust.py and "
-            ".env.example for details.",
+            "MISP tag-impersonation defense is DISABLED (EDGEGUARD_ENV=%s) — "
+            "all source-truthful claims accepted without creator-org "
+            "verification. Set EDGEGUARD_TRUSTED_MISP_ORG_UUIDS "
+            "(recommended) and/or EDGEGUARD_TRUSTED_MISP_ORG_NAMES to "
+            "your EdgeGuard collector org's identifier(s). Without the "
+            "allowlist, any MISP user / federated peer can spoof "
+            "source_id='nvd' and silently corrupt "
+            "MIN(r.source_reported_first_at). Planned: fail-closed in "
+            "prod/staging — see docs/SECURITY_ROADMAP.md. Gauge: "
+            "edgeguard_misp_tag_impersonation_defense_disabled.",
             env,
         )
 
 
-_warn_if_disabled_in_prod()
+_log_defense_state()
+
+
+def is_trust_check_configured() -> bool:
+    """Public: ``True`` iff at least one allowlist env var is non-empty.
+
+    Exposed as a public API (no leading underscore) so other modules —
+    notably ``src/metrics_server.py`` which mirrors this state into the
+    ``edgeguard_misp_tag_impersonation_defense_disabled`` Prometheus
+    gauge — can read it without reaching into private names. The
+    private ``_trust_check_configured`` alias is retained for
+    backward-compat with existing callers inside this module.
+    """
+    return _trust_check_configured()
 
 
 # Trust-check decision reasons (also appears as the ``reason`` Prometheus
