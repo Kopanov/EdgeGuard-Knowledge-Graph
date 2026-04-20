@@ -1828,7 +1828,15 @@ _KNOWN_BASELINE_CONF_KEYS = frozenset(
         "baseline_days",  # historical depth (consumed by get_baseline_config)
         "baseline_collection_limit",  # legacy per-source cap (back-compat)
         "collection_limit",  # current per-source cap (SSoT)
-        "clear_checkpoints",  # "all" wipes incremental cursors too (consumed by _baseline_start_summary)
+        # PR-K1 Bugbot round-2 (Medium): the ``clear_checkpoints`` key
+        # used to be consumed by ``_baseline_start_summary`` to choose
+        # between baseline-only and full wipe. PR-K1 §1-8 removed that
+        # consumption (additive baselines must preserve checkpoints
+        # for resume), so the key is now a no-op everywhere — including
+        # the fresh-baseline path, since ``baseline_clean.py::_wipe_checkpoints``
+        # always wipes unconditionally with ``include_incremental=True``.
+        # Removing the key from the allowlist surfaces stale operator
+        # docs as a typo-warning instead of silently accepting it.
     }
 )
 
@@ -2260,11 +2268,13 @@ def _baseline_start_summary(**context):
     the DAG. The DAG will no longer silently wipe on their behalf.
 
     Incremental state (OTX modified_since cursor, MITRE ETag) is
-    never touched by this task — it flows through the
-    fresh-baseline branch via ``_wipe_checkpoints()`` in
-    ``baseline_clean.py`` with its own opt-in (``clear_checkpoints:
-    "all"`` in the DAG conf). See PR-K1 §2-8 for the cursor
-    handoff details.
+    never touched by this task. On a fresh-baseline run,
+    ``baseline_clean.py::_wipe_checkpoints()`` wipes EVERYTHING
+    unconditionally (baseline + incremental) — there is no opt-in
+    to preserve incremental cursors on the fresh-baseline path
+    today. PR-K1 §2-8 (the cursor-handoff design) is deferred to a
+    follow-up PR; the existing "fresh-baseline = true clean slate"
+    operator invariant is preserved here.
     """
     limit, baseline_days = get_baseline_config(context)
 
@@ -2323,7 +2333,15 @@ def _baseline_start_summary(**context):
     logger.info("  BASELINE_DAYS             = 730 (2 years, recommended)")
     logger.info("  Or set env on Airflow container (overrides Variables):")
     logger.info("  EDGEGUARD_BASELINE_DAYS=7  EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000")
-    logger.info('  To wipe incremental cursors too: {"clear_checkpoints": "all"}')
+    # PR-K1 Bugbot round-2 (Medium): the previous hint
+    #   ``To wipe incremental cursors too: {"clear_checkpoints": "all"}``
+    # was misleading after PR-K1 §1-8 removed the only consumer of
+    # the ``clear_checkpoints`` key. The fresh-baseline path always
+    # wipes everything via ``_wipe_checkpoints(include_incremental=True)``
+    # in baseline_clean.py — there is no per-key control today.
+    # Surface the actual mechanism instead so operators don't follow
+    # a no-op instruction.
+    logger.info('  Fresh-baseline (wipe Neo4j + MISP + checkpoints): {"fresh_baseline": "true"}')
     logger.info("=" * 55)
 
 

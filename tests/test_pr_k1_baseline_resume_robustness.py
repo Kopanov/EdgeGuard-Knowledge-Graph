@@ -424,3 +424,100 @@ class TestSaveCheckpointLogIncludesExceptionMessage:
         )
         # Type name should still be there too (both, not either/or).
         assert any("OSError" in msg for msg in error_logs)
+
+
+class TestNoStaleClearCheckpointsReferences:
+    """PR-K1 Bugbot round-2 (Medium): when §1-8 removed the only
+    consumer of the ``clear_checkpoints`` conf key from
+    ``_baseline_start_summary``, three stale references survived:
+
+    1. ``_KNOWN_BASELINE_CONF_KEYS`` still listed it, so passing
+       it would silently pass conf-validation (no "did you mean?"
+       warning).
+    2. The ``_baseline_start_summary`` log told operators to pass
+       it for "wipe incremental cursors too" — pure no-op, would
+       mislead operators into thinking cursors were wiped.
+    3. The docstring claimed it "flows through baseline_clean.py
+       with its own opt-in" — but ``_wipe_checkpoints()`` always
+       wipes everything unconditionally; no opt-in exists.
+
+    Pin all three against regression."""
+
+    @pytest.fixture(scope="class")
+    def dag_source(self) -> str:
+        return (REPO_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
+
+    def test_clear_checkpoints_not_in_known_baseline_conf_keys(self, dag_source: str) -> None:
+        """The ``clear_checkpoints`` key MUST be absent from the
+        allowlist. Otherwise an operator passing it gets no warning
+        and silently believes it took effect."""
+        # Find the _KNOWN_BASELINE_CONF_KEYS frozenset literal block.
+        idx = dag_source.find("_KNOWN_BASELINE_CONF_KEYS = frozenset(")
+        assert idx > 0, "_KNOWN_BASELINE_CONF_KEYS not found"
+        # End at the closing of the literal.
+        end = dag_source.find(")", idx + len("_KNOWN_BASELINE_CONF_KEYS = frozenset("))
+        assert end > idx
+        block = dag_source[idx:end]
+        # Strip the explanatory comment block (which may legitimately
+        # mention "clear_checkpoints" as the removed key).
+        active_lines = [
+            line for line in block.splitlines() if not line.lstrip().startswith("#") and "clear_checkpoints" in line
+        ]
+        assert active_lines == [], (
+            f"clear_checkpoints must not appear as an active set member; "
+            f"found: {active_lines}. PR-K1 Bugbot round-2 caught this drift "
+            f"after §1-8 removed the consumer."
+        )
+
+    def test_baseline_start_summary_log_does_not_advertise_clear_checkpoints(self, dag_source: str) -> None:
+        """The operator-facing log MUST NOT tell operators to pass
+        the now-dead ``clear_checkpoints`` conf key. The mention IS
+        allowed in comments (explaining what was removed), but not
+        as live ``logger.info(...)`` text."""
+        # Locate _baseline_start_summary body
+        start = dag_source.find("def _baseline_start_summary")
+        end = dag_source.find("\ndef ", start + 1)
+        body = dag_source[start:end]
+        # Strip comments/docstrings — same code-only view as Bugbot is
+        # complaining about.
+        in_doc = False
+        doc_q = ""
+        live_lines = []
+        for line in body.splitlines():
+            s = line.lstrip()
+            if in_doc:
+                if doc_q in s:
+                    in_doc = False
+                    doc_q = ""
+                continue
+            for q in ('"""', "'''"):
+                if s.startswith(q):
+                    rest = s[len(q) :]
+                    if q in rest:
+                        break  # single-line, skip
+                    in_doc = True
+                    doc_q = q
+                    break
+            if in_doc or s.startswith("#"):
+                continue
+            live_lines.append(line)
+        live_code = "\n".join(live_lines)
+        assert '"clear_checkpoints"' not in live_code, (
+            "live (non-comment, non-docstring) code in _baseline_start_summary "
+            "must not advertise the clear_checkpoints conf key — it's a no-op "
+            "since PR-K1 §1-8."
+        )
+
+    def test_baseline_start_summary_advertises_fresh_baseline_instead(self, dag_source: str) -> None:
+        """The replacement: operators are pointed at
+        ``fresh_baseline: 'true'`` which IS still consumed (by
+        ``_baseline_clean``)."""
+        start = dag_source.find("def _baseline_start_summary")
+        end = dag_source.find("\ndef ", start + 1)
+        body = dag_source[start:end]
+        # The operator-facing instruction line must mention
+        # fresh_baseline as the actual lever.
+        assert "fresh_baseline" in body, (
+            "_baseline_start_summary must point operators at the fresh_baseline conf key as the "
+            "actual control for wiping data — that's the key still consumed by _baseline_clean."
+        )
