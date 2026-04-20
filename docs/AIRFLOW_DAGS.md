@@ -194,6 +194,20 @@ the `dag_run.conf` JSON when triggered:
 - Calls `src.baseline_clean.reset_baseline_data()` — atomic 3-step wipe (checkpoints → Neo4j `clear_all` → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero.
 - Has `retries=0` and `trigger_rule=ALL_SUCCESS` — destructive task does NOT auto-retry on failure (would re-execute the wipe), and ONLY runs after `baseline_misp_health` has fully succeeded.
 
+**Baseline DAG conf — accepted keys (PR-F5, 2026-04-20):**
+
+The baseline DAG accepts the following keys in `dag_run.conf`:
+
+| Key | Type | Effect | Consumed by |
+|---|---|---|---|
+| `fresh_baseline` | bool / `1` / `"true"` / `"yes"` / `"on"` | Enables destructive wipe before collection. ANY other value = additive. | `baseline_clean` |
+| `baseline_days` | int | Historical depth in days. Default 730. | `get_baseline_config` → all collectors |
+| `collection_limit` | int | Per-source item cap. `0` = unlimited. | `get_baseline_config` → all collectors |
+| `baseline_collection_limit` | int | Legacy alias for `collection_limit` (kept for back-compat). | `get_baseline_config` |
+| `clear_checkpoints` | `"all"` | Wipe incremental cursors too (default: keep them). | `_baseline_start_summary` |
+
+**Unknown keys are SILENTLY IGNORED** by Airflow's conf-passing mechanism, but PR-F5 emits a `WARNING [BASELINE_CONF]` log line for each unrecognized key, with a "did you mean?" suggestion for common typos (e.g. `days` → `baseline_days`). This catches the 2026-04-19 incident where an operator triggered with `{"days": 730}` (missing the `baseline_` prefix) and silently fell through to defaults — additive mode with the wrong window depth, no visible error. Grep your DAG logs for `[BASELINE_CONF]` to spot misconfigured triggers.
+
 **CLI vs DAG equivalence (PR-C parity):** the operator commands `edgeguard fresh-baseline --days <N>` and `edgeguard baseline --days <N>` shell out to the Airflow CLI to trigger this DAG with the appropriate `dag_run.conf` — they do NOT run a local pipeline. The destructive command (`edgeguard fresh-baseline`) prompts for typed `FRESH-BASELINE` confirmation before triggering; the additive command (`edgeguard baseline`) does not.
 
 **CLI-only `python src/run_pipeline.py --baseline` direct execution:** this legacy path runs the pipeline IN-PROCESS rather than triggering the DAG. It has one operator-visible asymmetry — `build_relationships` failures log a `WARN` and continue (so Step 5c enrichment still runs); the DAG raises `AirflowException` on the same failure. The CLI's degraded-mode behavior is documented in source comments at `src/run_pipeline.py:1565+`. Operators running the legacy CLI path should grep logs for `DEGRADED MODE` to detect missing link edges. The `edgeguard fresh-baseline` and `edgeguard baseline` wrappers (PR-C) inherit DAG semantics — no asymmetry there.
