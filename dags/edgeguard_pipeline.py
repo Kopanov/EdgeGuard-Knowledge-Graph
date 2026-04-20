@@ -2349,13 +2349,16 @@ def _baseline_clean(**context):
     # silent additive mode instead of the expected destructive wipe.
     # Accept ``1`` (int) symmetric with ``"1"`` (str) by checking for
     # ``True`` OR ``int 1`` explicitly.
-    raw_fresh = conf.get("fresh_baseline", False)
-    if raw_fresh is True or (isinstance(raw_fresh, int) and not isinstance(raw_fresh, bool) and raw_fresh == 1):
-        fresh_baseline = True
-    elif isinstance(raw_fresh, str) and raw_fresh.strip().lower() in ("true", "1", "yes", "on"):
-        fresh_baseline = True
-    else:
-        fresh_baseline = False
+    #
+    # PR-F8 Bugbot Medium (commit d356112): the inline parse was
+    # DUPLICATED in ``_is_truthy_conf_value`` (which the fail-fast
+    # guard uses). Two copies risks drift — if one is updated without
+    # the other, the fail-fast guard and the actual fresh_baseline
+    # parse disagree on what's "truthy", silently re-enabling the
+    # destructive-vs-additive mismatch this PR exists to prevent.
+    # Fix: use ``_is_truthy_conf_value`` at the consumption site so
+    # both paths share a single source of truth.
+    fresh_baseline = _is_truthy_conf_value(conf.get("fresh_baseline", False))
 
     if not fresh_baseline:
         logger.info("=" * 70)

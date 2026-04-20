@@ -883,15 +883,22 @@ class TestProbeHelpers:
 
 class TestDagFreshBaselineTruthyParse:
     """Pin the explicit truthy-parse for the ``fresh_baseline`` conf
-    knob in dags/edgeguard_pipeline.py:_baseline_clean. The previous
+    knob in dags/edgeguard_pipeline.py. The previous
     ``bool(conf.get("fresh_baseline", False))`` was wrong: operators
     typing ``{"fresh_baseline": "false"}`` triggered a destructive wipe
     (``bool("false") is True``).
 
-    Source-grep style because the inline function is buried under
-    PythonOperator and not unit-importable. The behavioural surface
-    (the destructive path triggered by the conf) is covered by
-    ``TestResetBaselineDataOrchestrator`` above."""
+    PR-F8 Bugbot Medium (commit d356112): the inline parse that used
+    to live in ``_baseline_clean`` was extracted to
+    ``_is_truthy_conf_value`` so the fail-fast guard and the actual
+    consumption site share a single source of truth. This test now
+    pins:
+      - ``_baseline_clean`` does NOT use ``bool(conf.get(...))``
+      - ``_baseline_clean`` DOES call ``_is_truthy_conf_value``
+      - ``_is_truthy_conf_value`` itself carries the explicit
+        bool/int-1/str-truthy matrix (with the bool-guard that
+        prevents False matching the int branch)
+    """
 
     def _read_dag_source(self) -> str:
         with open("dags/edgeguard_pipeline.py") as fh:
@@ -899,9 +906,8 @@ class TestDagFreshBaselineTruthyParse:
 
     def test_dag_uses_explicit_truthy_parse_not_bool_str(self):
         src = self._read_dag_source()
-        # The fix MUST NOT use ``bool(conf.get(`` for fresh_baseline
-        # parsing. Find the _baseline_clean function body specifically
-        # so we don't false-fail on an unrelated bool() elsewhere.
+        # Find the _baseline_clean function body specifically so we
+        # don't false-fail on an unrelated bool() elsewhere.
         idx = src.find("def _baseline_clean(")
         assert idx > 0
         end = src.find("\nbaseline_clean_task =", idx)
@@ -915,19 +921,39 @@ class TestDagFreshBaselineTruthyParse:
         # Negative assertion — the buggy pattern must be absent from code
         assert 'bool(conf.get("fresh_baseline"' not in code_only, (
             "Bug Hunter B1: bool() on conf.get returns True for any non-empty string — "
-            "use explicit truthy parse instead"
+            "use explicit truthy parse via _is_truthy_conf_value instead"
         )
-        # Positive assertion — the explicit-parse pattern must be present
-        assert "raw_fresh" in code_only and "is True" in code_only, (
-            "expected explicit truthy parse with `raw_fresh = ...; if raw_fresh is True:`"
+        # Positive assertion — the consumption site MUST call the shared
+        # helper (PR-F8 Bugbot Medium: extracted from an inline copy
+        # that risked drift with the fail-fast guard's parse).
+        assert "_is_truthy_conf_value(conf.get(" in code_only, (
+            "expected _baseline_clean to call _is_truthy_conf_value (shared helper) — "
+            "the old inline ``raw_fresh = ...; if raw_fresh is True:`` pattern was "
+            "extracted to prevent drift with the fail-fast guard (Bugbot Medium on "
+            "PR-F8 commit d356112)"
         )
-        assert "isinstance(raw_fresh, str)" in code_only, 'string parsing branch required to handle "true" / "1" / etc.'
 
-        # Bugbot MED on commit fdf14c1 — symmetric int 1 acceptance:
+    def test_is_truthy_helper_carries_the_explicit_matrix(self):
+        """The explicit bool/int-1/str-truthy matrix lives in
+        ``_is_truthy_conf_value`` now. Pin it there instead of the
+        inline site."""
+        src = self._read_dag_source()
+        idx = src.find("def _is_truthy_conf_value(")
+        assert idx > 0, "_is_truthy_conf_value helper must exist (PR-F8)"
+        end = src.find("\ndef ", idx + 1)
+        body = src[idx:end]
+
+        code_only_lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith("#")]
+        code_only = "\n".join(code_only_lines)
+
+        # The explicit matrix must be present INSIDE the helper
+        assert "is True" in code_only, "expected `value is True` branch"
+        assert "isinstance(value, str)" in code_only, 'string parsing branch required to handle "true" / "1" / etc.'
+        # Bugbot MED on PR-C commit fdf14c1 — symmetric int 1 acceptance:
         # int 1 must be accepted along with string "1", and bool guard
         # prevents accidental matching of False (Python bool subclass of int).
-        assert "isinstance(raw_fresh, int)" in code_only, "int 1 acceptance branch required"
-        assert "not isinstance(raw_fresh, bool)" in code_only, (
+        assert "isinstance(value, int)" in code_only, "int 1 acceptance branch required"
+        assert "not isinstance(value, bool)" in code_only, (
             "bool guard required so False doesn't accidentally match the int branch"
         )
 
