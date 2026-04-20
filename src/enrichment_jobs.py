@@ -542,9 +542,22 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
       ≤ 500 → 0.35  (large feed)
       > 500 → 0.30  (bulk dump — weak signal)
 
-    Only edges with source_id IN ('misp_cooccurrence', 'misp_correlation')
-    are modified. Explicit matches (malware_family_match, cve_tag_match,
-    mitre_explicit) and manually curated edges are untouched.
+    Only edges with ``'misp_cooccurrence'`` or ``'misp_correlation'`` in
+    ``r.source_ids`` (set-valued, populated by every source-tagged MERGE
+    in ``build_relationships.py``) are modified.  For edges that predate
+    PR-M3c and only have the scalar ``r.source_id``, that legacy field
+    is also consulted (fallback path).  Explicit-only matches
+    (``cve_tag_match``, ``mitre_explicit``) and manually curated edges
+    are untouched.
+
+    PR-M3c §8-RI-S3-Q9: this filter used to be ``r.source_id IN [...]``
+    (scalar) but Q9 (malware_family match) in build_relationships.py
+    OVERWROTE ``r.source_id`` on edges that ALSO came from Q4 co-occurrence,
+    hiding the co-occurrence tag and silently exempting ~30-50% of
+    INDICATES edges on a 730d baseline from calibration.  The
+    ``r.source_ids`` set accumulates every source tag that has ever
+    applied to the edge, so co-occurrence provenance cannot be erased
+    by a later MERGE.
     """
     if not neo4j_client.driver:
         logger.error("calibrate_cooccurrence_confidence: no Neo4j connection")
@@ -607,12 +620,26 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
 
                     # Match indicators that have this event id in misp_event_ids[].
                     # PR #33 round 10: dropped legacy scalar misp_event_id leg.
+                    # PR-M3c §8-RI-S3-Q9: match on ``r.source_ids`` (set-
+                    # valued accumulator, populated by every source-tagged
+                    # MERGE in build_relationships.py as of this PR) OR fall
+                    # back to scalar ``r.source_id`` for legacy edges that
+                    # predate PR-M3c and have no array yet. Before this fix,
+                    # Q9's MERGE overwrote ``r.source_id = "malware_family_match"``
+                    # on edges that ALSO came from Q4 co-occurrence, and the
+                    # scalar filter silently exempted them from size-based
+                    # calibration → confidence frozen at 0.8 instead of the
+                    # bulk-dump tier's 0.30. Matching on ANY() over the
+                    # accumulated array restores the co-occurrence tag's
+                    # visibility.
                     update_cypher = """
                     UNWIND $eids AS eid
                     MATCH (i:Indicator)
                     WHERE i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids
                     MATCH (i)-[r:INDICATES|EXPLOITS]->(target)
-                    WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"]
+                    WHERE (r.source_ids IS NOT NULL
+                           AND any(s IN r.source_ids WHERE s IN ["misp_cooccurrence", "misp_correlation"]))
+                       OR r.source_id IN ["misp_cooccurrence", "misp_correlation"]
                     SET r.confidence_score = $conf,
                         r.calibrated_at = datetime()
                     RETURN count(r) AS updated
@@ -650,11 +677,17 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     # cannot safely be used as bound entities in the inner. Pattern:
                     # outer returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
                     # ``MATCH ()-[r]->() WHERE id(r) = $rid`` to bind a fresh handle.
+                    # PR-M3c: same array-or-scalar filter as the small path
+                    # (see ``update_cypher`` above).  Must be expressed inside
+                    # the apoc.periodic.iterate OUTER matcher; a single line
+                    # with both branches concatenated with OR.
                     large_batch_query = (
                         "CALL apoc.periodic.iterate("
                         "  'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids "
                         "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
-                        '  WHERE r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
+                        "  WHERE (r.source_ids IS NOT NULL "
+                        '         AND any(s IN r.source_ids WHERE s IN ["misp_cooccurrence", "misp_correlation"])) '
+                        '     OR r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
                         "  RETURN id(r) AS rid', "
                         "  'MATCH ()-[r]->() WHERE id(r) = $rid "
                         "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "

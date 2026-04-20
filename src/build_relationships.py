@@ -206,7 +206,22 @@ def build_relationships():
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/12 Indicator → Vulnerability (exact CVE match)...")
         _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
-        _q3a_inner = 'WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)'
+        # PR-M3c §8-RI-S3-Q9: accumulate ``r.source_ids`` (set-valued) in
+        # addition to writing scalar ``r.source_id`` (last-writer-wins, kept
+        # for legacy readers and observability). Multiple merge passes (e.g.
+        # Q4 co-occurrence and Q9 malware-family-match) share the same
+        # INDICATES edge endpoints — scalar overwrite hides prior provenance
+        # from the calibrator filter. Accumulating via ``apoc.coll.toSet``
+        # preserves every source tag that has ever applied to the edge; the
+        # calibrator can then match on ANY() over the array.
+        _q3a_inner = (
+            "WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", '
+            '   r.source_id = "cve_tag_match", r.created_at = datetime() '
+            "SET r.updated_at = datetime(), "
+            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"]), '
+            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)"
+        )
         # PR #34 round 20: count Indicator orphans (cve_id set but no
         # matching Vulnerability) — directly the skip count, no comparison.
         _q3a_skip = (
@@ -229,7 +244,16 @@ def build_relationships():
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3b/12 Indicator → CVE (exact CVE match)...")
         _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
-        _q3b_inner = 'WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.source_id = "cve_tag_match", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)'
+        # PR-M3c: see Q3a above for rationale — same accumulate-source_ids
+        # pattern applied uniformly to every site that sets ``r.source_id``.
+        _q3b_inner = (
+            "WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", '
+            '   r.source_id = "cve_tag_match", r.created_at = datetime() '
+            "SET r.updated_at = datetime(), "
+            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"]), '
+            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
+        )
         _q3b_skip = (
             "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
             "AND NOT EXISTS { MATCH (c:CVE {cve_id: i.cve_id}) } "
@@ -273,7 +297,17 @@ def build_relationships():
             # in CLOUD_SYNC.md filters edges by ``r.updated_at >= ...`` to
             # extract the recent-changes window. Without it, INDICATES
             # co-occurrence edges would be silently excluded from cloud sync.
+            #
+            # PR-M3c §8-RI-S3-Q9 (HIGH): accumulate ``"misp_cooccurrence"`` in
+            # ``r.source_ids`` so Q9's later MERGE on the SAME edge (the bug —
+            # Q9 used to overwrite ``r.source_id = "malware_family_match"``,
+            # hiding the co-occurrence provenance from the calibrator filter
+            # on ``source_id IN ["misp_cooccurrence", "misp_correlation"]`` →
+            # edge silently exempted from calibration → confidence stays at
+            # 0.5/0.8 even for 96k-indicator bulk dumps) cannot erase the
+            # co-occurrence tag. ``apoc.coll.toSet`` dedupes repeated runs.
             "SET r.updated_at = datetime(), "
+            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["misp_cooccurrence"]), '
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
@@ -437,7 +471,41 @@ def build_relationships():
         # or family) — direct skip count, no comparison.
         logger.info("[LINK] 9/12 Indicator → Malware (malware_family match)...")
         _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
-        _q9_inner = 'WITH $i AS i MATCH (m:Malware) WHERE toLower(m.name) = toLower(i.malware_family) OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] OR toLower(m.family) = toLower(i.malware_family) MERGE (i)-[r:INDICATES]->(m) ON CREATE SET r.created_at = datetime() SET r.confidence_score = CASE WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 ELSE r.confidence_score END, r.match_type = "malware_family", r.source_id = "malware_family_match", r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)'
+        # PR-M3c §8-RI-S3-Q9 (HIGH): this is the overwrite site. The SAME
+        # INDICATES edge may already exist from Q4 (co-occurrence) with
+        # ``r.source_id = "misp_cooccurrence"``. Before this fix, Q9's MERGE
+        # matched that edge and clobbered ``r.source_id`` with
+        # ``"malware_family_match"``, so the calibrator's filter
+        # (``source_id IN ["misp_cooccurrence", "misp_correlation"]``)
+        # missed the edge and its confidence stayed at 0.8 even when the
+        # underlying MISP event was a 96k-indicator bulk dump that should
+        # have demoted it to 0.30. Estimated 30-50% of INDICATES edges on
+        # a 730-day baseline were inflated this way.
+        #
+        # Fix: accumulate ``"malware_family_match"`` into ``r.source_ids``
+        # via ``apoc.coll.toSet`` — both sources now coexist on the edge.
+        # The scalar ``r.source_id`` write is kept (last-writer-wins, for
+        # legacy readers) but the calibrator filter is updated in
+        # enrichment_jobs.py to match against the ``r.source_ids`` array
+        # so co-occurrence provenance is always seen.
+        _q9_inner = (
+            "WITH $i AS i MATCH (m:Malware) "
+            "WHERE toLower(m.name) = toLower(i.malware_family) "
+            "   OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] "
+            "   OR toLower(m.family) = toLower(i.malware_family) "
+            "MERGE (i)-[r:INDICATES]->(m) "
+            "ON CREATE SET r.created_at = datetime() "
+            "SET r.confidence_score = CASE "
+            "       WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 "
+            "       ELSE r.confidence_score "
+            "    END, "
+            '    r.match_type = "malware_family", '
+            '    r.source_id = "malware_family_match", '
+            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["malware_family_match"]), '
+            "    r.updated_at = datetime(), "
+            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
+            "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
+        )
         _q9_skip = (
             "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' "
             "AND NOT EXISTS { "
