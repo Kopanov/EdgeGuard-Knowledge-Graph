@@ -252,16 +252,44 @@ class TestPushItemsIntegration:
         body = src[idx:end]
         assert "_get_existing_source_attribute_keys" in body, "push_items must call _get_existing_source_attribute_keys"
 
-    def test_push_items_unions_per_event_and_cross_event_keys(self):
+    def test_push_items_filters_both_per_event_and_cross_event_keys(self):
+        """Both keysets must participate in the skip filter. The PR-F7
+        Bugbot-LOW follow-up (commit 2d747e6) moved from ``union + single
+        filter`` to ``two sequential filters`` so per-event and
+        cross-event skip counts are attributable exactly — but the
+        contract that BOTH keysets are applied remains."""
         with open("src/collectors/misp_writer.py") as fh:
             src = fh.read()
         idx = src.find("def push_items(")
         assert idx > 0
         end = src.find("\n    def ", idx + 1)
         body = src[idx:end]
-        # The union (|) of both keysets is what makes the dedup work
-        assert "existing_keys | cross_event_keys" in body or "cross_event_keys | existing_keys" in body, (
-            "push_items must union per-event and cross-event keys"
+        # Both identifier names must appear as keyset inputs to filter
+        # comprehensions, regardless of whether they are unioned or
+        # chained as two steps.
+        assert "per_event_keys" in body, "push_items must read per-event keys"
+        assert "cross_event_keys" in body, "push_items must read cross-event keys"
+        assert "not in per_event_keys" in body, "push_items must filter by per_event_keys"
+        assert "not in cross_event_keys" in body, "push_items must filter by cross_event_keys"
+
+    def test_push_items_skip_counts_sum_exactly_to_skipped_ct(self):
+        """Bugbot LOW (commit 2d747e6): the previous diagnostic summed
+        ``cross_event_skipped`` over a pre-within-batch-dedup list so
+        counts could EXCEED ``skipped_ct`` — producing contradictory
+        log lines. Pin that ``per_event_skipped + cross_event_skipped
+        == skipped_ct`` is a provable relation (from the source
+        structure, not an approximation)."""
+        with open("src/collectors/misp_writer.py") as fh:
+            src = fh.read()
+        idx = src.find("def push_items(")
+        assert idx > 0
+        end = src.find("\n    def ", idx + 1)
+        body = src[idx:end]
+        # The skipped_ct assignment MUST be the sum of the two layer
+        # counters (not a separate len-diff that could drift).
+        assert "skipped_ct = per_event_skipped + cross_event_skipped" in body, (
+            "skipped_ct must be exactly per_event_skipped + cross_event_skipped "
+            "(Bugbot LOW: previous diagnostic could produce contradictory counts)"
         )
 
     def test_push_items_caches_cross_event_per_source(self):

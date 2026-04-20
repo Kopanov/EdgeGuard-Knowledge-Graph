@@ -1404,35 +1404,43 @@ class MISPWriter:
                 total_failed += len(unique_attrs)
                 continue
 
-            # PR-F7: union of per-event keys (existing behavior) + cross-event
-            # keys for this source (new — catches 2026-04-19-style duplicates
-            # across separate ``EdgeGuard-{source}-{date}`` events). Cached
-            # per source within this push_items call. Defensive degradation
-            # built into the helper: probe failure → empty set → falls back
-            # to per-event-only dedup. See _get_existing_source_attribute_keys
-            # for the full rationale + the link to Issue #61.
-            existing_keys = self._get_existing_attribute_keys(event_id)
+            # PR-F7: filter in TWO explicit steps so the skip-count
+            # attribution for each layer is exact (not an approximation).
+            # Bugbot LOW (commit 2d747e6): the previous diagnostic summed
+            # ``cross_event_skipped`` over ``attributes`` (the PRE within-
+            # batch-dedup list with its own duplicates) so counts could
+            # EXCEED ``skipped_ct`` — producing contradictory log lines
+            # like "skipping 5 attributes (~8 caught by PR-F7)".
+            #
+            # Fix: step 1 filters by per-event keys (existing behavior);
+            # step 2 filters the remaining list by cross-event keys. Each
+            # step's contribution is exactly the difference in lengths,
+            # so the per-event + cross-event counts always add up to
+            # ``skipped_ct``.
+            per_event_keys = self._get_existing_attribute_keys(event_id)
             if source not in cross_event_cache:
                 source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
                 cross_event_cache[source] = self._get_existing_source_attribute_keys(source_tag)
             cross_event_keys = cross_event_cache[source]
-            existing_keys = existing_keys | cross_event_keys
 
             before_ct = len(unique_attrs)
-            unique_attrs = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in existing_keys]
-            skipped_ct = before_ct - len(unique_attrs)
+            # Step 1 — filter by per-event keys (attrs already in THIS event)
+            after_per_event = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in per_event_keys]
+            per_event_skipped = before_ct - len(after_per_event)
+            # Step 2 — filter the remainder by cross-event keys (attrs in
+            # ANY OTHER EdgeGuard event for this source). PR-F7's value is
+            # exactly this number: duplicates that the per-event prefetch
+            # would have missed.
+            unique_attrs = [a for a in after_per_event if (a.get("type"), a.get("value")) not in cross_event_keys]
+            cross_event_skipped = len(after_per_event) - len(unique_attrs)
+            skipped_ct = per_event_skipped + cross_event_skipped
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
-                # Distinguish per-event vs cross-event skips in the log
-                # so an operator reading the audit trail sees what each
-                # layer caught. Cross-event count is the "would have been
-                # duplicate writes to MISP without PR-F7" number.
-                cross_event_skipped = sum(1 for a in attributes if (a.get("type"), a.get("value")) in cross_event_keys)
                 logger.info(
-                    "MISP event %s: skipping %s attributes already present "
-                    "(type+value match; ~%s caught by cross-event PR-F7 dedup)",
+                    "MISP event %s: skipping %s attributes already present (%s per-event + %s cross-event PR-F7 dedup)",
                     event_id,
                     skipped_ct,
+                    per_event_skipped,
                     cross_event_skipped,
                 )
             if not unique_attrs:
