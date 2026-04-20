@@ -1702,20 +1702,55 @@ check_neo4j_quality_task = BashOperator(
 
 
 def run_build_relationships(**context):
-    """Run build_relationships.py after sync to create/refresh graph links."""
-    import subprocess
+    """Run build_relationships.py after sync to create/refresh graph links.
 
-    result = subprocess.run(
-        ["python3", os.path.join(BASE_DIR, "src", "build_relationships.py")],
-        capture_output=True,
-        text=True,
-        timeout=18000,  # 5 hours — aligned with execution_timeout (bumped from 3h
-        # after baseline re-runs hit the ceiling on the merged #20/#22/#24 scope)
+    PR-K3 §1-4: use the streaming helper so the child's 5-hour output
+    is logged line-by-line as it arrives instead of buffered in
+    parent memory until exit. On a 344K-node graph with 12 APOC
+    link queries each emitting progress logs, the old
+    ``capture_output=True`` path accumulated tens of MB of buffered
+    text — a real OOM risk on 8 GB Airflow workers, especially when
+    ``NEO4J_TX_MEMORY_MAX`` is also bumped to 8 g. The streaming
+    helper caps memory at ``DEFAULT_TAIL_LINES`` (200 lines
+    retained for error-context) and enforces the 5h timeout with
+    a SIGTERM-then-SIGKILL escalation so APOC transactions get a
+    chance to roll back cleanly.
+    """
+    from subprocess_streaming import (
+        SubprocessStreamTimeout,
+        run_with_streaming_output,
     )
-    if result.returncode != 0:
-        logger.error(f"build_relationships failed:\n{result.stderr}")
-        raise AirflowException(f"build_relationships.py exited with code {result.returncode}")
-    logger.info(result.stdout)
+
+    try:
+        returncode, tail = run_with_streaming_output(
+            ["python3", os.path.join(BASE_DIR, "src", "build_relationships.py")],
+            timeout=18000,  # 5 hours — aligned with execution_timeout (bumped
+            # from 3h after baseline re-runs hit the ceiling on the merged
+            # #20/#22/#24 scope). Same deadline as before PR-K3.
+            child_logger=logger,
+            line_prefix="[build_relationships] ",
+        )
+    except SubprocessStreamTimeout as exc:
+        # The helper already logged the SIGTERM/SIGKILL escalation;
+        # fail the task loudly so Airflow surfaces the timeout.
+        raise AirflowException(f"build_relationships.py exceeded deadline: {exc}") from exc
+
+    if returncode != 0:
+        # PR-K3: tail is a pre-bounded list of the last 200 lines,
+        # already streamed to the Airflow task log above. Re-emit a
+        # concise summary so the exception message includes enough
+        # context for operators eyeballing the task view. Full stderr
+        # is in the task log as INFO lines from the streaming reader.
+        logger.error(
+            "build_relationships failed with exit code %d. Tail (last %d lines streamed above):\n%s",
+            returncode,
+            len(tail),
+            "\n".join(tail),
+        )
+        raise AirflowException(f"build_relationships.py exited with code {returncode}")
+    # Success: output already streamed to the task log line-by-line
+    # by the helper; no final stdout dump needed.
+    logger.info("[build_relationships] complete (exit 0)")
 
 
 def run_enrichment_jobs(**context):
