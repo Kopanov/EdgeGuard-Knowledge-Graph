@@ -224,5 +224,15 @@ class TestDocsListAcceptedConfKeys:
         assert "[BASELINE_CONF]" in content, (
             "docs must mention the [BASELINE_CONF] log marker so operators know what to grep for"
         )
-        for key in ("fresh_baseline", "baseline_days", "collection_limit", "clear_checkpoints"):
-            assert f"`{key}`" in content, f"docs must document the {key!r} conf key"
+        # Bugbot LOW (PR-F5 commit 1fd7c98): originally iterated over a
+        # hardcoded 4-key tuple that omitted ``baseline_collection_limit``,
+        # so a future doc edit could quietly drop it from the table without
+        # the test catching the regression. Fix: iterate the SSoT
+        # (``_KNOWN_BASELINE_CONF_KEYS`` from the DAG module) so the test
+        # automatically covers any future additions/removals.
+        _, known_keys, _ = _import_validator()
+        for key in known_keys:
+            assert f"`{key}`" in content, (
+                f"docs must document the {key!r} conf key — present in "
+                "_KNOWN_BASELINE_CONF_KEYS but missing from AIRFLOW_DAGS.md"
+            )
