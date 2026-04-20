@@ -298,3 +298,71 @@ class TestSourcePinsCaptureOutputGone:
         assert "proc.terminate()" in code_only, "helper must send SIGTERM first"
         assert "proc.kill()" in code_only, "helper must escalate to SIGKILL after grace window"
         assert "SIGTERM_GRACE_SECONDS" in code_only, "helper must use the documented grace constant"
+
+
+# ===========================================================================
+# Default tail-lines cap + env-var override
+# ===========================================================================
+
+
+class TestDefaultTailLinesIsGenerous:
+    """PR-K3 bumped the default from 200 to 2000 lines after operator
+    concern that 200 was too few for common APOC failure modes.
+    Verify the generous default AND the env-var override path so
+    operators can tune per-deployment if needed."""
+
+    def test_default_is_at_least_2000_lines(self):
+        """The default retained-tail cap MUST be at least 2000 lines.
+        200 was operator-diagnostic-tight for APOC nested-exception
+        chains; 2000 gives 10x context at ~400KB memory (0.005% of
+        an 8GB worker)."""
+        # Import fresh so we don't pick up a prior test's env override.
+        import importlib
+
+        import subprocess_streaming
+
+        importlib.reload(subprocess_streaming)
+        assert subprocess_streaming.DEFAULT_TAIL_LINES >= 2000, (
+            f"DEFAULT_TAIL_LINES must be >= 2000 for operator-facing "
+            f"diagnostic context; got {subprocess_streaming.DEFAULT_TAIL_LINES}"
+        )
+
+    def test_env_var_override_honored(self, monkeypatch):
+        """Operators can raise the tail-line cap via
+        ``EDGEGUARD_SUBPROCESS_TAIL_LINES`` without a code change.
+        Useful for debugging a particularly verbose failure class."""
+        import importlib
+
+        monkeypatch.setenv("EDGEGUARD_SUBPROCESS_TAIL_LINES", "7777")
+        import subprocess_streaming
+
+        importlib.reload(subprocess_streaming)
+        assert subprocess_streaming.DEFAULT_TAIL_LINES == 7777
+
+    def test_env_var_invalid_falls_back_to_default(self, monkeypatch, caplog):
+        """Non-integer env var MUST fall back to the hard-coded default
+        with a clear warning, not crash the import."""
+        import importlib
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="subprocess_streaming")
+        monkeypatch.setenv("EDGEGUARD_SUBPROCESS_TAIL_LINES", "not-an-int")
+        import subprocess_streaming
+
+        importlib.reload(subprocess_streaming)
+        assert subprocess_streaming.DEFAULT_TAIL_LINES == 2000
+        assert any("not an integer" in rec.message for rec in caplog.records)
+
+    def test_env_var_non_positive_falls_back_to_default(self, monkeypatch, caplog):
+        """Zero or negative env var must also fall back — not clamp
+        to 0 (which would disable tail retention entirely)."""
+        import importlib
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="subprocess_streaming")
+        monkeypatch.setenv("EDGEGUARD_SUBPROCESS_TAIL_LINES", "0")
+        import subprocess_streaming
+
+        importlib.reload(subprocess_streaming)
+        assert subprocess_streaming.DEFAULT_TAIL_LINES == 2000
+        assert any("must be > 0" in rec.message for rec in caplog.records)

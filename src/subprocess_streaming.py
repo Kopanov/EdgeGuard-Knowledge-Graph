@@ -43,17 +43,60 @@ multiplexed stderr) should continue using ``subprocess.run`` directly.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
 from collections import deque
 from typing import List, Sequence, Tuple
 
-# Default: keep the last 200 lines of child output for error-context
-# logging if the child exits non-zero. At ~200 bytes/line average this
-# caps memory at ~40 KB, vs. the unbounded buffer the ``capture_output``
+# Default: keep the last 2000 lines of child output for error-context
+# logging if the child exits non-zero.  At ~200 bytes/line average this
+# caps memory at ~400 KB — still negligible on an 8 GB Airflow worker
+# (0.005% of RAM), vs. the unbounded buffer the ``capture_output``
 # path accumulated over 5-hour runs.
-DEFAULT_TAIL_LINES = 200
+#
+# Why 2000 (not 200): a Python stack trace is 10-30 lines, but an APOC
+# nested-exception chain can run 50-100 lines, a multi-query cascade
+# failure easily 200+, and a Neo4j transaction retry storm with nested
+# error details 100-200.  200 lines was operator-diagnostic-tight even
+# for common failure classes.  2000 gives 10x the context at the same
+# trivial memory footprint.
+#
+# **Operator override:** ``EDGEGUARD_SUBPROCESS_TAIL_LINES`` env var
+# lets operators tune without a code change — e.g. raise to 20000
+# (~4 MB) for a particularly gnarly diagnosis session, or drop to
+# 500 on memory-constrained workers.  Non-integer or <=0 values fall
+# back to the 2000-line default with a warning log.
+_DEFAULT_TAIL_LINES_CONST = 2000
+
+
+def _resolve_default_tail_lines() -> int:
+    """Resolve ``DEFAULT_TAIL_LINES`` from the env var with a safe
+    fallback. Called once at module load."""
+    raw = os.getenv("EDGEGUARD_SUBPROCESS_TAIL_LINES", "").strip()
+    if not raw:
+        return _DEFAULT_TAIL_LINES_CONST
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "EDGEGUARD_SUBPROCESS_TAIL_LINES=%r is not an integer; using default=%d.",
+            raw,
+            _DEFAULT_TAIL_LINES_CONST,
+        )
+        return _DEFAULT_TAIL_LINES_CONST
+    if value <= 0:
+        logging.getLogger(__name__).warning(
+            "EDGEGUARD_SUBPROCESS_TAIL_LINES=%d must be > 0; using default=%d.",
+            value,
+            _DEFAULT_TAIL_LINES_CONST,
+        )
+        return _DEFAULT_TAIL_LINES_CONST
+    return value
+
+
+DEFAULT_TAIL_LINES = _resolve_default_tail_lines()
 
 # Grace window between SIGTERM and SIGKILL when a child exceeds its
 # deadline. 30 seconds matches the sysadmin-folk-wisdom default (long
