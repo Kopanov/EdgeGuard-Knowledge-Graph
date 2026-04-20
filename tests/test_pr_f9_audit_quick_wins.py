@@ -189,12 +189,21 @@ class TestDeadPlaceholdersRemoved:
 # ===========================================================================
 
 
-class TestCurlNetrcReplacement:
+class TestCurlCredentialFileReplacement:
     """Neo4j password must NOT appear in ``curl -u user:$PWD`` form
-    anywhere (would leak into ``/proc/<pid>/cmdline``). Use
-    ``--netrc-file`` with a 0600 file + trap cleanup instead."""
+    anywhere (would leak into ``/proc/<pid>/cmdline``). Use curl's
+    config-file format (``-K``) with a 0600 file + trap cleanup.
 
-    def test_dag_quality_check_uses_netrc_not_argv_password(self):
+    PR-F9 round-2 (Bugbot LOW): initially used ``--netrc-file``, but
+    netrc is whitespace-delimited with no quoting — a password
+    containing a space silently truncates to the first token.
+    Switched to curl config format (``user = \"u:p\"``), which
+    supports quoted strings + backslash escapes (handles whitespace,
+    ``"``, and ``\\``). Same security win; correct for realistic
+    passwords.
+    """
+
+    def test_dag_quality_check_uses_config_file_not_argv_password(self):
         with open("dags/edgeguard_pipeline.py") as fh:
             src = fh.read()
         # Find the check_neo4j_quality_task bash_command block
@@ -206,24 +215,50 @@ class TestCurlNetrcReplacement:
         # The password-in-argv pattern must be gone
         assert 'curl -s -u "${NEO4J_USER}:${NEO4J_PWD}"' not in block, (
             "DAG quality check must NOT use ``curl -u user:$PWD`` — password leaks into "
-            "/proc/cmdline. Use --netrc-file instead."
+            "/proc/cmdline. Use ``curl -K <config-file>`` instead."
         )
-        # Must use the netrc approach
-        assert "--netrc-file" in block, "DAG quality check must use ``curl --netrc-file``"
+        # Must use the config-file approach
+        assert "curl -s -K " in block or "curl -K " in block, (
+            "DAG quality check must use ``curl -K <config>`` "
+            "(supports quoted-string credentials with whitespace; "
+            "PR-F9 round-2 Bugbot LOW fix)"
+        )
         # Must have a cleanup trap
-        assert "trap " in block, "netrc file MUST be cleaned up via ``trap``, even on crash / signal"
+        assert "trap " in block, "curl config file MUST be cleaned up via ``trap``, even on crash / signal"
         # chmod 600 is required so the file isn't world-readable
-        assert "chmod 600" in block, "netrc file must be chmod 600"
+        assert "chmod 600" in block, "curl config file must be chmod 600"
+        # netrc's truncation-on-whitespace bug must NOT return
+        assert "--netrc-file" not in block, (
+            "netrc format truncates passwords with whitespace — "
+            "use ``-K`` (curl config) instead (PR-F9 round-2 Bugbot LOW)"
+        )
 
-    def test_check_progress_sh_uses_netrc_not_argv_password(self):
+    def test_check_progress_sh_uses_config_file_not_argv_password(self):
         with open("src/check_progress.sh") as fh:
             content = fh.read()
         assert 'curl -s -u "neo4j:${NEO4J_PASSWORD' not in content, (
             "check_progress.sh must NOT embed password in curl argv"
         )
-        assert "--netrc-file" in content, "check_progress.sh must use --netrc-file"
+        assert "curl -s -K " in content or "curl -K " in content, "check_progress.sh must use ``curl -K <config>``"
         assert "chmod 600" in content
         assert "trap " in content
+        assert "--netrc-file" not in content, (
+            "netrc format truncates passwords with whitespace — use curl config instead"
+        )
+
+    def test_password_is_escaped_for_curl_config_format(self):
+        """curl config's quoted-string format supports ``\\\\`` (backslash)
+        and ``\\"`` (double-quote) escapes. Both call sites must escape
+        the password before writing it into the config file — otherwise
+        a password containing ``"`` would break the config parser."""
+        for path in ("dags/edgeguard_pipeline.py", "src/check_progress.sh"):
+            with open(path) as fh:
+                content = fh.read()
+            assert "NEO4J_PWD_ESC" in content, (
+                f"{path} must escape password characters (backslash + quote) "
+                "before embedding in curl config — otherwise special chars "
+                "break the config parser (PR-F9 round-2)"
+            )
 
 
 # ===========================================================================

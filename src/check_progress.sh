@@ -16,20 +16,21 @@ docker ps --filter "name=edgeguard" --filter "name=misp" --format "table {{.Name
 # Check Neo4j
 # PR-F9 Red Team audit (HIGH): ``curl -u user:password`` exposes the
 # password in ``/proc/<pid>/cmdline`` + ``ps auxw`` for the curl call's
-# duration. Use --netrc-file (0600 + trap-cleaned) so the creds never
-# enter argv.
+# duration. PR-F9 Bugbot LOW (round-2): netrc format is whitespace-
+# delimited with no quoting, silently truncating passwords containing
+# spaces. Use curl's config-file format (``-K``) instead — the
+# ``user = "u:p"`` quoted-string syntax supports whitespace + escapes.
 echo ""
 echo "🧠 Neo4j Status:"
 NEO4J_PWD="${NEO4J_PASSWORD:-changeme}"
-NETRC_TMP="$(mktemp -t edgeguard-netrc.XXXXXXXX)"
-chmod 600 "$NETRC_TMP"
-trap 'rm -f "$NETRC_TMP"' EXIT HUP INT TERM
-cat > "$NETRC_TMP" <<NETRC
-machine localhost
-login neo4j
-password $NEO4J_PWD
-NETRC
-if curl -s --netrc-file "$NETRC_TMP" http://localhost:7474 > /dev/null 2>&1; then
+CURL_CFG="$(mktemp -t edgeguard-curlcfg.XXXXXXXX)"
+chmod 600 "$CURL_CFG"
+trap 'rm -f "$CURL_CFG"' EXIT HUP INT TERM
+# Escape \ and " for curl config's quoted-string format
+NEO4J_PWD_ESC="${NEO4J_PWD//\\/\\\\}"
+NEO4J_PWD_ESC="${NEO4J_PWD_ESC//\"/\\\"}"
+printf 'user = "neo4j:%s"\n' "$NEO4J_PWD_ESC" > "$CURL_CFG"
+if curl -s -K "$CURL_CFG" http://localhost:7474 > /dev/null 2>&1; then
     echo "✅ Neo4j is running"
 else
     echo "❌ Neo4j is NOT reachable"

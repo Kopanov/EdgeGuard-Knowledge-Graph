@@ -1641,10 +1641,18 @@ check_neo4j_quality_task = BashOperator(
     # ``curl -s -u "$NEO4J_USER:$NEO4J_PWD" ...`` which writes the
     # password into the process argv (visible in ``/proc/<pid>/cmdline``
     # and ``ps auxw`` to any co-resident process for the lifetime of
-    # the curl call). Replaced with ``curl --netrc-file`` reading
-    # creds from a file opened 0600 and deleted immediately after —
-    # the password never appears in argv. ``trap`` ensures cleanup
-    # even if the pipeline crashes mid-run.
+    # the curl call).
+    #
+    # PR-F9 Bugbot LOW (round-2): the first fix used curl's netrc
+    # format, which is whitespace-delimited with no quoting mechanism —
+    # a password containing a space would silently truncate to only
+    # the first token (old ``curl -u "user:$PWD"`` handled this via
+    # shell quoting). Replaced with curl's config-file format
+    # (``-K`` / ``--config``), which supports quoted string values
+    # with backslash-escaped whitespace / quotes / backslashes. Same
+    # security win (password in file not argv) AND correct for
+    # realistic passwords; no silent truncation on
+    # e.g. ``NEO4J_PASSWORD="my pass phrase"``.
     bash_command="""
         set -euo pipefail
         echo "Neo4j Sync Complete - $(date)"
@@ -1656,22 +1664,23 @@ check_neo4j_quality_task = BashOperator(
             exit 0
         fi
 
-        # Write creds to a 0600 netrc file the curl process reads directly.
-        # $$ = this shell's PID, unique per invocation; trap cleans up on
-        # any exit path (success, error, signal).
-        NETRC_TMP="$(mktemp -t edgeguard-netrc.XXXXXXXX)"
-        chmod 600 "$NETRC_TMP"
-        trap 'rm -f "$NETRC_TMP"' EXIT HUP INT TERM
+        # Write creds to a 0600 curl-config file the curl process reads
+        # directly. trap cleans up on any exit path (success, error, signal).
+        CURL_CFG="$(mktemp -t edgeguard-curlcfg.XXXXXXXX)"
+        chmod 600 "$CURL_CFG"
+        trap 'rm -f "$CURL_CFG"' EXIT HUP INT TERM
 
-        # Extract host + port from NEO4J_HTTP for the netrc ``machine`` entry.
-        NEO4J_HOST=$(echo "$NEO4J_HTTP" | sed -E 's|^https?://||; s|/.*$||; s|:.*$||')
-        cat > "$NETRC_TMP" <<NETRC
-machine $NEO4J_HOST
-login $NEO4J_USER
-password $NEO4J_PWD
-NETRC
+        # Escape password for curl config's quoted-string format:
+        #   \ → \\   " → \"
+        # (curl config supports these escape sequences inside double-quoted values)
+        NEO4J_PWD_ESC="${NEO4J_PWD//\\\\/\\\\\\\\}"
+        NEO4J_PWD_ESC="${NEO4J_PWD_ESC//\\\"/\\\\\\\"}"
 
-        curl -s --netrc-file "$NETRC_TMP" "${NEO4J_HTTP}/db/neo4j/tx/commit" \
+        # Write the user credential via curl's config-file format
+        # (``user = "u:p"``). Quoted string handles whitespace + escapes.
+        printf 'user = "%s:%s"\\n' "$NEO4J_USER" "$NEO4J_PWD_ESC" > "$CURL_CFG"
+
+        curl -s -K "$CURL_CFG" "${NEO4J_HTTP}/db/neo4j/tx/commit" \
             -H "Content-Type: application/json" \
             -d '{"statements": [{"statement": "MATCH (n) WHERE n:Indicator OR n:Vulnerability OR n:CVE OR n:Malware OR n:ThreatActor OR n:Technique OR n:Tactic OR n:Campaign RETURN labels(n)[0] as type, count(*) as cnt ORDER BY cnt DESC"}]}' 2>/dev/null | \
             python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'{r[\\"row\\"][0]}: {r[\\"row\\"][1]}') for r in d.get('results',[{}])[0].get('data',[])]" || echo "Quality check skipped"
