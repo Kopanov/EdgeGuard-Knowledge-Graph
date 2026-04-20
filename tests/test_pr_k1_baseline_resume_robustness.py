@@ -450,14 +450,33 @@ class TestNoStaleClearCheckpointsReferences:
     def test_clear_checkpoints_not_in_known_baseline_conf_keys(self, dag_source: str) -> None:
         """The ``clear_checkpoints`` key MUST be absent from the
         allowlist. Otherwise an operator passing it gets no warning
-        and silently believes it took effect."""
+        and silently believes it took effect.
+
+        PR-K1 Bugbot round-2 Low on THIS test (commit 786e375): the
+        original bracketing used ``dag_source.find(")", idx)`` which
+        matched the first ``)`` — which happened to be INSIDE a
+        comment (``(consumed by _baseline_clean)``) on the first
+        entry's line, not at the actual frozenset closing ``)``. That
+        truncated ``block`` to a single-line view + made the
+        assertion vacuously pass. Fixed by bracketing on the
+        column-0 ``\\n)`` that terminates the frozenset literal —
+        the closing paren lives on its own line by convention
+        (``Black`` / ``ruff format`` enforce this for multi-line
+        calls), so this is robust."""
         # Find the _KNOWN_BASELINE_CONF_KEYS frozenset literal block.
         idx = dag_source.find("_KNOWN_BASELINE_CONF_KEYS = frozenset(")
         assert idx > 0, "_KNOWN_BASELINE_CONF_KEYS not found"
-        # End at the closing of the literal.
-        end = dag_source.find(")", idx + len("_KNOWN_BASELINE_CONF_KEYS = frozenset("))
-        assert end > idx
-        block = dag_source[idx:end]
+        # End at ``\n)`` at column 0 — the frozenset's actual closing
+        # paren on its own line. Any ``)`` inside comments or adjacent
+        # expressions is indented or mid-line, so ``\n)`` disambiguates.
+        end_marker = "\n)"
+        end = dag_source.find(end_marker, idx + len("_KNOWN_BASELINE_CONF_KEYS = frozenset("))
+        assert end > idx, (
+            "could not find ``\\n)`` terminator for _KNOWN_BASELINE_CONF_KEYS — "
+            "frozenset literal may have been reformatted onto one line; update this test"
+        )
+        block = dag_source[idx : end + len(end_marker)]
+
         # Strip the explanatory comment block (which may legitimately
         # mention "clear_checkpoints" as the removed key).
         active_lines = [
@@ -467,6 +486,30 @@ class TestNoStaleClearCheckpointsReferences:
             f"clear_checkpoints must not appear as an active set member; "
             f"found: {active_lines}. PR-K1 Bugbot round-2 caught this drift "
             f"after §1-8 removed the consumer."
+        )
+
+    def test_known_baseline_conf_keys_bracket_captures_all_entries(self, dag_source: str) -> None:
+        """Meta-pin for the test above: ensure the bracketing logic
+        captures ALL set members, not just the first one.  If a
+        reformatting ever collapses the frozenset to a single line
+        (``frozenset({...})``), the ``\\n)`` terminator won't match
+        and the test above will ``assert end > idx`` fail with a
+        clear message — but this test checks the POSITIVE case
+        (the bracket captures the real members) so we catch it."""
+        idx = dag_source.find("_KNOWN_BASELINE_CONF_KEYS = frozenset(")
+        assert idx > 0
+        end = dag_source.find("\n)", idx + len("_KNOWN_BASELINE_CONF_KEYS = frozenset("))
+        block = dag_source[idx : end + len("\n)")]
+        # The bracket must contain all the currently-active conf keys,
+        # not just one. Count them to ensure bracketing is robust.
+        active = {"fresh_baseline", "baseline_days", "baseline_collection_limit", "collection_limit"}
+        present = {k for k in active if f'"{k}"' in block}
+        missing = active - present
+        assert not missing, (
+            f"frozenset bracketing truncated before capturing all entries; "
+            f"missing from block: {missing}. This would vacuously pass the "
+            f"clear_checkpoints-absence test — matches the exact Bugbot "
+            f"round-2 Low finding pattern."
         )
 
     def test_baseline_start_summary_log_does_not_advertise_clear_checkpoints(self, dag_source: str) -> None:
