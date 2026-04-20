@@ -2200,8 +2200,33 @@ def cmd_fresh_baseline(args) -> int:
     # ``--skip-backup-check`` is the dev/test escape hatch — emits a
     # WARNING in the log so the bypass is auditable. Production
     # operators should NEVER use this flag.
+    #
+    # PR-F3 audit fix (Issue #58, clean-install UX gap): the gate has
+    # nothing to protect on a fresh install (empty Neo4j + empty MISP),
+    # so requiring ``EDGEGUARD_LAST_BACKUP_AT`` for the very first
+    # ``fresh-baseline`` call is friction-without-safety. Auto-skip the
+    # gate when both data stores are empty — log at INFO (audit-trail
+    # clarity: this is "no data exists", NOT a deliberate safety bypass
+    # like ``--skip-backup-check``). Checkpoint state is intentionally
+    # NOT considered: it's per-collector cursor progress, not user-data,
+    # and a leftover checkpoint file from a prior run on an emptied
+    # graph is exactly the case we want to allow without ceremony.
     if not getattr(args, "skip_backup_check", False):
-        backup_check_result = _check_recent_backup_timestamp()
+        backup_check_result: Optional[str]
+        gate_auto_skipped_clean_install = False
+        if state.neo4j_count == 0 and state.misp_count == 0:
+            info(
+                "Backup-timestamp gate auto-skipped: no existing data to back up "
+                "(clean install — Neo4j EdgeGuard nodes = 0, MISP EdgeGuard events = 0)."
+            )
+            logger.info(
+                "Backup-timestamp gate auto-skipped on clean install "
+                "(neo4j_count=0, misp_count=0); EDGEGUARD_LAST_BACKUP_AT not required."
+            )
+            backup_check_result = None
+            gate_auto_skipped_clean_install = True
+        else:
+            backup_check_result = _check_recent_backup_timestamp()
         if backup_check_result is not None:  # check failed
             print(file=sys.stderr)
             err("FRESH BASELINE — BACKUP GATE FAILED")
@@ -2234,7 +2259,11 @@ def cmd_fresh_baseline(args) -> int:
         # addition to the structured logger.info inside the helper.
         # Helps operators see WHY the gate accepted (and how much window
         # is left) without having to grep the log file.
-        info("Backup-timestamp gate passed (see log for age + remaining window).")
+        # Skip this on the clean-install auto-skip path: the helper never
+        # ran, so there's no age/remaining-window to point at and the
+        # auto-skip ``info(...)`` above is the canonical operator message.
+        if not gate_auto_skipped_clean_install:
+            info("Backup-timestamp gate passed (see log for age + remaining window).")
     else:
         warn("--skip-backup-check passed; bypassing the backup-timestamp gate.")
         warn("This is intended for dev/test only — production runs MUST take a backup first.")
