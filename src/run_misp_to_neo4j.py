@@ -178,6 +178,27 @@ def _fetch_edgeguard_events_via_requests_index(
     Try MISP event index endpoints (paginated). Returns:
       - list (possibly empty) if an index path responded successfully;
       - None if no index URL worked (caller may fall back to PyMISP/restSearch).
+
+    PR-K2 §1-2 — server-side ``timestamp`` narrowing:
+    when ``since`` is not None, pass ``timestamp = int(since.timestamp())``
+    as a query parameter so MISP narrows the result set on the server side
+    BEFORE pagination. The prior implementation only filtered client-side
+    (``_event_covers_since`` at the post-loop comprehension), which meant
+    a re-triggered baseline against a populated MISP would walk up to
+    ``MISP_EVENTS_INDEX_MAX_PAGES`` × ``MISP_EVENTS_INDEX_PAGE_SIZE``
+    rows of the entire MISP instance (including non-EdgeGuard events
+    from federated peers) before any filtering kicked in. On large
+    deployments the 100-page cap silently truncated — events past page
+    100 never made it to ``full_neo4j_sync``, exactly the
+    ``EdgeGuardSyncCoverageGap`` failure mode the alert was built to
+    catch (the gap was UPSTREAM of the accounting, so the alert never
+    fired).
+
+    The PyMISP and ``/events/restSearch`` fallback paths already use
+    this convention (see lines ~977 + ~997). This brings the index
+    path into parity. Older MISP versions that ignore the ``timestamp``
+    param degrade gracefully — the client-side ``_event_covers_since``
+    filter at the post-loop comprehension stays as defense-in-depth.
     """
     base = misp_base.rstrip("/")
     for path in ("/events/index", "/events"):
@@ -185,9 +206,13 @@ def _fetch_edgeguard_events_via_requests_index(
         path_unusable = False
         for page in range(1, MISP_EVENTS_INDEX_MAX_PAGES + 1):
             try:
+                params: dict = {"limit": MISP_EVENTS_INDEX_PAGE_SIZE, "page": page}
+                # Server-side narrowing — see docstring above for context.
+                if since is not None:
+                    params["timestamp"] = int(since.timestamp())
                 resp = session.get(
                     f"{base}{path}",
-                    params={"limit": MISP_EVENTS_INDEX_PAGE_SIZE, "page": page},
+                    params=params,
                     verify=SSL_VERIFY,
                     timeout=(MISP_CONNECT_TIMEOUT, MISP_REQUEST_TIMEOUT),
                 )
