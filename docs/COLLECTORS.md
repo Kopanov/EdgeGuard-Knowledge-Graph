@@ -758,6 +758,37 @@ SOURCE_TAG_MAPPING = {
 
 ---
 
+## Baseline collection limits — current & planned
+
+This table captures **what each collector actually pulls on a 730-day
+baseline today**, the **upstream API constraint** driving that choice,
+and any **planned follow-up work**. Operators running long baselines
+should expect the numbers in the "Current ceiling" column as the hard
+upper bound for a single baseline run.
+
+| Collector | Current ceiling | Upstream API constraint | Notes & planned follow-ups |
+|-----------|-----------------|-------------------------|----------------------------|
+| **NVD** | Full windowed collection (no artificial run-level cap on baseline) | `resultsPerPage <= 2000`; `pubStartDate..pubEndDate` must span `<= 120` days per request | Already iterates 120-day windows via `iter_nvd_published_windows`. PR-M1 adds a defensive WARNING + ignore if an incremental-style `limit` env is present in baseline (prevents ~99% silent truncation) |
+| **OTX** | `max_pages = 200` × `50/page` ≈ 10k pulses (~7 min runtime, 2 s between pages) | No publicly documented pulse cap; effective throttle ≈ 30 req/min on the free tier | Current settings produce **~100k nodes + relationships** on a 730-day run. Raising `max_pages` is a future knob (likely an env var) for operators with a paid tier and very active subscriptions |
+| **CISA KEV** | Full KEV snapshot per run | Public JSON, no auth, no rate limit | No change planned |
+| **MITRE ATT&CK** | Full STIX 2.1 bundle per run | Public GitHub raw file, no rate limit | No change planned |
+| **MISP (local)** | Full MISP server content matching the filter | Bounded by local MISP; no external quota | No change planned |
+| **AbuseIPDB** | As per `ABUSEIPDB_*` limits | Public API daily checks quota (1k free) | No change planned |
+| **VirusTotal** | `limit = 100` (baseline default, raised from 20 in PR-M1) | Free tier: **4 req/min**, **500 req/day** | At `limit=100` a baseline run consumes ~100-105 API calls (~26 min wall-clock at 4/min); comfortably inside the 500/day quota with headroom for incremental runs. **VT is enrichment-only on the free tier** — genuine bulk or historical depth requires the Premium API (no 4 req/min cap; per-step daily quotas). A Premium path is a future option, not planned |
+| **Finance (Feodo / SSLBL)** | Full feed | Public CSV/text feeds, no rate limit | No change planned |
+| **Global (URLhaus / CyberCure / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus/CyberCure full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
+| **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** ENTSO-E, EU-CERT, E-ISAC, national CERT integrations. Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1 |
+| **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** HC3, FDA, H-ISAC, national healthcare CERT integrations. Same skip-dashboard behaviour as Energy |
+
+### Planned improvements (future PRs)
+
+- **ThreatFox bulk-import collector** for historical IOCs >7 days (reads the abuse.ch JSON/CSV export, pushes to MISP with a dedicated `Source(source_id="threatfox_bulk")`)
+- **Energy + Healthcare sector collectors** — implementations for the placeholder slots; ENTSO-E + HC3 are the likeliest near-term integrations
+- **VT Premium API path** for operators with licensed service steps (unlocks bulk Intelligence search beyond the 500/day free-tier cap)
+- **OTX max-pages env knob** (`EDGEGUARD_OTX_BASELINE_MAX_PAGES`) for paid-tier operators with very active pulse subscriptions
+
+---
+
 ## Testing Collectors
 
 Each collector can be tested individually:
