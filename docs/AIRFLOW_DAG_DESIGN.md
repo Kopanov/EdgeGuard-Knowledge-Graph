@@ -126,6 +126,59 @@ for event partitioning by date range so no single event exceeds
 (<5K attrs each), don't trigger the oversized-event failure mode, and
 their parallel write pressure on MISP is negligible compared to OTX/NVD.
 
+### Parent-DAG liveness check (PR-F6, Issue #65, 2026-04-20)
+
+The four tier-1 baseline collectors install a **parent-DAG liveness
+callback** that polls the Airflow REST API between MISP push batches
+and exits cleanly if the parent `dag_run` is no longer in `running`
+or `queued` state. This closes the **orphan-collector-process gap**
+that produced Event 19 + 72,479-CVE duplication on 2026-04-19:
+
+> A failed `edgeguard_baseline` DAG run kept its `collect_nvd` Python
+> subprocess alive for 12+ hours after Airflow marked the run failed.
+> The orphan eventually pushed 78,313 attributes to MISP **after** the
+> next manual run's `baseline_clean` had already wiped MISP.
+
+**Root cause**: when a DAG run is marked `failed` (because *another*
+task in the same run failed), Airflow does NOT auto-kill in-flight
+tasks of that run. The collector keeps running in its worker
+subprocess until it finishes naturally or hits its 5h timeout.
+
+**The fix**: between MISP push batches (already throttled 5s by
+`EDGEGUARD_MISP_BATCH_THROTTLE_SEC`), the collector calls a callback
+that probes the Airflow REST API (rate-limited to one probe per
+60s). If the parent `dag_run` is in any terminal state, the callback
+raises `AbortedByDagFailureException` — the **current batch finishes**
+its write to MISP cleanly, the **next batch never starts**.
+
+**Trade-offs**:
+- ✅ Clean exit between batches → no half-written MISP events
+- ✅ Fail-OPEN → transient Airflow API blip doesn't false-kill the collector
+- ✅ Per-collector opt-in via `EDGEGUARD_PARENT_DAG_LIVENESS_CHECK` (default `true` for baseline)
+- ✅ Low overhead (~1 small HTTP call per minute)
+- ⚠️ Up to 60s lag between DAG-marked-failed and collector-noticing (configurable via `EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC`)
+
+**Operator visibility**: when the safeguard fires, you'll see this in the collector log:
+
+```
+WARNING [PARENT_DAG_DEAD] dag_run=edgeguard_baseline/manual__2026-04-19T22:46:59
+        observed state='failed' — aborting collector cleanly. Orphan-process
+        safeguard (PR-F6) prevented late writes to MISP/Neo4j.
+```
+
+Grep `PARENT_DAG_DEAD` in your DAG logs to find every aborted-by-parent-failure
+event. If you see it firing on healthy runs, your Airflow API is unreachable
+from the collector worker (check `AIRFLOW_WEBSERVER_URL` env).
+
+**What this DOES NOT do**: the safeguard runs collector-side, so it
+can't help if the collector itself is wedged (e.g., blocked in a
+syscall, in a non-MISP loop). For those cases, the existing
+`execution_timeout` per task remains the backstop. Combine the two
+for defense-in-depth.
+
+See [`src/parent_dag_liveness.py`](../src/parent_dag_liveness.py) for
+the full module documentation.
+
 ---
 
 ## Baseline DAG — How to Use

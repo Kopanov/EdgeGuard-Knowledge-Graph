@@ -1933,7 +1933,40 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
     from collectors.misp_writer import MISPWriter
 
     limit, baseline_days = get_baseline_config(context=context)
-    writer = MISPWriter()
+
+    # PR-F6 (Issue #65, orphan-process safeguard): install a parent-DAG
+    # liveness callback so the collector exits cleanly if its parent
+    # dag_run is marked failed mid-flight. Without this, a
+    # ``collect_nvd`` subprocess from a failed run can keep pushing to
+    # MISP for hours after Airflow has marked the run dead — the exact
+    # failure mode that produced Event 19 / 72K-CVE duplication on
+    # 2026-04-19. Callback is None when the env flag
+    # EDGEGUARD_PARENT_DAG_LIVENESS_CHECK is disabled OR when context
+    # doesn't carry dag_id/run_id (e.g., direct CLI invocation
+    # bypassing Airflow) — in either case, push_items behaves as
+    # before. See ``src/parent_dag_liveness.py`` for the full design.
+    liveness_cb = None
+    try:
+        from parent_dag_liveness import make_liveness_callback
+
+        dag_id_for_check = ""
+        run_id_for_check = ""
+        if context:
+            dag_obj = context.get("dag")
+            run_obj = context.get("dag_run")
+            if dag_obj is not None:
+                dag_id_for_check = getattr(dag_obj, "dag_id", "") or ""
+            if run_obj is not None:
+                run_id_for_check = getattr(run_obj, "run_id", "") or ""
+        liveness_cb = make_liveness_callback(dag_id_for_check, run_id_for_check)
+    except ImportError as e:
+        logger.warning(
+            "[BASELINE] parent_dag_liveness import failed (%s) — orphan-process safeguard "
+            "INACTIVE for this run. Failed-DAG cleanup falls back to manual `edgeguard dag kill`.",
+            e,
+        )
+
+    writer = MISPWriter(liveness_callback=liveness_cb)
     logger.info(f"[BASELINE] Starting {collector_name} — limit={limit or 'unlimited'}, baseline_days={baseline_days}")
 
     return run_collector_with_metrics(
