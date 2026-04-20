@@ -1853,6 +1853,74 @@ def _validate_baseline_dag_conf(conf: object, *, source_label: str = "dag_run.co
             )
 
 
+def _is_truthy_conf_value(value: object) -> bool:
+    """Return True when ``value`` matches the same truthy semantics
+    ``_baseline_clean`` applies to ``fresh_baseline`` (``True``, int 1,
+    and str forms ``true``/``1``/``yes``/``on`` — case-insensitive).
+
+    Extracted so the pre-consumption fail-fast check can mirror the
+    parse logic at the actual consumption site, preventing drift between
+    the two.
+    """
+    if value is True:
+        return True
+    if isinstance(value, int) and not isinstance(value, bool) and value == 1:
+        return True
+    if isinstance(value, str) and value.strip().lower() in ("true", "1", "yes", "on"):
+        return True
+    return False
+
+
+def _fail_fast_on_typo_d_fresh_baseline(conf: object) -> None:
+    """Raise ``AirflowException`` when a typo'd key in ``conf``
+    unambiguously maps to ``fresh_baseline`` in the typo map AND has a
+    truthy value.
+
+    PR-F8 (Logic Tracker audit HIGH): the PR-F5 validator logs WARN
+    but the DAG continues, so the 2026-04-19 incident (operator typo →
+    silent additive mode) repeats. For the destructive-vs-additive
+    distinction specifically, "log and continue" is wrong — the
+    consequence of running additive when destructive was intended is
+    days of missing wipe. Fail-fast ONLY for ``fresh_baseline`` typos
+    (non-destructive-key typos still fall through to the WARN path,
+    because those defaults are recoverable).
+
+    No-op if:
+      - ``conf`` is not a dict
+      - no typo'd key maps to ``fresh_baseline``
+      - the typo'd value is falsy (operator explicitly set false →
+        they're confirming additive)
+      - the canonical ``fresh_baseline`` key is ALSO present (operator
+        used both — they know what they want)
+    """
+    if not isinstance(conf, dict) or not conf:
+        return
+    # If the canonical key is present, respect the operator's explicit
+    # intent — even if a typo is also present, the canonical wins.
+    if "fresh_baseline" in conf:
+        return
+    for key in conf:
+        norm = str(key).strip().lower()
+        suggestion = _BASELINE_CONF_TYPO_MAP.get(norm)
+        if suggestion != "fresh_baseline":
+            continue
+        if not _is_truthy_conf_value(conf[key]):
+            # Typo'd AND falsy — operator was trying to say "additive";
+            # the canonical key is missing anyway, so the default
+            # behavior (additive) is already what they wanted.
+            continue
+        raise AirflowException(
+            f"[BASELINE_CONF] Detected typo'd destructive key {key!r}={conf[key]!r} "
+            f"— did you mean 'fresh_baseline'? Refusing to run: additive-when-destructive-was-intended "
+            f"is the exact 2026-04-19 incident pattern (operator typed '{{\"fresh\": true}}' and the "
+            f"DAG silently ran additive). Re-trigger with the corrected conf "
+            f'(``{{"fresh_baseline": true, "baseline_days": N}}``). See docs/AIRFLOW_DAGS.md § '
+            f"'Baseline DAG conf — accepted keys' for the canonical key list. "
+            f"If you really want additive-with-a-typo, set {key!r}=false OR add "
+            f"'fresh_baseline: false' explicitly."
+        )
+
+
 def get_baseline_config(context=None) -> tuple:
     """
     Read baseline collection settings from Airflow Variables, then apply optional
@@ -2242,6 +2310,25 @@ def _baseline_clean(**context):
     # warning catches. See ``_validate_baseline_dag_conf`` for rationale.
     _validate_baseline_dag_conf(conf, source_label="_baseline_clean")
 
+    # PR-F8 / Logic Tracker audit (HIGH): the PR-F5 validator LOGS a
+    # warning but the DAG still runs. The 2026-04-19 incident will
+    # repeat: operator types ``{"fresh": true, "days": 730}``, gets
+    # 3 warning log lines nobody reads, the DAG runs ADDITIVE (green,
+    # no wipe, no error), and the typo goes undiagnosed for days.
+    #
+    # Fix: when a typo'd key UNAMBIGUOUSLY maps to ``fresh_baseline``
+    # in the typo map AND the typo'd value is truthy, refuse to run.
+    # Destructive-vs-additive ambiguity is exactly the case where
+    # "log and continue" is wrong — forcing the operator to re-trigger
+    # with corrected JSON prevents silent mis-classification.
+    #
+    # We ONLY fail-fast on ``fresh_baseline`` typos. Other typos
+    # (e.g., ``days`` → ``baseline_days``) fall through to the
+    # existing WARN — non-destructive defaults are safe to recover
+    # from, but a skipped wipe is not (operator MAY have intended
+    # additive; cannot distinguish automatically).
+    _fail_fast_on_typo_d_fresh_baseline(conf)
+
     # PR-C v2 audit fix (Bug Hunter B1, comprehensive 7-agent audit):
     # ``bool(conf.get("fresh_baseline", False))`` is wrong for the Airflow
     # Trigger-DAG-with-Config UI — operators commonly type quoted bools
@@ -2262,13 +2349,16 @@ def _baseline_clean(**context):
     # silent additive mode instead of the expected destructive wipe.
     # Accept ``1`` (int) symmetric with ``"1"`` (str) by checking for
     # ``True`` OR ``int 1`` explicitly.
-    raw_fresh = conf.get("fresh_baseline", False)
-    if raw_fresh is True or (isinstance(raw_fresh, int) and not isinstance(raw_fresh, bool) and raw_fresh == 1):
-        fresh_baseline = True
-    elif isinstance(raw_fresh, str) and raw_fresh.strip().lower() in ("true", "1", "yes", "on"):
-        fresh_baseline = True
-    else:
-        fresh_baseline = False
+    #
+    # PR-F8 Bugbot Medium (commit d356112): the inline parse was
+    # DUPLICATED in ``_is_truthy_conf_value`` (which the fail-fast
+    # guard uses). Two copies risks drift — if one is updated without
+    # the other, the fail-fast guard and the actual fresh_baseline
+    # parse disagree on what's "truthy", silently re-enabling the
+    # destructive-vs-additive mismatch this PR exists to prevent.
+    # Fix: use ``_is_truthy_conf_value`` at the consumption site so
+    # both paths share a single source of truth.
+    fresh_baseline = _is_truthy_conf_value(conf.get("fresh_baseline", False))
 
     if not fresh_baseline:
         logger.info("=" * 70)

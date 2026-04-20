@@ -175,13 +175,19 @@ class TestRecommendationsTable:
         assert rows[0]["rec_gb"] >= rows[0]["min_gb"]
 
     def test_every_row_has_the_required_keys(self):
-        """Each row MUST have label / env_var / min_gb / rec_gb /
+        """Each row MUST have label / env_vars / min_gb / rec_gb /
         rationale — the doctor renderer + the docs table both consume
-        these fields."""
+        these fields.
+
+        PR-F8 (Cross-Checker audit HIGH): field renamed from singular
+        ``env_var`` to plural ``env_vars`` (tuple of candidate names)
+        to support both Neo4j-internal names (what the container sets)
+        and operator-facing wrappers (what operators set in .env).
+        """
         from edgeguard import _MEMORY_RECOMMENDATIONS
 
         for row in _MEMORY_RECOMMENDATIONS:
-            for required in ("key", "label", "env_var", "min_gb", "rec_gb", "rationale"):
+            for required in ("key", "label", "env_vars", "min_gb", "rec_gb", "rationale"):
                 assert required in row, f"row {row.get('key')!r} missing required field {required!r}"
 
 

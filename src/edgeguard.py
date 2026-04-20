@@ -578,11 +578,34 @@ def cmd_doctor(args):
 #     the 14.7% NVD failure rate when 80K-attribute event pushes hit MISP
 #     PHP-FPM workers under-provisioned at 512M
 # Update this table when ops experience reveals a new threshold.
+#
+# PR-F8 follow-up (Cross-Checker audit HIGH #1): env var names MUST match
+# what Neo4j reads AND what docker-compose.yml actually sets. Neo4j's
+# env-var → config-key mapping is documented:
+#   - Underscore-in-key → ``__`` in env var (so ``heap.max_size`` →
+#     ``server_memory_heap_max__size``)
+#   - Dot-separator → single ``_``
+# Our compose at docker-compose.yml:96-100 sets:
+#   - ``NEO4J_server_memory_heap_max__size`` (DOUBLE underscore)
+#   - ``NEO4J_server_memory_heap_initial__size`` (DOUBLE underscore)
+#   - ``NEO4J_server_memory_pagecache_size`` (single underscore — correct
+#     because ``pagecache`` is one word in the Neo4j config key)
+#   - ``NEO4J_dbms_memory_transaction_total_max`` (``dbms`` prefix, NOT ``server``)
+# The original PR-F5 probe looked up the WRONG key names and reported
+# "? unknown" regardless of operator config, silently defeating the
+# entire diagnostic goal. Each row now declares a tuple of candidate
+# env var names; the probe tries each in order so it works against
+# both the Neo4j-internal names (seen inside the container) AND the
+# operator-facing wrapper aliases (``NEO4J_HEAP_MAX`` etc. that compose
+# reads from ``.env`` before mapping to internal names). First match wins.
 _MEMORY_RECOMMENDATIONS = (
     {
         "key": "neo4j_heap",
         "label": "Neo4j heap",
-        "env_var": "NEO4J_server_memory_heap_max_size",
+        "env_vars": (
+            "NEO4J_server_memory_heap_max__size",  # Neo4j-internal (compose line 97)
+            "NEO4J_HEAP_MAX",  # operator-facing wrapper (.env)
+        ),
         "compose_service": "neo4j",
         "min_gb": 4.0,
         "rec_gb": 8.0,
@@ -591,7 +614,10 @@ _MEMORY_RECOMMENDATIONS = (
     {
         "key": "neo4j_page_cache",
         "label": "Neo4j page cache",
-        "env_var": "NEO4J_server_memory_pagecache_size",
+        "env_vars": (
+            "NEO4J_server_memory_pagecache_size",  # Neo4j-internal (compose line 98)
+            "NEO4J_PAGECACHE",  # operator-facing wrapper (.env)
+        ),
         "compose_service": "neo4j",
         "min_gb": 2.0,
         "rec_gb": 4.0,
@@ -600,7 +626,10 @@ _MEMORY_RECOMMENDATIONS = (
     {
         "key": "neo4j_tx_memory",
         "label": "Neo4j tx memory",
-        "env_var": "NEO4J_server_memory_transaction_total_max",
+        "env_vars": (
+            "NEO4J_dbms_memory_transaction_total_max",  # Neo4j-internal (compose line 100); `dbms` prefix, not `server`
+            "NEO4J_TX_MEMORY_MAX",  # operator-facing wrapper (.env)
+        ),
         "compose_service": "neo4j",
         "min_gb": 4.0,
         "rec_gb": 8.0,
@@ -663,7 +692,12 @@ def _probe_neo4j_memory_via_docker() -> dict:
 
     if not shutil.which("docker"):
         return {}
-    env_var_names = [r["env_var"] for r in _MEMORY_RECOMMENDATIONS if r.get("env_var")]
+    # PR-F8 / Cross-Checker audit: env_vars is now a tuple of candidate
+    # names per recommendation (Neo4j-internal + operator-facing wrapper).
+    # Accept either form when filtering the container's ``env`` output.
+    env_var_names: set[str] = set()
+    for rec in _MEMORY_RECOMMENDATIONS:
+        env_var_names.update(rec.get("env_vars", ()))
     try:
         # ``docker compose exec`` requires us to be in the compose project
         # dir. Fall back to ``docker exec`` against the canonical container
@@ -769,11 +803,19 @@ def _doctor_memory_check() -> None:
     print(f"  {'-' * 32}  {'-' * 10}  {'-' * 6}  {'-' * 6}  -------")
 
     for rec in _MEMORY_RECOMMENDATIONS:
-        env_var = rec["env_var"]
-        # Prefer live container value; fall back to local env (useful when
-        # operator runs ``edgeguard doctor --memory`` from inside an Airflow
-        # exec, where the container's own env vars are visible).
-        raw = neo4j_env.get(env_var) or os.environ.get(env_var)
+        env_vars = rec.get("env_vars", ())
+        # PR-F8 / Cross-Checker audit: try each candidate env-var name in
+        # order (Neo4j-internal first, then operator-facing wrapper).
+        # First match wins — the probe works from inside the container
+        # AND from the host shell where operators set wrapper aliases.
+        raw = None
+        matched_env_var = env_vars[0] if env_vars else ""
+        for candidate in env_vars:
+            val = neo4j_env.get(candidate) or os.environ.get(candidate)
+            if val:
+                raw = val
+                matched_env_var = candidate
+                break
         current_gb = _parse_memory_value_to_gb(raw)
         verdict = _verdict_for_memory(current_gb, rec["min_gb"], rec["rec_gb"])
         verdict_glyph = _verdict_glyph(verdict)
@@ -783,8 +825,14 @@ def _doctor_memory_check() -> None:
         )
         if verdict in ("warn", "fail", "unknown"):
             print(f"  {' ' * 32}  → {rec['rationale']}")
-            if env_var:
-                print(f"  {' ' * 32}  → set {env_var} in .env / docker-compose.yml")
+            if matched_env_var:
+                # Show the Neo4j-internal name AND the operator-facing
+                # wrapper (if they differ) so operators know exactly what
+                # to set in .env.
+                if len(env_vars) > 1 and env_vars[0] != env_vars[1]:
+                    print(f"  {' ' * 32}  → set {env_vars[1]} in .env (or {env_vars[0]} directly on the neo4j service)")
+                else:
+                    print(f"  {' ' * 32}  → set {matched_env_var} in .env / docker-compose.yml")
 
     # Host RAM
     print()
