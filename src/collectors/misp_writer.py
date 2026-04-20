@@ -27,6 +27,7 @@ from collectors.collector_utils import TransientServerError, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
+    MISP_CROSS_EVENT_DEDUP,
     MISP_PREFETCH_EXISTING_ATTRS,
     MISP_URL,
     SSL_VERIFY,
@@ -363,6 +364,118 @@ class MISPWriter:
             return []
         data = response.json()
         return data.get("response") or []
+
+    def _get_existing_source_attribute_keys(self, source_tag: str) -> set:
+        """Build a set of (MISP attribute type, value) already pushed under
+        ANY MISP event tagged with ``source_tag`` — across all events,
+        not just one.
+
+        PR-F7 (Issue #61 quick-fix): the per-event prefetch
+        (:meth:`_get_existing_attribute_keys`) misses duplicates across
+        different MISP events for the same source. Bravo's 2026-04-19
+        incident measured 72,479 CVEs duplicated between event 19
+        (``EdgeGuard-nvd-2026-04-19``) and event 20
+        (``EdgeGuard-nvd-2026-04-20``) — both runs pushed the same NVD
+        baseline window on different UTC days, creating two events with
+        the same content.
+
+        Uses MISP's ``attributes/restSearch`` ``tags`` filter — one
+        query per source per :meth:`push_items` call (cached by the
+        caller). Paginated identically to the per-event variant. Returns
+        an empty set when:
+
+          - ``EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS`` is disabled
+            (master switch — also gates the per-event prefetch)
+          - ``EDGEGUARD_MISP_CROSS_EVENT_DEDUP`` is disabled (this
+            feature's opt-out)
+          - ``source_tag`` is empty (defensive — caller couldn't resolve)
+          - The probe fails (any HTTP error / parse error) — degrades
+            cleanly to per-event-only dedup; no harm
+
+        Cost: ~30-40 seconds for ~92K NVD attributes paginated 5000/page
+        (~19 requests). Amortized over the entire baseline run (one call
+        per source per push_items invocation, not per batch).
+
+        See also Issue #61 — the architectural fix is event partitioning
+        by attribute date, not push date. This helper is the cheap
+        quick-fix until #61 lands.
+        """
+        if not MISP_PREFETCH_EXISTING_ATTRS:
+            return set()
+        if not MISP_CROSS_EVENT_DEDUP:
+            return set()
+        tag = (source_tag or "").strip()
+        if not tag:
+            return set()
+        keys: set = set()
+        page = 1
+        page_limit = 5000
+        max_pages = 200
+        while page <= max_pages:
+            try:
+                response = self.session.post(
+                    f"{self.url}/attributes/restSearch",
+                    json={
+                        "returnFormat": "json",
+                        "tags": [tag],
+                        "page": page,
+                        "limit": page_limit,
+                    },
+                    verify=self.verify_ssl,
+                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2),
+                )
+            except _TRANSIENT_HTTP_ERRORS:
+                # Bubble transient errors so the @retry_with_backoff
+                # higher up the stack can retry; never silently swallow
+                # what looks like an MISP outage.
+                raise
+            except Exception as ex:
+                logger.warning(
+                    "MISP cross-event prefetch failed for tag=%s page=%s: %s — degrading to per-event dedup only",
+                    tag,
+                    page,
+                    ex,
+                )
+                return set()
+            if response.status_code != 200:
+                logger.warning(
+                    "MISP cross-event prefetch HTTP %s for tag=%s — degrading to per-event dedup only",
+                    response.status_code,
+                    tag,
+                )
+                return set()
+            try:
+                data = response.json()
+            except ValueError:
+                logger.warning("MISP cross-event prefetch returned non-JSON for tag=%s page=%s — degrading", tag, page)
+                return set()
+            resp = data.get("response", data)
+            attrs: List = []
+            if isinstance(resp, list):
+                attrs = resp
+            elif isinstance(resp, dict):
+                raw = resp.get("Attribute")
+                if isinstance(raw, list):
+                    attrs = raw
+                elif isinstance(raw, dict):
+                    attrs = [raw]
+            for a in attrs:
+                if not isinstance(a, dict):
+                    continue
+                t = a.get("type")
+                v = a.get("value")
+                if t is not None and v is not None and str(v).strip():
+                    keys.add((str(t), str(v)))
+            if len(attrs) < page_limit:
+                break
+            page += 1
+        if keys:
+            logger.info(
+                "MISP cross-event prefetch tag=%s: %s existing keys (will skip duplicates at push time — PR-F7)",
+                tag,
+                len(keys),
+            )
+        return keys
 
     def _get_existing_attribute_keys(self, event_id: str) -> set:
         """
@@ -1268,6 +1381,13 @@ class MISPWriter:
         start_time = time.time()
         push_queue: List[Tuple[str, List[Dict]]] = []
 
+        # PR-F7 (Issue #61 quick-fix): cache cross-event prefetch per
+        # source so a single push_items call doesn't re-fetch the same
+        # tag set N times when grouped has multiple (source, date)
+        # entries for the same source. The fetch itself can be 30-40s
+        # on a 92K-attr NVD source — caching matters.
+        cross_event_cache: Dict[str, set] = {}
+
         for (source, date), attributes in grouped.items():
             # Deduplicate attributes by value
             seen = set()
@@ -1284,16 +1404,36 @@ class MISPWriter:
                 total_failed += len(unique_attrs)
                 continue
 
+            # PR-F7: union of per-event keys (existing behavior) + cross-event
+            # keys for this source (new — catches 2026-04-19-style duplicates
+            # across separate ``EdgeGuard-{source}-{date}`` events). Cached
+            # per source within this push_items call. Defensive degradation
+            # built into the helper: probe failure → empty set → falls back
+            # to per-event-only dedup. See _get_existing_source_attribute_keys
+            # for the full rationale + the link to Issue #61.
             existing_keys = self._get_existing_attribute_keys(event_id)
+            if source not in cross_event_cache:
+                source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
+                cross_event_cache[source] = self._get_existing_source_attribute_keys(source_tag)
+            cross_event_keys = cross_event_cache[source]
+            existing_keys = existing_keys | cross_event_keys
+
             before_ct = len(unique_attrs)
             unique_attrs = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in existing_keys]
             skipped_ct = before_ct - len(unique_attrs)
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
+                # Distinguish per-event vs cross-event skips in the log
+                # so an operator reading the audit trail sees what each
+                # layer caught. Cross-event count is the "would have been
+                # duplicate writes to MISP without PR-F7" number.
+                cross_event_skipped = sum(1 for a in attributes if (a.get("type"), a.get("value")) in cross_event_keys)
                 logger.info(
-                    "MISP event %s: skipping %s attributes already present (type+value match)",
+                    "MISP event %s: skipping %s attributes already present "
+                    "(type+value match; ~%s caught by cross-event PR-F7 dedup)",
                     event_id,
                     skipped_ct,
+                    cross_event_skipped,
                 )
             if not unique_attrs:
                 continue
