@@ -17,6 +17,7 @@ import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Dict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -194,6 +195,17 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
     results = {"campaigns_created": 0, "campaigns_updated": 0, "links_created": 0}
 
+    # PR-M3d: capture the run's start time in ISO-8601 with UTC offset.
+    # Passed to Step 3b's prune query as ``$run_start_at`` to distinguish
+    # edges touched by THIS run (``r.updated_at >= $run_start_at``) from
+    # stale edges left over from prior runs' non-deterministic top-100
+    # (``r.updated_at < $run_start_at``).  Python-side capture is
+    # sufficient because Neo4j server-side ``datetime()`` in Step 3a's
+    # SET is monotonic — any value stamped in Step 3a is guaranteed
+    # >= run_start_at (both read the same wall clock; Step 3a runs
+    # after this line by definition).
+    run_start_at = datetime.now(timezone.utc).isoformat()
+
     try:
         with neo4j_client.driver.session() as session:
             # Pre-fetch the names of every qualifying ThreatActor so we can
@@ -263,15 +275,28 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             WITH a, malware_list, i,
                  min(r.source_reported_first_at) AS i_source_first,
                  max(r.source_reported_last_at)  AS i_source_last
+            // PR-M3d §5-MD-C2 (CRITICAL): ``all_zones`` (below) used to be
+            // computed from ``collect(DISTINCT i)[0..100]``, a 100-sample
+            // in Neo4j's internal (non-deterministic) iteration order. On
+            // a Campaign with 500 associated indicators spanning multiple
+            // zones, ``c.zone`` would flap between different subsets of
+            // the full zone set across enrichment runs (e.g. ``["healthcare"]``
+            // on run 1, ``["healthcare","energy"]`` on run 2). Dashboards
+            // filtering ``WHERE 'healthcare' IN c.zone`` saw the campaign
+            // flicker in/out. Fix: compute zones from the FULL active-
+            // indicator set (no slice) — deterministic + semantically
+            // correct (Campaign's zones shouldn't depend on sample size).
+            // The slice was cheap compute defense; the full reduce is O(N)
+            // and trivial even for 10k-indicator campaigns.
             WITH a, malware_list,
                  count(DISTINCT i) AS indicator_total,
-                 collect(DISTINCT i)[0..100] AS indicator_sample,
+                 collect(DISTINCT i) AS all_indicators,
                  min(coalesce(i_source_first, i.first_imported_at)) AS first_seen,
                  max(coalesce(i_source_last,  i.last_updated))      AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
-            WITH a, malware_list, indicator_total, indicator_sample, first_seen, last_seen,
+            WITH a, malware_list, indicator_total, first_seen, last_seen,
                  apoc.coll.toSet(
-                     reduce(z=[], ind IN indicator_sample | z + coalesce(ind.zone, []))
+                     reduce(z=[], ind IN all_indicators | z + coalesce(ind.zone, []))
                  ) AS all_zones
             MERGE (c:Campaign {{name: a.name + ' Campaign'}})
             ON CREATE SET c.created_at = datetime(),
@@ -354,18 +379,50 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_created"] += record["links"] if record else 0
             query_pause()
 
-            # Step 3: Link active indicators to their campaigns (sample: up to 100 per campaign)
-            # Using LIMIT inside WITH to avoid huge relationship fans
+            # Step 3a: Link active indicators to their campaigns (top 100 per
+            # campaign by recency).
+            #
+            # PR-M3d §8-RI-S3-Camp (CRITICAL): the old implementation used
+            # ``collect(i)[0..100]`` which returns the first 100 in Neo4j's
+            # internal iteration order — NOT a stable order across runs.
+            # Combined with MERGE's no-delete semantic, PART_OF edges
+            # accumulated monotonically: run N attached {i1..i100}, run N+1
+            # attached {i17..i116}, old 16 kept their edges forever. After
+            # 730 daily runs, a ThreatActor with 10k active indicators had
+            # EVERY single one wired via PART_OF — defeating the 100-cap's
+            # purpose and producing a non-deterministic graph where "is
+            # indicator X PART_OF campaign C?" depended on history, not
+            # current state.
+            #
+            # Fix:
+            # (a) Deterministic ordering via ``ORDER BY i.first_imported_at
+            #     DESC, i.value ASC`` BEFORE the slice. Newest-first with a
+            #     stable tiebreaker on value. Same input graph → same top-
+            #     100 every run.
+            # (b) ``r.updated_at = datetime()`` stamped unconditionally on
+            #     every MERGE so Step 3b below can prune edges that WEREN'T
+            #     touched this run (i.e., indicators that have fallen out
+            #     of the top 100 since the last run).
+            # (c) ``r.created_at`` on ON CREATE for audit-trail.
+            #
+            # Net: PART_OF edges for each Campaign always equal the current
+            # top-100 of active indicators. Reproducible, bounded, matches
+            # the documented "sample: up to 100 per campaign" contract.
             link_indicators = """
             MATCH (c:Campaign)
             MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
             WHERE i.active = true
+            WITH c, i
+            ORDER BY i.first_imported_at DESC, i.value ASC
             WITH c, collect(i)[0..100] AS indicators
             UNWIND indicators AS i
             MERGE (i)-[r:PART_OF]->(c)
-            ON CREATE SET r.src_uuid = i.uuid, r.trg_uuid = c.uuid
+            ON CREATE SET r.created_at = datetime(),
+                          r.src_uuid = i.uuid,
+                          r.trg_uuid = c.uuid
             SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
-                r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
+                r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
+                r.updated_at = datetime()
             RETURN count(*) AS links
             """
             result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
@@ -373,12 +430,68 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_created"] += record["links"] if record else 0
             query_pause()
 
-            # Step 4: Deactivate campaigns whose indicators are all retired
+            # Step 3b: Prune stale PART_OF edges — indicators that WERE in a
+            # prior run's top-100 but aren't in THIS run's (aged out, retired,
+            # or displaced by newer active indicators).
+            #
+            # PR-M3d: without this prune, Step 3a's deterministic-top-100
+            # still accumulates across runs (MERGE never removes). We use
+            # ``r.updated_at`` as the freshness marker: every edge touched
+            # by Step 3a above gets ``r.updated_at = datetime()`` (which is
+            # always >= ``$run_start_at`` captured below). Any PART_OF edge
+            # with ``r.updated_at < $run_start_at`` OR ``r.updated_at IS
+            # NULL`` (from pre-fix edges) is stale and gets deleted.
+            #
+            # Type note: ``$run_start_at`` is passed as an ISO-8601 string
+            # from Python (``datetime.now(timezone.utc).isoformat()``).
+            # Neo4j returns NULL when comparing a DateTime to a String, so
+            # we parse it to a temporal via ``datetime($run_start_at)``.
+            # Same pattern as merge_indicators_batch in neo4j_client.py.
+            #
+            # Edge case: if Step 3a failed mid-run (transaction abort), some
+            # edges may have stale timestamps. Idempotent — next successful
+            # run reconciles.
+            prune_indicators = """
+            MATCH (i:Indicator)-[r:PART_OF]->(c:Campaign)
+            WHERE r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)
+            DELETE r
+            RETURN count(r) AS pruned
+            """
+            prune_result = session.run(
+                prune_indicators,
+                run_start_at=run_start_at,
+                timeout=NEO4J_READ_TIMEOUT,
+            )
+            prune_record = prune_result.single()
+            pruned = prune_record["pruned"] if prune_record else 0
+            if pruned:
+                logger.info(
+                    "[CAMPAIGN] pruned %d stale PART_OF edges (aged out of top-100 or pre-fix residue)",
+                    pruned,
+                )
+            results["links_pruned"] = pruned
+            query_pause()
+
+            # Step 4: Deactivate campaigns whose indicators are all retired.
+            #
+            # PR-M3d: must use OPTIONAL MATCH. The old inner-MATCH
+            # (``MATCH (c:Campaign)<-[:PART_OF]-(i:Indicator)``) relied on
+            # stale PART_OF edges to now-retired indicators to detect
+            # all-retired campaigns. After Step 3b prunes those stale
+            # edges, a campaign whose indicators have ALL become inactive
+            # ends up with ZERO PART_OF edges (Step 3a only (re)creates
+            # edges for ``i.active = true``) — the inner MATCH would miss
+            # it entirely and the campaign would remain ``active = true``
+            # as a zombie. OPTIONAL MATCH includes campaigns with no
+            # PART_OF edges, and the explicit check on ``c.active`` avoids
+            # re-setting campaigns already marked inactive.
             logger.info("[DECAY] Deactivating campaigns with no active indicators...")
             cleanup_query = """
-                MATCH (c:Campaign)<-[:PART_OF]-(i:Indicator)
-                WITH c, collect(i.active) AS statuses
-                WHERE NOT any(s IN statuses WHERE s = true)
+                MATCH (c:Campaign)
+                WHERE c.active IS NULL OR c.active = true
+                OPTIONAL MATCH (c)<-[:PART_OF]-(i:Indicator {active: true})
+                WITH c, count(i) AS active_links
+                WHERE active_links = 0
                 SET c.active = false
                 RETURN count(c) as count
             """
