@@ -1697,7 +1697,13 @@ baseline_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,  # Only one baseline at a time
-    dagrun_timeout=timedelta(hours=32),  # Worst-case: 26h (full collection + sync + retries) + buffer
+    # Worst-case wall time: tier1 sequential (cisa 14s + mitre 28s + otx ~3h
+    # + nvd ~5h ≈ 8h) + tier2 parallel (~2h) + full_sync (~6h) +
+    # build_rels (~5h) + enrich (~5h) = ~26h realistic, ~31h with a single
+    # retry on the longest task. 32h cap leaves ~1-6h of headroom; if real
+    # runs trend longer post-PR-F4 (sequential tier1 added ~3h), bump this
+    # via a follow-up rather than letting Airflow hard-kill at the cap.
+    dagrun_timeout=timedelta(hours=32),
     is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )
@@ -2123,7 +2129,59 @@ baseline_clean_task = PythonOperator(
 )
 
 
-# Tier 1 — Core intelligence (rate-limited APIs). ALL_DONE: one failure doesn't block others.
+# Tier 1 — Core intelligence (rate-limited APIs).
+#
+# **trigger_rule = ALL_DONE (deliberate, preserved across PR-F4):** each
+# tier-1 collector hits a DIFFERENT external API (CISA's, MITRE's, OTX's,
+# NVD's). When one source's API has a transient outage, the OTHER three
+# should still run — losing 1/4 of a baseline is much better than losing
+# all of it. ALL_DONE is what gives us that multi-source resilience.
+# Do NOT change to ALL_SUCCESS without explicit discussion: that would
+# cascade-skip downstream collectors on any single-source flake.
+#
+# PR-F4 (2026-04-20, Vanko's overnight baseline observation): collectors
+# now run **SEQUENTIALLY** (cisa → mitre → otx → nvd) instead of in
+# parallel. Rationale:
+#
+#   The 2026-04-19 overnight 730-day baseline run hit ~14.7% MISP push
+#   failure rate on NVD (13,620 of 92,620 attributes lost as silent HTTP
+#   500s) when all four tier1 collectors hammered MISP simultaneously.
+#   Bravo's investigation (Slack 2026-04-20 01:09 UTC) traced this to
+#   PHP-FPM worker exhaustion in MISP's AppModel.php under concurrent
+#   write load — symptom is ``Cannot use a scalar value as an array``
+#   warnings + 500s on edit-event calls.
+#
+#   The push-batch chunking (``EDGEGUARD_MISP_PUSH_BATCH_SIZE``, default
+#   500) and inter-batch throttle (``EDGEGUARD_MISP_BATCH_THROTTLE_SEC``,
+#   default 5s) were already in place — they bound per-request size but
+#   not per-event total size, and don't address concurrent writers.
+#
+#   Sequencing tier1 cuts the simultaneous-writer count from 4 → 1
+#   without any MISP server changes (the upstream image is fragile and
+#   not under our control). Trade-off: total runtime grows by ~30-60min
+#   (CISA + MITRE no longer overlap with OTX/NVD), but those small
+#   collectors complete in <1min combined, so the real cost is OTX+NVD
+#   no longer overlapping (~3h+5h = 8h vs. previous max(3h, 5h) = 5h).
+#
+# **Order rationale (cisa → mitre → otx → nvd):** the order is mostly
+# aesthetic — small-first reads more naturally in the Airflow grid view.
+# It does NOT give us automatic fast-fail because the ALL_DONE trigger
+# rule (correctly preserved for multi-source resilience above) means
+# downstream tasks run regardless of upstream success/failure. Operators
+# monitoring a live run can intervene manually if CISA fails fast and
+# the failure looks chain-wide (MISP completely down), but this is an
+# operator-discretion benefit, not a DAG-automatic one. The real value
+# of PR-F4 is halved MISP write concurrency; the order is incidental.
+#
+# **What this DOES NOT fix:** the per-event-grows-with-size cost on a
+# single oversized event (MISP edit-event loads the entire event for
+# dedup; cost grows linearly with existing attribute count). That's the
+# architectural fix tracked separately — event partitioning by date
+# range so no single event exceeds ~20K attributes (Issue #61).
+#
+# Tier2 stays parallel: those 6 feeds are individually tiny (<5K attrs
+# each), don't trigger the failure-mode-2 oversized-event problem, and
+# their parallel write pressure on MISP is negligible vs tier1's heavies.
 with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": TriggerRule.ALL_DONE}) as baseline_tier1:
     bl_otx = PythonOperator(
         task_id="collect_otx",
@@ -2149,6 +2207,15 @@ with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": Tri
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )
+
+    # PR-F4: sequential dependency chain inside the TaskGroup.
+    # cisa (~14s) → mitre (~28s) → otx (~3h) → nvd (~5h). The order is
+    # mostly aesthetic; the real value is halving the MISP write
+    # concurrency that triggered the 14.7% NVD loss. ALL_DONE trigger
+    # rule (set on the TaskGroup default_args above) is preserved so a
+    # single-source API flake doesn't cascade-skip the rest of tier1 —
+    # see the comment block above the TaskGroup for full reasoning.
+    bl_cisa >> bl_mitre >> bl_otx >> bl_nvd
 
 # Tier 2 — Reputation & bulk feeds (parallel after Tier 1).
 # ALL_DONE: Tier 1 tasks have no data dependency on each other; OTX (or NVD) failure must not
@@ -2294,9 +2361,11 @@ baseline_complete = BashOperator(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-# Dependency chain (PR-C audit fix Cross-Checker HIGH H3):
+# Dependency chain (PR-C audit fix Cross-Checker HIGH H3,
+# updated PR-F4 — tier1 is now sequential, see TaskGroup comment above):
 # health → clean (no-op unless fresh_baseline=true conf) → start → tier1
-# (parallel) → tier2 (parallel) → full_sync → build_rels → enrich → done
+# (cisa→mitre→otx→nvd serial) → tier2 (parallel) → full_sync → build_rels
+# → enrich → done
 (
     baseline_misp_health
     >> baseline_clean_task

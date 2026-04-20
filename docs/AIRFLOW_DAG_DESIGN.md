@@ -14,7 +14,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  edgeguard_baseline  (MANUAL TRIGGER ONLY — run once)               │    │
 │  │  misp_health → baseline_start                                        │    │
-│  │    → tier1 [otx, nvd, cisa, mitre] (parallel, limit=unlimited)      │    │
+│  │    → tier1 cisa → mitre → otx → nvd  (SEQUENTIAL, PR-F4)             │    │
 │  │    → tier2 [abuseipdb, threatfox, urlhaus, cybercure,                │    │
 │  │             feodo, sslbl] (parallel)                                 │    │
 │  │    → full_neo4j_sync → build_relationships                           │    │
@@ -90,6 +90,41 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 _Baseline OTX/NVD, `build_relationships`, and `run_enrichment_jobs` were
 bumped from 3h → 5h in 2026-04 after baseline re-runs on the merged
 #20/#22/#24 scope repeatedly hit the 3h ceiling._
+
+### Tier 1 collectors — sequential (PR-F4, 2026-04-20)
+
+The four tier-1 baseline collectors run **sequentially** inside the
+`tier1_core` TaskGroup, in the order **`cisa → mitre → otx → nvd`**. They
+were originally parallel; the change was made after the 2026-04-19
+overnight 730-day baseline run lost ~14.7% of NVD attributes (13,620 of
+92,620) to MISP HTTP 500 errors caused by PHP-FPM worker exhaustion when
+all four collectors hammered MISP simultaneously (`AppModel.php`
+"Cannot use a scalar value as an array" warnings cascading into 5xx
+responses on edit-event calls).
+
+**Order rationale:** the order is mostly aesthetic — small-first
+(CISA ~14s, MITRE ~28s) reads more naturally in the Airflow grid view.
+It does **not** give automatic fast-fail: the TaskGroup keeps its
+`trigger_rule = ALL_DONE` (preserved from the parallel design) so a
+single-source API flake doesn't cascade-skip the rest of tier-1 — losing
+1/4 of a baseline is much better than losing all of it. The real value
+of PR-F4 is **halved MISP write concurrency**, which is independent of
+the collector ordering.
+
+**Trade-off:** total tier-1 wall time grows from `max(otx, nvd) ≈ 5h` to
+`cisa + mitre + otx + nvd ≈ 8h`. The ~3h cost buys halved MISP write
+concurrency without any MISP server changes.
+
+**What this DOES NOT fix:** the per-event-grows-with-size cost on a
+single oversized event (MISP `edit-event` loads the entire event for
+dedup; cost grows linearly with existing attribute count). That's an
+architectural fix tracked separately — see [Issue #61](../../issues/61)
+for event partitioning by date range so no single event exceeds
+~20K attributes.
+
+**Tier 2 stays parallel** — the 6 reputation feeds are individually tiny
+(<5K attrs each), don't trigger the oversized-event failure mode, and
+their parallel write pressure on MISP is negligible compared to OTX/NVD.
 
 ---
 

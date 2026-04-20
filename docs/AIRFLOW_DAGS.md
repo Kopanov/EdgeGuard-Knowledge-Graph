@@ -180,6 +180,14 @@ the `dag_run.conf` JSON when triggered:
 
 **Task chain:** `baseline_misp_health` → `baseline_clean` (no-op or wipe) → `baseline_start` → `tier1_core` → `tier2_extended` → `tier3_low_freq` → `baseline_full_neo4j_sync` → `baseline_build_relationships` → `baseline_enrichment` → `baseline_complete`.
 
+> **Note (PR-F4, 2026-04-20):** the four tier-1 collectors inside
+> `tier1_core` run **sequentially** (`cisa → mitre → otx → nvd`),
+> not in parallel. This was changed after the 2026-04-19 overnight
+> baseline run lost ~14.7% of NVD attributes to MISP HTTP 500s under
+> concurrent-write pressure. See [AIRFLOW_DAG_DESIGN.md § Tier 1 collectors — sequential](AIRFLOW_DAG_DESIGN.md#tier-1-collectors--sequential-pr-f4-2026-04-20)
+> for the full rationale + trade-off (~3h longer wall time, halved
+> MISP write concurrency). Tier 2 stays parallel.
+
 **`baseline_clean` task semantics (introduced in PR-C):**
 
 - Reads `dag_run.conf.fresh_baseline`. Accepts Python `True`, integer `1`, or strings `"true"`/`"True"`/`"1"`/`"yes"`/`"on"` (case- and whitespace-insensitive). Anything else (including the explicit-falsy strings `"false"`/`"0"`) is treated as additive — a typo in the JSON config does NOT trigger destruction.
