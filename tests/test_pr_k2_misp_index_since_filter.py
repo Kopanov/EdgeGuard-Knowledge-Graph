@@ -220,9 +220,26 @@ class TestSourcePinTimestampParam:
         carried the ``timestamp = int(since.timestamp())`` convention
         BEFORE PR-K2. The audit's fix brings the index path into
         parity. If a future refactor breaks the fallback paths, the
-        whole convention is shaky; pin against it."""
-        # Both fallback paths set ``timestamp`` from int(since.timestamp())
-        assert source.count('"timestamp"] = int(since.timestamp())') >= 1, (
-            "fallback paths in the same module must continue using int(since.timestamp()) "
-            "for the timestamp param — convention shared with PR-K2's index-path fix"
+        whole convention is shaky; pin against it.
+
+        PR-K2 Bugbot round-1 (Low): the original ``>= 1`` threshold
+        was always satisfied because the NEW index-path fix itself
+        matches the pattern — so the test passed even if BOTH
+        fallbacks were deleted, defeating the stated purpose. Scope
+        the grep to EXCLUDE the index-path function body so only the
+        fallback matches count, then require ``>= 2`` (one for
+        PyMISP, one for restSearch)."""
+        # Carve out the index-path function so its occurrence of the
+        # pattern doesn't contribute to the count.
+        index_start = source.find("def _fetch_edgeguard_events_via_requests_index")
+        index_end = source.find("\ndef ", index_start + 1)
+        assert index_start > 0 and index_end > index_start, (
+            "could not bracket _fetch_edgeguard_events_via_requests_index — "
+            "refactor may have split or renamed the function; update this carve-out."
+        )
+        source_excluding_index_path = source[:index_start] + source[index_end:]
+        assert source_excluding_index_path.count('"timestamp"] = int(since.timestamp())') >= 2, (
+            "both fallback paths (PyMISP + restSearch) must continue using int(since.timestamp()) "
+            "for the timestamp param. Counted matches OUTSIDE the new index-path function body, "
+            "so the test can't be vacuously satisfied by the fix it's supposed to guard."
         )
