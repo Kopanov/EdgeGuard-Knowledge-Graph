@@ -207,13 +207,22 @@ class TestCliDagParity:
         return inspect.getsource(run_pipeline.EdgeGuardPipeline._run_pipeline_inner)
 
     def test_cli_baseline_invokes_build_relationships(self):
-        # CLI baseline path must call build_relationships.py via subprocess
+        # CLI baseline path must call build_relationships.py as a subprocess
         # (matches the DAG's invocation shape — same script, same timeout).
         src = self._pipeline_inner_source()
         # Gated on `if baseline:` to avoid surprising incremental runs
         assert "build_relationships.py" in src
-        # Subprocess invocation (matches the DAG's run_build_relationships shape)
-        assert "subprocess.run" in src
+        # Subprocess invocation must be present. PR-K3 §1-4 (2026-04-20
+        # flow audit) replaced the old ``subprocess.run(capture_output=True)``
+        # — which buffered 5h of stdout in parent memory — with
+        # ``run_with_streaming_output()`` from ``src/subprocess_streaming.py``
+        # (which wraps ``subprocess.Popen`` with line-by-line draining).
+        # Either form satisfies the "is invoked as a subprocess" contract
+        # this test pins.
+        assert "subprocess.run" in src or "run_with_streaming_output" in src, (
+            "CLI baseline must invoke build_relationships.py as a subprocess "
+            "(either subprocess.run directly or via run_with_streaming_output helper)"
+        )
 
     def test_cli_baseline_invokes_run_all_enrichment_jobs(self):
         # CLI baseline path must call enrichment_jobs.run_all_enrichment_jobs

@@ -1542,56 +1542,75 @@ class EdgeGuardPipeline:
         if baseline:
             # Step 5b: build_relationships (12 cross-entity link queries).
             # Subprocess-isolated to match the DAG's invocation shape.
+            #
+            # PR-K3 §1-4: use the streaming helper so the child's 5-hour
+            # output is logged line-by-line as it arrives instead of
+            # buffered in parent memory until exit. Same OOM concern
+            # as on the DAG side — the old ``capture_output=True`` path
+            # accumulated tens of MB of log text across the 12 APOC
+            # queries. The helper caps memory at
+            # ``DEFAULT_TAIL_LINES`` (200 lines retained for
+            # error-context) and enforces the 5h timeout with a
+            # SIGTERM-then-SIGKILL escalation so APOC transactions
+            # get a chance to roll back cleanly.
             logger.info("\n[TARGET] Step 5b: build_relationships (CLI parity with DAG)...")
             try:
-                import subprocess
-
-                br_result = subprocess.run(
-                    [sys.executable, os.path.join(os.path.dirname(__file__), "build_relationships.py")],
-                    capture_output=True,
-                    text=True,
-                    timeout=18000,  # 5h, matches DAG's run_build_relationships
-                    check=False,
+                from subprocess_streaming import (
+                    SubprocessStreamTimeout,
+                    run_with_streaming_output,
                 )
-                if br_result.returncode == 0:
+
+                br_returncode, br_tail = run_with_streaming_output(
+                    [sys.executable, os.path.join(os.path.dirname(__file__), "build_relationships.py")],
+                    timeout=18000,  # 5h, matches DAG's run_build_relationships
+                    child_logger=logger,
+                    line_prefix="[build_relationships] ",
+                )
+                if br_returncode == 0:
                     logger.info("   [OK] build_relationships complete")
                 else:
                     # PR-C v2 audit fix (Cross-Checker B2, comprehensive
                     # 7-agent audit): the previous comment claimed "same
                     # behavior as the DAG", but the DAG actually raises
                     # ``AirflowException`` on non-zero exit (see
-                    # ``dags/edgeguard_pipeline.py``: ``run_build_relationships``
-                    # at lines 1618-1633). The CLI deliberately diverges —
-                    # local operators want a "degraded-mode finish" rather
-                    # than a hard abort that loses Step 5c enrichment too.
-                    # Acknowledge the asymmetry explicitly so the parity
-                    # claim isn't a lie.
+                    # ``dags/edgeguard_pipeline.py``: ``run_build_relationships``).
+                    # The CLI deliberately diverges — local operators
+                    # want a "degraded-mode finish" rather than a hard
+                    # abort that loses Step 5c enrichment too.
                     #
-                    # Operator hint: the graph edges from build_relationships
-                    # (12 link queries: IMPLEMENTS_TECHNIQUE, TARGETS,
-                    # AFFECTS, ...) will be MISSING. Re-run
-                    # ``python src/build_relationships.py`` standalone to
-                    # complete the graph.
-                    # Production-test audit fix (Devil's Advocate + Maintainer
-                    # corroborated, post-PR-C-merge): emit structured log with
-                    # ``extra={"degraded": True}`` instead of setting an
-                    # instance-attribute marker that no caller actually read.
-                    # The previous ``self._build_relationships_degraded`` attr
-                    # was write-only — only test-framework grep referenced it,
-                    # zero production callers. Structured logs are cloud-
-                    # portable (Datadog/CloudWatch/etc. can route on the
-                    # ``degraded`` extra field), the attribute was not.
+                    # Operator hint: the graph edges from
+                    # build_relationships (12 link queries:
+                    # IMPLEMENTS_TECHNIQUE, TARGETS, AFFECTS, ...) will
+                    # be MISSING. Re-run ``python src/build_relationships.py``
+                    # standalone to complete the graph.
+                    #
+                    # Structured log with ``extra={"degraded": True}`` is
+                    # cloud-portable (Datadog/CloudWatch/etc. can route
+                    # on the ``degraded`` extra field).
+                    #
+                    # PR-K3: ``br_tail`` is the pre-bounded deque of the
+                    # last 200 lines streamed (already logged line-by-line
+                    # above). Joining the last ~10 gives the operator
+                    # enough context in the summary log without a second
+                    # full-stderr dump.
+                    tail_context = "\n".join(br_tail[-10:]) if br_tail else "(no output captured)"
                     logger.warning(
                         "   [WARN] build_relationships exited with code %d. "
                         "Graph is in DEGRADED MODE (link edges missing). "
                         "DAG would have raised AirflowException; CLI continues "
                         "to allow Step 5c enrichment to run. "
                         "Re-run ``python src/build_relationships.py`` standalone to repair. "
-                        "stderr (last 500 chars): %s",
-                        br_result.returncode,
-                        (br_result.stderr or "")[-500:],
+                        "Last 10 lines:\n%s",
+                        br_returncode,
+                        tail_context,
                         extra={"degraded": True, "step": "build_relationships"},
                     )
+            except SubprocessStreamTimeout as e:
+                logger.warning(
+                    "   [WARN] build_relationships timed out: %s. Graph in DEGRADED MODE.",
+                    e,
+                    extra={"degraded": True, "step": "build_relationships"},
+                )
             except Exception as e:
                 logger.warning(
                     "   [WARN] build_relationships skipped: %s",
