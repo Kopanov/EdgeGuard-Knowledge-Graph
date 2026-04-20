@@ -412,8 +412,43 @@ class OTXCollector:
                 pulse_tlp = pulse.get("TLP", "")
                 pulse_description = pulse.get("description", "")
 
-                # Filter by each sector's date range (use the widest among matched zones)
-                pulse_created = pulse.get("created", "")
+                # PR-M2 §4-F5: read the source's pulse-level timestamps
+                # ONCE at the top of the per-pulse block and use them for
+                # BOTH the date-filter pass below AND the per-indicator
+                # ``first_seen`` / ``last_seen`` propagation further down.
+                # Bugbot caught (PR-M2 round 1, LOW): the previous code
+                # assigned ``pulse_created = pulse.get("created", "")``
+                # for filtering, then later reassigned
+                # ``pulse_created = pulse.get("created")`` (None default)
+                # for honest-NULL propagation — same name, two semantics,
+                # latent breakage if a future edit moved one assignment.
+                # Single source of truth eliminates the shadowing risk:
+                # ``""`` and ``None`` are both falsy so the ``if
+                # pulse_created:`` filter check works either way, and
+                # downstream honest-NULL gating (``if indicator_first_seen``)
+                # treats ``""`` as "absent" too.
+                #
+                # OTX is intentionally NOT on ``_RELIABLE_FIRST_SEEN_SOURCES``
+                # so the read-side ``extract_source_truthful_timestamps``
+                # correctly ignores OTX's claim. BUT the MISP attribute
+                # itself still carries whatever we put here, so non-EdgeGuard
+                # consumers (ResilMesh, SIEM bridges) reading MISP directly
+                # will see this value as the source's claim.
+                #
+                # Honest-NULL pattern (mirrors AbuseIPDB blacklist): omit
+                # ``first_seen`` when the source field is absent rather
+                # than substituting wall-clock NOW. Per-indicator
+                # ``ind.get("created")`` overrides the pulse-level
+                # ``pulse.get("created")`` when present (OTX returns
+                # per-indicator timestamps for some pulse types).
+                # Concept 1 in docs/TIMESTAMPS.md.
+                pulse_created = pulse.get("created")  # may be None or "" — honest NULL
+                pulse_modified = pulse.get("modified")
+
+                # Filter by each sector's date range (use the widest among
+                # matched zones).  ``pulse_created`` is the source value
+                # read above; ``if pulse_created:`` rejects both None and
+                # empty-string in one check.
                 if pulse_created:
                     try:
                         pulse_date = datetime.fromisoformat(pulse_created.replace("Z", "+00:00"))
@@ -438,24 +473,6 @@ class OTXCollector:
                     "targeted_countries": pulse_targeted_countries,
                     "otx_industries": otx_industries,
                 }
-
-                # PR-M2 §4-F5 (HIGH): per-indicator first_seen / last_seen.
-                # OTX is intentionally NOT on ``_RELIABLE_FIRST_SEEN_SOURCES``
-                # so the read-side ``extract_source_truthful_timestamps``
-                # correctly ignores OTX's claim. BUT the MISP attribute
-                # itself still carries whatever we put here, so non-EdgeGuard
-                # consumers (ResilMesh, SIEM bridges) reading MISP directly
-                # will see this value as the source's claim.
-                #
-                # Honest-NULL pattern (mirrors AbuseIPDB blacklist): omit
-                # ``first_seen`` when the source field is absent rather
-                # than substituting wall-clock NOW. Per-indicator
-                # ``ind.get("created")`` overrides the pulse-level
-                # ``pulse.get("created")`` when present (OTX returns
-                # per-indicator timestamps for some pulse types).
-                # Concept 1 in docs/TIMESTAMPS.md.
-                pulse_created = pulse.get("created")  # may be None — honest NULL
-                pulse_modified = pulse.get("modified")
                 # Extract indicators - one entry per indicator (zone holds all matched sectors)
                 indicators = pulse.get("indicators", [])
                 for ind in indicators:
