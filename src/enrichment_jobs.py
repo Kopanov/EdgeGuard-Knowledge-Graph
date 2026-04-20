@@ -88,22 +88,57 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
                     RETURN count(n) AS affected
                     """
                     desc = f"{label} retired (>{min_days}d)"
+                    # Retire path is idempotent via the ``n.active = true``
+                    # guard in WHERE — already-retired nodes skip. No
+                    # ``last_decayed_tier`` gating needed here.
+                    params = {"min_days": min_days, "max_days": max_days, "mult": multiplier}
                 else:
+                    # PR-M3b §8-RI-S4-Decay: gate by ``last_decayed_tier`` so
+                    # the multiplicative decay fires AT MOST ONCE per tier
+                    # transition per node.  The prior query had no idempotency
+                    # marker: every enrichment run matched the same nodes in
+                    # the same tier and re-applied the multiplier, so a
+                    # node sitting in the 180-365d tier for 100 daily runs
+                    # got ``confidence × 0.70^100`` ≈ 0 (floored at 0.10)
+                    # within ~7 runs.  All indicators in the tier collapsed
+                    # to the 0.10 floor long before aging out — losing all
+                    # discriminatory power for filtering / ranking.
+                    #
+                    # Fix: each tier gets a unique label (``"<min>-<max>"``
+                    # format, stable across runs) stored on the node as
+                    # ``n.last_decayed_tier``. The WHERE clause excludes
+                    # nodes already decayed at this tier; the SET clause
+                    # updates the marker so the next run is a no-op.  When
+                    # a node AGES INTO the next tier, ``last_decayed_tier``
+                    # differs from the new tier label → decay fires once
+                    # for the new tier and updates the marker.  Net: each
+                    # node sees at most one decay application per tier
+                    # boundary crossed, matching the semantic intent
+                    # documented in the function docstring.
                     cypher = f"""
                     MATCH (n:{label})
                     WHERE n.last_updated IS NOT NULL
                       AND n.confidence_score IS NOT NULL
                       AND duration.between(n.last_updated, datetime()).days >= $min_days
                       AND duration.between(n.last_updated, datetime()).days < $max_days
+                      AND (n.last_decayed_tier IS NULL OR n.last_decayed_tier <> $tier_label)
                     SET n.confidence_score = CASE
                             WHEN n.confidence_score * $mult < 0.10 THEN 0.10
                             ELSE round(n.confidence_score * $mult * 100) / 100
-                        END
+                        END,
+                        n.last_decayed_tier = $tier_label,
+                        n.last_decayed_at = datetime()
                     RETURN count(n) AS affected
                     """
                     desc = f"{label} decayed ({min_days}–{max_days}d, ×{multiplier})"
+                    tier_label = f"{label.lower()}-{min_days}-{max_days}"
+                    params = {
+                        "min_days": min_days,
+                        "max_days": max_days,
+                        "mult": multiplier,
+                        "tier_label": tier_label,
+                    }
 
-                params = {"min_days": min_days, "max_days": max_days, "mult": multiplier}
                 result = session.run(cypher, timeout=NEO4J_READ_TIMEOUT, **params)
                 record = result.single()
                 count = record["affected"] if record else 0
