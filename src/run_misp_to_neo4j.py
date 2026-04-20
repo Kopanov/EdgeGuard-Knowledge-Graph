@@ -1528,12 +1528,25 @@ class MISPToNeo4jSync:
             # Check if this is a MITRE tactic (format: "TA0001: Initial Access")
             #
             # PR-G1 Bug Hunter audit (HIGH): same three defects as the tool
-            # branch above. STIX 2.1 has no first-class ``tactic`` SDO —
-            # MITRE tactics are most commonly modelled as ``x-mitre-tactic``
-            # (ATT&CK's own custom type) but for maximum consumer compat
-            # we emit an ``attack-pattern`` SDO (mirroring the technique
-            # branch) and mark the MITRE kind under ``x_edgeguard_mitre_kind``
-            # so downstream code that cares can distinguish.
+            # branch above.
+            #
+            # PR-G1 Bugbot round-2 (Medium): initial rewrite used
+            # ``"type": "attack-pattern"`` for tactics — which turned out
+            # to be strictly worse than the prior broken state:
+            # ``run_pipeline.py::load_stix21_to_neo4j`` (line ~567) routes
+            # ALL ``attack-pattern`` objects to ``merge_technique()`` and
+            # handles tactics only under ``"x-mitre-tactic"`` (line ~592).
+            # So the "fix" silently created Technique nodes from Tactic
+            # data (previously tactics were silently dropped because the
+            # non-standard ``"type": "tactic"`` matched no consumer
+            # branch). Misclassification beats silent drop.
+            #
+            # The correct type is MITRE ATT&CK's own custom type
+            # ``x-mitre-tactic`` (STIX 2.1 §3.6 custom-object convention),
+            # which the consumer already handles correctly. The
+            # ``x_edgeguard_mitre_kind`` marker stays as a secondary
+            # disambiguator for any code that cares, but the type alone
+            # is now authoritative.
             tactic_match = re.match(r"^(TA\d{4}):\s*(.+)$", value)
             if tactic_match:
                 tactic_id = tactic_match.group(1)
@@ -1546,9 +1559,9 @@ class MISPToNeo4jSync:
                     }
                 ]
                 stix_obj = {
-                    "type": "attack-pattern",
+                    "type": "x-mitre-tactic",
                     "spec_version": "2.1",
-                    "id": f"attack-pattern--{attr_uuid}",
+                    "id": f"x-mitre-tactic--{attr_uuid}",
                     "name": tactic_name,
                     "description": attr.get("comment", ""),
                     "external_references": tactic_external_refs,

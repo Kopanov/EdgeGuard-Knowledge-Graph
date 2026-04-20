@@ -535,11 +535,23 @@ class NVDCollector:
                 # resume. Read ``current_page`` to match the writer, and fall
                 # back to ``max(pages)`` for extra robustness if the schema
                 # ever diverges.
-                total_batches_done = int(
-                    checkpoint.get("current_page")
-                    or (max(checkpoint.get("pages") or [0]) if checkpoint.get("pages") else 0)
-                    or 0
-                )
+                #
+                # PR-G1 Bugbot round-2 (Low): a fresh baseline run AFTER a
+                # previously-completed one must start the counter at 0, not
+                # at the prior run's final value. The resume-detection
+                # branch below is skipped when ``completed=True``, so we
+                # have to reset explicitly here.  The old formula naturally
+                # reset because it recomputed from loop variables; the
+                # monotonic counter needs the operator-facing invariant
+                # made explicit.
+                if checkpoint.get("completed"):
+                    total_batches_done = 0
+                else:
+                    total_batches_done = int(
+                        checkpoint.get("current_page")
+                        or (max(checkpoint.get("pages") or [0]) if checkpoint.get("pages") else 0)
+                        or 0
+                    )
                 if not checkpoint.get("completed") and checkpoint.get("nvd_window_idx") is not None:
                     start_wi = int(checkpoint["nvd_window_idx"])
                     resume_index = int(checkpoint.get("nvd_start_index", 0))

@@ -148,19 +148,30 @@ class TestStixMitreToolTacticRewrite:
         assert '"external_references"' in tool_block
         assert "mitre-attack" in tool_block
 
-    def test_tactic_branch_returns_valid_stix21_sdo(self, source: str) -> None:
-        """Tactic branch MUST emit an ``attack-pattern`` SDO with
-        ``spec_version`` + ``id`` + ``external_references`` (STIX 2.1
-        has no first-class tactic SDO, so we use ``attack-pattern`` and
-        mark the kind under ``x_edgeguard_mitre_kind``)."""
+    def test_tactic_branch_uses_x_mitre_tactic_not_attack_pattern(self, source: str) -> None:
+        """Bugbot round-2 catch: MITRE tactics MUST be emitted as the
+        ``x-mitre-tactic`` custom type (MITRE ATT&CK STIX extension),
+        not as ``attack-pattern``.
+
+        Why: ``run_pipeline.py::load_stix21_to_neo4j`` routes ALL
+        ``attack-pattern`` objects to ``merge_technique()`` (line ~567)
+        and handles tactics only under ``"x-mitre-tactic"`` (line ~592).
+        If tactics land with type ``attack-pattern``, they get CREATED
+        AS TECHNIQUES — strictly worse than the prior "silently
+        dropped" state."""
         tactic_idx = source.find("if tactic_match:")
         assert tactic_idx > 0
-        # End of block is the next elif/else/return None at function scope
-        # — grab a reasonable window.
         tactic_block = source[tactic_idx : tactic_idx + 2000]
-        assert '"type": "attack-pattern"' in tactic_block
+        # Correct type + id prefix
+        assert '"type": "x-mitre-tactic"' in tactic_block
+        assert '"id": f"x-mitre-tactic--{attr_uuid}"' in tactic_block
+        # Wrong type must not resurface
+        assert '"type": "attack-pattern"' not in tactic_block, (
+            "tactics must NOT be emitted as attack-pattern — the consumer routes that type to merge_technique()"
+        )
+        assert '"id": f"attack-pattern--{attr_uuid}"' not in tactic_block
+        # Common structural requirements
         assert '"spec_version": "2.1"' in tactic_block
-        assert '"id": f"attack-pattern--{attr_uuid}"' in tactic_block
         assert '"x_edgeguard_mitre_kind": "tactic"' in tactic_block
 
     def test_tool_branch_uses_x_edgeguard_for_edgeguard_specific_fields(self, source: str) -> None:
@@ -249,7 +260,11 @@ class TestStixAttributeConversionDoesNotCrash:
 
     def test_tactic_with_empty_tags_returns_valid_stix(self) -> None:
         """Tactic branch was identically broken. Same NameError trigger,
-        same KeyError-on-caller."""
+        same KeyError-on-caller.
+
+        Bugbot round-2 catch: tactics MUST use STIX type
+        ``x-mitre-tactic`` — NOT ``attack-pattern``. The consumer's
+        routing for ``attack-pattern`` goes to ``merge_technique``."""
         syncer = self._make_syncer()
         attr = {
             "type": "text",
@@ -260,12 +275,73 @@ class TestStixAttributeConversionDoesNotCrash:
         }
         result = syncer._attribute_to_stix21(attr, "event-uuid-xyz", event_zones=["global"])
         assert result is not None
-        assert result["type"] == "attack-pattern"
+        assert result["type"] == "x-mitre-tactic"
         assert result["spec_version"] == "2.1"
-        assert result["id"] == "attack-pattern--22222222-2222-2222-2222-222222222222"
+        assert result["id"] == "x-mitre-tactic--22222222-2222-2222-2222-222222222222"
         assert result.get("x_edgeguard_mitre_kind") == "tactic"
         refs = result.get("external_references") or []
         assert any(r.get("external_id") == "TA0001" and r.get("source_name") == "mitre-attack" for r in refs)
+
+    def test_tactic_type_matches_consumer_routing_contract(self) -> None:
+        """Cross-file contract check: the type we emit for tactics in
+        ``_attribute_to_stix21`` MUST match the type the consumer in
+        ``run_pipeline.py::load_stix21_to_neo4j`` routes to
+        ``merge_tactic()``.
+
+        This test guards against a regression like the one Bugbot
+        caught: emitting a type that the consumer routes elsewhere
+        (attack-pattern → merge_technique) silently misclassifies
+        data in Neo4j. The contract is: tactics go through
+        ``x-mitre-tactic``. Period."""
+        syncer = self._make_syncer()
+        attr = {
+            "type": "text",
+            "value": "TA0003: Persistence",
+            "uuid": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "Tag": [],
+            "comment": "",
+        }
+        result = syncer._attribute_to_stix21(attr, "event-uuid", event_zones=[])
+        assert result is not None
+
+        # Read the consumer's routing rules from the source.  Note:
+        # run_pipeline.py has two dispatches on ``obj_type ==
+        # "x-mitre-tactic"`` — an upstream id-map populator and the
+        # actual neo4j merger call.  We only need to know that SOME
+        # branch (a) exists for the type we emit, and (b) routes to
+        # ``merge_tactic`` somewhere — not ``merge_technique``.
+        pipeline_src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
+        assert f'elif obj_type == "{result["type"]}":' in pipeline_src, (
+            f"Tactic type '{result['type']}' has no corresponding branch "
+            f"in run_pipeline.py — emitter and consumer are out of sync. "
+            f"See Bugbot round-2 finding on PR-G1 for why this matters."
+        )
+        # Find EVERY dispatch block for our type and confirm at least
+        # one routes to ``merge_tactic``.  A strict contract: none may
+        # route to ``merge_technique``.
+        type_str = result["type"]
+        dispatch_pattern = f'elif obj_type == "{type_str}":'
+        blocks = []
+        start = 0
+        while True:
+            idx = pipeline_src.find(dispatch_pattern, start)
+            if idx < 0:
+                break
+            # Slice until the next ``elif obj_type ==`` to bound this
+            # dispatch's body.
+            end = pipeline_src.find("elif obj_type ==", idx + len(dispatch_pattern))
+            if end < 0:
+                end = idx + 2000  # tail of function; reasonable cap
+            blocks.append(pipeline_src[idx:end])
+            start = end
+        assert blocks, f"no dispatch blocks for '{type_str}' found"
+        assert any("merge_tactic(" in b for b in blocks), (
+            f"no dispatch for '{type_str}' routes to merge_tactic(); tactics may be silently misrouted"
+        )
+        assert not any("merge_technique(" in b for b in blocks), (
+            f"a dispatch for '{type_str}' routes to merge_technique() — "
+            f"this is the exact misrouting bug Bugbot round-2 caught"
+        )
 
     def test_tool_with_mitre_uses_techniques_comment_parses(self) -> None:
         """The MITRE_USES_TECHNIQUES comment format must still parse,
@@ -341,6 +417,25 @@ class TestNvdCheckpointPageMath:
             'the original broken seed pinned ``.get("page", 0)`` which '
             "always returned 0 because the writer persists under "
             "``current_page`` — Bugbot caught this; don't let it regress"
+        )
+
+    def test_counter_resets_to_zero_on_completed_checkpoint(self, source: str) -> None:
+        """Bugbot round-2 catch: a fresh baseline run AFTER a previously
+        completed one MUST start the counter at 0, not at the prior
+        run's final value.  The seed expression reads ``current_page``
+        unconditionally, and the resume-detection block only runs when
+        ``completed=False``, so the reset for completed checkpoints has
+        to be explicit.
+
+        Source-pin: verify the explicit guard is present."""
+        assert 'if checkpoint.get("completed"):' in source
+        # And the guard's body must reset to 0 (not to the seeded value).
+        # Find the completed-branch and assert the reset is there.
+        idx = source.find('if checkpoint.get("completed"):')
+        assert idx > 0
+        branch = source[idx : idx + 200]
+        assert "total_batches_done = 0" in branch, (
+            "completed-checkpoint branch must explicitly reset the counter to 0 for fresh baseline runs"
         )
 
     def test_seed_recovers_persisted_page_end_to_end(self, tmp_path, monkeypatch) -> None:
