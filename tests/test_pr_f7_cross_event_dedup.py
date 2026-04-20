@@ -193,6 +193,87 @@ class TestCrossEventPrefetchHelper:
         # Must not raise; must return empty set
         assert MISPWriter._get_existing_source_attribute_keys(w, "source:nvd") == set()
 
+    def test_degrades_to_empty_on_transient_connection_error(self, monkeypatch, caplog):
+        """**Critical regression pin** — multi-agent audit (Logic Tracker
+        HIGH, Devil's Advocate HIGH, Bug Hunter HIGH) found that the
+        ORIGINAL PR-F7 re-raised ``_TRANSIENT_HTTP_ERRORS`` from this
+        helper, contradicting the docstring's "degrades cleanly" promise.
+        ``push_items`` had no retry/catch around the call, so the
+        exception propagated to the collector → catastrophic → entire
+        NVD baseline (~92K attrs) lost on ANY MISP transient 5xx during
+        prefetch. The SAME pressure MISP experiences that PR-F4/F7 were
+        addressing is what makes prefetch itself transiently fail —
+        re-raising amplified the incident, not mitigated it.
+
+        Fix: helper now WARN-logs + returns empty set on transient
+        errors, same shape as non-transient errors. Per-event dedup
+        still runs; collector proceeds; no half-write.
+
+        Pin: ConnectionError / Timeout / ReadTimeout / ChunkedEncodingError
+        all return ``set()``, not raise.
+        """
+        import logging
+
+        import requests
+
+        from collectors.misp_writer import MISPWriter
+
+        monkeypatch.setattr("collectors.misp_writer.MISP_PREFETCH_EXISTING_ATTRS", True)
+        monkeypatch.setattr("collectors.misp_writer.MISP_CROSS_EVENT_DEDUP", True)
+
+        for exc_cls in (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout,
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ChunkedEncodingError,
+        ):
+            w = _make_writer_skipping_init()
+            w.session.post = MagicMock(side_effect=exc_cls("simulated outage"))
+
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                # Must NOT raise — critical contract after the fix
+                result = MISPWriter._get_existing_source_attribute_keys(w, "source:nvd")
+
+            assert result == set(), f"transient {exc_cls.__name__} should return empty set, got {result!r}"
+            # Must leave a WARN log so operators can grep for the degradation
+            msg = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+            assert "transient error" in msg.lower() or "degrading" in msg.lower(), (
+                f"transient error must emit a WARN log (got records: {[r.message for r in caplog.records]})"
+            )
+
+    def test_source_rerasie_audit_pin_no_raise_from_helper(self):
+        """Source-pin against regression: the helper must NOT contain
+        a bare ``raise`` in the ``except _TRANSIENT_HTTP_ERRORS`` branch.
+        The audit's top blocker (B1) was exactly this pattern. Pin it
+        so a future refactor can't silently reinstate."""
+        with open("src/collectors/misp_writer.py") as fh:
+            src = fh.read()
+        helper_idx = src.find("def _get_existing_source_attribute_keys(")
+        assert helper_idx > 0
+        helper_end = src.find("\n    def ", helper_idx + 1)
+        body = src[helper_idx:helper_end]
+        # Find the transient except clause
+        tex_idx = body.find("except _TRANSIENT_HTTP_ERRORS")
+        assert tex_idx > 0, "helper must keep a transient-error except branch"
+        # Look at the block — the next ~20 lines should contain `return set()`, NOT `raise`
+        tex_block = body[tex_idx : tex_idx + 2000]
+        # The block before the next `except` or `if response.status_code`
+        next_except = tex_block.find("\n            except ", 1)
+        if next_except > 0:
+            tex_block = tex_block[:next_except]
+        assert "return set()" in tex_block, "transient except branch MUST return set() (fail-OPEN) — audit B1 fix"
+        # Defensive: reject a bare `raise` ending the transient branch
+        # (allow `raise SomeSpecificException(...)` though nothing in
+        # this branch should do that either).
+        lines = tex_block.splitlines()
+        bare_raises = [line for line in lines if line.strip() == "raise"]
+        assert not bare_raises, (
+            "transient except branch MUST NOT contain a bare `raise` — "
+            "audit finding B1 (multi-agent consensus): push_items has no "
+            "retry decorator, so re-raising causes catastrophic collector abort"
+        )
+
     def test_degrades_to_empty_on_non_json_response(self, monkeypatch):
         monkeypatch.setattr("collectors.misp_writer.MISP_PREFETCH_EXISTING_ATTRS", True)
         monkeypatch.setattr("collectors.misp_writer.MISP_CROSS_EVENT_DEDUP", True)
@@ -304,6 +385,36 @@ class TestPushItemsIntegration:
         end = src.find("\n    def ", idx + 1)
         body = src[idx:end]
         assert "cross_event_cache" in body, "push_items must cache cross-event prefetch per source within a call"
+
+    def test_push_items_cache_keyed_by_source_tag_not_raw_source(self):
+        """Multi-agent audit (Bug Hunter, Maintainer): the cache was
+        originally keyed by raw ``source`` (the item's ``tag`` field).
+        Two sources can share a resolved MISP tag via the registry's
+        alias map (e.g., ``cisa`` and ``cisa_kev`` both map to
+        ``source:CISA-KEV``). Raw-source keying → double prefetch of
+        the same tag set (~30-40s wasted) + race window where the
+        second prefetch can observe writes from the first.
+
+        Fix: cache MUST key by the resolved ``source_tag`` string so
+        aliases collapse to one cache entry. Source-pin it so a future
+        refactor can't silently revert."""
+        with open("src/collectors/misp_writer.py") as fh:
+            src = fh.read()
+        idx = src.find("def push_items(")
+        assert idx > 0
+        end = src.find("\n    def ", idx + 1)
+        body = src[idx:end]
+        # The cache-lookup pattern MUST use source_tag (the resolved tag)
+        # as the cache key, NOT the raw ``source`` variable.
+        assert "cross_event_cache[source_tag]" in body, (
+            "cross_event_cache MUST be keyed by source_tag (resolved MISP tag) — "
+            "keying by raw source double-fetches alias pairs"
+        )
+        # Defensive: reject the old pattern that keyed by raw source
+        assert "cross_event_cache[source]" not in body, (
+            "cache-key regression: push_items uses cross_event_cache[source] "
+            "instead of cross_event_cache[source_tag] — breaks alias collapsing"
+        )
 
     def test_push_items_resolves_source_tag_via_registry(self):
         """The source tag must come from ``self.SOURCE_TAGS`` (the

@@ -424,11 +424,35 @@ class MISPWriter:
                     verify=self.verify_ssl,
                     timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2),
                 )
-            except _TRANSIENT_HTTP_ERRORS:
-                # Bubble transient errors so the @retry_with_backoff
-                # higher up the stack can retry; never silently swallow
-                # what looks like an MISP outage.
-                raise
+            except _TRANSIENT_HTTP_ERRORS as ex:
+                # PR-F7 Bugbot round-3 / multi-agent audit (Logic Tracker HIGH,
+                # Devil's Advocate HIGH, Bug Hunter HIGH): previously this
+                # branch re-raised transient errors with a comment claiming
+                # "@retry_with_backoff higher up the stack can retry". That
+                # was WRONG — ``push_items`` has no retry decorator around
+                # this call, and the exception propagated → collector
+                # ``except Exception`` → catastrophic classification →
+                # [CRITICAL] HARD-FAILED alert + entire NVD batch (~92K
+                # attrs) lost. Worse: the failure mode this helper was
+                # meant to catch (MISP HTTP 500s under load) is the SAME
+                # condition that makes the prefetch itself transiently
+                # fail, so re-raising directly amplified the incident.
+                #
+                # The docstring promises "degrades cleanly to per-event
+                # dedup; no harm." Deliver on that: log at WARN (so
+                # operators notice the prefetch skipped), return an
+                # empty set (so per-event dedup still runs), never
+                # bubble. Same contract as the generic Exception branch
+                # below — kept separate only so transient errors get a
+                # distinct log marker for grepping.
+                logger.warning(
+                    "MISP cross-event prefetch transient error for tag=%s page=%s: %s — "
+                    "degrading to per-event dedup only (PR-F7: fail-OPEN, no collector abort)",
+                    tag,
+                    page,
+                    ex,
+                )
+                return set()
             except Exception as ex:
                 logger.warning(
                     "MISP cross-event prefetch failed for tag=%s page=%s: %s — degrading to per-event dedup only",
@@ -1418,10 +1442,17 @@ class MISPWriter:
             # so the per-event + cross-event counts always add up to
             # ``skipped_ct``.
             per_event_keys = self._get_existing_attribute_keys(event_id)
-            if source not in cross_event_cache:
-                source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
-                cross_event_cache[source] = self._get_existing_source_attribute_keys(source_tag)
-            cross_event_keys = cross_event_cache[source]
+            # PR-F7 Bugbot round-3 / multi-agent audit (Bug Hunter, Maintainer):
+            # cache key is the RESOLVED ``source_tag`` — not the raw ``source``
+            # string. Two sources can share a tag via the registry's alias
+            # map (e.g. ``cisa`` and ``cisa_kev`` both map to
+            # ``source:CISA-KEV``). Keying by raw ``source`` would double-fetch
+            # the same tag set; keying by resolved tag collapses aliases into
+            # one cache entry, which is what the prefetch cost model expects.
+            source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
+            if source_tag not in cross_event_cache:
+                cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(source_tag)
+            cross_event_keys = cross_event_cache[source_tag]
 
             before_ct = len(unique_attrs)
             # Step 1 — filter by per-event keys (attrs already in THIS event)
@@ -1436,12 +1467,31 @@ class MISPWriter:
             skipped_ct = per_event_skipped + cross_event_skipped
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
+                # Multi-agent audit (Cross-Checker, Logic Tracker): the
+                # "(0 cross-event PR-F7 dedup)" log was ambiguous —
+                # operators couldn't tell whether the 0 meant "we checked
+                # and found none" (feature working) vs "the feature is
+                # disabled/failed" (feature not running). Qualify the
+                # log line based on WHY cross_event_keys is empty.
+                if not MISP_CROSS_EVENT_DEDUP:
+                    cross_event_note = "cross-event DISABLED"
+                elif not cross_event_keys:
+                    # Empty set with feature enabled — could be genuinely
+                    # no cross-event dupes OR prefetch failed and logged
+                    # WARN above. The WARN log line is the truth source;
+                    # here we just mark "unavailable" so the count 0 is
+                    # honest rather than implying "feature ran and found
+                    # 0 dupes."
+                    cross_event_note = "cross-event unavailable/empty"
+                else:
+                    cross_event_note = "cross-event PR-F7 active"
                 logger.info(
-                    "MISP event %s: skipping %s attributes already present (%s per-event + %s cross-event PR-F7 dedup)",
+                    "MISP event %s: skipping %s attributes already present (%s per-event + %s cross-event; %s)",
                     event_id,
                     skipped_ct,
                     per_event_skipped,
                     cross_event_skipped,
+                    cross_event_note,
                 )
             if not unique_attrs:
                 continue
