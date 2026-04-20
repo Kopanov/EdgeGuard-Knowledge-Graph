@@ -151,12 +151,20 @@ def save_checkpoint(data: dict) -> None:
     try:
         _atomic_write(CHECKPOINT_FILE, data)
     except Exception as e:
+        # PR-K1 Bugbot round-1 (Low): include ``str(e)`` alongside
+        # ``type(e).__name__`` so operators triaging the alert can
+        # distinguish disk-full (``OSError: [Errno 28] No space left
+        # on device``) from permission-denied (``PermissionError:
+        # [Errno 13] Permission denied``) without having to dig for
+        # the traceback elsewhere. Matches ``load_checkpoint``'s
+        # existing ``logger.warning("... %s: %s", file, e)`` pattern.
         logger.error(
-            "CHECKPOINT WRITE FAILED: %s to %s — in-memory progress will NOT "
+            "CHECKPOINT WRITE FAILED: %s to %s: %s — in-memory progress will NOT "
             "be persisted and may be lost on restart. Caller should abort. "
             "(PR-K1 §2-1)",
             type(e).__name__,
             CHECKPOINT_FILE,
+            e,
         )
         raise
 

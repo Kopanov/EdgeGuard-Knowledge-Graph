@@ -2283,7 +2283,19 @@ def _baseline_start_summary(**context):
     # PR-K1 §1-8: NO checkpoint clearing here. Fresh-baseline runs
     # already had their checkpoints wiped by ``_baseline_clean``.
     # Additive runs must preserve checkpoint state for resume.
-    is_fresh_baseline = str(conf.get("fresh_baseline", "")).lower() in ("true", "1", "yes")
+    #
+    # PR-K1 Bugbot round-1 (Medium): use the shared
+    # ``_is_truthy_conf_value`` helper (line ~1890) instead of inline
+    # ``str(...).lower() in (...)``. The helper accepts ``"on"``,
+    # strips whitespace, and handles ``True`` / ``int(1)`` explicitly
+    # — mirroring ``_baseline_clean``'s parse exactly. PR-F8 extracted
+    # this helper SPECIFICALLY to prevent drift between the two
+    # truthy-parse sites; re-introducing inline parsing here would
+    # reproduce the exact class of bug the helper was built to prevent
+    # (operator passes ``{"fresh_baseline": "on"}``, ``_baseline_clean``
+    # wipes correctly, but ``_baseline_start_summary`` logs misleading
+    # "preserving checkpoints").
+    is_fresh_baseline = _is_truthy_conf_value(conf.get("fresh_baseline"))
     if is_fresh_baseline:
         logger.info("[BASELINE] Fresh-baseline: checkpoints already cleared by _baseline_clean task (PR-K1 §1-8)")
     else:

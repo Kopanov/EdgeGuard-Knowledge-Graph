@@ -362,3 +362,65 @@ class TestAdditiveBaselinePreservesCheckpoints:
             "_baseline_start_summary must reference the fresh_baseline conf so "
             "operators know how to opt into wipe behavior"
         )
+
+    def test_baseline_start_uses_shared_is_truthy_helper(self, dag_source: str) -> None:
+        """PR-K1 Bugbot round-1 (Medium): the truthy-check for
+        ``fresh_baseline`` MUST go through ``_is_truthy_conf_value``
+        (not an inline ``str(...).lower() in (...)`` check) so it
+        mirrors ``_baseline_clean``'s parse exactly.
+
+        PR-F8 extracted the helper SPECIFICALLY to prevent this drift:
+        operator passes ``{"fresh_baseline": "on"}`` →
+        ``_baseline_clean`` wipes correctly (helper accepts "on") but
+        inline check in ``_baseline_start_summary`` didn't → operator
+        sees misleading "preserving checkpoints" log. Silent operator
+        confusion."""
+        start = dag_source.find("def _baseline_start_summary")
+        end_marker_1 = dag_source.find("\ndef ", start + 1)
+        end_marker_2 = dag_source.find("\n# ", start + 1)
+        end = min(e for e in (end_marker_1, end_marker_2, len(dag_source)) if e > start)
+        body = dag_source[start:end]
+        code_only = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith("#"))
+
+        # Must use the shared helper
+        assert "_is_truthy_conf_value(" in code_only, (
+            "fresh_baseline truthy-check must use the shared _is_truthy_conf_value helper "
+            "(extracted in PR-F8 to prevent drift between _baseline_clean and _baseline_start_summary)"
+        )
+        # And must NOT re-introduce the inline pattern
+        assert 'str(conf.get("fresh_baseline", "")).lower() in' not in code_only, (
+            "the inline truthy parse must not return — PR-K1 Bugbot round-1 Medium "
+            "caught the exact drift PR-F8 was designed to prevent"
+        )
+
+
+class TestSaveCheckpointLogIncludesExceptionMessage:
+    """PR-K1 Bugbot round-1 (Low): the CHECKPOINT WRITE FAILED error
+    log MUST include ``str(e)`` (the actual exception message) along
+    with ``type(e).__name__``. Otherwise operators can't distinguish
+    ENOSPC from permission-denied from the alert alone."""
+
+    def test_log_includes_exception_message_not_just_type(self, isolated_checkpoint_dir, monkeypatch, caplog):
+        """Trigger a failure with a distinctive message and verify
+        both the exception type AND the exception message appear in
+        the ERROR log output."""
+        import logging
+
+        _, bc = isolated_checkpoint_dir
+
+        def failing_atomic_write(path, data):  # type: ignore[no-redef]
+            raise OSError(28, "No space left on device — distinctive marker")
+
+        monkeypatch.setattr(bc, "_atomic_write", failing_atomic_write)
+
+        caplog.set_level(logging.ERROR, logger="baseline_checkpoint")
+        with pytest.raises(OSError):
+            bc.save_checkpoint({"nvd": {}})
+
+        error_logs = [rec.message for rec in caplog.records if rec.levelno == logging.ERROR]
+        # Exception message (not just type name) must be in the log.
+        assert any("No space left on device" in msg for msg in error_logs), (
+            f"operator-facing error log must include the exception message, not just the type. Got: {error_logs}"
+        )
+        # Type name should still be there too (both, not either/or).
+        assert any("OSError" in msg for msg in error_logs)
