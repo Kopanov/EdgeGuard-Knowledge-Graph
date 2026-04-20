@@ -1828,7 +1828,15 @@ _KNOWN_BASELINE_CONF_KEYS = frozenset(
         "baseline_days",  # historical depth (consumed by get_baseline_config)
         "baseline_collection_limit",  # legacy per-source cap (back-compat)
         "collection_limit",  # current per-source cap (SSoT)
-        "clear_checkpoints",  # "all" wipes incremental cursors too (consumed by _baseline_start_summary)
+        # PR-K1 Bugbot round-2 (Medium): the ``clear_checkpoints`` key
+        # used to be consumed by ``_baseline_start_summary`` to choose
+        # between baseline-only and full wipe. PR-K1 §1-8 removed that
+        # consumption (additive baselines must preserve checkpoints
+        # for resume), so the key is now a no-op everywhere — including
+        # the fresh-baseline path, since ``baseline_clean.py::_wipe_checkpoints``
+        # always wipes unconditionally with ``include_incremental=True``.
+        # Removing the key from the allowlist surfaces stale operator
+        # docs as a typo-warning instead of silently accepting it.
     }
 )
 
@@ -2240,15 +2248,35 @@ baseline_misp_health = PythonOperator(
 def _baseline_start_summary(**context):
     """Print baseline config at run-time so it shows clearly in the Airflow log.
 
-    Always clears baseline checkpoints (page counters) so collectors start
-    from page 1. Incremental state (OTX modified_since cursor, MITRE ETag)
-    is preserved by default — pass ``clear_checkpoints: "all"`` in
-    dag_run.conf to wipe those too.
+    PR-K1 §1-8: the old contract cleared baseline checkpoints on EVERY
+    run — including additive ones. That killed the resume path that
+    ``update_source_checkpoint`` was designed to provide: if a tier-1
+    collector fails at page 50 of a 730-day run, the next retry
+    should start from page 51, NOT page 1. Unconditional clearing
+    meant operators paid the full baseline cost again on every
+    interruption + resume.
+
+    The fix: only wipe checkpoints on **fresh-baseline** runs. The
+    fresh-baseline path's own ``_baseline_clean`` task already wipes
+    via ``_wipe_checkpoints()`` *before* this task runs, so
+    ``_baseline_start_summary`` is now **read-only on checkpoint
+    state** (never writes to it). Additive baselines preserve
+    whatever checkpoint state is on disk, enabling proper resume.
+
+    Operators who WANT to wipe on an additive run can do so by hand
+    (``rm checkpoints/baseline_checkpoint.json``) before triggering
+    the DAG. The DAG will no longer silently wipe on their behalf.
+
+    Incremental state (OTX modified_since cursor, MITRE ETag) is
+    never touched by this task. On a fresh-baseline run,
+    ``baseline_clean.py::_wipe_checkpoints()`` wipes EVERYTHING
+    unconditionally (baseline + incremental) — there is no opt-in
+    to preserve incremental cursors on the fresh-baseline path
+    today. PR-K1 §2-8 (the cursor-handoff design) is deferred to a
+    follow-up PR; the existing "fresh-baseline = true clean slate"
+    operator invariant is preserved here.
     """
     limit, baseline_days = get_baseline_config(context)
-
-    # Clear baseline checkpoints so collectors start fresh (page 1, not stale page 80)
-    from baseline_checkpoint import clear_checkpoint
 
     # PR-C v2 audit fix (Bugbot HIGH on commit 951b163, same-pattern as
     # _baseline_clean below): ``dag_run.conf`` can be ``None`` in Airflow 3.x
@@ -2262,12 +2290,29 @@ def _baseline_start_summary(**context):
     # operators trace the full sequence of conf-consumption sites).
     _validate_baseline_dag_conf(conf, source_label="_baseline_start_summary")
 
-    include_incremental = str(conf.get("clear_checkpoints", "")).lower() == "all"
-    clear_checkpoint(include_incremental=include_incremental)
-    if include_incremental:
-        logger.info("[BASELINE] Cleared ALL checkpoints (baseline + incremental state)")
+    # PR-K1 §1-8: NO checkpoint clearing here. Fresh-baseline runs
+    # already had their checkpoints wiped by ``_baseline_clean``.
+    # Additive runs must preserve checkpoint state for resume.
+    #
+    # PR-K1 Bugbot round-1 (Medium): use the shared
+    # ``_is_truthy_conf_value`` helper (line ~1890) instead of inline
+    # ``str(...).lower() in (...)``. The helper accepts ``"on"``,
+    # strips whitespace, and handles ``True`` / ``int(1)`` explicitly
+    # — mirroring ``_baseline_clean``'s parse exactly. PR-F8 extracted
+    # this helper SPECIFICALLY to prevent drift between the two
+    # truthy-parse sites; re-introducing inline parsing here would
+    # reproduce the exact class of bug the helper was built to prevent
+    # (operator passes ``{"fresh_baseline": "on"}``, ``_baseline_clean``
+    # wipes correctly, but ``_baseline_start_summary`` logs misleading
+    # "preserving checkpoints").
+    is_fresh_baseline = _is_truthy_conf_value(conf.get("fresh_baseline"))
+    if is_fresh_baseline:
+        logger.info("[BASELINE] Fresh-baseline: checkpoints already cleared by _baseline_clean task (PR-K1 §1-8)")
     else:
-        logger.info("[BASELINE] Cleared baseline checkpoints (incremental cursors preserved)")
+        logger.info(
+            "[BASELINE] Additive baseline: preserving checkpoints for resume (PR-K1 §1-8). "
+            "To wipe checkpoints, trigger with dag_run.conf={'fresh_baseline': 'true'}."
+        )
 
     logger.info("=" * 55)
     logger.info("EdgeGuard BASELINE Collection Started")
@@ -2288,7 +2333,15 @@ def _baseline_start_summary(**context):
     logger.info("  BASELINE_DAYS             = 730 (2 years, recommended)")
     logger.info("  Or set env on Airflow container (overrides Variables):")
     logger.info("  EDGEGUARD_BASELINE_DAYS=7  EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000")
-    logger.info('  To wipe incremental cursors too: {"clear_checkpoints": "all"}')
+    # PR-K1 Bugbot round-2 (Medium): the previous hint
+    #   ``To wipe incremental cursors too: {"clear_checkpoints": "all"}``
+    # was misleading after PR-K1 §1-8 removed the only consumer of
+    # the ``clear_checkpoints`` key. The fresh-baseline path always
+    # wipes everything via ``_wipe_checkpoints(include_incremental=True)``
+    # in baseline_clean.py — there is no per-key control today.
+    # Surface the actual mechanism instead so operators don't follow
+    # a no-op instruction.
+    logger.info('  Fresh-baseline (wipe Neo4j + MISP + checkpoints): {"fresh_baseline": "true"}')
     logger.info("=" * 55)
 
 
