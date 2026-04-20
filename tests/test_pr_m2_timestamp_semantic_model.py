@@ -139,12 +139,25 @@ class TestNvdProducerHygiene:
         )
 
     def test_nvd_wraps_published(self):
+        """Bugbot round 3 (LOW): assignment must be the bare
+        ``coerce_iso(published_str)`` form WITHOUT a redundant
+        ``or None`` tail. ``coerce_iso`` already returns ``None`` for
+        empty / invalid input per contract; the ``or None`` was dead
+        code that misleadingly suggested otherwise."""
         src = (SRC / "collectors" / "nvd_collector.py").read_text()
+        # Positive pin: the bare form
         assert "published_iso = coerce_iso(published_str)" in src
+        # Negative pin: the redundant form must be gone from active code
+        active = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+        assert "coerce_iso(published_str) or None" not in active, (
+            "redundant ``or None`` tail must be removed (coerce_iso already returns None)"
+        )
 
     def test_nvd_wraps_last_modified(self):
         src = (SRC / "collectors" / "nvd_collector.py").read_text()
         assert 'last_modified_iso = coerce_iso(cve_data.get("lastModified"))' in src
+        active = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+        assert 'coerce_iso(cve_data.get("lastModified")) or None' not in active
 
 
 # ===========================================================================

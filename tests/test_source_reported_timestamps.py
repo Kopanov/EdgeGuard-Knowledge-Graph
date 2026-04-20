@@ -785,27 +785,35 @@ def test_nvd_collector_does_not_inject_wall_clock_first_seen():
     wall-clock NOW whenever NVD's ``published`` was empty.
 
     PR-M2 §4-F1.5 (defense in depth): the field is now derived via
-    ``published_iso = coerce_iso(published_str) or None`` at the
-    producer boundary, so any naive ISO from NVD (``"2023-05-09T15:15:10.897"``
+    ``published_iso = coerce_iso(published_str)`` at the producer
+    boundary, so any naive ISO from NVD (``"2023-05-09T15:15:10.897"``
     without offset) is canonicalized to tz-aware UTC BEFORE flowing
     downstream — closing the Neo4j-parses-as-server-local TZ shift.
-    The honest-NULL contract is preserved: when ``published_str`` is
-    empty, ``coerce_iso("")`` returns None, which then propagates as
-    None to the item dict.
+    The honest-NULL contract is preserved: ``coerce_iso`` returns
+    ``None`` for empty / invalid input by contract, so no ``or None``
+    tail is needed (Bugbot round 3 LOW: removing the redundant tail).
 
     This test pins both invariants:
-      (1) the producer hygiene step (``coerce_iso(published_str)``)
-      (2) the honest-NULL emission (the assignment uses ``or None``
-          for the empty case)
+      (1) the producer hygiene step (``coerce_iso(published_str)``
+          — bare, no ``or None``)
+      (2) the honest-NULL emission (item's ``first_seen`` is the
+          canonicalized value, which is None when source was empty)
     """
     path = os.path.join(_SRC, "collectors", "nvd_collector.py")
     with open(path) as fh:
         src = _code_only(fh.read())
-    # (1) Producer hygiene: published_str passes through coerce_iso
-    assert "published_iso = coerce_iso(published_str) or None" in src, (
+    # (1) Producer hygiene: published_str passes through coerce_iso (bare)
+    assert "published_iso = coerce_iso(published_str)" in src, (
         "NVD collector MUST canonicalize ``published_str`` via coerce_iso "
         "at the producer boundary (PR-M2 §4-F1.5). This injects UTC for "
         "naive ISO inputs, preventing Neo4j from parsing them as server-local."
+    )
+    # Negative pin: the redundant ``or None`` tail must NOT reappear
+    # (coerce_iso already returns None on bad input per contract)
+    assert "coerce_iso(published_str) or None" not in src, (
+        "redundant ``or None`` after coerce_iso is dead code — coerce_iso "
+        "already returns None on empty / invalid input per its documented "
+        "contract. Bugbot round 3 caught this."
     )
     # (2) Honest-NULL emission: the item's first_seen is the canonicalized
     # value (which is None when published_str was empty)

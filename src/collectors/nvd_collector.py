@@ -903,8 +903,17 @@ class NVDCollector:
                 # producer-side wrapping is belt-and-suspenders against
                 # any future regression in the chokepoint helper. See
                 # docs/TIMESTAMPS.md "Invariant 2".
-                published_iso = coerce_iso(published_str) or None
-                last_modified_iso = coerce_iso(cve_data.get("lastModified")) or None
+                #
+                # Bugbot round 3 (LOW): no ``or None`` tail — ``coerce_iso``
+                # already returns ``None`` for empty / invalid / malformed
+                # input per its contract (see source_truthful_timestamps.py).
+                # The previous ``coerce_iso(...) or None`` was dead code
+                # that misleadingly suggested ``coerce_iso`` could return
+                # ``""`` or another falsy non-None value. Removing the
+                # tail keeps producer code aligned with the helper's
+                # documented contract.
+                published_iso = coerce_iso(published_str)
+                last_modified_iso = coerce_iso(cve_data.get("lastModified"))
 
                 # One entry per CVE — property names aligned to ResilMesh schema
                 processed.append(

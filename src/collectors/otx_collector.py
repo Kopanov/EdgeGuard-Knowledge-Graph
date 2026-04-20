@@ -499,25 +499,35 @@ class OTXCollector:
                     processed.append(item)
 
                 # Extract malware families
+                # PR-M2 §4-F5 (Bugbot round 3): symmetric honest-NULL
+                # propagation. Indicator + CVE branches use
+                # ``pulse_created`` / ``pulse_modified`` for first_seen /
+                # last_seen; the malware-family branch must follow the
+                # same pattern or the per-pulse timestamp contract is
+                # broken (some entities from one pulse carry the source's
+                # claim, others don't — silently inconsistent).
                 malware_families = pulse.get("malware_families", [])
                 for mal in malware_families:
                     mal_name = mal if isinstance(mal, str) else mal.get("name", "Unknown")
-                    processed.append(
-                        {
-                            "type": "malware",
-                            "name": mal_name,
-                            "malware_types": ["unknown"],
-                            "family": mal_name,
-                            "description": pulse_description[:1000],
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "confidence_score": 0.5,
-                            # ATT&CK technique IDs from pulse → uses_techniques on Malware node
-                            "uses_techniques": pulse_attack_ids,
-                            **pulse_meta,
-                        }
-                    )
+                    mal_item: Dict[str, Any] = {
+                        "type": "malware",
+                        "name": mal_name,
+                        "malware_types": ["unknown"],
+                        "family": mal_name,
+                        "description": pulse_description[:1000],
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        # ATT&CK technique IDs from pulse → uses_techniques on Malware node
+                        "uses_techniques": pulse_attack_ids,
+                        **pulse_meta,
+                    }
+                    if pulse_created:
+                        mal_item["first_seen"] = pulse_created
+                    if pulse_modified:
+                        mal_item["last_seen"] = pulse_modified
+                    processed.append(mal_item)
 
                 # Extract CVE references (no cap — collect all CVEs from pulse)
                 # PR-M2 §4-F5: same honest-NULL treatment for CVE entries
@@ -546,22 +556,28 @@ class OTXCollector:
                         cve_item["last_seen"] = pulse_modified
                     processed.append(cve_item)
 
-                # Extract named adversary as a ThreatActor if present
+                # Extract named adversary as a ThreatActor if present.
+                # PR-M2 §4-F5 (Bugbot round 3): symmetric honest-NULL
+                # propagation — see malware-family branch above for
+                # rationale. Same pulse-level timestamps apply.
                 if pulse_adversary:
-                    processed.append(
-                        {
-                            "type": "actor",
-                            "name": pulse_adversary,
-                            "description": pulse_description[:1000],
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "confidence_score": 0.5,
-                            "uses_techniques": pulse_attack_ids,
-                            "aliases": [],
-                            **pulse_meta,
-                        }
-                    )
+                    actor_item: Dict[str, Any] = {
+                        "type": "actor",
+                        "name": pulse_adversary,
+                        "description": pulse_description[:1000],
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        "uses_techniques": pulse_attack_ids,
+                        "aliases": [],
+                        **pulse_meta,
+                    }
+                    if pulse_created:
+                        actor_item["first_seen"] = pulse_created
+                    if pulse_modified:
+                        actor_item["last_seen"] = pulse_modified
+                    processed.append(actor_item)
 
             # Deduplicate
             seen = set()
