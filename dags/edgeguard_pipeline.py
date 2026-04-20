@@ -835,6 +835,58 @@ def run_collector_with_metrics(
         # Already logged and metrics updated above (collector success=false path).
         raise
     except Exception as e:
+        # PR-F6 follow-up (Bugbot Medium on commit 5f1f44d): the
+        # orphan-process safeguard's clean-exit signal
+        # (``AbortedByDagFailureException``) MUST NOT be classified
+        # as catastrophic by the generic handler below — that would
+        # emit a ``[CRITICAL] HARD-FAILED`` Slack alert + bump
+        # ``pipeline_errors_total``, the OPPOSITE of "clean exit".
+        # Caught here at the same level as AirflowException so the
+        # orchestration short-circuits BEFORE the transient /
+        # catastrophic split runs.
+        #
+        # Lazy import to avoid creating a hard dependency at module
+        # load time — the parent_dag_liveness module is loaded lazily
+        # inside run_baseline_collector for the same reason.
+        try:
+            from parent_dag_liveness import AbortedByDagFailureException
+        except ImportError:
+            AbortedByDagFailureException = None  # type: ignore[assignment,misc]
+
+        if AbortedByDagFailureException is not None and isinstance(e, AbortedByDagFailureException):
+            duration = time.time() - start_time
+            from collectors.collector_utils import make_skipped_optional_source
+
+            logger.info(
+                "[%s] Aborted by parent-DAG safeguard (state=%r) after %.2fs: %s. "
+                "Clean exit between batches per PR-F6 design — no half-write to MISP/Neo4j. "
+                "Treating as task-success-skipped so downstream tier-1 collectors "
+                "are not blocked by ALL_DONE; the parent DAG run is already terminal "
+                "regardless.",
+                collector_name,
+                e.state,
+                duration,
+                e,
+            )
+            if METRICS_SERVER_AVAILABLE:
+                try:
+                    record_collection(collector_name, "global", 0, "skipped")
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted skip): {me}")
+                try:
+                    record_collection_duration(collector_name, "global", duration)
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted duration): {me}")
+                try:
+                    record_collector_skip(collector_name, "parent_dag_aborted")
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted skip-reason): {me}")
+            return make_skipped_optional_source(
+                collector_name,
+                skip_reason=f"parent dag_run state={e.state!r} — orphan-process safeguard aborted cleanly (PR-F6)",
+                skip_reason_class="parent_dag_aborted",
+            )
+
         # PR #35: distinguish TRANSIENT external errors (network, upstream
         # 5xx, DNS, SSL handshake, timeout) from CATASTROPHIC bugs
         # (TypeError, ImportError, programming mistakes). The user policy
@@ -1933,7 +1985,40 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
     from collectors.misp_writer import MISPWriter
 
     limit, baseline_days = get_baseline_config(context=context)
-    writer = MISPWriter()
+
+    # PR-F6 (Issue #65, orphan-process safeguard): install a parent-DAG
+    # liveness callback so the collector exits cleanly if its parent
+    # dag_run is marked failed mid-flight. Without this, a
+    # ``collect_nvd`` subprocess from a failed run can keep pushing to
+    # MISP for hours after Airflow has marked the run dead — the exact
+    # failure mode that produced Event 19 / 72K-CVE duplication on
+    # 2026-04-19. Callback is None when the env flag
+    # EDGEGUARD_PARENT_DAG_LIVENESS_CHECK is disabled OR when context
+    # doesn't carry dag_id/run_id (e.g., direct CLI invocation
+    # bypassing Airflow) — in either case, push_items behaves as
+    # before. See ``src/parent_dag_liveness.py`` for the full design.
+    liveness_cb = None
+    try:
+        from parent_dag_liveness import make_liveness_callback
+
+        dag_id_for_check = ""
+        run_id_for_check = ""
+        if context:
+            dag_obj = context.get("dag")
+            run_obj = context.get("dag_run")
+            if dag_obj is not None:
+                dag_id_for_check = getattr(dag_obj, "dag_id", "") or ""
+            if run_obj is not None:
+                run_id_for_check = getattr(run_obj, "run_id", "") or ""
+        liveness_cb = make_liveness_callback(dag_id_for_check, run_id_for_check)
+    except ImportError as e:
+        logger.warning(
+            "[BASELINE] parent_dag_liveness import failed (%s) — orphan-process safeguard "
+            "INACTIVE for this run. Failed-DAG cleanup falls back to manual `edgeguard dag kill`.",
+            e,
+        )
+
+    writer = MISPWriter(liveness_callback=liveness_cb)
     logger.info(f"[BASELINE] Starting {collector_name} — limit={limit or 'unlimited'}, baseline_days={baseline_days}")
 
     return run_collector_with_metrics(

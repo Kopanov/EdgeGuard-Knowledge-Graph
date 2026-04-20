@@ -17,7 +17,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 import urllib3
@@ -290,7 +290,13 @@ class MISPWriter:
     # but does not change behavior for any existing input.
     SOURCE_TAGS = source_registry.source_to_misp_tag_map()
 
-    def __init__(self, url: str = None, api_key: str = None, verify_ssl: bool = None):
+    def __init__(
+        self,
+        url: str = None,
+        api_key: str = None,
+        verify_ssl: bool = None,
+        liveness_callback: Optional[Callable[[], None]] = None,
+    ):
         """
         Initialize MISP writer.
 
@@ -298,6 +304,13 @@ class MISPWriter:
             url: MISP instance URL (defaults to config.MISP_URL)
             api_key: MISP API key (defaults to config.MISP_API_KEY)
             verify_ssl: Whether to verify SSL certificates (defaults to config.SSL_VERIFY)
+            liveness_callback: PR-F6 (Issue #65) — optional zero-arg callable
+                invoked between MISP push batches. Should raise
+                ``AbortedByDagFailureException`` (or any exception) to
+                signal the collector to abort cleanly. Used for the
+                parent-DAG-liveness orphan-process safeguard. ``None``
+                (default) preserves legacy behavior — push_items runs
+                to completion regardless of parent-DAG state.
         """
         self.url = url or MISP_URL
         self.api_key = api_key or MISP_API_KEY
@@ -327,6 +340,10 @@ class MISPWriter:
             "errors": 0,
             "attrs_skipped_existing": 0,
         }
+        # PR-F6 (Issue #65): per-batch parent-DAG liveness callback.
+        # ``None`` = no check (legacy / incremental DAGs); a callable
+        # = check before each batch. See src/parent_dag_liveness.py.
+        self.liveness_callback = liveness_callback
 
     def _restsearch_events_for_name(self, event_name: str) -> List[Any]:
         """Call ``/events/restSearch``; returns the ``response`` list (may need exact-info filtering)."""
@@ -1306,6 +1323,30 @@ class MISPWriter:
                 # Throttle between batches (skip only the very first batch of the first event)
                 if (i > 0 or processed_batches > 0) and batch_throttle > 0:
                     time.sleep(batch_throttle)
+
+                # PR-F6 (Issue #65): parent-DAG liveness check BEFORE the
+                # next push. If the parent dag_run has been marked failed
+                # (e.g., a sibling task failed), the callback raises
+                # ``AbortedByDagFailureException`` to exit the collector
+                # cleanly between batches — no half-written events. The
+                # callback is rate-limited internally (default 60s
+                # between actual API probes), so calling it every batch
+                # is cheap. ``None`` (the default) preserves legacy
+                # behavior — push_items runs to completion regardless.
+                # Re-raises ANY exception from the callback so callers
+                # can distinguish parent-DAG-died from other failures.
+                #
+                # ``getattr`` (not ``self.``) is deliberate: existing tests
+                # construct MISPWriter via ``__new__`` to bypass __init__
+                # for test-isolation reasons (see
+                # tests/test_incremental_dedup.py). The new
+                # ``liveness_callback`` attribute would otherwise be
+                # missing on those instances and crash push_items. The
+                # defensive ``getattr`` keeps the legacy test pattern
+                # working without requiring every test to opt-in.
+                liveness_cb = getattr(self, "liveness_callback", None)
+                if liveness_cb is not None:
+                    liveness_cb()
 
                 # Progress logging
                 processed_batches += 1
