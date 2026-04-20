@@ -515,11 +515,49 @@ class NVDCollector:
                 checkpoint = get_source_checkpoint("nvd")
                 start_wi = 0
                 resume_index = 0
+                # PR-G1 Bug Hunter audit (HIGH): the old ``page`` formula was
+                # ``wi * 5000 + (idx // batch_size) + 1`` with ``batch_size =
+                # 2000`` — the hard-coded ``5000`` multiplier made the page
+                # counter jump from e.g. ~60 (end of window 0) to 5001
+                # (start of window 1), so ``edgeguard baseline status``
+                # reported meaningless pages. Replace with a monotonic
+                # per-API-call batch counter. ``page`` is display-only —
+                # resume uses ``nvd_window_idx`` + ``nvd_start_index`` — so
+                # seeding the counter from the checkpoint keeps the display
+                # approximately correct across restarts without affecting
+                # resume correctness.
+                #
+                # PR-G1 Bugbot round-1 (Medium): ``update_source_checkpoint``
+                # persists the ``page`` kwarg under ``entry["current_page"]``
+                # (``baseline_checkpoint.py:135``) — NOT under ``"page"``. The
+                # original seed expression ``checkpoint.get("page", 0)`` would
+                # always return 0, so the counter never actually recovered on
+                # resume. Read ``current_page`` to match the writer, and fall
+                # back to ``max(pages)`` for extra robustness if the schema
+                # ever diverges.
+                #
+                # PR-G1 Bugbot round-2 (Low): a fresh baseline run AFTER a
+                # previously-completed one must start the counter at 0, not
+                # at the prior run's final value. The resume-detection
+                # branch below is skipped when ``completed=True``, so we
+                # have to reset explicitly here.  The old formula naturally
+                # reset because it recomputed from loop variables; the
+                # monotonic counter needs the operator-facing invariant
+                # made explicit.
+                if checkpoint.get("completed"):
+                    total_batches_done = 0
+                else:
+                    total_batches_done = int(
+                        checkpoint.get("current_page")
+                        or (max(checkpoint.get("pages") or [0]) if checkpoint.get("pages") else 0)
+                        or 0
+                    )
                 if not checkpoint.get("completed") and checkpoint.get("nvd_window_idx") is not None:
                     start_wi = int(checkpoint["nvd_window_idx"])
                     resume_index = int(checkpoint.get("nvd_start_index", 0))
                     if start_wi >= len(windows):
                         start_wi, resume_index = 0, 0
+                        total_batches_done = 0
                     else:
                         logger.info(
                             f"  Resuming baseline at window {start_wi + 1}/{len(windows)}, startIndex={resume_index}"
@@ -559,9 +597,10 @@ class NVDCollector:
                             f"(unique CVE rows: {len(all_cves)})"
                         )
                         next_idx = idx + len(cves)
+                        total_batches_done += 1
                         update_source_checkpoint(
                             "nvd",
-                            page=wi * 5000 + (idx // batch_size) + 1,
+                            page=total_batches_done,
                             items_collected=len(all_cves),
                             extra={"nvd_window_idx": wi, "nvd_start_index": next_idx},
                         )
@@ -585,7 +624,12 @@ class NVDCollector:
                 logger.info(f"  Baseline complete: {len(vulnerabilities)} CVEs collected")
                 update_source_checkpoint(
                     "nvd",
-                    page=len(windows) * 5000,
+                    # PR-G1 Bug Hunter audit (HIGH): was ``len(windows) * 5000``
+                    # — a meaningless product of window count and a stale
+                    # batch_size constant. Use the actual monotonic
+                    # per-API-call batch counter so the final checkpoint
+                    # reports the real number of NVD calls made.
+                    page=total_batches_done,
                     items_collected=len(vulnerabilities),
                     completed=True,
                 )
