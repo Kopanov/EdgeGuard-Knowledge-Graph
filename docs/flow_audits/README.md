@@ -34,6 +34,8 @@ Output: 37 findings. Driven fixes in PR-F9, PR-G1, PR-I, PR-J, PR-K1, PR-K2, PR-
 
 **~17 findings.** Each either silently loses data, corrupts historical dates, or produces non-deterministic graphs. Every one has a clear production path that triggers it during a real 730d run.
 
+> **Note on Issue #57 (baseline lock, finding §1-1 from Pass-1 audit):** the Airflow-aware baseline-lock architectural gap was identified in Pass 1 (tracked separately as [Issue #57](../../issues/57) — not a patch, needs design spike). Interim mitigation during 730d production-test: use CLI `python src/run_pipeline.py --baseline` (in-process lock acquisition works) OR pre-pause scheduled incremental DAGs in Airflow for the baseline window.
+
 ### A1. Silent data loss (operator sees "success", graph is empty or wrong)
 
 | ID | File:line | Sev | What breaks | Fix strategy |
