@@ -70,23 +70,95 @@ def _atomic_write(path: Path, data: dict) -> None:
 
 
 def load_checkpoint() -> dict:
-    """Load checkpoint from file. Returns {} on missing or corrupt file."""
+    """Load checkpoint from file. Returns {} on missing or corrupt file.
+
+    Corrupt-file handling (PR-K1 §2-3):  if the on-disk JSON fails to
+    parse (truncated by power loss, SIGKILL mid-write, disk bitrot),
+    the corrupt file is **renamed to
+    ``baseline_checkpoint.json.corrupt.{ISO-timestamp}``** before the
+    empty ``{}`` is returned. This preserves forensic evidence so
+    operators can inspect what went wrong and potentially recover the
+    pre-corruption state by hand (e.g. ``mv
+    baseline_checkpoint.json.corrupt.<ts> baseline_checkpoint.json``
+    after fixing the JSON).
+
+    The log level is ``ERROR`` (not WARN) because the consequence on
+    a 730-day baseline is silent loss of progress — on the next
+    ``update_source_checkpoint`` call, the empty dict gets overwritten
+    with a fresh entry for that source, and every OTHER source's
+    prior progress is irrecoverably gone. Operators MUST see this
+    event in the log.
+    """
     if not CHECKPOINT_FILE.exists():
         return {}
     try:
         with open(CHECKPOINT_FILE, "r") as f:
             return json.load(f)
     except Exception as e:
-        logger.warning("Could not parse checkpoint file %s: %s — starting fresh.", CHECKPOINT_FILE, e)
+        # Preserve the corrupt bytes so the operator can inspect / recover.
+        # Timestamp is UTC-ISO-compact with ``-`` separators — safe for
+        # every filesystem (no colons, no spaces).
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        corrupt_backup = CHECKPOINT_FILE.with_suffix(f".json.corrupt.{ts}")
+        try:
+            CHECKPOINT_FILE.rename(corrupt_backup)
+            preserved_msg = f"preserved as {corrupt_backup.name}"
+        except OSError as rename_err:
+            # Filesystem may be read-only or file may have been removed
+            # between exists() and rename(). Log and continue with empty
+            # state — the original bug (silent fresh start) is still
+            # closed, we just couldn't stash the evidence.
+            preserved_msg = f"could not preserve (rename failed: {rename_err})"
+        logger.error(
+            "CORRUPT CHECKPOINT: %s failed to parse (%s). All per-source "
+            "baseline progress will be LOST on the next update_source_checkpoint "
+            "call unless the corrupt file is recovered. Forensic backup: %s. "
+            "To recover: stop all baseline/incremental runs, inspect the "
+            "corrupt backup, restore it to %s if usable. To force fresh "
+            "start after inspection, delete any remaining baseline_checkpoint.* "
+            "files. (PR-K1 §2-3)",
+            CHECKPOINT_FILE,
+            e,
+            preserved_msg,
+            CHECKPOINT_FILE.name,
+        )
         return {}
 
 
 def save_checkpoint(data: dict) -> None:
-    """Atomically save checkpoint to file."""
+    """Atomically save checkpoint to file.
+
+    PR-K1 §2-1:  write failures now **propagate** instead of being
+    swallowed with a WARN log. The prior silent-fail behavior let an
+    ENOSPC / permission / disk-failure event during a 730-day
+    baseline drift the in-memory counter away from the on-disk state
+    — operators would see the collector "advancing" in logs while
+    ``edgeguard baseline status`` showed hours-old numbers, and on
+    restart the resume would redo enormous chunks.
+
+    Callers (``update_source_checkpoint`` and, transitively, every
+    collector's progress-recording call site) get a loud exception
+    they can handle explicitly. ``update_source_checkpoint`` itself
+    does NOT swallow — if the write fails, the collector should
+    abort so the failure is visible before the sync continues with
+    in-memory state that can't be persisted.
+    """
+    # Log at ERROR level on failure so operators see the event
+    # immediately (checkpoint write is a critical step — silent
+    # failure is exactly what PR-K1 §2-1 closes), then re-raise so
+    # the caller can abort rather than continuing with a stale
+    # on-disk state.
     try:
         _atomic_write(CHECKPOINT_FILE, data)
     except Exception as e:
-        logger.warning("Could not save checkpoint: %s", e)
+        logger.error(
+            "CHECKPOINT WRITE FAILED: %s to %s — in-memory progress will NOT "
+            "be persisted and may be lost on restart. Caller should abort. "
+            "(PR-K1 §2-1)",
+            type(e).__name__,
+            CHECKPOINT_FILE,
+        )
+        raise
 
 
 def get_source_checkpoint(source: str) -> dict:

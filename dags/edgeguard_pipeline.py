@@ -2240,15 +2240,33 @@ baseline_misp_health = PythonOperator(
 def _baseline_start_summary(**context):
     """Print baseline config at run-time so it shows clearly in the Airflow log.
 
-    Always clears baseline checkpoints (page counters) so collectors start
-    from page 1. Incremental state (OTX modified_since cursor, MITRE ETag)
-    is preserved by default — pass ``clear_checkpoints: "all"`` in
-    dag_run.conf to wipe those too.
+    PR-K1 §1-8: the old contract cleared baseline checkpoints on EVERY
+    run — including additive ones. That killed the resume path that
+    ``update_source_checkpoint`` was designed to provide: if a tier-1
+    collector fails at page 50 of a 730-day run, the next retry
+    should start from page 51, NOT page 1. Unconditional clearing
+    meant operators paid the full baseline cost again on every
+    interruption + resume.
+
+    The fix: only wipe checkpoints on **fresh-baseline** runs. The
+    fresh-baseline path's own ``_baseline_clean`` task already wipes
+    via ``_wipe_checkpoints()`` *before* this task runs, so
+    ``_baseline_start_summary`` is now **read-only on checkpoint
+    state** (never writes to it). Additive baselines preserve
+    whatever checkpoint state is on disk, enabling proper resume.
+
+    Operators who WANT to wipe on an additive run can do so by hand
+    (``rm checkpoints/baseline_checkpoint.json``) before triggering
+    the DAG. The DAG will no longer silently wipe on their behalf.
+
+    Incremental state (OTX modified_since cursor, MITRE ETag) is
+    never touched by this task — it flows through the
+    fresh-baseline branch via ``_wipe_checkpoints()`` in
+    ``baseline_clean.py`` with its own opt-in (``clear_checkpoints:
+    "all"`` in the DAG conf). See PR-K1 §2-8 for the cursor
+    handoff details.
     """
     limit, baseline_days = get_baseline_config(context)
-
-    # Clear baseline checkpoints so collectors start fresh (page 1, not stale page 80)
-    from baseline_checkpoint import clear_checkpoint
 
     # PR-C v2 audit fix (Bugbot HIGH on commit 951b163, same-pattern as
     # _baseline_clean below): ``dag_run.conf`` can be ``None`` in Airflow 3.x
@@ -2262,12 +2280,17 @@ def _baseline_start_summary(**context):
     # operators trace the full sequence of conf-consumption sites).
     _validate_baseline_dag_conf(conf, source_label="_baseline_start_summary")
 
-    include_incremental = str(conf.get("clear_checkpoints", "")).lower() == "all"
-    clear_checkpoint(include_incremental=include_incremental)
-    if include_incremental:
-        logger.info("[BASELINE] Cleared ALL checkpoints (baseline + incremental state)")
+    # PR-K1 §1-8: NO checkpoint clearing here. Fresh-baseline runs
+    # already had their checkpoints wiped by ``_baseline_clean``.
+    # Additive runs must preserve checkpoint state for resume.
+    is_fresh_baseline = str(conf.get("fresh_baseline", "")).lower() in ("true", "1", "yes")
+    if is_fresh_baseline:
+        logger.info("[BASELINE] Fresh-baseline: checkpoints already cleared by _baseline_clean task (PR-K1 §1-8)")
     else:
-        logger.info("[BASELINE] Cleared baseline checkpoints (incremental cursors preserved)")
+        logger.info(
+            "[BASELINE] Additive baseline: preserving checkpoints for resume (PR-K1 §1-8). "
+            "To wipe checkpoints, trigger with dag_run.conf={'fresh_baseline': 'true'}."
+        )
 
     logger.info("=" * 55)
     logger.info("EdgeGuard BASELINE Collection Started")
