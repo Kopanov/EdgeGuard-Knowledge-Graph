@@ -12,9 +12,19 @@ load when all four tier-1 collectors hammered MISP simultaneously.
 
 PR-F4 sequences the four tier-1 collectors (CISA → MITRE → OTX → NVD)
 inside the ``tier1_core`` TaskGroup so MISP only ever sees one
-heavy-write source at a time. Order rationale: small collectors first
-(CISA ~14s, MITRE ~28s) so a chain-wide failure surfaces in <1 minute
-rather than after sinking ~3-5 hours into OTX or NVD.
+heavy-write source at a time. The order is mostly aesthetic; the real
+value is halved MISP write concurrency. The TaskGroup keeps its
+``trigger_rule=ALL_DONE`` (preserved from the parallel design) so a
+single-source API flake doesn't cascade-skip the rest of tier-1 —
+losing 1/4 of a baseline is much better than losing all of it.
+
+Bugbot Medium-severity finding on commit 8403511 caught an earlier
+version of this docstring + the DAG comment block claiming the
+sequential chain gave automatic fast-fail behavior. That was wrong:
+ALL_DONE means downstream tasks run regardless of upstream
+success/failure. The misleading "fast failure signal before sinking
+3-5 hours into OTX/NVD" claim has been removed; the order is now
+documented honestly as aesthetic.
 
 What this DOES NOT fix
 ----------------------
@@ -152,6 +162,79 @@ class TestTier2StaysParallel:
         assert chain is None, (
             f"tier2 feeds should remain parallel; found a sequential edge: {chain.group(0)!r}. "
             "PR-F4 sequenced tier1 only — tier2 stays parallel per the design."
+        )
+
+
+# ---------------------------------------------------------------------------
+# ALL_DONE trigger rule preserved (Bugbot Medium on commit 8403511)
+# ---------------------------------------------------------------------------
+
+
+class TestAllDoneTriggerRulePreserved:
+    """Bugbot Medium-severity finding on PR-F4 commit 8403511: an earlier
+    version of the comment block claimed sequential ordering gave us a
+    "fast failure signal" — but the TaskGroup ``trigger_rule=ALL_DONE``
+    means downstream tasks run regardless of upstream success/failure,
+    defeating that claim.
+
+    The fix: keep ALL_DONE (multi-source resilience — a CISA-API flake
+    must NOT cascade-skip MITRE/OTX/NVD), drop the misleading fast-fail
+    claim, and pin the trigger rule + its rationale so the next reader
+    doesn't quietly switch to ALL_SUCCESS thinking it's an upgrade.
+    """
+
+    def test_tier1_taskgroup_uses_all_done_trigger_rule(self):
+        """The TaskGroup ``default_args`` MUST set
+        ``trigger_rule=TriggerRule.ALL_DONE`` — switching to ALL_SUCCESS
+        would cascade-skip downstream collectors on any single-source
+        API flake (CISA flake → MITRE/OTX/NVD all skipped). That's a
+        regression in multi-source resilience."""
+        src = _read_dag_source()
+        # Find the tier1_core TaskGroup constructor line.
+        m = re.search(
+            r'with TaskGroup\("tier1_core",[^)]*default_args\s*=\s*\{([^}]*)\}',
+            src,
+        )
+        assert m is not None, "could not locate tier1_core TaskGroup default_args"
+        default_args_blob = m.group(1)
+        assert "TriggerRule.ALL_DONE" in default_args_blob, (
+            "tier1_core default_args MUST set trigger_rule=TriggerRule.ALL_DONE — "
+            "ALL_SUCCESS would cascade-skip downstream collectors on single-source flakes"
+        )
+
+    def test_taskgroup_comment_explains_why_all_done_is_preserved(self):
+        """The TaskGroup comment block MUST explain WHY ALL_DONE is
+        preserved (multi-source resilience), so a future maintainer
+        doesn't quietly 'fix' it to ALL_SUCCESS thinking the sequential
+        chain implies fast-fail semantics."""
+        src = _read_dag_source()
+        block_idx = src.find('with TaskGroup("tier1_core"')
+        assert block_idx > 0
+        preceding = src[max(0, block_idx - 3000) : block_idx]
+        assert "ALL_DONE" in preceding, "tier1_core comment must explain the preserved ALL_DONE trigger rule"
+        assert "ALL_SUCCESS" in preceding, (
+            "tier1_core comment must explicitly warn against switching to ALL_SUCCESS "
+            "(the 'do not change without explicit discussion' clause)"
+        )
+        # Multi-source resilience is the rationale — must be discoverable.
+        assert "different external API" in preceding.lower() or "multi-source" in preceding.lower(), (
+            "tier1_core comment must surface the multi-source-resilience rationale for keeping ALL_DONE"
+        )
+
+    def test_no_overclaiming_fast_failure_signal_in_comments(self):
+        """Defensive: the misleading claim from the original PR-F4
+        comment ("fast failure signal before sinking 3-5 hours into
+        OTX or NVD") was inaccurate given ALL_DONE — downstream tasks
+        run anyway. Make sure that exact phrasing doesn't creep back in
+        on a future doc edit. (We allow the word "fast" in other contexts;
+        the specific anti-pattern is claiming the SEQUENTIAL CHAIN gives
+        automatic fast-fail.)"""
+        src = _read_dag_source()
+        # The exact phrase Bugbot flagged — pin against literal regression.
+        assert "before sinking ~3-5 hours" not in src, (
+            "removed by Bugbot fix on PR-F4 — the ALL_DONE trigger rule means "
+            "downstream tasks run regardless of upstream failure, so the chain "
+            "does NOT short-circuit on early-task failure"
         )
 
 

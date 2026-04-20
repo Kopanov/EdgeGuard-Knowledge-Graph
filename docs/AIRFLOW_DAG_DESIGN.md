@@ -102,9 +102,14 @@ all four collectors hammered MISP simultaneously (`AppModel.php`
 "Cannot use a scalar value as an array" warnings cascading into 5xx
 responses on edit-event calls).
 
-**Order rationale:** small collectors first (CISA ~14s, MITRE ~28s) so a
-chain-wide failure (auth issue, MISP completely down) surfaces in <1
-minute rather than after sinking ~3-5 hours into OTX/NVD.
+**Order rationale:** the order is mostly aesthetic — small-first
+(CISA ~14s, MITRE ~28s) reads more naturally in the Airflow grid view.
+It does **not** give automatic fast-fail: the TaskGroup keeps its
+`trigger_rule = ALL_DONE` (preserved from the parallel design) so a
+single-source API flake doesn't cascade-skip the rest of tier-1 — losing
+1/4 of a baseline is much better than losing all of it. The real value
+of PR-F4 is **halved MISP write concurrency**, which is independent of
+the collector ordering.
 
 **Trade-off:** total tier-1 wall time grows from `max(otx, nvd) ≈ 5h` to
 `cisa + mitre + otx + nvd ≈ 8h`. The ~3h cost buys halved MISP write
@@ -113,8 +118,9 @@ concurrency without any MISP server changes.
 **What this DOES NOT fix:** the per-event-grows-with-size cost on a
 single oversized event (MISP `edit-event` loads the entire event for
 dedup; cost grows linearly with existing attribute count). That's an
-architectural fix tracked separately — event partitioning by date range
-so no single event exceeds ~20K attributes.
+architectural fix tracked separately — see [Issue #61](../../issues/61)
+for event partitioning by date range so no single event exceeds
+~20K attributes.
 
 **Tier 2 stays parallel** — the 6 reputation feeds are individually tiny
 (<5K attrs each), don't trigger the oversized-event failure mode, and

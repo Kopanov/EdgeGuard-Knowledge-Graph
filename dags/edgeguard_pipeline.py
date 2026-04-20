@@ -2129,7 +2129,15 @@ baseline_clean_task = PythonOperator(
 )
 
 
-# Tier 1 — Core intelligence (rate-limited APIs). ALL_DONE: one failure doesn't block others.
+# Tier 1 — Core intelligence (rate-limited APIs).
+#
+# **trigger_rule = ALL_DONE (deliberate, preserved across PR-F4):** each
+# tier-1 collector hits a DIFFERENT external API (CISA's, MITRE's, OTX's,
+# NVD's). When one source's API has a transient outage, the OTHER three
+# should still run — losing 1/4 of a baseline is much better than losing
+# all of it. ALL_DONE is what gives us that multi-source resilience.
+# Do NOT change to ALL_SUCCESS without explicit discussion: that would
+# cascade-skip downstream collectors on any single-source flake.
 #
 # PR-F4 (2026-04-20, Vanko's overnight baseline observation): collectors
 # now run **SEQUENTIALLY** (cisa → mitre → otx → nvd) instead of in
@@ -2155,15 +2163,21 @@ baseline_clean_task = PythonOperator(
 #   collectors complete in <1min combined, so the real cost is OTX+NVD
 #   no longer overlapping (~3h+5h = 8h vs. previous max(3h, 5h) = 5h).
 #
-# **Order rationale:** small collectors first (cisa ~14s, mitre ~28s)
-# so we get a fast signal if the chain has any problem (auth issue,
-# MISP completely down) before sinking ~3-5 hours into OTX or NVD.
+# **Order rationale (cisa → mitre → otx → nvd):** the order is mostly
+# aesthetic — small-first reads more naturally in the Airflow grid view.
+# It does NOT give us automatic fast-fail because the ALL_DONE trigger
+# rule (correctly preserved for multi-source resilience above) means
+# downstream tasks run regardless of upstream success/failure. Operators
+# monitoring a live run can intervene manually if CISA fails fast and
+# the failure looks chain-wide (MISP completely down), but this is an
+# operator-discretion benefit, not a DAG-automatic one. The real value
+# of PR-F4 is halved MISP write concurrency; the order is incidental.
 #
 # **What this DOES NOT fix:** the per-event-grows-with-size cost on a
 # single oversized event (MISP edit-event loads the entire event for
 # dedup; cost grows linearly with existing attribute count). That's the
 # architectural fix tracked separately — event partitioning by date
-# range so no single event exceeds ~20K attributes.
+# range so no single event exceeds ~20K attributes (Issue #61).
 #
 # Tier2 stays parallel: those 6 feeds are individually tiny (<5K attrs
 # each), don't trigger the failure-mode-2 oversized-event problem, and
@@ -2195,9 +2209,12 @@ with TaskGroup("tier1_core", dag=baseline_dag, default_args={"trigger_rule": Tri
     )
 
     # PR-F4: sequential dependency chain inside the TaskGroup.
-    # cisa (~14s) → mitre (~28s) → otx (~3h) → nvd (~5h). Small ones
-    # first for fast failure signal; heavies serialized to halve the
-    # MISP write concurrency that triggered the 14.7% NVD loss.
+    # cisa (~14s) → mitre (~28s) → otx (~3h) → nvd (~5h). The order is
+    # mostly aesthetic; the real value is halving the MISP write
+    # concurrency that triggered the 14.7% NVD loss. ALL_DONE trigger
+    # rule (set on the TaskGroup default_args above) is preserved so a
+    # single-source API flake doesn't cascade-skip the rest of tier1 —
+    # see the comment block above the TaskGroup for full reasoning.
     bl_cisa >> bl_mitre >> bl_otx >> bl_nvd
 
 # Tier 2 — Reputation & bulk feeds (parallel after Tier 1).
