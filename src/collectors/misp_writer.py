@@ -27,6 +27,7 @@ from collectors.collector_utils import TransientServerError, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
+    MISP_CROSS_EVENT_DEDUP,
     MISP_PREFETCH_EXISTING_ATTRS,
     MISP_URL,
     SSL_VERIFY,
@@ -363,6 +364,157 @@ class MISPWriter:
             return []
         data = response.json()
         return data.get("response") or []
+
+    def _get_existing_source_attribute_keys(self, source_tag: str) -> set:
+        """Build a set of (MISP attribute type, value) already pushed under
+        ANY MISP event tagged with ``source_tag`` — across all events,
+        not just one.
+
+        PR-F7 (Issue #61 quick-fix): the per-event prefetch
+        (:meth:`_get_existing_attribute_keys`) misses duplicates across
+        different MISP events for the same source. Bravo's 2026-04-19
+        incident measured 72,479 CVEs duplicated between event 19
+        (``EdgeGuard-nvd-2026-04-19``) and event 20
+        (``EdgeGuard-nvd-2026-04-20``) — both runs pushed the same NVD
+        baseline window on different UTC days, creating two events with
+        the same content.
+
+        Uses MISP's ``attributes/restSearch`` ``tags`` filter — one
+        query per source per :meth:`push_items` call (cached by the
+        caller). Paginated identically to the per-event variant. Returns
+        an empty set when:
+
+          - ``EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS`` is disabled
+            (master switch — also gates the per-event prefetch)
+          - ``EDGEGUARD_MISP_CROSS_EVENT_DEDUP`` is disabled (this
+            feature's opt-out)
+          - ``source_tag`` is empty (defensive — caller couldn't resolve)
+          - The probe fails (any HTTP error / parse error) — degrades
+            cleanly to per-event-only dedup; no harm
+
+        Cost: ~30-40 seconds for ~92K NVD attributes paginated 5000/page
+        (~19 requests). Amortized over the entire baseline run (one call
+        per source per push_items invocation, not per batch).
+
+        See also Issue #61 — the architectural fix is event partitioning
+        by attribute date, not push date. This helper is the cheap
+        quick-fix until #61 lands.
+        """
+        if not MISP_PREFETCH_EXISTING_ATTRS:
+            return set()
+        if not MISP_CROSS_EVENT_DEDUP:
+            return set()
+        tag = (source_tag or "").strip()
+        if not tag:
+            return set()
+        keys: set = set()
+        page = 1
+        page_limit = 5000
+        max_pages = 200
+        while page <= max_pages:
+            try:
+                response = self.session.post(
+                    f"{self.url}/attributes/restSearch",
+                    json={
+                        "returnFormat": "json",
+                        "tags": [tag],
+                        "page": page,
+                        "limit": page_limit,
+                    },
+                    verify=self.verify_ssl,
+                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2),
+                )
+            except _TRANSIENT_HTTP_ERRORS as ex:
+                # PR-F7 Bugbot round-3 / multi-agent audit (Logic Tracker HIGH,
+                # Devil's Advocate HIGH, Bug Hunter HIGH): previously this
+                # branch re-raised transient errors. That was WRONG —
+                # ``push_items`` has no retry decorator around this call,
+                # so the exception propagated → collector ``except
+                # Exception`` → catastrophic classification → [CRITICAL]
+                # HARD-FAILED alert + entire NVD batch (~92K attrs) lost.
+                # The docstring promises "degrades cleanly to per-event
+                # dedup; no harm" — deliver on that.
+                #
+                # PR-F7 Bugbot round-4 (Medium on commit 90a0ab5):
+                # previous fix was ``return set()`` — which discarded
+                # every page already collected. On NVD (~19 pages) a
+                # transient blip on page 15 threw away ~70K valid keys
+                # → all cross-event dedup lost for the run, most likely
+                # to happen exactly when MISP is under load (the
+                # scenario this PR targets). Fix: ``break`` preserves
+                # the partial keyset (strictly better than empty). The
+                # sibling ``_get_existing_attribute_keys`` already uses
+                # the same pattern.
+                logger.warning(
+                    "MISP cross-event prefetch transient error for tag=%s page=%s after %s keys: %s — "
+                    "preserving partial keyset, degrading to per-event for remainder "
+                    "(PR-F7: fail-OPEN, no collector abort)",
+                    tag,
+                    page,
+                    len(keys),
+                    ex,
+                )
+                break
+            except Exception as ex:
+                logger.warning(
+                    "MISP cross-event prefetch failed for tag=%s page=%s after %s keys: %s — "
+                    "preserving partial keyset, degrading to per-event for remainder",
+                    tag,
+                    page,
+                    len(keys),
+                    ex,
+                )
+                break
+            if response.status_code != 200:
+                # PR-F7 Bugbot round-4: preserve partial keyset (same
+                # rationale as the transient-error break above).
+                logger.warning(
+                    "MISP cross-event prefetch HTTP %s for tag=%s page=%s after %s keys — "
+                    "preserving partial keyset, degrading to per-event for remainder",
+                    response.status_code,
+                    tag,
+                    page,
+                    len(keys),
+                )
+                break
+            try:
+                data = response.json()
+            except ValueError:
+                logger.warning(
+                    "MISP cross-event prefetch non-JSON response for tag=%s page=%s after %s keys — "
+                    "preserving partial keyset, degrading to per-event for remainder",
+                    tag,
+                    page,
+                    len(keys),
+                )
+                break
+            resp = data.get("response", data)
+            attrs: List = []
+            if isinstance(resp, list):
+                attrs = resp
+            elif isinstance(resp, dict):
+                raw = resp.get("Attribute")
+                if isinstance(raw, list):
+                    attrs = raw
+                elif isinstance(raw, dict):
+                    attrs = [raw]
+            for a in attrs:
+                if not isinstance(a, dict):
+                    continue
+                t = a.get("type")
+                v = a.get("value")
+                if t is not None and v is not None and str(v).strip():
+                    keys.add((str(t), str(v)))
+            if len(attrs) < page_limit:
+                break
+            page += 1
+        if keys:
+            logger.info(
+                "MISP cross-event prefetch tag=%s: %s existing keys (will skip duplicates at push time — PR-F7)",
+                tag,
+                len(keys),
+            )
+        return keys
 
     def _get_existing_attribute_keys(self, event_id: str) -> set:
         """
@@ -1268,6 +1420,13 @@ class MISPWriter:
         start_time = time.time()
         push_queue: List[Tuple[str, List[Dict]]] = []
 
+        # PR-F7 (Issue #61 quick-fix): cache cross-event prefetch per
+        # source so a single push_items call doesn't re-fetch the same
+        # tag set N times when grouped has multiple (source, date)
+        # entries for the same source. The fetch itself can be 30-40s
+        # on a 92K-attr NVD source — caching matters.
+        cross_event_cache: Dict[str, set] = {}
+
         for (source, date), attributes in grouped.items():
             # Deduplicate attributes by value
             seen = set()
@@ -1284,16 +1443,70 @@ class MISPWriter:
                 total_failed += len(unique_attrs)
                 continue
 
-            existing_keys = self._get_existing_attribute_keys(event_id)
+            # PR-F7: filter in TWO explicit steps so the skip-count
+            # attribution for each layer is exact (not an approximation).
+            # Bugbot LOW (commit 2d747e6): the previous diagnostic summed
+            # ``cross_event_skipped`` over ``attributes`` (the PRE within-
+            # batch-dedup list with its own duplicates) so counts could
+            # EXCEED ``skipped_ct`` — producing contradictory log lines
+            # like "skipping 5 attributes (~8 caught by PR-F7)".
+            #
+            # Fix: step 1 filters by per-event keys (existing behavior);
+            # step 2 filters the remaining list by cross-event keys. Each
+            # step's contribution is exactly the difference in lengths,
+            # so the per-event + cross-event counts always add up to
+            # ``skipped_ct``.
+            per_event_keys = self._get_existing_attribute_keys(event_id)
+            # PR-F7 Bugbot round-3 / multi-agent audit (Bug Hunter, Maintainer):
+            # cache key is the RESOLVED ``source_tag`` — not the raw ``source``
+            # string. Two sources can share a tag via the registry's alias
+            # map (e.g. ``cisa`` and ``cisa_kev`` both map to
+            # ``source:CISA-KEV``). Keying by raw ``source`` would double-fetch
+            # the same tag set; keying by resolved tag collapses aliases into
+            # one cache entry, which is what the prefetch cost model expects.
+            source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
+            if source_tag not in cross_event_cache:
+                cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(source_tag)
+            cross_event_keys = cross_event_cache[source_tag]
+
             before_ct = len(unique_attrs)
-            unique_attrs = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in existing_keys]
-            skipped_ct = before_ct - len(unique_attrs)
+            # Step 1 — filter by per-event keys (attrs already in THIS event)
+            after_per_event = [a for a in unique_attrs if (a.get("type"), a.get("value")) not in per_event_keys]
+            per_event_skipped = before_ct - len(after_per_event)
+            # Step 2 — filter the remainder by cross-event keys (attrs in
+            # ANY OTHER EdgeGuard event for this source). PR-F7's value is
+            # exactly this number: duplicates that the per-event prefetch
+            # would have missed.
+            unique_attrs = [a for a in after_per_event if (a.get("type"), a.get("value")) not in cross_event_keys]
+            cross_event_skipped = len(after_per_event) - len(unique_attrs)
+            skipped_ct = per_event_skipped + cross_event_skipped
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
+                # Multi-agent audit (Cross-Checker, Logic Tracker): the
+                # "(0 cross-event PR-F7 dedup)" log was ambiguous —
+                # operators couldn't tell whether the 0 meant "we checked
+                # and found none" (feature working) vs "the feature is
+                # disabled/failed" (feature not running). Qualify the
+                # log line based on WHY cross_event_keys is empty.
+                if not MISP_CROSS_EVENT_DEDUP:
+                    cross_event_note = "cross-event DISABLED"
+                elif not cross_event_keys:
+                    # Empty set with feature enabled — could be genuinely
+                    # no cross-event dupes OR prefetch failed and logged
+                    # WARN above. The WARN log line is the truth source;
+                    # here we just mark "unavailable" so the count 0 is
+                    # honest rather than implying "feature ran and found
+                    # 0 dupes."
+                    cross_event_note = "cross-event unavailable/empty"
+                else:
+                    cross_event_note = "cross-event PR-F7 active"
                 logger.info(
-                    "MISP event %s: skipping %s attributes already present (type+value match)",
+                    "MISP event %s: skipping %s attributes already present (%s per-event + %s cross-event; %s)",
                     event_id,
                     skipped_ct,
+                    per_event_skipped,
+                    cross_event_skipped,
+                    cross_event_note,
                 )
             if not unique_attrs:
                 continue

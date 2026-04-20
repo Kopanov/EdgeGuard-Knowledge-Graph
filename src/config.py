@@ -361,6 +361,24 @@ def _env_bool(name: str, default: str = "true") -> bool:
 # MISP push: prefetch existing (type, value) per target event to skip duplicates (reruns + overlap).
 MISP_PREFETCH_EXISTING_ATTRS = _env_bool("EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS", "true")
 
+# PR-F7 (Issue #61 quick-fix): also prefetch existing (type, value) ACROSS all
+# EdgeGuard MISP events for the same source — catches duplicates that the
+# per-event prefetch misses when a source's data lands in multiple events
+# (different push-day → different ``EdgeGuard-{source}-{date}`` event ID).
+# Bravo's 2026-04-19 incident: 72,479 CVEs duplicated between event 19 + 20
+# because both runs pushed on different UTC days. With this enabled, the
+# second run sees the first run's CVEs already exist (under any source-tagged
+# event) and skips them — saves MISP storage AND avoids the per-event size
+# cost that triggers HTTP 500s on big events.
+#
+# The architectural fix (event partitioning by attribute date) is Issue #61.
+# This flag is the cheap quick-fix that takes immediate pressure off MISP
+# without the migration that #61 requires. Default ON — operators on small
+# MISP installs (where the cross-event prefetch query is cheap) get
+# protection out-of-the-box; operators on huge installs can disable if
+# the prefetch query becomes the slow part of a baseline.
+MISP_CROSS_EVENT_DEDUP = _env_bool("EDGEGUARD_MISP_CROSS_EVENT_DEDUP", "true")
+
 # OTX incremental: first-run / no-checkpoint lookback; overlap subtracted from stored cursor to avoid gaps.
 OTX_INCREMENTAL_LOOKBACK_DAYS = _env_int("EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS", 3)
 OTX_INCREMENTAL_OVERLAP_SEC = _env_int("EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC", 300)
