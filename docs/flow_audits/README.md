@@ -1,122 +1,129 @@
-# Flow Audits — Tier 1 Findings Index
+# Flow Audits — Consolidated Findings Index
 
-Audits of the three production-test-critical flows, run 2026-04-20 against commit `8e39f88`. Findings are organized for **730-day baseline production-test readiness** — what bites a 2-year historical run.
+This directory holds multi-agent audit reports that drive the bug-fix
+work on the main pipeline. Organized for **730-day baseline
+production-test readiness** — what bites a 2-year historical run.
 
-## Audits
+## Audit passes
+
+### Pass 1 — Tier-1 critical flows (2026-04-20 morning)
+
+Output: 37 findings. Driven fixes in PR-F9, PR-G1, PR-I, PR-J, PR-K1, PR-K2, PR-K3 (merged or in flight).
 
 | # | Flow | File | Findings |
 |---|------|------|----------|
-| 1 | [Baseline sequence](01_baseline_sequence.md) | `src/edgeguard.py` → DAG → collectors → MISP → Neo4j | 11 |
-| 2 | [Checkpoint state machine](02_checkpoint_state_machine.md) | `src/baseline_checkpoint.py` + consumers | 13 |
-| 3 | [Collector → MISP → Neo4j](03_collector_misp_neo4j.md) | Write-path + read-path + merge | 13 areas |
+| 01 | Baseline sequence | [`01_baseline_sequence.md`](01_baseline_sequence.md) | 11 |
+| 02 | Checkpoint state machine | [`02_checkpoint_state_machine.md`](02_checkpoint_state_machine.md) | 13 |
+| 03 | Collector → MISP → Neo4j | [`03_collector_misp_neo4j.md`](03_collector_misp_neo4j.md) | 13 |
 
-**Total: ~37 findings.** Most are real; a minority are hardening/cosmetics.
+### Pass 2 — Comprehensive production-test audit (2026-04-20 afternoon)
 
----
+**Trigger:** operator pivoted from reactive Bugbot-fix cycles to proactive comprehensive auditing. 5 parallel agents audited specific 730d concerns. **~60 findings.**
 
-## Tier A — Production-test blockers (must fix before 730d run)
-
-These directly threaten a 2-year baseline's ability to complete or resume. Roughly 7 findings across the three audits:
-
-| ID | Finding | File | Severity |
-|----|---------|------|----------|
-| §1-1 | Baseline lock never acquired on DAG path → incrementals race baseline for 26+ hours | `dags/edgeguard_pipeline.py:2655-2697` | HIGH |
-| §1-2 | `fetch_edgeguard_events` missing `since` filter → entire MISP scan, 100-page cap silently truncates | `src/run_misp_to_neo4j.py:172-224` | HIGH |
-| §1-4 | `run_build_relationships` subprocess buffers 5h stdout → OOM risk + truncation on failure | `dags/edgeguard_pipeline.py:1704-1718` + `src/run_pipeline.py:1546-1594` | HIGH |
-| §1-8 | `baseline_start` clears checkpoints on every run → breaks additive-baseline resume | `dags/edgeguard_pipeline.py:2251-2270` | HIGH |
-| §2-1 | `save_checkpoint` swallows exceptions → silent checkpoint freeze | `src/baseline_checkpoint.py:84-89` | HIGH |
-| §2-3 | No recovery from corrupt checkpoint → one corrupt byte wipes 2 years of progress | `src/baseline_checkpoint.py:76-81` | HIGH |
-| §2-8 | Fresh-baseline + incremental cursor handoff → silent data gap | `src/baseline_clean.py:389-398` + `dags:2265` | HIGH |
-
-## Tier B — Accounting / silent-degradation (fix soon)
-
-| ID | Finding | Severity |
-|----|---------|----------|
-| §1-3 | `events_failed` double-count → `EdgeGuardSyncCoverageGap` alert flap | HIGH |
-| §1-6 | 3-layer retry composition → up to 32 attempts/event during MISP flake | MEDIUM |
-| §1-7 / §3-D | Trust check against live MISP user not enforced → Orgc rotation silently drops all timestamps | MEDIUM |
-| §2-2 | Readers lock-free — future RMW callers would race silently | HIGH (latent) |
-| §2-10 | `get_baseline_status` reads `"page"` but writer sets `"current_page"` — operator sees `"—"` | MEDIUM |
-| §2-12 | `{completed:True, nvd_window_idx:X}` reachable stuck state | MEDIUM |
-| §3-G | Indicator sub-batch fails whole batch; others fail per-item → inconsistent partial-failure | MEDIUM |
-| §3-J | `misp_event_ids[]` on node not edge; `raw_data` frozen on edge CREATE | MEDIUM |
-
-## Tier C — Cosmetics / observability gaps
-
-§1-5, §1-9/§2-5 (pages list unbounded — duplicate), §1-10, §1-11, §2-4, §2-6, §2-7, §2-9, §2-11, §2-13, §3-A/H/I/K-L/M, plus hardening tests.
-
-## Tier D — Data-surface parity (not 730d, but real)
-
-§3-F: STIX-export vs Cypher-sync emit different IOC counts for `email-dst`, `text` (non-MITRE), and `filename`/`regkey`/`mutex`/`yara`/`sigma`/`snort`/`btc`. ResilMesh consumers reading `/stix21` get fewer IOCs than `/graphql`. Real bug but not a baseline-stability issue.
+| # | Focus | File | Findings |
+|---|-------|------|----------|
+| 04 | Timestamps / dates end-to-end | [`04_timestamps_dates.md`](04_timestamps_dates.md) | 11 (5 HIGH) |
+| 05 | Neo4j merge determinism | [`05_merge_determinism.md`](05_merge_determinism.md) | 10+ (2 CRITICAL, 3 HIGH) |
+| 06 | MISP aggregation + dedup | [`06_misp_aggregation.md`](06_misp_aggregation.md) | 9 (4 HIGH, 5 MEDIUM) |
+| 07 | Per-collector baseline correctness | [`07_collector_baseline.md`](07_collector_baseline.md) | 19 (8 HIGH, 10 MED, 6 LOW) |
+| 08 | Relationship / edge integrity | [`08_relationship_integrity.md`](08_relationship_integrity.md) | 10+ (2 CRITICAL, 4 HIGH) |
 
 ---
 
-## Proposed fix plan
+## Tier A — 730-DAY BASELINE BLOCKERS (FIX BEFORE PRODUCTION RUN)
 
-Staged so each PR is shippable and reviewable.
+**~17 findings.** Each either silently loses data, corrupts historical dates, or produces non-deterministic graphs. Every one has a clear production path that triggers it during a real 730d run.
 
-### PR-K1 — Baseline resume robustness (Tier A, consolidated)
+> **Note on Issue #57 (baseline lock, finding §1-1 from Pass-1 audit):** the Airflow-aware baseline-lock architectural gap was identified in Pass 1 (tracked separately as [Issue #57](../../issues/57) — not a patch, needs design spike). Interim mitigation during 730d production-test: use CLI `python src/run_pipeline.py --baseline` (in-process lock acquisition works) OR pre-pause scheduled incremental DAGs in Airflow for the baseline window.
 
-**Scope:** Everything that turns a 730-day baseline into a restartable-without-data-loss run.
+### A1. Silent data loss (operator sees "success", graph is empty or wrong)
 
-- §1-8 — Move `clear_checkpoint()` into `_baseline_clean` on fresh-baseline branch only; remove from `_baseline_start_summary`. Additive baselines preserve checkpoints.
-- §2-1 — `save_checkpoint` re-raises on write failures (or sets degraded flag surfaced via `get_baseline_status`).
-- §2-3 — Corrupt JSON recovery: rename to `.corrupt.{timestamp}` before returning `{}`; refuse to start fresh without `EDGEGUARD_CHECKPOINT_FORCE_RESET=1`.
-- §2-8 — Baseline completion updates incremental cursors (or wipes them with warning) so first post-baseline incremental doesn't miss data.
+| ID | File:line | Sev | What breaks | Fix strategy |
+|----|-----------|-----|-------------|--------------|
+| **CB-H3** | `src/collectors/nvd_collector.py:618` | HIGH | NVD baseline truncates output to `EDGEGUARD_INCREMENTAL_LIMIT` if env set → 99%+ silent data loss | Gate on `baseline=True`; use separate `BASELINE_NVD_MAX` |
+| **CB-H1** | `src/collectors/otx_collector.py:291` | HIGH | OTX baseline hard-capped at `max_pages=200 × limit=50 = 10k` pulses; typical 2y = 15-30k | Raise `max_pages` via env, decouple from incremental limit |
+| **CB-H6** | `src/collectors/vt_collector.py:588` | HIGH | VT baseline forces `limit=20` when None → 20 items for a 730d run | Gate on `baseline=True` for baseline ceiling |
+| **CB-H7** | `src/collectors/energy_feed_collector.py:100` (+ healthcare) | HIGH | Sector placeholders have no `baseline` kwarg → silent no-op | `make_skipped_optional_source(..., skip_reason_class="placeholder")` |
+| **CB-H8** | `src/collectors/global_feed_collector.py:99,137` | HIGH | ThreatFox `days=730` silently clamped by abuse.ch API to 7/30 max | Loop 30d windows OR check `query_status=illegal_days` |
+| **MA-H3** | `src/collectors/misp_writer.py:548-552` | HIGH | Per-event attribute prefetch re-raises transient MISP errors → one flake aborts whole collector baseline | Apply PR-F7's `break`+preserve-partial pattern |
 
-**Size estimate:** ~100-150 LOC across 3 files + 6-8 new regression tests. Medium-risk (touches baseline + checkpoint code; needs thorough tests).
+### A2. Date/timestamp corruption (2 years of data with wrong dates)
 
-### PR-K2 — MISP events-index fetch fix (Tier A, isolated)
+| ID | File:line | Sev | What breaks | Fix strategy |
+|----|-----------|-----|-------------|--------------|
+| **TS-F1** | `src/source_truthful_timestamps.py:436-449` | HIGH | NVD `published` strings TZ-less → Neo4j parses as server-local, not UTC. Non-UTC server = 2y of CVEs offset by server tz | Apply `tzinfo=timezone.utc` in full-string branch of `coerce_iso` |
+| **TS-F2** | `src/collectors/misp_writer.py:1386` | HIGH | `push_items` buckets by wall-clock `now()`, ignores item's own date → 13-year-old CVE lands in "today's" MISP event | Bucket by `_coerce_item_date(item)` with fallback |
+| **TS-F4** | `src/collectors/vt_collector.py:404,523` | HIGH | VT's `datetime.now()` fallback for missing `first_submission_date` leaks wall-clock into `r.source_reported_first_at` (VT IS on reliable allowlist) | Omit `first_seen` when source provides no value (honest-NULL) |
+| **TS-F5** | `src/collectors/otx_collector.py:440,482` | HIGH | OTX `datetime.now()` fallback for missing `pulse.created` → today's date in MISP `first_seen` | Use `None` fallback |
+| **TS-F3** | `src/run_misp_to_neo4j.py:1316` | HIGH | Manual STIX fallback uses raw MISP Unix epoch int as `created`/`valid_from` | Route through `coerce_iso` |
 
-- §1-2 — Add `timestamp` + `searchall` params to `_fetch_edgeguard_events_via_requests_index`.
+### A3. Merge / relationship determinism (same input → different graph)
 
-**Size:** ~10-20 LOC + 1 regression test. Low-risk, high-impact.
+| ID | File:line | Sev | What breaks | Fix strategy |
+|----|-----------|-----|-------------|--------------|
+| **MD-C1** | `src/neo4j_client.py:2488,2501,2541,2597,3051,3065,3099,3106` | **CRITICAL** | Relationship MATCH uses raw indicator value; MERGE canonicalizes to lowercase → edges SILENTLY DROPPED for uppercase/mixed-case hashes from MISP | Canonicalize in dispatch before MATCH (one place) |
+| **RI-S4-Decay** | `src/enrichment_jobs.py:92-103` | **CRITICAL** | `decay_ioc_confidence` multi-decays nodes every Airflow run → confidence converges to 0.10 floor in ~7 runs | Add `last_decayed_tier` gate OR recompute from `base_confidence` |
+| **RI-S3-Q9** | `src/build_relationships.py:440` | HIGH | Query #9 overwrites `r.source_id` of co-occurrence edges → calibrator filter misses them → ~30-50% INDICATES edges with inflated 0.8 | Accumulate `r.source_ids` as array; calibrator uses ANY() |
+| **RI-S3-Camp** | `src/enrichment_jobs.py:324-335` | HIGH | `build_campaign_nodes` uses `collect(i)[0..100]` non-deterministic; PART_OF edges grow monotonically, 100-cap meaningless | Drop cap OR explicit delete-outside-top-N |
 
-### PR-K3 — Subprocess stdout streaming for build_relationships (Tier A, isolated)
+### A4. Scale / aggregation resilience
 
-- §1-4 — Replace `subprocess.run(capture_output=True)` with `Popen` + iterated stdout stream to Airflow logger; proper SIGTERM-then-SIGKILL on timeout.
-
-**Size:** ~40 LOC across 2 files + 1 mock-subprocess test. Low-risk.
-
-### PR-K4 — Baseline lock design spike (Tier A → Issue #57 path)
-
-- §1-1 — This IS Issue #57. Not a patch; needs design decision. Options tracked in the issue. Interim: operator runbook to pause scheduled DAGs before triggering baseline.
-
-**Size:** Design doc first, then implementation PR. Bigger scope.
-
-### PR-K5 — Accounting / display fixes (Tier B, grouped)
-
-- §1-3 — `events_failed` double-count
-- §2-10 — `get_baseline_status` wrong key
-- §2-12 — Detect `{completed:True, nvd_window_idx:X}` stuck state
-
-**Size:** ~50-80 LOC + regression tests. Low-risk.
-
-### PR-K6 — Trust-check operator hardening (Tier B)
-
-- §1-7 / §3-D — Preflight check that MISP API user's Orgc is in allowlist (or allow-untrusted flag set).
-
-**Size:** ~30 LOC in `assert_misp_preflight` + test.
-
-### Later / separate track
-
-- Tier C — grouped hygiene PR or folded into the above.
-- Tier D (STIX export parity) — own audit + PR; design question, not just a bug. Likely PR-K7 or a follow-up to PR #33 (UUID work).
+| ID | File:line | Sev | What breaks | Fix strategy |
+|----|-----------|-----|-------------|--------------|
+| **MA-H2** | `src/collectors/misp_writer.py::push_items` | HIGH | No large-event split; events >~20k attrs make MISP edit-event time out | Split overflow into `-part2` event before writes to part1 |
 
 ---
 
-## Ordering recommendation
+## Tier B — Production readiness (silent-degradation, not catastrophic)
 
-**Sprint 1 (most urgent for 730d readiness):**
-1. PR-K1 (baseline resume) — biggest risk reduction per LOC
-2. PR-K2 (MISP since filter) — tiny patch, huge silent-truncation fix
-3. PR-K3 (subprocess streaming) — small, targeted, closes OOM risk
+**~25 findings.** Covered in detail reports. Examples:
 
-**Sprint 2 (soon after):**
-4. PR-K5 (accounting fixes) — improves operator experience + alert reliability
-5. PR-K6 (trust-check preflight) — safety net for the production-test itself
-6. PR-K4 design spike for Issue #57 — architectural, needs discussion
+- **TS-F6** — `SECTOR_TIME_RANGES` `months × 30` approximation drops 10 days on 2y lookback
+- **MA-H4** — `restSearch limit=50` can miss exact match past row 49 (latent bomb)
+- **MD-H1** — `create_misp_relationships_batch` sets `r.confidence_score = row.confidence` flat overwrite, not MAX
+- **MD-H2** — `merge_node_with_source` scalar `extra_props` last-writer-wins for `cvss_score`, `severity`
+- **CB-H4** — CISA silently drops entries with empty `dateAdded` (string-compare)
+- **CB-H5** — OTX baseline truncates by pulse count, not item count
+- **TS-F7** — `_event_covers_since` compares dates not datetimes → 3-hour boundary loss per incremental run
+- **MA-M1/M2** — `_push_batch` retry can duplicate; tag rejection silently drops batch
+- **RI-S3-BridgeProvenance** — REFERS_TO edges lack `r.updated_at`, invisible to CLOUD_SYNC delta
+- Several more
 
-**Sprint 3 (after 730d proves stable):**
-7. Tier C hygiene
-8. PR-K7 STIX/Cypher parity (Tier D)
+---
+
+## Tier C — Hygiene / observability
+
+**~20 findings.** Best-effort, not bug-fixes. Deferred until Tier A + B stable.
+
+---
+
+## Proposed execution (Tier A only)
+
+Operator direction: **stop adding improvements, focus on fixing bugs in the main pipeline.**
+
+| PR | Scope | Touches | Est size |
+|----|-------|---------|----------|
+| **PR-M1** Collector silent-data-loss | CB-H1, H3, H6, H7, H8 | 5 collectors | ~150 LOC + tests |
+| **PR-M2** Timestamp/date corruption | TS-F1-F5 | `source_truthful_timestamps.py`, `misp_writer.py`, `run_misp_to_neo4j.py`, VT, OTX | ~100 LOC + tests |
+| **PR-M3a** Merge determinism — indicator canonicalization | MD-C1 | `neo4j_client.py` relationship dispatches | ~40 LOC + tests |
+| **PR-M3b** Decay idempotency | RI-S4-Decay | `enrichment_jobs.py` | ~30 LOC + tests |
+| **PR-M3c** Co-occurrence source_id accumulation | RI-S3-Q9 | `build_relationships.py` + calibrator | ~30 LOC + tests |
+| **PR-M3d** Campaign PART_OF determinism | RI-S3-Camp | `enrichment_jobs.py` | ~40 LOC + tests |
+| **PR-M4** MISP aggregation resilience | MA-H2, H3 | `misp_writer.py` | ~80 LOC + tests |
+
+Bundling option: M3a-d could be one PR if no conflicts (all touch different sites). Keeping separate for cleaner review.
+
+**After Tier A lands:** run 730d baseline as a real production test. Tier B and C land after that proves stable.
+
+---
+
+## What's NOT in this audit
+
+Deliberately out of scope for this pass; separate audit tracks:
+
+- Full STIX 2.1 export correctness (partial coverage via timestamps audit only)
+- ResilMesh integration surface
+- Security / trust-boundary (PR-I Tier 2 shipped; Tier 3 fail-closed tracked separately)
+- Observability + alerting (queued PR-H)
+
+These get audited after the main pipeline is bug-fixed and the 730d run exposes what remains.
