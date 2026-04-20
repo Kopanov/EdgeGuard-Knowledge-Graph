@@ -62,6 +62,7 @@ from config import (
 
 # Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
+from source_truthful_timestamps import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +292,7 @@ class NVDCollector:
         else:
             # Widest sector window for baseline
             months_range = max(SECTOR_TIME_RANGES.values())
-            desired_start = pub_end - timedelta(days=months_range * 30)
+            desired_start = pub_end - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
         pub_start, pub_end = clamp_nvd_published_range(desired_start, pub_end)
         pub_start_iso = _to_nvd_pub_iso(pub_start)
         pub_end_iso = _to_nvd_pub_iso(pub_end)
@@ -878,7 +879,7 @@ class NVDCollector:
                 if pub_date is not None:
                     try:
                         months_range = max(SECTOR_TIME_RANGES.get(s, SECTOR_TIME_RANGES["global"]) for s in sectors)
-                        cutoff = datetime.now(timezone.utc) - timedelta(days=months_range * 30)
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
 
                         if pub_date < cutoff:
                             skipped_old += 1
@@ -889,6 +890,21 @@ class NVDCollector:
                 # ResilMesh schema: Vulnerability.status is LIST OF STRING
                 vuln_status_raw = cve_data.get("vulnStatus", "")
                 vuln_status = ["rejected"] if vuln_status_raw == "Rejected" else ["active"]
+
+                # PR-M2 §4-F1.5 (defense in depth): canonicalize NVD's
+                # naive ISO timestamps at the producer boundary instead
+                # of relying on downstream ``coerce_iso`` to fix them.
+                # NVD returns ``"2023-05-09T15:15:10.897"`` without a TZ
+                # offset; without canonicalization Neo4j's ``datetime()``
+                # interprets the naive string as server-local time on
+                # non-UTC deployments — silently shifting every NVD
+                # CVE timestamp by the local offset. ``coerce_iso`` now
+                # injects ``+00:00`` for naive parses (PR-M2 §4-F1) so
+                # producer-side wrapping is belt-and-suspenders against
+                # any future regression in the chokepoint helper. See
+                # docs/TIMESTAMPS.md "Invariant 2".
+                published_iso = coerce_iso(published_str) or None
+                last_modified_iso = coerce_iso(cve_data.get("lastModified")) or None
 
                 # One entry per CVE — property names aligned to ResilMesh schema
                 processed.append(
@@ -908,13 +924,13 @@ class NVDCollector:
                         # wall-clock leak fixes. ``published`` and
                         # ``last_modified`` are also kept as ResilMesh-compatible
                         # plain string fields on the node for STIX export.
-                        "published": published_str,
-                        "last_modified": cve_data.get("lastModified") or None,
+                        "published": published_iso,
+                        "last_modified": last_modified_iso,
                         # ``first_seen`` / ``last_seen`` flow into the
                         # source-truthful extractor → SOURCED_FROM edge as
                         # ``r.source_reported_first_at`` / ``r.source_reported_last_at``.
-                        "first_seen": published_str or None,
-                        "last_seen": cve_data.get("lastModified") or None,
+                        "first_seen": published_iso,
+                        "last_seen": last_modified_iso,
                         # PR (S5) (Logic Tracker v3 LOW + Bug
                         # Hunter v3 #6): the previously-restored
                         # ``"last_updated"`` key was based on a misleading

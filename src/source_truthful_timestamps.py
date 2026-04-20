@@ -395,6 +395,14 @@ def coerce_iso(val: Any) -> Optional[str]:
             _metric_coerce_reject("overflow")
             return None
     if isinstance(val, datetime):
+        # PR-M2 §4-F1 (HIGH): if the datetime is naive (no tzinfo) we
+        # MUST inject UTC before serializing — otherwise Neo4j's Cypher
+        # ``datetime()`` parses the resulting naive ISO string as
+        # *server-local* time, not UTC. On a non-UTC Neo4j deployment
+        # every such timestamp is silently shifted by the local offset.
+        # See docs/TIMESTAMPS.md "Invariant 2 — Always tz-aware UTC ISO".
+        if val.tzinfo is None:
+            val = val.replace(tzinfo=timezone.utc)
         return val.isoformat()
     if isinstance(val, str):
         # PR (S5) (Red Team HIGH ×2 + Red Team v2 H3 HIGH):
@@ -437,7 +445,7 @@ def coerce_iso(val: Any) -> Optional[str]:
         #    Z-tolerance shim used elsewhere in the module).
         normalized = s.replace("Z", "+00:00") if s.endswith("Z") else s
         try:
-            datetime.fromisoformat(normalized)
+            parsed = datetime.fromisoformat(normalized)
         except (ValueError, TypeError):
             # Unparseable — return None so the caller's MIN/MAX logic
             # preserves any prior value rather than crashing the
@@ -446,6 +454,17 @@ def coerce_iso(val: Any) -> Optional[str]:
             # source_id context is available for better triage.
             _metric_coerce_reject("malformed_string")
             return None
+        # PR-M2 §4-F1 (HIGH): if the parsed datetime is naive (no tzinfo)
+        # we MUST inject UTC and re-emit so the returned string carries
+        # the offset.  Previously this branch returned the raw input
+        # ``s`` which, for naive ISO inputs (NVD's
+        # ``"2023-05-09T15:15:10.897"`` is the canonical case), flowed
+        # through to Neo4j's ``datetime()`` and was parsed as
+        # *server-local* time on a non-UTC deployment — silently
+        # shifting every NVD timestamp by the server's offset.  Mirror
+        # of the ``_stix_ts`` pattern in ``stix_exporter.py``.
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc).isoformat()
         return s
     return None
 

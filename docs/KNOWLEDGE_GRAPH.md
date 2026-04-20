@@ -90,6 +90,8 @@ Every threat-intel node (Indicator, Vulnerability, Malware, ThreatActor, Techniq
 
 **MIN/MAX merge semantics handle every realistic ordering scenario** — see `src/source_truthful_timestamps.py` module docstring or `migrations/2026_04_first_seen_at_source.md` for the full scenario walkthrough (baseline + incremental + out-of-order + stale-import + multi-source).
 
+**Timestamp invariants.** Every value flowing into `r.source_reported_first_at` / `r.source_reported_last_at` is **either NULL or tz-aware ISO-8601 UTC** (PR-M2 §4-F1). Mixing naive and aware values would corrupt the MIN/MAX comparison since Neo4j parses naive ISO strings as **server-local** time. The canonicalization chokepoint is `coerce_iso()` in `src/source_truthful_timestamps.py`. Producers MUST emit honest NULL when the source field is absent — never wall-clock NOW (PR-M2 §4-F4 / F5). The complete semantic model is documented in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md).
+
 ### Technique edges: attribution vs capability vs observation
 
 Prior to 2026-04 the three X→Technique edges were a single generic `USES` relationship. They have since been split into specialized types so Cypher queries and LLM/GraphRAG retrieval can distinguish **who does it** from **what the code can do** from **what an indicator observes**:

@@ -321,6 +321,20 @@ class OTXCollector:
                 if stored:
                     try:
                         base_dt = datetime.fromisoformat(stored.replace("Z", "+00:00"))
+                        # PR-M2 §4-F9: ``stored`` may have been written by an
+                        # older checkpoint version that omitted the ``Z``
+                        # suffix entirely (just ``"2024-01-15T10:00:00"``).
+                        # ``str.replace("Z", "+00:00")`` is a no-op on that
+                        # string, so ``fromisoformat`` returns a NAIVE
+                        # datetime, and subtracting ``overlap`` (which is a
+                        # tz-aware-arithmetic-safe timedelta) silently
+                        # produces a naive result that downstream
+                        # ``coerce_iso`` would treat differently than a
+                        # tz-aware one. Defensive UTC injection ensures
+                        # the resume cursor is always tz-aware, matching
+                        # docs/TIMESTAMPS.md "Invariant 2".
+                        if base_dt.tzinfo is None:
+                            base_dt = base_dt.replace(tzinfo=timezone.utc)
                         modified_since = (base_dt - overlap).isoformat()
                     except (ValueError, TypeError):
                         modified_since = (
@@ -404,7 +418,7 @@ class OTXCollector:
                     try:
                         pulse_date = datetime.fromisoformat(pulse_created.replace("Z", "+00:00"))
                         months_range = max(SECTOR_TIME_RANGES.get(s, SECTOR_TIME_RANGES["global"]) for s in sectors)
-                        cutoff = datetime.now(timezone.utc) - timedelta(days=months_range * 30)
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
 
                         if pulse_date < cutoff:
                             skipped_old += 1
@@ -425,27 +439,47 @@ class OTXCollector:
                     "otx_industries": otx_industries,
                 }
 
+                # PR-M2 §4-F5 (HIGH): per-indicator first_seen / last_seen.
+                # OTX is intentionally NOT on ``_RELIABLE_FIRST_SEEN_SOURCES``
+                # so the read-side ``extract_source_truthful_timestamps``
+                # correctly ignores OTX's claim. BUT the MISP attribute
+                # itself still carries whatever we put here, so non-EdgeGuard
+                # consumers (ResilMesh, SIEM bridges) reading MISP directly
+                # will see this value as the source's claim.
+                #
+                # Honest-NULL pattern (mirrors AbuseIPDB blacklist): omit
+                # ``first_seen`` when the source field is absent rather
+                # than substituting wall-clock NOW. Per-indicator
+                # ``ind.get("created")`` overrides the pulse-level
+                # ``pulse.get("created")`` when present (OTX returns
+                # per-indicator timestamps for some pulse types).
+                # Concept 1 in docs/TIMESTAMPS.md.
+                pulse_created = pulse.get("created")  # may be None — honest NULL
+                pulse_modified = pulse.get("modified")
                 # Extract indicators - one entry per indicator (zone holds all matched sectors)
                 indicators = pulse.get("indicators", [])
                 for ind in indicators:
                     indicator_type = self.map_indicator_type(ind.get("type"), ind.get("indicator"))
                     indicator_value = ind.get("indicator")
-                    processed.append(
-                        {
-                            "indicator_type": indicator_type,
-                            "value": indicator_value,
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "first_seen": pulse.get("created", datetime.now(timezone.utc).isoformat()),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
-                            "confidence_score": 0.5,
-                            "description": ind.get("description", "") or ind.get("title", ""),
-                            "indicator_role": ind.get("role", ""),
-                            "is_active": ind.get("is_active", True),
-                            **pulse_meta,
-                        }
-                    )
+                    indicator_first_seen = ind.get("created") or pulse_created
+                    indicator_last_seen = ind.get("modified") or pulse_modified
+                    item: Dict[str, Any] = {
+                        "indicator_type": indicator_type,
+                        "value": indicator_value,
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        "description": ind.get("description", "") or ind.get("title", ""),
+                        "indicator_role": ind.get("role", ""),
+                        "is_active": ind.get("is_active", True),
+                        **pulse_meta,
+                    }
+                    if indicator_first_seen:
+                        item["first_seen"] = indicator_first_seen
+                    if indicator_last_seen:
+                        item["last_seen"] = indicator_last_seen
+                    processed.append(item)
 
                 # Extract malware families
                 malware_families = pulse.get("malware_families", [])
@@ -469,25 +503,31 @@ class OTXCollector:
                     )
 
                 # Extract CVE references (no cap — collect all CVEs from pulse)
+                # PR-M2 §4-F5: same honest-NULL treatment for CVE entries
+                # synthesized from the pulse. OTX's claim about a CVE's
+                # first_seen is the pulse's ``created`` timestamp if the
+                # API provided it; otherwise we omit the field rather
+                # than substituting wall-clock NOW.
                 cve_refs = pulse.get("cve_references", [])
                 for cve in cve_refs:
-                    processed.append(
-                        {
-                            "type": "vulnerability",
-                            "cve_id": cve.upper() if isinstance(cve, str) else cve.get("cve", "").upper(),
-                            "description": f"Referenced in OTX pulse: {pulse.get('name', '')}",
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "first_seen": pulse.get("created", datetime.now(timezone.utc).isoformat()),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
-                            "confidence_score": 0.5,
-                            "severity": "UNKNOWN",
-                            "cvss_score": 0.0,
-                            "attack_vector": "NETWORK",
-                            **pulse_meta,
-                        }
-                    )
+                    cve_item: Dict[str, Any] = {
+                        "type": "vulnerability",
+                        "cve_id": cve.upper() if isinstance(cve, str) else cve.get("cve", "").upper(),
+                        "description": f"Referenced in OTX pulse: {pulse.get('name', '')}",
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        "severity": "UNKNOWN",
+                        "cvss_score": 0.0,
+                        "attack_vector": "NETWORK",
+                        **pulse_meta,
+                    }
+                    if pulse_created:
+                        cve_item["first_seen"] = pulse_created
+                    if pulse_modified:
+                        cve_item["last_seen"] = pulse_modified
+                    processed.append(cve_item)
 
                 # Extract named adversary as a ThreatActor if present
                 if pulse_adversary:

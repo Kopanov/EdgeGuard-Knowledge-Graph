@@ -916,11 +916,25 @@ class StixExporter:
         # field on ANY remaining baseline node get None here, falling
         # through to ``first_imported_at`` (the canonical DB-local sync
         # time) — semantically correct.
-        valid_from = _stix_ts(
-            _iso_str(props.get("first_seen_at_source"))
-            or _iso_str(props.get("first_imported_at"))
-            or _dt.datetime.now(_dt.timezone.utc).isoformat()
-        )
+        # PR-M2 design choice (c): split the resolution into
+        # source-truthful vs inferred so we can stamp
+        # ``x_edgeguard_first_seen_inferred`` on the inferred branches.
+        # Spec: docs/TIMESTAMPS.md "valid_from fallback chain".
+        source_truthful = _iso_str(props.get("first_seen_at_source"))
+        if source_truthful:
+            valid_from = _stix_ts(source_truthful)
+            valid_from_inferred = False
+        else:
+            inferred = _iso_str(props.get("first_imported_at")) or _dt.datetime.now(_dt.timezone.utc).isoformat()
+            valid_from = _stix_ts(inferred)
+            valid_from_inferred = True
+        # PR-M2: apply ``_producer_created_modified`` so Indicator
+        # SDO's ``created`` / ``modified`` come from EdgeGuard's
+        # ``first_imported_at`` / ``last_updated`` (concepts 3 / 4 in
+        # docs/TIMESTAMPS.md), not from the stix2 SDK's auto-stamp of
+        # current wall-clock. Brings Indicator into line with the 6
+        # other SDK-built SDO helpers (Malware/IntrusionSet/AttackPattern/
+        # Tool/Campaign/Vulnerability) that already use this helper.
         obj = stix2.Indicator(
             id=stix_id,
             pattern=pattern,
@@ -929,6 +943,7 @@ class StixExporter:
             name=props.get("name") or f"{ind_type}:{value}",
             indicator_types=_listify(props.get("indicator_classification") or ["malicious-activity"]),
             allow_custom=True,
+            **_producer_created_modified(props),
         )
         # PR (S5): expose source-truthful + import-wall-clock timestamps
         # as producer-specific custom properties so consumers can
@@ -936,7 +951,14 @@ class StixExporter:
         # best-practice pattern. Now applied via shared helper so every
         # SDO type emits the same envelope (Logic Tracker HIGH —
         # previously only Indicator got the custom props).
-        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
+        sdo_dict = self._apply_source_truthful_custom_props(_to_dict(obj), props)
+        # PR-M2: mark indicators whose valid_from came from the fallback
+        # chain so consumers can filter for source-truthful evidence
+        # only. Conscientious consumers (analyst UIs) check the flag;
+        # automation consumers can use valid_from directly.
+        if valid_from_inferred:
+            sdo_dict["x_edgeguard_first_seen_inferred"] = True
+        return sdo_dict
 
     def _malware_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         name = props.get("name", "")

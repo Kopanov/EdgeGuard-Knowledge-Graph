@@ -163,7 +163,19 @@ def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
             ds = str(date_s).strip()[:10]
             if len(ds) >= 10:
                 ev_day = datetime.strptime(ds, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                return ev_day.date() >= since.date()
+                # PR-M2 §4-F7: widen the boundary by 1 day. ``Event.date``
+                # is a date-only string (00:00:00 UTC) but ``since`` is a
+                # full datetime — typically computed as
+                # ``now - timedelta(days=N)`` which lands at e.g. 03:14:22
+                # UTC. ``ev_day.date() >= since.date()`` was excluding
+                # events on ``since.date()`` whose actual time-of-day was
+                # before ``since`` — losing up to 24 h per incremental
+                # run at the window floor. Cumulative ~3 h/run × 730 daily
+                # runs ≈ 2,190 h of dropped event coverage on a 2-yr
+                # baseline. Widening by 1 day errs on the side of
+                # inclusion (a few duplicates resolved by MERGE-side
+                # dedup) rather than silent loss.
+                return ev_day.date() >= (since - timedelta(days=1)).date()
         except (ValueError, TypeError):
             pass
     return True
@@ -1257,6 +1269,24 @@ class MISPToNeo4jSync:
 
         This is a fallback when PyMISP's to_stix2() is not available.
         Preserves zone information from MISP event names.
+
+        PR-M2 §4-F2/F10: previously this method used ``misp_event["date"]``
+        (a YYYY-MM-DD string stamped to *today* at MISP-write time, see
+        ``misp_writer.py:_get_or_create_event``) as the Report SDO's
+        ``created`` / ``modified``. That conflated three concepts:
+          * the Report (a new container we're generating now) — should
+            be stamped with the current wall-clock per STIX §3.6
+          * the Event.date (date-only string; not STIX-valid timestamp)
+          * the indicator's source-truthful first-seen (which is what
+            consumers actually want to know)
+
+        After PR-M2:
+          * Report ``created`` / ``modified`` / ``published`` = NOW (correct
+            STIX 2.1 §3.6 semantics — the Report is new)
+          * Each contained Indicator/Vulnerability SDO carries its own
+            source-truthful timestamps inside (see ``_attribute_to_stix21``
+            below)
+        See docs/TIMESTAMPS.md "Layer 4 — STIX 2.1 export" for the spec.
         """
         import uuid
         from datetime import datetime, timezone
@@ -1264,7 +1294,11 @@ class MISPToNeo4jSync:
         event_id = str(misp_event.get("id", uuid.uuid4()))
         event_uuid = misp_event.get("uuid", str(uuid.uuid4()))
         event_info = misp_event.get("info", "MISP Event")
-        event_date = misp_event.get("date", datetime.now(timezone.utc).isoformat())
+        # PR-M2: Report SDO timestamps are NOW (Report is new, per STIX
+        # §3.6). The misp_event["date"] field is irrelevant to the
+        # Report's STIX semantics; source-truthful info lives on the
+        # contained Indicator SDOs.
+        report_now = datetime.now(timezone.utc).isoformat()
 
         # Extract zone from event name (e.g., "EdgeGuard-FINANCE-alienvault_otx" → "finance")
         zone_from_name = self._extract_zone_from_event_name(event_info)
@@ -1291,13 +1325,22 @@ class MISPToNeo4jSync:
         stix_objects = []
         object_refs = []
 
-        # Create the Report object with zone labels
+        # Create the Report object with zone labels.
+        # PR-M2 §4-F2/F10: ``created`` / ``modified`` / ``published`` use
+        # the wall-clock NOW because the Report SDO is being generated
+        # in this method call. STIX 2.1 §3.6 requires both fields with
+        # full timestamp + offset; the previous code passed
+        # ``misp_event["date"]`` (date-only YYYY-MM-DD) which was both
+        # semantically wrong (consumers reading Report.created inferred
+        # the underlying entity's age, not the report's) and STIX-invalid
+        # (date-only strings fail strict validators per §3.2).
         report = {
             "type": "report",
             "spec_version": "2.1",
             "id": report_id,
-            "created": event_date,
-            "modified": event_date,
+            "created": report_now,
+            "modified": report_now,
+            "published": report_now,
             "name": event_info,
             "description": f"MISP Event {event_id}: {event_info}",
             "report_types": ["threat-report"],
@@ -1331,6 +1374,26 @@ class MISPToNeo4jSync:
 
         Returns:
             STIX 2.1 object dictionary or None
+
+        PR-M2 §4-F3 / spec docs/TIMESTAMPS.md: timestamp handling.
+
+        ``attr["timestamp"]`` is MISP's INTERNAL write-time epoch
+        integer (e.g. ``"1716825600"``); it is NOT a source-truthful
+        observation timestamp. The previous code used it verbatim as
+        STIX ``valid_from`` / ``created`` / ``modified`` — strict STIX
+        validators rejected it (raw int as ISO string), and any consumer
+        reading the value misinterpreted MISP's write time as the
+        source's first observation.
+
+        After PR-M2:
+          * ``stix_created_modified`` = NOW (when we generated this STIX
+            object) — matches concept 3 / 4 in TIMESTAMPS.md
+          * ``stix_valid_from`` = MISP-native ``Attribute.first_seen``
+            (concept 1, source-truthful) IF present, else NOW with
+            ``x_edgeguard_first_seen_inferred=true`` (design choice (c))
+          * MISP ``Attribute.timestamp`` is preserved as the custom
+            property ``x_edgeguard_misp_attribute_timestamp`` for
+            audit / debugging — never used as a STIX-spec field
         """
         import uuid
         from datetime import datetime, timezone
@@ -1338,7 +1401,60 @@ class MISPToNeo4jSync:
         attr_type = attr.get("type", "")
         value = attr.get("value", "")
         attr_uuid = attr.get("uuid", str(uuid.uuid4()))
-        timestamp = attr.get("timestamp", datetime.now(timezone.utc).isoformat())
+
+        # PR-M2 §4-F3: build the timestamp envelope cleanly, separating
+        # the four canonical concepts.
+        stix_now = datetime.now(timezone.utc).isoformat()
+        # MISP-native first_seen (source-truthful claim, MISP 2.4.120+).
+        # Coerced through the canonical helper so naive ISO / epoch int /
+        # date-only inputs all normalize to tz-aware UTC ISO.
+        attr_first_seen = _coerce_to_iso(attr.get("first_seen"))
+        attr_last_seen = _coerce_to_iso(attr.get("last_seen"))
+        # MISP-internal write-time epoch (for audit only, NOT a source claim).
+        misp_attr_timestamp = _coerce_to_iso(attr.get("timestamp"))
+
+        # Resolve valid_from per the canonical fallback chain
+        # (TIMESTAMPS.md "valid_from fallback chain"):
+        #   (1) source-truthful first_seen → no inferred flag
+        #   (2) wall-clock NOW            → x_edgeguard_first_seen_inferred=true
+        if attr_first_seen:
+            stix_valid_from = attr_first_seen
+            valid_from_inferred = False
+        else:
+            stix_valid_from = stix_now
+            valid_from_inferred = True
+
+        # Build the timestamp-envelope helpers that every SDO/SCO branch
+        # below applies before returning. Centralizes the spec.
+        #
+        # STIX 2.1 split (per §3 SDOs vs §6 SCOs):
+        #   SDOs (Indicator, Vulnerability, ThreatActor, Malware,
+        #     AttackPattern, x-mitre-tactic, Report) require
+        #     ``created`` / ``modified`` per §3.1.
+        #   SCOs (ipv4-addr, ipv6-addr, domain-name, url, file,
+        #     email-addr) do NOT carry ``created`` / ``modified`` —
+        #     they're SCOs, not SDOs. Adding the keys would fail
+        #     strict STIX 2.1 validation.
+        # Custom ``x_edgeguard_*`` properties are allowed on both
+        # (STIX 2.1 §3.1 / §6.1 producer custom properties).
+        def _x_props(stix_obj: dict) -> dict:
+            """Attach the EdgeGuard timestamp custom properties (safe
+            for both SDOs and SCOs)."""
+            if attr_first_seen:
+                stix_obj["x_edgeguard_first_seen_at_source"] = attr_first_seen
+            if attr_last_seen:
+                stix_obj["x_edgeguard_last_seen_at_source"] = attr_last_seen
+            if misp_attr_timestamp:
+                stix_obj["x_edgeguard_misp_attribute_timestamp"] = misp_attr_timestamp
+            return stix_obj
+
+        def _stamp_sdo(stix_obj: dict) -> dict:
+            """SDO timestamp envelope: ``created`` / ``modified`` =
+            wall-clock NOW (when this STIX object was generated, per
+            STIX §3.1) plus the custom EdgeGuard extensions."""
+            stix_obj.setdefault("created", stix_now)
+            stix_obj.setdefault("modified", stix_now)
+            return _x_props(stix_obj)
 
         if not value:
             return None
@@ -1377,32 +1493,32 @@ class MISPToNeo4jSync:
             stix_obj = {"type": "ipv4-addr", "spec_version": "2.1", "id": f"ipv4-addr--{attr_uuid}", "value": value}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
-            return stix_obj
+            return _x_props(stix_obj)
 
         elif attr_type == "ipv6":
             stix_obj = {"type": "ipv6-addr", "spec_version": "2.1", "id": f"ipv6-addr--{attr_uuid}", "value": value}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
-            return stix_obj
+            return _x_props(stix_obj)
 
         elif attr_type in ["domain", "hostname"]:
             stix_obj = {"type": "domain-name", "spec_version": "2.1", "id": f"domain-name--{attr_uuid}", "value": value}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
-            return stix_obj
+            return _x_props(stix_obj)
 
         elif attr_type == "url":
             stix_obj = {"type": "url", "spec_version": "2.1", "id": f"url--{attr_uuid}", "value": value}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
-            return stix_obj
+            return _x_props(stix_obj)
 
         elif attr_type in ["md5", "sha1", "sha256", "sha512"]:
             hashes = {attr_type.upper(): value}
             stix_obj = {"type": "file", "spec_version": "2.1", "id": f"file--{attr_uuid}", "hashes": hashes}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
-            return stix_obj
+            return _x_props(stix_obj)
 
         elif attr_type == "vulnerability":
             # vulnerability is an SDO — `labels` is valid here.
@@ -1415,7 +1531,7 @@ class MISPToNeo4jSync:
             }
             if labels:
                 stix_obj["labels"] = labels
-            return stix_obj
+            return _stamp_sdo(stix_obj)
 
         elif attr_type == "threat-actor":
             stix_obj = {
@@ -1428,7 +1544,7 @@ class MISPToNeo4jSync:
             }
             if labels:
                 stix_obj["labels"] = labels
-            return stix_obj
+            return _stamp_sdo(stix_obj)
 
         elif attr_type == "malware-type":
             # Extract malware family from tags if available
@@ -1449,7 +1565,7 @@ class MISPToNeo4jSync:
             }
             if labels:
                 stix_obj["labels"] = labels
-            return stix_obj
+            return _stamp_sdo(stix_obj)
 
         elif attr_type == "text":
             # Check if this is a MITRE technique (format: "T1234: Name" or starts with T followed by digits)
@@ -1486,7 +1602,7 @@ class MISPToNeo4jSync:
                 }
                 if labels:
                     stix_obj["labels"] = labels
-                return stix_obj
+                return _stamp_sdo(stix_obj)
 
             # Check if this is a MITRE tool (format: "S0001: Mimikatz")
             #
@@ -1548,7 +1664,7 @@ class MISPToNeo4jSync:
                     stix_obj["labels"] = labels
                 if uses_techniques:
                     stix_obj["x_edgeguard_uses_techniques"] = uses_techniques
-                return stix_obj
+                return _stamp_sdo(stix_obj)
 
             # Check if this is a MITRE tactic (format: "TA0001: Initial Access")
             #
@@ -1594,7 +1710,7 @@ class MISPToNeo4jSync:
                 }
                 if labels:
                     stix_obj["labels"] = labels
-                return stix_obj
+                return _stamp_sdo(stix_obj)
 
             # Not a MITRE technique/tool/tactic, treat as unknown indicator
             return None
@@ -1604,26 +1720,42 @@ class MISPToNeo4jSync:
             stix_obj = {"type": "email-addr", "spec_version": "2.1", "id": f"email-addr--{attr_uuid}", "value": value}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
-            return stix_obj
+            return _x_props(stix_obj)
 
         # Default to indicator with pattern
         else:
             pattern = self._value_to_stix_pattern(attr_type, value)
             if pattern:
+                # PR-M2 §4-F3: use the canonical four-concept timestamp
+                # mapping (TIMESTAMPS.md "Layer 4 — Indicator SDO"):
+                #   created   = NOW (when WE generated this SDO)
+                #   modified  = NOW (just generated)
+                #   valid_from= source-truthful first_seen ?? NOW
+                # Pre-PR-M2 used ``attr["timestamp"]`` (raw MISP-internal
+                # epoch int) for all three — strict STIX validators
+                # rejected the raw epoch as ISO; lenient consumers
+                # interpreted MISP's write-time as the source's first
+                # observation. Both wrong.
                 stix_obj = {
                     "type": "indicator",
                     "spec_version": "2.1",
                     "id": f"indicator--{attr_uuid}",
-                    "created": timestamp,
-                    "modified": timestamp,
+                    "created": stix_now,
+                    "modified": stix_now,
                     "name": f"MISP Indicator: {attr_type}",
                     "pattern": pattern,
                     "pattern_type": "stix",
-                    "valid_from": timestamp,
+                    "valid_from": stix_valid_from,
                 }
+                # PR-M2 design choice (c): mark inferred valid_from so
+                # consumers can filter for source-truthful evidence.
+                if valid_from_inferred:
+                    stix_obj["x_edgeguard_first_seen_inferred"] = True
                 if labels:
                     stix_obj["labels"] = labels
-                return stix_obj
+                # _stamp_sdo idempotently fills missing created/modified
+                # (already set above) and attaches x_edgeguard_* extensions
+                return _stamp_sdo(stix_obj)
 
         return None
 
@@ -2269,7 +2401,6 @@ class MISPToNeo4jSync:
                 # stamps first_imported_at = datetime() in neo4j_client.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
-                "last_updated": _coerce_to_iso(nvd_meta.get("last_modified") or attr.get("timestamp")),
                 "published": nvd_meta.get("published", ""),
                 "last_modified": nvd_meta.get("last_modified", ""),
                 "confidence_score": confidence,
@@ -2360,7 +2491,6 @@ class MISPToNeo4jSync:
                 # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
-                "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
@@ -2427,7 +2557,6 @@ class MISPToNeo4jSync:
                 # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
-                "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
@@ -2491,7 +2620,6 @@ class MISPToNeo4jSync:
                 # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
-                "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": 0.8,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
@@ -2530,7 +2658,6 @@ class MISPToNeo4jSync:
                 # first_imported_at (DB-local) instead.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
-                "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": 0.95,  # MITRE ATT&CK range
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
@@ -2605,7 +2732,6 @@ class MISPToNeo4jSync:
                 # vulnerability site for the rationale).
                 "first_seen_at_source": _fs_at_source_tool,
                 "last_seen_at_source": _ls_at_source_tool,
-                "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": 0.9,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
@@ -2703,7 +2829,6 @@ class MISPToNeo4jSync:
                 "source": [source_id],
                 # PR (S5): legacy first_seen removed (see
                 # vulnerability site for the rationale).
-                "last_updated": _coerce_to_iso(attr.get("timestamp")),
                 "confidence_score": confidence,
                 "pulse_name": otx_meta.get("pulse_name") or tf_meta.get("malware_family") or raw_comment,
                 "misp_event_id": str(event_info.get("id", "")),

@@ -171,6 +171,39 @@ MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Techniqu
 RETURN n, type(r) AS rel, t
 ```
 
+### 3.2.x STIX 2.1 timestamp semantics (PR-M2)
+
+The full timestamp model is documented in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md). For consumers, the upshot is:
+
+| STIX field | Meaning in EdgeGuard bundles |
+|---|---|
+| `created` | When the SDO was created in EdgeGuard's graph (= our import time). For Vulnerability SDOs specifically, this is NIST's `published` since the SDO represents the CVE itself. |
+| `modified` | When EdgeGuard last refreshed its record |
+| `valid_from` (Indicator only) | The source's first-observation claim if available; falls back to EdgeGuard's import time and sets `x_edgeguard_first_seen_inferred=true` so consumers can filter for source-truthful evidence |
+| `x_edgeguard_first_seen_at_source` | Verbatim source claim (concept 1). Absent if no source provided one |
+| `x_edgeguard_last_seen_at_source` | Verbatim source claim (concept 2). Absent if no source provided one |
+| `x_edgeguard_first_imported_at` | EdgeGuard's import wall-clock (concept 3) |
+| `x_edgeguard_last_updated` | EdgeGuard's last-touch wall-clock (concept 4) |
+| `x_edgeguard_first_seen_inferred` | `true` iff `valid_from` came from the fallback chain. Use this to filter for source-truthful indicators only when building correlation pipelines |
+
+**Worked example.** A CVE-2013 indicator ingested today appears as:
+
+```jsonc
+{
+  "type": "indicator",
+  "valid_from": "2013-05-29T00:00:00+00:00",          // source-truthful (NVD published)
+  "created":    "2026-04-21T08:00:00+00:00",          // EdgeGuard import time
+  "modified":   "2026-04-21T08:15:00+00:00",          // last refresh
+  "x_edgeguard_first_seen_at_source": "2013-05-29T00:00:00+00:00",
+  "x_edgeguard_last_seen_at_source":  "2024-03-15T18:42:00+00:00",
+  "x_edgeguard_first_imported_at":    "2026-04-21T08:00:00+00:00",
+  "x_edgeguard_last_updated":         "2026-04-21T08:15:00+00:00"
+  // x_edgeguard_first_seen_inferred ABSENT — we have a real source claim
+}
+```
+
+A consumer reading this gets a clear picture: the underlying CVE was published in 2013, was last updated by NIST in 2024, and EdgeGuard learned about it on 2026-04-21.
+
 ### 3.3 Sector/zone and TLP
 
 - **`zone`** — `LIST[STRING]` on merged threat-intel nodes (`global`, `healthcare`, `energy`, `finance`, …), populated from classification + MISP→Neo4j resolution (attribute-level `zone:` tags prioritized over event name / legacy event tags). Enables sector-scoped queries.
