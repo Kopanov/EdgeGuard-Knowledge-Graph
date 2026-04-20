@@ -2465,17 +2465,33 @@ class Neo4jClient:
             return False
 
     def create_indicator_vulnerability_relationship(
-        self, indicator_value: str, cve_id: str, source_id: str = "misp"
+        self,
+        indicator_value: str,
+        cve_id: str,
+        source_id: str = "misp",
+        indicator_type: Optional[str] = None,
     ) -> bool:
         """Create INDICATES/EXPLOITS relationship: Indicator -> Vulnerability or CVE.
 
         Matches the Indicator by value (any type) and links to both Vulnerability
         and CVE nodes (NVD-rich items are stored under the CVE label), cross-source.
+
+        PR-M3a §5-MD-C1: when ``indicator_type`` is provided, the ``indicator_value``
+        is canonicalized via ``canonicalize_merge_key`` BEFORE the MATCH — matching
+        the canonicalization that ``merge_indicators_batch`` applies before MERGE.
+        Without this, a caller passing ``"DEADBEEF..."`` (mixed case) would MATCH
+        zero nodes because the stored node is at ``"deadbeef..."`` → edge silently
+        dropped. When ``indicator_type`` is None, the raw value is used (backward-
+        compat for callers that haven't been migrated; NOT safe for case-sensitive
+        types — caller takes responsibility).
         """
         if not self.driver:
             return False
 
         ind = nonempty_graph_string(indicator_value)
+        if ind and indicator_type:
+            canon = canonicalize_merge_key("Indicator", {"indicator_type": indicator_type, "value": ind})
+            ind = canon.get("value", ind)
         cve = normalize_cve_id_for_graph(cve_id)
         if not ind or not cve:
             logger.debug("Skipping indicator↔vulnerability link: missing normalized indicator value or CVE id")
@@ -2520,17 +2536,31 @@ class Neo4jClient:
             return False
 
     def create_indicator_malware_relationship(
-        self, indicator_value: str, malware_name: str, source_id: str = "misp"
+        self,
+        indicator_value: str,
+        malware_name: str,
+        source_id: str = "misp",
+        indicator_type: Optional[str] = None,
     ) -> bool:
         """Create INDICATES relationship: Indicator -> Malware.
 
         Matches Malware by name or aliases, cross-source (no tag filter).
+
+        PR-M3a §5-MD-C1: Indicator value canonicalization when
+        ``indicator_type`` is provided. See
+        ``create_indicator_vulnerability_relationship`` for the rationale.
+        Malware name is ALWAYS canonicalized (lowercase + NFC + strip) since
+        Malware natural-key case-sensitivity is fixed by the project schema.
         """
         if not self.driver:
             return False
 
         iv = nonempty_graph_string(indicator_value)
+        if iv and indicator_type:
+            iv = canonicalize_merge_key("Indicator", {"indicator_type": indicator_type, "value": iv}).get("value", iv)
         mn = nonempty_graph_string(malware_name)
+        if mn:
+            mn = canonicalize_merge_key("Malware", {"name": mn}).get("name", mn)
         if not iv or not mn:
             logger.debug("Skipping indicator↔malware link: missing indicator value or malware name")
             return False
@@ -2566,13 +2596,24 @@ class Neo4jClient:
             return False
 
     def create_indicator_sector_relationship(
-        self, indicator_value: str, sector_name: str, source_id: str = "misp"
+        self,
+        indicator_value: str,
+        sector_name: str,
+        source_id: str = "misp",
+        indicator_type: Optional[str] = None,
     ) -> bool:
-        """Create TARGETS relationship: Indicator -> Sector."""
+        """Create TARGETS relationship: Indicator -> Sector.
+
+        PR-M3a §5-MD-C1: Indicator value canonicalization when
+        ``indicator_type`` is provided. See
+        ``create_indicator_vulnerability_relationship`` for the rationale.
+        """
         if not self.driver:
             return False
 
         iv = nonempty_graph_string(indicator_value)
+        if iv and indicator_type:
+            iv = canonicalize_merge_key("Indicator", {"indicator_type": indicator_type, "value": iv}).get("value", iv)
         sec = nonempty_graph_string(sector_name)
         if not iv or not sec:
             logger.debug("Skipping indicator↔sector link: missing indicator value or sector name")
@@ -2739,6 +2780,27 @@ class Neo4jClient:
             rt = rel.get("rel_type")
             fk = rel.get("from_key") or {}
             tk = rel.get("to_key") or {}
+            # PR-M3a §5-MD-C1: canonicalize Indicator / Malware / ThreatActor /
+            # Campaign natural keys via ``canonicalize_merge_key`` BEFORE
+            # appending rows. Without this, ``merge_indicators_batch`` stores
+            # e.g. SHA256 as lowercase (canonicalize_merge_key) but the
+            # relationship MATCH below uses the raw value from ``fk.get("value")``
+            # → mixed-case MISP data (uppercase hash/hostname/domain from some
+            # collectors) produces a row whose MATCH finds no node → edge
+            # SILENTLY DROPPED and _dropped_rels doesn't catch it (it only
+            # counts missing-endpoint rows BEFORE the query runs). Same issue
+            # affects Malware/ThreatActor/Campaign name matches — canonicalize
+            # uniformly so both sides of the MERGE↔MATCH pairing agree.
+            from_type = rel.get("from_type")
+            to_type = rel.get("to_type")
+            if from_type == "Indicator":
+                fk = {**fk, **canonicalize_merge_key("Indicator", fk)}
+            elif from_type in ("Malware", "ThreatActor", "Campaign"):
+                fk = {**fk, **canonicalize_merge_key(from_type, fk)}
+            if to_type == "Indicator":
+                tk = {**tk, **canonicalize_merge_key("Indicator", tk)}
+            elif to_type in ("Malware", "ThreatActor", "Campaign"):
+                tk = {**tk, **canonicalize_merge_key(to_type, tk)}
             conf = rel.get("confidence", 0.5)
             # Originating MISP event id, stamped by parse_attribute /
             # _build_cross_item_relationships. Threaded into each row dict so the
