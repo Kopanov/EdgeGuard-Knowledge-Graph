@@ -1709,6 +1709,98 @@ baseline_dag = DAG(
 )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PR-F5 (Issue #58 follow-up + Bravo's overnight-baseline investigation):
+# baseline DAG conf typo / unknown-key validation.
+#
+# **Why this exists.** On 2026-04-19 an operator triggered a fresh baseline
+# via the Airflow UI with ``{"days": 730}`` instead of ``{"baseline_days":
+# 730}`` AND missing ``fresh_baseline: true`` entirely. Both consumers
+# (``get_baseline_config`` and ``_baseline_clean``) silently fell through
+# to defaults — additive mode (no wipe), default 730-day window. The
+# operator believed they had triggered a destructive run with custom
+# depth; in reality they had triggered an additive run with the default
+# depth and no destructive guard. The misconfiguration was only caught
+# in postmortem hours later when Bravo's investigation surfaced it.
+#
+# Silent fallthrough is the worst possible UX for a destructive command:
+# the operator gets NO signal that they typo'd. PR-F5 closes that gap by
+# emitting a WARNING for every key in ``dag_run.conf`` that isn't on the
+# known-good list. Common typos get a "did you mean?" suggestion.
+#
+# **Why WARNING and not ERROR.** Refusing to run on an unknown key would
+# break operators who add forward-compat keys (e.g. a future
+# ``EXPERIMENTAL_NEW_FEATURE_FLAG`` key being set ahead of code that
+# consumes it). WARNING surfaces the issue without blocking the run.
+# Operators reading the log will see the warning; CI/scripted operators
+# can grep for the marker ``[BASELINE_CONF]`` to fail loudly on typos.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_KNOWN_BASELINE_CONF_KEYS = frozenset(
+    {
+        "fresh_baseline",  # destructive flag (consumed by _baseline_clean)
+        "baseline_days",  # historical depth (consumed by get_baseline_config)
+        "baseline_collection_limit",  # legacy per-source cap (back-compat)
+        "collection_limit",  # current per-source cap (SSoT)
+        "clear_checkpoints",  # "all" wipes incremental cursors too (consumed by _baseline_start_summary)
+    }
+)
+
+# Common typo patterns — Bravo's investigation 2026-04-20 found the
+# {"days": 730} vs {"baseline_days": 730} slip; this map turns that
+# silent fallthrough into a "did you mean?" warning. Add new entries
+# here as future typo patterns surface in operator postmortems.
+_BASELINE_CONF_TYPO_MAP = {
+    "days": "baseline_days",
+    "history_days": "baseline_days",
+    "fresh": "fresh_baseline",
+    "destructive": "fresh_baseline",
+    "wipe": "fresh_baseline",
+    "limit": "collection_limit",
+    "max_items": "collection_limit",
+    "items_per_source": "collection_limit",
+}
+
+
+def _validate_baseline_dag_conf(conf: object, *, source_label: str = "dag_run.conf") -> None:
+    """Emit a WARNING for each unrecognized key in the baseline DAG conf.
+
+    Defensive: silently no-ops when ``conf`` isn't a dict (the same
+    coalescing pattern used by every consumer in this DAG). Each warning
+    line is prefixed with ``[BASELINE_CONF]`` so CI/scripted operators
+    can grep for it as a fail signal even though we don't fail the task.
+
+    Per-call cost is negligible (membership tests on a tiny set); safe
+    to call from every consumer that reads ``dag_run.conf``.
+    """
+    if not isinstance(conf, dict) or not conf:
+        return
+    for key in conf:
+        if key in _KNOWN_BASELINE_CONF_KEYS:
+            continue
+        suggestion = _BASELINE_CONF_TYPO_MAP.get(str(key).strip().lower())
+        if suggestion:
+            logger.warning(
+                "[BASELINE_CONF] %s: unknown key %r — did you mean %r? "
+                "Unknown keys are SILENTLY IGNORED, which can cause an intended "
+                "fresh-baseline to run as additive (no wipe) or an intended --days "
+                "override to fall through to defaults. See docs/AIRFLOW_DAGS.md "
+                "for the full list of accepted conf keys.",
+                source_label,
+                key,
+                suggestion,
+            )
+        else:
+            logger.warning(
+                "[BASELINE_CONF] %s: unknown key %r (known keys: %s). "
+                "Unknown keys are SILENTLY IGNORED — verify your conf payload "
+                "before assuming the value took effect.",
+                source_label,
+                key,
+                sorted(_KNOWN_BASELINE_CONF_KEYS),
+            )
+
+
 def get_baseline_config(context=None) -> tuple:
     """
     Read baseline collection settings from Airflow Variables, then apply optional
@@ -1780,6 +1872,10 @@ def get_baseline_config(context=None) -> tuple:
     dag_run = context.get("dag_run") if context else None
     raw_conf = getattr(dag_run, "conf", None) if dag_run else None
     dag_conf: dict = raw_conf if isinstance(raw_conf, dict) else {}
+
+    # PR-F5: surface typo / unknown-key warnings BEFORE the conf is
+    # consumed. See ``_validate_baseline_dag_conf`` for rationale.
+    _validate_baseline_dag_conf(dag_conf, source_label="get_baseline_config")
 
     # Resolve via SSoT — handles env > variable > default and validation
     baseline_days = resolve_baseline_days(
@@ -1973,6 +2069,12 @@ def _baseline_start_summary(**context):
     dag_run = context.get("dag_run")
     raw_conf = getattr(dag_run, "conf", None) if dag_run else None
     conf = raw_conf if isinstance(raw_conf, dict) else {}
+
+    # PR-F5: validate (already run by get_baseline_config above for the
+    # same dag_run, but the duplicate marker line in the log helps
+    # operators trace the full sequence of conf-consumption sites).
+    _validate_baseline_dag_conf(conf, source_label="_baseline_start_summary")
+
     include_incremental = str(conf.get("clear_checkpoints", "")).lower() == "all"
     clear_checkpoint(include_incremental=include_incremental)
     if include_incremental:
@@ -2047,6 +2149,13 @@ def _baseline_clean(**context):
     dag_run = context.get("dag_run")
     raw_conf = getattr(dag_run, "conf", None) if dag_run else None
     conf = raw_conf if isinstance(raw_conf, dict) else {}
+
+    # PR-F5: validate conf keys BEFORE consuming fresh_baseline. The
+    # 2026-04-19 incident (operator typo'd ``{"days": 730}`` and the
+    # missing ``fresh_baseline: true`` was silently ignored, running
+    # additive instead of destructive) is the exact failure mode this
+    # warning catches. See ``_validate_baseline_dag_conf`` for rationale.
+    _validate_baseline_dag_conf(conf, source_label="_baseline_clean")
 
     # PR-C v2 audit fix (Bug Hunter B1, comprehensive 7-agent audit):
     # ``bool(conf.get("fresh_baseline", False))`` is wrong for the Airflow

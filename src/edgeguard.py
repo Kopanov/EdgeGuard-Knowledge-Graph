@@ -541,6 +541,16 @@ def cmd_doctor(args):
     except Exception as e:
         warn(f"Version compatibility check failed: {e}")
 
+    # PR-F5 (Issue #58 follow-up + Bravo's overnight-baseline investigation):
+    # opt-in memory + sizing report. Surfaces actual vs recommended values
+    # for Neo4j heap / page-cache / tx-memory and host RAM, so operators
+    # know whether their MISP HTTP 500s are caused by mis-sized Neo4j
+    # transactions (the build_relationships failure mode we hit on
+    # 2026-04-18) or by under-provisioned host RAM. See
+    # docs/MEMORY_TUNING.md for the recommendation rationale.
+    if getattr(args, "memory", False):
+        _doctor_memory_check()
+
     section("Diagnosis Complete")
     if all_ok:
         ok("EdgeGuard is healthy")
@@ -548,6 +558,242 @@ def cmd_doctor(args):
     else:
         err("EdgeGuard has issues - run 'edgeguard.py heal' to attempt repair")
         return 1
+
+
+# ---------------------------------------------------------------------------
+# PR-F5: edgeguard doctor --memory — memory + sizing diagnostics
+# ---------------------------------------------------------------------------
+#
+# These helpers are split out from cmd_doctor so each piece is independently
+# testable + mockable. The memory check is opt-in (--memory flag) because
+# it shells out to ``docker compose exec`` and adds 1-3s to a doctor run;
+# operators who want the fast connectivity check still get it by default.
+
+
+# Recommendation table — single source of truth for "current vs ought".
+# Numbers reflect real-world incidents:
+#   - neo4j_tx_memory bumped 4G→8G in 2026-04 after build_relationships
+#     hit MemoryLimitExceededException at 4G on a 350K-node baseline
+#   - misp_php_memory_limit recommendation comes from PR-F4's analysis of
+#     the 14.7% NVD failure rate when 80K-attribute event pushes hit MISP
+#     PHP-FPM workers under-provisioned at 512M
+# Update this table when ops experience reveals a new threshold.
+_MEMORY_RECOMMENDATIONS = (
+    {
+        "key": "neo4j_heap",
+        "label": "Neo4j heap",
+        "env_var": "NEO4J_server_memory_heap_max_size",
+        "compose_service": "neo4j",
+        "min_gb": 4.0,
+        "rec_gb": 8.0,
+        "rationale": "350K-node baseline + build_relationships needs ≥4G, 8G recommended",
+    },
+    {
+        "key": "neo4j_page_cache",
+        "label": "Neo4j page cache",
+        "env_var": "NEO4J_server_memory_pagecache_size",
+        "compose_service": "neo4j",
+        "min_gb": 2.0,
+        "rec_gb": 4.0,
+        "rationale": "Caches Neo4j store files; 4G recommended for 350K-node graph",
+    },
+    {
+        "key": "neo4j_tx_memory",
+        "label": "Neo4j tx memory",
+        "env_var": "NEO4J_server_memory_transaction_total_max",
+        "compose_service": "neo4j",
+        "min_gb": 4.0,
+        "rec_gb": 8.0,
+        "rationale": ("build_relationships hit MemoryLimitExceededException at 4G on 2026-04-18; 8G default since"),
+    },
+)
+
+
+def _parse_memory_value_to_gb(raw: Optional[str]) -> Optional[float]:
+    """Parse a Neo4j-style memory string (e.g. '4G', '512M', '8192k', '1024')
+    to GB as a float. Returns None for unparseable / empty values.
+
+    Neo4j config supports K / M / G / T suffixes (case-insensitive). Bare
+    numbers are bytes per Neo4j docs. We render to GB because that's what
+    operators reason about; sub-GB values get fractional output.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    multipliers = {"K": 1 / (1024**2), "M": 1 / 1024, "G": 1.0, "T": 1024.0}
+    suffix = s[-1].upper() if s else ""
+    if suffix in multipliers:
+        try:
+            return float(s[:-1]) * multipliers[suffix]
+        except (ValueError, TypeError):
+            return None
+    # Bare number = bytes
+    try:
+        return float(s) / (1024**3)
+    except (ValueError, TypeError):
+        return None
+
+
+def _verdict_for_memory(current_gb: Optional[float], min_gb: float, rec_gb: float) -> str:
+    """Return a short verdict string ('ok', 'warn', 'fail', 'unknown')
+    based on actual vs minimum-recommended-gb / recommended-gb thresholds.
+
+    Pure function for testability — no I/O, no side effects.
+    """
+    if current_gb is None:
+        return "unknown"
+    if current_gb >= rec_gb:
+        return "ok"
+    if current_gb >= min_gb:
+        return "warn"
+    return "fail"
+
+
+def _probe_neo4j_memory_via_docker() -> dict:
+    """Probe live ``neo4j`` container env for memory settings.
+
+    Returns a dict mapping env-var-name → raw string value (or empty dict
+    if the probe fails — operator may not have docker, may not be using
+    the compose stack, or container may not be running).
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("docker"):
+        return {}
+    env_var_names = [r["env_var"] for r in _MEMORY_RECOMMENDATIONS if r.get("env_var")]
+    try:
+        # ``docker compose exec`` requires us to be in the compose project
+        # dir. Fall back to ``docker exec`` against the canonical container
+        # name if compose isn't available in this CWD.
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "neo4j", "env"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            # Try plain `docker exec` against the conventional container name
+            result = subprocess.run(
+                ["docker", "exec", "edgeguard_neo4j", "env"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return {}
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return {}
+
+    out: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        if "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k in env_var_names:
+            out[k] = v
+    return out
+
+
+def _probe_host_ram_gb() -> Optional[float]:
+    """Return host RAM in GB (rounded to 1 decimal), or None on probe failure.
+
+    Tries cross-platform: /proc/meminfo (Linux) → sysctl (macOS) →
+    psutil if available → None.
+    """
+    # Linux first
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        kb = float(parts[1])
+                        return round(kb / (1024**2), 1)
+    except (FileNotFoundError, OSError):
+        pass
+    # macOS fallback
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return round(float(result.stdout.strip()) / (1024**3), 1)
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+    return None
+
+
+def _doctor_memory_check() -> None:
+    """Render the memory + sizing report. Each row shows actual vs
+    recommended vs minimum + a verdict."""
+    section("Memory & sizing check")
+
+    info("Probing live ``neo4j`` container for memory env vars (docker compose exec)...")
+    neo4j_env = _probe_neo4j_memory_via_docker()
+    if not neo4j_env:
+        warn("Could not probe Neo4j container — falling back to local os.environ.")
+        warn("Run from the docker-compose project dir, or ensure the neo4j container is up.")
+
+    print()
+    print(f"  {'Setting':<32}  {'Current':>10}  {'Min':>6}  {'Rec':>6}  Verdict")
+    print(f"  {'-' * 32}  {'-' * 10}  {'-' * 6}  {'-' * 6}  -------")
+
+    for rec in _MEMORY_RECOMMENDATIONS:
+        env_var = rec["env_var"]
+        # Prefer live container value; fall back to local env (useful when
+        # operator runs ``edgeguard doctor --memory`` from inside an Airflow
+        # exec, where the container's own env vars are visible).
+        raw = neo4j_env.get(env_var) or os.environ.get(env_var)
+        current_gb = _parse_memory_value_to_gb(raw)
+        verdict = _verdict_for_memory(current_gb, rec["min_gb"], rec["rec_gb"])
+        verdict_glyph = {
+            "ok": f"{Colors.GREEN}✓ ok{Colors.END}",
+            "warn": f"{Colors.YELLOW}⚠ low{Colors.END}",
+            "fail": f"{Colors.RED}✗ too low{Colors.END}",
+            "unknown": f"{Colors.YELLOW}? unknown{Colors.END}",
+        }[verdict]
+        current_str = f"{current_gb:.1f}G" if current_gb is not None else "—"
+        print(
+            f"  {rec['label']:<32}  {current_str:>10}  {rec['min_gb']:.0f}G    {rec['rec_gb']:.0f}G    {verdict_glyph}"
+        )
+        if verdict in ("warn", "fail", "unknown"):
+            print(f"  {' ' * 32}  → {rec['rationale']}")
+            if env_var:
+                print(f"  {' ' * 32}  → set {env_var} in .env / docker-compose.yml")
+
+    # Host RAM
+    print()
+    host_ram_gb = _probe_host_ram_gb()
+    if host_ram_gb is not None:
+        # Recommended host RAM = sum of recommended Neo4j memory + ~6G for
+        # MISP + Airflow + headroom. ~14G effective floor on self-hosted.
+        rec_host_gb = 16.0
+        min_host_gb = 8.0
+        verdict = _verdict_for_memory(host_ram_gb, min_host_gb, rec_host_gb)
+        verdict_glyph = {
+            "ok": f"{Colors.GREEN}✓ ok{Colors.END}",
+            "warn": f"{Colors.YELLOW}⚠ low{Colors.END}",
+            "fail": f"{Colors.RED}✗ too low{Colors.END}",
+            "unknown": f"{Colors.YELLOW}? unknown{Colors.END}",
+        }[verdict]
+        print(f"  {'Host RAM':<32}  {host_ram_gb:>9.1f}G  {min_host_gb:.0f}G    {rec_host_gb:.0f}G    {verdict_glyph}")
+        if verdict in ("warn", "fail"):
+            print(f"  {' ' * 32}  → Self-hosted (Neo4j 8G + MISP 4G + Airflow 2G + overhead) needs 16G+")
+    else:
+        info("Host RAM: unable to probe (non-Linux/macOS or sysctl unavailable)")
+
+    print()
+    info("MISP PHP settings (memory_limit, max_execution_time) are NOT auto-probed yet.")
+    info("Manual check: ``docker compose exec misp php -r 'echo ini_get(\"memory_limit\");'``")
+    info("Recommended values + rationale: see docs/MEMORY_TUNING.md")
 
 
 # ================================================================================
@@ -2648,7 +2894,13 @@ Examples:
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # Doctor command
-    subparsers.add_parser("doctor", help="Diagnose issues")
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose issues")
+    doctor_parser.add_argument(
+        "--memory",
+        action="store_true",
+        help="Also probe Neo4j heap/page-cache/tx-memory + host RAM and "
+        "compare against recommended values (PR-F5; see docs/MEMORY_TUNING.md)",
+    )
 
     # Heal command
     subparsers.add_parser("heal", help="Auto-repair")
