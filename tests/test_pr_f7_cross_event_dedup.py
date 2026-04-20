@@ -205,12 +205,15 @@ class TestCrossEventPrefetchHelper:
         addressing is what makes prefetch itself transiently fail —
         re-raising amplified the incident, not mitigated it.
 
-        Fix: helper now WARN-logs + returns empty set on transient
-        errors, same shape as non-transient errors. Per-event dedup
-        still runs; collector proceeds; no half-write.
+        Fix: helper now WARN-logs + returns the accumulated keyset
+        (empty if the error hit on page 1, partial if on page N>1 —
+        see ``test_preserves_partial_keyset_on_mid_pagination_*``).
+        This test exercises the page-1 case specifically: a fresh call
+        hits a transient error before accumulating any keys, returns
+        ``set()``. Per-event dedup still runs; collector proceeds.
 
         Pin: ConnectionError / Timeout / ReadTimeout / ChunkedEncodingError
-        all return ``set()``, not raise.
+        all return ``set()`` (empty) on page 1 failure — never raise.
         """
         import logging
 
@@ -242,11 +245,146 @@ class TestCrossEventPrefetchHelper:
                 f"transient error must emit a WARN log (got records: {[r.message for r in caplog.records]})"
             )
 
+    def test_preserves_partial_keyset_on_mid_pagination_transient_error(self, monkeypatch, caplog):
+        """**Bugbot Medium (commit 90a0ab5) — partial-preservation regression pin.**
+
+        Previous fix for B1 (transient re-raise → fail-OPEN) used
+        ``return set()`` on every error path. That discarded all keys
+        already accumulated from prior successful pages. On NVD (~19
+        pages, ~92K attrs) a transient blip on page 15 threw away
+        ~70K valid keys → all cross-event dedup lost for the run,
+        most likely to happen exactly when MISP is under load (the
+        scenario this PR targets).
+
+        Fix: ``break`` on mid-pagination failure preserves the
+        accumulated keyset (strictly better than empty — same pattern
+        as sibling ``_get_existing_attribute_keys``).
+
+        This test simulates: page 1 + page 2 return valid attributes,
+        page 3 raises a transient error. Expected: the helper returns
+        the 4 keys from pages 1+2, not an empty set.
+        """
+        import logging
+
+        import requests
+
+        from collectors.misp_writer import MISPWriter
+
+        monkeypatch.setattr("collectors.misp_writer.MISP_PREFETCH_EXISTING_ATTRS", True)
+        monkeypatch.setattr("collectors.misp_writer.MISP_CROSS_EVENT_DEDUP", True)
+
+        w = _make_writer_skipping_init()
+
+        # Simulate a full-page response so the helper keeps paginating.
+        # We need the attrs count to equal page_limit (5000) to NOT trip
+        # the "last page" early-exit. Craft deterministic attrs on pages
+        # 1 and 2, then raise on page 3.
+        page_limit = 5000
+
+        def make_full_page(page_num: int) -> dict:
+            return {
+                "response": {
+                    "Attribute": [
+                        {"type": "vulnerability", "value": f"CVE-2024-{page_num:04d}-{i:04d}"}
+                        for i in range(page_limit)
+                    ]
+                }
+            }
+
+        call_count = {"n": 0}
+
+        def fake_post(*args, **kwargs):
+            call_count["n"] += 1
+            n = call_count["n"]
+            if n <= 2:
+                r = MagicMock()
+                r.status_code = 200
+                r.json.return_value = make_full_page(n)
+                return r
+            # Page 3 — transient error
+            raise requests.exceptions.ConnectionError("simulated mid-pagination outage")
+
+        w.session.post = MagicMock(side_effect=fake_post)
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            result = MISPWriter._get_existing_source_attribute_keys(w, "source:nvd")
+
+        # Partial keyset from pages 1+2 MUST be preserved
+        assert len(result) == 2 * page_limit, (
+            f"expected partial keyset of {2 * page_limit} keys from pages 1+2; got {len(result)}"
+        )
+        # Spot-check specific keys are present
+        assert ("vulnerability", "CVE-2024-0001-0000") in result, "page 1 keys should be preserved"
+        assert ("vulnerability", "CVE-2024-0002-0099") in result, "page 2 keys should be preserved"
+
+        # WARN log must explicitly mention the partial-keyset preservation
+        # so operators can distinguish partial from full prefetch in grep
+        msg = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        assert "partial keyset" in msg.lower() or "partial" in msg.lower(), (
+            f"WARN log must indicate partial preservation; got {msg!r}"
+        )
+
+    def test_preserves_partial_keyset_on_mid_pagination_http_5xx(self, monkeypatch, caplog):
+        """Same contract for HTTP 5xx mid-pagination (distinct error
+        path from transient exceptions)."""
+        import logging
+
+        from collectors.misp_writer import MISPWriter
+
+        monkeypatch.setattr("collectors.misp_writer.MISP_PREFETCH_EXISTING_ATTRS", True)
+        monkeypatch.setattr("collectors.misp_writer.MISP_CROSS_EVENT_DEDUP", True)
+
+        w = _make_writer_skipping_init()
+        page_limit = 5000
+
+        def make_full_page(page_num: int) -> dict:
+            return {
+                "response": {
+                    "Attribute": [
+                        {"type": "vulnerability", "value": f"CVE-2024-{page_num:04d}-{i:04d}"}
+                        for i in range(page_limit)
+                    ]
+                }
+            }
+
+        call_count = {"n": 0}
+
+        def fake_post(*args, **kwargs):
+            call_count["n"] += 1
+            r = MagicMock()
+            if call_count["n"] == 1:
+                r.status_code = 200
+                r.json.return_value = make_full_page(1)
+                return r
+            # Page 2 — HTTP 503
+            r.status_code = 503
+            return r
+
+        w.session.post = MagicMock(side_effect=fake_post)
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            result = MISPWriter._get_existing_source_attribute_keys(w, "source:nvd")
+
+        # Page 1's 5000 keys must be preserved
+        assert len(result) == page_limit, f"expected partial keyset of {page_limit} keys from page 1; got {len(result)}"
+        msg = " ".join(r.message for r in caplog.records if r.levelno >= logging.WARNING)
+        assert "partial" in msg.lower()
+
     def test_source_rerasie_audit_pin_no_raise_from_helper(self):
         """Source-pin against regression: the helper must NOT contain
         a bare ``raise`` in the ``except _TRANSIENT_HTTP_ERRORS`` branch.
         The audit's top blocker (B1) was exactly this pattern. Pin it
-        so a future refactor can't silently reinstate."""
+        so a future refactor can't silently reinstate.
+
+        Note: the terminating statement changed from ``return set()``
+        (B1 fix) to ``break`` (B1-round-4 Bugbot Medium fix for
+        partial-keyset preservation). This test doesn't pin the
+        terminator shape — only the absence of ``raise``. See the
+        companion ``test_preserves_partial_keyset_on_mid_pagination_*``
+        tests for the ``break`` / partial-preservation contract.
+        """
         with open("src/collectors/misp_writer.py") as fh:
             src = fh.read()
         helper_idx = src.find("def _get_existing_source_attribute_keys(")
@@ -256,13 +394,17 @@ class TestCrossEventPrefetchHelper:
         # Find the transient except clause
         tex_idx = body.find("except _TRANSIENT_HTTP_ERRORS")
         assert tex_idx > 0, "helper must keep a transient-error except branch"
-        # Look at the block — the next ~20 lines should contain `return set()`, NOT `raise`
+        # Look at the block before the next `except`
         tex_block = body[tex_idx : tex_idx + 2000]
-        # The block before the next `except` or `if response.status_code`
         next_except = tex_block.find("\n            except ", 1)
         if next_except > 0:
             tex_block = tex_block[:next_except]
-        assert "return set()" in tex_block, "transient except branch MUST return set() (fail-OPEN) — audit B1 fix"
+        # The branch MUST terminate with either ``return set()`` OR
+        # ``break`` — both deliver fail-OPEN. Anything else (especially
+        # a bare ``raise``) regresses the audit fix.
+        assert "break" in tex_block or "return set()" in tex_block, (
+            "transient except branch MUST break or return set() (fail-OPEN) — audit B1 fix"
+        )
         # Defensive: reject a bare `raise` ending the transient branch
         # (allow `raise SomeSpecificException(...)` though nothing in
         # this branch should do that either).

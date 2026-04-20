@@ -427,52 +427,67 @@ class MISPWriter:
             except _TRANSIENT_HTTP_ERRORS as ex:
                 # PR-F7 Bugbot round-3 / multi-agent audit (Logic Tracker HIGH,
                 # Devil's Advocate HIGH, Bug Hunter HIGH): previously this
-                # branch re-raised transient errors with a comment claiming
-                # "@retry_with_backoff higher up the stack can retry". That
-                # was WRONG — ``push_items`` has no retry decorator around
-                # this call, and the exception propagated → collector
-                # ``except Exception`` → catastrophic classification →
-                # [CRITICAL] HARD-FAILED alert + entire NVD batch (~92K
-                # attrs) lost. Worse: the failure mode this helper was
-                # meant to catch (MISP HTTP 500s under load) is the SAME
-                # condition that makes the prefetch itself transiently
-                # fail, so re-raising directly amplified the incident.
-                #
+                # branch re-raised transient errors. That was WRONG —
+                # ``push_items`` has no retry decorator around this call,
+                # so the exception propagated → collector ``except
+                # Exception`` → catastrophic classification → [CRITICAL]
+                # HARD-FAILED alert + entire NVD batch (~92K attrs) lost.
                 # The docstring promises "degrades cleanly to per-event
-                # dedup; no harm." Deliver on that: log at WARN (so
-                # operators notice the prefetch skipped), return an
-                # empty set (so per-event dedup still runs), never
-                # bubble. Same contract as the generic Exception branch
-                # below — kept separate only so transient errors get a
-                # distinct log marker for grepping.
+                # dedup; no harm" — deliver on that.
+                #
+                # PR-F7 Bugbot round-4 (Medium on commit 90a0ab5):
+                # previous fix was ``return set()`` — which discarded
+                # every page already collected. On NVD (~19 pages) a
+                # transient blip on page 15 threw away ~70K valid keys
+                # → all cross-event dedup lost for the run, most likely
+                # to happen exactly when MISP is under load (the
+                # scenario this PR targets). Fix: ``break`` preserves
+                # the partial keyset (strictly better than empty). The
+                # sibling ``_get_existing_attribute_keys`` already uses
+                # the same pattern.
                 logger.warning(
-                    "MISP cross-event prefetch transient error for tag=%s page=%s: %s — "
-                    "degrading to per-event dedup only (PR-F7: fail-OPEN, no collector abort)",
+                    "MISP cross-event prefetch transient error for tag=%s page=%s after %s keys: %s — "
+                    "preserving partial keyset, degrading to per-event for remainder "
+                    "(PR-F7: fail-OPEN, no collector abort)",
                     tag,
                     page,
+                    len(keys),
                     ex,
                 )
-                return set()
+                break
             except Exception as ex:
                 logger.warning(
-                    "MISP cross-event prefetch failed for tag=%s page=%s: %s — degrading to per-event dedup only",
+                    "MISP cross-event prefetch failed for tag=%s page=%s after %s keys: %s — "
+                    "preserving partial keyset, degrading to per-event for remainder",
                     tag,
                     page,
+                    len(keys),
                     ex,
                 )
-                return set()
+                break
             if response.status_code != 200:
+                # PR-F7 Bugbot round-4: preserve partial keyset (same
+                # rationale as the transient-error break above).
                 logger.warning(
-                    "MISP cross-event prefetch HTTP %s for tag=%s — degrading to per-event dedup only",
+                    "MISP cross-event prefetch HTTP %s for tag=%s page=%s after %s keys — "
+                    "preserving partial keyset, degrading to per-event for remainder",
                     response.status_code,
                     tag,
+                    page,
+                    len(keys),
                 )
-                return set()
+                break
             try:
                 data = response.json()
             except ValueError:
-                logger.warning("MISP cross-event prefetch returned non-JSON for tag=%s page=%s — degrading", tag, page)
-                return set()
+                logger.warning(
+                    "MISP cross-event prefetch non-JSON response for tag=%s page=%s after %s keys — "
+                    "preserving partial keyset, degrading to per-event for remainder",
+                    tag,
+                    page,
+                    len(keys),
+                )
+                break
             resp = data.get("response", data)
             attrs: List = []
             if isinstance(resp, list):
