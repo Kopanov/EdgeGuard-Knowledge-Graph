@@ -24,7 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import json
 import logging
 import re
-from datetime import datetime, timezone
 
 import requests
 
@@ -258,7 +257,6 @@ class MISPCollector:
                             "tag": source,
                             "source": sources,
                             "first_seen": (event.get("date") or None),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
                             "confidence_score": 0.5,
                             "severity": "UNKNOWN",
                             "cvss_score": 0.0,
@@ -292,7 +290,6 @@ class MISPCollector:
                                     "tag": attr_source,
                                     "source": [attr_source],
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.6,
                                     "severity": "UNKNOWN",
                                     "cvss_score": 0.0,
@@ -312,7 +309,6 @@ class MISPCollector:
                             "tag": attr_source,
                             "source": [attr_source],
                             "first_seen": (event.get("date") or None),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
                             "confidence_score": 0.5,
                             "source_event": event.get("id"),
                             "misp_event_id": str(event_id),
@@ -356,7 +352,6 @@ class MISPCollector:
                                     "tag": obj_source,
                                     "source": [obj_source],  # Source as array (like zone)
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.6,
                                     "misp_event_id": str(event_id),
                                 }
@@ -383,7 +378,6 @@ class MISPCollector:
                                     "tag": obj_source,
                                     "source": [obj_source],  # Source as array (like zone)
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.6,
                                     "misp_event_id": str(event_id),
                                 }
@@ -406,7 +400,6 @@ class MISPCollector:
                                     "tag": obj_source,
                                     "source": [obj_source],  # Source as array (like zone)
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.7,  # Higher confidence for MITRE
                                     "misp_event_id": str(event_id),
                                 }
@@ -432,7 +425,6 @@ class MISPCollector:
                                     "tag": source,
                                     "source": sources,  # Source as array (like zone)
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.8,
                                     "misp_event_id": str(event_id),
                                 }
@@ -453,7 +445,6 @@ class MISPCollector:
                                     "tag": source,
                                     "source": sources,  # Source as array (like zone)
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.7,
                                     "misp_event_id": str(event_id),
                                 }
@@ -475,7 +466,6 @@ class MISPCollector:
                                     "tag": source,
                                     "source": sources,  # Source as array (like zone)
                                     "first_seen": (event.get("date") or None),
-                                    "last_updated": datetime.now(timezone.utc).isoformat(),
                                     "confidence_score": 0.7,
                                     "misp_event_id": str(event_id),
                                 }
@@ -494,7 +484,6 @@ class MISPCollector:
                                 "tag": source,
                                 "source": sources,  # Source as array (like zone)
                                 "first_seen": (event.get("date") or None),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
                                 "confidence_score": 0.5,
                                 "severity": "UNKNOWN",
                                 "cvss_score": 0.0,

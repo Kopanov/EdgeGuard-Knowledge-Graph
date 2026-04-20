@@ -259,9 +259,20 @@ valid_from = source_reported_first_at IF available
 
 | Branch | When | `x_edgeguard_first_seen_inferred` |
 |--------|------|-----------------------------------|
-| (1) Source-truthful | `r.source_reported_first_at IS NOT NULL` from any edge | absent (or `false`) |
-| (2) Inferred from import time | source claim absent BUT `n.first_imported_at` present | `true` |
+| (1) Source-truthful | `r.source_reported_first_at IS NOT NULL` from any edge (primary path) — OR MISP-native `Attribute.first_seen` (manual-fallback path) | absent (or `false`) |
+| (2) Inferred from import time | source claim absent BUT `n.first_imported_at` present (primary path) — OR MISP `Attribute.timestamp` present (manual-fallback path: when MISP first ingested the datum, analogous to `first_imported_at`) | `true` |
 | (3) Inferred from now() | both absent (orphan SDO with no node context — defensive) | `true` |
+
+**Manual-fallback path note.** The
+``run_misp_to_neo4j._attribute_to_stix21`` path re-emits STIX directly
+from MISP attributes without first writing to Neo4j (used when PyMISP's
+``to_stix2()`` is unavailable). In that path, the canonical concept-3
+analogue is **MISP ``Attribute.timestamp``** — the MISP-internal
+write-time epoch for the attribute. It's not Neo4j's
+``first_imported_at`` (that doesn't exist for this attribute yet) but
+it's the closest available signal: MISP first ingested the datum at
+that timestamp.  Better than wall-clock ``now()`` because it preserves
+at least the MISP-side ingest history.
 
 A conscientious consumer (e.g. ResilMesh's analyst-facing UI) can filter
 for `x_edgeguard_first_seen_inferred IS NULL` to show only

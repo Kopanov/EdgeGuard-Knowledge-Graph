@@ -1388,12 +1388,19 @@ class MISPToNeo4jSync:
         After PR-M2:
           * ``stix_created_modified`` = NOW (when we generated this STIX
             object) — matches concept 3 / 4 in TIMESTAMPS.md
-          * ``stix_valid_from`` = MISP-native ``Attribute.first_seen``
-            (concept 1, source-truthful) IF present, else NOW with
-            ``x_edgeguard_first_seen_inferred=true`` (design choice (c))
-          * MISP ``Attribute.timestamp`` is preserved as the custom
-            property ``x_edgeguard_misp_attribute_timestamp`` for
-            audit / debugging — never used as a STIX-spec field
+          * ``stix_valid_from`` follows the 3-step fallback chain from
+            docs/TIMESTAMPS.md "valid_from fallback chain":
+              (1) MISP-native ``Attribute.first_seen`` (concept 1,
+                  source-truthful) — no inferred flag
+              (2) MISP ``Attribute.timestamp`` (when MISP first
+                  recorded the attribute — analogous to concept 3
+                  ``first_imported_at`` for this manual-fallback
+                  context) — sets ``x_edgeguard_first_seen_inferred=true``
+              (3) wall-clock NOW (defensive last resort) — sets
+                  ``x_edgeguard_first_seen_inferred=true``
+          * MISP ``Attribute.timestamp`` is also preserved verbatim as
+            the custom property ``x_edgeguard_misp_attribute_timestamp``
+            for audit / debugging
         """
         import uuid
         from datetime import datetime, timezone
@@ -1410,16 +1417,30 @@ class MISPToNeo4jSync:
         # date-only inputs all normalize to tz-aware UTC ISO.
         attr_first_seen = _coerce_to_iso(attr.get("first_seen"))
         attr_last_seen = _coerce_to_iso(attr.get("last_seen"))
-        # MISP-internal write-time epoch (for audit only, NOT a source claim).
+        # MISP-internal write-time epoch (concept 3 analogue for this
+        # manual-fallback path: when MISP first recorded the attribute).
+        # Better than wall-clock NOW because it preserves at least the
+        # MISP-side ingest time when the source didn't expose
+        # ``Attribute.first_seen``.
         misp_attr_timestamp = _coerce_to_iso(attr.get("timestamp"))
 
-        # Resolve valid_from per the canonical fallback chain
+        # Resolve valid_from per the canonical 3-step fallback chain
         # (TIMESTAMPS.md "valid_from fallback chain"):
-        #   (1) source-truthful first_seen → no inferred flag
-        #   (2) wall-clock NOW            → x_edgeguard_first_seen_inferred=true
+        #   (1) source-truthful first_seen   → no inferred flag
+        #   (2) MISP attribute timestamp     → x_edgeguard_first_seen_inferred=true
+        #   (3) wall-clock NOW (defensive)   → x_edgeguard_first_seen_inferred=true
+        # Bugbot caught (PR-M2 round 2, MED): the prior 2-step chain
+        # skipped step (2) and went straight to NOW, which conflated
+        # "when we generated this STIX object" with "when this entity
+        # was first observed". MISP's ``Attribute.timestamp`` is a
+        # better intermediate value — it's at least when MISP first
+        # ingested this datum, not today's wall-clock.
         if attr_first_seen:
             stix_valid_from = attr_first_seen
             valid_from_inferred = False
+        elif misp_attr_timestamp:
+            stix_valid_from = misp_attr_timestamp
+            valid_from_inferred = True
         else:
             stix_valid_from = stix_now
             valid_from_inferred = True

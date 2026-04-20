@@ -304,6 +304,36 @@ class TestStixManualFallbackReadPath:
             "audit-only custom property, not as a STIX-spec field"
         )
 
+    def test_attribute_to_stix21_uses_3_step_chain_with_misp_timestamp(self):
+        """Bugbot finding (PR-M2 round 2, MED): the manual STIX
+        fallback's ``valid_from`` chain MUST be the canonical 3-step
+        chain from docs/TIMESTAMPS.md:
+
+          (1) source-truthful first_seen
+          (2) MISP Attribute.timestamp (concept-3 analogue for the
+              manual-fallback path — MISP first ingested datum)
+          (3) wall-clock NOW (defensive last resort)
+
+        The pre-fix 2-step chain skipped step (2), conflating ``now()``
+        with ``first_imported_at``."""
+        src = self._read()
+        # The new branch must be present
+        assert "elif misp_attr_timestamp:" in src, (
+            "valid_from chain must include the MISP attribute.timestamp "
+            "intermediate fallback (step 2) per TIMESTAMPS.md spec"
+        )
+        # The branch must assign valid_from from misp_attr_timestamp
+        assert "stix_valid_from = misp_attr_timestamp" in src, (
+            "step (2) branch must set stix_valid_from to misp_attr_timestamp"
+        )
+        # And mark inferred=True (it's not the source-truthful branch)
+        # Check that the elif branch is followed by valid_from_inferred = True
+        elif_idx = src.find("elif misp_attr_timestamp:")
+        assert elif_idx != -1
+        # Within ~200 chars of the elif, find inferred=True assignment
+        block = src[elif_idx : elif_idx + 200]
+        assert "valid_from_inferred = True" in block
+
 
 # ===========================================================================
 # Design choice (c) — inferred flag in primary STIX exporter
