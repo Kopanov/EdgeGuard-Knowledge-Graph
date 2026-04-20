@@ -1464,6 +1464,28 @@ class MISPToNeo4jSync:
                 return stix_obj
 
             # Check if this is a MITRE tool (format: "S0001: Mimikatz")
+            #
+            # PR-G1 Bug Hunter audit (HIGH): this branch and the tactic branch
+            # below had three compounding defects:
+            #
+            #   1. ``tag`` was an undefined name at this scope — the only
+            #      binding was the loop variable ``for tag in attr_tags`` at
+            #      line ~1327, which leaks out only if the loop body ran at
+            #      least once. Empty ``attr_tags`` → NameError at runtime,
+            #      crashing the STIX export for the whole event.
+            #   2. The returned dict had no ``id`` field, so the caller's
+            #      ``object_refs.append(stix_obj["id"])`` raised KeyError on
+            #      every single MITRE tool attribute regardless of tags.
+            #   3. Top-level fields ``mitre_id`` / ``zone`` / ``source`` /
+            #      ``confidence_score`` are not valid STIX 2.1 SDO fields,
+            #      so any downstream STIX parser would reject the bundle.
+            #
+            # The rewrite mirrors the technique branch above: a proper STIX
+            # 2.1 ``tool`` SDO with ``external_references`` carrying the
+            # MITRE ATT&CK ID, EdgeGuard-specific metadata under the
+            # ``x_edgeguard_*`` prefix per the STIX 2.1 custom-property
+            # convention (§3.1.1 of the spec), and ``labels`` populated from
+            # the zone extraction already done above (in-scope here).
             tool_match = re.match(r"^(S\d{4}):\s*(.+)$", value)
             if tool_match:
                 tool_id = tool_match.group(1)
@@ -1482,33 +1504,59 @@ class MISPToNeo4jSync:
                         description = tail or description
                     except (ValueError, TypeError, json.JSONDecodeError):
                         pass
-                return {
+                external_refs = [
+                    {
+                        "source_name": "mitre-attack",
+                        "external_id": tool_id,
+                        "url": f"https://attack.mitre.org/software/{tool_id}/",
+                    }
+                ]
+                stix_obj: dict = {
                     "type": "tool",
-                    "mitre_id": tool_id,
+                    "spec_version": "2.1",
+                    "id": f"tool--{attr_uuid}",
                     "name": tool_name,
                     "description": description,
-                    "uses_techniques": uses_techniques,
-                    "tag": tag,
-                    "zone": ["global"],
-                    "source": [tag],
-                    "confidence_score": 0.95,
+                    "external_references": external_refs,
                 }
+                if labels:
+                    stix_obj["labels"] = labels
+                if uses_techniques:
+                    stix_obj["x_edgeguard_uses_techniques"] = uses_techniques
+                return stix_obj
 
             # Check if this is a MITRE tactic (format: "TA0001: Initial Access")
+            #
+            # PR-G1 Bug Hunter audit (HIGH): same three defects as the tool
+            # branch above. STIX 2.1 has no first-class ``tactic`` SDO —
+            # MITRE tactics are most commonly modelled as ``x-mitre-tactic``
+            # (ATT&CK's own custom type) but for maximum consumer compat
+            # we emit an ``attack-pattern`` SDO (mirroring the technique
+            # branch) and mark the MITRE kind under ``x_edgeguard_mitre_kind``
+            # so downstream code that cares can distinguish.
             tactic_match = re.match(r"^(TA\d{4}):\s*(.+)$", value)
             if tactic_match:
                 tactic_id = tactic_match.group(1)
                 tactic_name = tactic_match.group(2).strip()
-                return {
-                    "type": "tactic",
-                    "mitre_id": tactic_id,
+                tactic_external_refs = [
+                    {
+                        "source_name": "mitre-attack",
+                        "external_id": tactic_id,
+                        "url": f"https://attack.mitre.org/tactics/{tactic_id}/",
+                    }
+                ]
+                stix_obj = {
+                    "type": "attack-pattern",
+                    "spec_version": "2.1",
+                    "id": f"attack-pattern--{attr_uuid}",
                     "name": tactic_name,
                     "description": attr.get("comment", ""),
-                    "tag": tag,
-                    "zone": ["global"],
-                    "source": [tag],
-                    "confidence_score": 1.0,
+                    "external_references": tactic_external_refs,
+                    "x_edgeguard_mitre_kind": "tactic",
                 }
+                if labels:
+                    stix_obj["labels"] = labels
+                return stix_obj
 
             # Not a MITRE technique/tool/tactic, treat as unknown indicator
             return None
@@ -2690,7 +2738,13 @@ class MISPToNeo4jSync:
                     success += 1
                 except Exception as e:
                     item_type = item.get("type", "unknown")
-                    item_value = item.get("value", item.get("name", "N/A"))[:50]
+                    # PR-G1 Bug Hunter audit (HIGH): ``dict.get(k, default)``
+                    # returns ``None`` — not the default — when the key exists
+                    # with a None value. ``None[:50]`` then raises TypeError
+                    # INSIDE the error-recovery path, aborting the whole sync
+                    # after most of the work succeeded. Use ``or`` chaining so
+                    # a None-valued key falls through to the next fallback.
+                    item_value = (item.get("value") or item.get("name") or "N/A")[:50]
                     logger.warning(f"[WARN] Error syncing {item_type} ({item_value}): {type(e).__name__}: {e}")
                     errors += 1
 
@@ -2758,7 +2812,11 @@ class MISPToNeo4jSync:
                         else:
                             errors += 1
                     except Exception as e:
-                        cve_id = vuln.get("cve_id", "?")[:20]
+                        # PR-G1 Bug Hunter audit (HIGH): defensive ``or``
+                        # chain — ``get("cve_id", "?")`` returns None (not
+                        # "?") when the key exists with a None value, and
+                        # ``None[:20]`` would crash the error-recovery path.
+                        cve_id = (vuln.get("cve_id") or "?")[:20]
                         logger.warning(f"[WARN] Error syncing plain CVE ({cve_id}): {type(e).__name__}: {e}")
                         errors += 1
 
@@ -2819,7 +2877,11 @@ class MISPToNeo4jSync:
                     else:
                         errors += 1
                 except Exception as e:
-                    actor_name = actor.get("name", "unknown")[:30]
+                    # PR-G1 Bug Hunter audit (HIGH): ``or`` chain guards
+                    # against ``actor.get("name")`` returning None on a
+                    # present-but-null key — see the companion fix in
+                    # ``_sync_single_item`` at ~line 2693.
+                    actor_name = (actor.get("name") or "unknown")[:30]
                     logger.warning(f"[WARN] Error syncing actor ({actor_name}): {type(e).__name__}: {e}")
                     errors += 1
             logger.info(f"  ✓ {len(actors)} actors")
@@ -2836,7 +2898,11 @@ class MISPToNeo4jSync:
                     else:
                         errors += 1
                 except Exception as e:
-                    tool_name = tool.get("name", "unknown")[:30]
+                    # PR-G1 Bug Hunter audit (HIGH): ``or`` chain guards
+                    # against ``tool.get("name")`` returning None on a
+                    # present-but-null key — matches the actor / CVE / item
+                    # sites above.
+                    tool_name = (tool.get("name") or "unknown")[:30]
                     logger.warning(f"[WARN] Error syncing tool ({tool_name}): {type(e).__name__}: {e}")
                     errors += 1
             logger.info(f"  ✓ {len(tools)} tools")
