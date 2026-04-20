@@ -1554,12 +1554,21 @@ class EdgeGuardPipeline:
             # SIGTERM-then-SIGKILL escalation so APOC transactions
             # get a chance to roll back cleanly.
             logger.info("\n[TARGET] Step 5b: build_relationships (CLI parity with DAG)...")
-            try:
-                from subprocess_streaming import (
-                    SubprocessStreamTimeout,
-                    run_with_streaming_output,
-                )
+            # PR-K3 Bugbot round-1 (Medium): import OUTSIDE the try block.
+            # If the import itself fails (e.g. module missing from deployment),
+            # a ModuleNotFoundError fires — but Python would then try to
+            # evaluate ``except SubprocessStreamTimeout as e:`` which
+            # references the un-imported name, raising NameError that
+            # propagates PAST the ``except Exception`` fallback. Bugbot
+            # caught this bypassing the CLI's degraded-mode guarantee.
+            # The DAG site already had the import outside ``try``; this
+            # brings the CLI site into parity.
+            from subprocess_streaming import (
+                SubprocessStreamTimeout,
+                run_with_streaming_output,
+            )
 
+            try:
                 br_returncode, br_tail = run_with_streaming_output(
                     [sys.executable, os.path.join(os.path.dirname(__file__), "build_relationships.py")],
                     timeout=18000,  # 5h, matches DAG's run_build_relationships

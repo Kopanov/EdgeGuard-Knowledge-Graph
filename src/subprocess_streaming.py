@@ -217,6 +217,15 @@ def run_with_streaming_output(
             elapsed,
         )
         proc.terminate()
+        # PR-K3 Bugbot round-1 (Low): track whether SIGKILL actually
+        # fired so the exception message reflects reality. Previously
+        # the message unconditionally said ``SIGTERM + grace → SIGKILL``
+        # even when SIGTERM alone succeeded within the grace window,
+        # which in an APOC-heavy workload could trigger unnecessary
+        # data-integrity investigations (SIGTERM → clean rollback;
+        # SIGKILL → transactions may be interrupted mid-commit). The
+        # distinction matters to operators.
+        sigkill_sent = False
         try:
             proc.wait(timeout=SIGTERM_GRACE_SECONDS)
         except subprocess.TimeoutExpired:
@@ -226,13 +235,23 @@ def run_with_streaming_output(
                 SIGTERM_GRACE_SECONDS,
             )
             proc.kill()
+            sigkill_sent = True
             # SIGKILL cannot be caught; wait() returns promptly.
             proc.wait()
         reader.join(timeout=5)
-        raise SubprocessStreamTimeout(
-            f"child exceeded timeout={timeout}s (elapsed={elapsed:.1f}s); "
-            f"SIGTERM + {SIGTERM_GRACE_SECONDS}s grace → SIGKILL"
-        ) from None
+        if sigkill_sent:
+            msg = (
+                f"child exceeded timeout={timeout}s (elapsed={elapsed:.1f}s); "
+                f"SIGTERM + {SIGTERM_GRACE_SECONDS}s grace → SIGKILL "
+                f"(child did not exit within grace; transactions may be interrupted)"
+            )
+        else:
+            msg = (
+                f"child exceeded timeout={timeout}s (elapsed={elapsed:.1f}s); "
+                f"exited cleanly after SIGTERM within {SIGTERM_GRACE_SECONDS}s grace "
+                f"(no SIGKILL)"
+            )
+        raise SubprocessStreamTimeout(msg) from None
 
     # Clean exit: drain the reader and return.
     reader.join(timeout=5)

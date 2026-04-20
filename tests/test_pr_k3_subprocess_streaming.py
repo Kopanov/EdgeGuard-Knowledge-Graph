@@ -211,7 +211,14 @@ class TestSourcePinsCaptureOutputGone:
         so source-pins don't false-positive on prose that explains
         what was removed. We're not parsing Python syntax; a simple
         state-machine over line-by-line text is enough for the
-        narrow 'code-only' view we need."""
+        narrow 'code-only' view we need.
+
+        PR-K3 Bugbot round-1 (Low): previously the single-line
+        docstring branch only ``break``ed the inner ``for`` loop but
+        never set a skip flag — control fell through to
+        ``out.append(raw)`` and the line was included anyway.
+        An explicit ``skip_this_line`` flag makes the intent match
+        the behaviour."""
         out = []
         in_doc = False
         doc_quote: str = ""
@@ -223,16 +230,20 @@ class TestSourcePinsCaptureOutputGone:
                     doc_quote = ""
                 continue
             # Detect triple-quoted docstring start (either """ or ''')
+            skip_this_line = False
             for quote in ('"""', "'''"):
                 if stripped.startswith(quote):
-                    # Single-line docstring ("""...""") — also skip
+                    # Single-line docstring ("""...""") — skip the line.
+                    # Multi-line — enter doc mode, skip subsequent lines
+                    # until the closing quote.
                     rest = stripped[len(quote) :]
                     if quote in rest:
-                        break  # single-line, skip this line and move on
-                    in_doc = True
-                    doc_quote = quote
+                        skip_this_line = True
+                    else:
+                        in_doc = True
+                        doc_quote = quote
                     break
-            if in_doc:
+            if skip_this_line or in_doc:
                 continue
             if stripped.startswith("#"):
                 continue
@@ -366,3 +377,155 @@ class TestDefaultTailLinesIsGenerous:
         importlib.reload(subprocess_streaming)
         assert subprocess_streaming.DEFAULT_TAIL_LINES == 2000
         assert any("must be > 0" in rec.message for rec in caplog.records)
+
+
+# ===========================================================================
+# Bugbot round-1 follow-up findings (Medium + 2 Low)
+# ===========================================================================
+
+
+class TestImportOutsideTryBlock:
+    """PR-K3 Bugbot round-1 (Medium): ``from subprocess_streaming
+    import ...`` MUST be OUTSIDE the ``try`` block in ``run_pipeline.py``
+    Step 5b. If the import is inside ``try`` and fails, the
+    ``except SubprocessStreamTimeout as e:`` clause references an
+    un-imported name → NameError propagates PAST the
+    ``except Exception`` fallback, breaking the CLI's degraded-mode
+    guarantee.
+
+    The DAG site already had it outside; this pin enforces parity."""
+
+    def test_subprocess_streaming_imported_outside_try(self):
+        """The import must precede the ``try:`` block, not be inside it."""
+        cli_src = (REPO_ROOT / "src" / "run_pipeline.py").read_text()
+        marker = "Step 5b: build_relationships"
+        idx = cli_src.find(marker)
+        assert idx > 0
+        block = cli_src[idx : idx + 6000]
+
+        # Find the import statement
+        import_line = "from subprocess_streaming import"
+        import_idx = block.find(import_line)
+        assert import_idx > 0, f"could not find {import_line!r} in Step 5b region"
+
+        # Find the first try: block AFTER the marker
+        try_idx = block.find("try:", 0)
+        assert try_idx > 0, "could not find try block in Step 5b region"
+
+        # The import MUST come before the try, not inside it.
+        assert import_idx < try_idx, (
+            "PR-K3 Bugbot round-1 (Medium): subprocess_streaming import must be "
+            "OUTSIDE the try block. If the import fails inside try, NameError on "
+            "the except clause bypasses the degraded-mode handler."
+        )
+
+
+class TestTimeoutMessageReflectsActualEscalation:
+    """PR-K3 Bugbot round-1 (Low): ``SubprocessStreamTimeout`` message
+    MUST distinguish between (a) child exited cleanly after SIGTERM
+    within grace window and (b) child required SIGKILL escalation.
+    Operators eyeballing the AirflowException need the right signal
+    for whether to investigate APOC transaction integrity."""
+
+    def test_clean_sigterm_message_does_not_claim_sigkill(self, caplog):
+        """A child that handles SIGTERM cleanly within the grace
+        window MUST get a message that says ``no SIGKILL`` — NOT a
+        message that claims SIGKILL was sent."""
+        import logging
+
+        from subprocess_streaming import (
+            SubprocessStreamTimeout,
+            run_with_streaming_output,
+        )
+
+        caplog.set_level(logging.INFO)
+        child_logger = logging.getLogger("test_clean_sigterm_msg")
+
+        # Child that handles SIGTERM by exiting cleanly (Python's
+        # default behavior: SIGTERM → KeyboardInterrupt-like).
+        child_code = "import time\ntime.sleep(10)\n"
+        with pytest.raises(SubprocessStreamTimeout) as exc_info:
+            run_with_streaming_output(
+                [sys.executable, "-u", "-c", child_code],
+                timeout=0.3,
+                child_logger=child_logger,
+            )
+
+        msg = str(exc_info.value)
+        # The cleaner outcome — child exited within grace window — must NOT
+        # claim SIGKILL was sent.
+        assert "no SIGKILL" in msg, (
+            f"timeout message must reflect that SIGKILL was NOT sent when child "
+            f"exited cleanly within grace window; got: {msg!r}"
+        )
+        # The misleading old message format must not return.
+        assert "→ SIGKILL" not in msg, (
+            f"timeout message must not unconditionally claim SIGKILL when SIGTERM succeeded; got: {msg!r}"
+        )
+
+    def test_timeout_message_distinguishes_sigterm_vs_sigkill_paths(self):
+        """Source-pin: the helper MUST track whether ``proc.kill()``
+        actually fired and emit different messages for the two cases.
+        Guards against a future refactor reverting to the unconditional-
+        SIGKILL message."""
+        helper_src = (SRC / "subprocess_streaming.py").read_text()
+        # The two distinct messages must exist
+        assert "no SIGKILL" in helper_src, "helper must emit a 'no SIGKILL' message when SIGTERM alone was sufficient"
+        # And the SIGKILL escalation message must remain for the actual escalation path
+        assert "→ SIGKILL" in helper_src
+        # A boolean tracking flag must be set inside the SIGKILL branch
+        assert "sigkill_sent" in helper_src, (
+            "helper must track whether SIGKILL was actually sent, not just always claim it was"
+        )
+
+
+class TestStripDocstringsHandlesSingleLine:
+    """PR-K3 Bugbot round-1 (Low): the test-helper
+    ``_strip_docstrings_and_comments`` MUST actually skip single-line
+    docstrings (e.g. ``\"\"\"text\"\"\"`` on one line). Previously the
+    inner ``break`` exited the for loop without setting any skip
+    flag, so the line was appended to the output anyway."""
+
+    def test_single_line_docstring_is_actually_stripped(self):
+        # Construct source with a single-line docstring that mentions
+        # a forbidden pattern; if the stripper doesn't actually skip
+        # it, our other source-pin tests would false-positive.
+        from tests.test_pr_k3_subprocess_streaming import TestSourcePinsCaptureOutputGone
+
+        source_with_singleline_doc = (
+            'def some_func():\n    """This docstring mentions subprocess.run but is only prose."""\n    return 42\n'
+        )
+        stripped = TestSourcePinsCaptureOutputGone._strip_docstrings_and_comments(source_with_singleline_doc)
+        assert "subprocess.run" not in stripped, (
+            "single-line docstring must be skipped; if it leaks through, source-pin tests could false-positive on prose"
+        )
+
+    def test_multi_line_docstring_still_stripped(self):
+        """Sanity: the multi-line case the helper handled correctly
+        before MUST still work."""
+        from tests.test_pr_k3_subprocess_streaming import TestSourcePinsCaptureOutputGone
+
+        source_with_multiline_doc = (
+            "def some_func():\n"
+            '    """\n'
+            "    This multi-line docstring also mentions subprocess.run.\n"
+            '    """\n'
+            "    return 42\n"
+        )
+        stripped = TestSourcePinsCaptureOutputGone._strip_docstrings_and_comments(source_with_multiline_doc)
+        assert "subprocess.run" not in stripped
+
+    def test_actual_code_lines_kept(self):
+        """Non-docstring, non-comment code MUST still appear in the
+        stripped output — otherwise the source-pin tests can't see
+        anything."""
+        from tests.test_pr_k3_subprocess_streaming import TestSourcePinsCaptureOutputGone
+
+        source = '"""Module docstring"""\n# A line comment\nx = 1\ny = subprocess.run(cmd)\n'
+        stripped = TestSourcePinsCaptureOutputGone._strip_docstrings_and_comments(source)
+        # Real code must survive
+        assert "x = 1" in stripped
+        assert "subprocess.run(cmd)" in stripped
+        # Module docstring + comment must be gone
+        assert "Module docstring" not in stripped
+        assert "A line comment" not in stripped
