@@ -325,8 +325,76 @@ class TestNvdCheckpointPageMath:
         # Two call sites must use the new formula (inner + final).
         assert source.count("page=total_batches_done") >= 2
 
-    def test_counter_seeds_from_checkpoint(self, source: str) -> None:
-        """On resume, the counter must seed from the previously-persisted
-        ``page`` so the display stays approximately correct across
-        restarts."""
-        assert 'int(checkpoint.get("page", 0) or 0)' in source
+    def test_counter_seeds_from_current_page_not_page(self, source: str) -> None:
+        """Bugbot round-1 catch: ``update_source_checkpoint`` persists
+        the ``page=`` kwarg under ``entry["current_page"]``
+        (``baseline_checkpoint.py:135``) — NOT under ``"page"``. The
+        seed MUST read ``current_page`` so resume actually recovers
+        the counter; reading ``"page"`` would always return 0 and the
+        counter would restart from scratch on every run."""
+        assert 'checkpoint.get("current_page")' in source, (
+            "seed must read the ``current_page`` key the writer stores, "
+            "not the legacy ``page`` key which always returns 0"
+        )
+        # And the old broken expression must be gone.
+        assert 'int(checkpoint.get("page", 0) or 0)' not in source, (
+            'the original broken seed pinned ``.get("page", 0)`` which '
+            "always returned 0 because the writer persists under "
+            "``current_page`` — Bugbot caught this; don't let it regress"
+        )
+
+    def test_seed_recovers_persisted_page_end_to_end(self, tmp_path, monkeypatch) -> None:
+        """End-to-end: persist a fake NVD checkpoint via the real
+        ``update_source_checkpoint`` API, then read back the value the
+        nvd_collector seed expression would read.  This proves the
+        seed + writer key agree, closing the class of bug Bugbot
+        caught at the source level (writer persists under
+        ``current_page`` but seed was reading ``page``)."""
+        import importlib
+
+        # The checkpoint module stays under the project root by design
+        # (path-traversal guard at baseline_checkpoint.py:34-42), so we
+        # set EDGEGUARD_CHECKPOINT_DIR to a path inside the repo that's
+        # safe to write to. ``tmp_path`` is guaranteed clean per-test.
+        project_root = REPO_ROOT
+        safe_dir = project_root / ".pytest_checkpoint_tmp"
+        safe_dir.mkdir(exist_ok=True)
+        monkeypatch.setenv("EDGEGUARD_CHECKPOINT_DIR", str(safe_dir))
+
+        # Reload so the module re-reads the env var + rebuilds
+        # ``CHECKPOINT_FILE`` at the redirected path.
+        import baseline_checkpoint
+
+        importlib.reload(baseline_checkpoint)
+        try:
+            # Wipe any stale state from a previous test run.
+            if baseline_checkpoint.CHECKPOINT_FILE.exists():
+                baseline_checkpoint.CHECKPOINT_FILE.unlink()
+
+            # Simulate what the NVD collector writes on each batch.
+            baseline_checkpoint.update_source_checkpoint(
+                "nvd",
+                page=42,
+                items_collected=84000,
+                extra={"nvd_window_idx": 3, "nvd_start_index": 4000},
+            )
+
+            # Now read back and apply the nvd_collector's seed expression.
+            ckpt = baseline_checkpoint.get_source_checkpoint("nvd")
+            seeded = int(ckpt.get("current_page") or (max(ckpt.get("pages") or [0]) if ckpt.get("pages") else 0) or 0)
+            assert seeded == 42, (
+                f"seed expression must recover the persisted ``page`` value; got {seeded}. "
+                f"checkpoint keys present: {sorted(ckpt.keys())}"
+            )
+        finally:
+            # Clean up so this test leaves no artefacts in the repo.
+            if baseline_checkpoint.CHECKPOINT_FILE.exists():
+                baseline_checkpoint.CHECKPOINT_FILE.unlink()
+            lock = baseline_checkpoint.CHECKPOINT_FILE.with_suffix(".lock")
+            if lock.exists():
+                lock.unlink()
+            if safe_dir.exists() and not any(safe_dir.iterdir()):
+                safe_dir.rmdir()
+            # Reload the module one more time so subsequent tests see
+            # the normal project-default checkpoint path again.
+            importlib.reload(baseline_checkpoint)

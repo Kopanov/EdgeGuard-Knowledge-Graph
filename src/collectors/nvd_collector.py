@@ -526,7 +526,20 @@ class NVDCollector:
                 # seeding the counter from the checkpoint keeps the display
                 # approximately correct across restarts without affecting
                 # resume correctness.
-                total_batches_done = int(checkpoint.get("page", 0) or 0)
+                #
+                # PR-G1 Bugbot round-1 (Medium): ``update_source_checkpoint``
+                # persists the ``page`` kwarg under ``entry["current_page"]``
+                # (``baseline_checkpoint.py:135``) — NOT under ``"page"``. The
+                # original seed expression ``checkpoint.get("page", 0)`` would
+                # always return 0, so the counter never actually recovered on
+                # resume. Read ``current_page`` to match the writer, and fall
+                # back to ``max(pages)`` for extra robustness if the schema
+                # ever diverges.
+                total_batches_done = int(
+                    checkpoint.get("current_page")
+                    or (max(checkpoint.get("pages") or [0]) if checkpoint.get("pages") else 0)
+                    or 0
+                )
                 if not checkpoint.get("completed") and checkpoint.get("nvd_window_idx") is not None:
                     start_wi = int(checkpoint["nvd_window_idx"])
                     resume_index = int(checkpoint.get("nvd_start_index", 0))
