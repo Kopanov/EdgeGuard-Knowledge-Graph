@@ -1,9 +1,17 @@
 # EdgeGuard Prototype Configuration
+import logging
 import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, MutableMapping, Optional, Protocol
+
+# Module-level logger for config-time diagnostics (env parsing warnings,
+# bad-credentials path, etc.). Previously this module only used ad-hoc
+# ``logging.getLogger(__name__)`` inline calls; PR-N6 R1 Bugbot added
+# the proper WARNING output path for ``_bounded_env_float`` rejections,
+# which needed a module-scope handle.
+logger = logging.getLogger(__name__)
 
 # Deployment environment
 # ----------------------
@@ -67,6 +75,16 @@ def _bounded_env_float(name: str, default: float, *, lo: float, hi: float) -> fl
     MISP backoff settings — see commit d9be313), and also clamps
     out-of-range values to the default with a WARN. ``lo``/``hi``
     form a hard safety envelope around the expected useful range.
+
+    PR-N6 R1 Bugbot MED (2026-04-21): all three rejection paths now
+    emit a ``logger.warning`` — matching the behaviour of the twin
+    ``_bounded_float_env`` helper in ``misp_writer.py``. Pre-fix the
+    docstring CLAIMED WARN-on-rejection but the implementation was
+    silent, so an operator setting ``EDGEGUARD_ZONE_DETECT_THRESHOLD=inf``
+    would silently fall back to the default with no log signal. For a
+    security-critical classification threshold, silent config
+    rejection is the worst outcome — the operator thinks their
+    override is in effect while the code uses the default.
     """
     raw = os.getenv(name)
     if not raw:
@@ -74,13 +92,28 @@ def _bounded_env_float(name: str, default: float, *, lo: float, hi: float) -> fl
     try:
         val = float(raw.strip())
     except (ValueError, TypeError):
+        logger.warning("%s=%r is not a valid float; using default %.3f", name, raw, default)
         return default
     # NaN and ±inf must be rejected BEFORE the bounds check — NaN
     # compares False against everything, so a naive ``val < lo or val > hi``
     # guard passes NaN through. isfinite() rejects all three in one call.
     if not math.isfinite(val):
+        logger.warning(
+            "%s=%r resolved to non-finite value (NaN/±inf); using default %.3f",
+            name,
+            raw,
+            default,
+        )
         return default
     if val < lo or val > hi:
+        logger.warning(
+            "%s=%.3f is out of valid range [%.3f, %.3f]; using default %.3f",
+            name,
+            val,
+            lo,
+            hi,
+            default,
+        )
         return default
     return val
 

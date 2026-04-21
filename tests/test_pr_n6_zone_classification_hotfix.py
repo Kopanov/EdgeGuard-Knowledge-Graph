@@ -245,6 +245,104 @@ class TestFinding2InfNaNThresholdBypass:
         monkeypatch.delenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", raising=False)
         importlib.reload(config)
 
+    # --- Bugbot PR-N6 R1 MED regression pins: WARN-on-rejection ---
+
+    def test_r1_warn_on_nan(self, monkeypatch, caplog):
+        """Bugbot PR-N6 R1 MED (2026-04-21): ``_bounded_env_float`` must
+        emit ``logger.warning`` on every rejection path. Pre-fix the
+        docstring CLAIMED WARN-on-rejection but the implementation was
+        silent — operator setting
+        ``EDGEGUARD_ZONE_DETECT_THRESHOLD=inf`` would silently fall
+        back to default with no log signal."""
+        import logging
+
+        monkeypatch.setenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", "NaN")
+        with caplog.at_level(logging.WARNING, logger="config"):
+            import config
+
+            importlib.reload(config)
+
+        assert any(
+            "non-finite" in rec.message and "EDGEGUARD_ZONE_DETECT_THRESHOLD" in rec.message for rec in caplog.records
+        ), f"R1: NaN must trigger a WARN naming the env var; got logs: {[r.message for r in caplog.records]}"
+
+        monkeypatch.delenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", raising=False)
+        importlib.reload(config)
+
+    def test_r1_warn_on_inf(self, monkeypatch, caplog):
+        """±inf must also WARN."""
+        import logging
+
+        monkeypatch.setenv("EDGEGUARD_ZONE_ITEM_THRESHOLD", "inf")
+        with caplog.at_level(logging.WARNING, logger="config"):
+            import config
+
+            importlib.reload(config)
+
+        assert any(
+            "non-finite" in rec.message and "EDGEGUARD_ZONE_ITEM_THRESHOLD" in rec.message for rec in caplog.records
+        ), f"R1: inf must trigger a WARN; got logs: {[r.message for r in caplog.records]}"
+
+        monkeypatch.delenv("EDGEGUARD_ZONE_ITEM_THRESHOLD", raising=False)
+        importlib.reload(config)
+
+    def test_r1_warn_on_out_of_range(self, monkeypatch, caplog):
+        """Out-of-range value (above ceiling) must WARN."""
+        import logging
+
+        monkeypatch.setenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", "500.0")
+        with caplog.at_level(logging.WARNING, logger="config"):
+            import config
+
+            importlib.reload(config)
+
+        assert any("out of valid range" in rec.message for rec in caplog.records), (
+            f"R1: out-of-range must trigger a WARN; got logs: {[r.message for r in caplog.records]}"
+        )
+
+        monkeypatch.delenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", raising=False)
+        importlib.reload(config)
+
+    def test_r1_warn_on_unparseable(self, monkeypatch, caplog):
+        """Unparseable ``abc123`` must WARN on the parse-fail path."""
+        import logging
+
+        monkeypatch.setenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", "abc123")
+        with caplog.at_level(logging.WARNING, logger="config"):
+            import config
+
+            importlib.reload(config)
+
+        assert any("not a valid float" in rec.message for rec in caplog.records), (
+            f"R1: unparseable must trigger a WARN; got logs: {[r.message for r in caplog.records]}"
+        )
+
+        monkeypatch.delenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", raising=False)
+        importlib.reload(config)
+
+    def test_r1_no_warn_on_valid(self, monkeypatch, caplog):
+        """Negative: a valid value must NOT trigger any WARN from
+        ``_bounded_env_float``."""
+        import logging
+
+        monkeypatch.setenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", "3.0")
+        with caplog.at_level(logging.WARNING, logger="config"):
+            import config
+
+            importlib.reload(config)
+
+        # Must not have any bounded_env_float rejection log
+        relevant = [
+            r.message
+            for r in caplog.records
+            if "EDGEGUARD_ZONE_DETECT_THRESHOLD" in r.message
+            and any(tag in r.message for tag in ("not a valid float", "non-finite", "out of valid range"))
+        ]
+        assert not relevant, f"R1 false-positive: valid value should not WARN; got: {relevant}"
+
+        monkeypatch.delenv("EDGEGUARD_ZONE_DETECT_THRESHOLD", raising=False)
+        importlib.reload(config)
+
 
 # ===========================================================================
 # Finding #4 — OTX industry map unification
