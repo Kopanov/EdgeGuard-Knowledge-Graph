@@ -341,7 +341,17 @@ class TestAdaptiveBackoffBehavioural:
 
     def test_no_cooldown_when_failures_below_threshold(self, monkeypatch):
         """Two consecutive failures (below default threshold of 3)
-        must NOT trigger the cooldown."""
+        must NOT trigger the cooldown.
+
+        Bugbot catch (commit 02a94ba5): the previous assertion
+        ``999.0 not in sleep_calls`` was trivially true because the
+        round-2 chunked cooldown (``_chunk = 30.0``) would never call
+        ``time.sleep(999.0)`` — it would call ``time.sleep(30.0)``
+        many times. Replaced with a cumulative-sleep assertion that
+        actually distinguishes "cooldown fired" from "didn't fire":
+        if the cooldown fires, total sleep time must be >= the
+        env-configured cooldown; if it doesn't, total sleep time is 0
+        (since we force batch throttle to 0.0)."""
         from collectors.misp_writer import MispTransientError
 
         w = self._make_writer()
@@ -372,7 +382,12 @@ class TestAdaptiveBackoffBehavioural:
             return r
 
         monkeypatch.setattr(w, "_push_batch", fake_push)
-        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", "999.0")  # would be glaring if it fired
+        # Use a SMALL cooldown value (1.5s) that ends up as ONE chunk
+        # (min(30.0, 1.5) = 1.5), so if the cooldown fires sleep_calls
+        # contains the value 1.5. All other sleeps in this test are
+        # throttles forced to 0.0, so 1.5 in sleep_calls uniquely
+        # identifies cooldown firing.
+        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", "1.5")
         monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
         sleep_calls = []
         monkeypatch.setattr("time.sleep", lambda s: sleep_calls.append(s))
@@ -380,8 +395,18 @@ class TestAdaptiveBackoffBehavioural:
         items = [{"indicator_type": "ipv4", "value": f"10.0.0.{i}", "tag": "test"} for i in range(1, 6)]
         w.push_items(items, batch_size=1)
 
-        # Must NOT have invoked the 999s cooldown
-        assert 999.0 not in sleep_calls, f"cooldown fired below threshold; sleeps: {sleep_calls}"
+        # Primary assertion: total cumulative sleep must be ≈ 0. If the
+        # cooldown fired once it would contribute 1.5s; >=2 cooldowns
+        # would contribute 3.0s+. Throttles are 0.0 in this test.
+        total_sleep = sum(sleep_calls)
+        assert total_sleep < 0.5, (
+            f"cooldown fired below threshold (2 failures < default 3); "
+            f"total sleep time {total_sleep}s, calls: {sleep_calls}"
+        )
+        # Secondary assertion: the exact cooldown chunk value must not
+        # appear (belt-and-suspenders — catches the case where a future
+        # change sets cooldown=0 accidentally bypassing the sum check)
+        assert 1.5 not in sleep_calls, f"cooldown chunk value observed in sleeps below threshold; calls: {sleep_calls}"
 
 
 # ===========================================================================
