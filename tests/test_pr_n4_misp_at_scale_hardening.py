@@ -358,6 +358,102 @@ class TestAdaptiveBackoffBehavioural:
 
 
 # ===========================================================================
+# Bugbot round 1 regression pins (PR-N4 commit 8ae3f82 → fix)
+# ===========================================================================
+
+
+class TestBugbotRound1Fixes:
+    """Pin the four Bugbot findings on PR-N4 commit 8ae3f82 so they
+    can't silently regress:
+
+      F1 [HIGH] Prometheus metrics used stale ``source`` from outer loop
+      F2 [MED]  Duplicate ``_get_existing_attribute_keys`` call (30-60s
+                paginated fetch run twice on the exact large events
+                PR-N4 targets)
+      F3 [LOW]  ``total_batches`` used wrong batch_size after adaptive
+                scaling \u2192 progress log >100% and negative ETAs
+      F4 [MED]  ``except Exception: pass`` around metric increments
+                silently swallowed errors with no signal
+    """
+
+    def _read(self) -> str:
+        return (SRC / "collectors" / "misp_writer.py").read_text()
+
+    def test_push_queue_threads_source(self):
+        """F1: push_queue tuples must include ``source`` so the second
+        loop binds it correctly per-event instead of inheriting the
+        last value of the outer loop's ``source`` variable."""
+        src = self._read()
+        # 4-tuple form (source, event_id, existing_count, attrs)
+        assert "push_queue.append((source, event_id, len(per_event_keys), unique_attrs))" in src, (
+            "push_queue must thread (source, event_id, existing_count, attrs) "
+            "so per-event metric labels are correct in a multi-source push"
+        )
+        # Inner loop must unpack the 4-tuple
+        assert "for source, event_id, existing_attrs_count, unique_attrs in push_queue:" in src
+
+    def test_no_duplicate_existing_attrs_fetch_in_inner_loop(self):
+        """F2: the inner loop must NOT re-call
+        ``_get_existing_attribute_keys`` for adaptive scaling \u2014 that
+        data is now threaded through ``push_queue`` from the dedup
+        loop. Pre-fix the call ran a second time per event,
+        doubling the prefetch cost on the exact 50K-120K events
+        PR-N4 targets.
+
+        Strip Python comment lines first so the historical breadcrumb
+        explaining what was removed (which legitimately mentions the
+        function name) doesn't false-match."""
+        src = self._read()
+        loop_idx = src.find("for source, event_id, existing_attrs_count, unique_attrs in push_queue:")
+        assert loop_idx != -1, "inner push loop must use the threaded 4-tuple"
+        next_def = src.find("\n    def ", loop_idx)
+        inner_block = src[loop_idx:next_def] if next_def != -1 else src[loop_idx:]
+        # Strip whole-line ``#`` Python comments
+        active_inner = "\n".join(line for line in inner_block.splitlines() if not line.lstrip().startswith("#"))
+        assert "_get_existing_attribute_keys(event_id)" not in active_inner, (
+            "Bugbot F2 regression: inner loop must reuse the existing-count "
+            "threaded through push_queue, not re-fetch via "
+            "_get_existing_attribute_keys (30-60s paginated REST call)"
+        )
+
+    def test_total_batches_uses_adaptive_helper(self):
+        """F3: ``total_batches`` must be computed using the same
+        ``_adaptive_for`` helper as the inner loop, so progress
+        percentages are accurate when scaling kicks in."""
+        src = self._read()
+        assert "def _adaptive_for(existing_ct: int)" in src, (
+            "PR-N4 must define an _adaptive_for helper inside push_items"
+        )
+        assert "total_batches = sum(" in src
+        ts_idx = src.find("total_batches = sum(")
+        assert ts_idx != -1
+        ts_block = src[ts_idx : ts_idx + 400]
+        assert "_adaptive_for(existing_ct)" in ts_block, (
+            "Bugbot F3 regression: total_batches must use _adaptive_for "
+            "so progress reporting matches the actual batches sent"
+        )
+
+    def test_metric_except_blocks_log_with_exc_info(self):
+        """F4: the ``except Exception:`` blocks around metric
+        increments must log at DEBUG with ``exc_info=True``, not
+        silently ``pass``."""
+        src = self._read()
+        active = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+        for needle in ("MISP_BACKOFF_TRIGGERED.labels", "MISP_PUSH_PERMANENT_FAILURES.labels"):
+            label_idx = active.find(needle)
+            if label_idx == -1:
+                continue
+            block = active[label_idx : label_idx + 600]
+            assert "except Exception as _metric_err:" in block, (
+                f"Bugbot F4 regression: except block around {needle} must name the exception as _metric_err for logging"
+            )
+            assert "logger.debug(" in block and "exc_info=True" in block, (
+                f"Bugbot F4 regression: except block around {needle} must "
+                "log at DEBUG with exc_info=True (not silently swallow)"
+            )
+
+
+# ===========================================================================
 # Behavioural — adaptive batch sizing kicks in for large events
 # ===========================================================================
 

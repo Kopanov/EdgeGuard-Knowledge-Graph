@@ -1556,9 +1556,21 @@ class MISPWriter:
                 )
             if not unique_attrs:
                 continue
-            push_queue.append((event_id, unique_attrs))
-
-        total_batches = sum((len(attrs) + batch_size - 1) // batch_size for _, attrs in push_queue)
+            # PR-N4 (Bugbot round 1): thread ``source`` and the
+            # already-fetched per-event attribute count INTO the queue.
+            #
+            #  * ``source`` is needed by the second loop's Prometheus
+            #    metric increments. The pre-fix version reused the
+            #    outer-loop ``source`` variable, which retains its last
+            #    iteration's value after the loop ends — silently
+            #    mis-attributing every metric in a multi-source push.
+            #  * ``existing_attrs_count`` is needed for adaptive scaling.
+            #    Pre-fix the second loop re-called
+            #    ``_get_existing_attribute_keys(event_id)`` (a 30-60s
+            #    paginated REST call on large events) — doubling the
+            #    prefetch cost on the exact events PR-N4 targets. Reuse
+            #    the count we already paid for during dedup.
+            push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
 
         if not push_queue and total_items > 0:
             logger.warning(
@@ -1593,6 +1605,31 @@ class MISPWriter:
         except (ValueError, TypeError):
             _backoff_cooldown_sec = 300.0
 
+        # PR-N4 helper: resolve the adaptive-scaling tier from an
+        # existing-attribute count. Defined inside push_items so the
+        # closure captures the env-tuned thresholds; both the
+        # ``total_batches`` precompute (immediately below) and the
+        # inner loop (further below) use the same logic — no
+        # duplication / drift risk.
+        def _adaptive_for(existing_ct: int) -> Tuple[int, float, str]:
+            if existing_ct >= _huge_threshold:
+                return min(50, batch_size), max(30.0, batch_throttle), "huge"
+            if existing_ct >= _large_threshold:
+                return min(100, batch_size), max(15.0, batch_throttle), "large"
+            return batch_size, batch_throttle, "default"
+
+        # PR-N4 (Bugbot round 1, LOW): ``total_batches`` recomputed using
+        # the per-event ``effective_batch_size`` (the adaptive tier may
+        # downscale from the static ``batch_size``). Pre-fix this was
+        # computed once with the static value, so when scaling kicked in
+        # the progress log reported >100% and negative ETAs on huge
+        # events. Now uses the same ``_adaptive_for`` helper as the inner
+        # loop — single source of truth.
+        total_batches = sum(
+            (len(attrs) + _adaptive_for(existing_ct)[0] - 1) // _adaptive_for(existing_ct)[0]
+            for _src, _eid, existing_ct, attrs in push_queue
+        )
+
         # Track consecutive 5xx failures across the entire push (per writer
         # instance, scoped to this push_items call). Reset on any successful
         # batch. When count >= threshold, insert an extended cooldown
@@ -1600,34 +1637,19 @@ class MISPWriter:
         # of hammering a struggling worker with 10s × 2^n retries.
         _consecutive_failures = 0
 
-        for event_id, unique_attrs in push_queue:
-            # PR-N4: ADAPTIVE SCALING. Look at how many attributes already
-            # live in the target event and downscale batch size + throttle
-            # if it's already large. The existing-attrs prefetch above
-            # already has a count for free via per_event_keys
-            # (set of (type, value) tuples) — re-use it rather than firing
-            # another network call. ``per_event_keys`` is scoped to a
-            # different ``event_id`` per outer loop iteration, so we
-            # re-derive each time.
-            try:
-                existing_attrs_count = len(self._get_existing_attribute_keys(event_id))
-            except Exception:
-                # Defensive: if the count lookup fails, fall back to
-                # default batching rather than crashing the push.
-                existing_attrs_count = 0
-
-            effective_batch_size = batch_size
-            effective_throttle = batch_throttle
-            if existing_attrs_count >= _huge_threshold:
-                effective_batch_size = min(50, batch_size)
-                effective_throttle = max(30.0, batch_throttle)
-                _scale_tier = "huge"
-            elif existing_attrs_count >= _large_threshold:
-                effective_batch_size = min(100, batch_size)
-                effective_throttle = max(15.0, batch_throttle)
-                _scale_tier = "large"
-            else:
-                _scale_tier = "default"
+        for source, event_id, existing_attrs_count, unique_attrs in push_queue:
+            # PR-N4: ADAPTIVE SCALING. ``existing_attrs_count`` was
+            # captured during the dedup loop above (we already paid for
+            # ``_get_existing_attribute_keys(event_id)`` there) and
+            # threaded through ``push_queue``. No second MISP call here.
+            #
+            # Bugbot round 1 caught the duplicate fetch (lines 1505 and
+            # 1613 both called the same paginated 30-60s REST endpoint)
+            # AND the silent except-pass that defaulted to 0 on lookup
+            # failure (defeating adaptive scaling exactly when it was
+            # most needed). Both fixed by threading the dedup-time count
+            # through ``push_queue``.
+            effective_batch_size, effective_throttle, _scale_tier = _adaptive_for(existing_attrs_count)
             if _scale_tier != "default":
                 logger.info(
                     "[PUSH] Event %s has %d existing attrs (>= %s threshold) — "
@@ -1670,8 +1692,18 @@ class MISPWriter:
                     if _METRICS_AVAILABLE:
                         try:
                             _MISP_BACKOFF_TRIGGERED.labels(source=source).inc()
-                        except Exception:
-                            pass
+                        except Exception as _metric_err:
+                            # Bugbot (PR-N4 round 1): don't swallow silently.
+                            # Metric failures shouldn't block the push, but they
+                            # SHOULD be debuggable — if Prometheus client is
+                            # mis-configured (e.g. duplicate registry registration)
+                            # the operator needs to see something other than
+                            # "no metric ever increments."
+                            logger.debug(
+                                "MISP backoff-triggered metric increment failed: %s",
+                                _metric_err,
+                                exc_info=True,
+                            )
                     time.sleep(_backoff_cooldown_sec)
                     # Reset the counter so we don't immediately re-pause
                     # if the next batch ALSO fails — the @retry_with_backoff
@@ -1756,8 +1788,14 @@ class MISPWriter:
                     if _METRICS_AVAILABLE:
                         try:
                             _MISP_PUSH_PERMANENT_FAILURES.labels(source=source, event_id=str(event_id)).inc()
-                        except Exception:
-                            pass
+                        except Exception as _metric_err:
+                            # Bugbot (PR-N4 round 1): don't swallow silently.
+                            # See backoff-trigger metric block above for rationale.
+                            logger.debug(
+                                "MISP permanent-failure metric increment failed: %s",
+                                _metric_err,
+                                exc_info=True,
+                            )
                 total_success += success
                 total_failed += failed
 
