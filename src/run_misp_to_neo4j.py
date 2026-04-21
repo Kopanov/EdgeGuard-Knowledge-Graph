@@ -2487,6 +2487,12 @@ class MISPToNeo4jSync:
                 "cisa_action_due": nvd_meta.get("cisa_action_due", ""),
                 "cisa_required_action": nvd_meta.get("cisa_required_action", ""),
                 "cisa_vulnerability_name": nvd_meta.get("cisa_vulnerability_name", ""),
+                # PR-N13 Fix #3 rehydration: ``version_constraints`` + ``status``
+                # mirror of the NVD_META extension in ``misp_writer.py``.
+                # ``merge_cve`` in neo4j_client.py already consumes both
+                # fields when present (JSON-serialize logic at ~L2389-2431).
+                "version_constraints": nvd_meta.get("version_constraints", []),
+                "status": nvd_meta.get("status", []),
             }
             return item, relationships
 
@@ -2914,6 +2920,16 @@ class MISPToNeo4jSync:
                 # never fired for OTX items (the biggest source).
                 item["malware_family"] = otx_meta.get("malware_family", "")
                 item["attributed_to"] = otx_meta.get("attributed_to", "")
+                # PR-N13 Fix #5 rehydration: pull ``pulse_id``,
+                # ``indicator_role``, ``is_active`` out of OTX_META now
+                # that misp_writer.py serializes them. Pre-PR-N13 all
+                # three were dropped on the round-trip; ``indicator_role``
+                # in particular is LIVE-WIRED at
+                # ``neo4j_client.merge_indicators_batch:~L2169`` which
+                # silently received None for every OTX-sourced row.
+                item["pulse_id"] = otx_meta.get("pulse_id", "")
+                item["indicator_role"] = otx_meta.get("indicator_role", "")
+                item["is_active"] = otx_meta.get("is_active", True)
 
             # Enrich indicator with ThreatFox metadata
             if tf_meta:
@@ -2926,6 +2942,13 @@ class MISPToNeo4jSync:
                 item["reporter"] = tf_meta.get("reporter", "")
                 # PR-N10 Fix #3: mirror OTX_META ``attributed_to`` pull-out.
                 item["attributed_to"] = tf_meta.get("attributed_to", "")
+                # PR-N13 Fix #4 rehydration: pull ``threat_type``,
+                # ``ioc_id``, ``malware_alias`` out of TF_META. Pre-PR-N13
+                # all three were dropped on round-trip; losing ``ioc_id``
+                # specifically broke cross-day ThreatFox dedup.
+                item["threat_type"] = tf_meta.get("threat_type", "")
+                item["ioc_id"] = tf_meta.get("ioc_id", "")
+                item["malware_alias"] = tf_meta.get("malware_alias", "")
 
             return item, relationships
 
