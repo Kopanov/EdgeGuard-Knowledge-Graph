@@ -84,6 +84,12 @@ from typing import Any, Dict, Tuple
 # ║ ``stix_exporter._deterministic_id("indicator", "...")`` produce the same ║
 # ║ UUID for the same logical entity (cross-system traceability).             ║
 # ║                                                                            ║
+# ║ PR-N2 §9-B1: ``stix_exporter`` enforces parity at module-load time via   ║
+# ║ a ``RuntimeError`` raise — if you edit either literal without the other, ║
+# ║ importing ``stix_exporter`` will fail loudly with the divergent UUIDs.   ║
+# ║ See the comment block immediately above ``EDGEGUARD_STIX_NAMESPACE`` in  ║
+# ║ src/stix_exporter.py for the rationale + the migration playbook.         ║
+# ║                                                                            ║
 # ║ If you genuinely need to migrate to a new namespace (e.g. for tenant      ║
 # ║ isolation), do it via a coordinated migration:                             ║
 # ║   1. Add a new constant ``EDGEGUARD_NODE_UUID_NAMESPACE_V2``               ║

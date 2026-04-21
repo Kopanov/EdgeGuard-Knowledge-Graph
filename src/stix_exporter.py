@@ -159,7 +159,45 @@ def _stix_ts(s: Optional[str]) -> Optional[str]:
 # Fixed namespace so UUIDv5 is stable across processes/machines. This
 # value is arbitrary but MUST NOT change — doing so would break ID
 # stability for ResilMesh consumers that cache by STIX ID.
+#
+# CROSS-MODULE INVARIANT (PR-N2 §9-B1): this MUST equal
+# ``node_identity.EDGEGUARD_NODE_UUID_NAMESPACE``. The deliberate
+# duplication exists so each module reads correctly in isolation —
+# the reuse is what makes ``compute_node_uuid("Indicator", {...})``
+# (Neo4j ``n.uuid``) and ``_deterministic_id("indicator", "...")``
+# (STIX SDO id UUID portion) produce the same value for the same
+# logical entity, enabling cross-system traceability between Neo4j
+# and STIX bundles consumed by ResilMesh.
+#
+# The runtime guard immediately below raises at module-load time if
+# the two literals ever drift — the audit (Devil's Advocate F2)
+# correctly noted that the comments say "MUST match" but nothing was
+# actually enforcing it. Pre-PR-N2, a routine refactor that edited
+# one literal without the other would have silently broken every
+# Neo4j↔STIX cross-reference; subsequent migration to repair would
+# require re-stamping every node + re-exporting every bundle.
 EDGEGUARD_STIX_NAMESPACE = uuid.UUID("5f2e1f9a-6a1b-5e0f-9b25-ed9ea2d574cb")
+
+# PR-N2 §9-B1: enforce parity at import time. ``assert`` is avoided
+# because Python's ``-O`` flag strips assertions; we use an explicit
+# ``raise`` instead so the check fires in production too.
+from node_identity import EDGEGUARD_NODE_UUID_NAMESPACE as _EDGEGUARD_NODE_UUID_NAMESPACE_FOR_PARITY_CHECK  # noqa: E402
+
+if EDGEGUARD_STIX_NAMESPACE != _EDGEGUARD_NODE_UUID_NAMESPACE_FOR_PARITY_CHECK:
+    raise RuntimeError(
+        "FATAL: UUID namespace drift detected between "
+        "stix_exporter.EDGEGUARD_STIX_NAMESPACE "
+        f"({EDGEGUARD_STIX_NAMESPACE}) and "
+        "node_identity.EDGEGUARD_NODE_UUID_NAMESPACE "
+        f"({_EDGEGUARD_NODE_UUID_NAMESPACE_FOR_PARITY_CHECK}). "
+        "These MUST be identical so Neo4j n.uuid and STIX SDO id UUIDs "
+        "match for the same logical entity (cross-system traceability). "
+        "If you genuinely need to migrate the namespace, follow the "
+        "coordinated migration in node_identity.py's FROZEN block — "
+        "do NOT just edit one of the literals."
+    )
+
+del _EDGEGUARD_NODE_UUID_NAMESPACE_FOR_PARITY_CHECK
 
 
 def _deterministic_id(obj_type: str, natural_key: str) -> str:
