@@ -191,9 +191,14 @@ def test_calibrate_large_event_query_is_parameterized_array_only():
 
 
 def test_build_relationships_indicates_cooccurrence_is_array_only():
-    """PR #33 round 10: the INDICATES co-occurrence query is array-only on
-    both the Indicator outer and the Malware inner. Pre-cleanup it had a
-    scalar+array union; now only the array."""
+    """PR #33 round 10 + PR-N7: the INDICATES co-occurrence query is
+    array-only on both the outer and inner sides (no scalar event-id
+    leg in either direction).
+
+    PR-N7 (2026-04-21 on-call): join direction REVERSED for scale —
+    outer is now Malware (~3.4K), inner scans Indicator per event_id.
+    The array-only invariant this test pins still holds, just with
+    the roles swapped."""
     import build_relationships
 
     src_path = build_relationships.__file__
@@ -205,15 +210,25 @@ def test_build_relationships_indicates_cooccurrence_is_array_only():
     assert block_start > 0 and block_end > block_start, "could not locate the INDICATES co-occurrence block"
     block = source[block_start:block_end]
 
-    # Outer: array filter only.
-    assert "i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0" in block, (
-        "outer query must filter Indicators by misp_event_ids[]"
+    # Outer (PR-N7 reversal): array filter on Malware side, small-side driver.
+    assert "m.misp_event_ids IS NOT NULL AND size(m.misp_event_ids) > 0" in block, (
+        "outer query must filter Malware by misp_event_ids[] (PR-N7 reversal)"
     )
-    # No leftover scalar leg.
-    assert "i.misp_event_id IS NOT NULL" not in block, "outer scalar leg must be removed"
-    assert "i.misp_event_id <> " not in block, "outer scalar empty-check must be removed"
+    # No leftover scalar leg anywhere.
+    assert "i.misp_event_id IS NOT NULL" not in block, "inner Indicator scalar leg must be removed"
+    assert "i.misp_event_id <> " not in block, "inner Indicator scalar empty-check must be removed"
+    assert "m.misp_event_id IS NOT NULL" not in block, "outer Malware scalar leg must be removed"
+    assert "m.misp_event_id <> " not in block, "outer Malware scalar empty-check must be removed"
 
-    # Inner Malware match: array IN-membership only.
-    assert "eid IN m.misp_event_ids" in block, "inner Malware match must use array IN membership"
-    assert "m.misp_event_id = eid" not in block, "inner scalar match must be removed"
-    assert "MATCH (m:Malware {misp_event_id: eid})" not in block, "legacy scalar property match must be removed"
+    # Inner Indicator match (post-PR-N7): array IN-membership only.
+    assert "eid IN i.misp_event_ids" in block, "inner Indicator match must use array IN membership (PR-N7 reversal)"
+    assert "i.misp_event_id = eid" not in block, "scalar Indicator match must be removed"
+    assert "MATCH (i:Indicator {misp_event_id: eid})" not in block, (
+        "legacy scalar Indicator property match must be removed"
+    )
+
+    # MERGE direction must remain Indicator→Malware (the reversal is
+    # only about which side drives the apoc outer loop, NOT edge semantics).
+    assert "MERGE (i)-[r:INDICATES]->(m)" in block, (
+        "edge direction must remain i→m INDICATES; PR-N7 reversal is about outer driver only"
+    )
