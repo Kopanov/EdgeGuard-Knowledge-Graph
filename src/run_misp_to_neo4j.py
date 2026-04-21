@@ -46,6 +46,7 @@ from config import (
 from misp_health import MISPHealthCheck
 from neo4j_client import (
     Neo4jClient,
+    clamp_cvss_score,
     normalize_cve_id_for_graph,
     resolve_vulnerability_cve_id,
 )
@@ -2399,18 +2400,40 @@ class MISPToNeo4jSync:
                     attack_vector = nvd_meta["attack_vector"]
                 else:
                     attack_vector = "UNKNOWN"
-                # Exact CVSS score from v3.1 or v2 metadata takes priority over tag category
+                # Exact CVSS score from v3.1 or v2 metadata takes priority over tag category.
+                #
+                # PR-N14 (pre-baseline audit Fix #1, 2026-04-21): use
+                # ``clamp_cvss_score`` instead of raw ``float(...)`` to
+                # reject inf / nan / negative / > 10.0. A compromised
+                # federated MISP peer can otherwise ship
+                # ``base_score: "1e309"`` → Python `inf` → forged CVE
+                # permanently tops GraphQL sort + corrupts STIX export.
+                # Returns None on bad input; we then fall through to the
+                # tag-derived score already computed above.
                 v31 = nvd_meta.get("cvss_v31_data") or {}
                 v2 = nvd_meta.get("cvss_v2_data") or {}
-                try:
-                    if v31.get("base_score") is not None and v31["base_score"] != "":
-                        cvss_score = float(v31["base_score"])
-                        severity = (v31.get("base_severity") or severity or "UNKNOWN").upper()
-                    elif v2.get("base_score") is not None and v2["base_score"] != "":
-                        cvss_score = float(v2["base_score"])
-                        severity = (v2.get("base_severity") or severity or "UNKNOWN").upper()
-                except (ValueError, TypeError):
-                    logger.debug("Non-numeric base_score in NVD_META for %s, using tag-derived score", value)
+                _v31_score = (
+                    clamp_cvss_score(v31.get("base_score")) if v31.get("base_score") not in (None, "") else None
+                )
+                _v2_score = clamp_cvss_score(v2.get("base_score")) if v2.get("base_score") not in (None, "") else None
+                if _v31_score is not None:
+                    cvss_score = _v31_score
+                    severity = (v31.get("base_severity") or severity or "UNKNOWN").upper()
+                elif _v2_score is not None:
+                    cvss_score = _v2_score
+                    severity = (v2.get("base_severity") or severity or "UNKNOWN").upper()
+                elif v31.get("base_score") not in (None, "") or v2.get("base_score") not in (None, ""):
+                    # Source claimed a score but it was rejected by clamp
+                    # (non-finite / out-of-range). Honest-NULL: fall
+                    # through to tag-derived score + emit WARN so
+                    # operators can investigate the offending feed.
+                    logger.warning(
+                        "CVSS base_score rejected by clamp for %s (v31=%r v2=%r) — "
+                        "falling back to tag-derived score. Compromised feed?",
+                        value,
+                        v31.get("base_score"),
+                        v2.get("base_score"),
+                    )
             else:
                 description = raw_comment
                 attack_vector = "NETWORK"

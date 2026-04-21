@@ -544,6 +544,69 @@ def nonempty_graph_string(value: Any) -> Optional[str]:
     return s if s else None
 
 
+def clamp_cvss_score(value: Any) -> Optional[float]:
+    """PR-N14 (pre-baseline audit Fix #1, 2026-04-21): clamp a CVSS
+    base_score to the valid [0.0, 10.0] range + reject non-finite.
+
+    Pre-PR-N14, an attacker-controlled NVD_META with ``base_score:
+    "1e309"`` reached ``float(...)`` → Python ``inf`` → landed on the
+    CVE node as ``n.cvss_score = Infinity``. Two consequences:
+
+      * GraphQL ``vulnerabilities(min_cvss: 9.0) ORDER BY n.cvss_score
+        DESC`` permanently placed the forged CVE at the top of the
+        triage queue, masking real P1s.
+      * STIX export emitted `"cvss_score": Infinity` which is NOT valid
+        JSON — downstream parsers crashed.
+
+    Returns None for unparseable / non-finite / out-of-range values so
+    callers can propagate NULL (honest-NULL per PR-N5 C7). Valid inputs
+    pass through as floats.
+    """
+    import math
+
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        # inf / -inf / NaN — reject (honest-NULL).
+        return None
+    if f < 0.0 or f > 10.0:
+        # Outside the NIST-defined CVSS range.
+        return None
+    return f
+
+
+def clamp_confidence_score(value: Any) -> Optional[float]:
+    """PR-N14 (pre-baseline audit Fix #2, 2026-04-21): clamp
+    confidence_score to [0.0, 1.0] + reject non-finite.
+
+    Pre-PR-N14, the max-wins CASE in every ``_upsert_sourced_relationship``
+    and batched UNWIND happily accepted ``$confidence = inf`` from a
+    compromised feed and pinned ``r.confidence_score = Infinity``
+    forever — defeating calibrator demotion, and corrupting every
+    query that sorts or filters on confidence.
+
+    Returns None for unparseable / non-finite / out-of-range so callers
+    can fall back to the documented default (0.5 at most sites).
+    """
+    import math
+
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f):
+        return None
+    if f < 0.0 or f > 1.0:
+        return None
+    return f
+
+
 def normalize_cve_id_for_graph(value: Any) -> Optional[str]:
     """
     Return a canonical CVE id string for graph keys/relationships, or None if unknown.
@@ -1324,7 +1387,24 @@ class Neo4jClient:
 
             raw_data_json = json.dumps(raw_data, default=str)
 
-            confidence = data.get("confidence_score", 0.5)
+            # PR-N14 Fix #2 (2026-04-21 pre-baseline audit): clamp
+            # confidence_score to [0.0, 1.0] + reject non-finite (inf/
+            # nan). A compromised feed shipping ``confidence_score:
+            # "1e309"`` would otherwise pin ``r.confidence_score = inf``
+            # on every max-wins upsert, permanently defeating the
+            # calibrator. Fall back to 0.5 on bad input (same default
+            # as the missing-field case).
+            _claimed_conf = data.get("confidence_score")
+            _clamped_conf = clamp_confidence_score(_claimed_conf)
+            if _claimed_conf is not None and _clamped_conf is None:
+                logger.warning(
+                    "confidence_score rejected by clamp for %s/%s (claimed=%r) — "
+                    "falling back to 0.5. Compromised feed?",
+                    label,
+                    source_id,
+                    _claimed_conf,
+                )
+            confidence = _clamped_conf if _clamped_conf is not None else 0.5
             zone = data.get("zone", ["global"])  # zone is an array
             # Accumulate tag into tags array (tag removed from MERGE key)
             tag_value = data.get("tag", source_id)
@@ -1427,12 +1507,82 @@ class Neo4jClient:
                     "tactic_phases",
                 }
             )
+            # PR-N14 Fix #3 (2026-04-21 pre-baseline audit): cardinality
+            # cap + placeholder-entry filter for accumulating array
+            # properties. A compromised feed can otherwise ship
+            # ``aliases=["a1",...,"a100000"]`` and grow a Malware
+            # node's aliases to 10M entries over several syncs —
+            # ``calibrate_cooccurrence_confidence`` + Q2 alias-match
+            # then walk that array per-row, OOM-crashing the entire
+            # enrichment pass. Also drop placeholder-name entries
+            # (``"unknown"``, ``"n/a"``, …) to mirror the PR-N10
+            # reject of placeholder node NAMES to their aliases lists.
+            #
+            # 50 is generous — MITRE / Malpedia malware corpora have
+            # p99 ≈ 30 aliases per family. Truncation policy: keep
+            # the FIRST 50 non-placeholder entries (stable order),
+            # log-and-drop the rest.
+            _MAX_ARRAY_ITEMS = 50
+            _MAX_ARRAY_ITEM_LEN = 200  # chars per individual entry
+
+            def _sanitize_array_value(prop: str, items: list) -> list:
+                """Drop placeholder entries, truncate overlong strings,
+                cap cardinality. Returns a new list (does NOT mutate)."""
+                out: list = []
+                dropped_placeholder = 0
+                for entry in items:
+                    if not isinstance(entry, str):
+                        # Non-strings pass through (e.g. numeric
+                        # malware_types in some feeds); only placeholder
+                        # name fields are filtered.
+                        out.append(entry)
+                        continue
+                    stripped = entry.strip()
+                    if not stripped:
+                        continue
+                    # Filter placeholder-name entries from accumulating
+                    # arrays. Uses the same canonical set as PR-N10's
+                    # merge-key reject.
+                    if prop == "aliases" and is_placeholder_name(stripped):
+                        dropped_placeholder += 1
+                        continue
+                    if len(stripped) > _MAX_ARRAY_ITEM_LEN:
+                        stripped = stripped[:_MAX_ARRAY_ITEM_LEN]
+                    out.append(stripped)
+                if dropped_placeholder:
+                    logger.info(
+                        "PR-N14: dropped %d placeholder entries from %s[%s] during merge "
+                        "(e.g. 'unknown'/'apt'/'n/a' — would otherwise create false-hub "
+                        "alias matches in Q2/Q9)",
+                        dropped_placeholder,
+                        label,
+                        prop,
+                    )
+                if len(out) > _MAX_ARRAY_ITEMS:
+                    logger.warning(
+                        "PR-N14: %s[%s] incoming size %d exceeds cap %d — truncating to "
+                        "first %d entries (stable order). A compromised feed may be "
+                        "shipping an unbounded alias list.",
+                        label,
+                        prop,
+                        len(out),
+                        _MAX_ARRAY_ITEMS,
+                        _MAX_ARRAY_ITEMS,
+                    )
+                    out = out[:_MAX_ARRAY_ITEMS]
+                return out
+
             extra_props = extra_props or {}
             params_extra = {}
             for prop_name, prop_value in extra_props.items():
                 _validate_prop_name(prop_name)
                 if prop_value is not None and prop_value != "":
                     if prop_name in _ARRAY_ACCUMULATE_PROPS and isinstance(prop_value, list):
+                        prop_value = _sanitize_array_value(prop_name, prop_value)
+                        if not prop_value:
+                            # Sanitization left an empty list — skip
+                            # emitting the SET clause entirely.
+                            continue
                         query += f", n.{prop_name} = {_dedup_concat_clause(f'n.{prop_name}', f'${prop_name}')}"
                     else:
                         query += f", n.{prop_name} = ${prop_name}"
@@ -2351,7 +2501,13 @@ class Neo4jClient:
                         "tag": tag,
                         "source_id": source_id,
                         "source_array": source_list,
-                        "confidence": item.get("confidence_score", 0.5),
+                        # PR-N14 Fix #2: clamp confidence to [0,1]; fall
+                        # back to 0.5 on inf/nan/negative/>1.
+                        "confidence": (
+                            clamp_confidence_score(item.get("confidence_score"))
+                            if clamp_confidence_score(item.get("confidence_score")) is not None
+                            else 0.5
+                        ),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
                         "node_uuid": node_uuid,
@@ -2582,7 +2738,13 @@ class Neo4jClient:
                         "tag": item.get("tag", "default"),
                         "source_id": source_id,
                         "source_array": source_list,
-                        "confidence": item.get("confidence_score", 0.5),
+                        # PR-N14 Fix #2: clamp confidence to [0,1]; fall
+                        # back to 0.5 on inf/nan/negative/>1.
+                        "confidence": (
+                            clamp_confidence_score(item.get("confidence_score"))
+                            if clamp_confidence_score(item.get("confidence_score")) is not None
+                            else 0.5
+                        ),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
                         "node_uuid": node_uuid,

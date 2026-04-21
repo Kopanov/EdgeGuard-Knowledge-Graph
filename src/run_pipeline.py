@@ -468,8 +468,15 @@ class EdgeGuardPipeline:
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
                                 "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
-                                "first_seen": obj.get("created", datetime.now(timezone.utc).isoformat()),
-                                "last_updated": obj.get("modified", datetime.now(timezone.utc).isoformat()),
+                                # PR-N14 Fix #4 (2026-04-21 pre-baseline audit): pass
+                                # None through when STIX has no ``created`` / ``modified``
+                                # — do NOT substitute wall-clock NOW. The prior
+                                # ``datetime.now(...).isoformat()`` default violated PR-N5
+                                # C7 honest-NULL: re-importing an old CVE-2013 bundle today
+                                # stamped ``first_seen=2026-04-21``, poisoning the
+                                # calibrator's age calculations.
+                                "first_seen": obj.get("created") or None,
+                                "last_updated": obj.get("modified") or None,
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
@@ -495,8 +502,10 @@ class EdgeGuardPipeline:
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
                                 "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
-                                "first_seen": obj.get("created", datetime.now(timezone.utc).isoformat()),
-                                "last_updated": obj.get("modified", datetime.now(timezone.utc).isoformat()),
+                                # PR-N14 Fix #4: honest-NULL on STIX re-import — see
+                                # Indicator block above for rationale.
+                                "first_seen": obj.get("created") or None,
+                                "last_updated": obj.get("modified") or None,
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
@@ -625,8 +634,15 @@ class EdgeGuardPipeline:
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
                                 "source": [obj.get("x_edgeguard_source", "unknown")],
-                                "first_seen": datetime.now(timezone.utc).isoformat(),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
+                                # PR-N14 Fix #4: STIX observables (IPv4 / domain /
+                                # URL / …) have no native ``created`` / ``modified``
+                                # properties. Pass None instead of wall-clock NOW —
+                                # the downstream merge's ON CREATE SET +
+                                # ``last_updated = datetime()`` clauses will stamp
+                                # server-side timestamps correctly, without forging
+                                # a ``first_seen`` the source never claimed.
+                                "first_seen": None,
+                                "last_updated": None,
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
