@@ -149,12 +149,21 @@ MISP_PUSH_DURATION = Histogram(
 # to hand-count from the logs because no metric existed. A non-zero
 # rate is the operator signal that MISP backend is undersized for the
 # current event size — see docs/MISP_TUNING.md for the tuning playbook.
+#
+# PR-N4 round 2 (Maintainer Dev #4, Bug Hunter #4): label set is
+# ``["source"]`` only. ``event_id`` was dropped because each MISP run
+# creates a new event (date-stamped name like ``EdgeGuard-otx-2026-04-21``),
+# which would balloon the time-series cardinality by ~365/year per source
+# (12 sources × 365 days = ~4.4K series/year just from this metric).
+# The actionable signal for operators is "is source X dropping batches?",
+# which ``source`` alone provides; the specific event_id is recoverable
+# from logs.
 MISP_PUSH_PERMANENT_FAILURES = Counter(
     "edgeguard_misp_push_permanent_failure_total",
     "MISP batch pushes that failed permanently after retry exhaustion. "
     "Each increment = one batch (typically 500 attributes) lost. "
     "See docs/MISP_TUNING.md for ops tuning playbook.",
-    ["source", "event_id"],
+    ["source"],
 )
 
 # PR-N4: adaptive backoff trigger — fires when the writer enters

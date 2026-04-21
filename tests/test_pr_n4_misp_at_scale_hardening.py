@@ -91,16 +91,21 @@ class TestPushItemsHasAdaptiveScalingSourcePins:
             assert env in src, f"{env} env knob must be present + documented"
 
     def test_default_thresholds_are_sane(self):
-        """Defaults must match docs/MISP_TUNING.md."""
+        """Defaults must match docs/MISP_TUNING.md.
+
+        Round-2 update: env-var parsing now goes through the bounded
+        ``_bounded_int_env`` / ``_bounded_float_env`` helper, so the
+        default values appear as the second positional arg (an int /
+        float, not a string)."""
         src = self._read()
         # Large event = 50K
-        assert '"EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD", "50000"' in src
+        assert '"EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD", 50000' in src
         # Huge event = 100K
-        assert '"EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD", "100000"' in src
+        assert '"EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD", 100000' in src
         # Backoff after 3 consecutive failures
-        assert '"EDGEGUARD_MISP_BACKOFF_THRESHOLD", "3"' in src
+        assert '"EDGEGUARD_MISP_BACKOFF_THRESHOLD", 3' in src
         # 5-minute cooldown
-        assert '"EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", "300.0"' in src
+        assert '"EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", 300.0' in src
 
     def test_three_tier_adaptive_logic_present(self):
         src = self._read()
@@ -115,23 +120,39 @@ class TestPushItemsHasAdaptiveScalingSourcePins:
 
     def test_consecutive_failure_tracking(self):
         src = self._read()
-        # Counter must be tracked, incremented on failure, reset on success
-        assert "_consecutive_failures" in src
-        assert "_consecutive_failures += 1" in src
-        assert "_consecutive_failures = 0" in src
+        # PR-N4 round 2 (Cross-Checker #2 / Bug Hunter #5): the counter
+        # is now an INSTANCE variable (self._misp_push_consecutive_failures)
+        # so it persists across push_items calls — see round-2 tests below.
+        assert "self._misp_push_consecutive_failures" in src
+        assert "self._misp_push_consecutive_failures += 1" in src
+        assert "self._misp_push_consecutive_failures = 0" in src
 
     def test_backoff_cooldown_call_present(self):
-        """When threshold hit, must sleep for the cooldown duration
-        (test that the time.sleep on the cooldown var is in source)."""
+        """When threshold hit, must sleep for the cooldown duration.
+
+        PR-N4 round 2 (Logic Tracker #1 / Prod Readiness #3): the
+        cooldown is now CHUNKED (30s steps with liveness-callback
+        between) rather than a single ``time.sleep(_backoff_cooldown_sec)``
+        — see test_cooldown_is_chunked_with_liveness for the round-2
+        pin. This test pins the existence of the cooldown logic via
+        the cooldown-var reference + chunked-sleep loop."""
         src = self._read()
-        assert "time.sleep(_backoff_cooldown_sec)" in src
+        # The cooldown variable must still drive a sleep loop
+        assert "_backoff_cooldown_sec" in src
+        # The chunked-sleep pattern (round 2 replacement for the single sleep)
+        assert "while _slept < _backoff_cooldown_sec:" in src
 
     def test_prometheus_failure_metric_increment(self):
         src = self._read()
-        # Permanent failure increments the counter with source + event_id labels
+        # PR-N4 round 2: permanent-failure metric now ``source``-only
+        # (event_id label dropped to keep cardinality bounded — each
+        # MISP run creates a date-stamped event id, which would explode
+        # the time-series count).
         assert "_MISP_PUSH_PERMANENT_FAILURES.labels(" in src
-        assert "source=source" in src
-        assert "event_id=str(event_id)" in src
+        assert "_MISP_PUSH_PERMANENT_FAILURES.labels(source=source).inc()" in src
+        # event_id label MUST NOT appear in the increment (regression
+        # pin: a future maintainer mustn't reintroduce it)
+        assert "_MISP_PUSH_PERMANENT_FAILURES.labels(source=source, event_id" not in src
 
     def test_prometheus_backoff_metric_increment(self):
         src = self._read()
@@ -154,7 +175,13 @@ class TestPrometheusMetricsDeclared:
         src = self._read()
         assert "MISP_PUSH_PERMANENT_FAILURES = Counter(" in src
         assert '"edgeguard_misp_push_permanent_failure_total"' in src
-        assert '["source", "event_id"]' in src
+        # PR-N4 round 2 (Maintainer Dev #4 / Bug Hunter #4): event_id
+        # label dropped — each MISP run creates a date-stamped event,
+        # which would explode Prometheus cardinality. Source-only label
+        # gives operators the actionable signal without the explosion.
+        assert '["source"]' in src
+        # Regression pin: event_id MUST NOT come back as a label
+        assert '["source", "event_id"]' not in src
 
     def test_backoff_triggered_counter_declared(self):
         src = self._read()
@@ -558,3 +585,441 @@ class TestAdaptiveBatchSizing:
         # Default tier: configured batch_size honored, so 200 items
         # = 1 batch of 200 (since 200 < 500)
         assert observed == [200], f"default tier should not downscale; got {observed}"
+
+
+# ===========================================================================
+# Bugbot round 2 + 7-agent audit regression pins (PR-N4 commit 53c66c1 → fix)
+# ===========================================================================
+
+
+class TestBugbotRound2Fixes:
+    """Pin the eight findings from the 7-agent comprehensive audit
+    (Red Team / Devil's Advocate / Maintainer Dev / Bug Hunter /
+    Cross-Checker / Logic Tracker / Prod Readiness) cross-referenced
+    with Bugbot round 2 on commit 53c66c1.
+
+      Fix #1  Validate all 4 env vars on parse (bounds + WARN on bad)
+      Fix #2  Drop ``event_id`` label from MISP_PUSH_PERMANENT_FAILURES
+              (cardinality explosion: each MISP run mints a new event_id)
+      Fix #3  Reset failure counter only after N **consecutive** full
+              successes (not on a single success — that masked flapping)
+      Fix #4  Promote ``_consecutive_failures`` to instance variable so
+              it persists across push_items calls
+      Fix #5  Chunked cooldown sleep + liveness check between chunks
+              (single ``time.sleep(300)`` blocked DAG-failure detection
+              for 5 min)
+      Fix #6  Validate ``HUGE > LARGE``; auto-swap + WARN if inverted
+      Fix #7  Update push_queue type annotation to 4-tuple
+      Fix #8  Sanitize ``event_id`` in log output (strip non-printable
+              + cap length 64)
+    """
+
+    def _src(self) -> str:
+        return (SRC / "collectors" / "misp_writer.py").read_text()
+
+    def _metrics(self) -> str:
+        return (SRC / "metrics_server.py").read_text()
+
+    def _docs(self) -> str:
+        return (REPO_ROOT / "docs" / "MISP_TUNING.md").read_text()
+
+    # -- Fix #1 ---------------------------------------------------------
+
+    def test_env_vars_use_bounded_helper(self):
+        """All 4 PR-N4 env vars must go through ``_bounded_int_env`` /
+        ``_bounded_float_env`` so bad operator input is caught + logged
+        instead of silently corrupting the adaptive logic."""
+        src = self._src()
+        assert "def _bounded_int_env(" in src, "round-2 helper missing"
+        assert "def _bounded_float_env(" in src, "round-2 helper missing"
+        # Each env var must be parsed via the bounded helper
+        for env in (
+            "EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD",
+            "EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD",
+            "EDGEGUARD_MISP_BACKOFF_THRESHOLD",
+        ):
+            assert f'_bounded_int_env(\n            "{env}"' in src or f'_bounded_int_env("{env}"' in src, (
+                f"{env} must be parsed via _bounded_int_env (round-2 Fix #1)"
+            )
+        assert "EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC" in src
+        assert "_bounded_float_env(" in src
+
+    def test_bounded_helper_warns_on_bad_input(self):
+        """The helper must log a WARNING (not silently default) so an
+        operator typo is visible in the logs."""
+        src = self._src()
+        helper_idx = src.find("def _bounded_int_env(")
+        assert helper_idx != -1
+        helper_body = src[helper_idx : helper_idx + 800]
+        assert "logger.warning" in helper_body, "_bounded_int_env must logger.warning on parse failure / out-of-range"
+
+    # -- Fix #2 ---------------------------------------------------------
+
+    def test_permanent_failure_counter_has_no_event_id_label(self):
+        """Cardinality regression pin: ``event_id`` must NOT be a label
+        on MISP_PUSH_PERMANENT_FAILURES (date-stamped → unbounded)."""
+        m = self._metrics()
+        # The Counter declaration block
+        idx = m.find("MISP_PUSH_PERMANENT_FAILURES = Counter(")
+        assert idx != -1
+        block = m[idx : idx + 500]
+        assert '["source"]' in block
+        assert '"event_id"' not in block, (
+            "Round-2 Fix #2 regression: event_id label was DROPPED for cardinality reasons; must not be reintroduced"
+        )
+
+    # -- Fix #3 ---------------------------------------------------------
+
+    def test_failure_counter_resets_only_after_consecutive_successes(self):
+        """The success branch must increment a ``_consecutive_successes``
+        counter and only reset failures after it crosses 2 — a single
+        success is not enough to declare recovery."""
+        src = self._src()
+        # Both counters must exist
+        assert "self._misp_push_consecutive_successes" in src
+        # Reset condition gated on >= 2 consecutive successes
+        success_idx = src.find("self._misp_push_consecutive_successes += 1")
+        assert success_idx != -1, "success branch must increment _consecutive_successes"
+        nearby = src[success_idx : success_idx + 400]
+        assert "self._misp_push_consecutive_successes >= 2" in nearby, (
+            "Round-2 Fix #3: reset only after >= 2 consecutive full successes"
+        )
+
+    # -- Fix #4 ---------------------------------------------------------
+
+    def test_consecutive_failures_is_instance_variable(self):
+        """Counter on ``self`` (not a function-local) so it persists
+        across push_items calls and a flapping backend eventually
+        trips the cooldown."""
+        src = self._src()
+        # No more bare ``_consecutive_failures = 0`` initialization
+        # at function scope (it's now ``self._misp_push_consecutive_failures``)
+        # — search for the bare assignment in active (non-comment) lines.
+        active = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+        # The bare local ``_consecutive_failures = 0`` initializer
+        # must be gone — only ``self._misp_push_consecutive_failures = 0``
+        # is allowed.
+        assert "        _consecutive_failures = 0" not in active, (
+            "Round-2 Fix #4 regression: failure counter must be instance-scoped, "
+            "not local — see round-2 rationale (cross-call persistence)"
+        )
+        # And the defensive hasattr-init pattern must be present
+        assert 'hasattr(self, "_misp_push_consecutive_failures")' in src
+
+    # -- Fix #5 ---------------------------------------------------------
+
+    def test_cooldown_is_chunked_with_liveness(self):
+        """The cooldown sleep must be chunked (≤30s steps) with the
+        liveness callback called between chunks — single 5-min
+        ``time.sleep(_backoff_cooldown_sec)`` blocked sibling DAG
+        failure detection."""
+        src = self._src()
+        # The chunked-loop pattern
+        assert "while _slept < _backoff_cooldown_sec:" in src
+        # Liveness callback called inside the loop
+        chunk_idx = src.find("while _slept < _backoff_cooldown_sec:")
+        assert chunk_idx != -1
+        chunk_body = src[chunk_idx : chunk_idx + 600]
+        assert "_liveness_cb_in_cooldown" in chunk_body
+        # The single bare time.sleep(_backoff_cooldown_sec) must be gone
+        assert "time.sleep(_backoff_cooldown_sec)" not in src, (
+            "Round-2 Fix #5 regression: cooldown must be chunked, not "
+            "a single time.sleep that blocks for the full duration"
+        )
+
+    # -- Fix #6 ---------------------------------------------------------
+
+    def test_threshold_inversion_warned_and_swapped(self):
+        """If an operator sets LARGE=100000, HUGE=50000 (inverted),
+        the writer must WARN and auto-swap so the tier resolution
+        produces semantically correct labels."""
+        src = self._src()
+        assert "_huge_threshold <= _large_threshold:" in src
+        # Warn + swap pattern
+        idx = src.find("_huge_threshold <= _large_threshold:")
+        block = src[idx : idx + 600]
+        assert "logger.warning" in block, "must warn on inversion"
+        assert "_large_threshold, _huge_threshold = _huge_threshold, _large_threshold" in block, (
+            "Round-2 Fix #6: must auto-swap inverted thresholds"
+        )
+
+    # -- Fix #7 ---------------------------------------------------------
+
+    def test_push_queue_type_annotation_is_4tuple(self):
+        """``push_queue`` annotation must reflect the 4-tuple shape
+        added in round 1 (Bugbot F1 + F2). Pre-fix the annotation said
+        2-tuple while the data was 4-tuple, silently misleading mypy."""
+        src = self._src()
+        assert "push_queue: List[Tuple[str, str, int, List[Dict]]] = []" in src, (
+            "Round-2 Fix #7: push_queue type annotation must match the "
+            "4-tuple actually used (source, event_id, existing_count, attrs)"
+        )
+
+    # -- Fix #8 ---------------------------------------------------------
+
+    def test_event_id_sanitized_in_error_log(self):
+        """``event_id`` going into the error log line must be sanitized
+        (printable-only, length-capped) — defense against
+        log-injection if the upstream MISP API ever returns a tainted
+        id."""
+        src = self._src()
+        # The sanitization pattern (loose match: ruff may inline or
+        # split the .join() call across lines depending on width).
+        # Required components: c.isprintable, str(event_id), [:64] cap.
+        assert "c.isprintable()" in src and "str(event_id)" in src and "[:64]" in src, (
+            "Round-2 Fix #8: event_id sanitization missing the isprintable / [:64] / str(event_id) pattern"
+        )
+        # Must use _safe_event_id in the error log call (not bare event_id)
+        log_idx = src.find('"Batch %s for event %s failed after retries')
+        assert log_idx != -1
+        log_block = src[log_idx : log_idx + 400]
+        assert "_safe_event_id" in log_block, (
+            "Round-2 Fix #8: error log line must use _safe_event_id, not the raw event_id"
+        )
+
+    # -- Doc round-2 additions -----------------------------------------
+
+    def test_runbook_has_prereq_section(self):
+        """Round-2 doc fix: a ``Prerequisites`` section telling
+        operators not to apply the TL;DR settings on a 4GB host."""
+        d = self._docs()
+        assert "Prerequisites" in d, "round-2 doc fix: prereq section missing"
+        assert "8 GB" in d or "8GB" in d, "round-2 doc fix: prereq must call out the 8GB minimum"
+
+    def test_runbook_has_rollback_section(self):
+        """Round-2 doc fix: a ``Rollback`` section so operators can
+        undo a tuning change cleanly."""
+        d = self._docs()
+        assert "Rollback" in d, "round-2 doc fix: rollback section missing"
+        assert "EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD=10000" in d, (
+            "round-2 doc fix: rollback must show conservative env values"
+        )
+
+    def test_runbook_documents_prefetch_dependency(self):
+        """Round-2 doc fix: the prefetch knob row must explain that
+        adaptive scaling DEPENDS on it (turning it off defeats the
+        whole point of PR-N4)."""
+        d = self._docs()
+        idx = d.find("EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS")
+        assert idx != -1
+        # Find the row containing the env var
+        row = d[idx : idx + 800]
+        assert "adaptive scaling" in row.lower() or "existing_attrs_count" in row.lower(), (
+            "round-2 doc fix: prefetch row must explain the adaptive-scaling dependency"
+        )
+
+
+# ===========================================================================
+# Behavioural — round-2 cross-call persistence + chunked cooldown
+# ===========================================================================
+
+
+class TestBugbotRound2Behavioural:
+    """Verify the round-2 invariants ACTUALLY hold at runtime, not just
+    in source. These complement the source pins in TestBugbotRound2Fixes
+    so a refactor that preserves the source patterns but breaks the
+    semantics still fails."""
+
+    def _make_writer(self):
+        from collectors.misp_writer import MISPWriter
+
+        w = MISPWriter.__new__(MISPWriter)
+        w.url = "http://test"
+        w.api_key = "test"
+        w.session = MagicMock()
+        w.verify_ssl = False
+        w.SOURCE_TAGS = {}
+        w.stats = {
+            "events_created": 0,
+            "events_existing": 0,
+            "attributes_added": 0,
+            "attrs_skipped_existing": 0,
+            "batches_sent": 0,
+            "errors": 0,
+        }
+        w.CONNECT_TIMEOUT = 30
+        w.READ_TIMEOUT = 60
+        return w
+
+    def test_failure_counter_persists_across_push_items_calls(self, monkeypatch):
+        """Fix #4 behaviour: two consecutive ``push_items`` calls each
+        producing 2 failures must accumulate to 4 on the writer
+        instance — pre-fix the counter reset to 0 every call."""
+        from collectors.misp_writer import MispTransientError
+
+        w = self._make_writer()
+        monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
+        monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "_get_existing_source_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "create_attribute", lambda item: {"type": "ip-dst", "value": item["value"]})
+        # Make every batch fail
+        monkeypatch.setattr(w, "_push_batch", MagicMock(side_effect=MispTransientError("simulated 500")))
+        # Disable the cooldown so the test doesn't trigger it (we're
+        # just measuring the counter, not the cooldown side-effect).
+        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_THRESHOLD", "100")
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        # Call 1: 2 failures
+        items1 = [{"indicator_type": "ipv4", "value": f"1.0.0.{i}", "tag": "test"} for i in range(1, 3)]
+        w.push_items(items1, batch_size=1)
+        after_call_1 = w._misp_push_consecutive_failures
+        assert after_call_1 == 2, f"after first call counter should be 2, got {after_call_1}"
+
+        # Call 2: 2 more failures
+        items2 = [{"indicator_type": "ipv4", "value": f"2.0.0.{i}", "tag": "test"} for i in range(1, 3)]
+        w.push_items(items2, batch_size=1)
+        after_call_2 = w._misp_push_consecutive_failures
+        # Round-2 Fix #4: counter persists, so it's now 4 (2+2), not 2
+        assert after_call_2 == 4, (
+            f"Fix #4 regression: counter should accumulate across push_items calls (2+2=4); got {after_call_2}"
+        )
+
+    def test_failure_counter_only_resets_after_two_successes(self, monkeypatch):
+        """Fix #3 behaviour: a SINGLE successful batch between failure
+        clusters must NOT reset the counter (chronic flap masking).
+        Only after 2 consecutive successes does the counter reset."""
+        from collectors.misp_writer import MispTransientError
+
+        w = self._make_writer()
+        monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
+        monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "_get_existing_source_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "create_attribute", lambda item: {"type": "ip-dst", "value": item["value"]})
+
+        # fail, fail, success, fail, fail (the lone success must NOT reset)
+        push_results = iter(
+            [
+                MispTransientError("f1"),
+                MispTransientError("f2"),
+                (1, 0),  # one success
+                MispTransientError("f3"),
+                MispTransientError("f4"),
+            ]
+        )
+
+        def fake_push(event_id, batch):
+            r = next(push_results)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        monkeypatch.setattr(w, "_push_batch", fake_push)
+        # Disable cooldown so we can exclusively measure counter behaviour
+        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_THRESHOLD", "100")
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        items = [{"indicator_type": "ipv4", "value": f"3.0.0.{i}", "tag": "test"} for i in range(1, 6)]
+        w.push_items(items, batch_size=1)
+
+        # Sequence is [fail, fail, success, fail, fail]:
+        #   Pre-Fix-#3 (BUGGY): counter = 0+1=1, +1=2, RESET=0, +1=1, +1=2
+        #     final = 2
+        #   Post-Fix-#3 (CORRECT): counter = 0+1=1, +1=2, (single success
+        #     does NOT reset; success_ct=1 < 2), +1=3, +1=4
+        #     final = 4
+        assert w._misp_push_consecutive_failures == 4, (
+            f"Fix #3 regression: a single successful batch between failure "
+            f"clusters reset the counter. After fail-fail-success-fail-fail "
+            f"the counter must be 4, got {w._misp_push_consecutive_failures}"
+        )
+
+    def test_two_consecutive_successes_DO_reset_failure_counter(self, monkeypatch):
+        """Fix #3 complement: two consecutive successes IS enough to
+        signal recovery, so the counter must reset."""
+        from collectors.misp_writer import MispTransientError
+
+        w = self._make_writer()
+        monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
+        monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "_get_existing_source_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "create_attribute", lambda item: {"type": "ip-dst", "value": item["value"]})
+
+        push_results = iter(
+            [
+                MispTransientError("f1"),
+                MispTransientError("f2"),
+                (1, 0),
+                (1, 0),  # 2 consecutive — should reset
+                MispTransientError("f3"),
+            ]
+        )
+
+        def fake_push(event_id, batch):
+            r = next(push_results)
+            if isinstance(r, Exception):
+                raise r
+            return r
+
+        monkeypatch.setattr(w, "_push_batch", fake_push)
+        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_THRESHOLD", "100")
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        items = [{"indicator_type": "ipv4", "value": f"4.0.0.{i}", "tag": "test"} for i in range(1, 6)]
+        w.push_items(items, batch_size=1)
+
+        # Sequence [fail, fail, success, success, fail]:
+        #   counter: 0,1,2, (success #1: success_ct=1 < 2, no reset; counter=2)
+        #            (success #2: success_ct=2 >= 2, RESET; counter=0)
+        #            +1 (final fail) = 1
+        assert w._misp_push_consecutive_failures == 1, (
+            f"Fix #3: after 2 consecutive successes the counter must reset "
+            f"to 0, then the final failure increments to 1; got "
+            f"{w._misp_push_consecutive_failures}"
+        )
+
+    def test_inverted_thresholds_auto_swap(self, monkeypatch, caplog):
+        """Fix #6 behaviour: setting LARGE > HUGE must auto-swap (with
+        a warning) so the tier resolution works correctly."""
+        import logging
+
+        w = self._make_writer()
+        monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
+        # Tiny event so we don't hit the adaptive tiers anyway
+        monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "_get_existing_source_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "create_attribute", lambda item: {"type": "ip-dst", "value": item["value"]})
+        monkeypatch.setattr(w, "_push_batch", lambda eid, b: (len(b), 0))
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        # INVERTED: LARGE > HUGE
+        monkeypatch.setenv("EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD", "100000")
+        monkeypatch.setenv("EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD", "50000")
+
+        items = [{"indicator_type": "ipv4", "value": "9.0.0.1", "tag": "test"}]
+        with caplog.at_level(logging.WARNING):
+            w.push_items(items, batch_size=10)
+
+        # Must have warned about the inversion
+        assert any("inverted" in rec.message.lower() or "swap" in rec.message.lower() for rec in caplog.records), (
+            f"Fix #6: must warn on inverted thresholds; got log: {[r.message for r in caplog.records]}"
+        )
+
+    def test_bad_env_var_warns_and_uses_default(self, monkeypatch, caplog):
+        """Fix #1 behaviour: an out-of-bounds env value must trigger a
+        WARNING and fall back to the default (not silently use the
+        bad value)."""
+        import logging
+
+        w = self._make_writer()
+        monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
+        monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "_get_existing_source_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "create_attribute", lambda item: {"type": "ip-dst", "value": item["value"]})
+        monkeypatch.setattr(w, "_push_batch", lambda eid, b: (len(b), 0))
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        # Pre-fix this would silently configure threshold=0 → cooldown
+        # fires on the very first batch. Now must warn + use default.
+        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_THRESHOLD", "0")  # below floor of 1
+
+        items = [{"indicator_type": "ipv4", "value": "5.0.0.1", "tag": "test"}]
+        with caplog.at_level(logging.WARNING):
+            w.push_items(items, batch_size=10)
+
+        assert any("BACKOFF_THRESHOLD" in rec.message and "valid range" in rec.message for rec in caplog.records), (
+            f"Fix #1: bad env value must trigger WARNING via _bounded_int_env; "
+            f"got log: {[r.message for r in caplog.records]}"
+        )
