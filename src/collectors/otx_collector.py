@@ -321,6 +321,20 @@ class OTXCollector:
                 if stored:
                     try:
                         base_dt = datetime.fromisoformat(stored.replace("Z", "+00:00"))
+                        # PR-M2 §4-F9: ``stored`` may have been written by an
+                        # older checkpoint version that omitted the ``Z``
+                        # suffix entirely (just ``"2024-01-15T10:00:00"``).
+                        # ``str.replace("Z", "+00:00")`` is a no-op on that
+                        # string, so ``fromisoformat`` returns a NAIVE
+                        # datetime, and subtracting ``overlap`` (which is a
+                        # tz-aware-arithmetic-safe timedelta) silently
+                        # produces a naive result that downstream
+                        # ``coerce_iso`` would treat differently than a
+                        # tz-aware one. Defensive UTC injection ensures
+                        # the resume cursor is always tz-aware, matching
+                        # docs/TIMESTAMPS.md "Invariant 2".
+                        if base_dt.tzinfo is None:
+                            base_dt = base_dt.replace(tzinfo=timezone.utc)
                         modified_since = (base_dt - overlap).isoformat()
                     except (ValueError, TypeError):
                         modified_since = (
@@ -398,13 +412,48 @@ class OTXCollector:
                 pulse_tlp = pulse.get("TLP", "")
                 pulse_description = pulse.get("description", "")
 
-                # Filter by each sector's date range (use the widest among matched zones)
-                pulse_created = pulse.get("created", "")
+                # PR-M2 §4-F5: read the source's pulse-level timestamps
+                # ONCE at the top of the per-pulse block and use them for
+                # BOTH the date-filter pass below AND the per-indicator
+                # ``first_seen`` / ``last_seen`` propagation further down.
+                # Bugbot caught (PR-M2 round 1, LOW): the previous code
+                # assigned ``pulse_created = pulse.get("created", "")``
+                # for filtering, then later reassigned
+                # ``pulse_created = pulse.get("created")`` (None default)
+                # for honest-NULL propagation — same name, two semantics,
+                # latent breakage if a future edit moved one assignment.
+                # Single source of truth eliminates the shadowing risk:
+                # ``""`` and ``None`` are both falsy so the ``if
+                # pulse_created:`` filter check works either way, and
+                # downstream honest-NULL gating (``if indicator_first_seen``)
+                # treats ``""`` as "absent" too.
+                #
+                # OTX is intentionally NOT on ``_RELIABLE_FIRST_SEEN_SOURCES``
+                # so the read-side ``extract_source_truthful_timestamps``
+                # correctly ignores OTX's claim. BUT the MISP attribute
+                # itself still carries whatever we put here, so non-EdgeGuard
+                # consumers (ResilMesh, SIEM bridges) reading MISP directly
+                # will see this value as the source's claim.
+                #
+                # Honest-NULL pattern (mirrors AbuseIPDB blacklist): omit
+                # ``first_seen`` when the source field is absent rather
+                # than substituting wall-clock NOW. Per-indicator
+                # ``ind.get("created")`` overrides the pulse-level
+                # ``pulse.get("created")`` when present (OTX returns
+                # per-indicator timestamps for some pulse types).
+                # Concept 1 in docs/TIMESTAMPS.md.
+                pulse_created = pulse.get("created")  # may be None or "" — honest NULL
+                pulse_modified = pulse.get("modified")
+
+                # Filter by each sector's date range (use the widest among
+                # matched zones).  ``pulse_created`` is the source value
+                # read above; ``if pulse_created:`` rejects both None and
+                # empty-string in one check.
                 if pulse_created:
                     try:
                         pulse_date = datetime.fromisoformat(pulse_created.replace("Z", "+00:00"))
                         months_range = max(SECTOR_TIME_RANGES.get(s, SECTOR_TIME_RANGES["global"]) for s in sectors)
-                        cutoff = datetime.now(timezone.utc) - timedelta(days=months_range * 30)
+                        cutoff = datetime.now(timezone.utc) - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
 
                         if pulse_date < cutoff:
                             skipped_old += 1
@@ -424,87 +473,111 @@ class OTXCollector:
                     "targeted_countries": pulse_targeted_countries,
                     "otx_industries": otx_industries,
                 }
-
                 # Extract indicators - one entry per indicator (zone holds all matched sectors)
                 indicators = pulse.get("indicators", [])
                 for ind in indicators:
                     indicator_type = self.map_indicator_type(ind.get("type"), ind.get("indicator"))
                     indicator_value = ind.get("indicator")
-                    processed.append(
-                        {
-                            "indicator_type": indicator_type,
-                            "value": indicator_value,
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "first_seen": pulse.get("created", datetime.now(timezone.utc).isoformat()),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
-                            "confidence_score": 0.5,
-                            "description": ind.get("description", "") or ind.get("title", ""),
-                            "indicator_role": ind.get("role", ""),
-                            "is_active": ind.get("is_active", True),
-                            **pulse_meta,
-                        }
-                    )
+                    indicator_first_seen = ind.get("created") or pulse_created
+                    indicator_last_seen = ind.get("modified") or pulse_modified
+                    item: Dict[str, Any] = {
+                        "indicator_type": indicator_type,
+                        "value": indicator_value,
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        "description": ind.get("description", "") or ind.get("title", ""),
+                        "indicator_role": ind.get("role", ""),
+                        "is_active": ind.get("is_active", True),
+                        **pulse_meta,
+                    }
+                    if indicator_first_seen:
+                        item["first_seen"] = indicator_first_seen
+                    if indicator_last_seen:
+                        item["last_seen"] = indicator_last_seen
+                    processed.append(item)
 
                 # Extract malware families
+                # PR-M2 §4-F5 (Bugbot round 3): symmetric honest-NULL
+                # propagation. Indicator + CVE branches use
+                # ``pulse_created`` / ``pulse_modified`` for first_seen /
+                # last_seen; the malware-family branch must follow the
+                # same pattern or the per-pulse timestamp contract is
+                # broken (some entities from one pulse carry the source's
+                # claim, others don't — silently inconsistent).
                 malware_families = pulse.get("malware_families", [])
                 for mal in malware_families:
                     mal_name = mal if isinstance(mal, str) else mal.get("name", "Unknown")
-                    processed.append(
-                        {
-                            "type": "malware",
-                            "name": mal_name,
-                            "malware_types": ["unknown"],
-                            "family": mal_name,
-                            "description": pulse_description[:1000],
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "confidence_score": 0.5,
-                            # ATT&CK technique IDs from pulse → uses_techniques on Malware node
-                            "uses_techniques": pulse_attack_ids,
-                            **pulse_meta,
-                        }
-                    )
+                    mal_item: Dict[str, Any] = {
+                        "type": "malware",
+                        "name": mal_name,
+                        "malware_types": ["unknown"],
+                        "family": mal_name,
+                        "description": pulse_description[:1000],
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        # ATT&CK technique IDs from pulse → uses_techniques on Malware node
+                        "uses_techniques": pulse_attack_ids,
+                        **pulse_meta,
+                    }
+                    if pulse_created:
+                        mal_item["first_seen"] = pulse_created
+                    if pulse_modified:
+                        mal_item["last_seen"] = pulse_modified
+                    processed.append(mal_item)
 
                 # Extract CVE references (no cap — collect all CVEs from pulse)
+                # PR-M2 §4-F5: same honest-NULL treatment for CVE entries
+                # synthesized from the pulse. OTX's claim about a CVE's
+                # first_seen is the pulse's ``created`` timestamp if the
+                # API provided it; otherwise we omit the field rather
+                # than substituting wall-clock NOW.
                 cve_refs = pulse.get("cve_references", [])
                 for cve in cve_refs:
-                    processed.append(
-                        {
-                            "type": "vulnerability",
-                            "cve_id": cve.upper() if isinstance(cve, str) else cve.get("cve", "").upper(),
-                            "description": f"Referenced in OTX pulse: {pulse.get('name', '')}",
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "first_seen": pulse.get("created", datetime.now(timezone.utc).isoformat()),
-                            "last_updated": datetime.now(timezone.utc).isoformat(),
-                            "confidence_score": 0.5,
-                            "severity": "UNKNOWN",
-                            "cvss_score": 0.0,
-                            "attack_vector": "NETWORK",
-                            **pulse_meta,
-                        }
-                    )
+                    cve_item: Dict[str, Any] = {
+                        "type": "vulnerability",
+                        "cve_id": cve.upper() if isinstance(cve, str) else cve.get("cve", "").upper(),
+                        "description": f"Referenced in OTX pulse: {pulse.get('name', '')}",
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        "severity": "UNKNOWN",
+                        "cvss_score": 0.0,
+                        "attack_vector": "NETWORK",
+                        **pulse_meta,
+                    }
+                    if pulse_created:
+                        cve_item["first_seen"] = pulse_created
+                    if pulse_modified:
+                        cve_item["last_seen"] = pulse_modified
+                    processed.append(cve_item)
 
-                # Extract named adversary as a ThreatActor if present
+                # Extract named adversary as a ThreatActor if present.
+                # PR-M2 §4-F5 (Bugbot round 3): symmetric honest-NULL
+                # propagation — see malware-family branch above for
+                # rationale. Same pulse-level timestamps apply.
                 if pulse_adversary:
-                    processed.append(
-                        {
-                            "type": "actor",
-                            "name": pulse_adversary,
-                            "description": pulse_description[:1000],
-                            "zone": sectors,
-                            "tag": self.tag,
-                            "source": [self.tag],
-                            "confidence_score": 0.5,
-                            "uses_techniques": pulse_attack_ids,
-                            "aliases": [],
-                            **pulse_meta,
-                        }
-                    )
+                    actor_item: Dict[str, Any] = {
+                        "type": "actor",
+                        "name": pulse_adversary,
+                        "description": pulse_description[:1000],
+                        "zone": sectors,
+                        "tag": self.tag,
+                        "source": [self.tag],
+                        "confidence_score": 0.5,
+                        "uses_techniques": pulse_attack_ids,
+                        "aliases": [],
+                        **pulse_meta,
+                    }
+                    if pulse_created:
+                        actor_item["first_seen"] = pulse_created
+                    if pulse_modified:
+                        actor_item["last_seen"] = pulse_modified
+                    processed.append(actor_item)
 
             # Deduplicate
             seen = set()

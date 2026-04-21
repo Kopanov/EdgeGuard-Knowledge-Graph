@@ -255,7 +255,8 @@ When data is pushed to MISP, it gets tagged with:
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
 `imported_at` is set once on first creation (`ON CREATE SET`) and never overwritten.
 
-**Source-truthful timestamps on `SOURCED_FROM` edges (PR S5, 2026-04):**
+**Source-truthful timestamps on `SOURCED_FROM` edges (PR S5, 2026-04;
+PR-M2 hardening, 2026-04):**
 The two new edge properties `r.source_reported_first_at` /
 `r.source_reported_last_at` carry the per-source first/last claim
 ("NVD says it published 2013-01-15", "AbuseIPDB says it first reported
@@ -264,9 +265,15 @@ stale imports cannot regress earlier claims. Node-level
 `n.first_imported_at` (ON CREATE SET only) and `n.last_updated`
 (refreshed every MERGE) carry only DB-local truths — they cannot be
 misread as real-world claims. STIX export aggregates MIN across all
-edges for `valid_from`. See `docs/KNOWLEDGE_GRAPH.md` for the full
-schema and `migrations/2026_04_first_seen_at_source.md` for operator
-verification queries + post-deploy backfill script.
+edges for `valid_from`; when no source claim exists, `valid_from`
+falls back to `first_imported_at` and the SDO is stamped with
+`x_edgeguard_first_seen_inferred=true` so consumers can filter for
+source-truthful evidence (PR-M2 design choice). The complete
+**timestamp semantic model** is documented in
+[`docs/TIMESTAMPS.md`](TIMESTAMPS.md) — invariants (honest-NULL +
+tz-aware UTC), per-collector source-field mapping, STIX 2.1 export
+contract for Indicator vs. Vulnerability vs. Report SDOs, and the
+backwards-compatibility plan for pre-PR-M2 data.
 
 **MISP traceability on edges (2026-04):** every relationship MERGEd by
 `Neo4jClient.create_misp_relationships_batch` (i.e. all `EMPLOYS_TECHNIQUE`,

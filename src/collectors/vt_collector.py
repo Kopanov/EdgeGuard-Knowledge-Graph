@@ -400,13 +400,26 @@ class VTCollector:
             # Calculate confidence
             confidence = self._calculate_confidence(attrs)
 
-            # Get first submission date
+            # PR-M2 §4-F4 (HIGH): VirusTotal is on
+            # ``_RELIABLE_FIRST_SEEN_SOURCES`` so MISP's ``Attribute.first_seen``
+            # propagates into ``r.source_reported_first_at`` (concept 1 in
+            # docs/TIMESTAMPS.md).  The previous wall-clock-NOW fallback for
+            # records missing ``first_submission_date`` (or having epoch 0)
+            # poisoned the source-truthful chronology forever via the MIN-CASE
+            # — every such VT record permanently anchored its
+            # ``MIN(source_reported_first_at)`` at baseline day 1.
+            #
+            # Honest-NULL pattern (mirrors AbuseIPDB blacklist): omit
+            # ``first_seen`` from the item when the source field is absent
+            # so MISP's attribute carries no claim and the MIN-CASE
+            # preserves any prior real value.  ``coerce_iso(None)`` → None
+            # downstream.
             first_seen_ts = attrs.get("first_submission_date", 0)
-            first_seen = (
-                datetime.fromtimestamp(first_seen_ts, tz=timezone.utc).isoformat()
-                if first_seen_ts
-                else datetime.now(timezone.utc).isoformat()
-            )
+            first_seen = datetime.fromtimestamp(first_seen_ts, tz=timezone.utc).isoformat() if first_seen_ts else None
+            # PR-M2: also propagate last_submission_date → last_seen
+            # (concept 2 in docs/TIMESTAMPS.md). Same honest-NULL pattern.
+            last_seen_ts = attrs.get("last_submission_date", 0)
+            last_seen = datetime.fromtimestamp(last_seen_ts, tz=timezone.utc).isoformat() if last_seen_ts else None
 
             # Get file type
             file_type = attrs.get("type_description", "unknown")
@@ -451,14 +464,17 @@ class VTCollector:
                 else ""
             )
 
-            return {
+            # PR-M2 honest-NULL: omit ``first_seen`` entirely when None
+            # rather than serializing a None value into the item dict.
+            # MISP writer's ``_apply_source_truthful_timestamps`` only
+            # writes the MISP-native ``Attribute.first_seen`` field when
+            # the key is non-empty, so omission is the right signal.
+            item: Dict[str, Any] = {
                 "indicator_type": "hash",
                 "value": value,
                 "zone": zones,
                 "tag": self.tag,
                 "source": [self.tag],
-                "first_seen": first_seen,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "confidence_score": confidence,
                 "description": description[:500],
                 "md5": md5,
@@ -474,6 +490,11 @@ class VTCollector:
                 "threat_label": threat_label,
                 "threat_category": threat_category,
             }
+            if first_seen is not None:
+                item["first_seen"] = first_seen
+            if last_seen is not None:
+                item["last_seen"] = last_seen
+            return item
 
         except Exception as e:
             logger.warning(f"Error processing VT file: {e}")
@@ -519,13 +540,15 @@ class VTCollector:
             # Calculate confidence
             confidence = self._calculate_confidence(attrs)
 
-            # Get first submission date
+            # PR-M2 §4-F4 (HIGH): same honest-NULL pattern as the file
+            # path above — see that comment for full reasoning. Omit
+            # ``first_seen`` from the URL item when VT's
+            # ``first_submission_date`` is absent or zero.
             first_seen_ts = attrs.get("first_submission_date", 0)
-            first_seen = (
-                datetime.fromtimestamp(first_seen_ts, tz=timezone.utc).isoformat()
-                if first_seen_ts
-                else datetime.now(timezone.utc).isoformat()
-            )
+            first_seen = datetime.fromtimestamp(first_seen_ts, tz=timezone.utc).isoformat() if first_seen_ts else None
+            # PR-M2: also propagate last_submission_date for URLs.
+            last_seen_ts = attrs.get("last_submission_date", 0)
+            last_seen = datetime.fromtimestamp(last_seen_ts, tz=timezone.utc).isoformat() if last_seen_ts else None
 
             # Get categories
             categories = attrs.get("categories", {})
@@ -545,19 +568,22 @@ class VTCollector:
 
             description = " | ".join(description_parts) if description_parts else "Malicious URL detected by VirusTotal"
 
-            return {
+            url_item: Dict[str, Any] = {
                 "indicator_type": "url",
                 "value": url,
                 "zone": zones,
                 "tag": self.tag,
                 "source": [self.tag],
-                "first_seen": first_seen,
-                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "confidence_score": confidence,
                 "description": description[:500],
                 "vt_reputation": attrs.get("reputation", 0),
                 "vt_last_analysis_stats": attrs.get("last_analysis_stats", {}),
             }
+            if first_seen is not None:
+                url_item["first_seen"] = first_seen
+            if last_seen is not None:
+                url_item["last_seen"] = last_seen
+            return url_item
 
         except Exception as e:
             logger.warning(f"Error processing VT URL: {e}")

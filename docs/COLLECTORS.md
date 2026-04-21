@@ -63,10 +63,14 @@ All collectors return items with these common fields:
 | `tag` | string | Source tag for MISP |
 | `sources` | list | List of source identifiers |
 | `confidence_score` | float | 0.0-1.0 confidence rating |
-| `first_seen` | string | ISO timestamp |
-| `last_updated` | string | ISO timestamp |
+| `first_seen` | tz-aware ISO-8601, **OPTIONAL** | Source's claim about when it first observed this entity (concept 1 in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md)). **Omit when source field is absent — never substitute wall-clock NOW** (PR-M2 §4-F4 / F5). |
+| `last_seen` | tz-aware ISO-8601, **OPTIONAL** | Source's claim about when it last updated this entity (concept 2). Same omit-when-absent rule. |
 
 **Note:** The `zone` property is always an array. The old `zones` property has been removed.
+
+**Removed in PR-M2:** the `last_updated` key on collector items (Finding 11). It was a dead key — Cypher MERGE sets `n.last_updated = datetime()` server-side and never reads the collector-supplied value. Concepts 3 (`first_imported_at`) and 4 (`last_updated`) are EdgeGuard-internal and always set server-side; collectors must NOT emit them.
+
+**Honest-NULL invariant.** If a collector's source doesn't expose a first/last-seen field, OMIT the key from the item dict — do not substitute `datetime.now()`. The downstream MIN/MAX CASE on the `SOURCED_FROM` edge preserves any prior real claim from another source. The reference pattern is `src/collectors/abuseipdb_collector.py` (blacklist endpoint omits `first_seen` because the API doesn't expose it). See [`docs/TIMESTAMPS.md`](TIMESTAMPS.md) for the full semantic model.
 
 ---
 

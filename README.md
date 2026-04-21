@@ -135,6 +135,26 @@ Staged defense-in-depth for untrusted MISP inputs. Full design + threat model in
 - ✅ **Tier 2 — Observability for the disabled state (PR-I, #71).** Defense-disabled state is now always visible: startup WARNING log fires in **all** envs (previously prod/staging only, which silently accepted the default `EDGEGUARD_ENV=dev`) + Prometheus gauge `edgeguard_misp_tag_impersonation_defense_disabled` exposes the state to alert rules. See [`docs/PROMETHEUS_SETUP.md`](docs/PROMETHEUS_SETUP.md) for the suggested alert rule.
 - 📋 **Tier 3 — Fail-closed boot refusal (planned, post-Tier 2).** After operators have had a deployment cycle to configure the allowlists, `EDGEGUARD_ENV ∈ {prod, staging}` will flip to boot-refusal: the process refuses to start unless an allowlist is configured OR `EDGEGUARD_ALLOW_UNTRUSTED_MISP=1` is set explicitly. Closes the "forgot to configure" footgun at deploy time.
 
+#### 🕒 Timestamp semantic model
+
+EdgeGuard carries **four distinct timestamps per indicator**, each
+answering one specific question (when did the SOURCE first observe vs
+when did EdgeGuard first ingest, etc.). The full model — including the
+honest-NULL invariant, the tz-aware-UTC invariant, the per-collector
+source-field mapping, and the STIX 2.1 export contract — is documented
+in [**`docs/TIMESTAMPS.md`**](docs/TIMESTAMPS.md). PR-M2 makes this
+spec the canonical reference and closes 11 audit findings + 10
+additional wall-clock-NOW leaks that were silently corrupting source-
+truthful chronology on the 730-day baseline.
+
+Quick consumer primer for STIX 2.1 bundles produced by EdgeGuard: a
+CVE-2013 indicator ingested today emits `valid_from = "2013-..."`
+(source-truthful) AND `created = "2026-04-21..."` (EdgeGuard import
+time) — both meanings preserved, no field conflation. Indicators where
+the source didn't tell us the first-observation date carry
+`x_edgeguard_first_seen_inferred=true` so analysts can filter for
+source-truthful evidence.
+
 #### 📊 Collector baseline limits — current & planned
 
 Each collector's 730-day baseline is bounded by the upstream API's

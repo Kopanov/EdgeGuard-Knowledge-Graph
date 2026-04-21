@@ -85,9 +85,16 @@ NEO4J_MAX_CONNECTION_POOL_SIZE = 50
 
 
 def get_sector_cutoff_date(sector: str = "global") -> str:
-    """Get cutoff date for a sector (ISO format)."""
+    """Get cutoff date for a sector (ISO format).
+
+    PR-M2 §4-F6: previously used ``months * 30`` days which is short by
+    ~0.437 days per month — for the 24-month maximum this dropped CVEs
+    in the oldest 10-day shoulder. Now uses the average-Gregorian-month
+    factor so a 24-month window covers ~731 days (within 1 day of true
+    2 calendar years; matches the audit's recommendation).
+    """
     months = SECTOR_TIME_RANGES.get(sector, SECTOR_TIME_RANGES["global"])
-    cutoff = datetime.now(timezone.utc) - timedelta(days=months * 30)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=int(months * 30.437))
     return cutoff.strftime("%Y-%m-%d")
 
 
