@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import logging
+import math
 import re
 import time
 from contextlib import contextmanager
@@ -1639,6 +1640,27 @@ class MISPWriter:
                 val = float(raw.strip())
             except (ValueError, TypeError):
                 logger.warning("%s=%r is not a valid float; using default %.1f", name, raw, default)
+                return default
+            # Bugbot R5 (commit bb86c329): reject NaN and ±inf BEFORE the
+            # bounds check.  Python's ``float("nan") < lo`` and ``> hi``
+            # both return False, so NaN slips past the ``val < lo or
+            # val > hi`` guard and propagates into the caller. For
+            # ``_backoff_cooldown_sec`` specifically this silently
+            # DISABLES the cooldown: the ``_backoff_cooldown_sec > 0``
+            # check later in push_items evaluates False for NaN, so the
+            # adaptive cooldown never fires — the opposite of what an
+            # operator setting an (accidentally-NaN) value intended.
+            # ``math.isfinite()`` rejects NaN, +inf, and -inf in one
+            # call.  ``_bounded_int_env`` doesn't need this guard
+            # because ``int("nan")`` / ``int("inf")`` raise ValueError
+            # and take the parse-fail branch above.
+            if not math.isfinite(val):
+                logger.warning(
+                    "%s=%r resolved to non-finite value (NaN/inf); using default %.1f",
+                    name,
+                    raw,
+                    default,
+                )
                 return default
             if val < lo or val > hi:
                 logger.warning(

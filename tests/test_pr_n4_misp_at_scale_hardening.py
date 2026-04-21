@@ -696,6 +696,80 @@ class TestBugbotRound2Fixes:
             "single transient 5xx trip the 5-min cooldown."
         )
 
+    def test_bounded_float_env_rejects_nan_and_inf(self, monkeypatch, caplog):
+        """Bugbot R5 (commit bb86c329): ``_bounded_float_env`` must
+        reject NaN and ±inf BEFORE the ``val < lo or val > hi`` bounds
+        check. Pre-fix NaN bypassed the bounds check (NaN compares
+        False against anything), then propagated to the cooldown
+        guard ``_backoff_cooldown_sec > 0`` which is also False for
+        NaN, silently DISABLING the adaptive cooldown — the exact
+        opposite of operator intent.
+
+        This test exercises the helper via the real ``push_items``
+        path (defined as a nested function inside push_items, so we
+        drive it with an environment variable) and asserts a WARN is
+        emitted with the "non-finite" diagnostic.
+        """
+        import logging
+
+        from collectors.misp_writer import MISPWriter
+
+        w = MISPWriter.__new__(MISPWriter)
+        w.url = "http://test"
+        w.api_key = "test"
+        w.session = MagicMock()
+        w.verify_ssl = False
+        w.SOURCE_TAGS = {}
+        w.stats = {
+            "events_created": 0,
+            "events_existing": 0,
+            "attributes_added": 0,
+            "attrs_skipped_existing": 0,
+            "batches_sent": 0,
+            "errors": 0,
+        }
+        w.CONNECT_TIMEOUT = 30
+        w.READ_TIMEOUT = 60
+
+        monkeypatch.setattr(w, "_get_or_create_event", lambda *a, **k: "EID-1")
+        monkeypatch.setattr(w, "_get_existing_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "_get_existing_source_attribute_keys", lambda *a, **k: set())
+        monkeypatch.setattr(w, "create_attribute", lambda item: {"type": "ip-dst", "value": item["value"]})
+        monkeypatch.setattr(w, "_push_batch", lambda eid, b: (len(b), 0))
+        monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0.0")
+        monkeypatch.setattr("time.sleep", lambda s: None)
+        # Set NaN via string — float("nan") succeeds, so the parse
+        # branch in _bounded_float_env does NOT reject it. Only the
+        # new math.isfinite() guard catches it.
+        monkeypatch.setenv("EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", "NaN")
+
+        items = [{"indicator_type": "ipv4", "value": "5.0.0.1", "tag": "test"}]
+        with caplog.at_level(logging.WARNING):
+            w.push_items(items, batch_size=10)
+
+        # Must have warned about non-finite
+        assert any("non-finite" in rec.message.lower() for rec in caplog.records), (
+            f"R5 regression: NaN must be caught as non-finite with a WARNING. "
+            f"Got logs: {[r.message for r in caplog.records]}"
+        )
+
+    def test_bounded_float_env_source_uses_isfinite(self):
+        """Source pin: the helper must use ``math.isfinite()`` (rejects
+        NaN and ±inf) rather than an isnan-only check. Using
+        ``math.isfinite`` provides belt-and-suspenders for +inf even
+        though +inf would also fail the upper bound — future refactors
+        that change the bounds shouldn't reopen the NaN door."""
+        src = self._src()
+        # Helper must exist
+        idx = src.find("def _bounded_float_env(")
+        assert idx != -1
+        body = src[idx : idx + 1500]
+        assert "math.isfinite" in body, (
+            "R5 fix must use math.isfinite() inside _bounded_float_env so NaN and ±inf are rejected together"
+        )
+        # import must be at module-level too
+        assert "\nimport math\n" in src, "module must `import math`"
+
     # -- Fix #2 ---------------------------------------------------------
 
     def test_permanent_failure_counter_has_no_event_id_label(self):
