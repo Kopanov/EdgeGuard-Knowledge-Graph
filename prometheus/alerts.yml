@@ -9,12 +9,27 @@ groups:
   - name: edgeguard_collection
     rules:
       - alert: EdgeGuardCollectionHighFailureRate
+        # PR-N12 Fix #3 (cursor-audit 2026-04-21 BLOCK): the prior expr
+        # used `rate(collected) > 0` as the denominator filter, which
+        # DROPS the series when the rate is zero — producing NO RESULT
+        # (undefined ratio) exactly when the collector has stopped
+        # producing anything, which is the scenario where the alert
+        # matters most. Fix: put total ATTEMPTS (successes + failures)
+        # in the denominator, clamp_min to avoid 0/0, and require at
+        # least one attempt. "Zero collected, any failures" is covered
+        # by EdgeGuardNoIndicatorsCollected.
         expr: |
           (
             sum by (source) (rate(edgeguard_collection_failures_total[5m]))
             /
-            sum by (source) (rate(edgeguard_indicators_collected_total[5m]) > 0)
+            clamp_min(
+              sum by (source) (rate(edgeguard_indicators_collected_total[5m]))
+              + sum by (source) (rate(edgeguard_collection_failures_total[5m])),
+              0.001
+            )
           ) > 0.2
+          and
+          sum by (source) (rate(edgeguard_collection_failures_total[5m])) > 0
         for: 5m
         labels:
           severity: warning
@@ -34,10 +49,29 @@ groups:
           description: "No successful collection from {{ $labels.source }} in over 1 hour."
 
       - alert: EdgeGuardNoIndicatorsCollected
+        # PR-N12 Fix #5 (cursor-audit 2026-04-21 BLOCK): two issues in
+        # the prior expr: (1) LHS was `sum by (source)` which DROPPED
+        # the `zone` label that RHS `edgeguard_source_health` carries,
+        # so the vector `and` had no matching labels and the alert was
+        # silent; (2) the hard-coded allow-list `source=~"otx|nvd|cisa|
+        # abuseipdb"` silently excluded every new source (ThreatFox,
+        # URLhaus, CyberCure, Feodo, SSLBL, MITRE, …). Fix: collapse
+        # both sides to `source` with `on (source)`, drop the
+        # regex allow-list — `source_health==1` already scopes to
+        # known-to-pipeline sources.
+        #
+        # PR-N12 Fix #5 follow-up (cursor-bugbot 2026-04-21 Medium):
+        # use `max by (source)` rather than `sum by (source)` on the
+        # source_health aggregation. A source can be emitted with
+        # health=1 in multiple zones (e.g. OTX reports into both
+        # "global" and "healthcare"); `sum == 1` fails on multi-zone
+        # sources and reintroduces the silent-alert bug we just fixed.
+        # `max == 1` correctly expresses "is this source healthy in any
+        # zone" without depending on zone cardinality.
         expr: |
           sum by (source) (increase(edgeguard_indicators_collected_total[1h])) == 0
-          and
-          edgeguard_source_health{source=~"otx|nvd|cisa|abuseipdb"} == 1
+          and on (source)
+          max by (source) (edgeguard_source_health) == 1
         for: 30m
         labels:
           severity: warning
@@ -135,7 +169,15 @@ groups:
           description: "Pipeline {{ $labels.pipeline_type }} 95th percentile duration is over 5 minutes."
 
       - alert: EdgeGuardNeo4jSyncStale
-        expr: time() - (edgeguard_neo4j_sync_duration_seconds_count > 0) > 259200
+        # PR-N12 Fix #1 (cursor-audit 2026-04-21 BLOCK): the prior expr
+        # `time() - (X > 0) > 259200` subtracted a histogram COUNT (int
+        # like 42) from current time and was permanently firing or silent
+        # depending on eval semantics. Use a dedicated
+        # `edgeguard_neo4j_sync_last_success_timestamp` gauge
+        # stamped at end of each successful sync.
+        expr: |
+          time() - edgeguard_neo4j_sync_last_success_timestamp > 259200
+          and edgeguard_neo4j_sync_last_success_timestamp > 0
         for: 1h
         labels:
           severity: warning
@@ -201,8 +243,31 @@ groups:
   - name: edgeguard_containers
     rules:
       - alert: EdgeGuardContainerRestartLoop
+        # PR-N12 Fix #2 (cursor-audit 2026-04-21 BLOCK): prior expr used
+        # `container_restart_count` which cAdvisor does NOT export — the
+        # alert was silently inert. cAdvisor exports `container_start_time_seconds`
+        # (a timestamp); use `changes()` over a window to detect restarts.
+        # Falls back to `kube_pod_container_status_restarts_total` if a
+        # Kubernetes/kubelet scrape is also present (harmless when it's not).
+        #
+        # PR-N12 Fix #2 follow-up (cursor-bugbot 2026-04-21 Low): cAdvisor
+        # labels the container as `name`; kubelet labels it as
+        # `container`. The prior annotation only referenced
+        # `{{ $labels.name }}`, so kubelet-branch fires rendered
+        # "Container  is in a restart loop" (empty). `label_replace`
+        # normalizes the kubelet `container` label into `name` on the
+        # second branch so the annotation works uniformly.
         expr: |
-          increase(container_restart_count{name=~"edgeguard.*"}[1h]) > 3
+          (
+            changes(container_start_time_seconds{name=~"edgeguard.*"}[1h]) > 3
+          )
+          or
+          (
+            label_replace(
+              increase(kube_pod_container_status_restarts_total{container=~"edgeguard.*"}[1h]),
+              "name", "$1", "container", "(.*)"
+            ) > 3
+          )
         for: 5m
         labels:
           severity: critical
