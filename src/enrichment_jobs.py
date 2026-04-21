@@ -351,9 +351,18 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 c.zone             = all_zones,
                 c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
             MERGE (a)-[r_runs:RUNS]->(c)
-            ON CREATE SET r_runs.src_uuid = a.uuid, r_runs.trg_uuid = c.uuid
+            // PR-N8 HIGH (audit Cross-Checker, 2026-04-21): stamp
+            // created_at / updated_at so this edge is visible to cloud
+            // delta-sync + STIX incremental export (both filter by
+            // r.updated_at >= cutoff — see docs/CLOUD_SYNC.md). Pre-fix
+            // the RUNS edge was missing both timestamps, so every
+            // re-run was invisible to delta consumers. Same omission
+            // existed on PART_OF(malware) and REFERS_TO — fixed below.
+            ON CREATE SET r_runs.src_uuid = a.uuid, r_runs.trg_uuid = c.uuid,
+                          r_runs.created_at = datetime()
             SET r_runs.src_uuid = coalesce(r_runs.src_uuid, a.uuid),
-                r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid)
+                r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid),
+                r_runs.updated_at = datetime()
             RETURN count(DISTINCT c) AS campaigns
             """
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
@@ -386,9 +395,14 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             MATCH (a:ThreatActor)<-[:ATTRIBUTED_TO]-(m:Malware)
             MATCH (c:Campaign {actor_name: a.name})
             MERGE (m)-[r:PART_OF]->(c)
-            ON CREATE SET r.src_uuid = m.uuid, r.trg_uuid = c.uuid
+            // PR-N8 HIGH (audit Cross-Checker): stamp created_at /
+            // updated_at so PART_OF(malware) edges are visible to
+            // cloud delta-sync. See RUNS comment above for rationale.
+            ON CREATE SET r.src_uuid = m.uuid, r.trg_uuid = c.uuid,
+                          r.created_at = datetime()
             SET r.src_uuid = coalesce(r.src_uuid, m.uuid),
-                r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
+                r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
+                r.updated_at = datetime()
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -775,10 +789,17 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     # Neo4j as separate quoted tokens and produce a syntax error. Bugbot
     # caught this on PR #33 round 3. Keep the inner action on a single
     # logical line (long but unambiguous).
+    # PR-N8 HIGH (audit Cross-Checker, 2026-04-21): stamp ON CREATE
+    # ``r.created_at`` + SET ``r.updated_at`` on BOTH directions of
+    # the bidirectional REFERS_TO. Pre-fix these edges had neither,
+    # so every bridge-job re-run was invisible to cloud delta-sync +
+    # STIX incremental export (both filter by ``r.updated_at >= cutoff``).
+    # Same omission was patched on RUNS + PART_OF(malware) in
+    # build_campaign_nodes above.
     query = """
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
-        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid) MERGE (c)-[r2:REFERS_TO]->(v) SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid)',
+        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) ON CREATE SET r1.created_at = datetime() SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid), r1.updated_at = datetime() MERGE (c)-[r2:REFERS_TO]->(v) ON CREATE SET r2.created_at = datetime() SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid), r2.updated_at = datetime()',
         {batchSize: 5000, parallel: false}
     )
     YIELD total

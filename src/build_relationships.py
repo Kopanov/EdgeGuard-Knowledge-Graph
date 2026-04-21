@@ -290,6 +290,46 @@ def _safe_run_batched(
             return True
     except Exception as e:
         _elapsed = _time.time() - _start
+        # PR-N8 HIGH (audit Bug Hunter H3, 2026-04-21): narrow the
+        # exception catch. Pre-fix, a blanket ``except Exception``
+        # swallowed Neo4j transient failures
+        # (``ServiceUnavailable``, ``SessionExpired``,
+        # ``TransientError``) and counted them as the step "failing"
+        # once, then the pipeline moved on. A 30-second Neo4j restart
+        # mid-pipeline silently zeroed a step's edge count instead of
+        # retrying. Operator sees "11/12 succeeded" in the SUMMARY and
+        # misses the real failure.
+        #
+        # Post-fix: re-raise transient classes so the outer layer
+        # (Airflow retry policy, or a future @retry_with_backoff
+        # wrapper) can decide to retry the whole step. Keep the
+        # catch-and-continue behaviour ONLY for non-transient Cypher
+        # errors (syntax errors, constraint violations, write
+        # conflicts) where retrying the SAME query won't help.
+        try:
+            from neo4j import exceptions as _neo4j_exc
+
+            _transient_classes: tuple = (
+                _neo4j_exc.ServiceUnavailable,
+                _neo4j_exc.SessionExpired,
+                _neo4j_exc.TransientError,
+            )
+        except ImportError:
+            # If neo4j package isn't available (test shell, dry-run),
+            # fall back to the old catch-everything behaviour — this
+            # branch doesn't matter in production where neo4j is
+            # always installed.
+            _transient_classes = ()
+        if _transient_classes and isinstance(e, _transient_classes):
+            logger.error(
+                "  [FAIL-TRANSIENT] %s after %.1fs: %s: %s — re-raising so caller can retry",
+                label,
+                _elapsed,
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+            raise
         logger.error(
             "  [FAIL] %s after %.1fs: %s: %s",
             label,
@@ -323,9 +363,18 @@ def build_relationships():
         query_pause()
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
+        #
+        # PR-N8 HIGH (audit Bug Hunter M5, 2026-04-21): apply trim()+
+        # toLower() canonicalization parity. Pre-fix ``a.name`` was
+        # NFC+strip+lower'd at ingest via ``canonicalize_merge_key``
+        # (PR #37) while ``m.attributed_to`` was stored RAW. A MITRE
+        # source emitting ``"APT29"`` on Malware.attributed_to
+        # silently missed the actor stored as ``"apt29"``. Same class
+        # of bug as Q9 / Fix #4 above — canonicalization parity
+        # between ingest-time and relationship-time Cypher.
         logger.info("[LINK] 2/12 Malware → ThreatActor (exact name match)...")
         _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND size(m.attributed_to) > 0) OR size(coalesce(m.aliases, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
+        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE toLower(trim(coalesce(m.attributed_to, ""))) = toLower(trim(a.name)) OR toLower(trim(coalesce(m.attributed_to, ""))) IN [x IN coalesce(a.aliases, []) | toLower(trim(x))] OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
         query_pause()
@@ -631,14 +680,61 @@ def build_relationships():
         # legacy readers) but the calibrator filter is updated in
         # enrichment_jobs.py to match against the ``r.source_ids`` array
         # so co-occurrence provenance is always seen.
+        # PR-N8 BLOCK-MERGE (audit Logic Tracker, 2026-04-21): the CASE
+        # expression below now gates on ``r.calibrated_at IS NOT NULL``
+        # to RESPECT the calibrator's demotion.
+        #
+        # Pre-fix: ``SET r.confidence_score = CASE WHEN 0.8 >
+        # r.confidence_score THEN 0.8 ELSE r.confidence_score END`` ran
+        # unconditionally on every re-MERGE. An edge that the calibrator
+        # had just demoted from 0.8 → 0.30 (e.g. for a 96K-indicator
+        # bulk MISP dump) would be re-inflated to 0.8 on the very next
+        # build_relationships run. The flap cycle was daily:
+        #
+        #     Day 1  → build_relationships Q4     sets 0.5 (ON CREATE)
+        #     Day 1  → build_relationships Q9     re-stamps 0.8 (CASE floor)
+        #     Day 1  → enrichment calibrator      detects bulk dump, sets 0.30 + calibrated_at
+        #     Day 2  → build_relationships Q9     RE-INFLATES to 0.8 ←── BUG
+        #     Day 2  → enrichment calibrator      detects bulk dump again, sets 0.30
+        #     … repeats nightly since the calibrator shipped (months) …
+        #
+        # Since the calibrator stamps ``r.calibrated_at`` at both of its
+        # write sites (``enrichment_jobs.py:661`` small-event path, and
+        # ``:710`` large-event path — see commit audit trail), we key
+        # the respect-clause on ``r.calibrated_at IS NOT NULL``. On a
+        # calibrated edge the CASE now short-circuits to the existing
+        # value, preserving the calibrator's work. On a fresh (never-
+        # calibrated) edge the previous max-wins floor still applies.
+        #
+        # Note: this does NOT recursively mean calibrated edges never
+        # upgrade again — if the calibrator later decides a bulk-dump
+        # edge deserves 0.8 (e.g. the dump was re-classified as
+        # "curated"), it clears or re-writes r.calibrated_at and the
+        # floor runs again.
+        # PR-N8 HIGH (audit Bug Hunter H1, 2026-04-21): canonicalization
+        # parity — apply ``trim() + toLower()`` on BOTH sides of every
+        # string comparison. Pre-fix ``m.name`` was NFC+strip+lower'd
+        # at ingest via ``canonicalize_merge_key`` (PR #37), while
+        # ``i.malware_family`` was stored RAW. A feed emitting
+        # ``"Emotet "`` (trailing whitespace) or ``"eMotet"`` (mixed
+        # case) on an Indicator wouldn't match ``m.name = "emotet"``
+        # despite being semantically identical — silent edge drop.
+        # ``trim()`` covers the whitespace case; ``toLower()`` covers
+        # case. NFC normalization is a known remaining gap (Cypher /
+        # APOC don't have ``unicodedata.normalize`` — NFD vs NFC of
+        # accented chars still miss, rare in practice but filed as a
+        # follow-up: fix at ingest via ``canonicalize_merge_key``).
         _q9_inner = (
             "WITH $i AS i MATCH (m:Malware) "
-            "WHERE toLower(m.name) = toLower(i.malware_family) "
-            "   OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] "
-            "   OR toLower(m.family) = toLower(i.malware_family) "
+            "WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
+            "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] "
+            "   OR toLower(trim(coalesce(m.family, ''))) = toLower(trim(i.malware_family)) "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.created_at = datetime() "
             "SET r.confidence_score = CASE "
+            # PR-N8 BLOCK-MERGE: respect calibrator. Must be the FIRST
+            # clause so it short-circuits before the 0.8 floor.
+            "       WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score "
             "       WHEN r.confidence_score IS NULL OR 0.8 > r.confidence_score THEN 0.8 "
             "       ELSE r.confidence_score "
             "    END, "
@@ -649,13 +745,15 @@ def build_relationships():
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
+        # PR-N8 HIGH: same trim()+toLower() parity as _q9_inner so the
+        # orphan count matches the actual post-fix match behaviour.
         _q9_skip = (
             "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(i.malware_family) > 0 "
             "AND NOT EXISTS { "
             "  MATCH (m:Malware) "
-            "  WHERE toLower(m.name) = toLower(i.malware_family) "
-            "     OR toLower(i.malware_family) IN [x IN coalesce(m.aliases, []) | toLower(x)] "
-            "     OR toLower(m.family) = toLower(i.malware_family) "
+            "  WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
+            "     OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] "
+            "     OR toLower(trim(coalesce(m.family, ''))) = toLower(trim(i.malware_family)) "
             "} "
             "RETURN count(i) AS c"
         )
