@@ -121,6 +121,46 @@ class TestFix1AlertRulesWired:
                     f"alert {rule['alert']!r} groups by forbidden high-cardinality label {label!r}"
                 )
 
+    def test_absolute_count_thresholds_use_increase_not_rate(self):
+        """Cursor-bugbot 2026-04-21 (HIGH x2): a threshold expressed as
+        an absolute count over a window (e.g. ">1/15min", ">100/hr")
+        must use ``increase()``, not ``rate()``. ``rate()`` returns the
+        per-SECOND average, so ``rate(...[15m]) > 1`` means >1/sec =
+        >900/15min, 900x the intended threshold.
+
+        The two alerts whose annotations document a per-window
+        threshold (sustained-backoff > 1/15min, honest-NULL > 100/hr)
+        must both use ``increase()``. The two that use ``rate(...) > 0``
+        are fine — a non-zero per-second rate IS a non-zero count.
+        """
+        group = self._rules()
+        # Map: alert name → expected functor.
+        expected_functor = {
+            "EdgeGuardMispBatchPermanentFailure": "rate",  # > 0 is fine
+            "EdgeGuardMispSustainedBackoff": "increase",  # > 1/15min
+            "EdgeGuardMispHonestNullViolation": "increase",  # > 100/hr
+            "EdgeGuardNeo4jIneffectiveBatch": "rate",  # > 0 is fine
+        }
+        for rule in group["rules"]:
+            name = rule["alert"]
+            expected = expected_functor.get(name)
+            if expected is None:
+                continue
+            expr = rule["expr"]
+            # The functor must appear immediately before the counter
+            # name inside parentheses, e.g. "increase(edgeguard_..."
+            expected_pattern = f"{expected}(edgeguard_"
+            assert expected_pattern in expr, (
+                f"alert {name!r} must use {expected}() (not the other functor) — expr={expr!r}"
+            )
+            # And must NOT use the wrong functor with a counter.
+            other = "rate" if expected == "increase" else "increase"
+            wrong_pattern = f"{other}(edgeguard_"
+            assert wrong_pattern not in expr, (
+                f"alert {name!r} uses {other}() on the counter but should use {expected}() — "
+                f"likely per-second vs per-window confusion"
+            )
+
 
 # ===========================================================================
 # Fix #2 — EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION kill-switch

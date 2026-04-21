@@ -417,7 +417,11 @@ groups:
               3. See docs/MISP_TUNING.md and docs/RUNBOOK.md § MISP OOM
 
       - alert: EdgeGuardMispSustainedBackoff
-        expr: sum by (source) (rate(edgeguard_misp_push_backoff_triggered_total[15m])) > 1
+        # Use `increase()` (absolute count over window), NOT `rate()`
+        # which returns a per-second average — `rate(...) > 1` would
+        # mean >1/sec = >900/15min, 900x the intended threshold.
+        # Cursor-bugbot 2026-04-21 HIGH.
+        expr: sum by (source) (increase(edgeguard_misp_push_backoff_triggered_total[15m])) > 1
         for: 15m
         labels:
           severity: warning
@@ -431,7 +435,11 @@ groups:
             "occasional flap" from "sustained overload."
 
       - alert: EdgeGuardMispHonestNullViolation
-        expr: sum by (source, field) (rate(edgeguard_misp_honest_null_violation_total[1h])) > 100
+        # Use `increase()` (absolute count over window), NOT `rate()`
+        # which returns a per-second average — `rate(...) > 100` would
+        # mean >100/sec = >360,000/hr, 3600x the intended threshold.
+        # Cursor-bugbot 2026-04-21 HIGH.
+        expr: sum by (source, field) (increase(edgeguard_misp_honest_null_violation_total[1h])) > 100
         for: 1h
         labels:
           severity: warning
@@ -441,8 +449,8 @@ groups:
           description: |
             A collector appears to be manufacturing wall-clock-NOW
             values for {{ $labels.field }} instead of passing NULL
-            through when the source is silent. Rate > 100/hr suggests
-            systematic violation, not occasional federation drift.
+            through when the source is silent. >100 violations/hour
+            suggests systematic violation, not occasional federation drift.
 
             Remediation: audit the {{ $labels.source }} collector's
             {{ $labels.field }} extraction path for ``datetime.now()``
