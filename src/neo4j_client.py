@@ -2757,7 +2757,10 @@ class Neo4jClient:
         if not self.driver or not relationships:
             return 0
 
-        # Split from a previously-generic "USES" bucket in the 2026-04 refactor:
+        # Specialized technique edge types (the legacy generic ``USES`` bucket
+        # was retired in 2026-04 PR #41; the backward-compat ``rt == "USES"``
+        # routing shim was removed in PR-N1 once verified that no caller
+        # emits the legacy value):
         # EMPLOYS_TECHNIQUE = attribution  (ThreatActor/Campaign → Technique)
         # IMPLEMENTS_TECHNIQUE = capability (Malware/Tool → Technique)
         # USES_TECHNIQUE already existed for Indicator → Technique (OTX attack_ids)
@@ -2817,12 +2820,15 @@ class Neo4jClient:
             # → uuid computed from "" → wrong fallback uuid that doesn't
             # match the node's n.uuid). Bugbot caught this on PR #33 round 4.
             #
-            # Backward-compat: accept legacy "USES" rel_type from callers that
-            # haven't been migrated yet, and route based on from_type. New
-            # code should emit the specialized rel_type directly.
-            if rt in ("EMPLOYS_TECHNIQUE", "IMPLEMENTS_TECHNIQUE") or (
-                rt == "USES" and rel.get("to_type") == "Technique"
-            ):
+            # PR-N1 §9-A2: removed the backward-compat ``rt == "USES"
+            # and to_type == "Technique"`` branch. Verified no caller
+            # anywhere in the codebase emits ``rel_type="USES"``
+            # (grep ``rel_type=.USES.`` returns zero hits in src/, dags/,
+            # and tests/), so the shim was dead defensive code that
+            # masked schema-drift regressions. The legacy ``USES`` edge
+            # type was retired in 2026-04 (PR #41) and fresh-start
+            # writes only the specialized rel_types below.
+            if rt in ("EMPLOYS_TECHNIQUE", "IMPLEMENTS_TECHNIQUE"):
                 # Require an explicit from_type. The previous default of
                 # "ThreatActor" silently misrouted any IMPLEMENTS_TECHNIQUE
                 # caller that forgot to set it — their row went to the

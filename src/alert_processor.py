@@ -377,13 +377,26 @@ class AlertProcessor:
                     enrichment["known_malware"] = malware_list
                     metadata["malware_found"] = len(malware_list) > 0
 
-                # Query 3: Find threat actors via malware
+                # Query 3: Find threat actors via malware.
+                # PR-N1 §9-A2: dropped legacy ``|USES`` alternation. The
+                # generic ``USES`` edge type was retired in 2026-04
+                # (PR #41) — fresh-start writes only the specialized
+                # ``EMPLOYS_TECHNIQUE`` (attribution: ThreatActor →
+                # Technique). Keeping the alternation as defensive
+                # fallback was dead code that masked schema-drift
+                # regressions: if a future write path accidentally
+                # re-introduced ``USES``, this query would silently
+                # re-include it and the operator wouldn't catch it.
+                # The backward-compat read path was also removed from
+                # ``neo4j_client.create_misp_relationships_batch`` in
+                # this PR (no callers emit ``rel_type="USES"`` anywhere
+                # in the codebase).
                 actors_result = session.run(
                     """
                     MATCH (i:Indicator {value: $indicator})
                     OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
                     OPTIONAL MATCH (m)-[:ATTRIBUTED_TO]->(a:ThreatActor)
-                    OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE|USES]->(t:Technique)
+                    OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
                     RETURN collect(DISTINCT a {
                         .name, .aliases, .description
                     }) as actors,
@@ -436,11 +449,34 @@ class AlertProcessor:
                 enrichment["cves"] = cves
                 metadata["cves_found"] = len(cves)
 
-                # Query 5: Find related Assets and Users from Alert
+                # Query 5: Find related Assets and Users from THIS Alert.
+                #
+                # PR-N1 §9-A1 (Tier-A production blocker, Logic Tracker
+                # found): the previous query bound ``alert_id`` as a
+                # parameter but the Cypher had NO ``WHERE`` filter
+                # using it. The variable ``a`` matched ALL ``:Alert``
+                # nodes in the graph and the query returned the
+                # cartesian product of every alert's assets + users.
+                # Every alert enrichment payload published to NATS /
+                # ResilMesh carried unrelated alerts' assets + users —
+                # healthcare-zone alerts mis-routed to finance-zone
+                # users, etc. On a graph with N alerts, every
+                # enrichment payload's ``assets`` list was N× too
+                # large (DoS-shaped if N grows).
+                #
+                # Fix: bind on ``Alert {alert_id: $alert_id}`` (matches
+                # the natural-key constraint at neo4j_client.py:794:
+                # ``CREATE CONSTRAINT alert_key IF NOT EXISTS FOR
+                # (n:Alert) REQUIRE (n.alert_id) IS UNIQUE``). Use
+                # ``OPTIONAL MATCH`` for assets / users so an alert
+                # with no associations still returns a single row with
+                # empty lists — preserving the original return shape
+                # the downstream code expects.
                 context_result = session.run(
                     """
-                    MATCH (a:Alert)-[:TARGETS]->(asset:Asset)
-                    MATCH (a:Alert)-[:INVOLVES_USER]->(u:User)
+                    MATCH (a:Alert {alert_id: $alert_id})
+                    OPTIONAL MATCH (a)-[:TARGETS]->(asset:Asset)
+                    OPTIONAL MATCH (a)-[:INVOLVES_USER]->(u:User)
                     RETURN collect(DISTINCT asset {
                         .hostname, .asset_type, .device_type, .zone
                     }) as assets,
