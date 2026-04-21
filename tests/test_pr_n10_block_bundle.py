@@ -247,6 +247,45 @@ class TestFix2CalibratorRespectComplete:
         # Helper definition (1) + docstring example (1) + 7 helper sites + 1 _set_clause = 10
         assert count >= 9, f"expected >=9 usages (def + docstring + 7 helpers + _set_clause); got {count}"
 
+    def test_kill_switch_reverts_to_unconditional_overwrite(self):
+        """``EDGEGUARD_RESPECT_CALIBRATOR=0`` restores pre-PR-N10 behaviour.
+        Ops escape hatch — must produce a bare literal, no CASE expr."""
+        import os
+
+        from neo4j_client import _confidence_respect_calibrator
+
+        for disable_val in ("0", "false", "no", "off", "FALSE", "Off", " 0 "):
+            os.environ["EDGEGUARD_RESPECT_CALIBRATOR"] = disable_val
+            try:
+                result = _confidence_respect_calibrator(0.7)
+                assert result == "0.7", f"kill-switch value {disable_val!r} should produce bare literal; got {result!r}"
+                assert "CASE" not in result
+                assert "calibrated_at" not in result
+            finally:
+                os.environ.pop("EDGEGUARD_RESPECT_CALIBRATOR", None)
+
+    def test_kill_switch_unset_or_true_keeps_guard(self):
+        """Default (unset) or any non-disable value keeps the CASE guard."""
+        import os
+
+        from neo4j_client import _confidence_respect_calibrator
+
+        # Unset
+        os.environ.pop("EDGEGUARD_RESPECT_CALIBRATOR", None)
+        result = _confidence_respect_calibrator(0.7)
+        assert "CASE WHEN r.calibrated_at IS NOT NULL" in result
+
+        # Explicit enable values
+        for enable_val in ("1", "true", "yes", "on", ""):
+            os.environ["EDGEGUARD_RESPECT_CALIBRATOR"] = enable_val
+            try:
+                result = _confidence_respect_calibrator(0.7)
+                assert "CASE WHEN r.calibrated_at IS NOT NULL" in result, (
+                    f"value {enable_val!r} should keep guard; got {result!r}"
+                )
+            finally:
+                os.environ.pop("EDGEGUARD_RESPECT_CALIBRATOR", None)
+
     def test_no_unconditional_confidence_writes_remaining(self):
         """Regression pin: no `r.confidence_score = <literal>` should
         appear in executable code (only in docstring examples). AST walk."""

@@ -193,7 +193,20 @@ def _confidence_respect_calibrator(value) -> str:
 
     Accepts numeric literals or Cypher expressions (e.g. the ``$conf``
     parameter in the batched `_set_clause` path).
+
+    Kill-switch: setting ``EDGEGUARD_RESPECT_CALIBRATOR`` to one of
+    ``0``/``false``/``no``/``off`` restores the pre-PR-N10 behaviour
+    (unconditional overwrite). Intended for on-call operators to revert
+    the semantic change without a code revert if a regression is
+    discovered post-deploy. Default (unset or any other value) keeps
+    the calibrator-respect guard active.
     """
+    import os as _os
+
+    _disable_values = ("0", "false", "no", "off")
+    if _os.environ.get("EDGEGUARD_RESPECT_CALIBRATOR", "").strip().lower() in _disable_values:
+        # Pre-PR-N10 behaviour: unconditional overwrite. Ops-only escape hatch.
+        return f"{value}"
     return f"CASE WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score ELSE {value} END"
 
 
