@@ -198,7 +198,7 @@ class TestFix3CollectionHighFailureRateDenominator:
         rule = _find_rule("EdgeGuardCollectionHighFailureRate")
         expr = rule["expr"]
         # Must use clamp_min or explicit > 0 denominator guard
-        assert "clamp_min(" in expr, "denominator must use clamp_min to handle zero-rate case; got {expr!r}"
+        assert "clamp_min(" in expr, f"denominator must use clamp_min to handle zero-rate case; got {expr!r}"
         # Total attempts in denominator = collected + failed
         assert "rate(edgeguard_indicators_collected_total" in expr
         assert "rate(edgeguard_collection_failures_total" in expr
