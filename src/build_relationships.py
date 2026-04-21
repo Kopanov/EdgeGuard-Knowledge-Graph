@@ -388,8 +388,19 @@ def build_relationships():
         # whitespace-only values via ``size(trim(x)) > 0``, so the
         # inner comparison never sees a post-trim empty string at all.
         logger.info("[LINK] 2/12 Malware → ThreatActor (exact name match)...")
+        # PR-N9 (follow-up to PR-N8 R1 Bugbot): list comprehensions
+        # filter out NULL/whitespace-only alias entries before
+        # comparing. Without the filter, a single whitespace-only
+        # entry in ``a.aliases`` (e.g. ``["foo", "  ", "bar"]``)
+        # would trim to ``""`` inside the comprehension. Combined
+        # with a whitespace-only ``m.attributed_to`` (which can
+        # reach the inner via the aliases-leg of the OR outer),
+        # the check ``"" IN ["foo", "", "bar"]`` → TRUE → spurious
+        # ATTRIBUTED_TO edge to every ThreatActor with a malformed
+        # alias. Unlikely in clean data but observable on noisy
+        # threat-intel feeds. Filter restores robustness.
         _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0) OR size(coalesce(m.aliases, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE toLower(trim(m.attributed_to)) = toLower(trim(a.name)) OR toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) | toLower(trim(x))] OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
+        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE toLower(trim(m.attributed_to)) = toLower(trim(a.name)) OR toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
         query_pause()
@@ -756,7 +767,12 @@ def build_relationships():
         _q9_inner = (
             "WITH $i AS i MATCH (m:Malware) "
             "WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
-            "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] "
+            # PR-N9: filter NULL/whitespace aliases (see Q2 comment for
+            # rationale). Q9's outer filter already ensures
+            # trim(i.malware_family) is non-empty so the LHS can't
+            # produce a false-match via "" = "", but defense-in-depth
+            # keeps the shape symmetric with Q2.
+            "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
             "   OR toLower(trim(m.family)) = toLower(trim(i.malware_family)) "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.created_at = datetime() "
@@ -782,7 +798,9 @@ def build_relationships():
             "AND NOT EXISTS { "
             "  MATCH (m:Malware) "
             "  WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
-            "     OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] "
+            # PR-N9: same NULL/whitespace filter as _q9_inner above so
+            # the orphan count matches actual match behaviour.
+            "     OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
             "     OR toLower(trim(m.family)) = toLower(trim(i.malware_family)) "
             "} "
             "RETURN count(i) AS c"

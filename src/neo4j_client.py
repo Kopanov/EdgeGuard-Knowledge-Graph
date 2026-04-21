@@ -44,9 +44,114 @@ logger = logging.getLogger(__name__)
 try:
     from metrics_server import NEO4J_QUERIES, NEO4J_QUERY_DURATION
 
+    # PR-N9 B6 (audit 09 Prod Readiness #2): ineffective-batch counter —
+    # increments when a batch of N items produces ZERO
+    # nodes_created/updated. See ``_record_batch_counters`` below.
+    try:
+        from metrics_server import (
+            NEO4J_MERGE_INEFFECTIVE_BATCH as _NEO4J_MERGE_INEFFECTIVE_BATCH,
+        )
+    except ImportError:
+        # Older metrics_server without the PR-N9 counter — keep the
+        # rest of the metrics bundle working (PR-N5 C7 established the
+        # nested-import graceful-degradation pattern).
+        _NEO4J_MERGE_INEFFECTIVE_BATCH = None  # type: ignore[assignment]
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
+    _NEO4J_MERGE_INEFFECTIVE_BATCH = None  # type: ignore[assignment]
+
+
+def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result) -> None:
+    """PR-N9 B6 (audit 09 Prod Readiness #2, 2026-04-21): inspect Neo4j
+    result counters to detect silent-write failures.
+
+    **The bug this closes:** ``merge_indicators_batch`` and
+    ``merge_vulnerabilities_batch`` historically used ``len(batch)``
+    as the success_count regardless of what Neo4j actually wrote. If
+    the MATCH-into-SOURCED_FROM silently failed (e.g. Source node
+    missing, constraint violation, schema mismatch), the outer
+    success_count lied and operators had no signal — the batch
+    silently produced zero edges.
+
+    **What this helper does:** reads
+    ``result.consume().counters.nodes_created +
+    nodes_updated + relationships_created + properties_set``. If ALL
+    four are zero on a non-empty batch, emits:
+
+      - ERROR log with label, source, batch size, and counter values
+        (so operators see exactly which batch went silent)
+      - Increments ``edgeguard_neo4j_merge_ineffective_batch_total``
+        Prometheus counter (so Grafana can alert on a non-zero rate)
+
+    A non-empty batch producing zero writes is almost always a bug
+    (missing prerequisite nodes, broken schema, constraint violation).
+    The rare legitimate case — every item already MERGEd with
+    identical properties — still increments ``properties_set`` at
+    least via the ``r.updated_at = datetime()`` clauses every batch
+    sets, so the all-zero check is a strong signal.
+
+    **Never raises:** defensive wrapped in try/except so a counter
+    bug can't break production writes. The metric increment itself
+    is None-guarded (PR-N5 R1 pattern).
+    """
+    try:
+        counters = result.consume().counters
+        # ``counters`` exposes attributes as ints; absent attrs default
+        # to 0 via getattr.
+        nodes_created = getattr(counters, "nodes_created", 0)
+        nodes_updated = getattr(counters, "nodes_updated", 0) if hasattr(counters, "nodes_updated") else 0
+        # Neo4j 5.x uses ``properties_set``; 4.x/5.0 naming is consistent.
+        properties_set = getattr(counters, "properties_set", 0)
+        rels_created = getattr(counters, "relationships_created", 0)
+        rels_updated = (
+            getattr(counters, "relationships_updated", 0) if hasattr(counters, "relationships_updated") else 0
+        )
+
+        total_touched = nodes_created + nodes_updated + properties_set + rels_created + rels_updated
+
+        if batch_len > 0 and total_touched == 0:
+            logger.error(
+                "[MERGE-INEFFECTIVE] label=%s source=%s batch_len=%d — Neo4j counters "
+                "all zero (nodes_created=%d, nodes_updated=%d, properties_set=%d, "
+                "rels_created=%d, rels_updated=%d). The batch silently produced zero "
+                "writes. Likely cause: missing prerequisite node (e.g. Source), "
+                "constraint violation, or schema mismatch. Operator action: check the "
+                "current Source nodes via ``MATCH (s:Source {source_id: '%s'}) RETURN s`` "
+                "and re-run ``ensure_sources()`` if missing.",
+                label,
+                source_id,
+                batch_len,
+                nodes_created,
+                nodes_updated,
+                properties_set,
+                rels_created,
+                rels_updated,
+                source_id,
+            )
+            if _NEO4J_MERGE_INEFFECTIVE_BATCH is not None:
+                try:
+                    _NEO4J_MERGE_INEFFECTIVE_BATCH.labels(label=label, source=source_id).inc()
+                except Exception as _metric_err:
+                    # Same non-silent pattern as other metric guards.
+                    logger.debug(
+                        "ineffective-batch metric increment failed: %s",
+                        _metric_err,
+                        exc_info=True,
+                    )
+    except Exception as _inspect_err:
+        # Counter inspection itself failed (e.g. driver API change,
+        # result already consumed). Log at DEBUG and continue — don't
+        # let observability code break a production write.
+        logger.debug(
+            "result-counter inspection failed for label=%s source=%s: %s",
+            label,
+            source_id,
+            _inspect_err,
+            exc_info=True,
+        )
+
 
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
@@ -2125,11 +2230,28 @@ class Neo4jClient:
                 """
 
                 with self.driver.session() as session:
-                    session.run(
+                    result = session.run(
                         query,
                         batch=batch_data,
                         source_node_uuid=source_node_uuid,
                         timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    # PR-N9 B6 (audit 09 Prod Readiness #2, 2026-04-21):
+                    # inspect the result counters to detect silent-write
+                    # failures. Pre-fix we used ``len(batch)`` as the
+                    # success_count even when Neo4j rejected every row
+                    # (e.g. constraint violation, schema mismatch, wrong
+                    # label). The SOURCED_FROM inner MATCH could fail
+                    # silently if the Source node was missing (PR (S5)
+                    # documented this hazard) — the ON CREATE edge never
+                    # ran, but the outer success_count lied. This
+                    # mirrors the PR-N4 permanent-failure metric that
+                    # the MISPWriter side now emits.
+                    _record_batch_counters(
+                        label="Indicator",
+                        source_id=source_id,
+                        batch_len=len(batch),
+                        result=result,
                     )
 
                 success_count += len(batch)
@@ -2318,11 +2440,19 @@ class Neo4jClient:
                 """
 
                 with self.driver.session() as session:
-                    session.run(
+                    result = session.run(
                         query,
                         batch=batch_data,
                         source_node_uuid=source_node_uuid,
                         timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    # PR-N9 B6: counter inspection (see
+                    # merge_indicators_batch for rationale).
+                    _record_batch_counters(
+                        label="Vulnerability",
+                        source_id=source_id,
+                        batch_len=len(batch_data),
+                        result=result,
                     )
 
                 success_count += len(batch_data)

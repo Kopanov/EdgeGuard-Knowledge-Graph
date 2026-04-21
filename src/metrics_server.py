@@ -321,6 +321,32 @@ NEO4J_QUERY_DURATION = Histogram(
     buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
 )
 
+# PR-N9 B6 (audit 09 Prod Readiness #2): ineffective-batch counter —
+# fires when ``merge_indicators_batch`` / ``merge_vulnerabilities_batch``
+# runs a non-empty batch that produces ZERO counter-visible writes
+# (no nodes_created, nodes_updated, properties_set, rels_created or
+# rels_updated). The typical silent-failure causes are:
+#
+#  * Source node missing (the SOURCED_FROM MATCH inside the UNWIND
+#    returns zero rows; the per-row edge MERGE never runs)
+#  * Constraint violation on the primary MERGE key (write rejected
+#    silently; caller still returns ``len(batch)`` as success_count)
+#  * Schema mismatch or broken Cypher
+#
+# Labels are bounded: ``label`` is one of the static node labels
+# (Indicator / Vulnerability / …), ``source`` is the per-source
+# identifier (otx / nvd / misp / …). No unbounded cardinality axes.
+# Alerting: ``rate(edgeguard_neo4j_merge_ineffective_batch_total[5m])
+# > 0`` for 5 min → write path is silently dropping edges.
+NEO4J_MERGE_INEFFECTIVE_BATCH = Counter(
+    "edgeguard_neo4j_merge_ineffective_batch_total",
+    "Non-empty Neo4j MERGE batches that produced ZERO counter-visible "
+    "writes (no nodes / rels / properties touched). Indicates silent-"
+    "write failure — missing prerequisite Source, constraint violation, "
+    "or schema drift. Non-zero rate is an operator-actionable signal.",
+    ["label", "source"],
+)
+
 # Pipeline metrics
 PIPELINE_DURATION = Histogram(
     "edgeguard_pipeline_duration_seconds",
