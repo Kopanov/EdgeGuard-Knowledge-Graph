@@ -45,6 +45,36 @@ from query_pause import query_pause  # noqa: E402
 # Configure logging
 logger = logging.getLogger(__name__)
 
+
+def _log_merge_counter_inspection_kill_switch_once() -> None:
+    """PR-N11 follow-up (cursor-bugbot 2026-04-21, Medium): emit ONE
+    WARN log at module import when ``EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION``
+    is set to a truthy value. Promised by the docstring on
+    ``_record_batch_counters`` — without this, an on-call operator who
+    flips the kill-switch has no log confirmation that the flag took
+    effect. In a production incident that's exactly when you need the
+    signal most.
+
+    Called unconditionally at module import; short-circuits (no log)
+    when the switch is disabled (the default). When enabled, emits
+    at WARNING so the line survives the default operator log filter
+    but doesn't escalate to ERROR for what is a deliberate ops choice.
+    """
+    import os as _os
+
+    _val = _os.environ.get("EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION", "").strip().lower()
+    if _val in ("1", "true", "yes", "on"):
+        logger.warning(
+            "[KILL-SWITCH-ACTIVE] EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=%r — "
+            "_record_batch_counters will short-circuit to no-op. "
+            "Ineffective-batch detection (PR-N9 B6) is DISABLED for this process. "
+            "This is an ops escape hatch; unset the env var and restart to re-enable.",
+            _val,
+        )
+
+
+_log_merge_counter_inspection_kill_switch_once()
+
 # Prometheus metrics (optional – gracefully degrade when metrics_server is not importable)
 try:
     from metrics_server import NEO4J_QUERIES, NEO4J_QUERY_DURATION
@@ -71,6 +101,18 @@ except ImportError:
 def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result) -> None:
     """PR-N9 B6 (audit 09 Prod Readiness #2, 2026-04-21): inspect Neo4j
     result counters to detect silent-write failures.
+
+    PR-N11 (2026-04-21 pre-baseline ops readiness): honor the
+    ``EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION`` env var. Pre-PR-N11
+    there was no way to disable this helper without a code revert — if
+    the inspection itself turned out to have a bug mid-baseline
+    (double-consume, API drift, etc.) on-call would be helpless. Set
+    env to any truthy value (``1``, ``true``, ``yes``) to short-circuit
+    the helper into a no-op. A module-load WARN log (see
+    ``_log_merge_counter_inspection_kill_switch_once`` below) emits
+    ONE line at startup when the kill-switch is active, so on-call
+    can confirm the flag took effect without reading every per-batch
+    DEBUG line.
 
     **The bug this closes:** ``merge_indicators_batch`` and
     ``merge_vulnerabilities_batch`` historically used ``len(batch)``
@@ -101,6 +143,20 @@ def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result
     bug can't break production writes. The metric increment itself
     is None-guarded (PR-N5 R1 pattern).
     """
+    # PR-N11 kill-switch: if the helper itself turns out to have a bug
+    # mid-baseline (driver API drift, double-consume, etc.) the
+    # operator sets EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1 and
+    # restarts the task. Checked every call (cheap env read) so the
+    # toggle takes effect on the next batch without a code change.
+    import os as _os  # local import to avoid polluting module-level os reuse
+
+    if _os.environ.get("EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
     try:
         counters = result.consume().counters
         # ``counters`` exposes attributes as ints; absent attrs default
