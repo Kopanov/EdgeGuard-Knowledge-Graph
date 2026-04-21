@@ -1653,19 +1653,23 @@ class MISPWriter:
             return val
 
         # Bounds rationale:
-        # * thresholds: floor 1 (no zero — would trigger immediately);
-        #   ceil 10M (sanity cap; MISP events with >10M attrs are
-        #   pathological regardless)
-        # * backoff threshold: floor 1 (one consecutive 5xx isn't enough
-        #   to warrant a 5-min pause; require at least 2); ceil 100
-        #   (effectively-disabled threshold)
+        # * tier thresholds (large / huge): floor 1 (no zero — would
+        #   classify every event as "huge"); ceil 10M (sanity cap; MISP
+        #   events with >10M attrs are pathological regardless)
+        # * backoff threshold: floor 2 (one consecutive 5xx isn't enough
+        #   to warrant a 5-min pause; require at least 2 — this matches
+        #   the comment intent and prevents an operator typo of "1"
+        #   from turning the @retry_with_backoff's first-attempt-fail
+        #   into a 5-min stall); ceil 100 (effectively-disabled threshold).
+        #   Bugbot R4 (commit 001846b) caught the prior floor=1 silently
+        #   contradicting this comment — now load-bearing.
         # * cooldown: floor 0.0 (operator can disable the cooldown by
         #   setting to 0; the cooldown branch then becomes a no-op);
         #   ceil 3600.0 (1 hour — anything longer is almost certainly
         #   a typo, e.g. 999999)
         _large_threshold = _bounded_int_env("EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD", 50000, lo=1, hi=10_000_000)
         _huge_threshold = _bounded_int_env("EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD", 100000, lo=1, hi=10_000_000)
-        _backoff_threshold = _bounded_int_env("EDGEGUARD_MISP_BACKOFF_THRESHOLD", 3, lo=1, hi=100)
+        _backoff_threshold = _bounded_int_env("EDGEGUARD_MISP_BACKOFF_THRESHOLD", 3, lo=2, hi=100)
         _backoff_cooldown_sec = _bounded_float_env("EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", 300.0, lo=0.0, hi=3600.0)
 
         # PR-N4 round 2 (Red Team #6, Bug Hunter #3, Devil's Advocate):

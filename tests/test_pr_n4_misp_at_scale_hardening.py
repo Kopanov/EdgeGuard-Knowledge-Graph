@@ -678,6 +678,24 @@ class TestBugbotRound2Fixes:
         helper_body = src[helper_idx : helper_idx + 800]
         assert "logger.warning" in helper_body, "_bounded_int_env must logger.warning on parse failure / out-of-range"
 
+    def test_backoff_threshold_floor_is_2_not_1(self):
+        """Bugbot R4 (commit 001846b): the backoff-threshold floor must
+        be ``lo=2``, not ``lo=1``. Pre-fix the parsing accepted ``1``,
+        which would trigger the 5-min cooldown after a single
+        ``MispTransientError`` — defeating the @retry_with_backoff
+        layer's first-attempt-fail recovery and turning every
+        transient 5xx into a multi-hour stall.
+
+        The bounds-rationale comment said "require at least 2" but
+        the code said ``lo=1``. This test pins the corrected value
+        so the comment and code stay in sync."""
+        src = self._src()
+        assert '"EDGEGUARD_MISP_BACKOFF_THRESHOLD", 3, lo=2, hi=100' in src, (
+            "Bugbot R4: backoff threshold floor must be 2 to match the "
+            "comment intent ('require at least 2'). lo=1 would let a "
+            "single transient 5xx trip the 5-min cooldown."
+        )
+
     # -- Fix #2 ---------------------------------------------------------
 
     def test_permanent_failure_counter_has_no_event_id_label(self):
