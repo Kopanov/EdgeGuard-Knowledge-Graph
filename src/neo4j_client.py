@@ -67,6 +67,15 @@ def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result
     """PR-N9 B6 (audit 09 Prod Readiness #2, 2026-04-21): inspect Neo4j
     result counters to detect silent-write failures.
 
+    PR-N11 (2026-04-21 pre-baseline ops readiness): honor the
+    ``EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION`` env var. Pre-PR-N11
+    there was no way to disable this helper without a code revert — if
+    the inspection itself turned out to have a bug mid-baseline
+    (double-consume, API drift, etc.) on-call would be helpless. Set
+    env to any truthy value (``1``, ``true``, ``yes``) to short-circuit
+    the helper into a no-op. Logged once per baseline at startup via
+    the module-load warning below.
+
     **The bug this closes:** ``merge_indicators_batch`` and
     ``merge_vulnerabilities_batch`` historically used ``len(batch)``
     as the success_count regardless of what Neo4j actually wrote. If
@@ -96,6 +105,20 @@ def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result
     bug can't break production writes. The metric increment itself
     is None-guarded (PR-N5 R1 pattern).
     """
+    # PR-N11 kill-switch: if the helper itself turns out to have a bug
+    # mid-baseline (driver API drift, double-consume, etc.) the
+    # operator sets EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1 and
+    # restarts the task. Checked every call (cheap env read) so the
+    # toggle takes effect on the next batch without a code change.
+    import os as _os  # local import to avoid polluting module-level os reuse
+
+    if _os.environ.get("EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    ):
+        return
     try:
         counters = result.consume().counters
         # ``counters`` exposes attributes as ints; absent attrs default

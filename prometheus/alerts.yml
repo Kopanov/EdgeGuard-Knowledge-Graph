@@ -381,3 +381,99 @@ groups:
             {{ $labels.mountpoint }} has {{ $value | humanizePercentage }}
             inodes free. airflow_logs creates many small files; ext4
             volumes can exhaust inodes well before bytes. Prune logs.
+
+  # ================================================================================
+  # PR-N4 / PR-N5 / PR-N9 observability metrics (PR-N11 follow-up)
+  # ================================================================================
+  # These rules surface the counters added in PR-N4 (MISP-at-scale),
+  # PR-N5 (C7 honest-NULL validator), and PR-N9 (Neo4j MERGE
+  # ineffective-batch). Pre-PR-N11, the metrics existed but no alert
+  # fired — the observability investment was invisible to operators.
+  #
+  # Baseline on-call: during the 730d baseline run, a non-zero rate
+  # on ANY of these alerts means silent data loss or semantic drift.
+  # Pre-PR-N7/N8/N9 the symptoms (multi-hour stalls, missing edges,
+  # confidence flaps) were only diagnosed post-hoc; these alerts flip
+  # detection latency from hours to 5-15 minutes.
+  - name: edgeguard_pipeline_observability
+    rules:
+      - alert: EdgeGuardMispBatchPermanentFailure
+        expr: sum by (source) (rate(edgeguard_misp_push_permanent_failure_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: misp_writer
+        annotations:
+          summary: "EdgeGuard losing MISP batches permanently ({{ $labels.source }})"
+          description: |
+            MISPWriter rejected one or more attribute batches after
+            ``@retry_with_backoff(max_retries=4)`` exhausted. Each
+            failure is ~500 attributes lost. Pre-PR-N4 this was a
+            hand-counted log-line; now alertable.
+
+            Remediation:
+              1. Check MISP backend RAM / PHP memory_limit
+              2. Check MySQL innodb_buffer_pool_size
+              3. See docs/MISP_TUNING.md and docs/RUNBOOK.md § MISP OOM
+
+      - alert: EdgeGuardMispSustainedBackoff
+        expr: sum by (source) (rate(edgeguard_misp_push_backoff_triggered_total[15m])) > 1
+        for: 15m
+        labels:
+          severity: warning
+          component: misp_writer
+        annotations:
+          summary: "EdgeGuard MISPWriter in extended cooldown >1×/15min ({{ $labels.source }})"
+          description: |
+            MISPWriter is hitting consecutive 5xx failures often enough
+            to enter the 5-minute extended cooldown more than once per
+            15 minutes. Backend is sustained-degraded. Distinguishes
+            "occasional flap" from "sustained overload."
+
+      - alert: EdgeGuardMispHonestNullViolation
+        expr: sum by (source, field) (rate(edgeguard_misp_honest_null_violation_total[1h])) > 100
+        for: 1h
+        labels:
+          severity: warning
+          component: misp_writer
+        annotations:
+          summary: "EdgeGuard honest-NULL invariant violated at high rate ({{ $labels.source }}/{{ $labels.field }})"
+          description: |
+            A collector appears to be manufacturing wall-clock-NOW
+            values for {{ $labels.field }} instead of passing NULL
+            through when the source is silent. Rate > 100/hr suggests
+            systematic violation, not occasional federation drift.
+
+            Remediation: audit the {{ $labels.source }} collector's
+            {{ $labels.field }} extraction path for ``datetime.now()``
+            fallbacks. See PR-N5 C7 + PR-N10 honest-NULL docs.
+
+      - alert: EdgeGuardNeo4jIneffectiveBatch
+        expr: sum by (label, source) (rate(edgeguard_neo4j_merge_ineffective_batch_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: neo4j_client
+        annotations:
+          summary: "EdgeGuard Neo4j MERGE batch silently producing zero writes ({{ $labels.label }}/{{ $labels.source }})"
+          description: |
+            A non-empty batch of {{ $labels.label }} nodes for source
+            {{ $labels.source }} completed with ZERO counter-visible
+            writes (no nodes_created, nodes_updated, properties_set,
+            rels_created, rels_updated). Typical causes:
+
+              * Source node missing (ensure_sources() misfire)
+              * Constraint violation
+              * Schema drift / wrong label
+
+            Remediation:
+              1. Check Neo4j logs for constraint errors on {{ $labels.label }}
+              2. Query ``MATCH (s:Source {source_id: '{{ $labels.source }}'}) RETURN s``
+                 to confirm Source node exists
+              3. See docs/RUNBOOK.md § Neo4j silent-write failures
+
+      # NOTE: a placeholder-reject alert (tracks spikes in the PR-N10
+      # Fix #1 merge-reject rate) requires a counter that isn't wired
+      # yet; it'll land in a PR-N12 follow-up alongside the counter
+      # definition so the alert rule and its backing metric ship
+      # atomically. Do not add here without the counter.
