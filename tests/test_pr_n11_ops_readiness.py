@@ -188,6 +188,45 @@ class TestFix2CounterInspectionKillSwitch:
                 return
         raise AssertionError("_record_batch_counters not found in neo4j_client.py")
 
+    def test_module_load_logs_once_when_kill_switch_active(self, monkeypatch, caplog):
+        """Cursor-bugbot 2026-04-21 Medium: the docstring promises a
+        module-load WARN log when the kill-switch is active. Without it,
+        an on-call operator who flips the switch has no log confirmation
+        the flag took effect. The helper
+        ``_log_merge_counter_inspection_kill_switch_once`` emits a
+        single WARNING containing ``[KILL-SWITCH-ACTIVE]``."""
+        import logging
+
+        import neo4j_client
+
+        monkeypatch.setenv("EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION", "1")
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            # Call the helper directly; importlib.reload would re-import
+            # the whole module (slow + has side effects). The helper is
+            # the unit under test, and it's called unconditionally at
+            # module import, so invoking it mirrors the import-time path.
+            neo4j_client._log_merge_counter_inspection_kill_switch_once()
+        assert any("[KILL-SWITCH-ACTIVE]" in r.message for r in caplog.records), (
+            "kill-switch activation must emit the [KILL-SWITCH-ACTIVE] WARN"
+        )
+        assert any("EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION" in r.message for r in caplog.records), (
+            "log line must name the env var so operators can grep for it"
+        )
+
+    def test_module_load_silent_when_kill_switch_unset(self, monkeypatch, caplog):
+        """Default (kill-switch OFF) must NOT log — otherwise every
+        process-start WARNs, polluting the log."""
+        import logging
+
+        import neo4j_client
+
+        monkeypatch.delenv("EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION", raising=False)
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            neo4j_client._log_merge_counter_inspection_kill_switch_once()
+        assert not any("[KILL-SWITCH-ACTIVE]" in r.message for r in caplog.records), (
+            "must not emit WARN when kill-switch is inactive"
+        )
+
     def test_kill_switch_short_circuits(self, monkeypatch):
         """Setting the env var to 1/true/yes/on makes the helper return
         without touching result.consume()."""
