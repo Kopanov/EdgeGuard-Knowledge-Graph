@@ -164,6 +164,24 @@ class TestFix2ContainerRestartLoopMetric:
         uses_kubelet = "kube_pod_container_status_restarts_total" in expr
         assert uses_cadvisor or uses_kubelet, "must reference a metric that a real Prometheus target exports"
 
+    def test_kubelet_branch_normalizes_container_label_to_name(self):
+        """Cursor-bugbot 2026-04-21 Low: cAdvisor labels the container as
+        `name`; kubelet labels it as `container`. If the kubelet branch
+        fires without a label rewrite, the annotation renders
+        `{{ $labels.name }}` as empty string. `label_replace` must copy
+        the kubelet `container` into `name` so both branches populate
+        the annotation uniformly."""
+        rule = _find_rule("EdgeGuardContainerRestartLoop")
+        expr = rule["expr"]
+        # The kubelet branch must be wrapped in label_replace that
+        # copies `container` into `name`.
+        if "kube_pod_container_status_restarts_total" in expr:
+            assert "label_replace(" in expr, (
+                "kubelet branch needs label_replace to normalize `container` → `name` "
+                "so the annotation `{{ $labels.name }}` isn't empty"
+            )
+            assert '"name"' in expr and '"container"' in expr, "label_replace must target `name` from `container`"
+
 
 # ===========================================================================
 # Fix #3 — CollectionHighFailureRate denominator is NaN-safe
@@ -287,13 +305,30 @@ class TestFix5NoIndicatorsCollectedLabelMatch:
 
     def test_both_sides_reduced_to_source_only(self):
         """LHS and RHS both aggregate by `source` so `and on (source)`
-        has matching label sets."""
+        has matching label sets. RHS uses `max by (source)` (not `sum`)
+        to correctly handle multi-zone healthy sources — see
+        test_source_health_uses_max_not_sum below."""
         rule = _find_rule("EdgeGuardNoIndicatorsCollected")
         expr = rule["expr"]
-        # Both `sum by (source)` calls should be present
-        # (one on indicators_collected, one on source_health)
-        count = expr.count("sum by (source)")
-        assert count >= 2, f"expected >=2 `sum by (source)` aggregations; got {count}"
+        assert "sum by (source)" in expr, "LHS must sum indicator rates by source"
+        assert "max by (source)" in expr, "RHS must max source_health by source"
+
+    def test_source_health_uses_max_not_sum(self):
+        """Cursor-bugbot 2026-04-21 Medium: `sum by (source)
+        (edgeguard_source_health) == 1` silently fails when a source
+        is emitted in multiple zones (e.g. OTX healthy in both `global`
+        and `healthcare` → sum == 2, not 1). That reintroduces the same
+        silent-alert class Fix #5 was meant to eliminate. `max by
+        (source) == 1` correctly captures "healthy in ANY zone"."""
+        rule = _find_rule("EdgeGuardNoIndicatorsCollected")
+        expr = rule["expr"]
+        assert "max by (source) (edgeguard_source_health)" in expr, (
+            "edgeguard_source_health must be aggregated with max by (source), "
+            "not sum — sum == 1 fails on multi-zone healthy sources"
+        )
+        assert "sum by (source) (edgeguard_source_health)" not in expr, (
+            "regression: sum by (source) on source_health reintroduces the multi-zone silent-alert bug"
+        )
 
 
 # ===========================================================================

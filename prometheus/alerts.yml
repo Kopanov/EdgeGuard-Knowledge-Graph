@@ -59,10 +59,19 @@ groups:
         # both sides to `source` with `on (source)`, drop the
         # regex allow-list — `source_health==1` already scopes to
         # known-to-pipeline sources.
+        #
+        # PR-N12 Fix #5 follow-up (cursor-bugbot 2026-04-21 Medium):
+        # use `max by (source)` rather than `sum by (source)` on the
+        # source_health aggregation. A source can be emitted with
+        # health=1 in multiple zones (e.g. OTX reports into both
+        # "global" and "healthcare"); `sum == 1` fails on multi-zone
+        # sources and reintroduces the silent-alert bug we just fixed.
+        # `max == 1` correctly expresses "is this source healthy in any
+        # zone" without depending on zone cardinality.
         expr: |
           sum by (source) (increase(edgeguard_indicators_collected_total[1h])) == 0
           and on (source)
-          sum by (source) (edgeguard_source_health) == 1
+          max by (source) (edgeguard_source_health) == 1
         for: 30m
         labels:
           severity: warning
@@ -240,13 +249,24 @@ groups:
         # (a timestamp); use `changes()` over a window to detect restarts.
         # Falls back to `kube_pod_container_status_restarts_total` if a
         # Kubernetes/kubelet scrape is also present (harmless when it's not).
+        #
+        # PR-N12 Fix #2 follow-up (cursor-bugbot 2026-04-21 Low): cAdvisor
+        # labels the container as `name`; kubelet labels it as
+        # `container`. The prior annotation only referenced
+        # `{{ $labels.name }}`, so kubelet-branch fires rendered
+        # "Container  is in a restart loop" (empty). `label_replace`
+        # normalizes the kubelet `container` label into `name` on the
+        # second branch so the annotation works uniformly.
         expr: |
           (
             changes(container_start_time_seconds{name=~"edgeguard.*"}[1h]) > 3
           )
           or
           (
-            increase(kube_pod_container_status_restarts_total{container=~"edgeguard.*"}[1h]) > 3
+            label_replace(
+              increase(kube_pod_container_status_restarts_total{container=~"edgeguard.*"}[1h]),
+              "name", "$1", "container", "(.*)"
+            ) > 3
           )
         for: 5m
         labels:
