@@ -38,6 +38,8 @@ from config import (
 # PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
 # backoff trigger. Optional import so MISPWriter can run in environments
 # without prometheus_client installed (CI, dev shells, dry-run).
+#
+# PR-N5 C7: honest-NULL violation counter joins the same optional bundle.
 try:
     from metrics_server import (
         MISP_PUSH_BACKOFF_TRIGGERED as _MISP_BACKOFF_TRIGGERED,
@@ -46,17 +48,137 @@ try:
         MISP_PUSH_PERMANENT_FAILURES as _MISP_PUSH_PERMANENT_FAILURES,
     )
 
+    try:
+        from metrics_server import (
+            MISP_HONEST_NULL_VIOLATIONS as _MISP_HONEST_NULL_VIOLATIONS,
+        )
+    except ImportError:
+        # Older metrics_server without the PR-N5 counter — set to None so
+        # the guard below degrades gracefully without breaking the PR-N4
+        # metrics that ARE available.
+        _MISP_HONEST_NULL_VIOLATIONS = None  # type: ignore[assignment]
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
     _MISP_PUSH_PERMANENT_FAILURES = None  # type: ignore[assignment]
     _MISP_BACKOFF_TRIGGERED = None  # type: ignore[assignment]
+    _MISP_HONEST_NULL_VIOLATIONS = None  # type: ignore[assignment]
 
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_honest_null(item: Dict[str, Any], source_hint: Optional[str] = None) -> None:
+    """PR-N5 C7 (Devil's Advocate F5, audit 09) — defensive runtime
+    guard for the PR-M2 honest-NULL invariant.
+
+    **Invariant under guard:** when a source does NOT report
+    ``first_seen`` / ``last_seen``, EdgeGuard stores NULL rather than
+    manufacturing a wall-clock substitute. Manufacturing substitutes
+    would turn ``n.source_reported_first_at`` into a lie — downstream
+    consumers couldn't distinguish "source said so" from "EdgeGuard
+    guessed".
+
+    **What this guard catches:** a future collector (or a future bug
+    in an existing one) that starts coercing a missing source timestamp
+    to ``datetime.now(timezone.utc).isoformat()``. Pre-guard that
+    corruption was invisible in the MISPWriter layer — nodes and edges
+    would just carry a fresh-looking ``source_reported_first_at``
+    indistinguishable from a real claim.
+
+    **Heuristic:** ``first_seen`` / ``last_seen`` values within
+    **±5 minutes of wall-clock NOW** are flagged. Real source claims
+    virtually never land in that window (even an NVD CVE published
+    "today" was published hours-to-days ago by the time we ingest it).
+    False positives are possible (e.g. a MISP attribute created right
+    now and immediately federated to us) but they're rare enough that
+    a WARN is the right disposition, not an exception.
+
+    **Action on violation:** logs a WARNING with structured context +
+    emits the ``edgeguard_misp_honest_null_violation_total`` Prometheus
+    counter so operators can alert on it. Does NOT raise — the point
+    is detection, not breaking a live push.
+    """
+    from datetime import datetime, timezone
+
+    from source_truthful_timestamps import coerce_iso
+
+    # ±5-minute window is a heuristic tuned for "this looks wall-clock NOW-ish".
+    # Real source claims are essentially never this fresh.
+    _suspicious_window_sec = 300.0
+    _now_epoch = datetime.now(timezone.utc).timestamp()
+
+    # PR-N5 R2 Bugbot MED (2026-04-21): include ``last_modified`` in
+    # the field list. The downstream chokepoint
+    # ``_apply_source_truthful_timestamps`` reads ``last_modified`` as
+    # an alias for ``last_seen`` (NVD/STIX collectors emit it under
+    # this name) — so a collector that manufactures
+    # ``item["last_modified"] = NOW`` but leaves ``last_seen`` unset
+    # would propagate the wall-clock substitute into the MISP attribute
+    # as ``last_seen`` while bypassing the honest-NULL guard entirely.
+    # Adding ``"last_modified"`` to this loop closes the gap; the WARN
+    # message already templates ``%s=...`` so the violation reports
+    # the field as ``last_modified``, preserving the audit trail.
+    for field in ("first_seen", "last_seen", "last_modified"):
+        raw = item.get(field)
+        if raw is None or raw == "":
+            continue  # honest NULL — the desired case
+        iso = coerce_iso(raw)
+        if not iso:
+            continue  # unparseable, let the existing pathway log
+        try:
+            val_epoch = datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+        except (ValueError, TypeError):
+            continue
+        delta = abs(val_epoch - _now_epoch)
+        if delta <= _suspicious_window_sec:
+            # Looks wall-clock NOW-ish.
+            source = source_hint or item.get("tag") or item.get("source") or "unknown"
+            if isinstance(source, list):
+                source = source[0] if source else "unknown"
+            logger.warning(
+                "[honest-NULL] Item %s=%r within ±%.0fs of wall-clock NOW "
+                "(delta=%.0fs, source=%s, item_type=%s, value=%r). "
+                "This is suspicious — real source claims are rarely that fresh. "
+                "Possible causes: (1) collector manufacturing a NOW() substitute "
+                "(violates PR-M2 honest-NULL invariant); (2) genuine MISP "
+                "attribute federated immediately after creation (rare). "
+                "If (1), check the collector's %s extraction path.",
+                field,
+                iso,
+                _suspicious_window_sec,
+                delta,
+                source,
+                item.get("type") or item.get("indicator_type") or "?",
+                item.get("value") or item.get("cve_id") or item.get("name") or "?",
+                field,
+            )
+            try:
+                # PR-N5 R1 Bugbot LOW (2026-04-21): check the COUNTER
+                # itself for None, not just ``_METRICS_AVAILABLE``. When
+                # the outer ``metrics_server`` import succeeds (PR-N4
+                # counters are present) but the nested PR-N5 counter
+                # import fails (older metrics_server without the new
+                # counter — backward-compat path), ``_METRICS_AVAILABLE``
+                # stays ``True`` while ``_MISP_HONEST_NULL_VIOLATIONS``
+                # stays ``None``. ``None.labels(...)`` raises
+                # AttributeError — the try/except below catches it, but
+                # the DEBUG log fires on EVERY violation (noisy + lies
+                # about the true failure mode). Explicit None check
+                # avoids the exception path entirely in that case.
+                if _MISP_HONEST_NULL_VIOLATIONS is not None:
+                    _MISP_HONEST_NULL_VIOLATIONS.labels(source=str(source), field=field).inc()
+            except Exception as _metric_err:
+                # Same non-silent pattern as the other metric guards.
+                logger.debug(
+                    "honest-NULL violation metric increment failed: %s",
+                    _metric_err,
+                    exc_info=True,
+                )
 
 
 def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str, Any]) -> None:
@@ -101,6 +223,14 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     # source_truthful_timestamps module lives at src/ root; this
     # collector module is under src/collectors/).
     from source_truthful_timestamps import coerce_iso
+
+    # PR-N5 C7 (audit 09): runtime honest-NULL invariant check.
+    # Detects collectors that manufacture wall-clock-NOW substitutes
+    # instead of passing NULL through when the source is silent. See
+    # ``_validate_honest_null`` docstring for heuristic + rationale.
+    # Runs BEFORE the coerce_iso calls below so the raw item state
+    # is observed (the coerce helper could normalize differently).
+    _validate_honest_null(item)
 
     first_seen = coerce_iso(item.get("first_seen"))
     # last_modified (NVD / STIX) is accepted as an alias for last_seen.

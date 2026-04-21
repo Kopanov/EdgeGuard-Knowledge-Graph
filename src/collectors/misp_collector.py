@@ -277,7 +277,21 @@ class MISPCollector:
                     # If this attribute carries a CVE, emit a structured vulnerability node
                     # in addition to (or instead of) a generic indicator.
                     attr_type = attr.get("type", "")
-                    attr_value = attr.get("value", "")
+                    # PR-N5 B4 (Bug Hunter F3, audit 09): defensive
+                    # str-coerce. A buggy MISP relay returning
+                    # ``value: 12345`` (int, not str) would crash the
+                    # next line's ``.lower()`` with AttributeError
+                    # mid-batch, killing the whole event's processing.
+                    #
+                    # PR-N5 R1 Bugbot LOW (2026-04-21): earlier form
+                    # ``str(attr.get("value", "") or "")`` had a latent
+                    # falsy-int bug — ``0 or ""`` evaluates to ``""``
+                    # because ``0`` is falsy, so an integer zero value
+                    # silently became an empty string instead of ``"0"``.
+                    # Explicit ``is not None`` check handles zero / False
+                    # correctly; only None falls to the empty-string path.
+                    _raw_value = attr.get("value")
+                    attr_value = str(_raw_value) if _raw_value is not None else ""
                     if attr_type == "vulnerability" or "cve" in attr_value.lower():
                         cve_val = self.extract_cve(attr_value)
                         if cve_val:

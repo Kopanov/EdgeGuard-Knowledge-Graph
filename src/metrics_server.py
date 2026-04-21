@@ -178,6 +178,24 @@ MISP_PUSH_BACKOFF_TRIGGERED = Counter(
     ["source"],
 )
 
+# PR-N5 C7: honest-NULL invariant violation counter. Fires when
+# MISPWriter's runtime validator spots an incoming item whose
+# ``first_seen`` / ``last_seen`` is suspiciously close to wall-clock
+# NOW (default ±5 min heuristic in ``_validate_honest_null``) —
+# a strong signal that a collector is manufacturing NOW() substitutes
+# instead of honoring the PR-M2 honest-NULL contract. Source-only
+# label keeps cardinality bounded (same reasoning as PR-N4 round 2:
+# ``event_id`` would explode time-series count).
+MISP_HONEST_NULL_VIOLATIONS = Counter(
+    "edgeguard_misp_honest_null_violation_total",
+    "Count of MISPWriter items flagged as violating the honest-NULL "
+    "invariant (first_seen / last_seen within ±5 min of wall-clock NOW, "
+    "a strong proxy for 'collector manufactured a NOW substitute instead "
+    "of passing NULL through'). Non-zero rate on a source indicates the "
+    "collector needs auditing.",
+    ["source", "field"],
+)
+
 MISP_HEALTH = Gauge("edgeguard_misp_health", "MISP health status (1=healthy, 0=unhealthy)", ["check_type"])
 
 # Neo4j metrics
