@@ -92,10 +92,21 @@ try:
         # nested-import graceful-degradation pattern).
         _NEO4J_MERGE_INEFFECTIVE_BATCH = None  # type: ignore[assignment]
 
+    # PR-N15 Fix #2 + #3: batch-permanent-failure counter — increments
+    # when a merge batch fails permanently (retries exhausted on
+    # transient, or non-retryable exception).
+    try:
+        from metrics_server import (
+            NEO4J_BATCH_PERMANENT_FAILURES as _NEO4J_BATCH_PERMANENT_FAILURES,
+        )
+    except ImportError:
+        _NEO4J_BATCH_PERMANENT_FAILURES = None  # type: ignore[assignment]
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
     _NEO4J_MERGE_INEFFECTIVE_BATCH = None  # type: ignore[assignment]
+    _NEO4J_BATCH_PERMANENT_FAILURES = None  # type: ignore[assignment]
 
 
 def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result) -> None:
@@ -210,6 +221,123 @@ def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result
             label,
             source_id,
             _inspect_err,
+            exc_info=True,
+        )
+
+
+def _execute_batch_with_retry(
+    driver,
+    query: str,
+    *,
+    label: str,
+    source_id: str,
+    batch_len: int,
+    query_kwargs: dict,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+):
+    """PR-N15 (2026-04-21 pre-baseline audit Fix #2 + #3): run a batch
+    MERGE with retry-on-transient semantics, inspect result counters,
+    and emit a Prometheus counter on permanent failure.
+
+    Pre-PR-N15, ``merge_indicators_batch`` and ``merge_vulnerabilities_batch``
+    both had a bare ``except Exception: error_count += len(batch)`` that
+    logged an ERROR and silently counted the entire batch as failed.
+    A 5-second Neo4j GC pause or a brief deadlock dropped 1000 nodes
+    per batch with no retry, no dedicated counter, and no operator
+    signal beyond one WARN log line. Over a 730d baseline with ~30
+    sync cycles, thousands of nodes were silently lost.
+
+    This helper:
+
+    1. Retries on transient Neo4j errors (``ServiceUnavailable`` /
+       ``TransientError`` / ``DatabaseError`` with a retryable ``.code`` —
+       via the same classifier used by the ``retry_with_backoff``
+       decorator) with exponential backoff (2s, 4s, 8s).
+    2. Runs ``_record_batch_counters`` on success to catch silent-write
+       failures (PR-N9 B6) — same observability as before.
+    3. On PERMANENT failure (retries exhausted, or non-retryable
+       exception), emits ``edgeguard_neo4j_batch_permanent_failure_total``
+       so operators can alert on silent data loss.
+
+    Returns: ``(ok: bool, rows_attempted: int)``. On success ``ok=True``
+    and ``rows_attempted = batch_len``. On permanent failure ``ok=False``
+    and the caller counts ``batch_len`` as errors.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_retries + 1):
+        try:
+            with driver.session() as session:
+                result = session.run(query, timeout=NEO4J_READ_TIMEOUT, **query_kwargs)
+                # B6 counter inspection (PR-N9) — done while result is open.
+                _record_batch_counters(
+                    label=label,
+                    source_id=source_id,
+                    batch_len=batch_len,
+                    result=result,
+                )
+            return True, batch_len
+        except Exception as e:  # noqa: BLE001 — retry classifier below
+            last_exc = e
+            if not _is_retryable_neo4j_error(e):
+                # Non-retryable — log + emit permanent-failure counter + stop retrying.
+                logger.error(
+                    "[BATCH-PERMANENT-FAILURE] label=%s source=%s batch_len=%d — non-retryable error %s: %s",
+                    label,
+                    source_id,
+                    batch_len,
+                    type(e).__name__,
+                    e,
+                )
+                _emit_batch_permanent_failure(label=label, source_id=source_id, reason="non_retryable")
+                return False, batch_len
+            if attempt >= max_retries:
+                break
+            delay = base_delay * (2**attempt)
+            code = getattr(e, "code", "")
+            logger.warning(
+                "[BATCH-RETRY] label=%s source=%s batch_len=%d attempt=%d/%d: %s%s — retrying in %.1fs",
+                label,
+                source_id,
+                batch_len,
+                attempt + 1,
+                max_retries + 1,
+                type(e).__name__,
+                f" [{code}]" if code else "",
+                delay,
+            )
+            time.sleep(delay)
+    # Retries exhausted.
+    logger.error(
+        "[BATCH-PERMANENT-FAILURE] label=%s source=%s batch_len=%d — "
+        "transient error persisted after %d retries: %s: %s",
+        label,
+        source_id,
+        batch_len,
+        max_retries,
+        type(last_exc).__name__ if last_exc else "UNKNOWN",
+        last_exc,
+    )
+    _emit_batch_permanent_failure(label=label, source_id=source_id, reason="retries_exhausted")
+    return False, batch_len
+
+
+def _emit_batch_permanent_failure(*, label: str, source_id: str, reason: str) -> None:
+    """PR-N15: emit the permanent-failure counter. None-guarded
+    (mirrors PR-N5 R1 pattern). Reason is a bounded enum
+    (``non_retryable`` / ``retries_exhausted``)."""
+    if _NEO4J_BATCH_PERMANENT_FAILURES is None:
+        return
+    try:
+        _NEO4J_BATCH_PERMANENT_FAILURES.labels(
+            label=label,
+            source=source_id,
+            reason=reason,
+        ).inc()
+    except Exception as _metric_err:
+        logger.debug(
+            "batch-permanent-failure metric increment failed: %s",
+            _metric_err,
             exc_info=True,
         )
 
@@ -683,8 +811,70 @@ def resolve_vulnerability_cve_id(item: Dict[str, Any]) -> Optional[str]:
 SOURCES = source_registry.to_neo4j_sources_dict()
 
 
+# PR-N15 (2026-04-21 pre-baseline audit Fix #1): Neo4j error codes that
+# the server reports as TransientError OR as DatabaseError-wrapped
+# transient conditions. The driver classifies most `Neo.TransientError.*`
+# into the ``neo4j_exceptions.TransientError`` Python class, BUT some
+# deadlock / lock-acquisition scenarios surface as
+# ``neo4j_exceptions.DatabaseError`` with a Neo.TransientError.* code,
+# because the server wraps the transient error into
+# ``Neo.DatabaseError.Statement.ExecutionFailed``.
+#
+# Pre-PR-N15, every ``DatabaseError`` was treated as terminal (returned
+# ``[]`` in ``run()``; counted as error_count in merge batches). Those
+# write paths silently dropped rows on every Neo4j GC pause >5s or
+# concurrent writer deadlock. Post-PR-N15 the decorator below matches
+# on ``.code`` substrings so the retry path catches them.
+#
+# Reference: https://neo4j.com/docs/status-codes/current/errors/
+_RETRYABLE_NEO4J_CODE_SUBSTRINGS = (
+    "Neo.TransientError",  # Any transient — lock timeout, deadlock, memory pool exhausted
+    "Neo.ClientError.Transaction.DeadlockDetected",  # Some drivers surface as ClientError
+    "Transaction.LockClientStopped",
+    "Transaction.LockAcquisitionTimeout",
+    "Transaction.Terminated",
+    "General.DatabaseUnavailable",
+    "Cluster.NotALeader",
+)
+
+
+def _is_retryable_neo4j_error(exc: BaseException) -> bool:
+    """PR-N15 Fix #1: classify a Neo4j exception as retryable or
+    terminal by inspecting its ``.code`` attribute.
+
+    Returns True for retryable conditions (deadlocks, lock-acquisition
+    timeouts, cluster failover, temporary memory exhaustion). False
+    for truly terminal errors (schema / constraint / syntax).
+
+    Used by the retry decorator AND by the merge-batch exception
+    handlers — same classification both places so the retry decision
+    is consistent across layers.
+    """
+    # Transient classes are always retryable.
+    if isinstance(exc, (neo4j_exceptions.ServiceUnavailable, neo4j_exceptions.TransientError)):
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    # DatabaseError / ClientError subclasses: inspect the .code attribute.
+    code = getattr(exc, "code", None) or ""
+    if not code:
+        return False
+    for marker in _RETRYABLE_NEO4J_CODE_SUBSTRINGS:
+        if marker in code:
+            return True
+    return False
+
+
 def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY_DELAY_BASE):
-    """Decorator for retry logic with exponential backoff."""
+    """Decorator for retry logic with exponential backoff.
+
+    PR-N15 (2026-04-21 pre-baseline audit Fix #1): also retries
+    ``DatabaseError``-wrapped transient errors via the
+    ``_is_retryable_neo4j_error`` classifier. Pre-PR-N15 a
+    ``Neo.DatabaseError.Statement.ExecutionFailed`` wrapping a deadlock
+    hit the generic ``except Exception`` and re-raised as terminal —
+    no retry, caller saw a failure it should have retried.
+    """
 
     def decorator(func):
         @wraps(func)
@@ -693,23 +883,28 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
             for attempt in range(max_retries + 1):  # +1: first attempt + max_retries retries (matches collector_utils)
                 try:
                     return func(*args, **kwargs)
-                except (
-                    neo4j_exceptions.ServiceUnavailable,
-                    neo4j_exceptions.TransientError,
-                    ConnectionError,  # includes ConnectionRefusedError, ConnectionResetError, BrokenPipeError
-                    TimeoutError,
-                ) as e:
-                    last_exception = e
-                    if attempt >= max_retries:
-                        break  # exhausted all retries
-                    delay = base_delay * (2**attempt)
-                    logger.warning(
-                        f"{func.__name__} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. Retrying in {delay}s..."
-                    )
-                    time.sleep(delay)
                 except Exception as e:
-                    # Non-retryable exception
-                    logger.error(f"{func.__name__} failed with non-retryable error: {e}")
+                    # PR-N15: classify retryable vs terminal uniformly
+                    # via ``_is_retryable_neo4j_error``. Covers
+                    # ServiceUnavailable / TransientError / ConnectionError /
+                    # TimeoutError (pre-PR-N15 behaviour) AND
+                    # DatabaseError-wrapped transient errors via .code
+                    # inspection (new in PR-N15).
+                    if _is_retryable_neo4j_error(e):
+                        last_exception = e
+                        if attempt >= max_retries:
+                            break  # exhausted all retries
+                        delay = base_delay * (2**attempt)
+                        code = getattr(e, "code", "")
+                        logger.warning(
+                            f"{func.__name__} failed (attempt {attempt + 1}/{max_retries + 1}): "
+                            f"{type(e).__name__}{f' [{code}]' if code else ''}: {e}. "
+                            f"Retrying in {delay}s..."
+                        )
+                        time.sleep(delay)
+                        continue
+                    # Non-retryable.
+                    logger.error(f"{func.__name__} failed with non-retryable error: {type(e).__name__}: {e}")
                     raise
 
             logger.error(f"{func.__name__} failed after {max_retries + 1} attempts")
@@ -928,9 +1123,29 @@ class Neo4jClient:
                 NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
             raise  # let @retry_with_backoff handle transient errors
         except neo4j_exceptions.DatabaseError as e:
+            # PR-N15 (2026-04-21 pre-baseline audit Fix #1): distinguish
+            # retryable DatabaseError subtypes from terminal ones via
+            # the shared ``_is_retryable_neo4j_error`` classifier. Pre-
+            # PR-N15, every DatabaseError was swallowed (returned ``[]``)
+            # — including ``Neo.DatabaseError.Statement.ExecutionFailed``
+            # which wraps deadlocks and lock-acquisition timeouts. At
+            # 730d baseline scale with concurrent build_relationships
+            # and enrichment writers, that silent-zero-edge pattern was
+            # guaranteed to fire (same class as PR-N7 deadlock-bug but
+            # in a different layer). Retryable → re-raise so the
+            # decorator retries; terminal → return [] (schema / constraint
+            # / syntax are never fixed by retrying).
             if _METRICS_AVAILABLE:
                 NEO4J_QUERIES.labels(query_type="cypher", status="error").inc()
-            logger.error(f"Neo4j database error: {type(e).__name__}: {e}")
+            if _is_retryable_neo4j_error(e):
+                code = getattr(e, "code", "")
+                logger.warning(
+                    "Neo4j DatabaseError classified as retryable (code=%r); re-raising for retry decorator. Error: %s",
+                    code,
+                    e,
+                )
+                raise
+            logger.error(f"Neo4j database error (terminal): {type(e).__name__}: {e}")
             return []
 
     @retry_with_backoff(max_retries=3)
@@ -2656,36 +2871,41 @@ class Neo4jClient:
                         ELSE r.source_reported_last_at END
                 """
 
-                with self.driver.session() as session:
-                    result = session.run(
-                        query,
-                        batch=batch_data,
-                        source_node_uuid=source_node_uuid,
-                        timeout=NEO4J_READ_TIMEOUT,
-                    )
-                    # PR-N9 B6 (audit 09 Prod Readiness #2, 2026-04-21):
-                    # inspect the result counters to detect silent-write
-                    # failures. Pre-fix we used ``len(batch)`` as the
-                    # success_count even when Neo4j rejected every row
-                    # (e.g. constraint violation, schema mismatch, wrong
-                    # label). The SOURCED_FROM inner MATCH could fail
-                    # silently if the Source node was missing (PR (S5)
-                    # documented this hazard) — the ON CREATE edge never
-                    # ran, but the outer success_count lied. This
-                    # mirrors the PR-N4 permanent-failure metric that
-                    # the MISPWriter side now emits.
-                    _record_batch_counters(
-                        label="Indicator",
-                        source_id=source_id,
-                        batch_len=len(batch),
-                        result=result,
-                    )
-
-                success_count += len(batch)
-                logger.debug(f"Batch merged {len(batch)} indicators")
+                # PR-N15 (2026-04-21 pre-baseline audit Fix #2): run
+                # the batch MERGE via ``_execute_batch_with_retry`` so
+                # transient errors (Neo4j GC pause / deadlock / lock
+                # acquisition timeout / leader election) get retried
+                # with exponential backoff instead of being silently
+                # counted as error_count. Permanent failures emit the
+                # ``edgeguard_neo4j_batch_permanent_failure_total``
+                # Prometheus counter so operators can alert on
+                # silent-data-loss in progress. PR-N9 B6 counter
+                # inspection is still run inside the helper.
+                ok, rows_attempted = _execute_batch_with_retry(
+                    self.driver,
+                    query,
+                    label="Indicator",
+                    source_id=source_id,
+                    batch_len=len(batch),
+                    query_kwargs={
+                        "batch": batch_data,
+                        "source_node_uuid": source_node_uuid,
+                    },
+                )
+                if ok:
+                    success_count += rows_attempted
+                    logger.debug(f"Batch merged {rows_attempted} indicators")
+                else:
+                    error_count += rows_attempted
 
             except Exception as e:
-                logger.error(f"Batch merge error: {e}")
+                # Per-batch unexpected (e.g. Cypher-string construction
+                # bug above the retry helper). Keep the wide catch to
+                # preserve the invariant that one bad batch doesn't
+                # crash the whole sync; ALSO emit the permanent-failure
+                # counter so the operator sees it.
+                logger.error(f"Batch merge error (outer): {type(e).__name__}: {e}")
+                _emit_batch_permanent_failure(label="Indicator", source_id=source_id, reason="non_retryable")
                 error_count += len(batch)
 
         return success_count, error_count
@@ -2876,27 +3096,32 @@ class Neo4jClient:
                         ELSE r.source_reported_last_at END
                 """
 
-                with self.driver.session() as session:
-                    result = session.run(
-                        query,
-                        batch=batch_data,
-                        source_node_uuid=source_node_uuid,
-                        timeout=NEO4J_READ_TIMEOUT,
-                    )
-                    # PR-N9 B6: counter inspection (see
-                    # merge_indicators_batch for rationale).
-                    _record_batch_counters(
-                        label="Vulnerability",
-                        source_id=source_id,
-                        batch_len=len(batch_data),
-                        result=result,
-                    )
-
-                success_count += len(batch_data)
-                error_count += skipped
+                # PR-N15 Fix #3: mirror merge_indicators_batch — retry
+                # transient errors + emit permanent-failure counter.
+                # See merge_indicators_batch above for full rationale.
+                ok, rows_attempted = _execute_batch_with_retry(
+                    self.driver,
+                    query,
+                    label="Vulnerability",
+                    source_id=source_id,
+                    batch_len=len(batch_data),
+                    query_kwargs={
+                        "batch": batch_data,
+                        "source_node_uuid": source_node_uuid,
+                    },
+                )
+                if ok:
+                    success_count += rows_attempted
+                    error_count += skipped
+                else:
+                    error_count += rows_attempted + skipped
 
             except Exception as e:
-                logger.error(f"Batch vulnerability merge error: {e}")
+                # Outer unexpected (construction bug). Same invariant
+                # as indicators batch: don't crash the whole sync, but
+                # emit the counter so operators see it.
+                logger.error(f"Batch vulnerability merge error (outer): {type(e).__name__}: {e}")
+                _emit_batch_permanent_failure(label="Vulnerability", source_id=source_id, reason="non_retryable")
                 error_count += len(batch)
 
         return success_count, error_count

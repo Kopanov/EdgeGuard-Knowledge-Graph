@@ -363,6 +363,33 @@ NEO4J_MERGE_INEFFECTIVE_BATCH = Counter(
     ["label", "source"],
 )
 
+# PR-N15 (2026-04-21 pre-baseline audit Fix #2 + #3): permanent-failure
+# counter for ``merge_indicators_batch`` / ``merge_vulnerabilities_batch``
+# batches that either (a) raised a non-retryable exception or (b)
+# exhausted the retry budget on transient errors. Pre-PR-N15 these
+# counted as anonymous error_count + one WARN log line — no metric,
+# so Prometheus alerting was blind to silent data loss.
+#
+# Over a 730d baseline with ~30 sync cycles, a 5-second Neo4j GC pause
+# mid-NVD-sync dropped 1000 CVEs per batch: thousands of nodes silently
+# lost without any operator signal beyond post-hoc log greps. This
+# counter makes that failure mode alertable.
+#
+# Labels are bounded: ``label`` is a static node label (Indicator /
+# Vulnerability), ``source`` is the per-source identifier (otx / nvd
+# / …), ``reason`` is the enum {``non_retryable``, ``retries_exhausted``}.
+# Alerting (intended in a follow-up alert PR):
+# ``rate(edgeguard_neo4j_batch_permanent_failure_total[5m]) > 0`` for
+# 5 min = silent-data-loss in progress — pause ingest + investigate.
+NEO4J_BATCH_PERMANENT_FAILURES = Counter(
+    "edgeguard_neo4j_batch_permanent_failure_total",
+    "Neo4j MERGE batches that failed permanently after retry exhaustion "
+    "(retries_exhausted) or non-retryable exception (non_retryable). "
+    "Each increment = one batch (up to BATCH_SIZE items) lost. "
+    "See docs/RUNBOOK.md § Neo4j silent-write failures.",
+    ["label", "source", "reason"],
+)
+
 # Pipeline metrics
 PIPELINE_DURATION = Histogram(
     "edgeguard_pipeline_duration_seconds",
