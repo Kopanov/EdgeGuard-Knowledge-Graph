@@ -152,21 +152,34 @@ Graph                                                  → STIX 2.1 SRO
 (Indicator)  -[:USES_TECHNIQUE]->(Technique)           → relationship { source_ref: indicator,      relationship_type: "indicates", target_ref: attack-pattern }
 ```
 
-**Backward compatibility during rollout:** `create_misp_relationships_batch` in `src/neo4j_client.py` still accepts `rel_type="USES"` when `to_type="Technique"` and routes it to the correct specialized type based on `from_type`. Partners with code that emits the legacy value will keep working.
+**Backward compatibility:** **Removed in PR-N1 (2026-04).** Earlier
+versions of `create_misp_relationships_batch` in `src/neo4j_client.py`
+accepted `rel_type="USES"` when `to_type="Technique"` and routed it to
+the specialized type based on `from_type`. That shim is gone — verified
+no caller anywhere in `src/`, `dags/`, or `tests/` emits
+`rel_type="USES"`. Any partner code still emitting the legacy value
+will be silently dropped (the row never matches any of the specialized
+buckets), so check your call sites before upgrading. Same goes for
+read paths — the alternation `[:EMPLOYS_TECHNIQUE|USES]` was removed
+from the alert-enrichment query in PR-N1.
 
-**Migration:** *Pre-release framework — no production graph exists, so no migration script is shipped.* The first baseline run already writes the specialized edge types (`EMPLOYS_TECHNIQUE` for actor/campaign, `IMPLEMENTS_TECHNIQUE` for malware/tool); a fresh baseline rerun heals any dev/test graph that still carries the legacy generic `USES` edges.
+**Migration:** *Pre-release framework — no production graph exists, so
+no migration script is shipped.* The first baseline run already writes
+the specialized edge types (`EMPLOYS_TECHNIQUE` for actor/campaign,
+`IMPLEMENTS_TECHNIQUE` for malware/tool); a fresh baseline rerun heals
+any dev/test graph that still carries the legacy generic `USES` edges.
 
 **What to update in your code:**
 
 ```cypher
-// Before (still works due to backward-compat read path, but write path is deprecated):
+// Before (no longer supported as of PR-N1):
 MATCH (a:ThreatActor)-[:USES]->(t:Technique) RETURN a, t
 
-// After (recommended — reads both attribution and capability explicitly):
+// After (specialized — reads attribution OR capability OR observation):
 MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique) RETURN a, t
 MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t:Technique)  RETURN m, t
 
-// If you want both specialized types in one query:
+// If you want all three specialized types in one query:
 MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Technique)
 RETURN n, type(r) AS rel, t
 ```

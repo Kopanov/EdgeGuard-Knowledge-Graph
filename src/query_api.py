@@ -677,10 +677,12 @@ async def graph_explore(
                     zone_ind = "AND $zone IN coalesce(i.zone, [])"
 
                 # Malware → Indicator edges are INDICATES (dropped/observed
-                # artifact) or DROPS (file drop). The legacy filter included
-                # "USES" which was incorrect — USES here was previously
-                # (Actor/Malware)→Technique, not Malware→Indicator, so any
-                # match was unreachable. Kept the two valid types.
+                # artifact) or DROPS (file drop). The pre-2026-04 filter
+                # included a generic "USES" type which was unreachable here
+                # — USES used to mean (Actor/Malware) → Technique, not
+                # Malware → Indicator. The generic USES edge type was
+                # retired entirely in PR #41 / PR-N1; only the two valid
+                # Malware → Indicator edge types remain.
                 cypher = f"""
                     MATCH (m:Malware)-[r]->(i:Indicator)
                     WHERE type(r) IN ['INDICATES', 'DROPS'] AND m.edgeguard_managed = true

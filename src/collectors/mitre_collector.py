@@ -271,9 +271,12 @@ class MITRECollector:
                 self.relationships = relationships
                 logger.info(f"   → Extracted {len(relationships)} relationships (no cap)")
 
-            # Build lookup: actor_name → [technique_mitre_ids] from explicit USES relationships.
-            # Used to populate uses_techniques on ThreatActor nodes so build_relationships.py
-            # can create ThreatActor -[:USES]-> Technique without co-occurrence guesswork.
+            # Build lookup: actor_name → [technique_mitre_ids] from explicit MITRE STIX
+            # ``uses`` relationships. Used to populate uses_techniques on ThreatActor
+            # nodes so build_relationships.py can create
+            # ThreatActor -[:EMPLOYS_TECHNIQUE]-> Technique without co-occurrence
+            # guesswork. (Edge type renamed from generic ``USES`` to specialized
+            # ``EMPLOYS_TECHNIQUE`` in 2026-04 PR #41 — see docs/KNOWLEDGE_GRAPH.md.)
             _actor_uses: dict = {}
             _malware_uses: dict = {}
             _tool_uses: dict = {}
@@ -397,9 +400,12 @@ class MITRECollector:
                             "first_seen": obj.get("created"),
                             "last_seen": obj.get("modified"),
                             "confidence_score": 0.7,
-                            # Explicit technique list from MITRE ATT&CK USES relationships.
-                            # Stored as a node property so build_relationships.py can create
-                            # ThreatActor -[:USES]-> Technique without co-occurrence guesswork.
+                            # Explicit technique list from MITRE ATT&CK ``uses``
+                            # STIX relationships. Stored as a node property so
+                            # build_relationships.py can create
+                            # ThreatActor -[:EMPLOYS_TECHNIQUE]-> Technique
+                            # without co-occurrence guesswork. (Edge type renamed
+                            # from generic ``USES`` in 2026-04 PR #41.)
                             "uses_techniques": _actor_uses.get(actor_name, []),
                         }
                     )
