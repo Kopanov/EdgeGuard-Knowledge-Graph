@@ -277,7 +277,13 @@ class MISPCollector:
                     # If this attribute carries a CVE, emit a structured vulnerability node
                     # in addition to (or instead of) a generic indicator.
                     attr_type = attr.get("type", "")
-                    attr_value = attr.get("value", "")
+                    # PR-N5 B4 (Bug Hunter F3, audit 09): defensive
+                    # str-coerce. A buggy MISP relay returning
+                    # ``value: 12345`` (int, not str) would crash the
+                    # next line's ``.lower()`` with AttributeError
+                    # mid-batch, killing the whole event's processing.
+                    # Also handles None silently (``"" or ""`` is "").
+                    attr_value = str(attr.get("value", "") or "")
                     if attr_type == "vulnerability" or "cve" in attr_value.lower():
                         cve_val = self.extract_cve(attr_value)
                         if cve_val:

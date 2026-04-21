@@ -1406,7 +1406,14 @@ class MISPToNeo4jSync:
         from datetime import datetime, timezone
 
         attr_type = attr.get("type", "")
-        value = attr.get("value", "")
+        # PR-N5 B4 (Bug Hunter F3, audit 09): defensive str-coerce.
+        # Downstream this ``value`` hits ``re.match()`` (line ~1595)
+        # and is used as the ``value`` field on STIX SCOs (ipv4-addr /
+        # domain-name / url / file). An int-typed MISP value would
+        # crash ``re.match`` with TypeError and produce schema-invalid
+        # STIX bundles. ``str(... or "")`` handles both None and
+        # non-string types in one idiom.
+        value = str(attr.get("value", "") or "")
         attr_uuid = attr.get("uuid", str(uuid.uuid4()))
 
         # PR-M2 §4-F3: build the timestamp envelope cleanly, separating

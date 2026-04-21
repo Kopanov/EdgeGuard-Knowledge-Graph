@@ -179,6 +179,42 @@ def _checkpoint_lock_path() -> Path:
     return CHECKPOINT_FILE.with_suffix(".lock")
 
 
+def _atomic_acquire_lock_fd(lock_path: Path) -> int:
+    """Atomically create-or-open the advisory lock file and return its fd.
+
+    PR-N5 B5 (Bug Hunter F10, audit 09): the prior pattern was:
+
+        lock_path.touch(exist_ok=True)   # step 1: ensure file exists
+        with open(lock_path, "r") as lf: # step 2: open for flock
+            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+
+    Between steps 1 and 2, an aggressive cleanup process (systemd-tmpfiles,
+    tmpwatch, a ``find /tmp -mtime +N -delete`` cron, or a disk-pressure
+    GC) can unlink the file. ``open("r")`` on the vanished file then
+    raises ``FileNotFoundError``, aborting the checkpoint update — and
+    on retry the same race recurs. Worse, if two concurrent writers
+    both get past the ``touch`` but one gets the file unlinked and the
+    other opens the newly-recreated file, they're flocking DIFFERENT
+    inodes and the "exclusive" lock isn't exclusive at all.
+
+    ``os.open(path, O_CREAT | O_RDWR, 0o644)`` is atomic: the kernel
+    create-or-open step happens under the filesystem's inode lock.
+    Since we're only using the fd for ``fcntl.flock`` (advisory), we
+    don't need to write anything to it; 0-byte lock file is fine.
+
+    The caller is responsible for ``os.close(fd)`` — that releases the
+    flock atomically.  Normal pattern:
+
+        fd = _atomic_acquire_lock_fd(lock_path)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            ...critical section...
+        finally:
+            os.close(fd)  # also releases the flock
+    """
+    return os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+
+
 def update_source_checkpoint(
     source: str,
     page: int = None,
@@ -196,9 +232,11 @@ def update_source_checkpoint(
     ``nvd_window_idx``, ``nvd_start_index``).
     """
     lock_path = _checkpoint_lock_path()
-    lock_path.touch(exist_ok=True)
-    with open(lock_path, "r") as lf:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    # PR-N5 B5: atomic create-or-open (see _atomic_acquire_lock_fd
+    # docstring).  ``os.close(fd)`` in the finally releases the flock.
+    fd = _atomic_acquire_lock_fd(lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         checkpoints = load_checkpoint()
 
         if source not in checkpoints:
@@ -233,6 +271,8 @@ def update_source_checkpoint(
 
         entry["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_checkpoint(checkpoints)
+    finally:
+        os.close(fd)
 
 
 def get_source_incremental(source: str) -> dict:
@@ -251,9 +291,11 @@ def update_source_incremental(source: str, **kwargs) -> None:
     Uses the same advisory file lock as update_source_checkpoint.
     """
     lock_path = _checkpoint_lock_path()
-    lock_path.touch(exist_ok=True)
-    with open(lock_path, "r") as lf:
-        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+    # PR-N5 B5: atomic create-or-open (see _atomic_acquire_lock_fd
+    # docstring).  ``os.close(fd)`` in the finally releases the flock.
+    fd = _atomic_acquire_lock_fd(lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         checkpoints = load_checkpoint()
         if source not in checkpoints:
             checkpoints[source] = {
@@ -267,6 +309,8 @@ def update_source_incremental(source: str, **kwargs) -> None:
         inc.update({k: v for k, v in kwargs.items() if v is not None})
         entry["updated_at"] = datetime.now(timezone.utc).isoformat()
         save_checkpoint(checkpoints)
+    finally:
+        os.close(fd)
 
 
 def clear_checkpoint(source: str = None, *, include_incremental: bool = False) -> None:

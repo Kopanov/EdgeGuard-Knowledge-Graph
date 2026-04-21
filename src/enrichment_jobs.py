@@ -294,9 +294,26 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                  min(coalesce(i_source_first, i.first_imported_at)) AS first_seen,
                  max(coalesce(i_source_last,  i.last_updated))      AS last_seen
             WHERE size(malware_list) > 0 AND indicator_total > 0
+            // PR-N5 C5 (Devil's Advocate F3, audit 09): deterministic
+            // zone ordering. ``apoc.coll.toSet()`` dedupes but preserves
+            // the INSERTION order of its input, which here comes from
+            // ``reduce()`` iterating ``all_indicators`` in the order
+            // ``collect(DISTINCT i)`` returned them — a Neo4j-internal
+            // iteration order that's non-deterministic across runs.
+            // Net: ``c.zone`` on the same logical campaign would come
+            // out ``["healthcare","energy"]`` one run and
+            // ``["energy","healthcare"]`` the next — same set, different
+            // list. Downstream diff tooling (Neo4j MERGE detect-change,
+            // STIX/GraphQL serialization) would flag the node as "updated"
+            // on every enrichment run even when nothing semantically changed,
+            // and dashboards/queries doing ``c.zone[0]`` would see the
+            // "primary" zone flicker. Wrapping in ``apoc.coll.sort()``
+            // pins the list to a stable alphabetical order.
             WITH a, malware_list, indicator_total, first_seen, last_seen,
-                 apoc.coll.toSet(
-                     reduce(z=[], ind IN all_indicators | z + coalesce(ind.zone, []))
+                 apoc.coll.sort(
+                     apoc.coll.toSet(
+                         reduce(z=[], ind IN all_indicators | z + coalesce(ind.zone, []))
+                     )
                  ) AS all_zones
             MERGE (c:Campaign {{name: a.name + ' Campaign'}})
             ON CREATE SET c.created_at = datetime(),
