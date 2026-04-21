@@ -34,7 +34,12 @@ except ImportError:
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
 import source_registry  # noqa: E402  — single-source-of-truth for SOURCES dict (chip 5a refactor)
-from node_identity import canonicalize_merge_key, compute_node_uuid, edge_endpoint_uuids  # noqa: E402
+from node_identity import (  # noqa: E402
+    canonicalize_merge_key,
+    compute_node_uuid,
+    edge_endpoint_uuids,
+    is_placeholder_name,
+)
 from query_pause import query_pause  # noqa: E402
 
 # Configure logging
@@ -151,6 +156,45 @@ def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result
             _inspect_err,
             exc_info=True,
         )
+
+
+def _confidence_respect_calibrator(value) -> str:
+    """PR-N10 (7-agent audit Cross-Checker BLOCK 1, 2026-04-21): return
+    a Cypher ``CASE`` expression for ``r.confidence_score`` writes that
+    respects the calibrator's demotion stamp.
+
+    Background: PR-N8 added a calibrator-respect guard to Q9 in
+    ``build_relationships.py:817`` so Q9's max-wins floor doesn't
+    re-inflate calibrator-demoted edges (0.30 → 0.8). But the cross-
+    checker audit found that 6 ``create_*_relationship`` helpers in
+    this module + ``create_misp_relationships_batch._set_clause``
+    ALSO unconditionally SET ``r.confidence_score``, undoing the
+    calibrator on every sync. The flap was bidirectional:
+
+        Enrichment  → calibrator sets 0.30 + r.calibrated_at
+        Next sync   → create_*_relationship UNCONDITIONALLY sets 0.7
+                      (or 0.5, 0.6, 1.0 depending on helper)
+                      → calibrator's work erased
+
+    This helper generates the same CASE pattern Q9 uses, so a SET like
+
+        SET r.confidence_score = 0.7
+
+    becomes
+
+        SET r.confidence_score = CASE
+            WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score
+            ELSE 0.7
+        END
+
+    Usage in an f-string Cypher template:
+
+        f"SET r.confidence_score = {_confidence_respect_calibrator(0.7)}"
+
+    Accepts numeric literals or Cypher expressions (e.g. the ``$conf``
+    parameter in the batched `_set_clause` path).
+    """
+    return f"CASE WHEN r.calibrated_at IS NOT NULL THEN r.confidence_score ELSE {value} END"
 
 
 # Configuration constants
@@ -1790,8 +1834,42 @@ class Neo4jClient:
         original Cypher-side case-sensitive MERGE was the only thing
         creating duplicates). Operators who relied on display case can
         recover the variant strings from ``n.aliases[]``.
+
+        PR-N10 (2026-04-21 7-agent audit Bug Hunter P1, Red Team #1):
+        reject MERGE when ``name`` canonicalizes to a placeholder
+        sentinel like "unknown", "Unknown malware", "N/A", "none", etc.
+        Three failure modes pre-fix:
+          (1) Feeds emitting default ``"unknown"`` (VT fallback, OTX
+              pulse-author fallback, MISPCollector meta-category
+              fallback, ThreatFox malware_printable) create a single
+              ``Malware{name:"unknown"}`` node. Q9 then links every
+              Indicator with family="unknown" to it.
+          (2) A compromised MISP peer (or low-privilege MISP user)
+              creates ``Malware{name:"unknown", attributed_to:"APT29"}``.
+              Q9 → thousands of false INDICATES; Q2 → false ATTRIBUTED_TO
+              edge to real APT29 ThreatActor. Adversarial attribution.
+          (3) ``build_campaign_nodes`` treats the placeholder-"unknown"
+              Malware as a campaign anchor → false campaign absorbs
+              indicators from dozens of unrelated threats.
+        Defense-in-depth: Q2/Q9 Cypher WHERE also filter placeholders.
         """
-        key_props = canonicalize_merge_key("Malware", {"name": data.get("name")})
+        # PR-N10: reject placeholder names at ingest. Canonicalization
+        # (NFC + strip + lower) happens inside is_placeholder_name so
+        # "Unknown", "UNKNOWN", "  unknown  " all normalize identically.
+        raw_name = data.get("name")
+        if is_placeholder_name(raw_name):
+            logger.warning(
+                "[MERGE-REJECT] Malware name=%r is a placeholder sentinel — "
+                "skipping MERGE. Source=%s. This is defense against feeds "
+                "emitting 'unknown'/'N/A'/'Generic' as default names and "
+                "against adversarial MISP attribution hijack (audit Bug "
+                "Hunter P1, Red Team #1). See node_identity."
+                "_REJECTED_PLACEHOLDER_NAMES for the full list.",
+                raw_name,
+                source_id,
+            )
+            return False
+        key_props = canonicalize_merge_key("Malware", {"name": raw_name})
         # Store malware types and aliases on the node for easier querying
         malware_types = data.get("malware_types", [])
         aliases = data.get("aliases", [])
@@ -1817,8 +1895,23 @@ class Neo4jClient:
         actor-rename problem — e.g. APT29 → Cozy Bear → Midnight Blizzard
         — that's Tier A A1 and needs an alias-graph resolution pass,
         not just casing.)
+
+        PR-N10: same placeholder-name reject as merge_malware. See that
+        function's docstring for the full rationale. Without this guard,
+        ``ThreatActor{name:"unknown"}`` becomes a false-hub to every
+        Malware whose attributed_to is "unknown" / "unspecified" / etc.
         """
-        key_props = canonicalize_merge_key("ThreatActor", {"name": data.get("name")})
+        raw_name = data.get("name")
+        if is_placeholder_name(raw_name):
+            logger.warning(
+                "[MERGE-REJECT] ThreatActor name=%r is a placeholder sentinel — "
+                "skipping MERGE. Source=%s. See merge_malware docstring for "
+                "rationale (PR-N10 audit Bug Hunter P3, Red Team #2).",
+                raw_name,
+                source_id,
+            )
+            return False
+        key_props = canonicalize_merge_key("ThreatActor", {"name": raw_name})
         aliases = data.get("aliases", [])
         description = data.get("description", "")
         # uses_techniques: list of MITRE technique IDs this actor explicitly uses,
@@ -2523,7 +2616,7 @@ class Neo4jClient:
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.7,
+            r.confidence_score = {_confidence_respect_calibrator(0.7)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, a.uuid),
@@ -2573,7 +2666,7 @@ class Neo4jClient:
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.7,
+            r.confidence_score = {_confidence_respect_calibrator(0.7)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, m.uuid),
@@ -2636,7 +2729,7 @@ class Neo4jClient:
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.5,
+            r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -2649,7 +2742,7 @@ class Neo4jClient:
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.5,
+            r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -2704,7 +2797,7 @@ class Neo4jClient:
         MERGE (i)-[r:INDICATES]->(m)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.6,
+            r.confidence_score = {_confidence_respect_calibrator(0.6)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -2770,7 +2863,7 @@ class Neo4jClient:
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.5,
+            r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, i.uuid),
@@ -2834,7 +2927,7 @@ class Neo4jClient:
         rel_props = f"""
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
-            r.confidence_score = 0.5,
+            r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
             r.src_uuid = coalesce(r.src_uuid, v.uuid),
@@ -3177,10 +3270,18 @@ class Neo4jClient:
                 "r.misp_event_ids", "row.misp_event_id", require_nonempty_string=True
             )
             extra = f"\n            {extra_set}," if extra_set else ""
+            # PR-N10 (7-agent audit Cross-Checker BLOCK 1): respect the
+            # calibrator's demotion stamp. Pre-fix this batched helper
+            # (the chokepoint for create_misp_relationships_batch, called
+            # on every sync) unconditionally SET ``r.confidence_score =
+            # row.confidence``, undoing the calibrator's 0.30 demotion
+            # the next time the sync ran. Post-fix the CASE preserves
+            # any value written after ``r.calibrated_at`` was stamped.
+            confidence_expr = _confidence_respect_calibrator("row.confidence")
             return (
                 f"SET r.sources = {sources_dedup},\n"
                 f"            r.source_id = row.source_id,\n"
-                f"            r.confidence_score = row.confidence,{extra}\n"
+                f"            r.confidence_score = {confidence_expr},{extra}\n"
                 f"            r.misp_event_ids = {misp_dedup},\n"
                 f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
                 f"            r.updated_at = datetime(),\n"

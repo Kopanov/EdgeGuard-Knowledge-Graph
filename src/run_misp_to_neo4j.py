@@ -2906,6 +2906,14 @@ class MISPToNeo4jSync:
                 item["pulse_tlp"] = otx_meta.get("pulse_tlp", "")
                 item["otx_industries"] = otx_meta.get("otx_industries", [])
                 item["description"] = otx_meta.get("description", "")
+                # PR-N10 Fix #3 (7-agent audit Logic Tracker B1): pull
+                # ``malware_family`` and ``attributed_to`` out of OTX_META
+                # now that misp_writer.py serializes them. Pre-fix, these
+                # were never in OTX_META → ``i.malware_family`` was NULL
+                # on every OTX-sourced Indicator → Q9 INDICATES edges
+                # never fired for OTX items (the biggest source).
+                item["malware_family"] = otx_meta.get("malware_family", "")
+                item["attributed_to"] = otx_meta.get("attributed_to", "")
 
             # Enrich indicator with ThreatFox metadata
             if tf_meta:
@@ -2916,6 +2924,8 @@ class MISPToNeo4jSync:
                 item["threat_type_desc"] = tf_meta.get("threat_type_desc", "")
                 item["malware_family"] = tf_meta.get("malware_family", "")
                 item["reporter"] = tf_meta.get("reporter", "")
+                # PR-N10 Fix #3: mirror OTX_META ``attributed_to`` pull-out.
+                item["attributed_to"] = tf_meta.get("attributed_to", "")
 
             return item, relationships
 

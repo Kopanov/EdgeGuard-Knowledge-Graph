@@ -439,6 +439,78 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
 )
 
 
+# PR-N10 (2026-04-21 7-agent pre-baseline audit): placeholder strings
+# that a threat-intel feed might emit as a "no value" sentinel. If any
+# of these reach a Neo4j MERGE key, two failure modes follow:
+#   (1) Every item whose natural key canonicalizes to a placeholder
+#       cross-joins the single node with that placeholder name, creating
+#       spurious relationships (Bug Hunter P1/P3: an attacker who posts a
+#       Malware{name:"unknown", attributed_to:"APT29"} to MISP gets every
+#       "unknown"-family Indicator attributed to APT29 via Q9 + Q2).
+#   (2) Legitimate feeds producing "unknown" as a default (e.g. OTX
+#       ingest fallback paths at ``run_misp_to_neo4j.py:3107,3128``,
+#       ``neo4j_client.py:4098``) create garbage nodes that pollute the
+#       graph with no provenance.
+#
+# Canonical values (after NFC+strip+lower) that are rejected as identity-
+# carrying names. Kept intentionally small and uncontroversial — everything
+# here is a *structural* no-op, never a meaningful malware/actor name.
+# Additions should be justified by a specific producer site emitting that
+# literal as a placeholder.
+_REJECTED_PLACEHOLDER_NAMES: frozenset = frozenset(
+    {
+        # Generic unknowns (canonicalized: lower + strip)
+        "",  # empty-string already caught by existing filters; included for completeness
+        "unknown",
+        "unknown malware",
+        "unspecified",
+        "undefined",
+        "null",
+        "none",
+        # Format variations
+        "n/a",
+        "na",
+        "not applicable",
+        "not available",
+        "not specified",
+        # Work-in-progress markers from hand-curated feeds
+        "tbd",
+        "tbc",
+        "todo",
+        "fixme",
+        # Symbol-placeholders
+        "-",
+        "--",
+        "---",
+        "..",
+        "...",
+        "?",
+        "??",
+        # Threat-intel-specific catch-alls
+        "generic",
+        "test",
+        "example",
+    }
+)
+
+
+def is_placeholder_name(value: Any) -> bool:
+    """Return True if ``value`` canonicalizes to a known placeholder
+    string. Used by merge_malware / merge_actor / merge_tool to reject
+    MERGE on placeholder natural keys (PR-N10).
+
+    Canonicalization mirrors ``canonicalize_merge_key``'s name handling:
+    NFC-normalize, strip, lowercase. Non-string inputs (None, int, etc.)
+    return True (a non-string is definitionally not a meaningful name,
+    and returning True means "reject the MERGE" — the caller then treats
+    the item as having no valid identity).
+    """
+    if not isinstance(value, str):
+        return True
+    canonical = unicodedata.normalize("NFC", value).strip().lower()
+    return canonical in _REJECTED_PLACEHOLDER_NAMES
+
+
 def canonicalize_merge_key(label: str, key_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of ``key_dict`` with the natural-key field lowercased
     + NFC-normalized + stripped, IF the (label, indicator_type) pair is
@@ -450,6 +522,12 @@ def canonicalize_merge_key(label: str, key_dict: Dict[str, Any]) -> Dict[str, An
     matching what ``compute_node_uuid`` does on its hash input).
 
     Returns a NEW dict — caller's dict is never mutated.
+
+    **Note**: this function does NOT reject placeholder names — that's
+    ``is_placeholder_name``'s job, called separately by merge callers.
+    Keeping the canonicalize/reject responsibilities split lets tests
+    distinguish "key was malformed" from "key was a valid-looking
+    placeholder."
     """
     out: Dict[str, Any] = dict(key_dict)
     canonical_label = (label or "").lower().strip()

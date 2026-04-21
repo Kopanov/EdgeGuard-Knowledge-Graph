@@ -85,25 +85,44 @@ class TestFix1QuoteEscapeBugEliminated:
 
     def test_step2_malware_threatactor_no_unsafe_literal(self):
         """Step 2: Malware → ThreatActor ATTRIBUTED_TO. Outer query
-        must not contain ``<> ''`` anywhere."""
+        must not contain ``<> ''`` anywhere.
+
+        PR-N10 refactored ``_outer`` to a multi-line tuple-of-strings
+        shape (to accommodate the placeholder NOT IN filter inline
+        with the OR branches). AST-extract the full resolved string
+        rather than the source-file line."""
+        import ast
+
         src = self._src()
-        # Find the _outer assignment for step 2 (first one after the
-        # step 2 log line).
+        # Scan a window around step 2 to find the _outer assignment.
         step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
-        assert step2_idx != -1
-        # Next _outer = line
-        outer_idx = src.find("_outer =", step2_idx)
-        assert outer_idx != -1
-        # Extract the line
-        line = src[outer_idx : src.find("\n", outer_idx)]
-        assert "<> ''" not in line, f"Step 2 outer still has unsafe `<> ''`: {line}"
-        # PR-N8 R1 Bugbot LOW hardened the outer filter from bare
-        # size(m.attributed_to) to size(trim(m.attributed_to)) so
-        # whitespace-only values are rejected. Either shape is
-        # quote-escape-safe (PR-N7's primary concern); we accept both
-        # here.
-        assert "size(m.attributed_to) > 0" in line or "size(trim(m.attributed_to)) > 0" in line, (
-            "Step 2 must use a size()-based length check (PR-N8 R1 hardened to size(trim(...)))"
+        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        assert step2_idx != -1 and step3_idx != -1
+        # Parse the full module so AST walker covers all assignments.
+        tree = ast.parse(src)
+        outer_value = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id == "_outer":
+                        # Collect all string Constant values from the RHS
+                        parts: list = []
+                        for sub in ast.walk(node.value):
+                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                                parts.append(sub.value)
+                        candidate = "".join(parts)
+                        # Is this the step-2 _outer? Step 2 MATCH is (m:Malware).
+                        if "MATCH (m:Malware)" in candidate and "m.attributed_to" in candidate:
+                            outer_value = candidate
+                            break
+                if outer_value:
+                    break
+
+        assert outer_value is not None, "could not locate step-2 _outer via AST"
+        assert "<> ''" not in outer_value, f"Step 2 outer still has unsafe `<> ''`: {outer_value}"
+        assert "size(m.attributed_to) > 0" in outer_value or "size(trim(m.attributed_to)) > 0" in outer_value, (
+            "Step 2 must use a size()-based length check (PR-N8 R1 hardened "
+            "to size(trim(...))); PR-N10 kept this shape."
         )
 
     def test_step3a_3b_cve_no_unsafe_literal(self):
@@ -119,16 +138,38 @@ class TestFix1QuoteEscapeBugEliminated:
         """Step 9: Indicator → Malware (malware_family match). Outer
         query must use size() check.
 
-        PR-N8 R1 Bugbot LOW hardened the outer filter to use
-        ``size(trim(i.malware_family))`` so whitespace-only values
-        are rejected before the comparison. Either shape is
-        quote-escape-safe (PR-N7's primary concern); we accept both
-        here."""
+        PR-N8 R1 hardened outer to ``size(trim(...))``. PR-N10 split
+        the outer into a multi-line tuple for the placeholder NOT IN
+        filter. We check the concatenated parts contain the size-check
+        pattern; the PR-N7 test's primary concern (no `<> ''`) is
+        separately pinned by ``test_no_unsafe_literal_in_any_outer_
+        or_inner_query_string`` which AST-walks the full module."""
         src = self._src()
-        assert (
-            "i.malware_family IS NOT NULL AND size(i.malware_family) > 0" in src
-            or "i.malware_family IS NOT NULL AND size(trim(i.malware_family)) > 0" in src
-        ), "Step 9 outer must use a size()-based length check on malware_family"
+        # Concatenate adjacent quoted string fragments so the multi-line
+        # tuple form (``_q9_outer = ("a " "b " "c")``) matches the same
+        # substring as the pre-PR-N10 single-line form.
+        # Easiest: just check both the OLD single-line form and a more
+        # flexible check on the AST-walked Q9 outer string.
+        import ast
+
+        tree = ast.parse(src)
+        q9_outer_value = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id == "_q9_outer":
+                        parts = [
+                            sub.value
+                            for sub in ast.walk(node.value)
+                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                        ]
+                        q9_outer_value = "".join(parts)
+                        break
+        assert q9_outer_value is not None, "_q9_outer not found"
+        # Accept either the pre-PR-N8-R1 size(x) or the post-R1 size(trim(x))
+        assert "i.malware_family IS NOT NULL" in q9_outer_value and (
+            "size(i.malware_family) > 0" in q9_outer_value or "size(trim(i.malware_family)) > 0" in q9_outer_value
+        ), f"Q9 outer must use a size()-based length check; got: {q9_outer_value!r}"
 
     def test_no_unsafe_literal_in_any_outer_or_inner_query_string(self):
         """AST-walk: verify NO ``<> ''`` appears in any string literal
