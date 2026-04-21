@@ -97,7 +97,14 @@ class TestFix1QuoteEscapeBugEliminated:
         # Extract the line
         line = src[outer_idx : src.find("\n", outer_idx)]
         assert "<> ''" not in line, f"Step 2 outer still has unsafe `<> ''`: {line}"
-        assert "size(m.attributed_to) > 0" in line, "Step 2 must use size() check"
+        # PR-N8 R1 Bugbot LOW hardened the outer filter from bare
+        # size(m.attributed_to) to size(trim(m.attributed_to)) so
+        # whitespace-only values are rejected. Either shape is
+        # quote-escape-safe (PR-N7's primary concern); we accept both
+        # here.
+        assert "size(m.attributed_to) > 0" in line or "size(trim(m.attributed_to)) > 0" in line, (
+            "Step 2 must use a size()-based length check (PR-N8 R1 hardened to size(trim(...)))"
+        )
 
     def test_step3a_3b_cve_no_unsafe_literal(self):
         """Steps 3a and 3b: Indicator → Vulnerability/CVE. Both
@@ -110,9 +117,18 @@ class TestFix1QuoteEscapeBugEliminated:
 
     def test_step9_malware_family_no_unsafe_literal(self):
         """Step 9: Indicator → Malware (malware_family match). Outer
-        query must use size() check."""
+        query must use size() check.
+
+        PR-N8 R1 Bugbot LOW hardened the outer filter to use
+        ``size(trim(i.malware_family))`` so whitespace-only values
+        are rejected before the comparison. Either shape is
+        quote-escape-safe (PR-N7's primary concern); we accept both
+        here."""
         src = self._src()
-        assert "i.malware_family IS NOT NULL AND size(i.malware_family) > 0" in src
+        assert (
+            "i.malware_family IS NOT NULL AND size(i.malware_family) > 0" in src
+            or "i.malware_family IS NOT NULL AND size(trim(i.malware_family)) > 0" in src
+        ), "Step 9 outer must use a size()-based length check on malware_family"
 
     def test_no_unsafe_literal_in_any_outer_or_inner_query_string(self):
         """AST-walk: verify NO ``<> ''`` appears in any string literal

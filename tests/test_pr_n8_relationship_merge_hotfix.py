@@ -288,17 +288,86 @@ class TestFix4CanonicalizationParity:
 
     def test_q2_uses_trim_and_lower_on_both_sides(self):
         """Q2 Malware.attributed_to vs ThreatActor.name comparison
-        must also use trim()+toLower()."""
+        must also use trim()+toLower().
+
+        Post-Bugbot-R1 (2026-04-21): the coalesce-to-empty-string
+        wrapper has been removed; the bare ``trim(m.attributed_to)``
+        form is now the correct shape (NULL propagates as falsy)."""
         src = self._src()
         # Find the step 2 block
         step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
         assert step2_idx != -1
         step3_idx = src.find("[LINK] 3a/12", step2_idx)
         block = src[step2_idx:step3_idx]
-        assert "toLower(trim(coalesce(m.attributed_to" in block, (
-            "Q2 m.attributed_to side must use coalesce+trim+toLower"
-        )
+        # Post-R1 form: no coalesce wrapper around the field
+        assert "toLower(trim(m.attributed_to))" in block, "Q2 m.attributed_to side must use trim()+toLower()"
         assert "toLower(trim(a.name))" in block, "Q2 a.name side must use trim()+toLower()"
+
+    def test_r1_no_coalesce_to_empty_string_in_q2_or_q9_comparisons(self):
+        """Bugbot PR-N8 R1 LOW (2026-04-21): ``coalesce(m.family, '')``
+        and ``coalesce(m.attributed_to, "")`` in the WHERE comparison
+        broke NULL propagation. Post-R1 fix: drop the coalesce, rely
+        on Cypher's native ``trim(NULL) → NULL → comparison NULL →
+        falsy`` semantic.
+
+        This test AST-walks Q2 and Q9 string literals and fails if any
+        contains ``coalesce(m.family`` or ``coalesce(m.attributed_to``
+        (with an empty-string default). The breadcrumb comments that
+        describe the old idiom are NOT caught because they're in
+        source comments, not in string literals."""
+        import ast
+
+        src = self._src()
+        tree = ast.parse(src)
+
+        findings: list = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                target_names = [
+                    t.id
+                    for t in node.targets
+                    if isinstance(t, ast.Name) and (t.id in ("_outer", "_inner", "_q9_outer", "_q9_inner", "_q9_skip"))
+                ]
+                if not target_names:
+                    continue
+                for const_node in ast.walk(node.value):
+                    if isinstance(const_node, ast.Constant) and isinstance(const_node.value, str):
+                        s = const_node.value
+                        # Detect the bad patterns: coalesce(<field>, '') or coalesce(<field>, "")
+                        if "coalesce(m.family, '')" in s or 'coalesce(m.family, "")' in s:
+                            findings.append((target_names[0], "coalesce(m.family, <empty>)"))
+                        if "coalesce(m.attributed_to, '')" in s or 'coalesce(m.attributed_to, "")' in s:
+                            findings.append((target_names[0], "coalesce(m.attributed_to, <empty>)"))
+
+        assert not findings, (
+            f"Bugbot PR-N8 R1 regression: found coalesce-to-empty-string in "
+            f"Q2/Q9 query strings: {findings}. This breaks NULL propagation — "
+            f"drop the coalesce and let trim(NULL) propagate as falsy."
+        )
+
+    def test_r1_outer_filters_reject_whitespace_only_values(self):
+        """Bugbot PR-N8 R1 LOW: outer filters must use ``size(trim(x))
+        > 0`` (not just ``size(x) > 0``) so whitespace-only values
+        (e.g. ``"   "``) are rejected before reaching the comparison.
+        Belt-and-suspenders against the same bug class the coalesce
+        removal prevents."""
+        src = self._src()
+        # Q2 outer
+        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
+        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        q2_block = src[step2_idx:step3_idx]
+        assert "size(trim(m.attributed_to)) > 0" in q2_block, (
+            "Q2 outer must filter with size(trim(m.attributed_to)) > 0"
+        )
+
+        # Q9 outer + skip
+        q9_start = src.find("[LINK] 9/12")
+        q10_start = src.find("[LINK] 10/12")
+        q9_block = src[q9_start:q10_start]
+        # Q9 outer and skip both need the hardened form
+        assert q9_block.count("size(trim(i.malware_family)) > 0") >= 2, (
+            "Q9 outer AND skip-query must both filter with size(trim(i.malware_family)) > 0"
+        )
 
     def test_no_bare_tolower_on_attributed_to_or_malware_family_in_match_clauses(self):
         """Regression pin: bare ``toLower(m.attributed_to)`` (without

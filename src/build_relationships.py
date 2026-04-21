@@ -372,9 +372,24 @@ def build_relationships():
         # silently missed the actor stored as ``"apt29"``. Same class
         # of bug as Q9 / Fix #4 above — canonicalization parity
         # between ingest-time and relationship-time Cypher.
+        # PR-N8 R1 Bugbot LOW (2026-04-21): the first cut of Fix #4
+        # used ``coalesce(m.attributed_to, "")`` inside the comparison,
+        # which converted NULL to empty-string. A whitespace-only
+        # ``i.malware_family``/``m.attributed_to`` would pass the
+        # ``size(x) > 0`` outer filter (whitespace has positive length)
+        # but then ``trim → ""`` on both sides, and ``"" = ""`` creates
+        # spurious edges to every counterpart node with a NULL field
+        # (or a whitespace-only alias). Bugbot's proposed fix is
+        # correct: drop the coalesce. Cypher's ``trim(NULL)`` returns
+        # NULL, which propagates through ``toLower`` and ``=`` so the
+        # comparison is universally falsy — the desired semantic.
+        #
+        # Belt-and-suspenders: harden the outer filter to also reject
+        # whitespace-only values via ``size(trim(x)) > 0``, so the
+        # inner comparison never sees a post-trim empty string at all.
         logger.info("[LINK] 2/12 Malware → ThreatActor (exact name match)...")
-        _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND size(m.attributed_to) > 0) OR size(coalesce(m.aliases, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE toLower(trim(coalesce(m.attributed_to, ""))) = toLower(trim(a.name)) OR toLower(trim(coalesce(m.attributed_to, ""))) IN [x IN coalesce(a.aliases, []) | toLower(trim(x))] OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
+        _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0) OR size(coalesce(m.aliases, [])) > 0 RETURN m"
+        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE toLower(trim(m.attributed_to)) = toLower(trim(a.name)) OR toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) | toLower(trim(x))] OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
         query_pause()
@@ -662,7 +677,13 @@ def build_relationships():
         # malware_family that have NO matching Malware node (by name, alias,
         # or family) — direct skip count, no comparison.
         logger.info("[LINK] 9/12 Indicator → Malware (malware_family match)...")
-        _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(i.malware_family) > 0 RETURN i"
+        # PR-N8 R1 Bugbot LOW: outer now uses ``size(trim(...)) > 0``
+        # so whitespace-only values (e.g. ``"   "``) are rejected
+        # before they reach the comparison. Prevents the spurious-
+        # match chain described below on the inner query.
+        _q9_outer = (
+            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(trim(i.malware_family)) > 0 RETURN i"
+        )
         # PR-M3c §8-RI-S3-Q9 (HIGH): this is the overwrite site. The SAME
         # INDICATES edge may already exist from Q4 (co-occurrence) with
         # ``r.source_id = "misp_cooccurrence"``. Before this fix, Q9's MERGE
@@ -724,11 +745,19 @@ def build_relationships():
         # APOC don't have ``unicodedata.normalize`` — NFD vs NFC of
         # accented chars still miss, rare in practice but filed as a
         # follow-up: fix at ingest via ``canonicalize_merge_key``).
+        # PR-N8 R1 Bugbot LOW: ``coalesce(m.family, '')`` has been
+        # DROPPED. Pre-R1 it converted NULL to empty-string; combined
+        # with a whitespace-only ``i.malware_family`` that passed the
+        # pre-R1 outer filter, the comparison ``"" = ""`` was TRUE →
+        # spurious INDICATES edge to every Malware with NULL family.
+        # Post-R1: ``trim(NULL)`` returns NULL which propagates through
+        # ``toLower`` and ``=`` → universally falsy. Safe. Outer filter
+        # hardened to ``size(trim(...)) > 0`` as belt-and-suspenders.
         _q9_inner = (
             "WITH $i AS i MATCH (m:Malware) "
             "WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
             "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] "
-            "   OR toLower(trim(coalesce(m.family, ''))) = toLower(trim(i.malware_family)) "
+            "   OR toLower(trim(m.family)) = toLower(trim(i.malware_family)) "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.created_at = datetime() "
             "SET r.confidence_score = CASE "
@@ -745,15 +774,16 @@ def build_relationships():
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
-        # PR-N8 HIGH: same trim()+toLower() parity as _q9_inner so the
-        # orphan count matches the actual post-fix match behaviour.
+        # PR-N8 HIGH + R1 Bugbot LOW: same trim()+toLower() parity as
+        # _q9_inner with the coalesce DROPPED (see _q9_inner comment
+        # above for rationale). Outer filter also uses size(trim(...)).
         _q9_skip = (
-            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(i.malware_family) > 0 "
+            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(trim(i.malware_family)) > 0 "
             "AND NOT EXISTS { "
             "  MATCH (m:Malware) "
             "  WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
             "     OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) | toLower(trim(x))] "
-            "     OR toLower(trim(coalesce(m.family, ''))) = toLower(trim(i.malware_family)) "
+            "     OR toLower(trim(m.family)) = toLower(trim(i.malware_family)) "
             "} "
             "RETURN count(i) AS c"
         )
