@@ -1983,6 +1983,29 @@ class Neo4jClient:
             # Let @retry_with_backoff at the calling layer handle these.
             raise
         except Exception as e:
+            # PR-N16 follow-up (cursor-bugbot 2026-04-22): the prior
+            # ``except Exception: return False`` silently swallowed
+            # ``DatabaseError``-wrapped transients (e.g. deadlocks
+            # surfacing as ``Neo.DatabaseError.Statement.ExecutionFailed``)
+            # — the @retry_with_backoff decorator's classifier never got
+            # to see them because ``return False`` short-circuited the
+            # propagation. PR-N15 fix #1 explicitly handles this code
+            # class but only when it reaches the decorator.
+            #
+            # Fix: re-raise on retryable conditions via the same
+            # ``_is_retryable_neo4j_error`` classifier the decorator
+            # uses. Truly terminal errors (schema / syntax / constraint)
+            # still log + return False so one bad row doesn't crash
+            # the whole sync.
+            if _is_retryable_neo4j_error(e):
+                code = getattr(e, "code", "")
+                logger.warning(
+                    "merge_node_with_source: retryable %s%s for %s — re-raising for decorator retry",
+                    type(e).__name__,
+                    f" [{code}]" if code else "",
+                    label,
+                )
+                raise
             # PR (S5) (Bug Hunter #3 HIGH): log with FULL
             # diagnostic context (label + key) and increment a counter
             # so silent drops are visible to operators. Previously this

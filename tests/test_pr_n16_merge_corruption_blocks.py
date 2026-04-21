@@ -217,6 +217,48 @@ class TestFix2MitreCaseAsymmetry:
 
 
 class TestFix3MergeNodeHasRetryDecorator:
+    def test_merge_node_with_source_inner_except_reraises_retryable(self):
+        """Cursor-bugbot 2026-04-22: the @retry_with_backoff decorator
+        on merge_node_with_source can ONLY retry exceptions that
+        propagate out — but the function's inner `except Exception:
+        return False` was silently swallowing
+        DatabaseError-wrapped transients (e.g. deadlocks surfacing as
+        Neo.DatabaseError.Statement.ExecutionFailed).
+
+        The fix re-raises retryable exceptions via the
+        _is_retryable_neo4j_error classifier so the decorator gets
+        a chance to retry. Terminal errors (schema/syntax/constraint)
+        still log + return False (one bad row doesn't crash the batch).
+        """
+        import ast
+
+        src = (SRC / "neo4j_client.py").read_text()
+        tree = ast.parse(src)
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef):
+                for node in cls.body:
+                    if isinstance(node, ast.FunctionDef) and node.name == "merge_node_with_source":
+                        body = ast.unparse(node)
+                        # The inner `except Exception` must reroute
+                        # retryable to raise (not swallow with return False).
+                        assert "_is_retryable_neo4j_error(e)" in body, (
+                            "merge_node_with_source inner `except Exception` must "
+                            "reroute retryable errors to raise (cursor-bugbot 2026-04-22)"
+                        )
+                        # The retryable branch must `raise`, not `return False`.
+                        # Find the if-block and confirm.
+                        # Substring check: a `raise` between the classifier check
+                        # and the terminal log/return path.
+                        idx = body.find("_is_retryable_neo4j_error(e)")
+                        assert idx != -1
+                        # Within ~500 chars after the check, there must be a raise.
+                        post = body[idx : idx + 500]
+                        assert "raise" in post, (
+                            "retryable branch must `raise` to let decorator retry"
+                        )
+                        return
+        raise AssertionError("merge_node_with_source not found")
+
     def test_merge_node_with_source_decorated_with_retry(self):
         """Regression pin: the function must be decorated with
         ``@retry_with_backoff`` so transient errors retry instead of
