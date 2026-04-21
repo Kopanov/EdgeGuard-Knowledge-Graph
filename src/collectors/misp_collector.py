@@ -282,8 +282,16 @@ class MISPCollector:
                     # ``value: 12345`` (int, not str) would crash the
                     # next line's ``.lower()`` with AttributeError
                     # mid-batch, killing the whole event's processing.
-                    # Also handles None silently (``"" or ""`` is "").
-                    attr_value = str(attr.get("value", "") or "")
+                    #
+                    # PR-N5 R1 Bugbot LOW (2026-04-21): earlier form
+                    # ``str(attr.get("value", "") or "")`` had a latent
+                    # falsy-int bug — ``0 or ""`` evaluates to ``""``
+                    # because ``0`` is falsy, so an integer zero value
+                    # silently became an empty string instead of ``"0"``.
+                    # Explicit ``is not None`` check handles zero / False
+                    # correctly; only None falls to the empty-string path.
+                    _raw_value = attr.get("value")
+                    attr_value = str(_raw_value) if _raw_value is not None else ""
                     if attr_type == "vulnerability" or "cve" in attr_value.lower():
                         cve_val = self.extract_cve(attr_value)
                         if cve_val:

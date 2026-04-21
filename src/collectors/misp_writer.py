@@ -147,7 +147,19 @@ def _validate_honest_null(item: Dict[str, Any], source_hint: Optional[str] = Non
                 field,
             )
             try:
-                if _METRICS_AVAILABLE:
+                # PR-N5 R1 Bugbot LOW (2026-04-21): check the COUNTER
+                # itself for None, not just ``_METRICS_AVAILABLE``. When
+                # the outer ``metrics_server`` import succeeds (PR-N4
+                # counters are present) but the nested PR-N5 counter
+                # import fails (older metrics_server without the new
+                # counter — backward-compat path), ``_METRICS_AVAILABLE``
+                # stays ``True`` while ``_MISP_HONEST_NULL_VIOLATIONS``
+                # stays ``None``. ``None.labels(...)`` raises
+                # AttributeError — the try/except below catches it, but
+                # the DEBUG log fires on EVERY violation (noisy + lies
+                # about the true failure mode). Explicit None check
+                # avoids the exception path entirely in that case.
+                if _MISP_HONEST_NULL_VIOLATIONS is not None:
                     _MISP_HONEST_NULL_VIOLATIONS.labels(source=str(source), field=field).inc()
             except Exception as _metric_err:
                 # Same non-silent pattern as the other metric guards.

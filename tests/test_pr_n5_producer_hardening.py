@@ -65,44 +65,144 @@ class TestB4StrCoerceAttrValue:
     at the two parse-entry points. Pre-fix, an int-typed MISP value
     would crash ``.lower()`` / ``re.match`` mid-batch."""
 
+    # NOTE: the shipped coerce idiom was revised in response to Bugbot
+    # R1 LOW (2026-04-21 "Falsy integer values silently coerced to empty
+    # string"). The first form ``str(attr.get("value", "") or "")`` had
+    # a latent bug: ``0 or ""`` evaluates to ``""`` because 0 is falsy,
+    # so an integer zero silently became empty string. The corrected
+    # form uses explicit ``is not None`` — see
+    # ``test_b4_bugbot_r1_zero_preserved`` below for the regression pin.
+
+    _EXPECTED_COERCE_SNIPPET = (
+        '_raw_value = attr.get("value")\n'
+        '                    attr_value = str(_raw_value) if _raw_value is not None else ""'
+    )
+
+    @staticmethod
+    def _file_has_buggy_or_idiom(src: str) -> bool:
+        """AST-walk: return True iff any executable ``str(attr.get("value",
+        "") or "")`` expression exists in ``src``. Walks the AST rather
+        than string-matching so that the breadcrumb comment in the fix
+        commit — which intentionally quotes the old buggy idiom to
+        explain what was broken — doesn't false-match.
+        """
+        import ast
+
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            # Looking for ``str(<BoolOp or=[<attr.get(...)>, Constant("")]>``
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "str"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.BoolOp)
+                and isinstance(node.args[0].op, ast.Or)
+            ):
+                # Check left operand is an attr.get("value", ...) call
+                or_expr = node.args[0]
+                if len(or_expr.values) != 2:
+                    continue
+                lhs, rhs = or_expr.values
+                if not (isinstance(lhs, ast.Call) and isinstance(lhs.func, ast.Attribute) and lhs.func.attr == "get"):
+                    continue
+                if not lhs.args or not (isinstance(lhs.args[0], ast.Constant) and lhs.args[0].value == "value"):
+                    continue
+                if not (isinstance(rhs, ast.Constant) and rhs.value == ""):
+                    continue
+                return True
+        return False
+
     def test_misp_collector_str_coerces(self):
         src = (SRC / "collectors" / "misp_collector.py").read_text()
-        assert 'attr_value = str(attr.get("value", "") or "")' in src, (
-            "misp_collector.py:280 must str-coerce attr.value to survive "
-            "upstream int/None values without crashing .lower() downstream"
+        # Current form: explicit ``is not None`` guard (Bugbot R1 fix)
+        assert '_raw_value = attr.get("value")' in src, (
+            "misp_collector.py must extract value via an intermediate variable"
+        )
+        assert 'attr_value = str(_raw_value) if _raw_value is not None else ""' in src, (
+            "misp_collector.py must use explicit is-not-None coerce so integer "
+            "zero / False don't collapse to empty string (Bugbot PR-N5 R1)"
+        )
+        # Regression pin: the old buggy idiom must NOT appear as executable code
+        assert not self._file_has_buggy_or_idiom(src), (
+            "Bugbot PR-N5 R1 regression: the `str(attr.get('value','') or '')` "
+            "idiom silently drops falsy values (0, False) — must stay out of "
+            "executable code"
         )
 
     def test_run_misp_to_neo4j_str_coerces(self):
         src = (SRC / "run_misp_to_neo4j.py").read_text()
-        assert 'value = str(attr.get("value", "") or "")' in src, (
-            "run_misp_to_neo4j.py (STIX build path) must str-coerce attr.value "
-            "so re.match() and STIX SCO value fields don't crash on int input"
+        assert '_raw_value = attr.get("value")' in src, (
+            "run_misp_to_neo4j.py (STIX build path) must extract value via an intermediate variable"
         )
+        assert 'value = str(_raw_value) if _raw_value is not None else ""' in src, (
+            "run_misp_to_neo4j.py must use explicit is-not-None coerce so "
+            "integer zero / False don't collapse to empty string"
+        )
+        assert not self._file_has_buggy_or_idiom(src), "Bugbot PR-N5 R1 regression pin"
 
     def test_b4_behaviour_int_value_does_not_crash_lower(self):
         """Direct behavioural check: given ``attr = {"value": 12345}``,
         the coerce pattern must produce a string that survives
         ``.lower()`` — NOT raise AttributeError."""
         attr = {"value": 12345}
-        # The exact pattern shipped in the fix
-        attr_value = str(attr.get("value", "") or "")
+        # The exact pattern shipped in the Bugbot-R1 fix
+        _raw = attr.get("value")
+        attr_value = str(_raw) if _raw is not None else ""
         # Must not raise
         result = attr_value.lower()
         assert result == "12345", f"expected '12345', got {result!r}"
 
     def test_b4_behaviour_none_value_coerces_to_empty(self):
-        """``None`` in Python's ``or`` chain falls to ``""`` — lower()
+        """``None`` must fall to the empty-string branch; lower() then
         works on empty string, no crash."""
         attr = {"value": None}
-        attr_value = str(attr.get("value", "") or "")
+        _raw = attr.get("value")
+        attr_value = str(_raw) if _raw is not None else ""
         assert attr_value == ""
         assert attr_value.lower() == ""  # no crash
 
     def test_b4_behaviour_missing_value_coerces_to_empty(self):
-        """No ``value`` key at all — default ``""`` kicks in."""
+        """No ``value`` key at all — ``.get()`` returns None, same branch."""
         attr = {}
-        attr_value = str(attr.get("value", "") or "")
+        _raw = attr.get("value")
+        attr_value = str(_raw) if _raw is not None else ""
         assert attr_value == ""
+
+    # --- Bugbot PR-N5 R1 regression pins (falsy-int preservation) ---
+
+    def test_b4_bugbot_r1_zero_int_preserved(self):
+        """Bugbot PR-N5 R1 LOW: integer ``0`` must be preserved as
+        the string ``"0"``, not collapsed to ``""`` by the ``or ""``
+        idiom the original fix used."""
+        attr = {"value": 0}
+        _raw = attr.get("value")
+        attr_value = str(_raw) if _raw is not None else ""
+        assert attr_value == "0", (
+            f"Bugbot PR-N5 R1 regression: integer 0 must coerce to '0', "
+            f"got {attr_value!r}. The old `or ''` idiom dropped it."
+        )
+        # Downstream .lower() still works
+        assert attr_value.lower() == "0"
+
+    def test_b4_bugbot_r1_empty_string_still_empty(self):
+        """Bugbot PR-N5 R1: an empty-string input must remain empty.
+        (Contrast with the zero case — empty string IS the honest empty
+        value; only None should collapse to ``""``.)"""
+        attr = {"value": ""}
+        _raw = attr.get("value")
+        attr_value = str(_raw) if _raw is not None else ""
+        assert attr_value == ""
+
+    def test_b4_bugbot_r1_false_bool_preserved(self):
+        """Bugbot PR-N5 R1 analogue: Python ``False`` is falsy like 0.
+        If a buggy relay ever sent ``value: false`` (MISP doesn't
+        usually, but JSON permits it), the old idiom would drop it.
+        New idiom preserves it as the string ``"False"``."""
+        attr = {"value": False}
+        _raw = attr.get("value")
+        attr_value = str(_raw) if _raw is not None else ""
+        assert attr_value == "False"
 
 
 # ===========================================================================
@@ -311,6 +411,52 @@ class TestC7HonestNullValidator:
             "C7: optional-import graceful degradation — _MISP_HONEST_NULL_VIOLATIONS "
             "must be None when prometheus_client isn't available"
         )
+
+    def test_honest_null_counter_guarded_by_is_not_none(self):
+        """Bugbot PR-N5 R1 LOW: the guard around the counter increment
+        must check ``_MISP_HONEST_NULL_VIOLATIONS is not None``, NOT
+        just ``_METRICS_AVAILABLE``. The outer import can succeed (PR-N4
+        counters present) while the nested PR-N5 counter import fails
+        on older metrics_server deploys — in that case
+        ``_METRICS_AVAILABLE=True`` but ``_MISP_HONEST_NULL_VIOLATIONS
+        is None``. Without this guard, every violation detection calls
+        ``None.labels(...)`` and the try/except catches AttributeError
+        → noisy DEBUG log on every event."""
+        src = self._src()
+        # Find the increment block and verify the guard shape
+        inc_idx = src.find("_MISP_HONEST_NULL_VIOLATIONS.labels(")
+        assert inc_idx != -1, "counter increment must exist"
+        # Scan backwards for the guard line
+        preceding = src[max(0, inc_idx - 300) : inc_idx]
+        assert "_MISP_HONEST_NULL_VIOLATIONS is not None" in preceding, (
+            "Bugbot PR-N5 R1 regression: the honest-NULL counter increment "
+            "must be guarded by `is not None` check on the counter itself, "
+            "not just `_METRICS_AVAILABLE`. See comment in misp_writer.py "
+            "at the increment site for rationale."
+        )
+
+    def test_honest_null_guard_does_not_rely_on_metrics_available_only(self):
+        """Stronger guard: scan the increment block and verify the
+        naive pattern (``if _METRICS_AVAILABLE:`` directly followed by
+        the .labels call) is NOT present."""
+        src = self._src()
+        inc_idx = src.find("_MISP_HONEST_NULL_VIOLATIONS.labels(")
+        assert inc_idx != -1
+        preceding = src[max(0, inc_idx - 200) : inc_idx]
+        # The naive pattern would be `if _METRICS_AVAILABLE:` immediately
+        # before the .labels() call with no None check. Sentinel strings
+        # that would be present in the buggy form but absent in the fix.
+        lines_before = preceding.strip().splitlines()
+        # Last non-empty line before the .labels call
+        for line in reversed(lines_before):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                # Must mention None, not just _METRICS_AVAILABLE
+                assert "is not None" in stripped or "_MISP_HONEST_NULL_VIOLATIONS" in stripped, (
+                    f"Bugbot PR-N5 R1: the line directly guarding the counter "
+                    f"increment must reference the counter's None-ness, got: {stripped!r}"
+                )
+                break
 
     def test_c7_behaviour_validator_warns_on_now_timestamp(self, caplog):
         """Drive the validator with a wall-clock-NOW-ish timestamp and
