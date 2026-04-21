@@ -200,21 +200,52 @@ class TestFixBMergeObservability:
         )
 
     def test_merge_indicators_batch_calls_helper(self):
-        """The Indicator batch must invoke the helper after session.run."""
+        """The Indicator batch must invoke the counter-inspection helper
+        after session.run. PR-N15 (2026-04-21) moved the direct call
+        from the batch body into the ``_execute_batch_with_retry``
+        wrapper — same invariant (B6 silent-write detector runs on
+        every batch), just one layer deeper. Accept either form so
+        this pin covers both the pre-PR-N15 direct pattern and the
+        post-PR-N15 via-helper pattern."""
         src = self._src()
         fn_idx = src.find("def merge_indicators_batch(")
         next_def = src.find("\n    def ", fn_idx + 1)
-        body = src[fn_idx : next_def if next_def != -1 else fn_idx + 5000]
-        assert "_record_batch_counters(" in body, "merge_indicators_batch must call _record_batch_counters"
-        # Specifically with label="Indicator"
+        body = src[fn_idx : next_def if next_def != -1 else fn_idx + 20000]
+        # Accept either:
+        #   (pre-PR-N15) direct _record_batch_counters(label="Indicator", ...)
+        #   (PR-N15)     _execute_batch_with_retry(..., label="Indicator", ...)
+        #                which itself calls _record_batch_counters internally.
+        direct = "_record_batch_counters(" in body
+        via_helper = "_execute_batch_with_retry(" in body
+        assert direct or via_helper, (
+            "merge_indicators_batch must invoke B6 counter inspection either directly "
+            "via _record_batch_counters OR via _execute_batch_with_retry"
+        )
+        # Label must match the Indicator path.
         assert 'label="Indicator"' in body
+        # If routed through the helper, the helper itself must still
+        # call _record_batch_counters (same invariant, different layer).
+        if via_helper and not direct:
+            helper_src = src[src.find("def _execute_batch_with_retry(") :]
+            helper_end = helper_src.find("\ndef ")
+            helper_body = helper_src[:helper_end] if helper_end != -1 else helper_src[:5000]
+            assert "_record_batch_counters(" in helper_body, (
+                "_execute_batch_with_retry must run _record_batch_counters so the B6 "
+                "silent-write detector invariant is preserved"
+            )
 
     def test_merge_vulnerabilities_batch_calls_helper(self):
+        """Same rationale as indicators — accept direct or via-helper call."""
         src = self._src()
         fn_idx = src.find("def merge_vulnerabilities_batch(")
         next_def = src.find("\n    def ", fn_idx + 1)
-        body = src[fn_idx : next_def if next_def != -1 else fn_idx + 5000]
-        assert "_record_batch_counters(" in body
+        body = src[fn_idx : next_def if next_def != -1 else fn_idx + 20000]
+        direct = "_record_batch_counters(" in body
+        via_helper = "_execute_batch_with_retry(" in body
+        assert direct or via_helper, (
+            "merge_vulnerabilities_batch must invoke B6 counter inspection either "
+            "directly or via _execute_batch_with_retry"
+        )
         assert 'label="Vulnerability"' in body
 
     def test_optional_import_graceful_degradation(self):
