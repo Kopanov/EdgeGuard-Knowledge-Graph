@@ -3,6 +3,7 @@ FastAPI Query Engine for GraphRAG
 REST endpoints for threat intelligence queries
 """
 
+import hmac
 import logging
 import os
 import re
@@ -109,8 +110,26 @@ if not _API_KEY:
 
 
 def _verify_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")) -> None:
-    """Dependency: require a valid API key when EDGEGUARD_API_KEY is configured."""
-    if _API_KEY and x_api_key != _API_KEY:
+    """Dependency: require a valid API key when EDGEGUARD_API_KEY is configured.
+
+    PR-N3 §9-B7 (Red Team): replaced naive ``!=`` string comparison
+    with ``hmac.compare_digest`` to defeat timing side-channels. The
+    naive ``!=`` short-circuits at the first byte mismatch, so an
+    attacker on a low-latency network can recover the API key one byte
+    at a time by measuring response-time differences. ``compare_digest``
+    runs in time independent of where (or whether) the inputs differ.
+
+    Edge cases:
+      * ``x_api_key is None`` — header missing; reject without invoking
+        compare_digest (which would crash on None).
+      * ``x_api_key`` is a string but type-mismatched in an exotic way
+        (e.g. bytes from a misbehaving client) — wrapped in str() to
+        keep ``compare_digest`` happy; still constant-time vs the
+        reference value.
+    """
+    if not _API_KEY:
+        return
+    if x_api_key is None or not hmac.compare_digest(str(_API_KEY), str(x_api_key)):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 
