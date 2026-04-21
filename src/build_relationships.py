@@ -17,8 +17,40 @@ import logging
 
 from config import VALID_ZONES
 from neo4j_client import Neo4jClient
-from node_identity import compute_node_uuid
+from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid
 from query_pause import query_pause
+
+
+# PR-N10 (7-agent audit): defense-in-depth placeholder filter for Q2/Q9
+# MATCH clauses. The merge-time reject in neo4j_client.merge_malware /
+# merge_actor blocks the primary vector (feeds emitting "unknown" as a
+# default name), but there may be PRE-EXISTING Malware/ThreatActor
+# nodes in the graph from before PR-N10 that carry placeholder names.
+# Embed the rejected set as a Cypher literal list so Q2/Q9 also filter
+# at query time. Sorted for stable generated Cypher across Python runs
+# (frozenset iteration order is implementation-defined).
+#
+# PR-N10 follow-up (cursor-bugbot 2026-04-21, Low): escape ``"`` and
+# ``\`` in each entry before embedding into the double-quoted Cypher
+# literal. All current entries are safe, but future additions (e.g. a
+# feed emitting ``unknown (vendor="n/a")`` as a placeholder) could
+# otherwise produce malformed Cypher or, worse, unintended query
+# behaviour — and this list is interpolated into security-critical
+# WHERE clauses in Q2 + Q9. The escaping rule mirrors Neo4j's string-
+# literal grammar: backslash → ``\\``, double quote → ``\"``. We can't
+# use query parameters here because the list is part of the Cypher
+# template string passed to apoc.periodic.iterate, which evaluates
+# parameters per-row, not at template-substitution time.
+def _escape_cypher_double_quoted(value: str) -> str:
+    """Escape ``\\`` and ``"`` for embedding in a Cypher double-quoted
+    string literal. Order matters: escape backslash FIRST, otherwise
+    the replacement's ``\\"`` would itself be re-escaped."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+_PLACEHOLDER_NAMES_CYPHER_LIST = (
+    "[" + ", ".join(f'"{_escape_cypher_double_quoted(name)}"' for name in sorted(_REJECTED_PLACEHOLDER_NAMES)) + "]"
+)
 
 try:
     from metrics_server import record_neo4j_relationships
@@ -399,8 +431,58 @@ def build_relationships():
         # ATTRIBUTED_TO edge to every ThreatActor with a malformed
         # alias. Unlikely in clean data but observable on noisy
         # threat-intel feeds. Filter restores robustness.
-        _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0) OR size(coalesce(m.aliases, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE toLower(trim(m.attributed_to)) = toLower(trim(a.name)) OR toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
+        # PR-N10 defense-in-depth: filter pre-existing placeholder-named
+        # Malware/Actor nodes (created before the merge-time reject
+        # shipped in neo4j_client.py). The placeholder check for
+        # ``m.attributed_to`` lives INSIDE the attributed_to OR-branch
+        # (not at the end with an AND) so that a row with NULL
+        # attributed_to but non-empty ``m.aliases`` still passes the
+        # outer via the aliases branch. Putting the NOT IN check at
+        # the end with AND would make NULL-propagation kill those
+        # legitimate rows (NULL IN […] → NULL → falsy → AND … → falsy).
+        # Inner separately rejects placeholder ``a.name``.
+        _outer = (
+            "MATCH (m:Malware) "
+            "WHERE (m.attributed_to IS NOT NULL "
+            "       AND size(trim(m.attributed_to)) > 0 "
+            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST}) "
+            "   OR size(coalesce(m.aliases, [])) > 0 "
+            "RETURN m"
+        )
+        # PR-N10 follow-up (cursor-bugbot 2026-04-21, Medium): placeholder
+        # filter for ``m.attributed_to`` must be scoped to branches 1 + 2
+        # (the ones that READ attributed_to), not at the top level — a
+        # top-level guard would filter out rows with NULL attributed_to
+        # even when branch 3 (alias-only path) should still match. The
+        # PR-N8 R1 pin forbids ``coalesce(m.attributed_to, '')`` because
+        # it breaks NULL propagation (NULL trim/compare → NULL → falsy
+        # is the correct filter behaviour for the outer).
+        #
+        # So: attr_present gate applied INSIDE branches 1+2 and nowhere
+        # else. Alias comprehensions on both sides additionally drop
+        # placeholder entries as defense-in-depth.
+        _inner = (
+            "WITH $m AS m MATCH (a:ThreatActor) "
+            # PR-N10: reject placeholder actor names at the inner.
+            f"WHERE NOT toLower(trim(a.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            "AND ("
+            # Branch 1: m.attributed_to = a.name — requires non-placeholder attributed_to
+            "   (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
+            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            "       AND toLower(trim(m.attributed_to)) = toLower(trim(a.name))) "
+            # Branch 2: m.attributed_to ∈ actor.aliases — same gate,
+            # plus aliases comprehension drops placeholder entries.
+            "   OR (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
+            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            f"       AND toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]) "
+            # Branch 3: a.name ∈ malware.aliases — doesn't read
+            # attributed_to, reachable when attributed_to is NULL.
+            f"   OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]"
+            ") "
+            "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() '
+            "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
+        )
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
         query_pause()
@@ -692,8 +774,21 @@ def build_relationships():
         # so whitespace-only values (e.g. ``"   "``) are rejected
         # before they reach the comparison. Prevents the spurious-
         # match chain described below on the inner query.
+        # PR-N10 defense-in-depth: drop Indicators whose malware_family
+        # canonicalizes to a placeholder (e.g. "unknown", "Unknown
+        # malware", "N/A"). See node_identity._REJECTED_PLACEHOLDER_NAMES
+        # for the full list. The merge-time reject in neo4j_client.
+        # merge_malware blocks the primary vector at ingest; this
+        # defense catches legacy indicators already in the graph AND
+        # placeholder values on Indicator.malware_family that come from
+        # collector default fallbacks (vt_collector.py:425,
+        # global_feed_collector.py:322, misp_collector.py:403).
         _q9_outer = (
-            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(trim(i.malware_family)) > 0 RETURN i"
+            "MATCH (i:Indicator) "
+            "WHERE i.malware_family IS NOT NULL "
+            "AND size(trim(i.malware_family)) > 0 "
+            f"AND NOT toLower(trim(i.malware_family)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            "RETURN i"
         )
         # PR-M3c §8-RI-S3-Q9 (HIGH): this is the overwrite site. The SAME
         # INDICATES edge may already exist from Q4 (co-occurrence) with
@@ -766,14 +861,20 @@ def build_relationships():
         # hardened to ``size(trim(...)) > 0`` as belt-and-suspenders.
         _q9_inner = (
             "WITH $i AS i MATCH (m:Malware) "
-            "WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
+            # PR-N10 defense-in-depth: skip Malware nodes whose canonical
+            # name is a placeholder — the merge-time reject at
+            # neo4j_client.merge_malware blocks new creation, but legacy
+            # "unknown" Malware nodes from pre-PR-N10 graphs could still
+            # hub false edges here.
+            f"WHERE NOT toLower(trim(m.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            "AND (toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
             # PR-N9: filter NULL/whitespace aliases (see Q2 comment for
             # rationale). Q9's outer filter already ensures
             # trim(i.malware_family) is non-empty so the LHS can't
             # produce a false-match via "" = "", but defense-in-depth
             # keeps the shape symmetric with Q2.
             "   OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
-            "   OR toLower(trim(m.family)) = toLower(trim(i.malware_family)) "
+            "   OR toLower(trim(m.family)) = toLower(trim(i.malware_family))) "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.created_at = datetime() "
             "SET r.confidence_score = CASE "
@@ -794,14 +895,20 @@ def build_relationships():
         # _q9_inner with the coalesce DROPPED (see _q9_inner comment
         # above for rationale). Outer filter also uses size(trim(...)).
         _q9_skip = (
-            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(trim(i.malware_family)) > 0 "
+            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL "
+            "AND size(trim(i.malware_family)) > 0 "
+            # PR-N10: exclude placeholder malware_family (so orphan
+            # count matches actual match behaviour post-placeholder-filter)
+            f"AND NOT toLower(trim(i.malware_family)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "AND NOT EXISTS { "
             "  MATCH (m:Malware) "
-            "  WHERE toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
+            # PR-N10: same Malware-name placeholder filter as _q9_inner
+            f"  WHERE NOT toLower(trim(m.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            "  AND (toLower(trim(m.name)) = toLower(trim(i.malware_family)) "
             # PR-N9: same NULL/whitespace filter as _q9_inner above so
             # the orphan count matches actual match behaviour.
             "     OR toLower(trim(i.malware_family)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
-            "     OR toLower(trim(m.family)) = toLower(trim(i.malware_family)) "
+            "     OR toLower(trim(m.family)) = toLower(trim(i.malware_family))) "
             "} "
             "RETURN count(i) AS c"
         )
