@@ -163,14 +163,26 @@ max_allowed_packet = 256M
 wait_timeout = 600
 ```
 
-Apply + restart with `docker compose restart misp misp-db`. Full
-playbook (verification commands, EdgeGuard env knobs, Prometheus
-alerts, symptom→setting cheat-sheet) in
+Apply + restart with `docker compose restart misp misp_db` (in **your**
+MISP compose dir — MISP is not vendored in EdgeGuard's
+`docker-compose.yml`). Path varies by image:
+
+- **`harvarditsecurity/misp:latest`** (currently deployed) — Apache
+  mod_php → edit `/etc/php/8.x/apache2/php.ini` or mount a custom
+  `*.ini` into `/etc/php/8.x/apache2/conf.d/zz-edgeguard.ini`.
+- **`coolacid/misp-docker:latest`** — php-fpm → mount
+  `php-overrides.ini` per the reference compose at
+  [`docs/sources/MISP/docker-compose.yml`](docs/sources/MISP/docker-compose.yml).
+
+Full playbook (image-aware paths, verification commands, prereq host
+RAM ≥ 8GB, EdgeGuard env knobs with bounded validation, Prometheus
+alerts, rollback steps, symptom→setting cheat-sheet) in
 [**`docs/MISP_TUNING.md`**](docs/MISP_TUNING.md). Two new metrics
-added in PR-N4 — `edgeguard_misp_push_permanent_failure_total` and
-`edgeguard_misp_push_backoff_triggered_total` — let operators alert
-on the data-loss rate that previously had to be hand-counted from
-logs.
+added in PR-N4 — `edgeguard_misp_push_permanent_failure_total{source}`
+and `edgeguard_misp_push_backoff_triggered_total{source}` — let
+operators alert on the data-loss rate that previously had to be
+hand-counted from logs. (Round 2 dropped the `event_id` label to
+keep cardinality bounded — each MISP run mints a date-stamped event.)
 
 #### 🕒 Timestamp semantic model
 

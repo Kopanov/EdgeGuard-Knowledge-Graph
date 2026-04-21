@@ -21,6 +21,65 @@ attrs in single events).
 
 ---
 
+## Where MISP runs (read this first)
+
+**MISP is NOT in EdgeGuard's main `docker-compose.yml`.** EdgeGuard
+treats MISP as the system of record; it's a separate, operator-managed
+container that EdgeGuard talks to over HTTPS via `MISP_URL` /
+`MISP_API_KEY`. The settings below apply to **your MISP container**,
+wherever you run it — not to anything in EdgeGuard's compose file.
+
+There are two MISP container images we've validated against. Where
+the tuning files live depends on which one you use:
+
+| Image | Base | PHP version | PHP config path inside container |
+|---|---|---|---|
+| `harvarditsecurity/misp:latest` | Ubuntu + Apache mod_php | PHP 8.x | `/etc/php/8.x/apache2/php.ini` (Apache SAPI) |
+| `coolacid/misp-docker:latest` | Debian bullseye-slim + php-fpm | PHP 7.4 (older builds) / 8.x (newer) | `/etc/php/<ver>/fpm/conf.d/*.ini` (drop-in scan dir) |
+
+**EdgeGuard's currently-deployed MISP is `harvarditsecurity/misp:latest`.**
+The reference compose layout for the `coolacid` image (with mounted
+`php-overrides.ini`) lives at
+[`docs/sources/MISP/docker-compose.yml`](sources/MISP/docker-compose.yml)
++ [`docs/sources/MISP/php-overrides.ini`](sources/MISP/php-overrides.ini).
+That reference compose is also a good template if you migrate from
+`harvarditsecurity` to `coolacid` later.
+
+### Which path to apply the TL;DR settings to
+
+| If you use… | Apply PHP settings to… | Apply MySQL settings to… |
+|---|---|---|
+| `harvarditsecurity/misp:latest` (current) | edit `/etc/php/8.x/apache2/php.ini` inside the running container, OR mount a custom `*.ini` into `/etc/php/8.x/apache2/conf.d/zz-edgeguard.ini` (drop-in dir, scanned after php.ini). | Same as below — the image's own MariaDB / MySQL container; configure via `my.cnf` mount or the container's environment. |
+| `coolacid/misp-docker:latest` | mount `php-overrides.ini` into `/etc/php/<ver>/fpm/conf.d/99-edgeguard.ini` per [`docs/sources/MISP/docker-compose.yml`](sources/MISP/docker-compose.yml). | the bundled `mysql:8.0` sidecar; configure via `my.cnf` mount. |
+
+**Apache vs php-fpm — important.** The `harvarditsecurity` image runs
+PHP via Apache mod_php, so the settings live under
+`/etc/php/<ver>/apache2/`. The `coolacid` image runs PHP via php-fpm,
+so the settings live under `/etc/php/<ver>/fpm/`. Editing the wrong
+path silently does nothing. Always verify with:
+```bash
+docker compose exec misp php -i | grep memory_limit
+```
+
+### `mem_limit` on the docker compose service
+
+Both images need the **container** memory ceiling raised in addition
+to the PHP ceiling. The reference compose sets `mem_limit: 8g` on
+both `misp` and `misp_db`. If your compose doesn't, the PHP process
+will be killed by the kernel OOM-killer at the container limit even
+though `memory_limit = 4096M` in php.ini would otherwise allow it.
+
+```yaml
+# docker-compose.yml — both services
+services:
+  misp:
+    mem_limit: 8g
+  misp_db:
+    mem_limit: 8g
+```
+
+---
+
 ## Prerequisites — host capacity before applying
 
 The TL;DR settings below assume a MISP host with **at least 8 GB
@@ -45,7 +104,12 @@ docker stats misp misp-db --no-stream      # current usage
 
 ## TL;DR — Apply these on the MISP container
 
-### `/etc/php/8.x/apache2/php.ini` (and the equivalent `php-fpm` if used)
+> See **"Where MISP runs"** above for which path applies to your
+> image (`harvarditsecurity` uses Apache `/etc/php/8.x/apache2/`;
+> `coolacid` uses fpm `/etc/php/<ver>/fpm/conf.d/`). The values
+> below are identical for both images.
+
+### PHP — `php.ini` (Apache mod_php) or `conf.d/zz-edgeguard.ini` (php-fpm)
 
 ```ini
 ; PR-N4 EdgeGuard MISP tuning — large-event batch ingest
@@ -71,15 +135,45 @@ innodb_flush_log_at_trx_commit = 2  ; faster commits, ACID-on-shutdown only
 
 ### Apply + verify
 
+**For `harvarditsecurity/misp:latest`** — drop-in conf.d file (survives
+container restart but not container rebuild; for permanence, mount via
+docker-compose):
 ```bash
-# In your MISP docker compose dir
-docker compose restart misp misp-db
+# In your MISP docker compose dir (NOT EdgeGuard's compose dir)
+# Option A: edit php.ini directly inside the container
+docker compose exec misp bash -c "cat >> /etc/php/8.2/apache2/php.ini <<'EOF'
+memory_limit = 4096M
+max_execution_time = 600
+post_max_size = 256M
+upload_max_filesize = 256M
+max_input_vars = 50000
+EOF"
 
-# Verify PHP changes
+# Option B (preferred): mount via docker-compose so it survives rebuild
+# Add to your MISP docker-compose.yml under services.misp.volumes:
+#   - ./misp-php-overrides.ini:/etc/php/8.2/apache2/conf.d/zz-edgeguard.ini:ro
+
+docker compose restart misp misp_db
+```
+
+**For `coolacid/misp-docker:latest`** — use the reference compose +
+`php-overrides.ini` already in this repo:
+```bash
+# Use the reference layout
+cp docs/sources/MISP/docker-compose.yml /path/to/your/misp-deploy/
+cp docs/sources/MISP/php-overrides.ini /path/to/your/misp-deploy/
+cd /path/to/your/misp-deploy/
+docker compose up -d
+```
+
+**Verify (both images):**
+```bash
+# PHP changes
 docker compose exec misp php -i | grep -E 'memory_limit|max_execution_time|post_max_size'
+# Should show: memory_limit => 4G => 4G  (or 8G if you bumped it)
 
-# Verify MySQL changes
-docker compose exec misp-db mysql -u root -p \
+# MySQL changes (service name varies: misp-db, misp_db_1, misp_db)
+docker compose exec misp_db mysql -u root -p \
   -e "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('innodb_buffer_pool_size','max_allowed_packet','wait_timeout');"
 ```
 

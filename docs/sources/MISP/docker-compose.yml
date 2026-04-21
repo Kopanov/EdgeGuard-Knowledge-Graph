@@ -1,3 +1,16 @@
+## Reference compose for the `coolacid/misp-docker:latest` image.
+##
+## NOTE: This is NOT EdgeGuard's main docker-compose.yml. EdgeGuard does
+## not vendor MISP — operators run MISP wherever they host Docker.
+## EdgeGuard's currently-deployed instance uses the alternative image
+## ``harvarditsecurity/misp:latest`` (Apache mod_php). Both images are
+## tuned via the same TL;DR settings — see ``docs/MISP_TUNING.md``
+## § "Where MISP runs" for the path differences (Apache vs php-fpm).
+##
+## Settings here are field-tested against the EdgeGuard 730-day baseline
+## (~150K OTX attrs + ~100K NVD attrs in single events). See PR-N4 +
+## docs/MISP_TUNING.md for the full backend-tuning playbook.
+
 services:
   misp:
     image: coolacid/misp-docker:latest
@@ -7,7 +20,8 @@ services:
     # EdgeGuard baseline pushes 95K+ attributes per event (NVD feed),
     # and PHP loads the full event context on every POST /attributes/add.
     # On a 4g cap the MISP container OOM-kills mid-baseline and the
-    # Airflow task has to retry. See docs/DOCKER_SETUP_GUIDE.md §
+    # Airflow task has to retry. See docs/MISP_TUNING.md § "Prerequisites"
+    # for the host-RAM sliding scale and docs/DOCKER_SETUP_GUIDE.md §
     # "MISP memory pressure" for the symptoms.
     mem_limit: 8g
     ports:
@@ -47,6 +61,16 @@ services:
     # memory for InnoDB buffer pool and query cache. 4g is the old
     # default and was OOM-prone during baseline.
     mem_limit: 8g
+    # MySQL CLI flags applied at startup. These match the PR-N4 TL;DR
+    # in docs/MISP_TUNING.md and supersede whatever the image's default
+    # my.cnf ships with. For a more permanent layout, mount a custom
+    # my.cnf at /etc/mysql/conf.d/zz-edgeguard.cnf instead.
+    command:
+      - --innodb-buffer-pool-size=4G       # default 128M; aim for ~50% of host RAM
+      - --innodb-log-file-size=512M        # default 48M; reduces frequent flushes
+      - --max-allowed-packet=256M          # default 64M; the big payloads hit this
+      - --innodb-flush-log-at-trx-commit=2 # faster commits, ACID-on-shutdown only
+      - --wait-timeout=600                 # explicit
     environment:
       - MYSQL_ROOT_PASSWORD=misp
       - MYSQL_DATABASE=misp
