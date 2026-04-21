@@ -126,14 +126,36 @@ class MISPCollector:
 
     @staticmethod
     def _extract_zones_from_tags(tags_list):
-        """Return all zone names found in a list of MISP tag dicts/strings."""
+        """Return all zone names found in a list of MISP tag dicts/strings.
+
+        PR-N6 hotfix #1 (audit 09, Bug Hunter H2 / Cross-Checker F1):
+        filter candidates through ``VALID_ZONES`` before returning.
+        Pre-fix any MISP tag matching ``zone:<anything>`` — including
+        typos like ``zone:healthcares`` or adversarial values like
+        ``zone:<attacker-controlled>`` from a federated MISP peer —
+        was accepted verbatim and propagated into the Neo4j
+        ``n.zone`` property. No downstream filter saves it: the
+        ``VALID_ZONES`` gate lives only inside ``detect_zones_from_text``.
+
+        PR-N6 hotfix #5 (audit 09, Cross-Checker F4): also accept the
+        ``sector:`` prefix for parity with ``run_misp_to_neo4j.
+        extract_zones_from_tags`` (line ~1176). Pre-fix this reader
+        accepted only ``zone:``, so any MISP feed emitting
+        ``sector:finance`` tags was silently ignored here but picked
+        up by the other reader — causing Neo4j/STIX divergence on
+        the same attribute.
+        """
+        from config import VALID_ZONES
+
         zones = []
         for tag in tags_list:
             tag_name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
-            if tag_name.startswith("zone:"):
-                zone_name = tag_name.replace("zone:", "").lower().strip()
-                if zone_name:
-                    zones.append(zone_name)
+            for prefix in ("zone:", "sector:"):
+                if tag_name.startswith(prefix):
+                    zone_name = tag_name[len(prefix) :].strip().lower()
+                    if zone_name and zone_name in VALID_ZONES:
+                        zones.append(zone_name)
+                    break
         return zones
 
     def _get_item_zones(self, item_tags, fallback_event_json: str = ""):
