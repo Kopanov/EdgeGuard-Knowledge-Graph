@@ -996,6 +996,20 @@ class MISPWriter:
                 # in both meta blocks (TF_META extended in mirror below).
                 "malware_family": indicator.get("malware_family", ""),
                 "attributed_to": indicator.get("attributed_to", ""),
+                # PR-N13 (2026-04-21 pre-baseline audit Fix #5): preserve
+                # ``pulse_id`` (OTX native pulse UUID — the stable
+                # cross-deployment dedup key for re-sync against OTX),
+                # ``indicator_role`` (e.g. "C2" / "dropper" — drives
+                # MITRE-killchain mapping and is LIVE-WIRED at
+                # ``neo4j_client.merge_indicators_batch:~L2169`` which
+                # currently reads None because OTX_META never carried
+                # it), and ``is_active`` (source-side activity state).
+                # All three were emitted by
+                # ``otx_collector.py:462,479-488`` and silently dropped
+                # on the MISP round-trip.
+                "pulse_id": indicator.get("pulse_id", ""),
+                "indicator_role": indicator.get("indicator_role", ""),
+                "is_active": indicator.get("is_active", True),
             }
             comment = "OTX_META:" + json.dumps(otx_meta, default=str)
             if len(comment) > 4000:
@@ -1015,6 +1029,19 @@ class MISPWriter:
                 # so TF-sourced indicators also carry the attribution
                 # hint through the MISP round-trip.
                 "attributed_to": indicator.get("attributed_to", ""),
+                # PR-N13 (2026-04-21 pre-baseline audit Fix #4): preserve
+                # ``threat_type`` (payload / C2 / exfil category),
+                # ``ioc_id`` (canonical ThreatFox ID — the stable
+                # cross-system dedup key for re-ingest across daily
+                # CSV exports), and ``malware_alias`` (alternate
+                # names). All three were emitted by
+                # ``global_feed_collector.py:240-243`` and silently
+                # dropped here, losing ``ioc_id`` cross-day dedup +
+                # losing the alias signal Q2/Q9 consumes. Mirror of
+                # the OTX_META ``malware_family`` fix in PR-N10 #3.
+                "threat_type": indicator.get("threat_type", ""),
+                "ioc_id": indicator.get("ioc_id", ""),
+                "malware_alias": indicator.get("malware_alias", ""),
             }
             comment = "TF_META:" + json.dumps(tf_meta, default=str)
             if len(comment) > 4000:
@@ -1131,6 +1158,22 @@ class MISPWriter:
             "cisa_action_due": vuln.get("cisa_action_due", ""),
             "cisa_required_action": vuln.get("cisa_required_action", ""),
             "cisa_vulnerability_name": vuln.get("cisa_vulnerability_name", ""),
+            # PR-N13 (2026-04-21 pre-baseline audit Fix #3): preserve
+            # ``version_constraints`` (up to 10 per-CPE range entries)
+            # and ``status`` (active / rejected list) through the MISP
+            # round-trip. Pre-PR-N13 both fields were emitted by
+            # ``nvd_collector.py`` (version_constraints at line 975,
+            # status at lines 892+924) but OMITTED here, so every
+            # NVD CVE reached Neo4j with ``version_constraints=None``
+            # and ``status=default``. ``neo4j_client.merge_cve``
+            # already consumes both fields when present (live
+            # JSON-serialize logic at ~line 2389-2431); this closes
+            # the collector-side drop so Neo4j actually sees them.
+            # ``status=["rejected"]`` is especially important — a
+            # withdrawn/duplicate CVE otherwise silently lands as if
+            # active, polluting downstream triage queues.
+            "version_constraints": vuln.get("version_constraints", []),
+            "status": vuln.get("status", []),
         }
         has_nvd_meta = any(
             [

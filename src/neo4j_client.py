@@ -1729,12 +1729,34 @@ class Neo4jClient:
         Neo4j nodes sharing ONE uuid. The audit-driven batch fix was
         applied in PR #37 commit 3 but the single-item path was missed
         — bugbot caught it.
+
+        PR-N13 (2026-04-21 pre-baseline audit Fix #1): reject None /
+        empty / whitespace-only ``value`` or ``indicator_type`` at
+        entry. The prior code let ``{"indicator_type": None, "value":
+        None}`` reach the Cypher MERGE, which collapses every None-
+        keyed row into ONE sentinel Indicator node. A single malformed
+        OTX pulse emitting ``{"type": "ipv4", "indicator": ""}`` can
+        therefore poison a production hub node that every subsequent
+        empty row cross-joins to. Mirror of ``merge_ip`` / ``merge_host``
+        None-guards (already established pattern).
         """
+        norm_value = nonempty_graph_string(data.get("value"))
+        norm_type = nonempty_graph_string(data.get("indicator_type"))
+        if norm_value is None or norm_type is None:
+            logger.warning(
+                "[MERGE-REJECT] Indicator MERGE refused: indicator_type=%r value=%r "
+                "(one or both are None / empty / whitespace-only). Creating a "
+                "null-keyed Indicator would produce a sentinel hub node that "
+                "every subsequent empty-keyed row collapses into.",
+                data.get("indicator_type"),
+                data.get("value"),
+            )
+            return False
         key_props = canonicalize_merge_key(
             "Indicator",
             {
-                "indicator_type": data.get("indicator_type"),
-                "value": data.get("value"),
+                "indicator_type": norm_type,
+                "value": norm_value,
             },
         )
         # Promote enrichment fields to queryable node properties
@@ -2001,10 +2023,24 @@ class Neo4jClient:
         return self.merge_node_with_source("ThreatActor", key_props, data, source_id, extra_props=extra_props)
 
     def merge_technique(self, data: Dict, source_id: str = "mitre_attck") -> bool:
-        """MERGE a Technique node with source tracking."""
-        key_props = {
-            "mitre_id": data.get("mitre_id"),
-        }
+        """MERGE a Technique node with source tracking.
+
+        PR-N13 (2026-04-21 pre-baseline audit Fix #2): reject None /
+        empty / whitespace-only ``mitre_id``. Without this, a single
+        malformed MITRE tag like ``{"name": "Foo"}`` (no mitre_id)
+        hijacks the sentinel ``(Technique {mitre_id: null})`` node
+        that every subsequent None-keyed row also collapses into.
+        Mirrors the PR-N10 placeholder-name guard for Malware / Actor.
+        """
+        mitre_id = nonempty_graph_string(data.get("mitre_id"))
+        if mitre_id is None:
+            logger.warning(
+                "[MERGE-REJECT] Technique MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
+                data.get("mitre_id"),
+                data.get("name"),
+            )
+            return False
+        key_props = {"mitre_id": mitre_id}
         extra_props: Dict[str, Any] = {"tactic_phases": data.get("tactic_phases", [])}
         extra_props["detection"] = data.get("detection", "")
         extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
@@ -2015,10 +2051,18 @@ class Neo4jClient:
         return self.merge_node_with_source("Technique", key_props, data, source_id, extra_props=extra_props)
 
     def merge_tactic(self, data: Dict, source_id: str = "mitre_attck") -> bool:
-        """MERGE a Tactic node with source tracking."""
-        key_props = {
-            "mitre_id": data.get("mitre_id"),
-        }
+        """MERGE a Tactic node with source tracking.
+
+        PR-N13 Fix #2: same None-guard pattern as ``merge_technique``."""
+        mitre_id = nonempty_graph_string(data.get("mitre_id"))
+        if mitre_id is None:
+            logger.warning(
+                "[MERGE-REJECT] Tactic MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
+                data.get("mitre_id"),
+                data.get("name"),
+            )
+            return False
+        key_props = {"mitre_id": mitre_id}
         extra_props: Dict[str, Any] = {"shortname": data.get("shortname", "")}
         if data.get("name"):
             extra_props["name"] = data["name"]
@@ -2027,9 +2071,19 @@ class Neo4jClient:
         return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props=extra_props)
 
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
-        """MERGE a Tool node with source tracking."""
+        """MERGE a Tool node with source tracking.
+
+        PR-N13 Fix #2: same None-guard pattern as ``merge_technique``."""
+        mitre_id = nonempty_graph_string(data.get("mitre_id"))
+        if mitre_id is None:
+            logger.warning(
+                "[MERGE-REJECT] Tool MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
+                data.get("mitre_id"),
+                data.get("name"),
+            )
+            return False
         key_props = {
-            "mitre_id": data.get("mitre_id"),
+            "mitre_id": mitre_id,
         }
         extra_props: Dict[str, Any] = {}
         if data.get("uses_techniques"):
@@ -2252,9 +2306,31 @@ class Neo4jClient:
                     # PR #37 commit X (bugbot LOW): import is hoisted to
                     # module level (line 36) so it doesn't re-resolve
                     # once per item in this hot batch loop.
+                    #
+                    # PR-N13 Fix #1 (2026-04-21): skip rows whose
+                    # natural key is None / empty / whitespace-only
+                    # BEFORE constructing the batch_item. The inner
+                    # Cypher would otherwise MERGE on ``value: null``
+                    # and collapse every such row into a single
+                    # sentinel hub node. merge_indicator (single-item)
+                    # already has this guard; the batch path must
+                    # match.
+                    norm_value = nonempty_graph_string(item.get("value"))
+                    norm_type = nonempty_graph_string(item.get("indicator_type"))
+                    if norm_value is None or norm_type is None:
+                        logger.warning(
+                            "[MERGE-REJECT] merge_indicators_batch: skipping row — "
+                            "indicator_type=%r value=%r (None / empty / "
+                            "whitespace-only). Would otherwise collapse into a "
+                            "sentinel hub Indicator node.",
+                            item.get("indicator_type"),
+                            item.get("value"),
+                        )
+                        error_count += 1
+                        continue
                     canonical_key = canonicalize_merge_key(
                         "Indicator",
-                        {"indicator_type": item.get("indicator_type"), "value": item.get("value")},
+                        {"indicator_type": norm_type, "value": norm_value},
                     )
                     canonical_value = canonical_key.get("value")
 
@@ -2266,11 +2342,11 @@ class Neo4jClient:
                     # state that caused the bug).
                     node_uuid = compute_node_uuid(
                         "Indicator",
-                        {"indicator_type": item.get("indicator_type"), "value": canonical_value},
+                        {"indicator_type": norm_type, "value": canonical_value},
                     )
 
                     batch_item = {
-                        "indicator_type": item.get("indicator_type"),
+                        "indicator_type": norm_type,
                         "value": canonical_value,
                         "tag": tag,
                         "source_id": source_id,
