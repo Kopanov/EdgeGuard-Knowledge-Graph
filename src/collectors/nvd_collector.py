@@ -668,7 +668,7 @@ class NVDCollector:
                                 items_collected=len(all_cves),
                                 extra={"nvd_window_idx": wi, "nvd_start_index": idx},
                             )
-                            break  # stop the while loop for this window
+                            break  # stop the inner while loop for this window
                         if not cves:
                             consecutive_empty += 1
                             if consecutive_empty >= 3:
@@ -711,18 +711,45 @@ class NVDCollector:
                             items_collected=len(all_cves),
                             extra={"nvd_window_idx": wi + 1, "nvd_start_index": 0},
                         )
+                    else:
+                        # PR-N17 follow-up (cursor-bugbot 2026-04-22 #1):
+                        # break the OUTER for-loop on first abort.
+                        # Pre-fix the inner ``break`` only exited the
+                        # while loop; the for loop continued with
+                        # subsequent windows whose successful batches
+                        # called ``update_source_checkpoint`` with
+                        # later ``nvd_window_idx`` values, OVERWRITING
+                        # the abort checkpoint. Resume then jumped
+                        # past the aborted window, losing its data.
+                        # Now: stop the for-loop too so the preserved
+                        # (wi, idx) checkpoint actually survives.
+                        break  # exit outer for-loop on first abort
 
-                # PR-N17 Fix #2: if ANY windows aborted, the baseline
-                # is partial — raise so the task fails loudly. Better
-                # to fail and retry than to silently mark "completed"
-                # on partial data (the pre-PR-N17 bug). Operator will
-                # see the log lines + task failure + retry at the
-                # aborted window.
+                # PR-N17 Fix #2 (cursor-bugbot 2026-04-22 #2): if any
+                # windows aborted, the baseline is partial — raise
+                # NvdBatchFetchError so the Airflow task fails loudly.
+                # The raise is OUTSIDE the wrapping try/except (re-
+                # raised explicitly below) so it isn't caught by the
+                # outer ``except Exception`` and converted to a normal
+                # status return — that conversion gave the appearance
+                # of a graceful "success: False" response which Airflow
+                # treats less aggressively than an explicit raise.
+                # Storing the to-raise condition + raising AFTER the
+                # try block guarantees the typed exception escapes.
                 if aborted_windows:
+                    # PR-N17 follow-up (cursor-bugbot 2026-04-22 #2):
+                    # raise IMMEDIATELY (not at end of try block) so
+                    # the typed exception propagates to the new
+                    # ``except NvdBatchFetchError:`` re-raise gate
+                    # below. Skips all the post-loop processing
+                    # (transform / push / status return) which would
+                    # otherwise hide the partial-baseline state.
                     raise NvdBatchFetchError(
                         f"NVD baseline partial: {len(aborted_windows)} window(s) aborted "
-                        f"(indices {aborted_windows}). Checkpoint preserved at first abort; "
-                        f"re-run baseline to resume."
+                        f"(indices {aborted_windows}). Checkpoint preserved at first abort "
+                        f"(per cursor-bugbot 2026-04-22 #1, the outer for-loop now breaks "
+                        f"on first abort to prevent later windows from overwriting the "
+                        f"checkpoint). Re-run baseline to resume."
                     )
 
                 # PR-M1 §7-H3: defensive guard against a run-level ``limit``
@@ -1111,6 +1138,23 @@ class NVDCollector:
                 record_collection_success(self.source_name)
                 return processed
 
+        except NvdBatchFetchError:
+            # PR-N17 follow-up (cursor-bugbot 2026-04-22 #2): the
+            # baseline-partial raise must escape the outer except
+            # chain so Airflow sees an actual exception. Without this
+            # explicit re-raise the broader ``except Exception as e:``
+            # below catches it, converts to ``return self._return_status(
+            # False, 0, error_msg)``, and the task function returns
+            # normally. Airflow treats the dict-return as a callable
+            # success (the dict's ``success: False`` field IS picked up
+            # by ``run_collector_with_metrics`` and converted to
+            # ``AirflowException``, but the typed exception is lost).
+            # Re-raising preserves the type so downstream alerting +
+            # retry logic can distinguish "NVD baseline partial — re-
+            # run will resume from preserved checkpoint" from "NVD
+            # generic collection failure".
+            self.circuit_breaker.record_failure()
+            raise
         except requests.exceptions.Timeout as e:
             error_msg = f"Timeout: {e}"
             logger.error(f"NVD timeout: {e}")

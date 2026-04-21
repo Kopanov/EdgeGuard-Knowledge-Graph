@@ -232,11 +232,10 @@ class TestFix2BaselineLoopAbortsWindowOnError:
         src = (SRC / "collectors" / "nvd_collector.py").read_text()
         idx = src.find("aborted_windows: list = []")
         assert idx != -1, "aborted_windows tracker must be initialized"
-        block = src[idx : idx + 6000]
+        # Widened window for PR-N17 follow-up comments.
+        block = src[idx : idx + 10000]
         assert "aborted_windows.append" in block, "must track aborted windows"
-        assert "raise NvdBatchFetchError" in block, (
-            "baseline must raise at end if any window aborted (fail task loudly)"
-        )
+        assert "raise NvdBatchFetchError" in block, "baseline must raise if any window aborted (fail task loudly)"
 
     def test_checkpoint_not_advanced_on_aborted_window(self):
         """AST pin: the ``update_source_checkpoint(..., nvd_window_idx=wi+1, ...)``
@@ -249,6 +248,69 @@ class TestFix2BaselineLoopAbortsWindowOnError:
         block = src[idx : idx + 600]
         assert 'extra={"nvd_window_idx": wi + 1' in block, (
             "advance to wi+1 must be inside the `not window_aborted` branch"
+        )
+
+    def test_outer_for_loop_breaks_on_first_abort(self):
+        """Cursor-bugbot 2026-04-22 #1: the inner ``break`` only exited
+        the while loop. The outer for-loop continued with subsequent
+        windows whose successful batches called update_source_checkpoint
+        with later nvd_window_idx values, OVERWRITING the abort
+        checkpoint. Resume then jumped past the aborted window, losing
+        its data.
+
+        Fix: ``else: break`` after the ``if not window_aborted: ...``
+        block exits the outer for-loop on first abort."""
+        src = (SRC / "collectors" / "nvd_collector.py").read_text()
+        # Find the gating block + verify the else: break exit.
+        idx = src.find("if not window_aborted:")
+        assert idx != -1
+        # Within ~1500 chars after, must be `else:` + `break  # exit outer for-loop`
+        block = src[idx : idx + 1500]
+        assert "else:" in block and "exit outer for-loop" in block, (
+            "outer for-loop must break on first abort (cursor-bugbot 2026-04-22 #1)"
+        )
+
+    def test_outer_except_chain_re_raises_NvdBatchFetchError(self):
+        """Cursor-bugbot 2026-04-22 #2: the ``raise NvdBatchFetchError``
+        was caught by the outer ``except Exception as e:`` and converted
+        to a normal status-dict return. The typed exception was lost.
+
+        Fix: an explicit ``except NvdBatchFetchError: raise`` ahead
+        of the broader handlers so the type escapes to Airflow."""
+        src = (SRC / "collectors" / "nvd_collector.py").read_text()
+        # The except clause must come BEFORE the generic except chain.
+        # AST scan: find the function `collect`, walk its handlers.
+        import ast as _ast
+
+        tree = _ast.parse(src)
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.FunctionDef) and node.name == "collect":
+                # Walk for `Try` nodes inside the function
+                for sub in _ast.walk(node):
+                    if isinstance(sub, _ast.Try):
+                        handler_types = []
+                        for h in sub.handlers:
+                            if h.type is not None:
+                                if isinstance(h.type, _ast.Name):
+                                    handler_types.append(h.type.id)
+                                elif isinstance(h.type, _ast.Attribute):
+                                    handler_types.append(h.type.attr)
+                            else:
+                                handler_types.append("Exception")
+                        if "NvdBatchFetchError" in handler_types:
+                            # Confirm it's BEFORE the bare Exception catch.
+                            try:
+                                nbfe_idx = handler_types.index("NvdBatchFetchError")
+                                exc_idx = handler_types.index("Exception")
+                                assert nbfe_idx < exc_idx, (
+                                    "NvdBatchFetchError handler must be ordered BEFORE the broader Exception handler"
+                                )
+                            except ValueError:
+                                pass  # one or other not present in this Try
+                            return
+        raise AssertionError(
+            "collect() must have an `except NvdBatchFetchError:` re-raise gate "
+            "ordered before the generic Exception handler"
         )
 
 
