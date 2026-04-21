@@ -490,6 +490,33 @@ _REJECTED_PLACEHOLDER_NAMES: frozenset = frozenset(
         "generic",
         "test",
         "example",
+        # Generic category names (PR-N10 follow-up, cursor-bugbot 2026-04-21).
+        # Feeds commonly emit the category label itself as a fallback when
+        # a specific family/actor name is unavailable (e.g. OTX pulse tagged
+        # only with "malware", NVD description containing "ransomware" with
+        # no specific family). A Malware{name:"malware"} / ThreatActor{name:
+        # "apt"} node becomes the same false-hub Red Team #1 flagged for
+        # "unknown" — every category-default Indicator attributes to it via
+        # Q9 + Q2. The entries below are the generic-category strings that
+        # must never survive as an identity-carrying name.
+        "malware",
+        "trojan",
+        "backdoor",
+        "virus",
+        "worm",
+        "ransomware",
+        "spyware",
+        "adware",
+        "rootkit",
+        "actor",
+        "threat",
+        "threat actor",
+        "attack",
+        "attacker",
+        "hacker",
+        "apt",
+        "apt group",
+        "adversary",
     }
 )
 

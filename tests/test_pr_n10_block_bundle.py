@@ -376,6 +376,169 @@ class TestFix3OtxMetaCompletion:
 
 
 # ===========================================================================
+# PR-N10 follow-up — cursor-bugbot 2026-04-21 findings
+# ===========================================================================
+
+
+class TestBugbotFollowupGenericCategoryBlocklist:
+    """Medium — blocklist must cover generic-category hub names."""
+
+    def test_generic_category_names_in_blocklist(self):
+        from node_identity import _REJECTED_PLACEHOLDER_NAMES
+
+        required = {
+            "malware",
+            "trojan",
+            "backdoor",
+            "virus",
+            "worm",
+            "ransomware",
+            "spyware",
+            "adware",
+            "rootkit",
+            "actor",
+            "threat",
+            "threat actor",
+            "attack",
+            "attacker",
+            "hacker",
+            "apt",
+            "apt group",
+            "adversary",
+        }
+        missing = required - set(_REJECTED_PLACEHOLDER_NAMES)
+        assert not missing, f"blocklist missing generic-category names: {missing}"
+
+    def test_malware_category_name_rejected_at_merge(self):
+        from unittest.mock import MagicMock
+
+        from neo4j_client import Neo4jClient
+
+        client = Neo4jClient.__new__(Neo4jClient)
+        client.driver = MagicMock()
+        for name in ["Malware", "MALWARE", "  malware  ", "apt", "APT", "ransomware"]:
+            assert client.merge_malware({"name": name}) is False, f"must reject generic-category malware name {name!r}"
+
+    def test_actor_category_name_rejected_at_merge(self):
+        from unittest.mock import MagicMock
+
+        from neo4j_client import Neo4jClient
+
+        client = Neo4jClient.__new__(Neo4jClient)
+        client.driver = MagicMock()
+        for name in ["actor", "Threat Actor", "APT group", "adversary", "hacker"]:
+            assert client.merge_actor({"name": name}) is False, f"must reject generic-category actor name {name!r}"
+
+
+class TestBugbotFollowupQ2InnerAttributedToFilter:
+    """Medium — Q2 inner must reject placeholder m.attributed_to so
+    branch 2 (attributed_to ∈ actor aliases) can't fire on a placeholder
+    alias match. Alias comprehensions on both sides also drop placeholder
+    entries as defense-in-depth."""
+
+    def _q2_block(self) -> str:
+        import ast
+
+        src = (SRC / "build_relationships.py").read_text()
+        tree = ast.parse(src)
+        # Find `_inner` assignment under the function scope that contains
+        # the "[LINK] 2/12 Malware → ThreatActor" log line.
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not (
+                len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "_inner"
+            ):
+                continue
+            rendered = ast.unparse(node)
+            if "ATTRIBUTED_TO" in rendered and "a:ThreatActor" in rendered:
+                return rendered
+        raise AssertionError("Q2 inner _inner = ... not found")
+
+    def test_q2_inner_rejects_placeholder_attributed_to(self):
+        """Branches 1 and 2 (the ones that READ attributed_to) must each
+        gate on ``NOT toLower(trim(m.attributed_to)) IN [...]``. Scoped
+        per-branch (not at the top level) so branch 3 (alias-only) can
+        still fire when attributed_to is NULL. The PR-N8 R1 pin forbids
+        ``coalesce(m.attributed_to, '')`` here — NULL-propagation is the
+        correct filter behaviour for the outer."""
+        inner = self._q2_block()
+        # At least two occurrences of the attributed_to placeholder guard
+        # (one per branch that reads attributed_to).
+        count = inner.count("NOT toLower(trim(m.attributed_to)) IN")
+        assert count >= 2, f"both attributed_to-reading branches must filter placeholders; found {count}, expected >=2"
+        # And must NOT use coalesce — PR-N8 R1 invariant.
+        assert "coalesce(m.attributed_to" not in inner, (
+            "PR-N8 R1 forbids coalesce(m.attributed_to, ...); use IS NOT NULL + per-branch gate"
+        )
+
+    def test_q2_inner_alias_comprehensions_filter_placeholders(self):
+        """Both alias-side comprehensions (actor.aliases and malware.aliases)
+        drop placeholder entries before matching."""
+        inner = self._q2_block()
+        # Count occurrences of the placeholder NOT IN guard in alias comprehensions
+        # Two comprehensions, each should have one guard
+        comprehension_guard = "AND NOT toLower(trim(x)) IN"
+        count = inner.count(comprehension_guard)
+        assert count >= 2, f"both alias comprehensions must filter placeholders; found {count} of 2 expected"
+
+
+class TestBugbotFollowupCypherStringEscaping:
+    """Low — _PLACEHOLDER_NAMES_CYPHER_LIST must escape ``\"`` and ``\\``
+    in entries so future blocklist additions can't break Cypher."""
+
+    def test_escape_helper_exists(self):
+        from build_relationships import _escape_cypher_double_quoted
+
+        # Backslash escapes first (order matters)
+        assert _escape_cypher_double_quoted("path\\to") == "path\\\\to"
+        # Double-quote escapes
+        assert _escape_cypher_double_quoted('say "hi"') == 'say \\"hi\\"'
+        # Combined — backslash must be escaped before the double-quote
+        # replacement introduces its own backslash
+        assert _escape_cypher_double_quoted('"\\') == '\\"\\\\'
+        # Safe values pass through
+        assert _escape_cypher_double_quoted("unknown") == "unknown"
+        assert _escape_cypher_double_quoted("") == ""
+
+    def test_cypher_list_uses_escape(self):
+        """Regression pin: _PLACEHOLDER_NAMES_CYPHER_LIST must build via
+        the escape helper, not raw f-string interpolation."""
+        import ast
+
+        src = (SRC / "build_relationships.py").read_text()
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not (
+                len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "_PLACEHOLDER_NAMES_CYPHER_LIST"
+            ):
+                continue
+            rendered = ast.unparse(node)
+            assert "_escape_cypher_double_quoted" in rendered, "_PLACEHOLDER_NAMES_CYPHER_LIST must use escape helper"
+            return
+        raise AssertionError("_PLACEHOLDER_NAMES_CYPHER_LIST assignment not found")
+
+    def test_cypher_list_is_syntactically_valid_cypher(self):
+        """The generated list should be a valid Cypher literal list of
+        double-quoted strings. Smoke-test: parse it as a JSON-like array."""
+        import json
+
+        from build_relationships import _PLACEHOLDER_NAMES_CYPHER_LIST
+
+        # Cypher double-quoted strings align with JSON for the subset we emit
+        parsed = json.loads(_PLACEHOLDER_NAMES_CYPHER_LIST)
+        assert isinstance(parsed, list)
+        assert all(isinstance(x, str) for x in parsed)
+        # All current entries should pass through unchanged (none contain " or \)
+        assert "unknown" in parsed
+        assert "malware" in parsed  # PR-N10 follow-up addition
+
+
+# ===========================================================================
 # Module import sanity
 # ===========================================================================
 

@@ -20,6 +20,7 @@ from neo4j_client import Neo4jClient
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid
 from query_pause import query_pause
 
+
 # PR-N10 (7-agent audit): defense-in-depth placeholder filter for Q2/Q9
 # MATCH clauses. The merge-time reject in neo4j_client.merge_malware /
 # merge_actor blocks the primary vector (feeds emitting "unknown" as a
@@ -28,7 +29,28 @@ from query_pause import query_pause
 # Embed the rejected set as a Cypher literal list so Q2/Q9 also filter
 # at query time. Sorted for stable generated Cypher across Python runs
 # (frozenset iteration order is implementation-defined).
-_PLACEHOLDER_NAMES_CYPHER_LIST = "[" + ", ".join(f'"{name}"' for name in sorted(_REJECTED_PLACEHOLDER_NAMES)) + "]"
+#
+# PR-N10 follow-up (cursor-bugbot 2026-04-21, Low): escape ``"`` and
+# ``\`` in each entry before embedding into the double-quoted Cypher
+# literal. All current entries are safe, but future additions (e.g. a
+# feed emitting ``unknown (vendor="n/a")`` as a placeholder) could
+# otherwise produce malformed Cypher or, worse, unintended query
+# behaviour — and this list is interpolated into security-critical
+# WHERE clauses in Q2 + Q9. The escaping rule mirrors Neo4j's string-
+# literal grammar: backslash → ``\\``, double quote → ``\"``. We can't
+# use query parameters here because the list is part of the Cypher
+# template string passed to apoc.periodic.iterate, which evaluates
+# parameters per-row, not at template-substitution time.
+def _escape_cypher_double_quoted(value: str) -> str:
+    """Escape ``\\`` and ``"`` for embedding in a Cypher double-quoted
+    string literal. Order matters: escape backslash FIRST, otherwise
+    the replacement's ``\\"`` would itself be re-escaped."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+_PLACEHOLDER_NAMES_CYPHER_LIST = (
+    "[" + ", ".join(f'"{_escape_cypher_double_quoted(name)}"' for name in sorted(_REJECTED_PLACEHOLDER_NAMES)) + "]"
+)
 
 try:
     from metrics_server import record_neo4j_relationships
@@ -427,13 +449,36 @@ def build_relationships():
             "   OR size(coalesce(m.aliases, [])) > 0 "
             "RETURN m"
         )
+        # PR-N10 follow-up (cursor-bugbot 2026-04-21, Medium): placeholder
+        # filter for ``m.attributed_to`` must be scoped to branches 1 + 2
+        # (the ones that READ attributed_to), not at the top level — a
+        # top-level guard would filter out rows with NULL attributed_to
+        # even when branch 3 (alias-only path) should still match. The
+        # PR-N8 R1 pin forbids ``coalesce(m.attributed_to, '')`` because
+        # it breaks NULL propagation (NULL trim/compare → NULL → falsy
+        # is the correct filter behaviour for the outer).
+        #
+        # So: attr_present gate applied INSIDE branches 1+2 and nowhere
+        # else. Alias comprehensions on both sides additionally drop
+        # placeholder entries as defense-in-depth.
         _inner = (
             "WITH $m AS m MATCH (a:ThreatActor) "
-            # PR-N10: reject placeholder actor names at the inner
+            # PR-N10: reject placeholder actor names at the inner.
             f"WHERE NOT toLower(trim(a.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
-            "AND (toLower(trim(m.attributed_to)) = toLower(trim(a.name)) "
-            "   OR toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))] "
-            "   OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 | toLower(trim(x))]) "
+            "AND ("
+            # Branch 1: m.attributed_to = a.name — requires non-placeholder attributed_to
+            "   (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
+            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            "       AND toLower(trim(m.attributed_to)) = toLower(trim(a.name))) "
+            # Branch 2: m.attributed_to ∈ actor.aliases — same gate,
+            # plus aliases comprehension drops placeholder entries.
+            "   OR (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
+            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
+            f"       AND toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]) "
+            # Branch 3: a.name ∈ malware.aliases — doesn't read
+            # attributed_to, reachable when attributed_to is NULL.
+            f"   OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]"
+            ") "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
             'ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() '
             "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
