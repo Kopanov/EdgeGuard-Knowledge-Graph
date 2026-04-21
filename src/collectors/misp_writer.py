@@ -34,6 +34,23 @@ from config import (
     apply_misp_http_host_header,
 )
 
+# PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
+# backoff trigger. Optional import so MISPWriter can run in environments
+# without prometheus_client installed (CI, dev shells, dry-run).
+try:
+    from metrics_server import (
+        MISP_PUSH_BACKOFF_TRIGGERED as _MISP_BACKOFF_TRIGGERED,
+    )
+    from metrics_server import (
+        MISP_PUSH_PERMANENT_FAILURES as _MISP_PUSH_PERMANENT_FAILURES,
+    )
+
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+    _MISP_PUSH_PERMANENT_FAILURES = None  # type: ignore[assignment]
+    _MISP_BACKOFF_TRIGGERED = None  # type: ignore[assignment]
+
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1355,6 +1372,35 @@ class MISPWriter:
 
         Returns:
             Tuple of (successful_count, failed_count)
+
+        PR-N4 — adaptive scaling for MISP-at-scale (closes the on-call
+        report from 2026-04-21 where a 730d baseline lost ~11,500 attrs
+        across OTX + NVD pushes due to MISP HTTP 500s on large events):
+
+        The default ``batch_size=500, throttle=5s`` works well when MISP
+        events are small (<50K attrs). At ~50K+ attributes per event
+        the MISP PHP/MySQL backend starts crashing per batch
+        (worker OOMs, MySQL transaction timeouts, Apache prefork
+        restarts). EdgeGuard now adapts on a per-event basis:
+
+          existing_attrs >= 100K → batch_size=50,  throttle=30s
+          existing_attrs >= 50K  → batch_size=100, throttle=15s
+          existing_attrs <  50K  → use the configured/default values
+
+        Per-batch HTTP POST is smaller, MISP PHP can finish, less
+        likely to OOM. The thresholds are env-tunable via
+        ``EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD`` (default 50000) and
+        ``EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD`` (default 100000).
+
+        Plus an adaptive backoff: after N consecutive HTTP 5xx batch
+        failures (default 3, env ``EDGEGUARD_MISP_BACKOFF_THRESHOLD``)
+        the writer inserts a longer cooldown (default 5min, env
+        ``EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC``) before the next batch
+        — gives MISP time to fully recover instead of hammering a
+        struggling worker. Reset on success.
+
+        See docs/MISP_TUNING.md for the full playbook (php.ini /
+        my.cnf settings + when to apply each EdgeGuard env knob).
         """
         if not items:
             return 0, 0
@@ -1528,14 +1574,111 @@ class MISPWriter:
         except (ValueError, TypeError):
             batch_throttle = 5.0
 
+        # PR-N4 adaptive-scaling thresholds + backoff knobs (env-tunable
+        # so ops can tune without code change). See push_items docstring.
+        try:
+            _large_threshold = int(os.environ.get("EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD", "50000"))
+        except (ValueError, TypeError):
+            _large_threshold = 50000
+        try:
+            _huge_threshold = int(os.environ.get("EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD", "100000"))
+        except (ValueError, TypeError):
+            _huge_threshold = 100000
+        try:
+            _backoff_threshold = int(os.environ.get("EDGEGUARD_MISP_BACKOFF_THRESHOLD", "3"))
+        except (ValueError, TypeError):
+            _backoff_threshold = 3
+        try:
+            _backoff_cooldown_sec = float(os.environ.get("EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", "300.0"))
+        except (ValueError, TypeError):
+            _backoff_cooldown_sec = 300.0
+
+        # Track consecutive 5xx failures across the entire push (per writer
+        # instance, scoped to this push_items call). Reset on any successful
+        # batch. When count >= threshold, insert an extended cooldown
+        # before the next batch — gives MISP time to fully recover instead
+        # of hammering a struggling worker with 10s × 2^n retries.
+        _consecutive_failures = 0
+
         for event_id, unique_attrs in push_queue:
+            # PR-N4: ADAPTIVE SCALING. Look at how many attributes already
+            # live in the target event and downscale batch size + throttle
+            # if it's already large. The existing-attrs prefetch above
+            # already has a count for free via per_event_keys
+            # (set of (type, value) tuples) — re-use it rather than firing
+            # another network call. ``per_event_keys`` is scoped to a
+            # different ``event_id`` per outer loop iteration, so we
+            # re-derive each time.
+            try:
+                existing_attrs_count = len(self._get_existing_attribute_keys(event_id))
+            except Exception:
+                # Defensive: if the count lookup fails, fall back to
+                # default batching rather than crashing the push.
+                existing_attrs_count = 0
+
+            effective_batch_size = batch_size
+            effective_throttle = batch_throttle
+            if existing_attrs_count >= _huge_threshold:
+                effective_batch_size = min(50, batch_size)
+                effective_throttle = max(30.0, batch_throttle)
+                _scale_tier = "huge"
+            elif existing_attrs_count >= _large_threshold:
+                effective_batch_size = min(100, batch_size)
+                effective_throttle = max(15.0, batch_throttle)
+                _scale_tier = "large"
+            else:
+                _scale_tier = "default"
+            if _scale_tier != "default":
+                logger.info(
+                    "[PUSH] Event %s has %d existing attrs (>= %s threshold) — "
+                    "adaptive scaling: batch_size=%d, throttle=%.0fs (was %d / %.0fs)",
+                    event_id,
+                    existing_attrs_count,
+                    _scale_tier,
+                    effective_batch_size,
+                    effective_throttle,
+                    batch_size,
+                    batch_throttle,
+                )
+
             # Send attributes in batches
-            for i in range(0, len(unique_attrs), batch_size):
-                batch = unique_attrs[i : i + batch_size]
+            for i in range(0, len(unique_attrs), effective_batch_size):
+                batch = unique_attrs[i : i + effective_batch_size]
 
                 # Throttle between batches (skip only the very first batch of the first event)
-                if (i > 0 or processed_batches > 0) and batch_throttle > 0:
-                    time.sleep(batch_throttle)
+                if (i > 0 or processed_batches > 0) and effective_throttle > 0:
+                    time.sleep(effective_throttle)
+
+                # PR-N4 adaptive backoff: if we've seen N consecutive 5xx
+                # failures, insert an extended cooldown BEFORE retrying.
+                # The @retry_with_backoff decorator on _push_batch retries
+                # internally with 10s × 2^n delay (max ~150s budget per
+                # batch); that's not enough when the underlying MISP is
+                # stuck OOMing. The cooldown gives MISP a real chance to
+                # recover before we send the next request.
+                if _consecutive_failures >= _backoff_threshold:
+                    logger.warning(
+                        "[PUSH] %d consecutive 5xx failures (>= threshold %d) — "
+                        "entering extended cooldown for %.0fs before next batch. "
+                        "MISP backend appears overwhelmed; check backend RAM / "
+                        "PHP memory_limit / MySQL innodb_buffer_pool_size — see "
+                        "docs/MISP_TUNING.md.",
+                        _consecutive_failures,
+                        _backoff_threshold,
+                        _backoff_cooldown_sec,
+                    )
+                    if _METRICS_AVAILABLE:
+                        try:
+                            _MISP_BACKOFF_TRIGGERED.labels(source=source).inc()
+                        except Exception:
+                            pass
+                    time.sleep(_backoff_cooldown_sec)
+                    # Reset the counter so we don't immediately re-pause
+                    # if the next batch ALSO fails — the @retry_with_backoff
+                    # gives it 4 attempts; if those fail, we'll re-trigger
+                    # the cooldown after another N consecutive batch-level
+                    # failures.
+                    _consecutive_failures = 0
 
                 # PR-F6 (Issue #65): parent-DAG liveness check BEFORE the
                 # next push. If the parent dag_run has been marked failed
@@ -1589,6 +1732,10 @@ class MISPWriter:
                 # bad event doesn't destroy a whole NVD push.
                 try:
                     success, failed = self._push_batch(event_id, batch)
+                    # PR-N4: success resets the consecutive-failure counter
+                    # (any single successful batch means MISP recovered)
+                    if success > 0 and failed == 0:
+                        _consecutive_failures = 0
                 except MispTransientError as exc:
                     logger.error(
                         "Batch %s for event %s failed after retries (%s) — counting batch as failed and continuing",
@@ -1598,6 +1745,19 @@ class MISPWriter:
                     )
                     success, failed = 0, len(batch)
                     self.stats["errors"] += 1
+                    # PR-N4: track for adaptive backoff (next iteration of
+                    # the inner loop will check this against threshold)
+                    _consecutive_failures += 1
+                    # PR-N4: emit Prometheus permanent-failure counter so
+                    # operators can alert on data loss rate. Pre-PR-N4 the
+                    # only signal was the log line above, which Bravo had
+                    # to hand-count from. ``source`` is the resolved
+                    # source string from the outer loop's ``grouped`` dict.
+                    if _METRICS_AVAILABLE:
+                        try:
+                            _MISP_PUSH_PERMANENT_FAILURES.labels(source=source, event_id=str(event_id)).inc()
+                        except Exception:
+                            pass
                 total_success += success
                 total_failed += failed
 
