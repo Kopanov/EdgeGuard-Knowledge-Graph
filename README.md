@@ -135,6 +135,55 @@ Staged defense-in-depth for untrusted MISP inputs. Full design + threat model in
 - ✅ **Tier 2 — Observability for the disabled state (PR-I, #71).** Defense-disabled state is now always visible: startup WARNING log fires in **all** envs (previously prod/staging only, which silently accepted the default `EDGEGUARD_ENV=dev`) + Prometheus gauge `edgeguard_misp_tag_impersonation_defense_disabled` exposes the state to alert rules. See [`docs/PROMETHEUS_SETUP.md`](docs/PROMETHEUS_SETUP.md) for the suggested alert rule.
 - 📋 **Tier 3 — Fail-closed boot refusal (planned, post-Tier 2).** After operators have had a deployment cycle to configure the allowlists, `EDGEGUARD_ENV ∈ {prod, staging}` will flip to boot-refusal: the process refuses to start unless an allowlist is configured OR `EDGEGUARD_ALLOW_UNTRUSTED_MISP=1` is set explicitly. Closes the "forgot to configure" footgun at deploy time.
 
+#### 🛡️ MISP backend tuning (required for >50K-attr events)
+
+When EdgeGuard is pushing into MISP events with >50,000 attributes
+(typical for OTX / NVD baselines at 365-730 day lookback), the
+default Docker MISP container's PHP / MySQL settings cause HTTP 500
+errors per batch. EdgeGuard's `MISPWriter` now adapts batch size +
+throttle automatically (PR-N4: at 50K attrs → 100/batch + 15s
+throttle; at 100K → 50/batch + 30s throttle), and inserts an
+extended cooldown after sustained 5xx failures, but the **MISP
+backend itself needs the settings below** for the adaptive scaling
+to actually help:
+
+```ini
+# /etc/php/8.x/apache2/php.ini
+memory_limit = 4096M
+max_execution_time = 600
+post_max_size = 256M
+upload_max_filesize = 256M
+max_input_vars = 50000
+
+# /etc/mysql/mariadb.conf.d/50-server.cnf
+[mysqld]
+innodb_buffer_pool_size = 4G       # ~50% of host RAM
+innodb_log_file_size = 512M
+max_allowed_packet = 256M
+wait_timeout = 600
+```
+
+Apply + restart with `docker compose restart misp misp_db` (in **your**
+MISP compose dir — MISP is not vendored in EdgeGuard's
+`docker-compose.yml`). Path varies by image:
+
+- **`harvarditsecurity/misp:latest`** (currently deployed) — Apache
+  mod_php → edit `/etc/php/8.x/apache2/php.ini` or mount a custom
+  `*.ini` into `/etc/php/8.x/apache2/conf.d/zz-edgeguard.ini`.
+- **`coolacid/misp-docker:latest`** — php-fpm → mount
+  `php-overrides.ini` per the reference compose at
+  [`docs/sources/MISP/docker-compose.yml`](docs/sources/MISP/docker-compose.yml).
+
+Full playbook (image-aware paths, verification commands, prereq host
+RAM ≥ 8GB, EdgeGuard env knobs with bounded validation, Prometheus
+alerts, rollback steps, symptom→setting cheat-sheet) in
+[**`docs/MISP_TUNING.md`**](docs/MISP_TUNING.md). Two new metrics
+added in PR-N4 — `edgeguard_misp_push_permanent_failure_total{source}`
+and `edgeguard_misp_push_backoff_triggered_total{source}` — let
+operators alert on the data-loss rate that previously had to be
+hand-counted from logs. (Round 2 dropped the `event_id` label to
+keep cardinality bounded — each MISP run mints a date-stamped event.)
+
 #### 🕒 Timestamp semantic model
 
 EdgeGuard carries **four distinct timestamps per indicator**, each

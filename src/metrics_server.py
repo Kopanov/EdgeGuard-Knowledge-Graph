@@ -142,6 +142,42 @@ MISP_PUSH_DURATION = Histogram(
     buckets=[0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0],
 )
 
+# PR-N4: permanent batch failure after exhausting MISPWriter's
+# @retry_with_backoff(max_retries=4) on 5xx. The on-call report from
+# Bravo Vanko on 2026-04-21 had 7 OTX + 16 NVD batches × 500 attrs ≈
+# 11,500 attrs silently dropped during a 730-day baseline; Bravo had
+# to hand-count from the logs because no metric existed. A non-zero
+# rate is the operator signal that MISP backend is undersized for the
+# current event size — see docs/MISP_TUNING.md for the tuning playbook.
+#
+# PR-N4 round 2 (Maintainer Dev #4, Bug Hunter #4): label set is
+# ``["source"]`` only. ``event_id`` was dropped because each MISP run
+# creates a new event (date-stamped name like ``EdgeGuard-otx-2026-04-21``),
+# which would balloon the time-series cardinality by ~365/year per source
+# (12 sources × 365 days = ~4.4K series/year just from this metric).
+# The actionable signal for operators is "is source X dropping batches?",
+# which ``source`` alone provides; the specific event_id is recoverable
+# from logs.
+MISP_PUSH_PERMANENT_FAILURES = Counter(
+    "edgeguard_misp_push_permanent_failure_total",
+    "MISP batch pushes that failed permanently after retry exhaustion. "
+    "Each increment = one batch (typically 500 attributes) lost. "
+    "See docs/MISP_TUNING.md for ops tuning playbook.",
+    ["source"],
+)
+
+# PR-N4: adaptive backoff trigger — fires when the writer enters
+# extended-pause mode after N consecutive 5xx failures. Lets operators
+# distinguish "occasional flap MISP is recovering from" from "MISP is
+# sustained-degraded and we're throttling ourselves down."
+MISP_PUSH_BACKOFF_TRIGGERED = Counter(
+    "edgeguard_misp_push_backoff_triggered_total",
+    "Number of times MISPWriter entered extended-cooldown mode after "
+    "N consecutive HTTP 5xx batch failures (default N=3, see "
+    "EDGEGUARD_MISP_BACKOFF_THRESHOLD).",
+    ["source"],
+)
+
 MISP_HEALTH = Gauge("edgeguard_misp_health", "MISP health status (1=healthy, 0=unhealthy)", ["check_type"])
 
 # Neo4j metrics

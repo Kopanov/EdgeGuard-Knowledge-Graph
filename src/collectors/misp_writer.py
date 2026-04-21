@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
 import logging
+import math
 import re
 import time
 from contextlib import contextmanager
@@ -33,6 +34,23 @@ from config import (
     SSL_VERIFY,
     apply_misp_http_host_header,
 )
+
+# PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
+# backoff trigger. Optional import so MISPWriter can run in environments
+# without prometheus_client installed (CI, dev shells, dry-run).
+try:
+    from metrics_server import (
+        MISP_PUSH_BACKOFF_TRIGGERED as _MISP_BACKOFF_TRIGGERED,
+    )
+    from metrics_server import (
+        MISP_PUSH_PERMANENT_FAILURES as _MISP_PUSH_PERMANENT_FAILURES,
+    )
+
+    _METRICS_AVAILABLE = True
+except ImportError:
+    _METRICS_AVAILABLE = False
+    _MISP_PUSH_PERMANENT_FAILURES = None  # type: ignore[assignment]
+    _MISP_BACKOFF_TRIGGERED = None  # type: ignore[assignment]
 
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
@@ -1355,6 +1373,41 @@ class MISPWriter:
 
         Returns:
             Tuple of (successful_count, failed_count)
+
+        PR-N4 — adaptive scaling for MISP-at-scale (closes the on-call
+        report from 2026-04-21 where a 730d baseline lost ~11,500 attrs
+        across OTX + NVD pushes due to MISP HTTP 500s on large events):
+
+        The default ``batch_size=500, throttle=5s`` works well when MISP
+        events are small (<50K attrs). At ~50K+ attributes per event
+        the MISP PHP/MySQL backend starts crashing per batch
+        (worker OOMs, MySQL transaction timeouts, Apache prefork
+        restarts). EdgeGuard now adapts on a per-event basis:
+
+          existing_attrs >= 100K → batch_size=50,  throttle=30s
+          existing_attrs >= 50K  → batch_size=100, throttle=15s
+          existing_attrs <  50K  → use the configured/default values
+
+        Per-batch HTTP POST is smaller, MISP PHP can finish, less
+        likely to OOM. The thresholds are env-tunable via
+        ``EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD`` (default 50000) and
+        ``EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD`` (default 100000).
+
+        Plus an adaptive backoff: after N consecutive HTTP 5xx batch
+        failures (default 3, env ``EDGEGUARD_MISP_BACKOFF_THRESHOLD``)
+        the writer inserts a longer cooldown (default 5min, env
+        ``EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC``) before the next batch
+        — gives MISP time to fully recover instead of hammering a
+        struggling worker.  The failure counter persists across
+        ``push_items`` calls (instance-scoped on ``self``) and resets
+        only after **2 consecutive fully-successful** batches — one
+        success could be a fluke; two suggests genuine recovery.
+        During the cooldown the writer wakes every 30s to call the
+        parent-DAG liveness callback so a sibling task failure is
+        detected within ~30s rather than after the full cooldown.
+
+        See docs/MISP_TUNING.md for the full playbook (php.ini /
+        my.cnf settings + when to apply each EdgeGuard env knob).
         """
         if not items:
             return 0, 0
@@ -1418,7 +1471,12 @@ class MISPWriter:
         total_failed = 0
         processed_batches = 0
         start_time = time.time()
-        push_queue: List[Tuple[str, List[Dict]]] = []
+        # PR-N4 round 2 (Bugbot R2-A): widened from 2-tuple to 4-tuple
+        # carrying (source, event_id, existing_attrs_count, attrs).
+        # The threading was added in round 1 (F1: stale source) + round 1
+        # (F2: avoid duplicate _get_existing_attribute_keys fetch); the
+        # type annotation was forgotten and silently misled mypy.
+        push_queue: List[Tuple[str, str, int, List[Dict]]] = []
 
         # PR-F7 (Issue #61 quick-fix): cache cross-event prefetch per
         # source so a single push_items call doesn't re-fetch the same
@@ -1510,9 +1568,21 @@ class MISPWriter:
                 )
             if not unique_attrs:
                 continue
-            push_queue.append((event_id, unique_attrs))
-
-        total_batches = sum((len(attrs) + batch_size - 1) // batch_size for _, attrs in push_queue)
+            # PR-N4 (Bugbot round 1): thread ``source`` and the
+            # already-fetched per-event attribute count INTO the queue.
+            #
+            #  * ``source`` is needed by the second loop's Prometheus
+            #    metric increments. The pre-fix version reused the
+            #    outer-loop ``source`` variable, which retains its last
+            #    iteration's value after the loop ends — silently
+            #    mis-attributing every metric in a multi-source push.
+            #  * ``existing_attrs_count`` is needed for adaptive scaling.
+            #    Pre-fix the second loop re-called
+            #    ``_get_existing_attribute_keys(event_id)`` (a 30-60s
+            #    paginated REST call on large events) — doubling the
+            #    prefetch cost on the exact events PR-N4 targets. Reuse
+            #    the count we already paid for during dedup.
+            push_queue.append((source, event_id, len(per_event_keys), unique_attrs))
 
         if not push_queue and total_items > 0:
             logger.warning(
@@ -1528,14 +1598,266 @@ class MISPWriter:
         except (ValueError, TypeError):
             batch_throttle = 5.0
 
-        for event_id, unique_attrs in push_queue:
+        # PR-N4 adaptive-scaling thresholds + backoff knobs (env-tunable
+        # so ops can tune without code change). See push_items docstring.
+        #
+        # PR-N4 round 2 (Bugbot R2-B + 7-agent audit Red Team #1, Bug Hunter
+        # #2): every env var is now BOUNDS-CHECKED on parse. Pre-fix, an
+        # operator setting ``EDGEGUARD_MISP_BACKOFF_THRESHOLD=0`` would
+        # immediately satisfy ``_consecutive_failures (0) >= 0``, firing
+        # the 5-min cooldown on the first batch and turning a 30-min push
+        # into a multi-hour stall with the confusing log "0 consecutive
+        # 5xx failures — entering extended cooldown." Negative values had
+        # similar pathologies. Now: unparseable / out-of-bounds values
+        # log a WARNING and use the safe default. See docs/MISP_TUNING.md
+        # § "EdgeGuard-side env knobs" for valid ranges.
+        def _bounded_int_env(name: str, default: int, *, lo: int, hi: int) -> int:
+            raw = os.environ.get(name)
+            if not raw:
+                return default
+            try:
+                val = int(raw.strip())
+            except (ValueError, TypeError):
+                logger.warning("%s=%r is not a valid integer; using default %d", name, raw, default)
+                return default
+            if val < lo or val > hi:
+                logger.warning(
+                    "%s=%d is out of valid range [%d, %d]; using default %d",
+                    name,
+                    val,
+                    lo,
+                    hi,
+                    default,
+                )
+                return default
+            return val
+
+        def _bounded_float_env(name: str, default: float, *, lo: float, hi: float) -> float:
+            raw = os.environ.get(name)
+            if not raw:
+                return default
+            try:
+                val = float(raw.strip())
+            except (ValueError, TypeError):
+                logger.warning("%s=%r is not a valid float; using default %.1f", name, raw, default)
+                return default
+            # Bugbot R5 (commit bb86c329): reject NaN and ±inf BEFORE the
+            # bounds check.  Python's ``float("nan") < lo`` and ``> hi``
+            # both return False, so NaN slips past the ``val < lo or
+            # val > hi`` guard and propagates into the caller. For
+            # ``_backoff_cooldown_sec`` specifically this silently
+            # DISABLES the cooldown: the ``_backoff_cooldown_sec > 0``
+            # check later in push_items evaluates False for NaN, so the
+            # adaptive cooldown never fires — the opposite of what an
+            # operator setting an (accidentally-NaN) value intended.
+            # ``math.isfinite()`` rejects NaN, +inf, and -inf in one
+            # call.  ``_bounded_int_env`` doesn't need this guard
+            # because ``int("nan")`` / ``int("inf")`` raise ValueError
+            # and take the parse-fail branch above.
+            if not math.isfinite(val):
+                logger.warning(
+                    "%s=%r resolved to non-finite value (NaN/inf); using default %.1f",
+                    name,
+                    raw,
+                    default,
+                )
+                return default
+            if val < lo or val > hi:
+                logger.warning(
+                    "%s=%.1f is out of valid range [%.1f, %.1f]; using default %.1f",
+                    name,
+                    val,
+                    lo,
+                    hi,
+                    default,
+                )
+                return default
+            return val
+
+        # Bounds rationale:
+        # * tier thresholds (large / huge): floor 1 (no zero — would
+        #   classify every event as "huge"); ceil 10M (sanity cap; MISP
+        #   events with >10M attrs are pathological regardless)
+        # * backoff threshold: floor 2 (one consecutive 5xx isn't enough
+        #   to warrant a 5-min pause; require at least 2 — this matches
+        #   the comment intent and prevents an operator typo of "1"
+        #   from turning the @retry_with_backoff's first-attempt-fail
+        #   into a 5-min stall); ceil 100 (effectively-disabled threshold).
+        #   Bugbot R4 (commit 001846b) caught the prior floor=1 silently
+        #   contradicting this comment — now load-bearing.
+        # * cooldown: floor 0.0 (operator can disable the cooldown by
+        #   setting to 0; the cooldown branch then becomes a no-op);
+        #   ceil 3600.0 (1 hour — anything longer is almost certainly
+        #   a typo, e.g. 999999)
+        _large_threshold = _bounded_int_env("EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD", 50000, lo=1, hi=10_000_000)
+        _huge_threshold = _bounded_int_env("EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD", 100000, lo=1, hi=10_000_000)
+        _backoff_threshold = _bounded_int_env("EDGEGUARD_MISP_BACKOFF_THRESHOLD", 3, lo=2, hi=100)
+        _backoff_cooldown_sec = _bounded_float_env("EDGEGUARD_MISP_BACKOFF_COOLDOWN_SEC", 300.0, lo=0.0, hi=3600.0)
+
+        # PR-N4 round 2 (Red Team #6, Bug Hunter #3, Devil's Advocate):
+        # validate that HUGE > LARGE so the tier-resolution logic below
+        # produces semantically correct labels.  Pre-fix, an operator
+        # mistakenly setting LARGE=100000, HUGE=50000 (inverted) would
+        # cause every event in the 50K-100K range to mis-label as "huge"
+        # and over-throttle (50/batch + 30s instead of 100/batch + 15s).
+        # Auto-swap + warn rather than silently accept the inversion.
+        if _huge_threshold <= _large_threshold:
+            logger.warning(
+                "MISP adaptive-scaling thresholds inverted: LARGE=%d, HUGE=%d "
+                "(huge must be > large). Auto-swapping; please fix the env vars "
+                "EDGEGUARD_MISP_LARGE_EVENT_THRESHOLD / "
+                "EDGEGUARD_MISP_HUGE_EVENT_THRESHOLD per docs/MISP_TUNING.md.",
+                _large_threshold,
+                _huge_threshold,
+            )
+            _large_threshold, _huge_threshold = _huge_threshold, _large_threshold
+
+        # PR-N4 helper: resolve the adaptive-scaling tier from an
+        # existing-attribute count. Defined inside push_items so the
+        # closure captures the env-tuned thresholds; both the
+        # ``total_batches`` precompute (immediately below) and the
+        # inner loop (further below) use the same logic — no
+        # duplication / drift risk.
+        def _adaptive_for(existing_ct: int) -> Tuple[int, float, str]:
+            if existing_ct >= _huge_threshold:
+                return min(50, batch_size), max(30.0, batch_throttle), "huge"
+            if existing_ct >= _large_threshold:
+                return min(100, batch_size), max(15.0, batch_throttle), "large"
+            return batch_size, batch_throttle, "default"
+
+        # PR-N4 (Bugbot round 1, LOW): ``total_batches`` recomputed using
+        # the per-event ``effective_batch_size`` (the adaptive tier may
+        # downscale from the static ``batch_size``). Pre-fix this was
+        # computed once with the static value, so when scaling kicked in
+        # the progress log reported >100% and negative ETAs on huge
+        # events. Now uses the same ``_adaptive_for`` helper as the inner
+        # loop — single source of truth.
+        total_batches = sum(
+            (len(attrs) + _adaptive_for(existing_ct)[0] - 1) // _adaptive_for(existing_ct)[0]
+            for _src, _eid, existing_ct, attrs in push_queue
+        )
+
+        # PR-N4 round 2 (Devil's Advocate #1): track consecutive 5xx
+        # failures on the WRITER INSTANCE so the count persists across
+        # successive ``push_items`` calls. Pre-fix the counter was
+        # local-var scoped (`_consecutive_failures = 0` at function
+        # entry) and reset every call — meaning a sustained MISP
+        # degradation that flapped across multiple push_items calls
+        # never accumulated 3 consecutive failures within ANY single
+        # call, so the cooldown never fired even though MISP was clearly
+        # struggling. Now the count is on ``self`` and only resets on
+        # SUSTAINED recovery (Fix #3 below).
+        #
+        # Defensive ``getattr`` (not ``self.``): same pattern as
+        # ``liveness_callback`` lower in the file — existing tests
+        # construct MISPWriter via __new__ and bypass __init__, so the
+        # instance attribute may not exist on test instances.
+        if not hasattr(self, "_misp_push_consecutive_failures"):
+            self._misp_push_consecutive_failures = 0
+        if not hasattr(self, "_misp_push_consecutive_successes"):
+            self._misp_push_consecutive_successes = 0
+
+        for source, event_id, existing_attrs_count, unique_attrs in push_queue:
+            # PR-N4: ADAPTIVE SCALING. ``existing_attrs_count`` was
+            # captured during the dedup loop above (we already paid for
+            # ``_get_existing_attribute_keys(event_id)`` there) and
+            # threaded through ``push_queue``. No second MISP call here.
+            #
+            # Bugbot round 1 caught the duplicate fetch (lines 1505 and
+            # 1613 both called the same paginated 30-60s REST endpoint)
+            # AND the silent except-pass that defaulted to 0 on lookup
+            # failure (defeating adaptive scaling exactly when it was
+            # most needed). Both fixed by threading the dedup-time count
+            # through ``push_queue``.
+            effective_batch_size, effective_throttle, _scale_tier = _adaptive_for(existing_attrs_count)
+            if _scale_tier != "default":
+                logger.info(
+                    "[PUSH] Event %s has %d existing attrs (>= %s threshold) — "
+                    "adaptive scaling: batch_size=%d, throttle=%.0fs (was %d / %.0fs)",
+                    event_id,
+                    existing_attrs_count,
+                    _scale_tier,
+                    effective_batch_size,
+                    effective_throttle,
+                    batch_size,
+                    batch_throttle,
+                )
+
             # Send attributes in batches
-            for i in range(0, len(unique_attrs), batch_size):
-                batch = unique_attrs[i : i + batch_size]
+            for i in range(0, len(unique_attrs), effective_batch_size):
+                batch = unique_attrs[i : i + effective_batch_size]
 
                 # Throttle between batches (skip only the very first batch of the first event)
-                if (i > 0 or processed_batches > 0) and batch_throttle > 0:
-                    time.sleep(batch_throttle)
+                if (i > 0 or processed_batches > 0) and effective_throttle > 0:
+                    time.sleep(effective_throttle)
+
+                # PR-N4 adaptive backoff: if we've seen N consecutive 5xx
+                # failures (instance-scoped via self._misp_push_*), insert
+                # an extended cooldown BEFORE retrying. The
+                # @retry_with_backoff decorator on _push_batch retries
+                # internally with 10s × 2^n delay (max ~150s budget per
+                # batch); that's not enough when the underlying MISP is
+                # stuck OOMing. The cooldown gives MISP a real chance to
+                # recover before we send the next request.
+                #
+                # PR-N4 round 2 (Logic Tracker #1, Prod Readiness #3 #7):
+                # CHUNKED sleep with a liveness check between chunks.
+                # Pre-fix the cooldown was a single ``time.sleep(300)``
+                # call that blocked the parent-DAG liveness callback for
+                # the full 5 minutes. If a sibling DAG task failed during
+                # that window, EdgeGuard slept through the failure signal
+                # and continued pushing for ~5 min before noticing.
+                # Now we sleep in 30s chunks, calling the liveness
+                # callback between each — DAG-failure detection latency
+                # drops from 5min to ~30s.
+                if self._misp_push_consecutive_failures >= _backoff_threshold and _backoff_cooldown_sec > 0:
+                    logger.warning(
+                        "[PUSH] %d consecutive 5xx failures (>= threshold %d) — "
+                        "entering extended cooldown for %.0fs before next batch. "
+                        "MISP backend appears overwhelmed; check backend RAM / "
+                        "PHP memory_limit / MySQL innodb_buffer_pool_size — see "
+                        "docs/MISP_TUNING.md.",
+                        self._misp_push_consecutive_failures,
+                        _backoff_threshold,
+                        _backoff_cooldown_sec,
+                    )
+                    if _METRICS_AVAILABLE:
+                        try:
+                            _MISP_BACKOFF_TRIGGERED.labels(source=source).inc()
+                        except Exception as _metric_err:
+                            # Bugbot (PR-N4 round 1): don't swallow silently.
+                            # Metric failures shouldn't block the push, but they
+                            # SHOULD be debuggable — if Prometheus client is
+                            # mis-configured (e.g. duplicate registry registration)
+                            # the operator needs to see something other than
+                            # "no metric ever increments."
+                            logger.debug(
+                                "MISP backoff-triggered metric increment failed: %s",
+                                _metric_err,
+                                exc_info=True,
+                            )
+                    # Chunked sleep + liveness check. ``_BACKOFF_LIVENESS_CHUNK_SEC``
+                    # default 30s — short enough to detect parent-DAG death
+                    # within 30s, long enough that we don't burn CPU calling
+                    # the rate-limited liveness callback.
+                    _liveness_cb_in_cooldown = getattr(self, "liveness_callback", None)
+                    _chunk = 30.0
+                    _slept = 0.0
+                    while _slept < _backoff_cooldown_sec:
+                        _step = min(_chunk, _backoff_cooldown_sec - _slept)
+                        time.sleep(_step)
+                        _slept += _step
+                        # Liveness check; re-raises AbortedByDagFailureException
+                        # if parent DAG died (per PR-F6 contract).
+                        if _liveness_cb_in_cooldown is not None:
+                            _liveness_cb_in_cooldown()
+                    # Reset the counter so we don't immediately re-pause
+                    # if the next batch ALSO fails — the @retry_with_backoff
+                    # gives it 4 attempts; if those fail, we'll re-trigger
+                    # the cooldown after another N consecutive batch-level
+                    # failures.
+                    self._misp_push_consecutive_failures = 0
+                    self._misp_push_consecutive_successes = 0
 
                 # PR-F6 (Issue #65): parent-DAG liveness check BEFORE the
                 # next push. If the parent dag_run has been marked failed
@@ -1589,15 +1911,70 @@ class MISPWriter:
                 # bad event doesn't destroy a whole NVD push.
                 try:
                     success, failed = self._push_batch(event_id, batch)
+                    # PR-N4 round 2 (Cross-Checker #2, Bug Hunter #5):
+                    # require N CONSECUTIVE FULL SUCCESSES before
+                    # resetting the failure counter. Pre-fix, a single
+                    # success between two failure clusters reset the
+                    # counter, masking a chronically-flapping backend.
+                    # ``_REQUIRED_RECOVERIES = 2`` — one success could
+                    # be a fluke; two suggests genuine recovery. Kept
+                    # in-function (not env-tunable) because the right
+                    # answer doesn't vary across deployments.
+                    if success > 0 and failed == 0:
+                        self._misp_push_consecutive_successes += 1
+                        if self._misp_push_consecutive_successes >= 2:
+                            self._misp_push_consecutive_failures = 0
+                    else:
+                        # Partial success (some attrs failed but no exception):
+                        # don't count as recovery, but don't punish either.
+                        self._misp_push_consecutive_successes = 0
                 except MispTransientError as exc:
+                    # PR-N4 round 2 (Bug Hunter #6, Prod Readiness #11):
+                    # sanitize event_id in log output. ``event_id`` is
+                    # operator-controlled-but-tainted (it comes from MISP
+                    # API responses; if MISP is compromised, it could
+                    # contain log-injection sequences). Strip ANSI/control
+                    # chars defensively.
+                    _safe_event_id = "".join(c for c in str(event_id) if c.isprintable() and c not in ("\r", "\n"))[:64]
                     logger.error(
                         "Batch %s for event %s failed after retries (%s) — counting batch as failed and continuing",
                         processed_batches,
-                        event_id,
+                        _safe_event_id,
                         exc,
                     )
                     success, failed = 0, len(batch)
                     self.stats["errors"] += 1
+                    # PR-N4 round 2 (Cross-Checker #2): instance-scoped
+                    # counter persists across push_items calls so a
+                    # flapping backend eventually trips the cooldown.
+                    self._misp_push_consecutive_failures += 1
+                    self._misp_push_consecutive_successes = 0
+                    # PR-N4: emit Prometheus permanent-failure counter so
+                    # operators can alert on data loss rate. Pre-PR-N4 the
+                    # only signal was the log line above, which Bravo had
+                    # to hand-count from. ``source`` is the resolved
+                    # source string from the outer loop's ``grouped`` dict.
+                    #
+                    # PR-N4 round 2 (Maintainer Dev #4, Bug Hunter #4):
+                    # DROPPED ``event_id`` label. Each MISP run creates a
+                    # new event_id (date-stamped), so labelling by event_id
+                    # produced a new Prometheus time series every day.
+                    # Over 365 days that's 365 unbounded series PER
+                    # SOURCE — would balloon Prometheus storage and
+                    # slow alerting queries. ``source`` alone gives
+                    # operators the actionable signal ("OTX is dropping
+                    # batches") without the cardinality.
+                    if _METRICS_AVAILABLE:
+                        try:
+                            _MISP_PUSH_PERMANENT_FAILURES.labels(source=source).inc()
+                        except Exception as _metric_err:
+                            # Bugbot (PR-N4 round 1): don't swallow silently.
+                            # See backoff-trigger metric block above for rationale.
+                            logger.debug(
+                                "MISP permanent-failure metric increment failed: %s",
+                                _metric_err,
+                                exc_info=True,
+                            )
                 total_success += success
                 total_failed += failed
 
