@@ -152,6 +152,55 @@ class TestFix2ConfidenceClamp:
         assert clamp_confidence_score(1.0) == 1.0
         assert clamp_confidence_score("0.75") == 0.75
 
+    def test_batch_paths_use_single_evaluation_helper(self, caplog):
+        """Cursor-bugbot PR #98 Medium (2026-04-21): the batch paths
+        must (a) call the clamp ONCE per item, not twice, and (b) emit
+        a WARN on reject so operators see the compromised-feed signal
+        (parity with the single-item merge_node_with_source path).
+        Behavioral test — call the helper with a bad value + observe
+        both return value and log output."""
+        import logging
+
+        from neo4j_client import _clamp_confidence_with_log
+
+        # Bad value → fall back to default + emit WARN
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            result = _clamp_confidence_with_log(float("inf"), label="Indicator", source_id="otx")
+        assert result == 0.5, "must fall back to default on reject"
+        assert any("rejected by clamp" in r.message for r in caplog.records), (
+            "batch-path helper must emit WARN on reject (parity with single-item path)"
+        )
+
+        # None → default (None is legitimately "no claim", not a reject)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            result = _clamp_confidence_with_log(None, label="Indicator", source_id="otx")
+        assert result == 0.5
+        assert not any("rejected by clamp" in r.message for r in caplog.records), (
+            "None must NOT WARN (it's not a reject, it's a missing field)"
+        )
+
+        # Valid value → pass through unchanged
+        assert _clamp_confidence_with_log(0.8, label="Indicator", source_id="otx") == 0.8
+
+    def test_batch_paths_no_duplicate_clamp_call(self):
+        """Regression pin: both merge_indicators_batch and
+        merge_vulnerabilities_batch must use the helper, not the
+        old double-call ternary pattern."""
+        src = (SRC / "neo4j_client.py").read_text()
+        # The old pattern was:
+        #     clamp_confidence_score(item.get("confidence_score"))
+        #     if clamp_confidence_score(item.get("confidence_score")) is not None
+        #     else 0.5
+        # Must NOT appear (regression forbid).
+        assert 'if clamp_confidence_score(item.get("confidence_score")) is not None' not in src, (
+            "regression: batch paths must NOT call clamp_confidence_score twice per row "
+            "(use _clamp_confidence_with_log instead)"
+        )
+        # The helper must be referenced at least twice (one per batch path).
+        count = src.count("_clamp_confidence_with_log(")
+        assert count >= 3, f"helper must be used in both batch paths (+ definition); got {count}"
+
     def test_merge_node_applies_clamp_with_fallback(self):
         """Regression pin: the merge_node_with_source read site uses
         the clamp + falls back to 0.5 on rejection."""

@@ -607,6 +607,35 @@ def clamp_confidence_score(value: Any) -> Optional[float]:
     return f
 
 
+def _clamp_confidence_with_log(raw: Any, label: str, source_id: str, default: float = 0.5) -> float:
+    """PR-N14 follow-up (cursor-bugbot 2026-04-21 Medium):
+    single evaluation of ``clamp_confidence_score`` + WARN-on-reject,
+    so the batch paths in ``merge_indicators_batch`` and
+    ``merge_vulnerabilities_batch`` don't (a) call the clamp twice per
+    row in the hot loop, and (b) silently swallow rejects — the
+    single-item ``merge_node_with_source`` path emits a WARN and the
+    batch paths MUST emit the same signal so operators can identify
+    the offending feed uniformly.
+
+    Returns ``clamped`` on success, ``default`` (0.5) on reject.
+    Never returns None — callers use the return value as a Cypher
+    param.
+    """
+    if raw is None:
+        return default
+    clamped = clamp_confidence_score(raw)
+    if clamped is None:
+        logger.warning(
+            "confidence_score rejected by clamp for %s/%s (claimed=%r) — falling back to %.2f. Compromised feed?",
+            label,
+            source_id,
+            raw,
+            default,
+        )
+        return default
+    return clamped
+
+
 def normalize_cve_id_for_graph(value: Any) -> Optional[str]:
     """
     Return a canonical CVE id string for graph keys/relationships, or None if unknown.
@@ -2501,12 +2530,16 @@ class Neo4jClient:
                         "tag": tag,
                         "source_id": source_id,
                         "source_array": source_list,
-                        # PR-N14 Fix #2: clamp confidence to [0,1]; fall
-                        # back to 0.5 on inf/nan/negative/>1.
-                        "confidence": (
-                            clamp_confidence_score(item.get("confidence_score"))
-                            if clamp_confidence_score(item.get("confidence_score")) is not None
-                            else 0.5
+                        # PR-N14 Fix #2 (follow-up 2026-04-21): clamp confidence to
+                        # [0,1]; fall back to 0.5 on inf/nan/negative/>1. Use the
+                        # single-evaluation helper so (a) the clamp doesn't run
+                        # twice per row in this hot loop, and (b) the batch path
+                        # emits the same WARN-on-reject that
+                        # merge_node_with_source does (cursor-bugbot Medium).
+                        "confidence": _clamp_confidence_with_log(
+                            item.get("confidence_score"),
+                            label="Indicator",
+                            source_id=source_id,
                         ),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
@@ -2738,12 +2771,16 @@ class Neo4jClient:
                         "tag": item.get("tag", "default"),
                         "source_id": source_id,
                         "source_array": source_list,
-                        # PR-N14 Fix #2: clamp confidence to [0,1]; fall
-                        # back to 0.5 on inf/nan/negative/>1.
-                        "confidence": (
-                            clamp_confidence_score(item.get("confidence_score"))
-                            if clamp_confidence_score(item.get("confidence_score")) is not None
-                            else 0.5
+                        # PR-N14 Fix #2 (follow-up 2026-04-21): clamp confidence to
+                        # [0,1]; fall back to 0.5 on inf/nan/negative/>1. Use the
+                        # single-evaluation helper so (a) the clamp doesn't run
+                        # twice per row in this hot loop, and (b) the batch path
+                        # emits the same WARN-on-reject that
+                        # merge_node_with_source does (cursor-bugbot Medium).
+                        "confidence": _clamp_confidence_with_log(
+                            item.get("confidence_score"),
+                            label="Vulnerability",
+                            source_id=source_id,
                         ),
                         "zone": zone,
                         "raw_data": json.dumps(raw_data, default=str),
