@@ -477,6 +477,23 @@ def build_relationships():
             f"       AND toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]) "
             # Branch 3: a.name ∈ malware.aliases — doesn't read
             # attributed_to, reachable when attributed_to is NULL.
+            #
+            # TODO (PR-N16+): Red-Team attribution-hijack vector left open.
+            # A compromised MISP peer can ship ``Malware{name:"benign",
+            # aliases:["APT29","Cozy Bear"]}``. Branch 3 then matches
+            # real APT29 (a.name) against the forged aliases entry,
+            # creating a false ATTRIBUTED_TO edge. PR-N14 Fix #3
+            # capped aliases cardinality + dropped placeholder entries,
+            # but DOES NOT block real-actor-name injection. The full
+            # fix needs either (a) source-allowlist (only trusted
+            # sources can write aliases), (b) multi-source
+            # corroboration (require 2+ sources agreeing on the
+            # alias before it attributes), or (c) disabling branch 3
+            # entirely (current mitigation: branch 3's aliases
+            # comprehension drops placeholder entries, but not
+            # real-actor names). Deferred pending design discussion.
+            # See: 7-agent pre-baseline audit Red-Team BLOCK #19
+            # (2026-04-21), PR-N14 body.
             f"   OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]"
             ") "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "

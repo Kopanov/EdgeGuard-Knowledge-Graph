@@ -390,6 +390,31 @@ NEO4J_BATCH_PERMANENT_FAILURES = Counter(
     ["label", "source", "reason"],
 )
 
+# PR-N18 (2026-04-22): placeholder-name MERGE reject counter. PR-N11
+# promised this counter but it was deferred. Landing now so the
+# RUNBOOK's failure-mode #5 detection step switches from log-grep
+# to proper Prometheus alerting.
+#
+# Fires when ``merge_malware`` / ``merge_actor`` rejects a MERGE
+# because the incoming ``name`` matches a known placeholder sentinel
+# (``unknown``, ``N/A``, ``generic``, …) from the
+# ``_REJECTED_PLACEHOLDER_NAMES`` frozenset.
+#
+# Low baseline rate is expected (many feeds emit ``unknown`` as a
+# fallback). High rate = adversarial injection or feed schema
+# regression. Alert threshold: >10/15min per source.
+#
+# Labels are bounded: ``label`` is ``Malware`` or ``ThreatActor``;
+# ``source`` is the per-source identifier (otx, threatfox, …).
+MERGE_REJECT_PLACEHOLDER = Counter(
+    "edgeguard_merge_reject_placeholder_total",
+    "MERGE attempts rejected because the node name matched a known "
+    "placeholder sentinel (unknown / N/A / generic / …). Spike = "
+    "adversarial or malconfigured collector emitting placeholder-named "
+    "Malware or ThreatActor nodes. Low baseline rate is normal.",
+    ["label", "source"],
+)
+
 # Pipeline metrics
 PIPELINE_DURATION = Histogram(
     "edgeguard_pipeline_duration_seconds",

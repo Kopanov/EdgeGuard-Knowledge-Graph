@@ -545,8 +545,70 @@ groups:
                  to confirm Source node exists
               3. See docs/RUNBOOK.md § Neo4j silent-write failures
 
-      # NOTE: a placeholder-reject alert (tracks spikes in the PR-N10
-      # Fix #1 merge-reject rate) requires a counter that isn't wired
-      # yet; it'll land in a PR-N12 follow-up alongside the counter
-      # definition so the alert rule and its backing metric ship
-      # atomically. Do not add here without the counter.
+      - alert: EdgeGuardNeo4jBatchPermanentFailure
+        # PR-N18 (2026-04-22): alert PR-N15 promised but didn't ship.
+        # Fires when a MERGE batch fails permanently — either the
+        # retry budget exhausted on transient errors (deadlock, GC
+        # pause, lock timeout) or a non-retryable exception occurred.
+        # Each increment = one batch (up to BATCH_SIZE=1000 items)
+        # silently lost. Critical severity: at 730d baseline scale,
+        # this directly correlates to silent data loss and must
+        # page on-call.
+        expr: sum by (label, source, reason) (rate(edgeguard_neo4j_batch_permanent_failure_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: neo4j_client
+        annotations:
+          summary: "EdgeGuard Neo4j batch permanently failed ({{ $labels.label }}/{{ $labels.source }}, reason={{ $labels.reason }})"
+          description: |
+            A Neo4j MERGE batch for {{ $labels.label }} from source
+            {{ $labels.source }} failed permanently. Reason:
+            ``{{ $labels.reason }}`` (either ``retries_exhausted``
+            after 3 transient-error retries, or ``non_retryable``
+            for schema/syntax/constraint errors).
+
+            Each increment = one batch (up to 1000 rows) lost. See
+            ``[BATCH-PERMANENT-FAILURE]`` log lines for exact batch
+            context.
+
+            Remediation:
+              1. Tail Airflow logs: ``grep "\[BATCH-PERMANENT-FAILURE\]" /opt/airflow/logs/**/*.log | tail -20``
+              2. If ``retries_exhausted``: Neo4j is overloaded. Scale or wait.
+              3. If ``non_retryable``: schema drift or constraint. Check
+                 Neo4j logs: ``docker logs edgeguard-neo4j 2>&1 | grep -i constraint``
+              4. See docs/RUNBOOK.md § Top-5 failure mode #4 (Neo4j ineffective-batch)
+
+      - alert: EdgeGuardMergeRejectPlaceholderSpike
+        # PR-N18 (2026-04-22): alert paired with the new
+        # ``edgeguard_merge_reject_placeholder_total`` counter. Low
+        # baseline rate is expected (feeds emit ``unknown`` as
+        # defaults), but a sudden spike means a compromised or
+        # malconfigured collector is emitting placeholder-named
+        # Malware / ThreatActor nodes at scale. Warning severity —
+        # PR-N10's merge-time reject already blocks the actual writes,
+        # so the graph is safe; the alert surfaces the upstream issue.
+        expr: sum by (label, source) (increase(edgeguard_merge_reject_placeholder_total[15m])) > 10
+        for: 15m
+        labels:
+          severity: warning
+          component: neo4j_client
+        annotations:
+          summary: "EdgeGuard rejecting placeholder-name {{ $labels.label }} MERGEs at high rate ({{ $labels.source }})"
+          description: |
+            {{ $labels.source }} is attempting to create {{ $labels.label }}
+            nodes with placeholder names (``unknown``/``N/A``/``generic``/
+            ``malware``/``apt``/...) at rate > 10/15min. PR-N10 merge-
+            time reject blocks the actual writes — the graph is safe.
+
+            Low rate is expected (feed defaults); high rate suggests
+            a feed regression or adversarial injection.
+
+            Remediation:
+              1. Identify the offending source from the label.
+              2. Extend the collector's normalization to skip placeholder
+                 names BEFORE they reach merge_malware/merge_actor.
+              3. If adversarial: freeze the source, audit the MISP event.
+              4. See ``src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES``
+                 for the full rejected list.
+              5. See docs/RUNBOOK.md § Top-5 failure mode #5
