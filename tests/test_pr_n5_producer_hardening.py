@@ -510,6 +510,55 @@ class TestC7HonestNullValidator:
             f"historical claims. Got logs: {[r.message for r in caplog.records]}"
         )
 
+    def test_c7_behaviour_validator_catches_last_modified_alias(self, caplog):
+        """Bugbot PR-N5 R2 MED (2026-04-21): the validator MUST also
+        scan ``last_modified`` because the downstream chokepoint
+        ``_apply_source_truthful_timestamps`` accepts it as an alias
+        for ``last_seen``. Pre-fix a collector setting
+        ``item["last_modified"] = NOW`` (without ``last_seen``) would
+        bypass the validator entirely, yet still propagate a wall-clock
+        substitute into the MISP attribute as ``last_seen``."""
+        import logging
+        from datetime import datetime, timezone
+
+        from collectors.misp_writer import _validate_honest_null
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        # Critical: only `last_modified` is set (the alias path), not `last_seen`
+        item = {
+            "type": "vulnerability",
+            "cve_id": "CVE-2026-9999",
+            "tag": "nvd",
+            "last_modified": now_iso,
+        }
+        with caplog.at_level(logging.WARNING):
+            _validate_honest_null(item)
+
+        # Must catch via the last_modified branch
+        relevant = [r.message for r in caplog.records if "honest-NULL" in r.message]
+        assert relevant, (
+            f"R2 regression: validator must catch wall-clock-NOW values in "
+            f"`last_modified` (alias for last_seen). Got logs: "
+            f"{[r.message for r in caplog.records]}"
+        )
+        # The WARN should mention the field name `last_modified` so operators
+        # can audit which collector path produced the violation.
+        assert any("last_modified" in m for m in relevant), (
+            f"R2 regression: WARN must reference `last_modified` field name; got: {relevant}"
+        )
+
+    def test_c7_validator_field_list_source_pin(self):
+        """Source pin: the validator's field tuple must include all three
+        timestamp aliases that ``_apply_source_truthful_timestamps``
+        reads (``first_seen``, ``last_seen``, ``last_modified``).
+        Pre-Bugbot R2, only the first two were checked → silent gap."""
+        src = self._src()
+        # The exact tuple shipped in the R2 fix
+        assert '("first_seen", "last_seen", "last_modified")' in src, (
+            "Bugbot PR-N5 R2 regression: _validate_honest_null must scan all "
+            "three timestamp fields that the chokepoint reads, not just two"
+        )
+
     def test_c7_behaviour_validator_quiet_on_null(self, caplog):
         """The HAPPY path: ``first_seen`` is None / absent (collector
         correctly passed NULL through). Validator must be silent."""

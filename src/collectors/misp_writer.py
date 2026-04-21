@@ -112,7 +112,18 @@ def _validate_honest_null(item: Dict[str, Any], source_hint: Optional[str] = Non
     _suspicious_window_sec = 300.0
     _now_epoch = datetime.now(timezone.utc).timestamp()
 
-    for field in ("first_seen", "last_seen"):
+    # PR-N5 R2 Bugbot MED (2026-04-21): include ``last_modified`` in
+    # the field list. The downstream chokepoint
+    # ``_apply_source_truthful_timestamps`` reads ``last_modified`` as
+    # an alias for ``last_seen`` (NVD/STIX collectors emit it under
+    # this name) — so a collector that manufactures
+    # ``item["last_modified"] = NOW`` but leaves ``last_seen`` unset
+    # would propagate the wall-clock substitute into the MISP attribute
+    # as ``last_seen`` while bypassing the honest-NULL guard entirely.
+    # Adding ``"last_modified"`` to this loop closes the gap; the WARN
+    # message already templates ``%s=...`` so the violation reports
+    # the field as ``last_modified``, preserving the audit trail.
+    for field in ("first_seen", "last_seen", "last_modified"):
         raw = item.get(field)
         if raw is None or raw == "":
             continue  # honest NULL — the desired case
