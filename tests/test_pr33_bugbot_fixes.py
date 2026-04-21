@@ -1416,9 +1416,15 @@ def test_safe_run_batched_logs_skip_count_when_skip_query_returns_positive(caplo
     from unittest.mock import MagicMock
 
     client = MagicMock()
-    # First call: skip_query → returns 30 orphans. Second call: apoc → returns 70 processed.
+    # PR-N7 (2026-04-21) added a pre-count query before the main apoc
+    # call so operators see the scale of work before a multi-hour step
+    # starts. The mock now needs 3 side_effect values:
+    #   1. skip_query → orphan count
+    #   2. pre-count (PR-N7) → outer-row count for the preamble log
+    #   3. main apoc.periodic.iterate → actual result
     client.run.side_effect = [
         [{"c": 30}],  # skip count (orphans)
+        [{"c": 100}],  # PR-N7 pre-count (outer row count for the preamble log)
         [{"count": 70, "batches": 1, "errorMessages": []}],  # apoc result
     ]
     stats: dict = {}
@@ -1450,8 +1456,11 @@ def test_safe_run_batched_does_not_log_skip_when_skip_query_returns_zero(caplog)
     from unittest.mock import MagicMock
 
     client = MagicMock()
+    # PR-N7: include pre-count mock result (same 3-call pattern as the
+    # positive-skip test above — see that test for rationale).
     client.run.side_effect = [
         [{"c": 0}],  # no orphans
+        [{"c": 50}],  # PR-N7 pre-count (outer row count)
         [{"count": 50, "batches": 1, "errorMessages": []}],
     ]
     stats: dict = {}

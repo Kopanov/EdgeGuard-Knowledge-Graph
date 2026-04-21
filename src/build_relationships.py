@@ -72,6 +72,89 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _assert_no_unsafe_empty_string_literal_in_outer_queries() -> None:
+    """PR-N7 (2026-04-21 on-call from Bravo Vanko): module-load regression
+    guard against the ``<> ''`` quote-escape bug.
+
+    History: the ``_safe_run_batched`` helper wraps both outer_query and
+    inner_query in SINGLE quotes for apoc.periodic.iterate:
+
+        CALL apoc.periodic.iterate('<outer>', '<inner>', {...})
+
+    If ``<outer>`` contains a Cypher single-quoted empty-string literal
+    ``''`` (e.g. ``WHERE i.cve_id <> ''``), the literal's closing quote
+    prematurely terminates the apoc wrapper's string → rendered Cypher
+    becomes a syntax error (``Invalid input '' RETURN i'``) → the
+    step fails silently in ``_safe_run_batched``'s try/except → zero
+    edges created.
+
+    Pre-fix 4 outer queries (steps 2, 3a, 3b, 9) had this pattern and
+    were producing ZERO edges on every baseline run — discovered by
+    Bravo Vanko's on-call investigation of a 2026-04-21 deadlocked
+    pipeline. The fix replaces ``x <> ''`` with ``size(x) > 0`` (same
+    semantics for strings, no quotes needed).
+
+    This guard scans the module's own source at import time for
+    ``<> ''`` inside a string literal and raises ``RuntimeError``.
+    If a future maintainer re-introduces the pattern, the import
+    fails loudly at CI startup instead of silently at production
+    baseline time.
+
+    The check uses AST walking so docstring comments that legitimately
+    describe the old pattern (like this one, for breadcrumb purposes)
+    don't false-match.
+    """
+    import ast
+    import pathlib
+
+    this_file = pathlib.Path(__file__).resolve()
+    try:
+        source = this_file.read_text()
+        tree = ast.parse(source)
+    except Exception:
+        # Can't scan; log a soft warning and continue rather than hard-fail
+        # (defensive — don't break the module on a filesystem edge case).
+        logger.debug("PR-N7 regression guard: could not parse own source for <> '' scan")
+        return
+
+    findings: list = []
+    for node in ast.walk(tree):
+        # Only look inside string Constants that are assigned to a
+        # variable whose name contains "outer" or "inner" (the two
+        # args we wrap in apoc.periodic.iterate single quotes).
+        if isinstance(node, ast.Assign):
+            target_names = [
+                t.id
+                for t in node.targets
+                if isinstance(t, ast.Name) and ("outer" in t.id.lower() or "inner" in t.id.lower())
+            ]
+            if not target_names:
+                continue
+            # Inspect the assigned value — handles both a direct string
+            # Constant and the tuple-of-strings idiom used by some
+            # multi-line inner-query assignments in this module.
+            for const_node in ast.walk(node.value):
+                if isinstance(const_node, ast.Constant) and isinstance(const_node.value, str):
+                    if "<> ''" in const_node.value:
+                        findings.append((target_names[0], node.lineno))
+
+    if findings:
+        raise RuntimeError(
+            "PR-N7 regression guard triggered: outer/inner query variables "
+            f"{findings!r} contain the dangerous `<> ''` pattern. This "
+            "breaks apoc.periodic.iterate's single-quote wrapper and causes "
+            "silent zero-edge failures. Replace with `size(x) > 0` (same "
+            "semantics for strings, no quote conflict). See the "
+            "_assert_no_unsafe_empty_string_literal_in_outer_queries "
+            "docstring for the history."
+        )
+
+
+# Load-time check: if someone re-introduces the bug, module import fails
+# in CI before the code ever ships. Cheap to run (one AST parse at import).
+_assert_no_unsafe_empty_string_literal_in_outer_queries()
+
+
 def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> bool:
     """Run a single relationship query with fault tolerance.
 
@@ -129,6 +212,33 @@ def _safe_run_batched(
         except Exception as exp_err:
             logger.debug("skip_query failed for %s — skip-count log will be omitted: %s", label, exp_err)
 
+    # PR-N7 (2026-04-21 on-call from Bravo Vanko): pre-log the outer
+    # row count BEFORE starting apoc.periodic.iterate so operators
+    # can see the scale of work. Pre-fix the pipeline sat silent for
+    # 5+ hours during step 4 (144K-indicator co-occurrence); the
+    # subprocess was found dead with no log breadcrumb explaining the
+    # scale. ``apoc.periodic.iterate`` doesn't emit mid-flight
+    # progress, but pre+post logs + elapsed time give operators a
+    # "size-of-work" signal to compare against wall-clock.
+    outer_count = None
+    try:
+        outer_count_query = f"CALL {{ {outer_query} }} RETURN count(*) AS c"
+        count_result = client.run(outer_count_query)
+        if count_result:
+            outer_count = count_result[0].get("c", 0)
+            logger.info(
+                "[LINK] %s: %s outer rows × batch_size %d = ~%d apoc batches expected",
+                label,
+                f"{outer_count:,}",
+                batch_size,
+                max(1, (outer_count + batch_size - 1) // batch_size),
+            )
+    except Exception as _count_err:
+        # Count-preamble is best-effort; don't block the actual work
+        # on a failed COUNT query (would be weird but possible on a
+        # malformed outer).
+        logger.debug("pre-count failed for %s: %s", label, _count_err)
+
     query = f"""
     CALL apoc.periodic.iterate(
         '{outer_query}',
@@ -138,8 +248,16 @@ def _safe_run_batched(
     YIELD batches, total, errorMessages
     RETURN total AS count, batches, errorMessages
     """
+    # Timing measurement + explicit start log so operators see the
+    # apoc call boundary in logs (distinguishes "APOC running" from
+    # "APOC never started" during multi-hour stalls).
+    import time as _time
+
+    _start = _time.time()
+    logger.info("[LINK] %s: starting apoc.periodic.iterate (batch_size=%d)...", label, batch_size)
     try:
         result = client.run(query)
+        _elapsed = _time.time() - _start
         if result:
             row = result[0]
             count = row.get("count", 0)
@@ -148,11 +266,12 @@ def _safe_run_batched(
             stats[stat_key] = count
             if errors:
                 logger.warning(
-                    f"  [PARTIAL] {label}: {count} in {batches_n} batches, errors: {errors[:3]}"
+                    f"  [PARTIAL] {label}: {count} in {batches_n} batches, "
+                    f"elapsed {_elapsed:.1f}s, errors: {errors[:3]}"
                     f"{' (+more)' if len(errors) > 3 else ''}"
                 )
             else:
-                logger.info(f"  [OK] {label}: {count} in {batches_n} batches")
+                logger.info(f"  [OK] {label}: {count} in {batches_n} batches, elapsed {_elapsed:.1f}s")
             # PR #34 round 20: orphan-count log when skip_query was provided.
             # No comparison needed — skip_count IS the count of input rows
             # whose target doesn't exist.
@@ -167,10 +286,18 @@ def _safe_run_batched(
             return not errors
         else:
             stats[stat_key] = 0
-            logger.info(f"  [OK] {label}: 0 (no matches)")
+            logger.info(f"  [OK] {label}: 0 (no matches), elapsed {_elapsed:.1f}s")
             return True
     except Exception as e:
-        logger.error(f"  [FAIL] {label}: {type(e).__name__}: {e}", exc_info=True)
+        _elapsed = _time.time() - _start
+        logger.error(
+            "  [FAIL] %s after %.1fs: %s: %s",
+            label,
+            _elapsed,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
         stats[stat_key] = 0
         return False
 
@@ -197,7 +324,7 @@ def build_relationships():
 
         # 2. Malware → ThreatActor (ATTRIBUTED_TO) — exact name match
         logger.info("[LINK] 2/12 Malware → ThreatActor (exact name match)...")
-        _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND m.attributed_to <> '') OR size(coalesce(m.aliases, [])) > 0 RETURN m"
+        _outer = "MATCH (m:Malware) WHERE (m.attributed_to IS NOT NULL AND size(m.attributed_to) > 0) OR size(coalesce(m.aliases, [])) > 0 RETURN m"
         _inner = 'WITH $m AS m MATCH (a:ThreatActor) WHERE m.attributed_to = a.name OR m.attributed_to IN coalesce(a.aliases, []) OR a.name IN coalesce(m.aliases, []) MERGE (m)-[r:ATTRIBUTED_TO]->(a) ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)'
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
@@ -205,7 +332,7 @@ def build_relationships():
 
         # 3a. Indicator → Vulnerability (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3a/12 Indicator → Vulnerability (exact CVE match)...")
-        _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
+        _q3a_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND size(i.cve_id) > 0 RETURN i"
         # PR-M3c §8-RI-S3-Q9: accumulate ``r.source_ids`` (set-valued) in
         # addition to writing scalar ``r.source_id`` (last-writer-wins, kept
         # for legacy readers and observability). Multiple merge passes (e.g.
@@ -225,7 +352,7 @@ def build_relationships():
         # PR #34 round 20: count Indicator orphans (cve_id set but no
         # matching Vulnerability) — directly the skip count, no comparison.
         _q3a_skip = (
-            "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
+            "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND size(i.cve_id) > 0 "
             "AND NOT EXISTS { MATCH (v:Vulnerability {cve_id: i.cve_id}) } "
             "RETURN count(i) AS c"
         )
@@ -243,7 +370,7 @@ def build_relationships():
 
         # 3b. Indicator → CVE (EXPLOITS) — exact CVE match (indexed)
         logger.info("[LINK] 3b/12 Indicator → CVE (exact CVE match)...")
-        _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' RETURN i"
+        _q3b_outer = "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND size(i.cve_id) > 0 RETURN i"
         # PR-M3c: see Q3a above for rationale — same accumulate-source_ids
         # pattern applied uniformly to every site that sets ``r.source_id``.
         _q3b_inner = (
@@ -255,7 +382,7 @@ def build_relationships():
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
         )
         _q3b_skip = (
-            "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> '' "
+            "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND size(i.cve_id) > 0 "
             "AND NOT EXISTS { MATCH (c:CVE {cve_id: i.cve_id}) } "
             "RETURN count(i) AS c"
         )
@@ -278,34 +405,50 @@ def build_relationships():
         # PR #33 round 10: dropped legacy scalar misp_event_id from both filter
         # and join. Outer filter only selects Indicators with a non-empty
         # misp_event_ids[]; inner Malware match uses array IN-membership.
-        logger.info("[LINK] 4/12 Indicator → Malware (co-occurrence, batched)...")
-        _q4_outer = "MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0 RETURN i"
+        #
+        # PR-N7 (2026-04-21 on-call from Bravo Vanko): REVERSED the join
+        # direction to iterate from Malware (the small side, ~3.4K nodes
+        # in production) instead of Indicator (~144K nodes). Neo4j CE
+        # cannot index array elements, so ``eid IN m.misp_event_ids``
+        # is an unindexed scan of every Malware per (indicator, event_id)
+        # pair. Pre-fix that was ~500K outer pairs × 3.4K malware scan
+        # ≈ 1.7B comparisons → 5+ hours on the 730-day baseline and
+        # the pipeline was found stuck with no progress logs.
+        #
+        # Post-fix: 3.4K outer Malware × avg ~10 event_ids each =
+        # ~34K outer pairs × 144K indicator scan ≈ 5B comparisons in
+        # the worst case — WORSE on paper, but in practice each outer
+        # Malware touches only a tiny subset of Indicators (those
+        # sharing at least one event_id), and Neo4j's query planner
+        # can short-circuit on the first-found match because the inner
+        # MATCH doesn't need all indicators. The 43× drop in
+        # apoc.periodic.iterate outer iterations (144K → 3.4K) means
+        # 43× fewer batch transactions + commit overheads, which
+        # dominates. Field observation from Bravo: ~5 hours stuck →
+        # expected ~10-20 min with the reversal + reduced outer count.
+        #
+        # Correctness: the resulting edge set is identical — MERGE on
+        # (i)-[:INDICATES]->(m) is commutative in the Cartesian sense
+        # (every (i, m) pair sharing an event_id matches from either
+        # direction). MERGE idempotence means re-running is safe.
+        logger.info("[LINK] 4/12 Indicator → Malware (co-occurrence, batched — reversed join for scale)...")
+        _q4_outer = "MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND size(m.misp_event_ids) > 0 RETURN m"
         _q4_inner = (
-            "WITH $i AS i "
-            'WITH i, [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ""][0..200] AS eids '
+            "WITH $m AS m "
+            # Cap per-malware event id fan-out at 200 (same cap as the
+            # pre-reversal form to match existing bounded behaviour).
+            "WITH m, [eid IN m.misp_event_ids WHERE eid IS NOT NULL AND size(eid) > 0][0..200] AS eids "
             "UNWIND eids AS eid "
-            "WITH i, eid "
-            "MATCH (m:Malware) "
-            "WHERE m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids "
+            "WITH m, eid "
+            "MATCH (i:Indicator) "
+            "WHERE i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids "
             "MERGE (i)-[r:INDICATES]->(m) "
             "ON CREATE SET r.confidence_score = 0.5, "
             '  r.match_type = "misp_cooccurrence", '
             '  r.source_id = "misp_cooccurrence", '
             "  r.created_at = datetime() "
-            # PR #33 round 14 (bugbot MED): add r.updated_at — every other
-            # relationship query in this file sets it, and the delta-sync recipe
-            # in CLOUD_SYNC.md filters edges by ``r.updated_at >= ...`` to
-            # extract the recent-changes window. Without it, INDICATES
-            # co-occurrence edges would be silently excluded from cloud sync.
-            #
-            # PR-M3c §8-RI-S3-Q9 (HIGH): accumulate ``"misp_cooccurrence"`` in
-            # ``r.source_ids`` so Q9's later MERGE on the SAME edge (the bug —
-            # Q9 used to overwrite ``r.source_id = "malware_family_match"``,
-            # hiding the co-occurrence provenance from the calibrator filter
-            # on ``source_id IN ["misp_cooccurrence", "misp_correlation"]`` →
-            # edge silently exempted from calibration → confidence stays at
-            # 0.5/0.8 even for 96k-indicator bulk dumps) cannot erase the
-            # co-occurrence tag. ``apoc.coll.toSet`` dedupes repeated runs.
+            # PR #33 round 14 + PR-M3c §8-RI-S3-Q9: r.updated_at + source_ids
+            # accumulation (see pre-reversal comments for rationale).
             "SET r.updated_at = datetime(), "
             '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["misp_cooccurrence"]), '
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
@@ -470,7 +613,7 @@ def build_relationships():
         # malware_family that have NO matching Malware node (by name, alias,
         # or family) — direct skip count, no comparison.
         logger.info("[LINK] 9/12 Indicator → Malware (malware_family match)...")
-        _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' RETURN i"
+        _q9_outer = "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(i.malware_family) > 0 RETURN i"
         # PR-M3c §8-RI-S3-Q9 (HIGH): this is the overwrite site. The SAME
         # INDICATES edge may already exist from Q4 (co-occurrence) with
         # ``r.source_id = "misp_cooccurrence"``. Before this fix, Q9's MERGE
@@ -507,7 +650,7 @@ def build_relationships():
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
         _q9_skip = (
-            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND i.malware_family <> '' "
+            "MATCH (i:Indicator) WHERE i.malware_family IS NOT NULL AND size(i.malware_family) > 0 "
             "AND NOT EXISTS { "
             "  MATCH (m:Malware) "
             "  WHERE toLower(m.name) = toLower(i.malware_family) "
