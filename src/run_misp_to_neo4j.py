@@ -1496,15 +1496,41 @@ class MISPToNeo4jSync:
         # Start with zones from event name
         all_zones = set(event_zones) if event_zones else set()
 
-        # Extract zones from attribute tags for STIX labels
+        # Extract zones from attribute tags for STIX labels.
+        #
+        # PR-N6 hotfix #1 (audit 09, Cross-Checker F1): filter
+        # candidates through ``VALID_ZONES`` before accepting them
+        # as zones / STIX labels. Pre-fix this manual-STIX fallback
+        # path read ``zone:<anything>`` verbatim — including
+        # adversarial tags a malicious MISP peer could inject —
+        # and emitted them straight into STIX ``labels`` +
+        # ``x_edgeguard_zones``. The convert_to_stix21 path above
+        # (line ~1218) already went through ``extract_zones_from_tags``
+        # which DOES whitelist, so only this attribute-level fallback
+        # loop was affected, causing asymmetric behaviour between
+        # the pyMISP and manual-fallback conversion paths.
+        #
+        # PR-N6 hotfix #5 (audit 09, Cross-Checker F4): also accept
+        # the ``sector:`` prefix for parity with
+        # ``extract_zones_from_tags`` above. Pre-fix only ``zone:``
+        # was accepted here, so any MISP feed emitting
+        # ``sector:finance`` was silently dropped by the STIX
+        # exporter while being picked up by the Neo4j-merge path —
+        # same attribute ends up with ``n.zone=["finance"]`` but
+        # ``x_edgeguard_zones=[]``.
+        from config import VALID_ZONES
+
         labels = []
         attr_tags = normalize_misp_tag_list(attr.get("Tag", []))
         for tag in attr_tags:
             tag_name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
-            if tag_name.startswith("zone:"):
-                zone_name = tag_name.replace("zone:", "").lower().strip()
-                all_zones.add(zone_name)
-                labels.append(f"zone:{zone_name}")
+            for prefix in ("zone:", "sector:"):
+                if tag_name.startswith(prefix):
+                    zone_name = tag_name[len(prefix) :].strip().lower()
+                    if zone_name and zone_name in VALID_ZONES:
+                        all_zones.add(zone_name)
+                        labels.append(f"zone:{zone_name}")
+                    break
 
         # If no zones found in attribute tags, use event zones
         if not labels and event_zones:

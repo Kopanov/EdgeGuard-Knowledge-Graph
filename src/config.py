@@ -1,8 +1,17 @@
 # EdgeGuard Prototype Configuration
+import logging
+import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, MutableMapping, Optional, Protocol
+
+# Module-level logger for config-time diagnostics (env parsing warnings,
+# bad-credentials path, etc.). Previously this module only used ad-hoc
+# ``logging.getLogger(__name__)`` inline calls; PR-N6 R1 Bugbot added
+# the proper WARNING output path for ``_bounded_env_float`` rejections,
+# which needed a module-scope handle.
+logger = logging.getLogger(__name__)
 
 # Deployment environment
 # ----------------------
@@ -49,6 +58,64 @@ def _env_float(name: str, default: float) -> float:
         return float(raw.strip())
     except (ValueError, TypeError):
         return default
+
+
+def _bounded_env_float(name: str, default: float, *, lo: float, hi: float) -> float:
+    """PR-N6 hotfix #2 (audit 09, Bug Hunter H1): bounded + finite env
+    float. The previous idiom ``max(0.1, _env_float(name, default))``
+    had a latent bug: ``max(0.1, float('inf'))`` returns ``inf``,
+    and NaN propagates silently through subsequent comparisons because
+    ``nan < anything`` is always False. Downstream a zone-detection
+    threshold of ``inf`` causes every weighted-score comparison to
+    fail → every item routes to ``["global"]``, silently disabling
+    the entire classification layer.
+
+    This helper rejects NaN and ±inf explicitly via ``math.isfinite``
+    (same approach as ``_bounded_float_env`` in PR-N4 round 5 for
+    MISP backoff settings — see commit d9be313), and also clamps
+    out-of-range values to the default with a WARN. ``lo``/``hi``
+    form a hard safety envelope around the expected useful range.
+
+    PR-N6 R1 Bugbot MED (2026-04-21): all three rejection paths now
+    emit a ``logger.warning`` — matching the behaviour of the twin
+    ``_bounded_float_env`` helper in ``misp_writer.py``. Pre-fix the
+    docstring CLAIMED WARN-on-rejection but the implementation was
+    silent, so an operator setting ``EDGEGUARD_ZONE_DETECT_THRESHOLD=inf``
+    would silently fall back to the default with no log signal. For a
+    security-critical classification threshold, silent config
+    rejection is the worst outcome — the operator thinks their
+    override is in effect while the code uses the default.
+    """
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        val = float(raw.strip())
+    except (ValueError, TypeError):
+        logger.warning("%s=%r is not a valid float; using default %.3f", name, raw, default)
+        return default
+    # NaN and ±inf must be rejected BEFORE the bounds check — NaN
+    # compares False against everything, so a naive ``val < lo or val > hi``
+    # guard passes NaN through. isfinite() rejects all three in one call.
+    if not math.isfinite(val):
+        logger.warning(
+            "%s=%r resolved to non-finite value (NaN/±inf); using default %.3f",
+            name,
+            raw,
+            default,
+        )
+        return default
+    if val < lo or val > hi:
+        logger.warning(
+            "%s=%.3f is out of valid range [%.3f, %.3f]; using default %.3f",
+            name,
+            val,
+            lo,
+            hi,
+            default,
+        )
+        return default
+    return val
 
 
 # Neo4j Connection
@@ -110,12 +177,19 @@ def get_sector_cutoff_date(sector: str = "global") -> str:
 # Minimum weighted score for a sector to count in ``detect_zones_from_text`` (per field).
 # At default ``body`` weight 1.5, a single keyword match scores 1.5 — so 2.0 wrongly required
 # two matches for typical CVE/feed sentences.
-# Must be > 0; zero would match everything into every sector.
-ZONE_DETECT_THRESHOLD = max(0.1, _env_float("EDGEGUARD_ZONE_DETECT_THRESHOLD", 1.5))
+#
+# PR-N6 hotfix #2 (audit 09, Bug Hunter H1): use ``_bounded_env_float``
+# to reject NaN, ±inf, and out-of-range values with a fallback to the
+# default. Pre-fix ``max(0.1, _env_float(..., 1.5))`` let ``inf`` slip
+# through (max(0.1, inf) == inf) → every weighted score fell below
+# threshold → every item routed to ``["global"]``, silently disabling
+# the entire zone-classification layer. Bounds: [0.1, 100.0] covers
+# "effectively disabled at 100" down to "everything matches at 0.1".
+ZONE_DETECT_THRESHOLD = _bounded_env_float("EDGEGUARD_ZONE_DETECT_THRESHOLD", 1.5, lo=0.1, hi=100.0)
 
 # Minimum combined score in ``detect_zones_from_item`` after multi-field accumulation.
-# Must be > 0; zero would match everything into every sector.
-ZONE_ITEM_COMBINED_THRESHOLD = max(0.1, _env_float("EDGEGUARD_ZONE_ITEM_THRESHOLD", 1.5))
+# Same PR-N6 bounds rationale as ``ZONE_DETECT_THRESHOLD``.
+ZONE_ITEM_COMBINED_THRESHOLD = _bounded_env_float("EDGEGUARD_ZONE_ITEM_THRESHOLD", 1.5, lo=0.1, hi=100.0)
 
 
 def detect_zones_from_text(text: str, default_zone: str = "global", context: str = "body") -> list:
@@ -266,6 +340,19 @@ def detect_zones_from_item(item: dict) -> list:
 
     # Only return sectors within 50% of max score (prevents weak matches)
     matched = [s for s, score in combined_scores.items() if score >= max_score * 0.5 and score >= threshold]
+
+    # PR-N6 hotfix #1 (audit 09, Bug Hunter H3 / Cross-Checker F1):
+    # filter through VALID_ZONES before returning. ``detect_zones_from_text``
+    # already does this at line 208, but this function historically
+    # did NOT — relying on the implicit invariant
+    # ``set(SECTOR_KEYWORDS.keys()) <= VALID_ZONES``. Two unrelated
+    # constants maintained separately is a latent drift risk: the
+    # moment someone adds a key to ``SECTOR_KEYWORDS`` without
+    # updating ``VALID_ZONES``, this function would emit a zone string
+    # that breaks every downstream consumer (Neo4j ``n.zone`` queries,
+    # STIX label matching, GraphQL enum validation). Explicit filter
+    # makes the invariant load-bearing.
+    matched = [z for z in matched if z in VALID_ZONES]
 
     return matched if matched else ["global"]
 
@@ -703,6 +790,60 @@ DEFAULT_SECTOR = "global"
 
 # Valid zone values — used to filter out unexpected strings before they reach Neo4j.
 VALID_ZONES: frozenset = frozenset({"global", "healthcare", "energy", "finance"})
+
+# PR-N6 hotfix #4 (audit 09, Maintainer #1): canonical map from
+# OTX's ``pulse.industries`` raw labels to EdgeGuard zones.
+# Previously this dict lived inline inside ``otx_collector.py`` as a
+# local ``_industry_map`` variable, which made it invisible to
+# ``SECTOR_KEYWORDS`` maintainers — the OTX path contained
+# "pharmaceutical", "utilities", "oil", "gas", "insurance" that
+# were NOT in ``SECTOR_KEYWORDS``, so vocabulary refinements to
+# the latter silently diverged from OTX's mapping. Centralizing
+# here means (a) the two lists are visible side-by-side for
+# maintainers, and (b) the OTX mapping is assert-testable against
+# ``VALID_ZONES`` at module load (below).
+OTX_INDUSTRY_ZONE_ALIASES: Dict[str, str] = {
+    # Healthcare aliases
+    "healthcare": "healthcare",
+    "health": "healthcare",
+    "medical": "healthcare",
+    "pharmaceutical": "healthcare",
+    # Energy aliases
+    "energy": "energy",
+    "utilities": "energy",
+    "oil": "energy",
+    "gas": "energy",
+    # Finance aliases
+    "finance": "finance",
+    "banking": "finance",
+    "financial": "finance",
+    "insurance": "finance",
+}
+
+# Module-load invariant: every OTX mapping target must be a canonical
+# EdgeGuard zone. Adding a new target like "transport" without first
+# adding it to VALID_ZONES would silently produce out-of-whitelist
+# zones on OTX-sourced items.
+assert set(OTX_INDUSTRY_ZONE_ALIASES.values()) <= VALID_ZONES, (
+    "OTX_INDUSTRY_ZONE_ALIASES targets must be subset of VALID_ZONES; "
+    f"invalid targets: {set(OTX_INDUSTRY_ZONE_ALIASES.values()) - VALID_ZONES}"
+)
+
+# PR-N6 hotfix #1 (audit 09 / Maintainer #1): module-load assertion
+# making the previously-implicit invariant ``SECTOR_KEYWORDS.keys()
+# ⊆ VALID_ZONES`` load-bearing. Pre-fix the two constants were
+# maintained as separate sources of truth — adding a new key to
+# ``SECTOR_KEYWORDS`` without updating ``VALID_ZONES`` would make
+# ``detect_zones_from_text`` emit zone strings that silently get
+# filtered out by the VALID_ZONES gate at line 208, producing items
+# that ``["global"]`` when they should have been classified. The
+# assertion fires at import time so the error is impossible to miss
+# during development or CI startup.
+assert set(SECTOR_KEYWORDS.keys()) <= VALID_ZONES, (
+    f"SECTOR_KEYWORDS zones {set(SECTOR_KEYWORDS.keys())} must be a "
+    f"subset of VALID_ZONES {set(VALID_ZONES)}. Add the missing key(s) "
+    f"to VALID_ZONES or remove them from SECTOR_KEYWORDS."
+)
 
 # Pre-compiled word-boundary patterns for SECTOR_KEYWORDS.
 # Built once at module load time to avoid re-compiling on every call.

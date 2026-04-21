@@ -52,6 +52,7 @@ from config import (
     OTX_INCREMENTAL_LOOKBACK_DAYS,
     OTX_INCREMENTAL_MAX_PAGES,
     OTX_INCREMENTAL_OVERLAP_SEC,
+    OTX_INDUSTRY_ZONE_ALIASES,
     SECTOR_TIME_RANGES,
     SOURCE_TAGS,
     SSL_VERIFY,
@@ -376,24 +377,19 @@ class OTXCollector:
 
                 # OTX-native industry_sectors override: if OTX itself classified
                 # the pulse into industries, use that as authoritative sector data.
+                #
+                # PR-N6 hotfix #4 (audit 09, Maintainer #1): the inline
+                # industry map moved to ``config.OTX_INDUSTRY_ZONE_ALIASES``
+                # so it lives side-by-side with ``VALID_ZONES`` /
+                # ``SECTOR_KEYWORDS``. Previously this was a hidden
+                # second source of truth containing vocabulary absent
+                # from ``SECTOR_KEYWORDS`` ("pharmaceutical", "utilities",
+                # "oil", "gas", "insurance") — so vocabulary refinements
+                # in ``config.py`` silently diverged from OTX ingestion.
                 otx_industries = pulse.get("industries", [])
                 if otx_industries:
-                    _industry_map = {
-                        "healthcare": "healthcare",
-                        "health": "healthcare",
-                        "medical": "healthcare",
-                        "pharmaceutical": "healthcare",
-                        "energy": "energy",
-                        "utilities": "energy",
-                        "oil": "energy",
-                        "gas": "energy",
-                        "finance": "finance",
-                        "banking": "finance",
-                        "financial": "finance",
-                        "insurance": "finance",
-                    }
                     for ind_name in otx_industries:
-                        mapped = _industry_map.get(str(ind_name).lower().strip())
+                        mapped = OTX_INDUSTRY_ZONE_ALIASES.get(str(ind_name).lower().strip())
                         if mapped and mapped not in sectors:
                             sectors.append(mapped)
                     # Remove "global" if we now have specific sectors

@@ -1332,17 +1332,44 @@ def _extract_zones(props: Dict[str, Any]) -> List[str]:
     ``["healthcare", "global"]``) per ``neo4j_client.py`` merge
     semantics. Fall back to ``zones`` (plural) if present, and accept a
     scalar string for defensive tolerance. Empty/null → ``[]``.
+
+    PR-N6 hotfix #1 (audit 09, Cross-Checker F2): defense-in-depth
+    VALID_ZONES filter. Every writer today validates zones against
+    the whitelist before storing on Neo4j, so in principle this
+    filter is redundant. But ``_extract_zones`` is the last stop
+    before zones flow out to ResilMesh via STIX — if ANY writer ever
+    slips an unvalidated zone through (a future bug, an out-of-band
+    Cypher write, a direct Bolt query from an ops script), this
+    prevents the corruption from propagating to downstream
+    consumers. Also logs a WARNING so the operator notices.
     """
+    from config import VALID_ZONES
+
     raw = props.get("zone")
     if raw is None:
         raw = props.get("zones")
     if raw is None:
         return []
     if isinstance(raw, str):
-        return [raw] if raw else []
-    if isinstance(raw, (list, tuple)):
-        return [str(z) for z in raw if z]
-    return []
+        candidates = [raw] if raw else []
+    elif isinstance(raw, (list, tuple)):
+        candidates = [str(z) for z in raw if z]
+    else:
+        return []
+
+    valid = [z for z in candidates if z in VALID_ZONES]
+    # Log a single WARN per call if ANY candidate was dropped — a
+    # non-zero rate is the signal that upstream write-path validation
+    # has regressed somewhere.
+    if len(valid) != len(candidates):
+        dropped = [z for z in candidates if z not in VALID_ZONES]
+        logger.warning(
+            "[stix-export] Dropped %d non-canonical zone(s) %r from Neo4j node "
+            "while exporting to STIX — check upstream write-path validation.",
+            len(dropped),
+            dropped,
+        )
+    return valid
 
 
 def _bundle_provenance() -> Dict[str, Any]:
