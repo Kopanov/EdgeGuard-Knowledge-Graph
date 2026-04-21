@@ -282,16 +282,64 @@ def is_reliable_first_seen_source(source_id: Optional[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# PR-N14 Fix #5 (2026-04-21 pre-baseline audit): the earliest date
+# EdgeGuard accepts as a source-truthful timestamp. Anything older is
+# rejected (returned as None — honest-NULL) because it's either a feed
+# bug, a collector substituting ``datetime(1,1,1)`` as a "missing"
+# sentinel, or an adversarial attempt to hide a campaign from
+# recent-threat filters via a year-0001 ``first_seen``.
+#
+# Default: 1995-01-01 — before the mainstream-internet threat-intel era.
+# Configurable via ``EDGEGUARD_EARLIEST_IOC_DATE`` env var (ISO date).
+# An operator importing deep historical corpora can loosen it; the
+# bound never hurts ingest of modern threat intel (defaults are
+# decades in the past).
+_DEFAULT_EARLIEST_IOC_DATE = "1995-01-01"
+
+
+def _earliest_allowed_date() -> datetime:
+    """Resolve the earliest-allowed-date floor, env-overridable.
+
+    Read per-call (cheap; datetime.fromisoformat is fast) so an
+    operator can tune the floor mid-baseline without a restart.
+    """
+    import os as _os
+
+    raw = _os.environ.get("EDGEGUARD_EARLIEST_IOC_DATE", "").strip() or _DEFAULT_EARLIEST_IOC_DATE
+    try:
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except (ValueError, TypeError):
+        logger.warning(
+            "EDGEGUARD_EARLIEST_IOC_DATE=%r is not a valid ISO date; falling back to default %r",
+            raw,
+            _DEFAULT_EARLIEST_IOC_DATE,
+        )
+        return datetime.fromisoformat(_DEFAULT_EARLIEST_IOC_DATE).replace(tzinfo=timezone.utc)
+
+
 def _clamp_future_to_now(iso: Optional[str]) -> Optional[str]:
-    """Clamp a future-dated ISO timestamp to UTC now.
+    """Clamp a future-dated ISO timestamp to UTC now, AND reject
+    implausibly-ancient timestamps via honest-NULL.
 
     Defensive: an upstream feed bug or operator clock drift could
-    produce a value like 2099-01-01. We never trust the future —
-    silently clamp + WARNING log so it surfaces in operator dashboards.
+    produce a value like 2099-01-01 (future) or 0001-01-01 (sentinel-
+    default or adversarial). We never trust the future — silently
+    clamp + WARNING log. We never trust pre-1995 (configurable via
+    ``EDGEGUARD_EARLIEST_IOC_DATE``) — return None so downstream
+    sees honest-NULL rather than a forged ancient date.
 
-    Returns the original string when the value is in the past or
-    parse fails (we'd rather pass an unparseable string downstream
-    than swallow it; the merge layer already handles odd inputs).
+    Returns the original string when the value is in the acceptable
+    window [earliest, now] or parse fails (we'd rather pass an
+    unparseable string downstream than swallow it; the merge layer
+    already handles odd inputs).
+
+    PR-N14 Fix #5 (cursor-audit 2026-04-21 MEDIUM): the earliest-date
+    floor closes the "make a real campaign disappear from the
+    recent-threats dashboard by spoofing its first_seen to year
+    0001" attack flagged by the red-team audit.
     """
     if not iso:
         return iso
@@ -306,6 +354,20 @@ def _clamp_future_to_now(iso: Optional[str]) -> Optional[str]:
         return iso
 
     now = datetime.now(timezone.utc)
+
+    # Past bound (PR-N14 Fix #5) — reject pre-1995 (configurable).
+    earliest = _earliest_allowed_date()
+    if parsed < earliest:
+        logger.warning(
+            "Source-truthful timestamp %s is before earliest-allowed %s — "
+            "rejecting as honest-NULL. Likely upstream feed bug, sentinel "
+            "default, or adversarial input trying to hide in the distant past.",
+            iso,
+            earliest.isoformat(),
+        )
+        _metric_future_clamp()  # reuse the existing counter surface — same class of drop
+        return None
+
     if parsed > now:
         logger.warning(
             "Source-truthful timestamp %s is in the future (now=%s) — clamping to now. "
