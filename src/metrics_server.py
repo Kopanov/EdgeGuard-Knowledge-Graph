@@ -209,6 +209,22 @@ NEO4J_SYNC_DURATION = Histogram(
     buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
 )
 
+# PR-N12 (pre-baseline audit Fix #1, 2026-04-21): dedicated gauge for the
+# last successful MISP→Neo4j sync wall-clock. Pre-PR-N12 the
+# EdgeGuardNeo4jSyncStale alert used the nonsensical expression
+# ``time() - (edgeguard_neo4j_sync_duration_seconds_count > 0) > 259200``
+# which subtracted a histogram COUNT (e.g. 42) from current time; the
+# alert was permanently firing or permanently silent depending on eval
+# semantics. Either way it carried no signal. This gauge is written on
+# every successful sync completion and read by the alert as
+# ``time() - edgeguard_neo4j_sync_last_success_timestamp > 259200``.
+NEO4J_SYNC_LAST_SUCCESS = Gauge(
+    "edgeguard_neo4j_sync_last_success_timestamp",
+    "Unix timestamp (seconds) of the last successful MISP→Neo4j sync "
+    "completion. Used by EdgeGuardNeo4jSyncStale alert. Set on every "
+    "successful run of MISPToNeo4jSync.run() after counters are flushed.",
+)
+
 # Distribution of accumulator-list sizes on Neo4j nodes/relationships.
 # Sampled periodically (NOT per-write) — see ``record_neo4j_list_dedup_size``
 # in this module and the ``scrape_list_dedup_sizes`` helper in neo4j_client.
@@ -731,8 +747,15 @@ def record_misp_unmapped_attribute_type(attr_type: str, count: int = 1):
 
 
 def record_neo4j_sync(node_counts: Dict[str, int], duration: float):
-    """Record Neo4j sync metrics."""
+    """Record Neo4j sync metrics.
+
+    PR-N12 (2026-04-21): also stamp ``NEO4J_SYNC_LAST_SUCCESS`` with
+    the current wall-clock so ``EdgeGuardNeo4jSyncStale`` has a real
+    signal to alert on. Called at the END of a sync, so a crashed
+    sync does NOT update the gauge (which is exactly the behaviour the
+    staleness alert needs)."""
     NEO4J_SYNC_DURATION.observe(duration)
+    NEO4J_SYNC_LAST_SUCCESS.set(time.time())
     for label, count in node_counts.items():
         zone = "unknown"
         if ":" in label:
