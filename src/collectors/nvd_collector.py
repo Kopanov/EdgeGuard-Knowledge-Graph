@@ -168,6 +168,25 @@ NVD_CIRCUIT_BREAKER = get_circuit_breaker(
 )
 
 
+class NvdBatchFetchError(Exception):
+    """PR-N17 (2026-04-22 pre-baseline collection audit, BLOCK):
+    raised by ``_fetch_cves_batch`` when an HTTP / rate-limit / JSON-
+    parse failure occurs AFTER the rate-limit retry layer exhausted.
+
+    The baseline loop MUST catch this and abort the current window
+    WITHOUT advancing the checkpoint — distinguishing "NVD returned
+    an empty result, this window is done" (legit end-of-window, the
+    caller's ``consecutive_empty`` counter handles it) from "fetch
+    errored, do not mark the window complete" (data at this startIndex
+    never arrived).
+
+    Pre-PR-N17 both cases returned ``[]`` and the baseline advanced
+    past unfetched data → silent loss of entire 120-day CVE windows.
+    """
+
+    pass
+
+
 class NVDCollector:
     """
     NVD (National Vulnerability Database) Collector.
@@ -442,6 +461,21 @@ class NVDCollector:
                 params["pubStartDate"] = pub_start_iso
                 params["pubEndDate"] = pub_end_iso
 
+        # PR-N17 Fix #1 (BLOCK, 2026-04-22 pre-baseline collection audit):
+        # Pre-PR-N17 this method returned ``[]`` on ANY exception, and
+        # the baseline caller treated 3 consecutive ``[]`` as "window
+        # done" → advanced the checkpoint PAST data that was never
+        # fetched. A single DNS flap / NVD 502 cluster / CPU-starved
+        # worker silently lost a 120-day window.
+        #
+        # Fix: distinguish the two failure modes.
+        #   - API returned 200 with ``vulnerabilities: []`` → legit empty.
+        #     Return ``[]`` (caller may increment consecutive_empty).
+        #   - API returned non-200 AFTER rate-limit retries → raise
+        #     NvdBatchFetchError so caller aborts the window.
+        #   - Exception inside the HTTP call → raise NvdBatchFetchError.
+        # The caller MUST catch NvdBatchFetchError and abort the
+        # window (not advance checkpoint). See the baseline loop.
         try:
             response = request_with_rate_limit_retries(
                 "GET",
@@ -456,18 +490,68 @@ class NVDCollector:
                 retry_on_403=False,
                 context="NVD",
             )
-
-            if response.status_code != 200:
-                logger.warning(f"NVD API error: {response.status_code} (after rate-limit retries where applicable)")
-                return []
-
-            data = response.json()
-            vulnerabilities = data.get("vulnerabilities", [])
-            return vulnerabilities
-
         except Exception as e:
-            logger.warning(f"NVD batch fetch error: {e}")
-            return []
+            # Transient raised after the rate-limit-retry layer exhausted.
+            # Propagate so the caller knows NOT to advance checkpoint.
+            logger.error("[NVD-BATCH-FETCH-ERROR] exception: %s: %s", type(e).__name__, e)
+            raise NvdBatchFetchError(f"NVD fetch exception: {type(e).__name__}: {e}") from e
+
+        if response.status_code != 200:
+            # Non-200 post-retry — the window is NOT complete; raise so
+            # the caller aborts + preserves checkpoint at the current
+            # (wi, idx) instead of advancing past unfetched data.
+            logger.error(
+                "[NVD-BATCH-FETCH-ERROR] status_code=%d after rate-limit retries",
+                response.status_code,
+            )
+            raise NvdBatchFetchError(f"NVD returned {response.status_code} after retries")
+
+        try:
+            data = response.json()
+        except Exception as e:
+            # Malformed JSON response — could be maintenance page /
+            # error HTML / truncated body. Treat as transient (caller
+            # aborts window).
+            logger.error("[NVD-BATCH-FETCH-ERROR] JSON parse: %s", e)
+            raise NvdBatchFetchError(f"NVD response not JSON: {e}") from e
+
+        # PR-N17 follow-up (cursor-bugbot 2026-04-22 #3): NVD can
+        # return JSON that's valid but not the expected dict shape
+        # (maintenance page returning a JSON string / array / null).
+        # Pre-fix, ``data.get("vulnerabilities", [])`` on a non-dict
+        # raised AttributeError OUTSIDE the try/except above, bypassing
+        # the NvdBatchFetchError abort path — the baseline loop saw
+        # a raw AttributeError (not caught by its
+        # ``except NvdBatchFetchError``), which then propagated to the
+        # outer ``except Exception`` and got converted to a soft
+        # status dict. Same "error indistinguishable from success"
+        # class that PR-N17 was meant to close.
+        #
+        # Fix: explicit type check. Raise NvdBatchFetchError so the
+        # baseline loop's abort handler fires normally.
+        if not isinstance(data, dict):
+            logger.error(
+                "[NVD-BATCH-FETCH-ERROR] response is valid JSON but not a dict "
+                "(got %s) — likely a maintenance page or upstream proxy error",
+                type(data).__name__,
+            )
+            raise NvdBatchFetchError(f"NVD response JSON is {type(data).__name__}, expected dict")
+
+        vulnerabilities = data.get("vulnerabilities", [])
+        # Defense-in-depth: confirm ``vulnerabilities`` is a list.
+        # A legitimate empty response returns ``[]`` (caller's
+        # consecutive_empty counter handles end-of-window). A bad
+        # payload with ``vulnerabilities: "some string"`` would
+        # otherwise propagate as a non-list into downstream iteration.
+        if not isinstance(vulnerabilities, list):
+            logger.error(
+                "[NVD-BATCH-FETCH-ERROR] ``vulnerabilities`` field is %s, expected list",
+                type(vulnerabilities).__name__,
+            )
+            raise NvdBatchFetchError(
+                f"NVD ``vulnerabilities`` field is {type(vulnerabilities).__name__}, expected list"
+            )
+        return vulnerabilities
 
     def collect(
         self, limit: int = None, push_to_misp: bool = True, baseline: bool = False, baseline_days: int = 365
@@ -564,6 +648,12 @@ class NVDCollector:
                             f"  Resuming baseline at window {start_wi + 1}/{len(windows)}, startIndex={resume_index}"
                         )
 
+                # PR-N17 Fix #2 (BLOCK, 2026-04-22): track whether any
+                # window aborted due to fetch error so the operator
+                # sees "partial" status + the checkpoint is NOT marked
+                # ``completed=True`` at the end of the baseline run.
+                aborted_windows: list = []
+
                 for wi in range(start_wi, len(windows)):
                     w_start, w_end = windows[wi]
                     pub_start_iso = _to_nvd_pub_iso(w_start)
@@ -571,14 +661,47 @@ class NVDCollector:
                     idx = resume_index if wi == start_wi else 0
                     resume_index = 0
                     consecutive_empty = 0
+                    window_aborted = False
 
                     while consecutive_empty < 3:
-                        cves = self._fetch_cves_batch(
-                            pub_start_iso=pub_start_iso,
-                            pub_end_iso=pub_end_iso,
-                            start_index=idx,
-                            limit=batch_size,
-                        )
+                        try:
+                            cves = self._fetch_cves_batch(
+                                pub_start_iso=pub_start_iso,
+                                pub_end_iso=pub_end_iso,
+                                start_index=idx,
+                                limit=batch_size,
+                            )
+                        except NvdBatchFetchError as fetch_err:
+                            # PR-N17 Fix #1+#2: fetch errored (not a
+                            # legit empty response). DO NOT advance
+                            # the checkpoint — abort this window and
+                            # preserve the current (wi, idx) so resume
+                            # picks up where the failure happened.
+                            logger.error(
+                                "[NVD-WINDOW-ABORT] window %d/%d @ startIndex %d — "
+                                "aborting due to fetch error: %s. Checkpoint NOT "
+                                "advanced; next baseline run will resume at this "
+                                "position. Affected date range: %s to %s.",
+                                wi + 1,
+                                len(windows),
+                                idx,
+                                fetch_err,
+                                pub_start_iso,
+                                pub_end_iso,
+                            )
+                            record_collection_failure(self.source_name, f"window-abort wi={wi} idx={idx}: {fetch_err}")
+                            aborted_windows.append(wi)
+                            window_aborted = True
+                            # Preserve checkpoint at current (wi, idx) —
+                            # explicit write so if the process dies now,
+                            # resume is exactly where it aborted.
+                            update_source_checkpoint(
+                                "nvd",
+                                page=total_batches_done,
+                                items_collected=len(all_cves),
+                                extra={"nvd_window_idx": wi, "nvd_start_index": idx},
+                            )
+                            break  # stop the inner while loop for this window
                         if not cves:
                             consecutive_empty += 1
                             if consecutive_empty >= 3:
@@ -610,10 +733,56 @@ class NVDCollector:
                         idx = next_idx
                         time.sleep(batch_sleep)
 
-                    update_source_checkpoint(
-                        "nvd",
-                        items_collected=len(all_cves),
-                        extra={"nvd_window_idx": wi + 1, "nvd_start_index": 0},
+                    # PR-N17 Fix #2: only mark this window complete
+                    # (advance ``nvd_window_idx`` to wi+1) if the
+                    # window actually finished via consecutive-empty.
+                    # If it aborted due to fetch error, leave the
+                    # checkpoint at (wi, idx) so resume retries.
+                    if not window_aborted:
+                        update_source_checkpoint(
+                            "nvd",
+                            items_collected=len(all_cves),
+                            extra={"nvd_window_idx": wi + 1, "nvd_start_index": 0},
+                        )
+                    else:
+                        # PR-N17 follow-up (cursor-bugbot 2026-04-22 #1):
+                        # break the OUTER for-loop on first abort.
+                        # Pre-fix the inner ``break`` only exited the
+                        # while loop; the for loop continued with
+                        # subsequent windows whose successful batches
+                        # called ``update_source_checkpoint`` with
+                        # later ``nvd_window_idx`` values, OVERWRITING
+                        # the abort checkpoint. Resume then jumped
+                        # past the aborted window, losing its data.
+                        # Now: stop the for-loop too so the preserved
+                        # (wi, idx) checkpoint actually survives.
+                        break  # exit outer for-loop on first abort
+
+                # PR-N17 Fix #2 (cursor-bugbot 2026-04-22 #2): if any
+                # windows aborted, the baseline is partial — raise
+                # NvdBatchFetchError so the Airflow task fails loudly.
+                # The raise is OUTSIDE the wrapping try/except (re-
+                # raised explicitly below) so it isn't caught by the
+                # outer ``except Exception`` and converted to a normal
+                # status return — that conversion gave the appearance
+                # of a graceful "success: False" response which Airflow
+                # treats less aggressively than an explicit raise.
+                # Storing the to-raise condition + raising AFTER the
+                # try block guarantees the typed exception escapes.
+                if aborted_windows:
+                    # PR-N17 follow-up (cursor-bugbot 2026-04-22 #2):
+                    # raise IMMEDIATELY (not at end of try block) so
+                    # the typed exception propagates to the new
+                    # ``except NvdBatchFetchError:`` re-raise gate
+                    # below. Skips all the post-loop processing
+                    # (transform / push / status return) which would
+                    # otherwise hide the partial-baseline state.
+                    raise NvdBatchFetchError(
+                        f"NVD baseline partial: {len(aborted_windows)} window(s) aborted "
+                        f"(indices {aborted_windows}). Checkpoint preserved at first abort "
+                        f"(per cursor-bugbot 2026-04-22 #1, the outer for-loop now breaks "
+                        f"on first abort to prevent later windows from overwriting the "
+                        f"checkpoint). Re-run baseline to resume."
                     )
 
                 # PR-M1 §7-H3: defensive guard against a run-level ``limit``
@@ -1002,6 +1171,23 @@ class NVDCollector:
                 record_collection_success(self.source_name)
                 return processed
 
+        except NvdBatchFetchError:
+            # PR-N17 follow-up (cursor-bugbot 2026-04-22 #2): the
+            # baseline-partial raise must escape the outer except
+            # chain so Airflow sees an actual exception. Without this
+            # explicit re-raise the broader ``except Exception as e:``
+            # below catches it, converts to ``return self._return_status(
+            # False, 0, error_msg)``, and the task function returns
+            # normally. Airflow treats the dict-return as a callable
+            # success (the dict's ``success: False`` field IS picked up
+            # by ``run_collector_with_metrics`` and converted to
+            # ``AirflowException``, but the typed exception is lost).
+            # Re-raising preserves the type so downstream alerting +
+            # retry logic can distinguish "NVD baseline partial — re-
+            # run will resume from preserved checkpoint" from "NVD
+            # generic collection failure".
+            self.circuit_breaker.record_failure()
+            raise
         except requests.exceptions.Timeout as e:
             error_msg = f"Timeout: {e}"
             logger.error(f"NVD timeout: {e}")
