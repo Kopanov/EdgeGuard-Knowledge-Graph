@@ -2583,16 +2583,27 @@ def test_zone_clause_semantic_matrix_via_ephemeral_cypher():
 
     # The ELSE branch must be the full union (including 'global' if that's
     # all we have) — otherwise a legitimate ['global']-only node would lose
-    # its zone on merge.
-    else_pattern = r"ELSE apoc\.coll\.toSet\(coalesce\(n\.zone, \[\]\) \+ \$zone\) END"
+    # its zone on merge. PR-N19 Fix #2 wraps both branches in
+    # ``apoc.coll.sort(...)`` for canonical ordering; the underlying union
+    # expression must still appear intact inside the sort wrapper.
+    else_pattern = r"ELSE apoc\.coll\.sort\(apoc\.coll\.toSet\(coalesce\(n\.zone, \[\]\) \+ \$zone\)\) END"
     assert re.search(else_pattern, clause), (
-        "ELSE branch must preserve the full union — otherwise global-only nodes would be emptied"
+        "ELSE branch must preserve the full union (wrapped in apoc.coll.sort per PR-N19 Fix #2) "
+        "— otherwise global-only nodes would be emptied"
     )
 
     # And the condition must be strictly greater than zero (so an empty
     # specifics set falls through to ELSE).
     assert "size(" in clause and "> 0" in clause, (
         "CASE condition must be ``size(specifics) > 0`` — not ``>= 1`` or negation"
+    )
+
+    # PR-N19 Fix #2: both branches must be wrapped in apoc.coll.sort() so
+    # two nodes seeing the same zones in different ingest order produce
+    # the same canonical array (eliminates the fragmented-sector-stats bug
+    # Bravo caught in the 2026-04-22 baseline).
+    assert clause.count("apoc.coll.sort(") >= 2, (
+        "both CASE branches must be wrapped in apoc.coll.sort() for canonical ordering (PR-N19 Fix #2)"
     )
 
 

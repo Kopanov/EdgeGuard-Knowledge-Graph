@@ -546,7 +546,28 @@ def _zone_override_global_clause(node_var: str, source_expr: str) -> str:
     # ``_dedup_concat_clause`` and tests/test_pr33_bugbot_fixes.py:2430.
     union = _dedup_concat_clause(f"{node_var}.zone", source_expr)
     specifics = f"[z IN {union} WHERE z <> 'global']"
-    return f"{node_var}.zone = CASE WHEN size({specifics}) > 0 THEN {specifics} ELSE {union} END"
+    # PR-N19 Fix #2 (post-baseline 2026-04-22, from Bravo's baseline-run
+    # audit): wrap the final zone expression in ``apoc.coll.sort`` to
+    # guarantee canonical ordering across writes. Pre-PR-N19,
+    # ``apoc.coll.toSet`` dedup'd exact-string entries but did NOT
+    # sort, so two nodes seeing the same zones in different ingest
+    # order produced different ``n.zone`` arrays:
+    #   Node A: ["healthcare", "energy"]  (count=1)
+    #   Node B: ["energy", "healthcare"]  (count=448)
+    # ``MATCH (n) RETURN n.zone, count(n)`` groups by exact array
+    # equality → fragmented sector stats + unstable STIX export
+    # (any consumer hashing the zone array saw duplicate "sectors").
+    #
+    # Fix: canonical alphabetic sort at write time. Existing legacy
+    # nodes can be repaired with one-shot Cypher migration:
+    #   MATCH (n) WHERE n.zone IS NOT NULL
+    #   SET n.zone = apoc.coll.sort(apoc.coll.toSet(n.zone))
+    # documented in docs/RUNBOOK.md.
+    return (
+        f"{node_var}.zone = CASE WHEN size({specifics}) > 0 "
+        f"THEN apoc.coll.sort({specifics}) "
+        f"ELSE apoc.coll.sort({union}) END"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2353,6 +2374,23 @@ class Neo4jClient:
             extra_props["severity"] = data["severity"]
         if data.get("attack_vector"):
             extra_props["attack_vector"] = data["attack_vector"]
+        # PR-N19 Fix #1 (post-baseline 2026-04-22, from Bravo's
+        # baseline-run audit): promote NVD ``published`` +
+        # ``last_modified`` to node properties. Pre-PR-N19 the data
+        # was correctly rehydrated from NVD_META into
+        # ``item["published"]`` / ``item["last_modified"]``
+        # (``run_misp_to_neo4j.py:2487-2488``) but this extra_props
+        # builder never included them — so ``c.published`` and
+        # ``c.last_modified`` stayed NULL on every NVD CVE. Only
+        # ``c.first_imported_at`` (the EdgeGuard DB-local fact) had
+        # a date. The ResilMesh-native ``merge_resilmesh_cve`` at
+        # L5051 correctly writes both; the MISP-sourced path (the
+        # one used for the 99,664 CVEs in the 2026-04-22 baseline)
+        # did not. Fixes the gap Bravo caught.
+        if data.get("published"):
+            extra_props["published"] = data["published"]
+        if data.get("last_modified"):
+            extra_props["last_modified"] = data["last_modified"]
 
         ok = self.merge_node_with_source("CVE", key_props, data, source_id, extra_props=extra_props or None)
         if not ok:
