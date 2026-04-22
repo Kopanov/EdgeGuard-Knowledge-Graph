@@ -234,8 +234,12 @@ class TestBugbotRound1Fixes:
         past it. Regression pin against someone "simplifying" the driver
         back to the no-cursor loop."""
         src = self._src()
-        # The assignment pattern we need to see inside backfill()
-        assert 'last_cve_id = candidates[-1]["cve_id"]' in src or 'last_cve_id = candidates[-1]["cve_id"]' in src, (
+        # The assignment pattern we need to see inside backfill().
+        # Bugbot round 2 (PR #106, Low): the pre-fix ``or`` had two
+        # IDENTICAL string literals (copy-paste bug — both branches
+        # were double-quoted instead of one double + one single). Fix:
+        # accept either single-quoted or double-quoted dict-key form.
+        assert "last_cve_id = candidates[-1]['cve_id']" in src or 'last_cve_id = candidates[-1]["cve_id"]' in src, (
             "backfill driver must advance last_cve_id to candidates[-1]['cve_id'] after each batch"
         )
 
