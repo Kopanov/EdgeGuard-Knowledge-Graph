@@ -102,11 +102,23 @@ try:
     except ImportError:
         _NEO4J_BATCH_PERMANENT_FAILURES = None  # type: ignore[assignment]
 
+    # PR-N18 (2026-04-22): placeholder-reject counter — emits when
+    # merge_malware / merge_actor rejects a MERGE because the name
+    # matched a placeholder sentinel. Closes the promise PR-N11 made
+    # but deferred.
+    try:
+        from metrics_server import (
+            MERGE_REJECT_PLACEHOLDER as _MERGE_REJECT_PLACEHOLDER,
+        )
+    except ImportError:
+        _MERGE_REJECT_PLACEHOLDER = None  # type: ignore[assignment]
+
     _METRICS_AVAILABLE = True
 except ImportError:
     _METRICS_AVAILABLE = False
     _NEO4J_MERGE_INEFFECTIVE_BATCH = None  # type: ignore[assignment]
     _NEO4J_BATCH_PERMANENT_FAILURES = None  # type: ignore[assignment]
+    _MERGE_REJECT_PLACEHOLDER = None  # type: ignore[assignment]
 
 
 def _record_batch_counters(*, label: str, source_id: str, batch_len: int, result) -> None:
@@ -874,6 +886,22 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
     ``Neo.DatabaseError.Statement.ExecutionFailed`` wrapping a deadlock
     hit the generic ``except Exception`` and re-raised as terminal —
     no retry, caller saw a failure it should have retried.
+
+    TODO (post-baseline, tracked in the 7-agent audit's "execute_write
+    migration" item): every write path in this module uses the
+    auto-commit ``session.run`` API. Neo4j's official Python driver
+    recommends the ``session.execute_write`` managed-transaction API
+    for mutating queries — it provides AUTOMATIC retry on transient
+    errors + atomic rollback on mid-statement failure. This decorator
+    partially closes the gap (retry) but does NOT give atomicity —
+    an exception mid-UNWIND can commit partial state. Full migration
+    is ~40 call sites; deferred
+    pending post-baseline stability validation. Not a baseline
+    blocker because the batched paths (``merge_indicators_batch``,
+    ``merge_vulnerabilities_batch``, ``_execute_batch_with_retry``,
+    ``_run_rows``) now retry and PR-N9 B6 + PR-N15 permanent-failure
+    counter detect silent-write failures. But for max safety the
+    ``execute_write`` migration should land in a post-baseline PR.
     """
 
     def decorator(func):
@@ -2353,6 +2381,14 @@ class Neo4jClient:
                 raw_name,
                 source_id,
             )
+            # PR-N18 (2026-04-22): emit the counter PR-N11 promised.
+            # Closes the log-grep-only detection path with proper
+            # Prometheus alerting. None-guarded (PR-N5 R1 pattern).
+            if _MERGE_REJECT_PLACEHOLDER is not None:
+                try:
+                    _MERGE_REJECT_PLACEHOLDER.labels(label="Malware", source=source_id).inc()
+                except Exception as _metric_err:
+                    logger.debug("placeholder-reject metric increment failed: %s", _metric_err, exc_info=True)
             return False
         key_props = canonicalize_merge_key("Malware", {"name": raw_name})
         # Store malware types and aliases on the node for easier querying
@@ -2395,6 +2431,12 @@ class Neo4jClient:
                 raw_name,
                 source_id,
             )
+            # PR-N18 (2026-04-22): same counter emission as merge_malware.
+            if _MERGE_REJECT_PLACEHOLDER is not None:
+                try:
+                    _MERGE_REJECT_PLACEHOLDER.labels(label="ThreatActor", source=source_id).inc()
+                except Exception as _metric_err:
+                    logger.debug("placeholder-reject metric increment failed: %s", _metric_err, exc_info=True)
             return False
         key_props = canonicalize_merge_key("ThreatActor", {"name": raw_name})
         aliases = data.get("aliases", [])
@@ -6125,9 +6167,58 @@ def scrape_list_dedup_sizes(client: "Neo4jClient", *, sample_size: int = 200) ->
     return observed
 
 
+def _cli_bootstrap_sources() -> bool:
+    """PR-N18 (2026-04-22, RUNBOOK drift): run ``ensure_sources()`` as
+    a standalone one-shot for on-call use.
+
+    The RUNBOOK's Neo4j-ineffective-batch remediation directs on-call
+    to run ``python -m src.neo4j_client --bootstrap-sources`` when the
+    Source node is missing. Pre-PR-N18 the CLI had no argparse and
+    this invocation silently ran ``test_connection()`` instead — the
+    documented command was fabricated.
+
+    This helper provides the real implementation: connect, ensure
+    constraints (needed for Source UNIQUE), run ensure_sources, close.
+    Returns True on success so the process exits 0 for the operator.
+    """
+    client = Neo4jClient()
+    if not client.connect():
+        logger.error("[BOOTSTRAP-SOURCES] failed: could not connect to Neo4j")
+        return False
+    try:
+        # Constraints first — Source UNIQUE on source_id is required
+        # before ensure_sources can be safely idempotent.
+        client.create_constraints()
+        client.create_indexes()
+        client.ensure_sources()
+        logger.info("[BOOTSTRAP-SOURCES] ensure_sources() completed")
+        return True
+    finally:
+        client.close()
+
+
 if __name__ == "__main__":
+    import argparse
+
     # Configure logging for standalone execution
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-    success = test_connection()
+    parser = argparse.ArgumentParser(
+        description="EdgeGuard Neo4j client — standalone utility commands. "
+        "Default (no flags): run a connection health check. "
+        "For scripted use, prefer the Python API.",
+    )
+    parser.add_argument(
+        "--bootstrap-sources",
+        action="store_true",
+        help="Run ensure_sources() + create_constraints() + create_indexes() "
+        "as a one-shot. Use when docs/RUNBOOK.md § Neo4j ineffective-batch "
+        "indicates missing Source node.",
+    )
+    args = parser.parse_args()
+
+    if args.bootstrap_sources:
+        success = _cli_bootstrap_sources()
+    else:
+        success = test_connection()
     sys.exit(0 if success else 1)

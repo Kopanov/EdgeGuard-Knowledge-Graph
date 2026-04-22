@@ -68,25 +68,30 @@ class TestFix1AlertRulesWired:
         assert group["name"] == "edgeguard_pipeline_observability"
         assert "rules" in group
 
-    def test_four_rules_present(self):
-        """Placeholder-reject alert deferred to PR-N12 so exactly 4 rules."""
+    def test_pr_n11_rules_present(self):
+        """PR-N11 introduced 4 rules; PR-N18 added 2 more (permanent-failure
+        + placeholder-reject-spike). PR-N11's 4 must still be present;
+        the SUPERSET is allowed."""
         group = self._rules()
         names = {rule["alert"] for rule in group["rules"]}
-        assert names == {
+        pr_n11_rules = {
             "EdgeGuardMispBatchPermanentFailure",
             "EdgeGuardMispSustainedBackoff",
             "EdgeGuardMispHonestNullViolation",
             "EdgeGuardNeo4jIneffectiveBatch",
-        }, f"unexpected rule set: {names}"
+        }
+        missing = pr_n11_rules - names
+        assert not missing, f"PR-N11 rules missing from observability group: {missing}"
 
-    def test_placeholder_alert_deferred_not_present(self):
-        """PR-N12 follow-up adds this; must not be in PR-N11 without
-        the counter wire."""
+    def test_placeholder_alert_now_landed_via_pr_n18(self):
+        """PR-N11 documented this as deferred. PR-N18 landed the
+        counter + alert. The alert name is now
+        ``EdgeGuardMergeRejectPlaceholderSpike`` (not the bare
+        ``EdgeGuardMergeRejectPlaceholder`` placeholder name)."""
         group = self._rules()
         names = {rule["alert"] for rule in group["rules"]}
-        assert "EdgeGuardMergeRejectPlaceholder" not in names, (
-            "Placeholder-reject alert requires edgeguard_merge_reject_placeholder_total "
-            "counter (not wired yet); must not ship in PR-N11"
+        assert "EdgeGuardMergeRejectPlaceholderSpike" in names, (
+            "PR-N18 landed the placeholder-reject alert that PR-N11 deferred"
         )
 
     def test_every_alert_references_existing_metric(self):
