@@ -260,10 +260,31 @@ class MISPCollector:
                 # === INDICATORS (attributes) ===
                 attributes = full_event.get("Attribute", [])
                 if len(attributes) > MAX_ATTRIBUTES_PER_EVENT:
+                    # PR-N23 BLOCKER #6 (proactive audit 2026-04-22):
+                    # promoted from bare WARN log to a greppable
+                    # ``[MISP-EVENT-TRUNCATED]`` token + Prometheus
+                    # counter ``edgeguard_misp_event_attributes_truncated_total``.
+                    # Pre-N23 the WARN was the only signal — large NVD
+                    # events (2000+ CVEs) routinely hit this and lost
+                    # 75%+ of their data with nothing actionable
+                    # surfaced to the operator or the DAG task status.
+                    dropped = len(attributes) - MAX_ATTRIBUTES_PER_EVENT
                     logger.warning(
-                        f"      Event {event_id} has {len(attributes)} attributes "
-                        f"(limiting to {MAX_ATTRIBUTES_PER_EVENT})"
+                        "[MISP-EVENT-TRUNCATED] event=%s source=%s has %d attributes; "
+                        "limiting to %d (dropping %d). Raise MAX_ATTRIBUTES_PER_EVENT if "
+                        "MISP can handle it, or investigate the source feed.",
+                        event_id,
+                        source,
+                        len(attributes),
+                        MAX_ATTRIBUTES_PER_EVENT,
+                        dropped,
                     )
+                    try:
+                        from metrics_server import MISP_EVENT_ATTRIBUTES_TRUNCATED
+
+                        MISP_EVENT_ATTRIBUTES_TRUNCATED.labels(source=source).inc()
+                    except Exception:
+                        logger.debug("truncation counter emission failed", exc_info=True)
 
                 # === INDICATORS + CVEs in a single pass ===
                 # Extract any CVE mentioned in the event title first.
@@ -582,8 +603,27 @@ class MISPCollector:
             return unique, active_event_ids
 
         except Exception as e:
-            logger.error(f"MISP collection error: {e}")
-            return [], set()
+            # PR-N23 BLOCKER (proactive audit 2026-04-22): re-raise
+            # instead of silently returning (``[]``, ``set()``).
+            #
+            # The pre-N23 swallower had the same shape as the PR-N17
+            # NVD silent-window-drop bug — Airflow saw "success, 0
+            # items, 0 inactive" regardless of whether the MISP backend
+            # was healthy-and-empty or transiently unreachable.
+            #
+            # Downstream impact: ``run_misp_to_neo4j._sync_single_item``
+            # and ``mark_inactive_nodes`` read ``active_event_ids`` to
+            # decide which indicators are currently-represented in MISP.
+            # An empty set on transient MISP outage silently SKIPS the
+            # mark-inactive step (neo4j_client.py:2753), leaving stale
+            # indicators ``active=true`` forever — the graph freezes
+            # in-place while the DAG shows green.
+            #
+            # Fix: re-raise so the DAG task fails loudly, the operator
+            # sees the actual MISP exception in the Airflow log, and
+            # the stale-indicator freeze stops before it accumulates.
+            logger.error(f"[MISP-COLLECT] MISPCollector.collect FAILED: {e}", exc_info=True)
+            raise
 
     def map_attribute_type(self, attr_type):
         """Map MISP attribute types to standard"""

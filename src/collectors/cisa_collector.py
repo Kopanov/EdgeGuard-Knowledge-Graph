@@ -311,10 +311,27 @@ class CISACollector:
 
         except requests.exceptions.Timeout as e:
             logger.error(f"CISA KEV timeout: {e}")
-            return self._return_status(False, 0, str(e)) if push_to_misp else []
+            # PR-N23 BLOCKER #4 (proactive audit 2026-04-22): same
+            # shape as the PR-N17 NVD silent-window-drop bug, in a
+            # different collector.
+            # Pre-N23 ``return self._return_status(False, 0, ...) if
+            # push_to_misp else []`` returned an EMPTY LIST when
+            # ``push_to_misp=False`` (alert-preview / baseline drain-
+            # mode / test-harness flows) — indistinguishable from "CISA
+            # feed is empty today". Caller cannot tell fetch failure
+            # from empty feed → a KEV entry the operator knows was
+            # published silently disappears from the output.
+            # Fix: when push_to_misp=True we still return a status dict
+            # (existing contract — Airflow consumes it); when False we
+            # re-raise so the caller sees the actual error.
+            if push_to_misp:
+                return self._return_status(False, 0, str(e))
+            raise
         except requests.exceptions.ConnectionError as e:
             logger.error(f"CISA KEV connection error: {e}")
-            return self._return_status(False, 0, str(e)) if push_to_misp else []
+            if push_to_misp:
+                return self._return_status(False, 0, str(e))
+            raise
         except requests.exceptions.HTTPError as e:
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"CISA KEV: auth/access denied — skipping (optional public feed): {e}")
@@ -328,10 +345,14 @@ class CISACollector:
                 st["circuit_breaker_state"] = CISA_CIRCUIT_BREAKER.state.name
                 return st
             logger.error(f"CISA KEV HTTP error: {e}")
-            return self._return_status(False, 0, str(e)) if push_to_misp else []
+            if push_to_misp:
+                return self._return_status(False, 0, str(e))
+            raise
         except Exception as e:
             logger.error(f"CISA KEV collection error: {type(e).__name__}: {e}")
-            return self._return_status(False, 0, str(e)) if push_to_misp else []
+            if push_to_misp:
+                return self._return_status(False, 0, str(e))
+            raise
 
     def _return_status(self, success: bool, count: int, error: str = None, failed: int = 0) -> Dict[str, Any]:
         """Standard status dict for Airflow when push_to_misp=True."""

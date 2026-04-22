@@ -3245,6 +3245,68 @@ class Neo4jClient:
                     if item.get("cisa_notes"):
                         batch_item["cisa_notes"] = item["cisa_notes"]
 
+                    # PR-N23 BLOCKER #2 (proactive audit 2026-04-22):
+                    # the batch path was dropping every Vulnerability
+                    # enrichment field on the floor. PR-N19 Fix #1 closed
+                    # this gap for the ``merge_cve``/``merge_vulnerability``
+                    # single-row paths but the BATCH path (used by the
+                    # ResilMesh delta, alert-pipeline bulk imports, and
+                    # test harnesses) was never updated. Result:
+                    # Vulnerability nodes ingested via batch had NULL
+                    # for ``cvss_score``, ``severity``, ``attack_vector``,
+                    # ``cisa_*``, ``published``, ``last_modified``,
+                    # ``cwe``, ``ref_tags``, ``reference_urls``, and
+                    # ``affected_products`` — even though the upstream
+                    # collector item had all of them. Same symptom as
+                    # Bravo's 2026-04-22 findings, just a different
+                    # code path.
+                    #
+                    # Fix: mirror ``merge_cve`` / ``merge_vulnerability``
+                    # extra_props builder shape. Each field is conditional
+                    # on presence so the batch_item stays compact for
+                    # items that don't carry enrichment.
+                    if item.get("description"):
+                        batch_item["description"] = item["description"]
+                    if item.get("cvss_score") is not None:
+                        batch_item["cvss_score"] = item["cvss_score"]
+                    if item.get("severity"):
+                        batch_item["severity"] = item["severity"]
+                    if item.get("attack_vector"):
+                        batch_item["attack_vector"] = item["attack_vector"]
+                    if item.get("published"):
+                        batch_item["published"] = item["published"]
+                    if item.get("last_modified"):
+                        batch_item["last_modified"] = item["last_modified"]
+                    if item.get("cisa_exploit_add"):
+                        batch_item["cisa_exploit_add"] = item["cisa_exploit_add"]
+                    if item.get("cisa_action_due"):
+                        batch_item["cisa_action_due"] = item["cisa_action_due"]
+                    if item.get("cisa_required_action"):
+                        batch_item["cisa_required_action"] = item["cisa_required_action"]
+                    if item.get("cisa_vulnerability_name"):
+                        batch_item["cisa_vulnerability_name"] = item["cisa_vulnerability_name"]
+                    # PR-N23 Bugbot round 1 (PR #107, MEDIUM): the original
+                    # PR-N23 fix promoted 10 fields but missed 4 that
+                    # ``parse_attribute`` in run_misp_to_neo4j.py:2497-2502
+                    # writes on every NVD vulnerability item: ``cwe``,
+                    # ``ref_tags``, ``reference_urls``, ``affected_products``.
+                    # The ``merge_cve`` single-row path (post-PR-N19 Fix #1)
+                    # writes none of these either — they're carried in
+                    # the SOURCED_FROM edge's raw_data only. But the
+                    # PR-N23 fix's own comment claimed they were among the
+                    # batch-path drop set ("13+ fields"). Close the docs/
+                    # behavior gap: stage them on the batch_item and SET
+                    # them in the Cypher below for parity with what
+                    # operators expect after the PR-N23 changelog.
+                    if item.get("cwe"):
+                        batch_item["cwe"] = item["cwe"]
+                    if item.get("ref_tags"):
+                        batch_item["ref_tags"] = item["ref_tags"]
+                    if item.get("reference_urls"):
+                        batch_item["reference_urls"] = item["reference_urls"]
+                    if item.get("affected_products"):
+                        batch_item["affected_products"] = item["affected_products"]
+
                     batch_data.append(batch_item)
 
                 if not batch_data:
@@ -3282,7 +3344,31 @@ class Neo4jClient:
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
                     n.version_constraints = coalesce(item.version_constraints, n.version_constraints),
                     n.cisa_cwes = {_dedup_concat_clause("n.cisa_cwes", "coalesce(item.cisa_cwes, [])")},
-                    n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes)
+                    n.cisa_notes = coalesce(item.cisa_notes, n.cisa_notes),
+                    // PR-N23 BLOCKER #2: promote Vulnerability enrichment
+                    // fields (was silently dropped in the batch path pre-N23).
+                    // ``coalesce(item.X, n.X)`` shape so partial-item
+                    // batches don't clobber previously-set values with
+                    // NULL — matches merge_cve's extra_props semantics.
+                    n.description = coalesce(item.description, n.description),
+                    n.cvss_score = coalesce(item.cvss_score, n.cvss_score),
+                    n.severity = coalesce(item.severity, n.severity),
+                    n.attack_vector = coalesce(item.attack_vector, n.attack_vector),
+                    n.published = coalesce(item.published, n.published),
+                    n.last_modified = coalesce(item.last_modified, n.last_modified),
+                    n.cisa_exploit_add = coalesce(item.cisa_exploit_add, n.cisa_exploit_add),
+                    n.cisa_action_due = coalesce(item.cisa_action_due, n.cisa_action_due),
+                    n.cisa_required_action = coalesce(item.cisa_required_action, n.cisa_required_action),
+                    n.cisa_vulnerability_name = coalesce(item.cisa_vulnerability_name, n.cisa_vulnerability_name),
+                    // PR-N23 Bugbot round 1 (PR #107 MEDIUM): four fields
+                    // the original PR-N23 fix's comment described as
+                    // "silently dropped" but didn't actually promote.
+                    // Now they land on the node when the upstream item
+                    // carries them.
+                    n.cwe = coalesce(item.cwe, n.cwe),
+                    n.ref_tags = coalesce(item.ref_tags, n.ref_tags),
+                    n.reference_urls = coalesce(item.reference_urls, n.reference_urls),
+                    n.affected_products = coalesce(item.affected_products, n.affected_products)
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)

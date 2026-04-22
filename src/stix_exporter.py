@@ -1175,6 +1175,22 @@ class StixExporter:
                     "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
                 }
             )
+
+        # PR-N23 BLOCKER #3 (proactive audit 2026-04-22): pre-N23 the
+        # STIX Vulnerability SDO emitted ONLY ``name`` + ``description``
+        # + ``external_references`` — dropping 13+ enrichment fields
+        # silently on every export. ResilMesh cloud dashboards showed
+        # ``severity="UNKNOWN"`` for every CVE, even though Neo4j knew
+        # the real CVSS score + severity + CISA KEV status. The
+        # ``published`` / ``last_modified`` fields PR-N19 Fix #1 worked
+        # so hard to preserve were also being stripped at this boundary.
+        #
+        # Fix: emit each enrichment field as an ``x_edgeguard_*`` STIX
+        # custom-property via ``allow_custom=True``. STIX 2.1 allows
+        # producer-specific custom props on any SDO as long as the key
+        # starts with ``x_``. ResilMesh consumers that know to look for
+        # the ``x_edgeguard_*`` prefix get the full enrichment; STIX
+        # consumers that don't, still get the valid Vulnerability SDO.
         kwargs: Dict[str, Any] = {
             "id": stix_id,
             "name": cve_id,
@@ -1183,6 +1199,34 @@ class StixExporter:
         }
         if ext_refs:
             kwargs["external_references"] = ext_refs
+
+        # Promote CVSS + severity + CISA KEV + NVD dates + CWE /
+        # references to STIX custom properties so the SDO actually
+        # carries the Neo4j enrichment through to ResilMesh.
+        _promoted_fields = (
+            ("cvss_score", "x_edgeguard_cvss_score"),
+            ("severity", "x_edgeguard_severity"),
+            ("attack_vector", "x_edgeguard_attack_vector"),
+            ("published", "x_edgeguard_published"),
+            ("last_modified", "x_edgeguard_last_modified"),
+            ("cisa_exploit_add", "x_edgeguard_cisa_exploit_add"),
+            ("cisa_action_due", "x_edgeguard_cisa_action_due"),
+            ("cisa_required_action", "x_edgeguard_cisa_required_action"),
+            ("cisa_vulnerability_name", "x_edgeguard_cisa_vulnerability_name"),
+            ("cwe", "x_edgeguard_cwe"),
+            ("cisa_cwes", "x_edgeguard_cisa_cwes"),
+            ("ref_tags", "x_edgeguard_ref_tags"),
+            ("reference_urls", "x_edgeguard_reference_urls"),
+            ("affected_products", "x_edgeguard_affected_products"),
+        )
+        for neo4j_key, stix_key in _promoted_fields:
+            val = props.get(neo4j_key)
+            # Skip None / empty strings / empty collections so we don't
+            # bloat the STIX bundle with "x_edgeguard_cvss_score: null".
+            if val is None or val == "" or val == [] or val == {}:
+                continue
+            kwargs[stix_key] = val
+
         kwargs.update(_producer_created_modified(props))
         obj = stix2.Vulnerability(**kwargs)
         return self._apply_source_truthful_custom_props(_to_dict(obj), props)

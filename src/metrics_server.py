@@ -415,6 +415,26 @@ MERGE_REJECT_PLACEHOLDER = Counter(
     ["label", "source"],
 )
 
+# PR-N23 BLOCKER #6 (proactive audit 2026-04-22): a MISP event whose
+# attribute list exceeds MAX_ATTRIBUTES_PER_EVENT (default 500) is
+# silently sliced by ``MISPCollector.collect``. Pre-N23 the WARN log
+# was the only signal — no counter, no alert, no visibility in
+# Airflow task status. Large NVD events (2000+ CVEs/event at baseline
+# scale) routinely hit this and lose 75%+ of their data with nothing
+# actionable surfaced.
+#
+# Fires once per truncated event, labelled by source_id (bounded
+# cardinality, ~12 known sources). Non-zero rate = data loss; operators
+# should either raise the cap (if MISP can handle it) or investigate
+# why the source feed is producing over-sized events.
+MISP_EVENT_ATTRIBUTES_TRUNCATED = Counter(
+    "edgeguard_misp_event_attributes_truncated_total",
+    "MISP events whose attribute list exceeded MAX_ATTRIBUTES_PER_EVENT "
+    "and got silently sliced by MISPCollector.collect. Non-zero rate = "
+    "data loss from over-sized events. See src/collectors/misp_collector.py.",
+    ["source"],
+)
+
 # Pipeline metrics
 PIPELINE_DURATION = Histogram(
     "edgeguard_pipeline_duration_seconds",
