@@ -289,13 +289,93 @@ Absence of this line = silent subprocess death (the exact scenario the
 
 ## Baseline-day protocol
 
+### ⚠️ Baseline launch path — PICK ONE (CLI or DAG+pause)
+
+The 730-day baseline runs for ~26h. Over that window, the 4 scheduled
+incremental DAGs will try to write to MISP + Neo4j in parallel with the
+baseline unless you stop them. This is Issue #57 (documented in
+`docs/flow_audits/01_baseline_sequence.md` Finding 1) and was the
+underlying cause of the 2026-04-19 MISP-PHP-FPM exhaustion + 14.7%
+NVD loss. Three regression xfails pin this contract in
+`tests/test_tier1_sequential_robustness.py` — they stay failing until
+Issue #57 ships a DB-backed mutex.
+
+**Until Issue #57 lands, pick one of the two safe launch paths below.**
+
+#### Option A — CLI (recommended)
+
+The CLI path acquires an in-process `baseline_lock` sentinel
+(`src/run_pipeline.py:1093`) that makes every `baseline_skip_reason()`
+check on the scheduled DAGs return a reason — they self-skip.
+
+```bash
+docker compose exec -T airflow-worker \
+  python -m edgeguard baseline --days 730
+```
+
+Or for the fresh-baseline shape (wipes existing Neo4j data first):
+
+```bash
+docker compose exec -T airflow-worker \
+  python -m edgeguard fresh-baseline --days 730
+```
+
+Confirm the lock sentinel is present during tier-1:
+
+```bash
+docker compose exec airflow-worker ls /tmp/edgeguard/baseline_lock.sentinel
+# expect: /tmp/edgeguard/baseline_lock.sentinel  (file present while baseline runs)
+```
+
+#### Option B — DAG + pre-pause the 4 incremental schedulers
+
+If you must use the Airflow UI trigger, pause the 4 scheduled DAGs
+first so they cannot fire during the ~26h window:
+
+```bash
+docker compose exec airflow-worker airflow dags pause edgeguard_daily
+docker compose exec airflow-worker airflow dags pause edgeguard_medium_freq
+docker compose exec airflow-worker airflow dags pause edgeguard_pipeline
+docker compose exec airflow-worker airflow dags pause edgeguard_low_freq
+
+# trigger the baseline
+docker compose exec airflow-worker airflow dags trigger edgeguard_baseline
+
+# AFTER baseline + enrichment complete (watch the baseline_complete task):
+docker compose exec airflow-worker airflow dags unpause edgeguard_daily
+docker compose exec airflow-worker airflow dags unpause edgeguard_medium_freq
+docker compose exec airflow-worker airflow dags unpause edgeguard_pipeline
+docker compose exec airflow-worker airflow dags unpause edgeguard_low_freq
+```
+
+Alternatively, run the preflight helper which verifies the 4 DAGs are
+paused AND the MISP/Neo4j endpoints respond AND env-var prerequisites
+are satisfied before returning exit 0:
+
+```bash
+./scripts/preflight_baseline.sh
+```
+
+Exit non-zero = do NOT launch. Exit zero + green summary = safe to trigger.
+
+#### Why not both CLI + DAG?
+
+CLI delegates to the DAG via `_trigger_baseline_dag` in recent releases
+(`src/edgeguard.py:2377`) but takes the in-process lock FIRST. If you
+trigger the DAG directly without pausing, nothing takes the lock →
+incrementals race.
+
+---
+
 ### Before a 730d baseline run
 
-1. **Smoke test.** Run a 7-day window first (`baseline=True, baseline_days=7`
+1. **Launch path decided.** Per the section above (CLI vs DAG+pause).
+2. **Preflight green.** `./scripts/preflight_baseline.sh` returns exit 0.
+3. **Smoke test.** Run a 7-day window first (`baseline=True, baseline_days=7`
    in the baseline DAG config). Success criteria: no ERROR lines, all
    6 pre-baseline alerts green, spot-check 10 random Indicators via
    Neo4j Browser or `graphql_api`.
-2. **Prometheus rules loaded.** Verify the `edgeguard_pipeline_observability`
+4. **Prometheus rules loaded.** Verify the `edgeguard_pipeline_observability`
    rule group has all 8 alerts (4 from PR-N11/N12 + 2 added in PR-N18 +
    2 Bravo-ops added in PR-N21):
    ```bash
@@ -303,13 +383,13 @@ Absence of this line = silent subprocess death (the exact scenario the
    curl -s localhost:9090/api/v1/rules | \
      jq '.data.groups[] | select(.name=="edgeguard_pipeline_observability") | .rules[].name'
    ```
-3. **Alert paging destinations confirmed.** Test that each alert
+5. **Alert paging destinations confirmed.** Test that each alert
    actually reaches the on-call pager/inbox. Manual metric injection:
    `curl -X POST localhost:9091/metrics/job/manual -d 'edgeguard_neo4j_batch_permanent_failure_total{label="test",source="test",reason="test"} 1'`
-4. **Worker RAM sized.** NVD baseline holds ~1-2 GB of CVE dicts in
+6. **Worker RAM sized.** NVD baseline holds ~1-2 GB of CVE dicts in
    memory (HIGH gap tracked for follow-up). Ensure `airflow-worker`
    container has ≥ 4 GB RAM: `docker inspect edgeguard-airflow-worker | grep -i mem`.
-5. **Kill-switches staged.** Decide in advance what signal would make
+7. **Kill-switches staged.** Decide in advance what signal would make
    you set each:
    - `EDGEGUARD_RESPECT_CALIBRATOR=0` → if edges flap confidence 0.3 ↔ 0.8 nightly (PR-N10 Fix #2 regression signal).
    - `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1` → if `_record_batch_counters` raises persistently in logs.
@@ -359,6 +439,87 @@ RETURN label, c ORDER BY c DESC;
 ```
 
 Any non-zero on #1–#4 = regression; file issue.
+
+---
+
+## Retrieving raw MISP data from a Neo4j node
+
+Three complementary retrieval paths exist for every MISP-sourced node
+(Indicator, CVE, Vulnerability, Malware, ThreatActor, Technique,
+Tactic, Tool). Use whichever fits your consumer.
+
+### ⚠️ `n.uuid` is NOT the MISP link
+
+`n.uuid` is a **deterministic UUIDv5** computed from `(label, natural_key)`
+(`src/node_identity.py:compute_node_uuid`). It's stable across
+environments (local vs cloud Neo4j produce the same `n.uuid` for the
+same logical entity) and has **STIX parity** (the UUID portion of a
+STIX SDO id equals `n.uuid`). It is NOT a foreign key into MISP.
+
+### Path 1 — MISP attribute UUID (most granular)
+
+Every MISP-sourced node carries `n.misp_attribute_ids[]` — the real
+MISP attribute UUID(s) captured at ingest
+(`src/run_misp_to_neo4j.py:2311`).
+
+```cypher
+MATCH (i:Indicator) WHERE i.value = '203.0.113.5'
+RETURN i.misp_attribute_ids;
+// returns e.g. ['5f8d-abcd-...', '61b2-efgh-...']
+```
+
+Fetch raw attribute JSON from MISP:
+
+```bash
+curl -H "Authorization: $MISP_API_KEY" \
+     -H "Accept: application/json" \
+     "$MISP_URL/attributes/5f8d-abcd-..."
+```
+
+### Path 2 — MISP event ID (coarser, per-event context)
+
+`n.misp_event_ids[]` carries stringified MISP event IDs.
+
+```cypher
+MATCH (i:Indicator) WHERE i.value = '203.0.113.5'
+RETURN i.misp_event_ids;
+// returns e.g. ['12345', '12678']
+
+MATCH ()-[r:INDICATES]->(:Malware {name: 'Cobalt Strike'})
+RETURN r.misp_event_ids LIMIT 10;
+```
+
+Fetch the event (contains all related attributes):
+
+```bash
+curl -H "Authorization: $MISP_API_KEY" \
+     "$MISP_URL/events/12345"
+```
+
+### Path 3 — Raw MISP JSON on SOURCED_FROM edge (no network call)
+
+Every per-source ingest carries the raw MISP attribute JSON pickled
+into `r.raw_data` on the `SOURCED_FROM` edge
+(`src/neo4j_client.py:_upsert_sourced_relationship`). Useful when you
+need the original payload without a round-trip to MISP.
+
+```cypher
+MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'otx'})
+WHERE i.value = '203.0.113.5'
+RETURN r.raw_data LIMIT 1;
+```
+
+### Coverage
+
+| Node label | Attribute UUID | Event IDs | Raw JSON on edge |
+|---|:-:|:-:|:-:|
+| Indicator | ✅ | ✅ | ✅ |
+| CVE / Vulnerability | ✅ | ✅ | ✅ |
+| Malware | ✅ | ✅ | ✅ |
+| ThreatActor | ✅ | ✅ | ✅ |
+| Technique / Tactic / Tool | ✅ | ✅ | ✅ |
+| Campaign | via inbound edges only | via inbound edges only | — |
+| Sector | — (fixed vocab) | — | — |
 
 ---
 
