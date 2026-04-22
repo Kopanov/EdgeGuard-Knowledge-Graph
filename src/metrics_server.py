@@ -423,6 +423,40 @@ PIPELINE_DURATION = Histogram(
     buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0],
 )
 
+# ----------------------------------------------------------------------------
+# build_relationships observability (PR-N21 follow-up, Bravo's ops list)
+# ----------------------------------------------------------------------------
+# Bravo flagged two operational gaps that would catch a build_relationships
+# failure the streaming helper (PR-K3) can't protect against — specifically
+# a mid-run OOM of Neo4j itself (``MemoryLimitExceededException`` inside the
+# transaction, not Python buffering) that kills APOC batches without
+# graceful rollback.
+#
+# 1. ``BUILD_RELATIONSHIPS_COMPLETIONS`` — incremented exactly once when
+#    build_relationships emits its ``[BUILD_RELATIONSHIPS SUMMARY]``
+#    line. Its ABSENCE after ``baseline_start`` is the signal that the
+#    subprocess died silently (exit 137 OOM, SIGKILL from timeout, etc.).
+#    Alert: ``absent()`` or ``rate == 0`` for 6h+ after baseline kickoff.
+#
+# 2. ``APOC_BATCH_PARTIAL`` — incremented per ``[PARTIAL]`` log line that
+#    APOC emits when a ``apoc.periodic.iterate`` batch fails mid-stream.
+#    Any occurrence = partial data loss in that step → P2 alert so
+#    operator can re-run that specific step before it contaminates
+#    downstream analysis.
+BUILD_RELATIONSHIPS_COMPLETIONS = Counter(
+    "edgeguard_build_relationships_completions_total",
+    "build_relationships SUMMARY emissions (one per successful end-to-end run). "
+    "Absence after a baseline started = silent subprocess death (OOM / SIGKILL).",
+)
+
+APOC_BATCH_PARTIAL = Counter(
+    "edgeguard_apoc_batch_partial_total",
+    "APOC periodic.iterate batches that reported partial success (non-empty "
+    "errorMessages) — each one = partial data-loss in a build_relationships "
+    "step. Labelled by step identifier so operators can target a re-run.",
+    ["step"],
+)
+
 PIPELINE_ERRORS = Counter("edgeguard_pipeline_errors_total", "Total pipeline errors", ["task", "error_type", "source"])
 
 PIPELINE_STAGES = Gauge("edgeguard_pipeline_stage", "Current pipeline stage (1=running, 0=idle)", ["stage"])
@@ -908,6 +942,33 @@ def record_indicators_processed(operation: str, count: int, status: str = "succe
 def record_enrichment_duration(enricher_type: str, duration: float):
     """Record enrichment duration."""
     ENRICHMENT_DURATION.labels(enricher_type=enricher_type).observe(duration)
+
+
+def record_build_relationships_completion() -> None:
+    """PR-N21 Bravo-ops: call once per successful build_relationships run,
+    when ``[BUILD_RELATIONSHIPS SUMMARY]`` is emitted. Absence after a
+    baseline starts = silent subprocess death (OOM / SIGKILL). The
+    ``EdgeGuardBuildRelationshipsSilentDeath`` alert fires on 6h of
+    zero-rate after baseline kickoff."""
+    BUILD_RELATIONSHIPS_COMPLETIONS.inc()
+
+
+def record_apoc_batch_partial(step: str) -> None:
+    """PR-N21 Bravo-ops: call per partial/errored APOC batch (any
+    ``errorMessages`` entry from ``apoc.periodic.iterate``). Any
+    occurrence = partial data-loss for that step → P2 alert so the
+    operator can re-run the specific step before downstream is
+    contaminated.
+
+    Args:
+        step: short, bounded-cardinality identifier of the build_relationships
+            step that reported the partial batch (e.g. ``"4"``, ``"9"``,
+            ``"link_indicators"``). Keep it low-cardinality to avoid
+            unbounded label explosion.
+    """
+    # Bound cardinality: unknown/long step identifiers collapse to "<other>"
+    safe_step = str(step).strip()[:40] if step else "<unknown>"
+    APOC_BATCH_PARTIAL.labels(step=safe_step).inc()
 
 
 def get_all_metrics() -> bytes:

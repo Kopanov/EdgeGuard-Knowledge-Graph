@@ -148,7 +148,18 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
                     logger.info(f"  [DECAY] {desc}: {count} nodes")
 
     except Exception as e:
-        logger.error(f"decay_ioc_confidence error: {e}")
+        # PR-N21 BLOCKER: re-raise instead of silently returning zero
+        # results. The pre-N21 ``except Exception: logger.error()`` (no
+        # raise) swallowed real Cypher errors (timeouts, schema drift,
+        # OOM) and returned ``{}`` — which the runner happily aggregated
+        # and Airflow marked SUCCESS. Operators saw a green DAG with no
+        # decay actually applied, identical to a "no work needed" run.
+        # The 2026-04-22 cloud baseline showed ``Campaign = 0`` with the
+        # same root cause (the swallower in ``build_campaign_nodes``).
+        # Fix: re-raise so the DAG task FAILS loudly and the operator
+        # sees the actual exception in the Airflow log.
+        logger.error(f"[DECAY] decay_ioc_confidence FAILED: {e}", exc_info=True)
+        raise
 
     total = sum(results.values())
     logger.info(f"[DECAY] IOC decay complete — {total} nodes updated")
@@ -439,27 +450,75 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # Net: PART_OF edges for each Campaign always equal the current
             # top-100 of active indicators. Reproducible, bounded, matches
             # the documented "sample: up to 100 per campaign" contract.
-            link_indicators = """
-            MATCH (c:Campaign)
-            MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
-            WHERE i.active = true
-            WITH c, i
-            ORDER BY i.first_imported_at DESC, i.value ASC
-            WITH c, collect(i)[0..100] AS indicators
-            UNWIND indicators AS i
-            MERGE (i)-[r:PART_OF]->(c)
-            ON CREATE SET r.created_at = datetime(),
-                          r.src_uuid = i.uuid,
-                          r.trg_uuid = c.uuid
-            SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
-                r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
-                r.updated_at = datetime()
-            RETURN count(*) AS links
+            #
+            # PR-N21 (next-baseline robustness): wrap in
+            # ``apoc.periodic.iterate`` with one Campaign per batch so the
+            # cartesian explosion (Campaign × Malware × Indicator) doesn't
+            # materialize in a single transaction. Pre-N21 the un-batched
+            # version produced an intermediate row count of (n_campaigns ×
+            # avg_malware × avg_indicators) ≈ 0.5–3M rows for the cloud
+            # graph (156 campaigns × ~22 malware × ~159 indicators) — fine
+            # at 1-year scale, fragile at 730-day scale. The
+            # 2026-04-22 Campaign = 0 incident was almost certainly this
+            # query timing out / OOMing inside a single TX, then the
+            # broad ``except Exception`` (now removed) swallowing the
+            # raise. Same shape ``bridge_vulnerability_cve`` already
+            # uses for symmetric scale safety.
+            link_indicators_batched = """
+            CALL apoc.periodic.iterate(
+              "MATCH (c:Campaign) RETURN c",
+              "MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
+               WHERE i.active = true
+               WITH c, i
+               ORDER BY i.first_imported_at DESC, i.value ASC
+               WITH c, collect(i)[0..100] AS indicators
+               UNWIND indicators AS i
+               MERGE (i)-[r:PART_OF]->(c)
+               ON CREATE SET r.created_at = datetime(),
+                             r.src_uuid = i.uuid,
+                             r.trg_uuid = c.uuid
+               SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
+                   r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
+                   r.updated_at = datetime()",
+              {batchSize: 25, parallel: false, retries: 2}
+            )
+            YIELD batches, total, errorMessages, committedOperations
+            RETURN batches, total, errorMessages, committedOperations
             """
-            result = session.run(link_indicators, timeout=NEO4J_READ_TIMEOUT)
+            result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
-            results["links_created"] += record["links"] if record else 0
+            if record:
+                err_msgs = record.get("errorMessages") or {}
+                if err_msgs:
+                    # Fail loudly: any per-batch error counts as a partial
+                    # data-loss event; we want the operator to see it.
+                    raise RuntimeError(f"[CAMPAIGNS] link_indicators apoc.periodic.iterate batch errors: {err_msgs}")
             query_pause()
+
+            # Bugbot round 1 (PR #105, MEDIUM): the pre-fix code used
+            # ``record.get("committedOperations")`` as the PART_OF link
+            # count. Per APOC docs ``committedOperations`` is the number
+            # of SUCCESSFUL INNER-STATEMENT EXECUTIONS — one per outer row
+            # (i.e. one per Campaign) — NOT the number of MERGE rows
+            # produced. Pre-N21 ``count(*) AS links`` returned ~15,600
+            # for 156 campaigns × ~100 indicators; using
+            # committedOperations would report ~156 instead → ~100× low.
+            # The ``[CAMPAIGNS] Built N campaigns, M links`` log at the
+            # end of build_campaign_nodes would show a misleading M.
+            #
+            # Fix: run a follow-up count query keyed on
+            # ``r.updated_at >= $run_start_at`` — this gives the true
+            # count of PART_OF edges touched by THIS run's Step 3a
+            # (same freshness marker Step 3b uses to prune).
+            links_count_query = """
+            MATCH (:Indicator)-[r:PART_OF]->(:Campaign)
+            WHERE r.updated_at >= datetime($run_start_at)
+            RETURN count(r) AS links
+            """
+            links_result = session.run(
+                links_count_query, run_start_at=run_start_at, timeout=NEO4J_READ_TIMEOUT
+            ).single()
+            results["links_created"] += int((links_result["links"] if links_result else 0) or 0)
 
             # Step 3b: Prune stale PART_OF edges — indicators that WERE in a
             # prior run's top-100 but aren't in THIS run's (aged out, retired,
@@ -546,7 +605,24 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 logger.info(f"  [OK] {reactivated} campaigns active (updated in this run)")
 
     except Exception as e:
-        logger.error(f"build_campaign_nodes error: {e}")
+        # PR-N21 BLOCKER (root cause of 2026-04-22 cloud Campaign = 0):
+        # the pre-N21 swallower ate exceptions and returned
+        # ``{campaigns_created: 0, links_created: 0}``. Airflow saw a
+        # clean dict, marked the task SUCCESS, and the operator
+        # discovered Campaign = 0 only via post-baseline manual
+        # inspection. With 156 qualifying ThreatActors in the cloud
+        # graph, the expected output was ~156 Campaigns; the actual
+        # output was 0 because the link_indicators step (likely
+        # exception cause: Neo4j transaction memory / timeout on the
+        # un-batched MATCH (c)<-[:RUNS]-(a)<-[:ATTRIBUTED_TO]-(m)<-
+        # [:INDICATES]-(i) cartesian) raised mid-run.
+        # Fix: re-raise. Airflow then marks task FAILED with the real
+        # traceback, and the operator gets a 1-shot diagnostic instead
+        # of a multi-day mystery. See also: ``link_indicators`` is now
+        # wrapped in ``apoc.periodic.iterate`` (this PR) to reduce the
+        # likelihood of the underlying timeout in the first place.
+        logger.error(f"[CAMPAIGNS] build_campaign_nodes FAILED: {e}", exc_info=True)
+        raise
 
     logger.info(f"[CAMPAIGNS] Built {results['campaigns_created']} campaigns, {results['links_created']} links")
     return results
@@ -745,7 +821,17 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     results[tier_label] = 0
 
     except Exception as e:
-        logger.error(f"calibrate_cooccurrence_confidence error: {e}")
+        # PR-N21 BLOCKER: see decay_ioc_confidence + build_campaign_nodes
+        # for full rationale. Re-raise so enrichment task fails loudly.
+        # Note: per-tier exception handling at line ~743 already catches
+        # transient per-event failures and continues with the next tier
+        # (results[tier_label] = 0 + log) — that's the correct
+        # best-effort behaviour at the FINE-GRAINED level. The OUTER
+        # except (here) catches whole-session failures (driver dead,
+        # schema corruption, etc.) which must NOT be silently
+        # swallowed.
+        logger.error(f"[CALIBRATE] calibrate_cooccurrence_confidence FAILED: {e}", exc_info=True)
+        raise
 
     total = sum(results.values())
     tier_summary = ", ".join(f"{k}: {v}" for k, v in results.items() if v > 0)
@@ -838,8 +924,16 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
                 skip_count,
             )
     except Exception as e:
-        logger.warning(f"[BRIDGE] Vulnerability↔CVE bridge failed: {e}")
-        results["errors"] += 1
+        # PR-N21 BLOCKER: see decay_ioc_confidence + build_campaign_nodes
+        # for full rationale. The pre-N21 swallower downgraded to
+        # WARNING + incremented results["errors"], but neither Airflow
+        # nor any post-baseline assertion read results["errors"], so
+        # the failure was effectively invisible.
+        # Re-raise so the DAG task FAILS loudly. Operators see the
+        # actual exception in the Airflow log on the FIRST failed run
+        # instead of debugging stale REFERS_TO counts days later.
+        logger.error(f"[BRIDGE] Vulnerability↔CVE bridge FAILED: {e}", exc_info=True)
+        raise
 
     return results
 

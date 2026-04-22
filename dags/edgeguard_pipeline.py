@@ -2270,6 +2270,118 @@ def run_baseline_enrichment(**context):
         client.close()
 
 
+def assert_baseline_postconditions(**context):
+    """PR-N21: post-baseline data-integrity assertion.
+
+    After enrichment_jobs runs, certain invariants MUST hold or the
+    baseline is silently broken (the 2026-04-22 cloud Campaign = 0
+    incident shape). Pre-N21, exit-code-only success checks let an
+    empty Campaign label slip through with the DAG status green; ops
+    discovered the gap only via manual Cypher inspection.
+
+    Invariants checked (each fails the DAG with an actionable message):
+
+      [INV-1] Campaign > 0 IFF ATTRIBUTED_TO > 0.
+        If the graph carries Malware→ThreatActor attributions but no
+        Campaigns materialized, ``build_campaign_nodes`` raised an
+        exception that was swallowed before PR-N21 (now re-raised).
+
+      [INV-2] Indicator > 0.
+        Sync produced data. Zero Indicators means the sync silently
+        wrote nothing — either MISP empty, allowlist mismatch, or
+        per-batch silent drop.
+
+      [INV-3] Source > 0.
+        Bootstrap created the Source nodes. Zero Sources means
+        ``ensure_sources()`` never ran.
+    """
+    from neo4j_client import Neo4jClient
+
+    client = Neo4jClient()
+    violations = []
+    try:
+        client.connect()
+        with client.driver.session() as session:
+            # INV-1: Campaign > 0 iff there are QUALIFYING ThreatActors.
+            #
+            # History:
+            # - Bugbot round 1 (PR #105, HIGH): pre-fix version chained
+            #   ``MATCH (m)-[:ATTRIBUTED_TO]->(a) WITH count(*) MATCH
+            #   (c:Campaign)`` which returned ZERO ROWS when Campaign=0
+            #   (second MATCH on empty label eliminated all tuples).
+            #   Violation silently skipped — exact bug the invariant
+            #   exists to catch.
+            # - Bugbot round 2 (PR #105, MEDIUM): naive
+            #   ``count(ATTRIBUTED_TO edges) > 0`` was a FALSE-POSITIVE
+            #   risk. ``build_campaign_nodes`` only creates Campaigns for
+            #   actors with BOTH a Malware attribution AND at least one
+            #   active Indicator linked via INDICATES (enrichment_jobs.py:
+            #   296: ``WHERE size(malware_list) > 0 AND indicator_total > 0``).
+            #   A graph with ATTRIBUTED_TO edges but no active Indicators
+            #   is a LEGITIMATE zero-Campaign outcome — INV-1 firing on
+            #   that state would falsely block the DAG.
+            #
+            # Fix: mirror ``build_campaign_nodes``'s exact qualifying-actor
+            # condition. Independent count queries (one row each, no
+            # silent-skip risk).
+            row = session.run(
+                """
+                MATCH (a:ThreatActor)
+                WHERE EXISTS {
+                    MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
+                    WHERE i.active = true
+                }
+                RETURN count(a) AS qualifying_actors
+                """
+            ).single()
+            qualifying = int((row["qualifying_actors"] if row else 0) or 0)
+
+            row = session.run("MATCH (c:Campaign) RETURN count(c) AS campaigns").single()
+            camps = int((row["campaigns"] if row else 0) or 0)
+
+            if qualifying > 0 and camps == 0:
+                violations.append(
+                    f"[INV-1] {qualifying} qualifying ThreatActors exist (have Malware "
+                    "ATTRIBUTED_TO + active Indicator via INDICATES) but Campaign count = 0. "
+                    "build_campaign_nodes silently produced no campaigns. "
+                    "Check Airflow log for the underlying exception (PR-N21 made enrichment_jobs re-raise)."
+                )
+
+            # INV-2: Indicator > 0
+            row = session.run("MATCH (i:Indicator) RETURN count(i) AS n").single()
+            ind_count = int((row["n"] if row else 0) or 0)
+            if ind_count == 0:
+                violations.append(
+                    "[INV-2] Indicator count = 0. Sync silently wrote no data — check MISP "
+                    "allowlist (EDGEGUARD_TRUSTED_MISP_ORG_UUIDS) and `[MERGE-INEFFECTIVE]` log lines."
+                )
+
+            # INV-3: Source > 0
+            row = session.run("MATCH (s:Source) RETURN count(s) AS n").single()
+            src_count = int((row["n"] if row else 0) or 0)
+            if src_count == 0:
+                violations.append(
+                    "[INV-3] Source count = 0. ensure_sources() never bootstrapped. "
+                    "Run `python -m src.neo4j_client --bootstrap-sources` and re-trigger enrichment."
+                )
+
+        if violations:
+            joined = "\n  - " + "\n  - ".join(violations)
+            logger.error("[BASELINE-POSTCHECK] %d invariant violation(s):%s", len(violations), joined)
+            raise AirflowException(
+                f"Baseline post-check failed ({len(violations)} violations). "
+                "DAG marked FAILED so the operator sees this immediately. Details above."
+            )
+
+        logger.info(
+            "[BASELINE-POSTCHECK] all invariants OK — Indicator=%d Source=%d (plus Campaign>0 iff ATTRIBUTED_TO>0)",
+            ind_count,
+            src_count,
+        )
+    finally:
+        client.close()
+
+
 # ---- Baseline tasks ----
 
 baseline_misp_health = PythonOperator(
@@ -2715,6 +2827,20 @@ baseline_enrichment_task = PythonOperator(
     dag=baseline_dag,
 )
 
+# PR-N21: post-baseline data-integrity check. Asserts the invariants
+# operators expect after a successful enrichment run. Without this, a
+# silent ``Campaign = 0`` (the 2026-04-22 incident shape) shows the
+# DAG green and the operator only finds out via manual Cypher days
+# later. STRICT trigger_rule (ALL_SUCCESS): if enrichment failed the
+# postcheck is meaningless, so don't run.
+baseline_postcheck_task = PythonOperator(
+    task_id="baseline_postcheck",
+    python_callable=assert_baseline_postconditions,
+    execution_timeout=timedelta(minutes=10),
+    trigger_rule=TriggerRule.ALL_SUCCESS,
+    dag=baseline_dag,
+)
+
 baseline_complete = BashOperator(
     task_id="baseline_complete",
     bash_command="""
@@ -2781,5 +2907,6 @@ baseline_complete = BashOperator(
     >> baseline_full_sync_task
     >> baseline_build_rels_task
     >> baseline_enrichment_task
+    >> baseline_postcheck_task  # PR-N21: invariant check, fails DAG on Campaign=0 etc.
     >> baseline_complete
 )
