@@ -93,9 +93,6 @@ import urllib3
 
 from neo4j import GraphDatabase
 
-# Suppress urllib3 warnings for self-signed cert setups — operator chose it.
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 # Log format matches the rest of the EdgeGuard operator surface.
 logging.basicConfig(
     level=logging.INFO,
@@ -129,10 +126,40 @@ def _env_optional(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def _ssl_verify_enabled() -> bool:
-    """Match src/config.py strict-allow-list semantics: only the literal
-    string "true" (case-insensitive, stripped) enables verification."""
-    raw = os.environ.get("EDGEGUARD_SSL_VERIFY") or os.environ.get("SSL_VERIFY") or ""
-    return raw.strip().lower() == "true"
+    """Mirror ``src/config.py:edgeguard_ssl_verify_from_env`` exactly.
+
+    Bugbot round 1 (PR #106, HIGH): pre-fix returned ``False`` when
+    neither env var was set — that's the OPPOSITE of the project's
+    secure-by-default convention, and would silently send MISP_API_KEY
+    over unverified TLS in dev environments where operators "didn't
+    set anything."
+
+    Contract (matches src/config.py:434):
+      - Both env vars unset / empty   → ``True``  (secure default)
+      - ``EDGEGUARD_SSL_VERIFY=true`` → ``True``
+      - ``EDGEGUARD_SSL_VERIFY=<other>`` (false, FALSE, 0, ...) → ``False``
+      - SSL_VERIFY checked only if EDGEGUARD_SSL_VERIFY is unset/empty
+    """
+    for key in ("EDGEGUARD_SSL_VERIFY", "SSL_VERIFY"):
+        raw = os.environ.get(key)
+        if raw is None:
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        return stripped.lower() == "true"
+    return True
+
+
+# Bugbot round 1 (PR #106, MEDIUM): the unconditional
+# ``urllib3.disable_warnings(InsecureRequestWarning)`` at module load
+# was the wrong shape — every other EdgeGuard file (misp_writer.py,
+# run_misp_to_neo4j.py, health_check.py) gates this behind
+# ``if not SSL_VERIFY:`` so operators KEEP the urllib3 warning when
+# they're verifying TLS (the warning is then a noisy false-positive).
+# Suppress only when SSL verification is explicitly disabled.
+if not _ssl_verify_enabled():
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ---------------------------------------------------------------------------
@@ -229,10 +256,24 @@ FETCH_CANDIDATES_CYPHER = """
 MATCH (c:CVE)
 WHERE (c.published IS NULL OR c.last_modified IS NULL)
   AND size(coalesce(c.misp_attribute_ids, [])) > 0
+  // Bugbot round 1 (PR #106, HIGH × 2): cursor-based pagination eliminates
+  // TWO distinct infinite-loop modes the pre-fix script had:
+  //   (a) --dry-run: no writes → candidates stay in the WHERE filter
+  //       forever → same batch re-fetched every iteration → no exit.
+  //   (b) normal mode: CVEs that can't be resolved (MISP 404, no NVD_META,
+  //       partial dates) never update → same filter-match → same loop.
+  // Fix: sort by cve_id and advance a cursor (``c.cve_id > $last_cve_id``)
+  // in Python. Every call returns the NEXT batch regardless of whether
+  // writes happened. Loop terminates when the fetch returns < batch_size
+  // rows (exhausted the NULL-candidate set). Deterministic + safe under
+  // concurrent writers (the WHERE filter drops already-backfilled rows
+  // even if the cursor position is pre-written).
+  AND c.cve_id > $last_cve_id
 RETURN c.cve_id AS cve_id,
        c.misp_attribute_ids AS attr_ids,
        c.published AS published,
        c.last_modified AS last_modified
+ORDER BY c.cve_id
 LIMIT $batch_size
 """
 
@@ -247,9 +288,17 @@ RETURN c.published IS NOT NULL AS has_pub, c.last_modified IS NOT NULL AS has_mo
 """
 
 
-def fetch_candidates(session, batch_size: int) -> List[Dict]:
-    """Fetch a batch of CVEs missing either date field."""
-    rows = session.run(FETCH_CANDIDATES_CYPHER, batch_size=batch_size)
+def fetch_candidates(session, batch_size: int, last_cve_id: str = "") -> List[Dict]:
+    """Fetch a batch of CVEs missing either date field, cursor-paginated.
+
+    Args:
+        session: Neo4j session.
+        batch_size: max rows per fetch.
+        last_cve_id: cursor — fetch CVEs with cve_id > this value.
+            Start with ``""`` (empty string) for the first batch;
+            every subsequent call passes the last returned cve_id.
+    """
+    rows = session.run(FETCH_CANDIDATES_CYPHER, batch_size=batch_size, last_cve_id=last_cve_id)
     return [dict(row) for row in rows]
 
 
@@ -299,21 +348,37 @@ def backfill(
     min_interval = 1.0 / rate_limit if rate_limit > 0 else 0.0
     last_fetch_at = 0.0
 
+    # PR-N22 Bugbot round 1 (HIGH × 2): cursor-based pagination. Start
+    # with empty string (every real CVE ID sorts after "") and advance
+    # by the highest cve_id we saw in the previous batch. This eliminates
+    # the infinite-loop failure modes in both --dry-run and normal mode
+    # when CVEs can't be resolved (no writes → no change to WHERE match →
+    # same batch forever).
+    last_cve_id = ""
+
     while True:
         if max_cves is not None and summary["processed"] >= max_cves:
             logger.info("Hit --max-cves=%d; stopping.", max_cves)
             break
 
         with neo4j_driver.session() as session:
-            candidates = fetch_candidates(session, batch_size)
+            candidates = fetch_candidates(session, batch_size, last_cve_id=last_cve_id)
 
         if not candidates:
             logger.info("No more candidates — backfill complete.")
             break
 
+        # Advance cursor to the LAST cve_id in the returned batch.
+        # Because the query ORDER BYs cve_id, this is monotonically
+        # increasing. Safe under concurrent writers: a CVE backfilled
+        # by another process just drops out of the NULL-filter — the
+        # cursor still advances past it.
+        last_cve_id = candidates[-1]["cve_id"]
+
         logger.info(
-            "[BATCH] %d candidates fetched (summary so far: %s)",
+            "[BATCH] %d candidates fetched, cursor → %s (summary: %s)",
             len(candidates),
+            last_cve_id,
             summary,
         )
 

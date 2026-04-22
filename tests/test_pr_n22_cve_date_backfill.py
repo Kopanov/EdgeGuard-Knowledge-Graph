@@ -200,6 +200,108 @@ class TestIdempotencyCypher:
 
 
 # ===========================================================================
+# Bugbot round 1 (PR #106) — 4 legit findings must stay closed
+# ===========================================================================
+
+
+class TestBugbotRound1Fixes:
+    """Bugbot caught 4 real bugs on the first-pass PR-N22 commit:
+    - HIGH:   dry-run infinite loop (no writes → same batch re-fetched)
+    - HIGH:   normal-mode infinite loop on unresolvable CVEs
+    - HIGH:   SSL verify defaulted to INSECURE when env unset
+    - MEDIUM: urllib3 disable_warnings unconditional
+    """
+
+    def _src(self) -> str:
+        return BACKFILL_SCRIPT.read_text()
+
+    def test_fetch_uses_cursor_pagination(self):
+        """HIGH × 2: both infinite-loop modes (--dry-run + unresolvable
+        CVEs) are caused by the WHERE filter never changing for failed
+        attempts. Fix: cursor-based pagination via
+        ``c.cve_id > $last_cve_id ORDER BY c.cve_id LIMIT $batch_size``.
+        Every fetch returns the NEXT batch regardless of write success."""
+        src = self._src()
+        assert "c.cve_id > $last_cve_id" in src, (
+            "fetch query must use cursor pagination (c.cve_id > $last_cve_id) — "
+            "without this, dry-run AND unresolvable-CVE normal-mode runs infinite-loop"
+        )
+        assert "ORDER BY c.cve_id" in src, "cursor pagination requires deterministic ordering by cve_id"
+
+    def test_backfill_driver_advances_cursor(self):
+        """The Python-side driver must advance ``last_cve_id`` to the
+        LAST cve_id in the returned batch so the next iteration fetches
+        past it. Regression pin against someone "simplifying" the driver
+        back to the no-cursor loop."""
+        src = self._src()
+        # The assignment pattern we need to see inside backfill()
+        assert 'last_cve_id = candidates[-1]["cve_id"]' in src or 'last_cve_id = candidates[-1]["cve_id"]' in src, (
+            "backfill driver must advance last_cve_id to candidates[-1]['cve_id'] after each batch"
+        )
+
+    def test_ssl_verify_defaults_to_secure(self):
+        """HIGH: pre-fix ``_ssl_verify_enabled`` returned False when env
+        var was unset. Project convention (src/config.py:434) defaults
+        to True (secure). Mirror the config.py function exactly."""
+        src = self._src()
+        # The implementation must have an explicit ``return True`` fall-through
+        # (the "neither env set" case). Anchor on the function body.
+        start = src.find("def _ssl_verify_enabled")
+        end = src.find("\ndef ", start + 1)
+        body = src[start:end]
+        assert "return True" in body, (
+            "_ssl_verify_enabled must default to True (secure) when env vars unset — "
+            "matching src/config.py:edgeguard_ssl_verify_from_env"
+        )
+        # Must iterate both env var names (canonical + fallback), matching
+        # the config.py precedence.
+        assert '"EDGEGUARD_SSL_VERIFY"' in body and '"SSL_VERIFY"' in body, (
+            "_ssl_verify_enabled must check both EDGEGUARD_SSL_VERIFY (canonical) "
+            "and SSL_VERIFY (fallback) in that order"
+        )
+
+    def test_urllib3_disable_warnings_guarded_by_ssl_verify(self):
+        """MEDIUM: urllib3.disable_warnings was called UNCONDITIONALLY at
+        module load. Other EdgeGuard files gate this behind
+        ``if not SSL_VERIFY:`` so the warning stays visible when TLS IS
+        being verified (then it's a real signal). Pin via AST — only
+        look at actual ``Expr(Call(urllib3.disable_warnings))`` nodes
+        at module top-level, not at docstring/comment mentions."""
+        import ast
+
+        tree = ast.parse(self._src())
+        # Find top-level ``Expr`` statements whose value is a Call to
+        # ``urllib3.disable_warnings``. If any exists at module level
+        # (NOT inside an ``If``), the guard is missing.
+        for node in tree.body:
+            if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                if isinstance(func, ast.Attribute) and func.attr == "disable_warnings":
+                    raise AssertionError(
+                        "urllib3.disable_warnings called at module top-level without an ``if not "
+                        "_ssl_verify_enabled()`` guard. This was Bugbot round 1 MEDIUM — "
+                        "unconditional suppression hides real TLS-misconfig warnings."
+                    )
+        # Positive: the guarded call must exist somewhere. Walk all Ifs
+        # at module level and confirm at least one has a disable_warnings
+        # call in its body.
+        found_guarded = False
+        for node in tree.body:
+            if isinstance(node, ast.If):
+                # The test condition should reference _ssl_verify_enabled
+                test_src = ast.unparse(node.test)
+                if "_ssl_verify_enabled" not in test_src:
+                    continue
+                for stmt in node.body:
+                    if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                        fn = stmt.value.func
+                        if isinstance(fn, ast.Attribute) and fn.attr == "disable_warnings":
+                            found_guarded = True
+                            break
+        assert found_guarded, "urllib3.disable_warnings must be inside an ``if not _ssl_verify_enabled():`` block"
+
+
+# ===========================================================================
 # Fix #4 — CLI contract
 # ===========================================================================
 
