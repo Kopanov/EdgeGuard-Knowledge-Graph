@@ -327,42 +327,57 @@ class TestFix2BaselineLoopAbortsWindowOnError:
         to a normal status-dict return. The typed exception was lost.
 
         Fix: an explicit ``except NvdBatchFetchError: raise`` ahead
-        of the broader handlers so the type escapes to Airflow."""
+        of the broader handlers so the type escapes to Airflow.
+
+        Bugbot 2026-04-22 #4: the prior version of this test walked
+        ast.walk (order-dependent) and could match the INNER try/except
+        around _fetch_cves_batch — which has ONLY NvdBatchFetchError
+        and no Exception handler, so the test returned without
+        asserting anything. Rewrote to specifically find the OUTER
+        try/except chain (identified by having BOTH the typed handler
+        AND an Exception handler), then assert ordering."""
         src = (SRC / "collectors" / "nvd_collector.py").read_text()
-        # The except clause must come BEFORE the generic except chain.
-        # AST scan: find the function `collect`, walk its handlers.
         import ast as _ast
 
         tree = _ast.parse(src)
+        matching_outer_trys = []
         for node in _ast.walk(tree):
-            if isinstance(node, _ast.FunctionDef) and node.name == "collect":
-                # Walk for `Try` nodes inside the function
-                for sub in _ast.walk(node):
-                    if isinstance(sub, _ast.Try):
-                        handler_types = []
-                        for h in sub.handlers:
-                            if h.type is not None:
-                                if isinstance(h.type, _ast.Name):
-                                    handler_types.append(h.type.id)
-                                elif isinstance(h.type, _ast.Attribute):
-                                    handler_types.append(h.type.attr)
-                            else:
-                                handler_types.append("Exception")
-                        if "NvdBatchFetchError" in handler_types:
-                            # Confirm it's BEFORE the bare Exception catch.
-                            try:
-                                nbfe_idx = handler_types.index("NvdBatchFetchError")
-                                exc_idx = handler_types.index("Exception")
-                                assert nbfe_idx < exc_idx, (
-                                    "NvdBatchFetchError handler must be ordered BEFORE the broader Exception handler"
-                                )
-                            except ValueError:
-                                pass  # one or other not present in this Try
-                            return
-        raise AssertionError(
-            "collect() must have an `except NvdBatchFetchError:` re-raise gate "
-            "ordered before the generic Exception handler"
+            if not (isinstance(node, _ast.FunctionDef) and node.name == "collect"):
+                continue
+            for sub in _ast.walk(node):
+                if not isinstance(sub, _ast.Try):
+                    continue
+                handler_types = []
+                for h in sub.handlers:
+                    if h.type is None:
+                        handler_types.append("Exception")
+                    elif isinstance(h.type, _ast.Name):
+                        handler_types.append(h.type.id)
+                    elif isinstance(h.type, _ast.Attribute):
+                        handler_types.append(h.type.attr)
+                # The OUTER try/except chain is identified by having
+                # BOTH NvdBatchFetchError AND a bare Exception handler.
+                # Inner try/excepts (e.g. around _fetch_cves_batch) only
+                # catch NvdBatchFetchError, so filtering on the
+                # intersection ensures we're testing the right one.
+                has_nbfe = "NvdBatchFetchError" in handler_types
+                has_exception = "Exception" in handler_types
+                if has_nbfe and has_exception:
+                    matching_outer_trys.append(handler_types)
+
+        assert matching_outer_trys, (
+            "collect() must contain a try/except chain with BOTH "
+            "NvdBatchFetchError AND Exception handlers — the outer "
+            "chain that guards against the typed exception being "
+            "caught by the generic handler."
         )
+        for handler_types in matching_outer_trys:
+            nbfe_idx = handler_types.index("NvdBatchFetchError")
+            exc_idx = handler_types.index("Exception")
+            assert nbfe_idx < exc_idx, (
+                f"NvdBatchFetchError handler must be ordered BEFORE "
+                f"the broader Exception handler. Found order: {handler_types}"
+            )
 
 
 # ===========================================================================
