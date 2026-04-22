@@ -109,12 +109,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _env(name: str, required: bool = True, default: Optional[str] = None) -> Optional[str]:
-    """Read an env var; raise if required and missing."""
-    v = os.environ.get(name, default)
-    if required and not v:
+def _env_required(name: str) -> str:
+    """Read a REQUIRED env var; ``SystemExit`` if missing.
+
+    Returning ``str`` (not ``Optional[str]``) so callers don't need
+    ``# type: ignore`` or assert-not-None patterns at every use site.
+    Mypy: the ``raise`` exits the function on the missing-var path,
+    so the return value is provably non-None when control reaches it.
+    """
+    v = os.environ.get(name)
+    if not v:
         raise SystemExit(f"Missing required env var: {name}")
     return v
+
+
+def _env_optional(name: str, default: Optional[str] = None) -> Optional[str]:
+    """Read an OPTIONAL env var; ``None`` if unset and no default."""
+    return os.environ.get(name, default)
 
 
 def _ssl_verify_enabled() -> bool:
@@ -414,10 +425,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Read env early so missing creds fail fast
-    neo4j_uri = _env("NEO4J_URI", default="bolt://localhost:7687")
-    neo4j_password = _env("NEO4J_PASSWORD")
-    misp_url = _env("MISP_URL")
-    misp_api_key = _env("MISP_API_KEY")
+    # NEO4J_URI defaults to localhost; the others are mandatory (script can't
+    # do anything useful without MISP credentials + Neo4j password).
+    neo4j_uri = _env_optional("NEO4J_URI", default="bolt://localhost:7687") or "bolt://localhost:7687"
+    neo4j_password = _env_required("NEO4J_PASSWORD")
+    misp_url = _env_required("MISP_URL")
+    misp_api_key = _env_required("MISP_API_KEY")
     ssl_verify = _ssl_verify_enabled()
 
     if not ssl_verify:
