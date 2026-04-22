@@ -26,6 +26,13 @@ os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
 os.environ.setdefault("NEO4J_USER", "neo4j")
 os.environ.setdefault("NEO4J_PASSWORD", "test")
 
+# PR-N23 BLOCKER #5: post-N23 _IS_PROD defaults to True when
+# EDGEGUARD_ENV is unset (fail-closed / secure). Tests in this module
+# exercise schema introspection, which is BLOCKED in prod. Pin
+# EDGEGUARD_ENV=dev at module-load time (before graphql_api is
+# imported) so introspection stays on for these tests.
+os.environ.setdefault("EDGEGUARD_ENV", "dev")
+
 # ── Stub heavy transitive imports so tests run without a live environment ────
 # neo4j, pymisp, apache-airflow etc. are not installed in the slim CI image
 # used for unit tests.  We insert lightweight stubs into sys.modules BEFORE

@@ -154,8 +154,15 @@ def test_graphql_introspection_disabled_in_prod(monkeypatch):
 
 def test_graphql_introspection_left_on_in_dev(monkeypatch):
     """Negative pin: in dev/staging, introspection MUST stay on so
-    developers can use GraphiQL / Apollo Studio / schema autocomplete."""
-    monkeypatch.delenv("EDGEGUARD_ENV", raising=False)  # default: dev
+    developers can use GraphiQL / Apollo Studio / schema autocomplete.
+
+    PR-N23 BLOCKER #5 changed the default: unset ``EDGEGUARD_ENV`` now
+    defaults to prod (secure, fail-closed) instead of dev. Tests that
+    want dev behavior must set ``EDGEGUARD_ENV=dev`` EXPLICITLY —
+    ``delenv`` falls through to the new secure-default and introspection
+    stays DISABLED (pre-N23 this test relied on the insecure default).
+    """
+    monkeypatch.setenv("EDGEGUARD_ENV", "dev")  # explicit dev; pre-N23 relied on delenv→dev
     monkeypatch.delenv("EDGEGUARD_API_KEY", raising=False)
     # Set the var graphql_api ACTUALLY reads (see comment in the prod-mode
     # test above for why setting EDGEGUARD_API_HOST was the wrong fix).

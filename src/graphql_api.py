@@ -687,7 +687,35 @@ from strawberry.extensions import QueryDepthLimiter  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
 
 _GRAPHQL_MAX_DEPTH = int(os.getenv("EDGEGUARD_GRAPHQL_MAX_DEPTH", "8"))
-_IS_PROD = os.getenv("EDGEGUARD_ENV", "dev").strip().lower() == "prod"
+
+
+def _is_prod_env() -> bool:
+    """PR-N23 BLOCKER #5 (proactive audit 2026-04-22): the pre-N23
+    ``_IS_PROD`` check was ``os.getenv("EDGEGUARD_ENV", "dev").strip().
+    lower() == "prod"`` — fails-open on:
+      - Typos: ``EDGEGUARD_ENV=production`` → ``"production" == "prod"``
+        is False → introspection stays ENABLED in prod.
+      - Unset: ``EDGEGUARD_ENV`` missing (the default-dev case) — but
+        if a prod container image ships without the env var set,
+        introspection is enabled by default.
+      - Case + whitespace already handled via strip+lower.
+
+    Fix: accept ``{"prod", "production", "prd"}`` as prod tokens, and
+    ALSO accept a ``dev``-only allowlist so prod is the default when the
+    var is unset or unrecognized. Net: introspection is ENABLED only
+    when EDGEGUARD_ENV is explicitly one of {"dev", "development",
+    "local", "staging", "test"}. Anything else (prod, production,
+    prd, unset, typos) → introspection BLOCKED.
+    """
+    raw = (os.getenv("EDGEGUARD_ENV") or "").strip().lower()
+    # Explicit allowlist of "non-prod" environments where introspection
+    # is a useful dev affordance. Every other value (including
+    # typos and unset) is treated as prod — fail-closed.
+    _NON_PROD_ENVS = frozenset({"dev", "development", "local", "staging", "test"})
+    return raw not in _NON_PROD_ENVS
+
+
+_IS_PROD = _is_prod_env()
 
 _extensions: list = [QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH)]
 if _IS_PROD:
