@@ -403,6 +403,103 @@ class TestBravoOpsRunbookGuidance:
 
 
 # ===========================================================================
+# Bugbot round 1 (PR #105) — three real bugs Bugbot caught in the
+# Bravo-ops extension. Each fix needs a regression pin.
+# ===========================================================================
+
+
+class TestBugbotRound1Fixes:
+    """Three Bugbot findings on the Bravo-ops extension of PR-N21:
+    - HIGH:   INV-1 postcheck Cypher returned no rows when Campaign=0
+    - MEDIUM: apoc.periodic.iterate ``committedOperations`` counts
+              Campaigns (~156) not PART_OF edges (~15,600)
+    - MEDIUM: PromQL ``AND`` label mismatch makes silent-death alert
+              unfireable
+    """
+
+    def _dag_src(self) -> str:
+        return (DAGS / "edgeguard_pipeline.py").read_text()
+
+    def _enrichment_src(self) -> str:
+        return (SRC / "enrichment_jobs.py").read_text()
+
+    def _alerts_src(self) -> str:
+        return (REPO_ROOT / "prometheus" / "alerts.yml").read_text()
+
+    def test_inv1_uses_separate_count_queries(self):
+        """Bugbot round 1 HIGH: the pre-fix INV-1 chained
+        ``MATCH (m)-[:ATTRIBUTED_TO]->(a) WITH count(*) MATCH (c:Campaign)``
+        which returned ZERO ROWS when Campaign=0 (the MATCH eliminated
+        all tuples). ``.single()`` → None → violation check silently
+        skipped → DAG green — the exact bug the invariant exists to
+        catch. Fix: separate queries, each returns one row."""
+        src = self._dag_src()
+        post_body = _function_body(src, "assert_baseline_postconditions")
+
+        # Pin the new shape: two independent queries, each returning a
+        # single count. Anchor on the 2 ``RETURN count(...)`` lines.
+        assert post_body.count("RETURN count") >= 4, (
+            "INV-1 + INV-2 + INV-3 must each use a standalone count query "
+            "returning one row (total: at least 4 ``RETURN count`` occurrences). "
+            "Bugbot round 1 HIGH: chained MATCH + count returned no rows when "
+            "the second MATCH targets an empty label."
+        )
+
+        # Negative: the original silently-broken pattern (two MATCHes
+        # joined by intermediate WITH) must NOT be present.
+        assert "WITH count(*) AS attrib_edges MATCH (c:Campaign)" not in post_body, (
+            "chained MATCH after aggregation is the regression pattern Bugbot flagged"
+        )
+
+    def test_links_counted_by_updated_at_not_committed_operations(self):
+        """Bugbot round 1 MEDIUM: pre-fix code treated apoc.periodic.iterate's
+        ``committedOperations`` as the PART_OF edge count. Per APOC docs it
+        counts SUCCESSFUL INNER-STATEMENT EXECUTIONS (one per Campaign,
+        ~156) — NOT the number of MERGE rows produced (~15,600 for 156
+        campaigns × ~100 indicators). Post-deploy the ``[CAMPAIGNS] Built
+        N campaigns, M links`` log would show M ≈ 156 instead of ≈15,600 —
+        confusing operators monitoring PART_OF growth."""
+        body = _function_body(self._enrichment_src(), "build_campaign_nodes")
+        # Positive: the implementation must include a follow-up count
+        # query keyed on ``r.updated_at >= datetime($run_start_at)`` —
+        # this gives the TRUE per-run edge count using the freshness
+        # marker Step 3a stamps and Step 3b prunes against.
+        assert "r.updated_at >= datetime($run_start_at)" in body, (
+            "Step 3a must follow the apoc.periodic.iterate with a count "
+            "query keyed on r.updated_at (the per-run freshness marker)"
+        )
+        # Negative: the pre-fix ``committedOperations``-based read MUST
+        # NOT appear as an increment into links_created (the misleading
+        # line).
+        assert 'links_created"] += record.get("committedOperations"' not in body, (
+            "link count must not read from committedOperations — that's the "
+            "Bugbot-round-1-regression shape (Campaign count != edge count)"
+        )
+
+    def test_silent_death_alert_uses_on_join_modifier(self):
+        """Bugbot round 1 MEDIUM: pre-fix PromQL used bare ``AND`` to
+        join the completion-counter absence with the DAG-start-timestamp
+        check. Left side has ``{}`` labels; right side has
+        ``{dag_id="edgeguard_baseline"}`` → default AND requires label
+        equality → no match → alert never fires. Fix: ``and on()`` to
+        ignore all labels on the join."""
+        src = self._alerts_src()
+        # Find the silent-death alert block
+        start = src.find("EdgeGuardBuildRelationshipsSilentDeath")
+        next_alert = src.find("- alert:", start + 50)
+        block = src[start:next_alert] if next_alert != -1 else src[start:]
+        # Positive: must use ``and on()`` (or ``and ignoring(dag_id)``) on
+        # the cross-series join.
+        has_on = "and on()" in block or "and ignoring(" in block
+        assert has_on, (
+            "silent-death alert must use ``and on()`` or ``and ignoring(...)`` "
+            "to join the differently-labeled series — otherwise default AND "
+            "requires label equality and the alert never fires. "
+            "Bugbot round 1 MEDIUM."
+        )
+
+
+# ===========================================================================
 # Module import sanity
 # ===========================================================================
 

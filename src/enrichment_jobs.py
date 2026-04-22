@@ -488,15 +488,37 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             if record:
-                # ``committedOperations`` is the number of inner-query rows
-                # that produced a MERGE — the PART_OF link count.
-                results["links_created"] += record.get("committedOperations") or 0
                 err_msgs = record.get("errorMessages") or {}
                 if err_msgs:
                     # Fail loudly: any per-batch error counts as a partial
                     # data-loss event; we want the operator to see it.
                     raise RuntimeError(f"[CAMPAIGNS] link_indicators apoc.periodic.iterate batch errors: {err_msgs}")
             query_pause()
+
+            # Bugbot round 1 (PR #105, MEDIUM): the pre-fix code used
+            # ``record.get("committedOperations")`` as the PART_OF link
+            # count. Per APOC docs ``committedOperations`` is the number
+            # of SUCCESSFUL INNER-STATEMENT EXECUTIONS — one per outer row
+            # (i.e. one per Campaign) — NOT the number of MERGE rows
+            # produced. Pre-N21 ``count(*) AS links`` returned ~15,600
+            # for 156 campaigns × ~100 indicators; using
+            # committedOperations would report ~156 instead → ~100× low.
+            # The ``[CAMPAIGNS] Built N campaigns, M links`` log at the
+            # end of build_campaign_nodes would show a misleading M.
+            #
+            # Fix: run a follow-up count query keyed on
+            # ``r.updated_at >= $run_start_at`` — this gives the true
+            # count of PART_OF edges touched by THIS run's Step 3a
+            # (same freshness marker Step 3b uses to prune).
+            links_count_query = """
+            MATCH (:Indicator)-[r:PART_OF]->(:Campaign)
+            WHERE r.updated_at >= datetime($run_start_at)
+            RETURN count(r) AS links
+            """
+            links_result = session.run(
+                links_count_query, run_start_at=run_start_at, timeout=NEO4J_READ_TIMEOUT
+            ).single()
+            results["links_created"] += int((links_result["links"] if links_result else 0) or 0)
 
             # Step 3b: Prune stale PART_OF edges — indicators that WERE in a
             # prior run's top-100 but aren't in THIS run's (aged out, retired,

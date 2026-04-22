@@ -2302,22 +2302,35 @@ def assert_baseline_postconditions(**context):
     try:
         client.connect()
         with client.driver.session() as session:
-            # INV-1: Campaign > 0 iff ATTRIBUTED_TO > 0
+            # INV-1: Campaign > 0 iff ATTRIBUTED_TO > 0.
+            #
+            # Bugbot round 1 (PR #105, HIGH): the pre-fix version chained
+            # ``MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) WITH
+            # count(*) AS attrib_edges MATCH (c:Campaign) WITH attrib_edges,
+            # count(c) AS campaigns`` — which returned ZERO ROWS when
+            # ``Campaign = 0`` (the MATCH on the empty label eliminated
+            # all tuples despite ``attrib_edges`` being a grouping key).
+            # ``.single()`` returned None → ``if row:`` False → violation
+            # silently skipped → DAG green. That's the EXACT bug the
+            # invariant is supposed to catch.
+            #
+            # Fix: two independent count queries. Each returns exactly
+            # one row (count on empty label = 0, not no-rows). Cleaner
+            # to read, impossible to silently drop a branch.
             row = session.run(
-                "MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) "
-                "WITH count(*) AS attrib_edges "
-                "MATCH (c:Campaign) WITH attrib_edges, count(c) AS campaigns "
-                "RETURN attrib_edges, campaigns"
+                "MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) RETURN count(*) AS attrib_edges"
             ).single()
-            if row:
-                attrib = int(row["attrib_edges"] or 0)
-                camps = int(row["campaigns"] or 0)
-                if attrib > 0 and camps == 0:
-                    violations.append(
-                        f"[INV-1] {attrib} ATTRIBUTED_TO edges exist but Campaign count = 0. "
-                        "build_campaign_nodes silently produced no campaigns. "
-                        "Check Airflow log for the underlying exception (PR-N21 made enrichment_jobs re-raise)."
-                    )
+            attrib = int((row["attrib_edges"] if row else 0) or 0)
+
+            row = session.run("MATCH (c:Campaign) RETURN count(c) AS campaigns").single()
+            camps = int((row["campaigns"] if row else 0) or 0)
+
+            if attrib > 0 and camps == 0:
+                violations.append(
+                    f"[INV-1] {attrib} ATTRIBUTED_TO edges exist but Campaign count = 0. "
+                    "build_campaign_nodes silently produced no campaigns. "
+                    "Check Airflow log for the underlying exception (PR-N21 made enrichment_jobs re-raise)."
+                )
 
             # INV-2: Indicator > 0
             row = session.run("MATCH (i:Indicator) RETURN count(i) AS n").single()

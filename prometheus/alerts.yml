@@ -625,13 +625,23 @@ groups:
         # relationships_completion``). If the counter hasn't incremented
         # for 6h while a DAG run started in the last 8h, we have a
         # silent death.
+        #
+        # Bugbot round 1 (PR #105, MEDIUM): pre-fix PromQL had a label
+        # mismatch on the ``AND`` — left side (``absent(...)`` or
+        # ``rate(...) == 0``) produces an empty label set ``{}`` while
+        # the right side (``max_over_time({dag_id="edgeguard_baseline"})``)
+        # carries the ``dag_id`` label. Default PromQL ``AND`` requires
+        # exact label-set equality → no match → alert never fires.
+        # Fix: ``and on()`` — ignore ALL labels on the join, since what
+        # matters here is simply "both conditions true in the same
+        # evaluation step" not "same series."
         expr: |
           (
             absent(edgeguard_build_relationships_completions_total)
             OR
             rate(edgeguard_build_relationships_completions_total[6h]) == 0
           )
-          AND
+          and on()
           (
             max_over_time(edgeguard_dag_run_start_timestamp{dag_id="edgeguard_baseline"}[8h])
               > (time() - (6 * 60 * 60))

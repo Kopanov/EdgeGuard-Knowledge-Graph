@@ -2101,16 +2101,18 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         # 6th call. With the swallower removed (PR-N21), all 8 must be
         # mocked correctly. The 5th call (link_indicators_batched) now
         # returns ``apoc.periodic.iterate`` shape (committedOperations
-        # + errorMessages) instead of the legacy ``links`` int.
+        # + errorMessages) instead of the legacy ``links`` int. Plus
+        # PR-N21 Bugbot round 1 added a follow-up links-count query.
         # Order:
         #   (1) qualifying_actors_query           — returns iter of actors
         #   (2) create_cypher (Step 1)            — .single() = {campaigns: N}
         #   (3) backfill_cypher                   — .single() = {backfilled: N}
         #   (4) link_malware (Step 2)             — .single() = {links: N}
         #   (5) link_indicators_batched (Step 3a) — .single() = {committedOperations, errorMessages, ...}
-        #   (6) prune_query (Step 3b)             — .single() = {pruned: N}
-        #   (7) cleanup_query (Step 4)            — .single() = {orphans: N}
-        #   (8) reactivated_query (Step 5)        — .single() = {count: N}
+        #   (6) links_count_query (Step 3a')      — .single() = {links: N}  ← NEW in PR-N21 Bugbot round 1
+        #   (7) prune_query (Step 3b)             — .single() = {pruned: N}
+        #   (8) cleanup_query (Step 4)            — .single() = {count: N}
+        #   (9) reactivated_query (Step 5)        — .single() = {count: N}
         actors_iter = iter([{"name": "APT-Test"}])
         actors_result = MagicMock()
         actors_result.__iter__ = lambda self: actors_iter
@@ -2121,9 +2123,8 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         link_m_result = MagicMock()
         link_m_result.single.return_value = {"links": 0}
         # PR-N21: link_indicators_batched returns apoc.periodic.iterate
-        # output shape — the implementation reads
-        # ``record.get("committedOperations")`` + ``record.get("errorMessages")``.
-        # ``errorMessages`` MUST be empty (or falsy) or the impl raises.
+        # output shape. ``errorMessages`` MUST be empty (or falsy) or
+        # the impl raises.
         link_i_result = MagicMock()
         link_i_result.single.return_value = {
             "committedOperations": 0,
@@ -2131,6 +2132,11 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
             "batches": 1,
             "total": 0,
         }
+        # PR-N21 Bugbot round 1: follow-up count query for the TRUE
+        # PART_OF edge count (Bugbot caught that committedOperations
+        # counts Campaigns, not edges).
+        links_count_result = MagicMock()
+        links_count_result.single.return_value = {"links": 0}
         prune_result = MagicMock()
         prune_result.single.return_value = {"pruned": 0}
         cleanup_result = MagicMock()
@@ -2143,9 +2149,10 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
             backfill_result,  # 3
             link_m_result,  # 4
             link_i_result,  # 5 — PR-N21 batched shape
-            prune_result,  # 6
-            cleanup_result,  # 7
-            reactivated_result,  # 8
+            links_count_result,  # 6 — PR-N21 Bugbot round 1 follow-up
+            prune_result,  # 7
+            cleanup_result,  # 8
+            reactivated_result,  # 9
         ]
         client.driver.session.return_value = sess
 
