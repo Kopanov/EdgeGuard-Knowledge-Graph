@@ -1617,11 +1617,24 @@ class Neo4jClient:
             logger.error(f"Error applying sector labels: {e}")
             return 0
 
+    @retry_with_backoff(max_retries=3)
     def merge_node_with_source(
         self, label: str, key_props: Dict, data: Dict, source_id: str, extra_props: Dict = None
     ) -> bool:
         """
         Merge a node with proper source tracking.
+
+        PR-N16 Fix #3 (HIGH, 2026-04-22 pre-baseline merge-audit):
+        decorated with ``@retry_with_backoff`` so single-item merge
+        paths (``merge_indicator``, ``merge_malware``, ``merge_actor``,
+        ``merge_technique``, ``merge_tactic``, ``merge_tool``,
+        ``merge_cve``, ``merge_vulnerability``, topology mergers) retry
+        on Neo4j transient errors (deadlock, lock timeout, GC pause,
+        cluster failover) — not just the batched paths that PR-N15
+        hardened. At 730-day baseline scale, single-item merges of
+        Malware/Actor/MITRE nodes are foundational — a transient that
+        drops one Malware node silently breaks every downstream
+        `create_misp_relationships_batch` INDICATES edge referencing it.
 
         Args:
             label: Node label (e.g., 'Indicator', 'Vulnerability')
@@ -1849,7 +1862,47 @@ class Neo4jClient:
             for prop_name, prop_value in extra_props.items():
                 _validate_prop_name(prop_name)
                 if prop_value is not None and prop_value != "":
-                    if prop_name in _ARRAY_ACCUMULATE_PROPS and isinstance(prop_value, list):
+                    # PR-N16 Fix #1 (BLOCK, 2026-04-22 pre-baseline merge-audit):
+                    # for accumulating-array props, ALWAYS take the list
+                    # accumulation path — coerce scalars to a single-
+                    # element list if the caller passed a string.
+                    # Pre-PR-N16 the ``isinstance(prop_value, list)``
+                    # check silently fell through to the scalar SET
+                    # branch (``SET n.aliases = $aliases``), which
+                    # OVERWROTE the accumulated list with a scalar
+                    # string — destroying every alias from previous
+                    # syncs. MISP objects emit string-typed
+                    # ``aliases`` / ``malware_types`` attributes
+                    # commonly (misp_collector.py:385,410,478,498);
+                    # this bug fired on every overlap and broke
+                    # downstream alias-based relationship MATCHes
+                    # (Q2/Q9 + create_malware_actor_relationship).
+                    if prop_name in _ARRAY_ACCUMULATE_PROPS:
+                        if isinstance(prop_value, (list, tuple)):
+                            prop_value = list(prop_value)
+                        elif isinstance(prop_value, str):
+                            # Scalar string → single-element list.
+                            # Strip whitespace; empty-after-strip →
+                            # skip (same semantic as the outer
+                            # ``!= ""`` gate).
+                            stripped = prop_value.strip()
+                            if not stripped:
+                                continue
+                            prop_value = [stripped]
+                        else:
+                            # Non-list / non-string (int, dict, …) —
+                            # cannot safely merge into an array. Log
+                            # + skip rather than corrupt.
+                            logger.warning(
+                                "PR-N16: %s[%s] skipped — incoming value type %s "
+                                "is neither list nor string; cannot merge into "
+                                "accumulating-array property. value=%r",
+                                label,
+                                prop_name,
+                                type(prop_value).__name__,
+                                prop_value,
+                            )
+                            continue
                         prop_value = _sanitize_array_value(prop_name, prop_value)
                         if not prop_value:
                             # Sanitization left an empty list — skip
@@ -1958,6 +2011,29 @@ class Neo4jClient:
             # Let @retry_with_backoff at the calling layer handle these.
             raise
         except Exception as e:
+            # PR-N16 follow-up (cursor-bugbot 2026-04-22): the prior
+            # ``except Exception: return False`` silently swallowed
+            # ``DatabaseError``-wrapped transients (e.g. deadlocks
+            # surfacing as ``Neo.DatabaseError.Statement.ExecutionFailed``)
+            # — the @retry_with_backoff decorator's classifier never got
+            # to see them because ``return False`` short-circuited the
+            # propagation. PR-N15 fix #1 explicitly handles this code
+            # class but only when it reaches the decorator.
+            #
+            # Fix: re-raise on retryable conditions via the same
+            # ``_is_retryable_neo4j_error`` classifier the decorator
+            # uses. Truly terminal errors (schema / syntax / constraint)
+            # still log + return False so one bad row doesn't crash
+            # the whole sync.
+            if _is_retryable_neo4j_error(e):
+                code = getattr(e, "code", "")
+                logger.warning(
+                    "merge_node_with_source: retryable %s%s for %s — re-raising for decorator retry",
+                    type(e).__name__,
+                    f" [{code}]" if code else "",
+                    label,
+                )
+                raise
             # PR (S5) (Bug Hunter #3 HIGH): log with FULL
             # diagnostic context (label + key) and increment a counter
             # so silent drops are visible to operators. Previously this
@@ -1980,7 +2056,20 @@ class Neo4jClient:
             )
             return False
 
-    @retry_with_backoff(max_retries=3)
+    # PR-N16 follow-up (cursor-bugbot 2026-04-22): the inner
+    # @retry_with_backoff was REMOVED. Pre-fix this method had its
+    # own decorator AND was called from merge_node_with_source which
+    # ALSO has @retry_with_backoff (added in PR-N16 Fix #3). On a
+    # transient: inner decorator retries 3 times → propagates → outer
+    # decorator retries 3 times → each outer retry calls this method
+    # which retries 3 times internally. Total: 4 × 4 = 16 attempts
+    # with 14s × 4 = ~70s of waiting per upsert.
+    #
+    # Now: only the outer @retry_with_backoff on merge_node_with_source
+    # retries (4 attempts, ~14s max waiting). _upsert_sourced_relationship
+    # is private and only called from merge_node_with_source, so
+    # removing the inner decorator is safe — exception classification
+    # happens at the outer level via _is_retryable_neo4j_error.
     def _upsert_sourced_relationship(
         self,
         label: str,
@@ -2111,9 +2200,31 @@ class Neo4jClient:
             ConnectionError,
             TimeoutError,
         ):
-            raise  # let @retry_with_backoff handle transient errors
+            raise  # let outer @retry_with_backoff (on merge_node_with_source) handle transient errors
         except Exception as e:
-            logger.warning(f"SOURCED_FROM relationship error: {e}")
+            # PR-N16 follow-up #3 (cursor-bugbot 2026-04-22):
+            # ``except Exception: return False`` was swallowing
+            # ``DatabaseError``-wrapped transients (the exact error
+            # class PR-N16 Fix #3 targets). After removing the inner
+            # @retry_with_backoff (follow-up #2, to avoid nested retry
+            # stacking), the OUTER decorator on merge_node_with_source
+            # can only retry if this inner method propagates the
+            # exception. Swallowing + return False short-circuits that.
+            #
+            # Fix: use the same _is_retryable_neo4j_error classifier +
+            # re-raise pattern as merge_node_with_source. Terminal
+            # errors (schema / syntax / constraint) still log + return
+            # False so one bad row doesn't crash the calling sync.
+            if _is_retryable_neo4j_error(e):
+                code = getattr(e, "code", "")
+                logger.warning(
+                    "_upsert_sourced_relationship: retryable %s%s for %s — re-raising for outer decorator retry",
+                    type(e).__name__,
+                    f" [{code}]" if code else "",
+                    label,
+                )
+                raise
+            logger.warning("SOURCED_FROM relationship error (terminal): %s: %s", type(e).__name__, e)
             return False
 
     def merge_vulnerability(self, data: Dict, source_id: str = "nvd") -> bool:
@@ -2458,6 +2569,42 @@ class Neo4jClient:
             extra_props["resource_level"] = data["resource_level"]
         return self.merge_node_with_source("ThreatActor", key_props, data, source_id, extra_props=extra_props)
 
+    def _normalize_mitre_id(self, raw: Any, *, label: str, data: Dict) -> Optional[str]:
+        """PR-N16 Fix #2 (BLOCK, 2026-04-22): normalize a MITRE ATT&CK
+        id (T####, TA####, S####, G####) to canonical UPPERCASE +
+        None-guard.
+
+        Pre-PR-N16, ``merge_technique`` / ``merge_tactic`` /
+        ``merge_tool`` stored mitre_ids as-received. ``compute_node_uuid``
+        goes through ``canonical_node_key`` which ``.lower()`` the
+        joined canonical string — so ``"T1056"`` and ``"t1056"`` compute
+        the SAME uuid. But the Cypher ``MERGE (n:Technique {mitre_id:
+        $mitre_id})`` is case-sensitive, so two distinct nodes get
+        created sharing one uuid. Cross-environment delta-sync hits
+        either node non-deterministically → split subgraphs.
+
+        Same asymmetry class as PR #37 (Indicator value canonicalization
+        — fixed then) but in MITRE helpers missed at that time.
+
+        MITRE ID convention: uppercase throughout
+        (https://attack.mitre.org/techniques/T1056/). Normalize at
+        ingest to uppercase so both MERGE key AND uuid match. Strip
+        surrounding whitespace.
+        """
+        mitre_id = nonempty_graph_string(raw)
+        if mitre_id is None:
+            logger.warning(
+                "[MERGE-REJECT] %s MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
+                label,
+                raw,
+                data.get("name"),
+            )
+            return None
+        # PR-N16 Fix #2: canonicalize to uppercase — matches both the
+        # MITRE spec AND the canonical_node_key's .lower() so the
+        # Cypher MERGE key and the uuid don't diverge.
+        return mitre_id.upper()
+
     def merge_technique(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Technique node with source tracking.
 
@@ -2467,14 +2614,15 @@ class Neo4jClient:
         hijacks the sentinel ``(Technique {mitre_id: null})`` node
         that every subsequent None-keyed row also collapses into.
         Mirrors the PR-N10 placeholder-name guard for Malware / Actor.
+
+        PR-N16 Fix #2 (2026-04-22 BLOCK): canonicalize mitre_id to
+        uppercase via ``_normalize_mitre_id`` so the case-sensitive
+        Cypher MERGE key agrees with the case-insensitive uuid
+        computation. Prevents split-node / shared-uuid bugs on
+        MISP peers storing lowercase ids.
         """
-        mitre_id = nonempty_graph_string(data.get("mitre_id"))
+        mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Technique", data=data)
         if mitre_id is None:
-            logger.warning(
-                "[MERGE-REJECT] Technique MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
-                data.get("mitre_id"),
-                data.get("name"),
-            )
             return False
         key_props = {"mitre_id": mitre_id}
         extra_props: Dict[str, Any] = {"tactic_phases": data.get("tactic_phases", [])}
@@ -2489,14 +2637,9 @@ class Neo4jClient:
     def merge_tactic(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tactic node with source tracking.
 
-        PR-N13 Fix #2: same None-guard pattern as ``merge_technique``."""
-        mitre_id = nonempty_graph_string(data.get("mitre_id"))
+        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization."""
+        mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tactic", data=data)
         if mitre_id is None:
-            logger.warning(
-                "[MERGE-REJECT] Tactic MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
-                data.get("mitre_id"),
-                data.get("name"),
-            )
             return False
         key_props = {"mitre_id": mitre_id}
         extra_props: Dict[str, Any] = {"shortname": data.get("shortname", "")}
@@ -2509,14 +2652,9 @@ class Neo4jClient:
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tool node with source tracking.
 
-        PR-N13 Fix #2: same None-guard pattern as ``merge_technique``."""
-        mitre_id = nonempty_graph_string(data.get("mitre_id"))
+        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization."""
+        mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tool", data=data)
         if mitre_id is None:
-            logger.warning(
-                "[MERGE-REJECT] Tool MERGE refused: mitre_id=%r (None / empty / whitespace-only). name=%r",
-                data.get("mitre_id"),
-                data.get("name"),
-            )
             return False
         key_props = {
             "mitre_id": mitre_id,
@@ -4023,12 +4161,67 @@ class Neo4jClient:
             nonlocal total
             if not rows:
                 return
-            try:
-                session.run(query, rows=rows, timeout=_REL_QUERY_TIMEOUT)
-                total += len(rows)
-            except Exception as e:
-                # Each UNWIND is auto-committed; do not zero the whole batch on one failure.
-                logger.warning("MISP relationship batch %s failed (%s rows): %s", label, len(rows), e)
+            # PR-N16 Fix #4 (HIGH, 2026-04-22 pre-baseline merge-audit):
+            # retry on transient errors instead of silently logging a
+            # WARN + dropping the batch. Sibling bug-class to PR-N15
+            # (which hardened merge_indicators_batch /
+            # merge_vulnerabilities_batch but missed this relationship
+            # batch path). At 700K-relationship baseline scale, a single
+            # Neo4j GC pause mid-batch dropped up to 1000 relationships
+            # with no counter, no retry, just a WARN log — the exact
+            # class of silent data loss PR-N15 closed elsewhere.
+            #
+            # Exponential backoff: 2s → 4s → 8s, 3 retries. On
+            # permanent failure, emit
+            # ``edgeguard_neo4j_batch_permanent_failure_total{label=<rel>,
+            # source, reason}`` via the shared helper so operators can
+            # alert on silent relationship-loss.
+            max_retries = 3
+            base_delay = 2.0
+            last_exc: Optional[BaseException] = None
+            for attempt in range(max_retries + 1):
+                try:
+                    session.run(query, rows=rows, timeout=_REL_QUERY_TIMEOUT)
+                    total += len(rows)
+                    return
+                except Exception as e:
+                    last_exc = e
+                    if not _is_retryable_neo4j_error(e):
+                        logger.error(
+                            "[BATCH-PERMANENT-FAILURE] MISP relationship batch %s (%d rows) — non-retryable %s: %s",
+                            label,
+                            len(rows),
+                            type(e).__name__,
+                            e,
+                        )
+                        _emit_batch_permanent_failure(label=label, source_id=source_id, reason="non_retryable")
+                        return
+                    if attempt >= max_retries:
+                        break
+                    delay = base_delay * (2**attempt)
+                    code = getattr(e, "code", "")
+                    logger.warning(
+                        "[BATCH-RETRY] MISP relationship batch %s (%d rows) attempt=%d/%d: %s%s — retrying in %.1fs",
+                        label,
+                        len(rows),
+                        attempt + 1,
+                        max_retries + 1,
+                        type(e).__name__,
+                        f" [{code}]" if code else "",
+                        delay,
+                    )
+                    time.sleep(delay)
+            # Retries exhausted.
+            logger.error(
+                "[BATCH-PERMANENT-FAILURE] MISP relationship batch %s (%d rows) — "
+                "transient persisted after %d retries: %s: %s",
+                label,
+                len(rows),
+                max_retries,
+                type(last_exc).__name__ if last_exc else "UNKNOWN",
+                last_exc,
+            )
+            _emit_batch_permanent_failure(label=label, source_id=source_id, reason="retries_exhausted")
 
         with self.driver.session() as session:
             _run_rows(session, "EMPLOYS_TECHNIQUE_actor", q_actor_employs, actor_employs_rows)
