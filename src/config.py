@@ -447,6 +447,45 @@ def edgeguard_ssl_verify_from_env() -> bool:
 SSL_VERIFY = edgeguard_ssl_verify_from_env()
 
 
+# PR-N24 audit HIGH (proactive 2026-04-22): single source of truth for
+# "is this a production env?". Originally added in PR-N23 BLOCKER #5
+# inside ``src/graphql_api.py`` (as ``_is_prod_env``), but ``src/query_api.py``
+# was NOT updated and still used the pre-N23 fails-open ``_ENV == "prod"``
+# pattern — splitting prod/dev security state across the two API surfaces
+# (Maintainer Dev + Integration agents both flagged this; Devil's Advocate
+# called it out as a scope-gap of the N23 "single source of truth" claim).
+#
+# Lifting the canonical check here so BOTH ``graphql_api.py`` and
+# ``query_api.py`` import the SAME function and can never disagree on
+# the prod/non-prod classification. Any future API surface that needs
+# the same gate must import from here.
+#
+# Contract (matches ``src/graphql_api.py:_is_prod_env`` exactly):
+#   - Both env vars unset / empty → True (secure default)
+#   - EDGEGUARD_ENV in {dev, development, local, staging, test} → False
+#   - Anything else (prod, production, prd, typos, unrecognized) → True
+def is_production_env() -> bool:
+    """Canonical project-wide "is this a production env?" check.
+
+    Fail-closed default: unset / empty / typo → prod.
+
+    The non-prod allowlist is explicit and exhaustive. Anything not in
+    the allowlist is treated as prod. This means an operator typo like
+    ``EDGEGUARD_ENV=production`` or ``EDGEGUARD_ENV=Dev`` correctly
+    treats the deployment as prod (introspection blocked, API key
+    required, etc.) instead of silently falling open.
+    """
+    raw = (os.getenv("EDGEGUARD_ENV") or "").strip().lower()
+    _NON_PROD_ENVS = frozenset({"dev", "development", "local", "staging", "test"})
+    return raw not in _NON_PROD_ENVS
+
+
+# Module-level convenience constant — read once at import time.
+# Callers that need to re-evaluate after env mutation (e.g. tests
+# using monkeypatch.setenv) should call ``is_production_env()`` directly.
+IS_PROD = is_production_env()
+
+
 def _env_bool(name: str, default: str = "true") -> bool:
     raw = os.getenv(name, default)
     return str(raw).strip().lower() in ("1", "true", "yes", "on")

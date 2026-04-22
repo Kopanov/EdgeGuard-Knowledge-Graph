@@ -1221,7 +1221,17 @@ class NVDCollector:
             logger.error(f"NVD collection error: {type(e).__name__}: {e}")
             self.circuit_breaker.record_failure()
             record_collection_failure(self.source_name, error_msg)
-            return self._return_status(False, 0, error_msg)
+            # PR-N24 BLOCKER B3 (proactive audit 2026-04-22): PR-N17 closed
+            # the NvdBatchFetchError internal path but left this outer
+            # ``except Exception`` as a silent swallower for the
+            # ``push_to_misp=False`` branch — caller (baseline-drain /
+            # alert-preview) got a status dict indistinguishable from
+            # "NVD has no new CVEs today". NVD is the canonical CVE source
+            # for the 730-day baseline; a silent outage here is
+            # unacceptable. Same fix shape as OTX/MITRE/CISA.
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
 
     def _return_status(self, success: bool, count: int, error: str = None, failed: int = 0) -> Dict[str, Any]:
         """Return standardized status dict."""

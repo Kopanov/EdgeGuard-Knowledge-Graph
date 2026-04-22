@@ -2831,13 +2831,29 @@ baseline_enrichment_task = PythonOperator(
 # operators expect after a successful enrichment run. Without this, a
 # silent ``Campaign = 0`` (the 2026-04-22 incident shape) shows the
 # DAG green and the operator only finds out via manual Cypher days
-# later. STRICT trigger_rule (ALL_SUCCESS): if enrichment failed the
-# postcheck is meaningless, so don't run.
+# later.
+#
+# PR-N24 audit HIGH H2 (proactive 2026-04-22 Prod Readiness): pre-N24
+# this used ``trigger_rule=ALL_SUCCESS`` with the rationale "if
+# enrichment failed the postcheck is meaningless, so don't run." But
+# the postcheck's INV-2 (Indicator > 0) and INV-3 (Source > 0) are
+# UPSTREAM diagnostics — they answer "did sync produce data at all?"
+# which is exactly what an operator needs to triage WHY enrichment
+# failed (e.g. enrichment failed because Source=0 → mark_inactive
+# silent skip → bootstrap_sources never ran). Skipping postcheck on
+# enrichment failure hides the upstream cause.
+#
+# Fix: ``NONE_FAILED_MIN_ONE_SUCCESS`` matches the upstream
+# ``baseline_full_sync_task`` and ``baseline_build_rels_task`` pattern.
+# Postcheck runs whenever AT LEAST ONE upstream succeeded and NO
+# upstream had a true failure → we get the diagnostic signal even
+# when enrichment is the failed task. If everything upstream failed
+# (no successes), the postcheck task is also skipped — correct.
 baseline_postcheck_task = PythonOperator(
     task_id="baseline_postcheck",
     python_callable=assert_baseline_postconditions,
     execution_timeout=timedelta(minutes=10),
-    trigger_rule=TriggerRule.ALL_SUCCESS,
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 

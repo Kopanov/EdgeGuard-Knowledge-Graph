@@ -613,6 +613,48 @@ groups:
                  for the full rejected list.
               5. See docs/RUNBOOK.md § Top-5 failure mode #5
 
+      - alert: EdgeGuardMispEventAttributesTruncated
+        # PR-N24 audit fix (H3): wires the
+        # ``edgeguard_misp_event_attributes_truncated_total`` counter
+        # added in PR-N23 to an actual alert. Pre-N24 the counter
+        # existed but no alert fired — observability was unwired.
+        #
+        # Each increment = one MISP event whose attribute list exceeded
+        # ``MAX_ATTRIBUTES_PER_EVENT`` and was silently sliced by
+        # ``MISPCollector.collect``. At baseline scale large NVD events
+        # routinely lose 75%+ of their data this way. Non-zero rate
+        # within an hour means active data loss — operator should
+        # either raise the cap (if MISP can handle it) or investigate
+        # why the source is producing over-sized events.
+        #
+        # Use ``increase()`` (absolute count over window) NOT
+        # ``rate()`` — same lesson as PR-N12 follow-ups.
+        expr: sum by (source) (increase(edgeguard_misp_event_attributes_truncated_total[1h])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: misp_collector
+        annotations:
+          summary: "EdgeGuard MISP collector truncated over-sized event(s) for {{ $labels.source }} — silent data loss"
+          description: |
+            ``MISPCollector.collect`` truncated one or more events from
+            source ``{{ $labels.source }}`` whose attribute list
+            exceeded ``MAX_ATTRIBUTES_PER_EVENT``. Each occurrence
+            silently drops attributes (typically 75%+ of the event's
+            data on large NVD events).
+
+            Remediation:
+              1. Identify the offending event(s):
+                 ``grep -E 'truncated.*attributes' /opt/airflow/logs/**/misp_collector.log | tail -20``
+              2. Decide: raise ``MAX_ATTRIBUTES_PER_EVENT`` (if MISP
+                 backend can handle larger events — check PHP
+                 ``memory_limit`` and MySQL ``innodb_buffer_pool_size``
+                 first), OR investigate why the upstream source is
+                 producing over-sized events (collector regression /
+                 missing pagination).
+              3. See ``src/collectors/misp_collector.py`` and
+                 ``docs/RUNBOOK.md`` § MISP truncation.
+
       - alert: EdgeGuardBuildRelationshipsSilentDeath
         # PR-N21 Bravo-ops: catches a silent ``build_relationships``
         # subprocess death (exit 137 OOM, SIGKILL from timeout, crash

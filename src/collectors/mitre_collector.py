@@ -537,7 +537,17 @@ class MITRECollector:
                 )
             logger.error(f"MITRE ATT&CK collection error: {e}")
             MITRE_CIRCUIT_BREAKER.record_failure()
-            return self._return_status(False, 0, str(e)) if push_to_misp else []
+            # PR-N24 BLOCKER B3 (proactive audit 2026-04-22): same shape as
+            # PR-N17 NVD silent-window-drop + PR-N23 CISA fix. Pre-N24
+            # ``return self._return_status(False, 0, str(e)) if push_to_misp
+            # else []`` returned an EMPTY LIST when push_to_misp=False
+            # (alert-preview / baseline-drain / test-harness flows) —
+            # indistinguishable from "MITRE has no updates today".
+            # Fix: when push_to_misp=True still return status dict (Airflow
+            # contract); when False, re-raise so caller sees the actual error.
+            if push_to_misp:
+                return self._return_status(False, 0, str(e))
+            raise
 
     def _return_status(self, success: bool, count: int, error: str = None, failed: int = 0):
         """Return standardized status dict (delegates to shared make_status)."""

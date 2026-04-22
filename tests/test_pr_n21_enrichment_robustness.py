@@ -234,16 +234,25 @@ class TestFix6BaselinePostcheck:
         assert "AirflowException" in post_body, "violations must raise AirflowException so DAG marks FAILED"
 
     def test_postcheck_strict_trigger_rule(self):
-        """The postcheck task must have ALL_SUCCESS trigger_rule — running
-        it when enrichment failed would just produce a misleading second
-        error."""
+        """The postcheck task's trigger_rule must let the diagnostics run
+        when at least one upstream succeeded.
+
+        PR-N21 originally pinned ``ALL_SUCCESS`` ("don't run on partial
+        failure"), but the proactive PR-N24 audit (Cross-Checker H2) flipped
+        this to ``NONE_FAILED_MIN_ONE_SUCCESS``: INV-2 (Indicator > 0) and
+        INV-3 (Source > 0) are UPSTREAM diagnostics — operators NEED them
+        to triage *why* an enrichment task failed. ``ALL_SUCCESS`` skipped
+        them in exactly the case they were most useful."""
         src = self._dag_src()
         # Find the baseline_postcheck_task PythonOperator block
         anchor = src.find('task_id="baseline_postcheck"')
         assert anchor != -1
         # Search forward for trigger_rule within the next ~500 chars (block size)
         block = src[anchor : anchor + 600]
-        assert "TriggerRule.ALL_SUCCESS" in block, "baseline_postcheck must use ALL_SUCCESS trigger_rule"
+        assert "TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS" in block, (
+            "baseline_postcheck must use NONE_FAILED_MIN_ONE_SUCCESS trigger_rule "
+            "(PR-N24 H2: diagnostics must run after partial-failure to help triage)"
+        )
 
 
 # ===========================================================================

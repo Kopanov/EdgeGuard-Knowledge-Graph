@@ -76,8 +76,20 @@ receivers:
         send_resolved: true
 
   - name: 'on-call'
+    # PR-N24 BLOCKER B2 (proactive audit 2026-04-22): pre-N24 the
+    # service_key was the LITERAL placeholder ``<YOUR_PAGERDUTY_KEY>``.
+    # Alertmanager loaded it (it's a valid YAML string) and PagerDuty
+    # silently 403'd every page — meaning EVERY critical alert during
+    # the 26h baseline window WOULD HAVE GONE UNROUTED. The preflight
+    # script (`scripts/preflight_baseline.sh` check [11], also added
+    # in PR-N24) now refuses to launch if this template is still here.
+    #
+    # Operator action: replace ``${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}``
+    # via env-var substitution in your deploy pipeline, OR edit this file
+    # directly to insert your real PagerDuty Events-API v2 integration key
+    # (32-char hex string from the PagerDuty service "Integrations" tab).
     pagerduty_configs:
-      - service_key: '<YOUR_PAGERDUTY_KEY>'
+      - service_key: '${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}'
         description: '{{ .GroupLabels.alertname }}'
         severity: '{{ .GroupLabels.severity }}'
 

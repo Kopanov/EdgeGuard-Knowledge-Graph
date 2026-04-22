@@ -251,12 +251,48 @@ else
   warn "promtool not installed; skipping alerts parse check (install Prometheus tools)"
 fi
 
-# Quick structural pin — expect the edgeguard_pipeline_observability rule group with at least 6 alerts.
+# Quick structural pin — expect the edgeguard_pipeline_observability rule group with at least 9 alerts.
+# PR-N24 audit MED follow-up: bumped from ≥ 6 → ≥ 8 (PR-N21 Bravo-ops adds
+# EdgeGuardBuildRelationshipsSilentDeath + EdgeGuardApocBatchPartial), then
+# bumped again to ≥ 9 for PR-N24 H3 (EdgeGuardMispEventAttributesTruncated).
+# This is a defense-in-depth structural pin — promtool above does the real validation.
 ALERT_COUNT=$(grep -cE '^\s+- alert:' prometheus/alerts.yml 2>/dev/null || echo "0")
-if [[ "$ALERT_COUNT" -ge 6 ]]; then
-  pass "prometheus/alerts.yml has $ALERT_COUNT alert rules (≥ 6 required)"
+if [[ "$ALERT_COUNT" -ge 9 ]]; then
+  pass "prometheus/alerts.yml has $ALERT_COUNT alert rules (≥ 9 required)"
 else
-  fail "prometheus/alerts.yml has only $ALERT_COUNT alerts — expected ≥ 6 per PR-N11/N12/N18"
+  fail "prometheus/alerts.yml has only $ALERT_COUNT alerts — expected ≥ 9 (PR-N11/N12/N18/N21/N24)"
+fi
+
+# -----------------------------------------------------------------------------
+# [7b] PR-N24 BLOCKER B2: alertmanager pager wiring not still placeholder
+# -----------------------------------------------------------------------------
+# Pre-N24, ``prometheus/alertmanager.yml`` shipped with literal
+# ``service_key: '<YOUR_PAGERDUTY_KEY>'``. PagerDuty silently 403s on
+# every page. During the 26h baseline window, EVERY critical alert
+# (BatchPermanentFailure, IneffectiveBatch, BuildRelationshipsSilentDeath,
+# etc.) would have been emitted-but-unrouted — the on-call would never know.
+# This check refuses to launch the baseline if the placeholder template
+# is still in place.
+hdr "[7b] alertmanager pager wiring (PR-N24 B2)"
+if [ -f prometheus/alertmanager.yml ]; then
+  # Only fail when the placeholder appears as a YAML *value* (quoted
+  # scalar), NOT when it appears in an explanatory ``#`` comment. The
+  # comment block in alertmanager.yml documents the placeholder's
+  # history; matching that would fail-close unnecessarily. The actual
+  # failure mode is Alertmanager loading the placeholder as the
+  # ``service_key:`` value — that only happens when it's in quotes.
+  #
+  # sed strips the trailing ``#...`` portion of each line before grep;
+  # the placeholder patterns are then only matched against uncommented
+  # YAML content.
+  if sed 's/#.*$//' prometheus/alertmanager.yml | \
+     grep -qE "'<YOUR_PAGERDUTY_KEY>'|\"<YOUR_PAGERDUTY_KEY>\"|'<YOUR_API_KEY>'|\"<YOUR_API_KEY>\"|'<PLACEHOLDER>'|\"<PLACEHOLDER>\"|'XXXXXXXX-XXXX'|\"XXXXXXXX-XXXX\""; then
+    fail "prometheus/alertmanager.yml still contains a placeholder pager key as a YAML value — PagerDuty will silently 403 every alert. Replace with EDGEGUARD_PAGERDUTY_INTEGRATION_KEY env-var substitution OR a real PagerDuty integration key."
+  else
+    pass "alertmanager.yml has no placeholder pager key values"
+  fi
+else
+  warn "prometheus/alertmanager.yml not found — pager routing not configured"
 fi
 
 # -----------------------------------------------------------------------------
