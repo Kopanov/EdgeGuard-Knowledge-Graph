@@ -302,6 +302,22 @@ def _safe_run_batched(
                     f"elapsed {_elapsed:.1f}s, errors: {errors[:3]}"
                     f"{' (+more)' if len(errors) > 3 else ''}"
                 )
+                # PR-N21 Bravo-ops: fire the partial-batch counter so the
+                # ``EdgeGuardApocBatchPartial`` P2 alert can catch mid-run
+                # Neo4j OOM / MemoryLimitExceededException inside the APOC
+                # transaction (which the streaming helper from PR-K3
+                # CANNOT protect against — it only bounds Python-side
+                # subprocess buffering, not Neo4j-side TX memory). Any
+                # occurrence = partial data loss for this step → operator
+                # should re-run the specific step before downstream
+                # analysis runs.
+                if _METRICS_AVAILABLE:
+                    try:
+                        from metrics_server import record_apoc_batch_partial
+
+                        record_apoc_batch_partial(step=stat_key)
+                    except Exception:
+                        logger.debug("APOC partial counter failed", exc_info=True)
             else:
                 logger.info(f"  [OK] {label}: {count} in {batches_n} batches, elapsed {_elapsed:.1f}s")
             # PR #34 round 20: orphan-count log when skip_query was provided.
@@ -1009,6 +1025,18 @@ def build_relationships():
                 record_neo4j_relationships(stats)
             except Exception:
                 logger.debug("Metrics recording failed", exc_info=True)
+            # PR-N21 Bravo-ops: fire the completion counter so the Prometheus
+            # ``EdgeGuardBuildRelationshipsSilentDeath`` alert can detect a
+            # silent subprocess death (exit 137 OOM, SIGKILL). The counter is
+            # incremented ONLY if we reach this line — i.e. the summary log
+            # line was emitted AND the stats query succeeded. Absence of this
+            # counter for 6h+ after baseline_start = silent failure.
+            try:
+                from metrics_server import record_build_relationships_completion
+
+                record_build_relationships_completion()
+            except Exception:
+                logger.debug("Completion counter failed", exc_info=True)
 
         return failures == 0
 

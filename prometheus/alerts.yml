@@ -612,3 +612,93 @@ groups:
               4. See ``src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES``
                  for the full rejected list.
               5. See docs/RUNBOOK.md § Top-5 failure mode #5
+
+      - alert: EdgeGuardBuildRelationshipsSilentDeath
+        # PR-N21 Bravo-ops: catches a silent ``build_relationships``
+        # subprocess death (exit 137 OOM, SIGKILL from timeout, crash
+        # before the ``[BUILD_RELATIONSHIPS SUMMARY]`` line is emitted).
+        # PR-K3's streaming helper already bounds Python-side buffering
+        # — this alert catches the OTHER failure modes: Neo4j-side
+        # MemoryLimitExceededException inside the TX, kernel OOM of the
+        # Airflow worker, or a build_relationships.py exception that
+        # dies before emitting the summary counter (``record_build_
+        # relationships_completion``). If the counter hasn't incremented
+        # for 6h while a DAG run started in the last 8h, we have a
+        # silent death.
+        expr: |
+          (
+            absent(edgeguard_build_relationships_completions_total)
+            OR
+            rate(edgeguard_build_relationships_completions_total[6h]) == 0
+          )
+          AND
+          (
+            max_over_time(edgeguard_dag_run_start_timestamp{dag_id="edgeguard_baseline"}[8h])
+              > (time() - (6 * 60 * 60))
+          )
+        for: 10m
+        labels:
+          severity: critical
+          component: build_relationships
+        annotations:
+          summary: "build_relationships may have died silently — no SUMMARY emitted for 6h after baseline start"
+          description: |
+            The ``edgeguard_build_relationships_completions_total`` counter
+            has not incremented for 6 hours despite the
+            ``edgeguard_baseline`` DAG starting within the last 8h.
+            build_relationships emits this counter ONLY when it reaches
+            the ``[BUILD_RELATIONSHIPS SUMMARY]`` log line — absence =
+            subprocess died before reaching the end.
+
+            Common causes (ranked by likelihood):
+              1. Airflow worker OOM-killed (exit 137). Check:
+                 ``docker stats edgeguard-airflow-worker --no-stream``
+              2. Neo4j MemoryLimitExceededException inside an APOC batch.
+                 Check: ``docker logs edgeguard-neo4j 2>&1 | grep -iE
+                 'MemoryLimit|OutOfMemory'``
+              3. Airflow task ``execution_timeout`` (5h default) fired.
+                 Check the task's state in Airflow UI.
+
+            Remediation:
+              1. Check Airflow task state + exit code; if 137 → OOM.
+              2. Raise ``AIRFLOW_MEMORY_LIMIT`` to 12g and/or lower
+                 ``NEO4J_TX_MEMORY_MAX`` to 4g (see docs/RUNBOOK.md §
+                 "Bravo-ops: memory posture for next baseline").
+              3. Re-trigger the baseline after raising memory.
+
+      - alert: EdgeGuardApocBatchPartial
+        # PR-N21 Bravo-ops: ANY partial APOC batch during
+        # build_relationships = partial data loss in that step. Fires
+        # within 15m of the first ``[PARTIAL]`` log line (via the
+        # paired ``record_apoc_batch_partial`` counter). P2 severity —
+        # operator should re-run the specific step before downstream
+        # enrichment/analysis contaminates the graph with partial data.
+        expr: sum by (step) (increase(edgeguard_apoc_batch_partial_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+          component: build_relationships
+        annotations:
+          summary: "APOC batch returned partial success in build_relationships step {{ $labels.step }} — partial data loss"
+          description: |
+            apoc.periodic.iterate for build_relationships step
+            ``{{ $labels.step }}`` reported non-empty errorMessages.
+            This means some inner-query transactions failed mid-batch
+            without propagating to the Python layer. The graph has
+            partial data for this step.
+
+            Common causes:
+              1. Neo4j MemoryLimitExceededException inside a single
+                 batch transaction.
+              2. Deadlock timeout on a single batch.
+              3. Per-row Cypher error (schema drift, constraint violation).
+
+            Remediation:
+              1. Log probe: ``docker logs edgeguard-airflow-worker
+                 2>&1 | grep -E '\[PARTIAL\]' | tail -20``
+              2. Inspect the reported errorMessages in the log line
+                 (first 3 errors are pre-logged).
+              3. Re-run build_relationships for this step only, or
+                 accept partial data and move to the next step if
+                 errors are transient and row count is acceptable.
+              4. See docs/RUNBOOK.md § "APOC partial batch response".

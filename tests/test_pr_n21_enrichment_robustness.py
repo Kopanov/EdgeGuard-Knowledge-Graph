@@ -247,6 +247,162 @@ class TestFix6BaselinePostcheck:
 
 
 # ===========================================================================
+# Bravo-ops: build_relationships observability counters + 2 alerts + RUNBOOK
+# ===========================================================================
+
+
+class TestBravoOpsCountersExist:
+    """PR-N21 follow-up from Bravo's 2026-04-22 OOM-forensics review:
+    add metrics so a future silent build_relationships death (OOM-kill,
+    Neo4j MemoryLimitExceededException inside APOC TX, etc.) can be
+    detected by Prometheus instead of noticed days later via manual grep."""
+
+    def _metrics_src(self) -> str:
+        return (SRC / "metrics_server.py").read_text()
+
+    def test_build_relationships_completion_counter_defined(self):
+        src = self._metrics_src()
+        assert "BUILD_RELATIONSHIPS_COMPLETIONS" in src, (
+            "metrics_server must define BUILD_RELATIONSHIPS_COMPLETIONS counter"
+        )
+        assert "edgeguard_build_relationships_completions_total" in src, (
+            "counter must expose the ``edgeguard_build_relationships_completions_total`` Prometheus metric name"
+        )
+
+    def test_apoc_batch_partial_counter_defined(self):
+        src = self._metrics_src()
+        assert "APOC_BATCH_PARTIAL" in src, "metrics_server must define APOC_BATCH_PARTIAL counter"
+        assert "edgeguard_apoc_batch_partial_total" in src, (
+            "counter must expose the ``edgeguard_apoc_batch_partial_total`` Prometheus metric name"
+        )
+        # Must be labelled by step so operators can target re-runs.
+        assert '"step"' in src or "'step'" in src, "APOC_BATCH_PARTIAL must be labelled by step identifier"
+
+    def test_recorder_helpers_defined(self):
+        src = self._metrics_src()
+        assert "def record_build_relationships_completion" in src, (
+            "metrics_server must define record_build_relationships_completion helper"
+        )
+        assert "def record_apoc_batch_partial" in src, (
+            "metrics_server must define record_apoc_batch_partial(step=) helper"
+        )
+
+
+class TestBravoOpsBuildRelationshipsWiring:
+    """build_relationships.py must actually CALL the new recorders at the
+    right points, otherwise the counters stay flat and the alerts never
+    fire for real events."""
+
+    def _src(self) -> str:
+        return (SRC / "build_relationships.py").read_text()
+
+    def test_completion_counter_fired_after_summary(self):
+        """The completion counter MUST be incremented only after the
+        ``[BUILD_RELATIONSHIPS SUMMARY]`` log line is emitted — absence
+        of this call = subprocess died before reaching the end."""
+        src = self._src()
+        assert "record_build_relationships_completion" in src, (
+            "build_relationships must call record_build_relationships_completion "
+            "after the summary log line so Prometheus can detect silent death"
+        )
+        # Must come AFTER the summary log, not at import time.
+        summary_pos = src.find("[BUILD_RELATIONSHIPS SUMMARY]")
+        completion_pos = src.find("record_build_relationships_completion(")
+        assert summary_pos != -1 and completion_pos > summary_pos, (
+            "completion counter must be AFTER the summary log (call_counter < summary_log "
+            "would give false positives on every import)"
+        )
+
+    def test_partial_counter_fired_per_partial_batch(self):
+        """The partial counter MUST be incremented inside the
+        ``if errors:`` branch of _safe_run_batched so any
+        apoc.periodic.iterate errorMessages increment the counter."""
+        src = self._src()
+        assert "record_apoc_batch_partial" in src, (
+            "build_relationships must call record_apoc_batch_partial(step=) "
+            "when apoc.periodic.iterate reports errorMessages"
+        )
+        # Must be inside the _safe_run_batched function, near the [PARTIAL] log
+        partial_log_pos = src.find("[PARTIAL]")
+        record_pos = src.find("record_apoc_batch_partial")
+        assert partial_log_pos != -1 and record_pos > partial_log_pos, (
+            "partial counter must be fired in the same [PARTIAL] log branch"
+        )
+
+
+class TestBravoOpsPrometheusAlerts:
+    """Two alert rules must be loaded so the above counters produce
+    actionable paging signals."""
+
+    def _alerts_src(self) -> str:
+        return (REPO_ROOT / "prometheus" / "alerts.yml").read_text()
+
+    def test_silent_death_alert_defined(self):
+        src = self._alerts_src()
+        assert "EdgeGuardBuildRelationshipsSilentDeath" in src, (
+            "Prometheus must define EdgeGuardBuildRelationshipsSilentDeath alert"
+        )
+        # Must reference the completion counter
+        assert "edgeguard_build_relationships_completions_total" in src, (
+            "silent-death alert must key on the completion counter"
+        )
+        # Must be critical severity (OOM-kill is data-loss, page the operator)
+        silent_death_block = src[src.find("EdgeGuardBuildRelationshipsSilentDeath") :]
+        silent_death_block = silent_death_block[: silent_death_block.find("- alert:", 50)]
+        assert "severity: critical" in silent_death_block, (
+            "silent-death alert must be critical severity (OOM = data-loss)"
+        )
+
+    def test_apoc_partial_alert_defined(self):
+        src = self._alerts_src()
+        assert "EdgeGuardApocBatchPartial" in src, "Prometheus must define EdgeGuardApocBatchPartial alert"
+        # Must reference the partial counter
+        assert "edgeguard_apoc_batch_partial_total" in src, "APOC partial alert must key on the partial counter"
+        # Must be warning severity (partial is recoverable, but worth paging)
+        partial_block = src[src.find("EdgeGuardApocBatchPartial") :]
+        # Pick this alert's block out (until next alert or end)
+        next_alert = partial_block.find("- alert:", 50)
+        partial_block = partial_block[:next_alert] if next_alert != -1 else partial_block
+        assert "severity: warning" in partial_block, (
+            "APOC partial alert must be warning severity (partial = recoverable)"
+        )
+
+
+class TestBravoOpsRunbookGuidance:
+    """RUNBOOK must document the memory posture + APOC partial response
+    playbook so operators have a single source of truth."""
+
+    def _runbook(self) -> str:
+        return (REPO_ROOT / "docs" / "RUNBOOK.md").read_text()
+
+    def test_runbook_has_bravo_ops_section(self):
+        rb = self._runbook()
+        assert "Bravo-ops" in rb, "RUNBOOK must have Bravo-ops memory-posture section"
+
+    def test_runbook_documents_tx_memory_max_cap(self):
+        """The key Bravo recommendation: NEO4J_TX_MEMORY_MAX ≤ 4g on an
+        8 GB worker to avoid MemoryLimitExceededException inside APOC TX."""
+        rb = self._runbook()
+        assert "NEO4J_TX_MEMORY_MAX" in rb, "RUNBOOK must reference NEO4J_TX_MEMORY_MAX"
+        # Must mention the 4g cap (the specific recommendation)
+        assert "4g" in rb or "≤ 4" in rb, "RUNBOOK must specify the ≤ 4g TX memory cap"
+
+    def test_runbook_documents_silent_death_alert(self):
+        rb = self._runbook()
+        assert "EdgeGuardBuildRelationshipsSilentDeath" in rb, (
+            "RUNBOOK must document the silent-death alert so operators know what to do when it fires"
+        )
+
+    def test_runbook_documents_apoc_partial_playbook(self):
+        rb = self._runbook()
+        # Must have a playbook entry with MemoryLimitExceededException handling
+        assert "APOC partial" in rb or "EdgeGuardApocBatchPartial" in rb
+        assert "MemoryLimitExceededException" in rb, (
+            "RUNBOOK must mention MemoryLimitExceededException as a common APOC partial cause"
+        )
+
+
+# ===========================================================================
 # Module import sanity
 # ===========================================================================
 
@@ -254,6 +410,22 @@ class TestFix6BaselinePostcheck:
 class TestModuleImportsCleanly:
     def test_enrichment_jobs_imports(self):
         import enrichment_jobs  # noqa: F401
+
+    def test_metrics_server_exports_new_recorders(self):
+        """PR-N21 Bravo-ops: the new recorders must be importable.
+        NOTE: cannot ``del sys.modules['metrics_server'] + reimport``
+        because prometheus_client's ``CollectorRegistry`` forbids
+        duplicate metric registration — the second import would raise
+        ``ValueError: Duplicated timeseries``. Just check attribute
+        presence on the already-imported module; duplicate-registration
+        would have surfaced on the first import in the test collector."""
+        import metrics_server
+
+        assert hasattr(metrics_server, "record_build_relationships_completion")
+        assert hasattr(metrics_server, "record_apoc_batch_partial")
+        # Spot-check the counter object is actually a Counter (not a stub)
+        assert hasattr(metrics_server, "BUILD_RELATIONSHIPS_COMPLETIONS")
+        assert hasattr(metrics_server, "APOC_BATCH_PARTIAL")
 
     def test_dag_module_parses(self):
         """DAG module must remain Python-syntax-valid after the

@@ -56,6 +56,8 @@ the change to take effect. Revert by unsetting + restarting.
 | `EdgeGuardNeo4jIneffectiveBatch` | critical | `rate(edgeguard_neo4j_merge_ineffective_batch_total[5m]) > 0` for 5m |
 | `EdgeGuardNeo4jBatchPermanentFailure` | critical | `rate(edgeguard_neo4j_batch_permanent_failure_total[5m]) > 0` for 5m |
 | `EdgeGuardMergeRejectPlaceholderSpike` | warning | `increase(edgeguard_merge_reject_placeholder_total[15m]) > 10` for 15m |
+| `EdgeGuardBuildRelationshipsSilentDeath` | critical | `absent(build_rels_completions) or rate == 0` for 6h after baseline start (PR-N21 Bravo-ops) |
+| `EdgeGuardApocBatchPartial` | warning | `increase(edgeguard_apoc_batch_partial_total[15m]) > 0` (PR-N21 Bravo-ops) |
 
 Verify alerts load cleanly on baseline day:
 
@@ -213,6 +215,78 @@ Each entry: symptom → detection signal → remediation.
 
 ---
 
+## Bravo-ops: memory posture for the next baseline
+
+After the 2026-04-04 baseline was OOM-killed (exit 137) during
+`build_relationships`, and the 2026-04-22 baseline silently returned
+`Campaign = 0` due to a downstream enrichment swallower (now fixed in
+PR-N21), these are the memory settings and alerts that should guard
+the next 26h baseline run:
+
+### Memory ceilings (reconcile BEFORE kickoff)
+
+On an 8 GB Airflow worker with Neo4j co-hosted (typical EdgeGuard
+dev/staging topology):
+
+| Knob | Value | Why |
+|---|---|---|
+| `AIRFLOW_MEMORY_LIMIT` | `12g` | Allow headroom above the ~8 GB working set that MISP-to-Neo4j sync consumes on 100K+ event baselines |
+| `NEO4J_HEAP_MAX` | `8g` | Matches `NEO4J_HEAP_INITIAL`; avoids GC pauses from heap resize mid-APOC |
+| `NEO4J_TX_MEMORY_MAX` | **`≤ 4g`** | **Critical.** Per-TX cap. Above 4g you risk Neo4j `MemoryLimitExceededException` inside a single APOC `periodic.iterate` batch → partial data loss (`[PARTIAL]` log + `EdgeGuardApocBatchPartial` alert). Cap it. |
+| `NEO4J_PAGECACHE` | `4g` | Enough for 350K-node working set without eating heap |
+
+Worker resident set: baseline should peak around 6 GB. **If
+`docker stats edgeguard-airflow-worker` shows RSS > 6 GB before the
+baseline even kicks off, raise `AIRFLOW_MEMORY_LIMIT` first or the
+baseline will OOM mid-run.**
+
+### Two Bravo-ops Prometheus alerts (added in PR-N21)
+
+Both fire on the new counters `build_relationships` now emits:
+
+| Alert | Fires when | Severity | What to do |
+|---|---|---|---|
+| `EdgeGuardBuildRelationshipsSilentDeath` | `edgeguard_build_relationships_completions_total` hasn't incremented for 6h while a baseline DAG started in the last 8h | critical | subprocess died silently (exit 137 OOM, SIGKILL, TX memory exhausted). Check docker stats + Neo4j logs for `MemoryLimit`. Raise memory ceilings, re-trigger. |
+| `EdgeGuardApocBatchPartial` | any `apoc.periodic.iterate` in build_relationships returned non-empty `errorMessages` in last 15m | warning | partial data loss in that step. Grep `[PARTIAL]` in worker logs for the step identifier and error detail; re-run that single step or accept partial and move on. |
+
+Verify both load cleanly on baseline day:
+
+```bash
+promtool check rules prometheus/alerts.yml
+curl -s localhost:9090/api/v1/rules | \
+  jq '.data.groups[] | select(.name=="edgeguard_pipeline_observability") | .rules[].name' | \
+  grep -E 'BuildRelationshipsSilentDeath|ApocBatchPartial'
+```
+
+### APOC partial-batch response playbook
+
+When `EdgeGuardApocBatchPartial` fires:
+
+1. Find the step and first few error messages:
+   ```bash
+   docker logs edgeguard-airflow-worker 2>&1 | grep -E '\[PARTIAL\]' | tail -5
+   ```
+2. Classify the root cause from the logged `errorMessages`:
+   - `MemoryLimitExceededException` → Neo4j TX memory cap hit. Lower batch size for that step, OR raise `NEO4J_TX_MEMORY_MAX` (but watch the ceiling — above 4g on 8 GB worker and you're eating worker RSS).
+   - `DeadlockDetected` → transient, re-run the step.
+   - Schema / constraint error → code bug, file an issue, do NOT re-run blindly.
+3. Option A — re-run just this step: invoke `python -m src.build_relationships --step <N>` (if the CLI supports it) or re-trigger the whole DAG from that step in Airflow UI.
+4. Option B — if partial data is acceptable for the demo window, leave it. The next incremental sync will fill in most missed edges. Flag for follow-up.
+
+### Post-run summary grep
+
+A successful baseline should always emit this line:
+
+```bash
+docker logs edgeguard-airflow-worker 2>&1 | grep -E '\[BUILD_RELATIONSHIPS SUMMARY\]'
+# expected: total_edges=N failures=0/12 per_query=[...]
+```
+
+Absence of this line = silent subprocess death (the exact scenario the
+`EdgeGuardBuildRelationshipsSilentDeath` alert guards against).
+
+---
+
 ## Baseline-day protocol
 
 ### Before a 730d baseline run
@@ -222,7 +296,8 @@ Each entry: symptom → detection signal → remediation.
    6 pre-baseline alerts green, spot-check 10 random Indicators via
    Neo4j Browser or `graphql_api`.
 2. **Prometheus rules loaded.** Verify the `edgeguard_pipeline_observability`
-   rule group has all 6 alerts (4 from PR-N11/N12 + 2 added in PR-N18):
+   rule group has all 8 alerts (4 from PR-N11/N12 + 2 added in PR-N18 +
+   2 Bravo-ops added in PR-N21):
    ```bash
    promtool check rules prometheus/alerts.yml
    curl -s localhost:9090/api/v1/rules | \
