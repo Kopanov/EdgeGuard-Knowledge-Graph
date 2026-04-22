@@ -375,3 +375,99 @@ class TestRunbookDocumentsBackfill:
         assert "still_null" in rb or "Verify success" in rb, (
             "RUNBOOK must include a verification Cypher block (e.g. count of still-NULL CVEs)"
         )
+
+
+# ===========================================================================
+# Bugbot round 2 (PR #106) — 4 new findings addressed
+# ===========================================================================
+
+
+class TestBugbotRound2Fixes:
+    """Bugbot's re-review of the round-1 fix commit flagged 4 new real bugs:
+    - MEDIUM: --max-cves cap not enforced within a batch
+    - LOW: progress rate uses wrong time reference
+    - MEDIUM: Neo4j username hardcoded, ignores NEO4J_USER
+    - MEDIUM: parse_nvd_meta can return non-dict, crashing extract_dates
+    """
+
+    def _src(self) -> str:
+        return BACKFILL_SCRIPT.read_text()
+
+    def test_max_cves_enforced_within_batch(self):
+        """MEDIUM: pre-fix the max_cves check only fired at the TOP of the
+        while-loop. With ``--max-cves=10`` and ``--batch-size=100`` the
+        first batch would process all 100 before the check — defeating
+        the smoke-test cap."""
+        src = self._src()
+        # The fix adds a second max_cves check inside the for-loop.
+        # Count ``max_cves is not None`` occurrences in backfill() — must
+        # be at least 2 (outer while + inner for).
+        body = src[src.find("def backfill") : src.find("\ndef ", src.find("def backfill") + 5)]
+        check_count = body.count("max_cves is not None and summary[")
+        assert check_count >= 2, (
+            f"max_cves must be checked BOTH at the while-loop top AND inside the for-loop; "
+            f"found only {check_count} checks (need >= 2 for per-iteration enforcement)"
+        )
+
+    def test_progress_rate_uses_run_started_at(self):
+        """LOW: the pre-fix progress log divided by ``time.monotonic() -
+        last_fetch_at`` where last_fetch_at was ~ms ago, producing absurd
+        rates like "40000 CVE/s". Fix uses ``run_started_at`` (captured
+        once before the loop)."""
+        src = self._src()
+        assert "run_started_at = time.monotonic()" in src, (
+            "backfill() must capture run_started_at before the loop for accurate rate calculation"
+        )
+        # Negative: the pre-fix denominator pattern must NOT appear.
+        assert 'summary["processed"] / max(time.monotonic() - last_fetch_at' not in src, (
+            "pre-fix rate calculation (time since last_fetch_at) is the Bugbot round 2 regression shape"
+        )
+        # Positive: the progress log must use run_started_at-based denominator.
+        assert "time.monotonic() - run_started_at" in src, (
+            "progress log must compute elapsed from run_started_at, not last_fetch_at"
+        )
+
+    def test_neo4j_user_from_env_not_hardcoded(self):
+        """MEDIUM: pre-fix used ``auth=("neo4j", neo4j_password)`` — hardcoded
+        the username. Must read ``NEO4J_USER`` env var (default "neo4j")
+        matching src/config.py convention."""
+        src = self._src()
+        # Negative: hardcoded literal must NOT appear.
+        assert 'auth=("neo4j", neo4j_password)' not in src, (
+            'hardcoded ``auth=("neo4j", neo4j_password)`` ignores NEO4J_USER env var. '
+            "Bugbot round 2, PR #106, Medium severity."
+        )
+        # Positive: must read NEO4J_USER env + use it in auth.
+        assert '"NEO4J_USER"' in src or "'NEO4J_USER'" in src, (
+            "script must read NEO4J_USER env var (default 'neo4j') like src/config.py"
+        )
+        assert "auth=(neo4j_user, neo4j_password)" in src, (
+            "Neo4j driver must be constructed with (neo4j_user, neo4j_password)"
+        )
+
+    def test_parse_nvd_meta_rejects_non_dict(self):
+        """MEDIUM: pre-fix ``parse_nvd_meta`` returned ``json.loads(...)``
+        directly — could yield list/string/int/bool. A truthy non-dict
+        would pass the ``if not nvd_meta:`` guard, then extract_dates
+        would call ``.get()`` on it and raise AttributeError OUTSIDE
+        the per-CVE try/except, crashing the entire backfill."""
+        src = self._src()
+        # Positive: the fix must narrow to dict with an isinstance check.
+        assert "isinstance(parsed, dict)" in src or "isinstance(nvd_meta, dict)" in src, (
+            "parse_nvd_meta must narrow return type to dict — json.loads can yield any JSON type"
+        )
+
+    def test_parse_nvd_meta_behavior_non_dict_inputs(self):
+        """Behavioral pin for Bugbot round 2 parse_nvd_meta fix."""
+        backfill_module = _load_backfill_module()
+        # List payload → {} (not [1,2,3])
+        assert backfill_module.parse_nvd_meta("NVD_META:[1,2,3]") == {}
+        # String payload → {}
+        assert backfill_module.parse_nvd_meta('NVD_META:"just a string"') == {}
+        # Integer payload → {}
+        assert backfill_module.parse_nvd_meta("NVD_META:42") == {}
+        # Boolean payload → {}
+        assert backfill_module.parse_nvd_meta("NVD_META:true") == {}
+        # Dict payload → passes through
+        result = backfill_module.parse_nvd_meta('NVD_META:{"published":"2021-01-01"}')
+        assert result == {"published": "2021-01-01"}

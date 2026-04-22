@@ -181,11 +181,24 @@ def parse_nvd_meta(comment: str) -> Dict:
     if not comment.startswith(NVD_META_PREFIX):
         return {}
     try:
-        return json.loads(comment[len(NVD_META_PREFIX) :])
+        parsed = json.loads(comment[len(NVD_META_PREFIX) :])
     except (json.JSONDecodeError, ValueError):
         # Operator-visible but not fatal — some older events may have
         # corrupted comment fields; skip and move on.
         return {}
+    # Bugbot round 2 (PR #106, Medium): ``json.loads`` returns any JSON
+    # type (list / string / int / bool), not just a dict. A truthy
+    # non-dict value (e.g., ``NVD_META:[1,2]``) would pass the
+    # ``if not nvd_meta:`` guard at the call site, then ``extract_dates``
+    # would call ``.get()`` on it and raise ``AttributeError`` OUTSIDE
+    # the per-CVE try/except — crashing the entire backfill. On re-run
+    # the same corrupted CVE reappears at the cursor position, blocking
+    # all progress. Fix: narrow return type to dict; anything else
+    # (list, string, int, etc.) is equivalent to "no NVD_META" for our
+    # purposes.
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed
 
 
 def extract_dates(nvd_meta: Dict) -> Tuple[Optional[str], Optional[str]]:
@@ -348,6 +361,15 @@ def backfill(
     min_interval = 1.0 / rate_limit if rate_limit > 0 else 0.0
     last_fetch_at = 0.0
 
+    # Bugbot round 2 (PR #106, Low): track the REAL run-start so the
+    # ``[PROGRESS]`` rate calculation uses a meaningful denominator.
+    # Pre-fix used ``time.monotonic() - last_fetch_at`` where
+    # ``last_fetch_at`` is the timestamp of the LAST MISP fetch (a few
+    # ms ago), producing garbage values like "40000 CVE/s". Using
+    # ``run_started_at`` gives the average throughput across the full
+    # run — the actionable operator signal.
+    run_started_at = time.monotonic()
+
     # PR-N22 Bugbot round 1 (HIGH × 2): cursor-based pagination. Start
     # with empty string (every real CVE ID sorts after "") and advance
     # by the highest cve_id we saw in the previous batch. This eliminates
@@ -383,6 +405,15 @@ def backfill(
         )
 
         for row in candidates:
+            # Bugbot round 2 (PR #106, Medium): the max-cves cap used to
+            # only fire at the TOP of the while-loop, meaning a first
+            # batch of 100 candidates would process ALL 100 even when
+            # ``--max-cves=10`` was set — defeating the smoke-test use
+            # case. Fix: check at every iteration of the inner for-loop.
+            if max_cves is not None and summary["processed"] >= max_cves:
+                logger.info("Hit --max-cves=%d mid-batch; stopping.", max_cves)
+                break
+
             cve_id = row["cve_id"]
             attr_ids = row.get("attr_ids") or []
             summary["processed"] += 1
@@ -433,13 +464,19 @@ def backfill(
                 logger.error("Failed to write %s: %s", cve_id, e)
                 summary["errors"] += 1
 
-        # Progress summary after each batch
+        # Progress summary after each batch.
+        # Bugbot round 2 (PR #106, Low): use ``run_started_at`` instead
+        # of ``last_fetch_at`` as the rate-denominator. Pre-fix divided
+        # by "time since the last fetch (~ms)" producing absurd rates
+        # like "40000/s".
+        elapsed_total = max(time.monotonic() - run_started_at, 0.001)
         logger.info(
-            "[PROGRESS] processed=%d backfilled=%d errors=%d rate=%.1f/s",
+            "[PROGRESS] processed=%d backfilled=%d errors=%d elapsed=%.1fs avg_rate=%.2f/s",
             summary["processed"],
             summary["backfilled"],
             summary["errors"],
-            summary["processed"] / max(time.monotonic() - last_fetch_at + 0.001, 0.001),
+            elapsed_total,
+            summary["processed"] / elapsed_total,
         )
 
         # If we got fewer than batch_size candidates, we're done (no more
@@ -490,9 +527,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Read env early so missing creds fail fast
-    # NEO4J_URI defaults to localhost; the others are mandatory (script can't
-    # do anything useful without MISP credentials + Neo4j password).
+    # NEO4J_URI defaults to localhost; NEO4J_USER defaults to "neo4j"
+    # (matches src/config.py convention). Password + MISP creds are
+    # mandatory (script can't do anything useful without them).
     neo4j_uri = _env_optional("NEO4J_URI", default="bolt://localhost:7687") or "bolt://localhost:7687"
+    # Bugbot round 2 (PR #106, Medium): pre-fix hardcoded ``"neo4j"``
+    # as the username. Rest of the project reads ``NEO4J_USER`` via
+    # src/config.py (default "neo4j"); deployments using a different
+    # user would fail to authenticate when running this script.
+    neo4j_user = _env_optional("NEO4J_USER", default="neo4j") or "neo4j"
     neo4j_password = _env_required("NEO4J_PASSWORD")
     misp_url = _env_required("MISP_URL")
     misp_api_key = _env_required("MISP_API_KEY")
@@ -506,13 +549,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
     logger.info("Starting CVE date backfill (dry_run=%s)", args.dry_run)
-    logger.info("  Neo4j URI: %s", neo4j_uri)
+    logger.info("  Neo4j URI: %s (user: %s)", neo4j_uri, neo4j_user)
     logger.info("  MISP URL:  %s", misp_url)
     logger.info("  Batch:     %d candidates / rate-limit %s req/s", args.batch_size, args.rate_limit)
 
     # Connect to Neo4j
     try:
-        driver = GraphDatabase.driver(neo4j_uri, auth=("neo4j", neo4j_password))
+        driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
         driver.verify_connectivity()
     except Exception as e:
         logger.error("Neo4j connection failed: %s", e)
