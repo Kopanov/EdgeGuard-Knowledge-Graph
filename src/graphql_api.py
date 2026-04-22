@@ -66,6 +66,47 @@ MISP_URL = os.getenv("MISP_URL", "").rstrip("/")
 # Auth helper
 # ---------------------------------------------------------------------------
 EDGEGUARD_API_KEY = os.getenv("EDGEGUARD_API_KEY", "")
+
+
+def _is_prod_env() -> bool:
+    """Single source of truth for "is this a production env?".
+
+    PR-N23 BLOCKER #5 (proactive audit 2026-04-22): the pre-N23
+    ``_IS_PROD`` check used ``os.getenv("EDGEGUARD_ENV", "dev").strip().
+    lower() == "prod"`` — fails-open on:
+      - Typos: ``EDGEGUARD_ENV=production`` → "production" != "prod" →
+        introspection stays ENABLED in prod.
+      - Unset: ``EDGEGUARD_ENV`` missing → introspection ENABLED by default.
+
+    PR-N23 Bugbot round 1 (PR #107, MEDIUM follow-up): the original PR-N23
+    fix only patched ``_IS_PROD`` (line 718) but the ``_ENV`` variable at
+    line 69 — used to gate the API-key requirement at line 96 — still
+    used the OLD fails-open ``"dev"`` default. That created a split
+    state: introspection blocked when EDGEGUARD_ENV unset (good), but
+    API-key enforcement skipped (bad). Fix: define ``_is_prod_env()``
+    ONCE at the top of the module and use it for both gates.
+
+    Contract:
+      - Both env vars unset / empty → ``True`` (secure default)
+      - ``EDGEGUARD_ENV`` in {"dev","development","local","staging","test"}
+        → ``False`` (non-prod allowlist)
+      - Anything else (prod, production, prd, typos, unrecognized values)
+        → ``True``
+    """
+    raw = (os.getenv("EDGEGUARD_ENV") or "").strip().lower()
+    _NON_PROD_ENVS = frozenset({"dev", "development", "local", "staging", "test"})
+    return raw not in _NON_PROD_ENVS
+
+
+# Module-level prod flag — single source of truth for both the API-key
+# enforcement gate (below) AND the GraphQL introspection extension
+# (further down). Pre-N23-Bugbot-round-1 these used different checks
+# and could disagree (introspection blocked + API-key skipped).
+_IS_PROD = _is_prod_env()
+# Backwards-compat: the legacy ``_ENV`` literal is still used by some
+# downstream readers / tests. Keep it for surface compatibility but
+# DON'T use it for security-relevant gating — _is_prod_env() is the
+# canonical check.
 _ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()
 
 # PR (security A6) — Red Team Tier A: previously the API-key requirement
@@ -93,9 +134,10 @@ _ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()
 _BIND_HOST = os.getenv("EDGEGUARD_GRAPHQL_HOST", "127.0.0.1").strip()
 _ALLOW_UNAUTH = os.getenv("EDGEGUARD_ALLOW_UNAUTH", "").strip().lower() in ("1", "true", "yes", "on")
 
-if _ENV == "prod" and not EDGEGUARD_API_KEY:
+if _IS_PROD and not EDGEGUARD_API_KEY:
     raise RuntimeError(
-        "EDGEGUARD_API_KEY must be set when EDGEGUARD_ENV=prod. "
+        "EDGEGUARD_API_KEY must be set when EDGEGUARD_ENV is prod (or unset/typo'd "
+        "since PR-N23 secure defaults treat unrecognized values as prod). "
         "Set a strong random value before starting the GraphQL API in production."
     )
 
@@ -687,35 +729,11 @@ from strawberry.extensions import QueryDepthLimiter  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
 
 _GRAPHQL_MAX_DEPTH = int(os.getenv("EDGEGUARD_GRAPHQL_MAX_DEPTH", "8"))
-
-
-def _is_prod_env() -> bool:
-    """PR-N23 BLOCKER #5 (proactive audit 2026-04-22): the pre-N23
-    ``_IS_PROD`` check was ``os.getenv("EDGEGUARD_ENV", "dev").strip().
-    lower() == "prod"`` — fails-open on:
-      - Typos: ``EDGEGUARD_ENV=production`` → ``"production" == "prod"``
-        is False → introspection stays ENABLED in prod.
-      - Unset: ``EDGEGUARD_ENV`` missing (the default-dev case) — but
-        if a prod container image ships without the env var set,
-        introspection is enabled by default.
-      - Case + whitespace already handled via strip+lower.
-
-    Fix: accept ``{"prod", "production", "prd"}`` as prod tokens, and
-    ALSO accept a ``dev``-only allowlist so prod is the default when the
-    var is unset or unrecognized. Net: introspection is ENABLED only
-    when EDGEGUARD_ENV is explicitly one of {"dev", "development",
-    "local", "staging", "test"}. Anything else (prod, production,
-    prd, unset, typos) → introspection BLOCKED.
-    """
-    raw = (os.getenv("EDGEGUARD_ENV") or "").strip().lower()
-    # Explicit allowlist of "non-prod" environments where introspection
-    # is a useful dev affordance. Every other value (including
-    # typos and unset) is treated as prod — fail-closed.
-    _NON_PROD_ENVS = frozenset({"dev", "development", "local", "staging", "test"})
-    return raw not in _NON_PROD_ENVS
-
-
-_IS_PROD = _is_prod_env()
+# Note: ``_IS_PROD`` is defined at the top of this module (line ~70)
+# alongside the API-key auth check. The single source of truth is
+# ``_is_prod_env()`` so the introspection-enable check below and the
+# auth-gate check above ALWAYS agree. PR-N23 Bugbot round 1 (PR #107
+# MEDIUM) — pre-fix had two separate env reads that could disagree.
 
 _extensions: list = [QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH)]
 if _IS_PROD:

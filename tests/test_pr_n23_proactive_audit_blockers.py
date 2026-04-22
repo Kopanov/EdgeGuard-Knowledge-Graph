@@ -144,10 +144,31 @@ class TestFix2MergeVulnerabilitiesBatchPromotesEnrichment:
                 f"batch path must stage {field} (CISA KEV enrichment was dropped pre-N23)"
             )
 
+    def test_batch_item_includes_round1_followup_fields(self):
+        """PR-N23 Bugbot round 1 (PR #107 MEDIUM): the original PR-N23 fix
+        comment claimed 4 additional fields (cwe / ref_tags / reference_urls
+        / affected_products) were "silently dropped" but didn't actually
+        promote them. Round 1 fix adds them too."""
+        body = self._body()
+        for field in ("cwe", "ref_tags", "reference_urls", "affected_products"):
+            assert f'batch_item["{field}"]' in body or f"batch_item['{field}']" in body, (
+                f"batch path must stage {field} (Bugbot round 1 follow-up to PR-N23)"
+            )
+
     def test_cypher_promotes_enrichment_fields_to_node(self):
         """The MERGE Cypher SET clause must write each staged field onto the node."""
         body = self._body()
-        for field in ("cvss_score", "severity", "attack_vector", "published", "last_modified"):
+        for field in (
+            "cvss_score",
+            "severity",
+            "attack_vector",
+            "published",
+            "last_modified",
+            "cwe",
+            "ref_tags",
+            "reference_urls",
+            "affected_products",
+        ):
             # coalesce(item.X, n.X) — don't clobber existing values with NULL
             assert f"n.{field} = coalesce(item.{field}, n.{field})" in body, (
                 f"Cypher SET must use ``n.{field} = coalesce(item.{field}, n.{field})`` "
@@ -271,6 +292,28 @@ class TestFix5IsProdFailsClosed:
         # ``def _is_prod_env`` function (structural change indicator).
         assert "def _is_prod_env" in src, (
             "graphql_api must define a _is_prod_env() function (not a one-liner strict-equality check)"
+        )
+
+    def test_api_key_gate_uses_is_prod_env(self):
+        """Bugbot round 1 (PR #107 MEDIUM): pre-fix had a SPLIT prod/dev
+        security state — ``_IS_PROD`` (line 718) used the secure
+        ``_is_prod_env()`` allowlist but ``_ENV`` (line 69) used the OLD
+        fails-open ``"dev"`` default. The API-key requirement gate at
+        line 96 read ``_ENV == "prod"`` → with EDGEGUARD_ENV unset,
+        introspection blocked (good) but API-key skipped (bad).
+
+        Fix: gate at line 96 must use ``_IS_PROD`` (single source of
+        truth via ``_is_prod_env()``)."""
+        src = (SRC / "graphql_api.py").read_text()
+        # Negative: the broken ``_ENV == "prod"`` gate must NOT be the
+        # condition for the prod-API-key check.
+        assert 'if _ENV == "prod" and not EDGEGUARD_API_KEY' not in src, (
+            "API-key gate must use ``_IS_PROD`` (which goes through _is_prod_env() "
+            "fail-closed allowlist), not ``_ENV == 'prod'`` (fails-open string compare)"
+        )
+        # Positive: must use _IS_PROD on the gate.
+        assert "if _IS_PROD and not EDGEGUARD_API_KEY" in src, (
+            "API-key gate must use ``_IS_PROD`` for consistency with introspection-disable check"
         )
 
     def test_is_prod_behavior(self):

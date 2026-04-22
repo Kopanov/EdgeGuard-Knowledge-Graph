@@ -3285,6 +3285,27 @@ class Neo4jClient:
                         batch_item["cisa_required_action"] = item["cisa_required_action"]
                     if item.get("cisa_vulnerability_name"):
                         batch_item["cisa_vulnerability_name"] = item["cisa_vulnerability_name"]
+                    # PR-N23 Bugbot round 1 (PR #107, MEDIUM): the original
+                    # PR-N23 fix promoted 10 fields but missed 4 that
+                    # ``parse_attribute`` in run_misp_to_neo4j.py:2497-2502
+                    # writes on every NVD vulnerability item: ``cwe``,
+                    # ``ref_tags``, ``reference_urls``, ``affected_products``.
+                    # The ``merge_cve`` single-row path (post-PR-N19 Fix #1)
+                    # writes none of these either — they're carried in
+                    # the SOURCED_FROM edge's raw_data only. But the
+                    # PR-N23 fix's own comment claimed they were among the
+                    # batch-path drop set ("13+ fields"). Close the docs/
+                    # behavior gap: stage them on the batch_item and SET
+                    # them in the Cypher below for parity with what
+                    # operators expect after the PR-N23 changelog.
+                    if item.get("cwe"):
+                        batch_item["cwe"] = item["cwe"]
+                    if item.get("ref_tags"):
+                        batch_item["ref_tags"] = item["ref_tags"]
+                    if item.get("reference_urls"):
+                        batch_item["reference_urls"] = item["reference_urls"]
+                    if item.get("affected_products"):
+                        batch_item["affected_products"] = item["affected_products"]
 
                     batch_data.append(batch_item)
 
@@ -3338,7 +3359,16 @@ class Neo4jClient:
                     n.cisa_exploit_add = coalesce(item.cisa_exploit_add, n.cisa_exploit_add),
                     n.cisa_action_due = coalesce(item.cisa_action_due, n.cisa_action_due),
                     n.cisa_required_action = coalesce(item.cisa_required_action, n.cisa_required_action),
-                    n.cisa_vulnerability_name = coalesce(item.cisa_vulnerability_name, n.cisa_vulnerability_name)
+                    n.cisa_vulnerability_name = coalesce(item.cisa_vulnerability_name, n.cisa_vulnerability_name),
+                    // PR-N23 Bugbot round 1 (PR #107 MEDIUM): four fields
+                    // the original PR-N23 fix's comment described as
+                    // "silently dropped" but didn't actually promote.
+                    // Now they land on the node when the upstream item
+                    // carries them.
+                    n.cwe = coalesce(item.cwe, n.cwe),
+                    n.ref_tags = coalesce(item.ref_tags, n.ref_tags),
+                    n.reference_urls = coalesce(item.reference_urls, n.reference_urls),
+                    n.affected_products = coalesce(item.affected_products, n.affected_products)
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)
