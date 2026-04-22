@@ -266,6 +266,76 @@ class TestFix4RunbookMispRetrievalPaths:
 
 
 # ===========================================================================
+# Fix #5 — README.md surfaces the launch procedure for colleagues
+# ===========================================================================
+
+
+class TestFix5ReadmeLaunchProcedure:
+    """Colleagues new to the project read the README first, not RUNBOOK.
+    Pin that the baseline-launch options + the MISP retrieval paths live
+    at the README level so they can't get lost in deep docs."""
+
+    def _readme(self) -> str:
+        return (REPO_ROOT / "README.md").read_text()
+
+    def test_readme_has_baseline_launch_section(self):
+        rd = self._readme()
+        assert "Running the 730-day baseline" in rd, (
+            "README must have a top-level 'Running the 730-day baseline' section "
+            "so colleagues see the launch-path decision without hunting through docs/"
+        )
+
+    def test_readme_documents_cli_and_dag_options(self):
+        rd = self._readme()
+        # Both options must be visible; colleague should be able to pick
+        # without having to open RUNBOOK.md first.
+        assert "Option A" in rd and "Option B" in rd, "README must show both launch options (CLI + DAG)"
+        assert "python -m edgeguard baseline" in rd, "README must show the CLI launch command"
+        assert "airflow dags pause" in rd, "README must show the DAG pause command"
+
+    def test_readme_references_preflight_script(self):
+        rd = self._readme()
+        assert "preflight_baseline.sh" in rd, (
+            "README must point to scripts/preflight_baseline.sh as the pre-kickoff check"
+        )
+
+    def test_readme_explains_issue_57_rationale(self):
+        """The 'why' matters as much as the 'what' — colleagues need to
+        understand the 2026-04-19 incident shape to make the right
+        launch-path choice."""
+        rd = self._readme()
+        assert "Issue #57" in rd, "README must cross-reference Issue #57 (DB-backed mutex)"
+        assert "2026-04-19" in rd or "14.7%" in rd, (
+            "README must explain the historical incident that motivates the launch-path decision"
+        )
+
+    def test_readme_documents_misp_retrieval_paths(self):
+        rd = self._readme()
+        assert "misp_attribute_ids" in rd, "README must show Path 1 (attribute UUID)"
+        assert "misp_event_ids" in rd, "README must show Path 2 (event ID)"
+        assert "SOURCED_FROM" in rd and "raw_data" in rd, "README must show Path 3 (raw JSON on edge)"
+
+    def test_readme_clarifies_node_uuid_is_not_misp_link(self):
+        """The user's original question conflated n.uuid with the MISP
+        back-pointer. Pin the clarifying note at the README level."""
+        rd = self._readme()
+        assert "n.uuid" in rd and "NOT" in rd, (
+            "README must clarify n.uuid is a deterministic UUIDv5 for cross-env identity, NOT a foreign key into MISP"
+        )
+
+    def test_airflow_section_warns_about_launch_path(self):
+        """The existing 'Airflow DAG-based workflow' section must point
+        readers at the launch-path decision before they hit the
+        `airflow dags trigger edgeguard_baseline` button."""
+        rd = self._readme()
+        # Look for a warning in the Airflow section that references the
+        # new launch-path decision section.
+        assert "Running the 730-day baseline" in rd and "IMPORTANT" in rd, (
+            "Existing Airflow DAG section must warn readers to consult the baseline launch procedure before triggering"
+        )
+
+
+# ===========================================================================
 # Module import sanity
 # ===========================================================================
 
