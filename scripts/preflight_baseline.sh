@@ -271,8 +271,19 @@ fi
 # every page. During the 26h baseline window, EVERY critical alert
 # (BatchPermanentFailure, IneffectiveBatch, BuildRelationshipsSilentDeath,
 # etc.) would have been emitted-but-unrouted — the on-call would never know.
-# This check refuses to launch the baseline if the placeholder template
-# is still in place.
+#
+# This check refuses to launch the baseline if a placeholder OR an
+# un-rendered ``${ENV_VAR}`` template is still in place.
+#
+# Bugbot round 1 (2026-04-23): the original PR-N24 fix replaced the
+# literal ``<YOUR_PAGERDUTY_KEY>`` with ``'${EDGEGUARD_PAGERDUTY_
+# INTEGRATION_KEY}'`` thinking Alertmanager would substitute the
+# env var. It does NOT — Alertmanager loads the YAML literally and
+# would send ``${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}`` as the
+# service key → same silent 403 as the original placeholder.
+# Operators must render alertmanager.yml from a template (envsubst,
+# helm, kustomize, etc.) BEFORE Alertmanager starts. This preflight
+# now refuses both shapes (literal placeholder + un-rendered env var).
 hdr "[7b] alertmanager pager wiring (PR-N24 B2)"
 if [ -f prometheus/alertmanager.yml ]; then
   # Only fail when the placeholder appears as a YAML *value* (quoted
@@ -283,13 +294,13 @@ if [ -f prometheus/alertmanager.yml ]; then
   # ``service_key:`` value — that only happens when it's in quotes.
   #
   # sed strips the trailing ``#...`` portion of each line before grep;
-  # the placeholder patterns are then only matched against uncommented
-  # YAML content.
+  # the placeholder / env-template patterns are then only matched
+  # against uncommented YAML content.
   if sed 's/#.*$//' prometheus/alertmanager.yml | \
-     grep -qE "'<YOUR_PAGERDUTY_KEY>'|\"<YOUR_PAGERDUTY_KEY>\"|'<YOUR_API_KEY>'|\"<YOUR_API_KEY>\"|'<PLACEHOLDER>'|\"<PLACEHOLDER>\"|'XXXXXXXX-XXXX'|\"XXXXXXXX-XXXX\""; then
-    fail "prometheus/alertmanager.yml still contains a placeholder pager key as a YAML value — PagerDuty will silently 403 every alert. Replace with EDGEGUARD_PAGERDUTY_INTEGRATION_KEY env-var substitution OR a real PagerDuty integration key."
+     grep -qE "'<YOUR_PAGERDUTY_KEY>'|\"<YOUR_PAGERDUTY_KEY>\"|'<YOUR_API_KEY>'|\"<YOUR_API_KEY>\"|'<PLACEHOLDER>'|\"<PLACEHOLDER>\"|'XXXXXXXX-XXXX'|\"XXXXXXXX-XXXX\"|'\\\$\\{[A-Z_][A-Z0-9_]*\\}'|\"\\\$\\{[A-Z_][A-Z0-9_]*\\}\""; then
+    fail "prometheus/alertmanager.yml still contains a placeholder OR un-rendered \${...} env-var template as a YAML value — PagerDuty will silently 403 every alert (Alertmanager does NOT expand env vars in YAML). Render alertmanager.yml via envsubst/helm/kustomize before Alertmanager starts, OR insert a real PagerDuty integration key directly."
   else
-    pass "alertmanager.yml has no placeholder pager key values"
+    pass "alertmanager.yml has no placeholder or un-rendered env-template pager key values"
   fi
 else
   warn "prometheus/alertmanager.yml not found — pager routing not configured"

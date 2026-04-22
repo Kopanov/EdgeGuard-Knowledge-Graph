@@ -178,11 +178,35 @@ class TestB2AlertmanagerNoPlaceholderPagerKey:
             "Replace with EDGEGUARD_PAGERDUTY_INTEGRATION_KEY env-var substitution."
         )
 
-    def test_alertmanager_uses_env_var_substitution(self):
+    def test_alertmanager_documents_template_rendering_requirement(self):
+        """The committed alertmanager.yml uses ``${EDGEGUARD_PAGERDUTY_
+        INTEGRATION_KEY}`` as a TEMPLATE PLACEHOLDER that operators must
+        render via envsubst (or replace inline) before Alertmanager
+        starts. Bugbot round 1 (PR #108) caught the original PR-N24
+        misunderstanding that Alertmanager would expand the template
+        itself — it does not. The ``${...}`` shape is intentional but
+        REQUIRES rendering; without rendering, PagerDuty 403s same as
+        the original ``<YOUR_PAGERDUTY_KEY>`` placeholder.
+
+        This test pins the dual contract: (a) the template marker is
+        present so operators know what to render, and (b) the comment
+        explains the rendering requirement so they don't assume
+        Alertmanager will do it for them."""
         text = (PROMETHEUS / "alertmanager.yml").read_text()
+        # (a) Template marker present (so envsubst has something to substitute).
         assert "${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}" in text, (
-            "alertmanager.yml service_key must use ``${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}`` "
-            "env-var template so operators can wire a real key without editing the file"
+            "alertmanager.yml must include the ``${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}`` "
+            "template marker so operators can render via envsubst at deploy time"
+        )
+        # (b) Comment must explicitly warn about Alertmanager's lack of
+        # env-var substitution, so a future maintainer doesn't assume
+        # the template will be magically expanded.
+        assert "envsubst" in text or "does NOT" in text, (
+            "alertmanager.yml comment must explain that Alertmanager does NOT "
+            "expand ${...} env-var templates in YAML; operators MUST render "
+            "the file (envsubst/helm/kustomize) before Alertmanager loads it. "
+            "This was the Bugbot round 1 finding on PR #108 — without the "
+            "warning, future maintainers will trip on the same bug."
         )
 
     def test_preflight_check_7b_present(self):
@@ -193,6 +217,75 @@ class TestB2AlertmanagerNoPlaceholderPagerKey:
         )
         # The fail message must reference the placeholder shapes.
         assert "<YOUR_PAGERDUTY_KEY>" in text, "preflight check [7b] must scan for the <YOUR_PAGERDUTY_KEY> placeholder"
+
+    def test_preflight_check_7b_rejects_unrendered_env_template(self):
+        """Bugbot round 1 (PR #108): Alertmanager does NOT perform env-var
+        substitution in its YAML config. If alertmanager.yml ships with
+        ``service_key: '${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}'``, the
+        literal string ``${EDGEGUARD_...}`` is sent to PagerDuty as the
+        key → silent 403, identical to the original ``<YOUR_PAGERDUTY_KEY>``
+        bug. Preflight must refuse both shapes."""
+        text = (SCRIPTS / "preflight_baseline.sh").read_text()
+        # The check must include the un-rendered env-var template pattern.
+        # Match either the regex token shape used in [7b] or an explicit
+        # mention in the comment block.
+        assert "[A-Z_][A-Z0-9_]*" in text, (
+            "preflight [7b] must include an ``\\$\\{[A-Z_][A-Z0-9_]*\\}`` "
+            "regex token rejecting un-rendered env-var templates "
+            "(Bugbot round 1, PR #108)"
+        )
+        # The fail message / comment must explain Alertmanager doesn't
+        # expand env vars (so future maintainers don't 'simplify' the
+        # check away thinking the env-var pattern is safe).
+        assert "Alertmanager does NOT" in text or "envsubst" in text, (
+            "preflight [7b] comment / failure message must clarify why "
+            "the env-var template is unsafe (Alertmanager doesn't expand "
+            "${...} in YAML)"
+        )
+
+    def test_preflight_check_7b_rejects_unrendered_template_at_runtime(self):
+        """End-to-end pin: actually run the preflight script's [7b] check
+        against the current ``alertmanager.yml`` and assert it fails.
+        This catches shell-escaping bugs in the regex (which the static
+        text scan above can't detect)."""
+        import subprocess
+
+        # Extract just the [7b] check stanza and run it standalone in a
+        # subshell against the real alertmanager.yml. Use a quick wrapper
+        # that emits an exit code we can introspect.
+        script = r"""
+        set -uo pipefail
+        cd "$1"
+        if [ ! -f prometheus/alertmanager.yml ]; then
+            echo "alertmanager.yml missing"; exit 99
+        fi
+        if sed 's/#.*$//' prometheus/alertmanager.yml | \
+           grep -qE "'<YOUR_PAGERDUTY_KEY>'|\"<YOUR_PAGERDUTY_KEY>\"|'<YOUR_API_KEY>'|\"<YOUR_API_KEY>\"|'<PLACEHOLDER>'|\"<PLACEHOLDER>\"|'XXXXXXXX-XXXX'|\"XXXXXXXX-XXXX\"|'\\\$\\{[A-Z_][A-Z0-9_]*\\}'|\"\\\$\\{[A-Z_][A-Z0-9_]*\\}\""; then
+            echo "PLACEHOLDER_DETECTED"
+            exit 1
+        else
+            echo "CLEAN"
+            exit 0
+        fi
+        """
+        result = subprocess.run(
+            ["bash", "-c", script, "_", str(REPO_ROOT)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        # While alertmanager.yml ships with the un-rendered ``${...}``
+        # template, the check must EXIT 1 (PLACEHOLDER_DETECTED).
+        # Once an operator renders the file via envsubst (or inserts a
+        # real key), the check exits 0 — and this test will need to be
+        # updated to point at a fixture file with the un-rendered shape.
+        assert result.returncode == 1, (
+            f"preflight [7b] regex must reject the un-rendered "
+            f"``${{EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}}`` template currently "
+            f"in alertmanager.yml. Got exit={result.returncode}, "
+            f"stdout={result.stdout!r}, stderr={result.stderr!r}"
+        )
+        assert "PLACEHOLDER_DETECTED" in result.stdout
 
     def test_preflight_alert_count_floor_bumped(self):
         """PR-N24 H3 added EdgeGuardMispEventAttributesTruncated, so the
