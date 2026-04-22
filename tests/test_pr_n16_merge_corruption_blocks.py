@@ -275,6 +275,41 @@ class TestFix3MergeNodeHasRetryDecorator:
                 return
         raise AssertionError("merge_node_with_source not found")
 
+    def test_upsert_sourced_relationship_inner_except_reraises_retryable(self):
+        """Cursor-bugbot 2026-04-22 #3: after removing the inner
+        @retry_with_backoff from _upsert_sourced_relationship (to avoid
+        nested retry stacking), the method's ``except Exception: return
+        False`` was STILL swallowing DatabaseError-wrapped transients
+        before they could propagate to the outer decorator on
+        merge_node_with_source. The SOURCED_FROM edge write path
+        therefore had ZERO retry coverage for deadlock-wrapped errors
+        — contradicting the stated safety claim of PR-N16 Fix #3.
+
+        Fix: mirror merge_node_with_source's pattern — classify via
+        ``_is_retryable_neo4j_error(e)`` and re-raise on retryable.
+        Terminal errors still log + return False.
+        """
+        import ast
+
+        src = (SRC / "neo4j_client.py").read_text()
+        tree = ast.parse(src)
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef):
+                for node in cls.body:
+                    if isinstance(node, ast.FunctionDef) and node.name == "_upsert_sourced_relationship":
+                        body = ast.unparse(node)
+                        assert "_is_retryable_neo4j_error(e)" in body, (
+                            "_upsert_sourced_relationship must classify + re-raise "
+                            "retryable errors (cursor-bugbot 2026-04-22 #3)"
+                        )
+                        # Retryable branch must raise, not return False.
+                        idx = body.find("_is_retryable_neo4j_error(e)")
+                        assert idx != -1
+                        post = body[idx : idx + 400]
+                        assert "raise" in post, "retryable branch must raise to let outer decorator retry"
+                        return
+        raise AssertionError("_upsert_sourced_relationship not found")
+
     def test_no_nested_retry_stacking_on_inner_helper(self):
         """Cursor-bugbot 2026-04-22: ``_upsert_sourced_relationship``
         is the inner-most retry-friendly helper, called only from

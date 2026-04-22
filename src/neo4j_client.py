@@ -2172,9 +2172,31 @@ class Neo4jClient:
             ConnectionError,
             TimeoutError,
         ):
-            raise  # let @retry_with_backoff handle transient errors
+            raise  # let outer @retry_with_backoff (on merge_node_with_source) handle transient errors
         except Exception as e:
-            logger.warning(f"SOURCED_FROM relationship error: {e}")
+            # PR-N16 follow-up #3 (cursor-bugbot 2026-04-22):
+            # ``except Exception: return False`` was swallowing
+            # ``DatabaseError``-wrapped transients (the exact error
+            # class PR-N16 Fix #3 targets). After removing the inner
+            # @retry_with_backoff (follow-up #2, to avoid nested retry
+            # stacking), the OUTER decorator on merge_node_with_source
+            # can only retry if this inner method propagates the
+            # exception. Swallowing + return False short-circuits that.
+            #
+            # Fix: use the same _is_retryable_neo4j_error classifier +
+            # re-raise pattern as merge_node_with_source. Terminal
+            # errors (schema / syntax / constraint) still log + return
+            # False so one bad row doesn't crash the calling sync.
+            if _is_retryable_neo4j_error(e):
+                code = getattr(e, "code", "")
+                logger.warning(
+                    "_upsert_sourced_relationship: retryable %s%s for %s — re-raising for outer decorator retry",
+                    type(e).__name__,
+                    f" [{code}]" if code else "",
+                    label,
+                )
+                raise
+            logger.warning("SOURCED_FROM relationship error (terminal): %s: %s", type(e).__name__, e)
             return False
 
     def merge_vulnerability(self, data: Dict, source_id: str = "nvd") -> bool:
