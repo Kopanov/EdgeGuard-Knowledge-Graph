@@ -3066,9 +3066,26 @@ class MISPToNeo4jSync:
                 for vuln in rich_vulns:
                     src = vuln.get("tag", "misp")
                     try:
-                        self.neo4j.merge_cve(vuln, source_id=src)
-                        success += 1
-                        self.stats["vulnerabilities_synced"] += 1
+                        # PR-N19 Fix #3 follow-up: pre-PR-N19 this loop
+                        # did not check merge_cve's return value —
+                        # CVEs that silently failed via return-False
+                        # (e.g. unresolvable cve_id) were counted as
+                        # success. Mirrors the plain_vulns loop below.
+                        if self.neo4j.merge_cve(vuln, source_id=src):
+                            success += 1
+                            self.stats["vulnerabilities_synced"] += 1
+                        else:
+                            cve_id = (
+                                resolve_vulnerability_cve_id(vuln) or vuln.get("cve_id") or vuln.get("value") or "?"
+                            )
+                            logger.warning(
+                                "[MERGE-RETURNED-FALSE] rich CVE %s source=%s — merge_cve returned False. "
+                                "Likely cause: resolve_vulnerability_cve_id returned falsy (missing/empty "
+                                "cve_id), or the underlying merge_node_with_source hit a terminal error.",
+                                str(cve_id)[:30],
+                                src,
+                            )
+                            errors += 1
                     except Exception as e:
                         logger.warning(
                             "merge_cve error for %s: %s",
@@ -3089,6 +3106,20 @@ class MISPToNeo4jSync:
                             self.stats["vulnerabilities_synced"] += 1
                             success += 1
                         else:
+                            # PR-N19 Fix #3 (post-baseline 2026-04-22, from
+                            # Bravo's report): identify which CVE failed so
+                            # the operator can trace the "N merge/load errors"
+                            # summary to specific entities. Pre-PR-N19 the
+                            # count was anonymous — the "4 errors" mystery
+                            # in Event 3 was exactly this.
+                            cve_id = (vuln.get("cve_id") or vuln.get("value") or "?")[:30]
+                            logger.warning(
+                                "[MERGE-RETURNED-FALSE] plain CVE %s source=%s — merge_cve returned False. "
+                                "Likely cause: resolve_vulnerability_cve_id returned falsy, or "
+                                "merge_node_with_source hit a terminal error. See earlier logs.",
+                                cve_id,
+                                src,
+                            )
                             errors += 1
                     except Exception as e:
                         # PR-G1 Bug Hunter audit (HIGH): defensive ``or``
@@ -3109,6 +3140,14 @@ class MISPToNeo4jSync:
                         self.stats["tactics_synced"] += 1
                         success += 1
                     else:
+                        # PR-N19 Fix #3: identify the tactic on merge-returned-False.
+                        tactic_id = (tactic.get("mitre_id") or tactic.get("name") or "?")[:30]
+                        logger.warning(
+                            "[MERGE-RETURNED-FALSE] Tactic %s source=%s — merge_tactic returned False. "
+                            "Likely cause: missing/empty mitre_id (PR-N13 None-guard), or terminal Neo4j error.",
+                            tactic_id,
+                            source_id,
+                        )
                         errors += 1
                 except Exception as e:
                     logger.warning(f"Error syncing tactic: {e}")
@@ -3124,6 +3163,14 @@ class MISPToNeo4jSync:
                         self.stats["techniques_synced"] += 1
                         success += 1
                     else:
+                        # PR-N19 Fix #3: identify the technique on merge-returned-False.
+                        tech_id = (technique.get("mitre_id") or technique.get("name") or "?")[:30]
+                        logger.warning(
+                            "[MERGE-RETURNED-FALSE] Technique %s source=%s — merge_technique returned False. "
+                            "Likely cause: missing/empty mitre_id (PR-N13 None-guard), or terminal Neo4j error.",
+                            tech_id,
+                            source_id,
+                        )
                         errors += 1
                 except Exception as e:
                     logger.warning(f"Error syncing technique: {e}")
@@ -3139,6 +3186,15 @@ class MISPToNeo4jSync:
                         self.stats["malware_synced"] += 1
                         success += 1
                     else:
+                        # PR-N19 Fix #3: identify the malware on merge-returned-False.
+                        m_name = (malware.get("name") or "?")[:30]
+                        logger.warning(
+                            "[MERGE-RETURNED-FALSE] Malware %s source=%s — merge_malware returned False. "
+                            "Likely cause: placeholder-name reject (PR-N10 _REJECTED_PLACEHOLDER_NAMES), "
+                            "or terminal Neo4j error.",
+                            m_name,
+                            source_id,
+                        )
                         errors += 1
                 except Exception as e:
                     logger.warning(f"Error syncing malware: {e}")
@@ -3154,6 +3210,14 @@ class MISPToNeo4jSync:
                         self.stats["actors_synced"] += 1
                         success += 1
                     else:
+                        # PR-N19 Fix #3: identify the actor on merge-returned-False.
+                        a_name = (actor.get("name") or "?")[:30]
+                        logger.warning(
+                            "[MERGE-RETURNED-FALSE] ThreatActor %s source=%s — merge_actor returned False. "
+                            "Likely cause: placeholder-name reject (PR-N10), or terminal Neo4j error.",
+                            a_name,
+                            source_id,
+                        )
                         errors += 1
                 except Exception as e:
                     # PR-G1 Bug Hunter audit (HIGH): ``or`` chain guards
@@ -3175,6 +3239,14 @@ class MISPToNeo4jSync:
                         self.stats["tools_synced"] += 1
                         success += 1
                     else:
+                        # PR-N19 Fix #3: identify the tool on merge-returned-False.
+                        t_id = (tool.get("mitre_id") or tool.get("name") or "?")[:30]
+                        logger.warning(
+                            "[MERGE-RETURNED-FALSE] Tool %s source=%s — merge_tool returned False. "
+                            "Likely cause: missing/empty mitre_id (PR-N13 None-guard), or terminal Neo4j error.",
+                            t_id,
+                            source_id,
+                        )
                         errors += 1
                 except Exception as e:
                     # PR-G1 Bug Hunter audit (HIGH): ``or`` chain guards
@@ -4026,8 +4098,15 @@ class MISPToNeo4jSync:
                 record_collection_success("misp_to_neo4j")
 
             if total_errors != 0:
+                # PR-N19 Fix #3: point operators at the new [MERGE-RETURNED-FALSE]
+                # grep token so the "N errors" summary is traceable to specific
+                # entities. Pre-PR-N19 the message said "see logs above" but no
+                # per-entity log actually existed for return-False cases —
+                # only for thrown exceptions. Fixed Bravo's "4 mystery errors".
                 self._last_sync_failure_reason = (
-                    f"sync_to_neo4j reported {total_errors} merge/load error(s); see logs above"
+                    f"sync_to_neo4j reported {total_errors} merge/load error(s); "
+                    "grep '[MERGE-RETURNED-FALSE]' or '[MERGE-REJECT]' in the logs above for "
+                    "per-entity detail (CVE id / Malware name / Actor name / MITRE id)"
                 )
 
             return total_errors == 0
