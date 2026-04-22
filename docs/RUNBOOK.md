@@ -523,6 +523,80 @@ RETURN r.raw_data LIMIT 1;
 
 ---
 
+## PR-N22: backfill historical CVE `published` / `last_modified`
+
+### When to run
+
+PR-N19 Fix #1 closed the MISP-sourced `merge_cve` path that was silently
+dropping `published` / `last_modified` before 2026-04-22. The write path
+is fixed in code, but any CVE ingested before PR-N19 deployed has NULL
+date fields in Neo4j. Run this script when:
+
+- You want to demo/export graph data with proper CVE timelines
+- You don't have 26h for a fresh full baseline
+- You want to preserve existing edge counts / confidence scores (a
+  backfill is non-destructive; a re-baseline would rebuild everything)
+
+### How to run
+
+Safe + idempotent. Dry-run first, then execute:
+
+```bash
+# 1. Dry-run — logs what WOULD change, writes nothing
+./scripts/backfill_cve_dates_from_nvd_meta.py --dry-run
+
+# 2. Real run against cloud Neo4j (env vars set)
+export NEO4J_URI="bolt+s://neo4j-bolt.edgeguard.org:443"
+export NEO4J_PASSWORD="<cloud-password>"
+export MISP_URL="https://misp.edgeguard.org"
+export MISP_API_KEY="<key>"
+export EDGEGUARD_SSL_VERIFY=true
+./scripts/backfill_cve_dates_from_nvd_meta.py --batch-size 100 --rate-limit 10
+```
+
+Expected duration: ~1-2 hours for a ~100K-CVE graph at 10 MISP req/s.
+Lower `--rate-limit 5` during business hours if MISP is user-facing.
+
+### Verify success
+
+After the script completes:
+
+```cypher
+// Expect: very small number (maybe 0) — only CVEs with no NVD_META in MISP
+MATCH (c:CVE)
+WHERE c.published IS NULL AND size(coalesce(c.misp_attribute_ids,[])) > 0
+RETURN count(c) AS still_null;
+
+// Spot-check: top 5 most-connected CVEs should now have dates
+MATCH (c:CVE)
+WHERE c.published IS NOT NULL
+RETURN c.cve_id, c.published, c.last_modified
+ORDER BY c.cvss_score DESC LIMIT 5;
+```
+
+### Idempotency guarantee
+
+The script's `SET c.published = coalesce(c.published, $pub)` pattern
+means re-runs are safe:
+
+- If a baseline ran between script invocations and populated the field,
+  the script respects the baseline value (coalesce prefers the existing
+  non-NULL).
+- If the script crashes mid-run, just re-invoke — it picks up where it
+  left off (the `WHERE c.published IS NULL` filter skips already-done).
+- Running dry-run → real-run → re-run all produce the same final state.
+
+### Known edge cases
+
+- **CVEs without NVD_META in MISP**: ~0.1-0.5% of CVEs (older events
+  with corrupted comment fields). These stay NULL; no data corruption.
+- **Rate-limit too aggressive**: if MISP returns 429, lower
+  `--rate-limit`. Default 10 req/s is conservative.
+- **Neo4j transient errors mid-write**: script logs + increments the
+  `errors` counter but continues. Exit code 1 if any error occurred.
+
+---
+
 ## See also
 
 - `docs/MISP_TUNING.md` — backend tuning for failure modes 1-2
@@ -535,3 +609,4 @@ RETURN r.raw_data LIMIT 1;
 - `src/neo4j_client.py:_is_retryable_neo4j_error` — exception classifier (PR-N15)
 - `src/collectors/nvd_collector.py:NvdBatchFetchError` — NVD silent-window-drop guard (PR-N17)
 - `src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES` — placeholder blocklist (PR-N10 + PR-N10-followup)
+- `scripts/backfill_cve_dates_from_nvd_meta.py` — historical CVE date backfill migration (PR-N22)
