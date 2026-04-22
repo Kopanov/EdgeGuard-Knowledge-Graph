@@ -160,6 +160,45 @@ class TestFix2PreflightScript:
         assert "exit 1" in src, "preflight must exit 1 when any hard-fail check fails"
         assert "exit 0" in src, "preflight must exit 0 on all-green"
 
+    def test_preflight_env_var_loop_reports_value_length_not_name_length(self):
+        """Bugbot round 1 (PR #104, Medium severity): the env-var loop used
+        ``${#var}`` which measures the length of the variable NAME
+        ("NEO4J_PASSWORD" = 14 chars), not the indirectly-referenced VALUE.
+        The printed copy said "value not echoed" so the reported count
+        had to correspond to the value; a 40-char API key printed "12
+        chars" misleading operators about credential state.
+
+        Pin: the env-var loop MUST (a) capture the indirect value into a
+        local like ``var_value="${!var:-}"``, and (b) measure
+        ``${#var_value}``. Regression-guard against a literal ``${#var}``
+        re-appearing inside that loop."""
+        src = self._script()
+        # Isolate the env-var loop so we don't false-fail on similar
+        # constructs elsewhere in the script (if any are added later).
+        # Rough anchor: the loop starts after the "[1] required env vars" header.
+        loop_start = src.find("for var in NEO4J_PASSWORD MISP_API_KEY MISP_URL")
+        assert loop_start != -1, "env-var loop anchor missing"
+        loop_end = src.find("done", loop_start)
+        assert loop_end != -1, "env-var loop terminator missing"
+        loop_body = src[loop_start:loop_end]
+
+        # Positive: the loop must capture the indirect reference into a
+        # local variable (any name is fine as long as it's used below).
+        assert '"${!var' in loop_body, (
+            'env-var loop must capture the indirect reference (``"${!var..}"``) into a local before measuring length'
+        )
+        # Negative: ``${#var}`` (measuring the name) must NOT appear inside
+        # the loop body. This is the exact Bugbot-flagged regression shape.
+        assert "${#var}" not in loop_body, (
+            "env-var loop reports ${#var} (length of NAME, always 8/12/14) instead of the VALUE length. "
+            'Capture ``var_value="${!var:-}"`` first, then measure ``${#var_value}``. '
+            "Bugbot round 1, PR #104, Medium severity."
+        )
+        # Positive: the correct form (value-length) must appear.
+        assert "${#var_value}" in loop_body or "${#value}" in loop_body, (
+            "env-var loop must report the VALUE length (e.g. ``${#var_value}``) after capturing the indirect reference"
+        )
+
 
 # ===========================================================================
 # Fix #3 — merge_vulnerability promotes published + last_modified (symmetry

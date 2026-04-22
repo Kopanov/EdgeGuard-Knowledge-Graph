@@ -83,11 +83,17 @@ esac
 # [1] required env vars present
 # -----------------------------------------------------------------------------
 hdr "[1] required env vars"
+# NOTE (Bugbot round 1): measure ${#var_value}, not ${#var}. ${#var}
+# returns the length of the variable NAME ("NEO4J_PASSWORD" = 14 chars);
+# we want the length of the indirectly-referenced VALUE so a 40-char
+# API key actually shows 40. The copy says "value not echoed" so the
+# reported count must correspond to the value.
 for var in NEO4J_PASSWORD MISP_API_KEY MISP_URL; do
-  if [[ -z "${!var:-}" ]]; then
+  var_value="${!var:-}"
+  if [[ -z "$var_value" ]]; then
     fail "$var is not set (export it or add to .env + docker compose up -d)"
   else
-    pass "$var is set (${#var} chars — value not echoed)"
+    pass "$var is set (${#var_value} chars — value not echoed)"
   fi
 done
 
