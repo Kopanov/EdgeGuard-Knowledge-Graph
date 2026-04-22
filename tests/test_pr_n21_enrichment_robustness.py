@@ -436,19 +436,38 @@ class TestBugbotRound1Fixes:
         src = self._dag_src()
         post_body = _function_body(src, "assert_baseline_postconditions")
 
-        # Pin the new shape: two independent queries, each returning a
-        # single count. Anchor on the 2 ``RETURN count(...)`` lines.
+        # Pin the new shape: independent queries, each returning a
+        # single count. INV-1 (qualifying actors + Campaigns) + INV-2
+        # (Indicator) + INV-3 (Source) → ≥4 ``RETURN count`` occurrences.
         assert post_body.count("RETURN count") >= 4, (
-            "INV-1 + INV-2 + INV-3 must each use a standalone count query "
-            "returning one row (total: at least 4 ``RETURN count`` occurrences). "
-            "Bugbot round 1 HIGH: chained MATCH + count returned no rows when "
-            "the second MATCH targets an empty label."
+            "INV-1 + INV-2 + INV-3 must each use a standalone count query (≥4 ``RETURN count`` total)"
         )
 
-        # Negative: the original silently-broken pattern (two MATCHes
-        # joined by intermediate WITH) must NOT be present.
+        # Negative: the original silently-broken pattern must NOT be present.
         assert "WITH count(*) AS attrib_edges MATCH (c:Campaign)" not in post_body, (
-            "chained MATCH after aggregation is the regression pattern Bugbot flagged"
+            "chained MATCH after aggregation is the Bugbot round 1 HIGH regression pattern"
+        )
+
+    def test_inv1_uses_qualifying_actor_filter_not_naive_attrib_count(self):
+        """Bugbot round 2 (PR #105, MEDIUM): naive ``count(ATTRIBUTED_TO
+        edges) > 0`` would false-positive on a graph where actors have
+        Malware attributions but no active Indicators (a legitimate
+        zero-Campaign outcome — ``build_campaign_nodes`` requires BOTH
+        per enrichment_jobs.py:296 ``size(malware_list) > 0 AND
+        indicator_total > 0``). INV-1 must mirror the actual qualifying-
+        actor condition: Malware ATTRIBUTED_TO + INDICATES from active
+        Indicator."""
+        src = self._dag_src()
+        post_body = _function_body(src, "assert_baseline_postconditions")
+
+        # Positive: must reference INDICATES + active filter (qualifying-actor logic)
+        assert "INDICATES" in post_body, "INV-1 must include INDICATES traversal to mirror build_campaign_nodes filter"
+        assert "i.active = true" in post_body or "i.active=true" in post_body, (
+            "INV-1 must filter on i.active=true to match build_campaign_nodes (enrichment_jobs.py:251)"
+        )
+        # Negative: the naive ATTRIBUTED_TO-only count must NOT appear
+        assert "MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) RETURN count(*)" not in post_body, (
+            "INV-1 must not use the naive ATTRIBUTED_TO-only count — that's the Bugbot round 2 false-positive shape"
         )
 
     def test_links_counted_by_updated_at_not_committed_operations(self):

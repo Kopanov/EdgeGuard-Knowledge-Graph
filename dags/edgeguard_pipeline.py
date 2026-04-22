@@ -2302,32 +2302,47 @@ def assert_baseline_postconditions(**context):
     try:
         client.connect()
         with client.driver.session() as session:
-            # INV-1: Campaign > 0 iff ATTRIBUTED_TO > 0.
+            # INV-1: Campaign > 0 iff there are QUALIFYING ThreatActors.
             #
-            # Bugbot round 1 (PR #105, HIGH): the pre-fix version chained
-            # ``MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) WITH
-            # count(*) AS attrib_edges MATCH (c:Campaign) WITH attrib_edges,
-            # count(c) AS campaigns`` — which returned ZERO ROWS when
-            # ``Campaign = 0`` (the MATCH on the empty label eliminated
-            # all tuples despite ``attrib_edges`` being a grouping key).
-            # ``.single()`` returned None → ``if row:`` False → violation
-            # silently skipped → DAG green. That's the EXACT bug the
-            # invariant is supposed to catch.
+            # History:
+            # - Bugbot round 1 (PR #105, HIGH): pre-fix version chained
+            #   ``MATCH (m)-[:ATTRIBUTED_TO]->(a) WITH count(*) MATCH
+            #   (c:Campaign)`` which returned ZERO ROWS when Campaign=0
+            #   (second MATCH on empty label eliminated all tuples).
+            #   Violation silently skipped — exact bug the invariant
+            #   exists to catch.
+            # - Bugbot round 2 (PR #105, MEDIUM): naive
+            #   ``count(ATTRIBUTED_TO edges) > 0`` was a FALSE-POSITIVE
+            #   risk. ``build_campaign_nodes`` only creates Campaigns for
+            #   actors with BOTH a Malware attribution AND at least one
+            #   active Indicator linked via INDICATES (enrichment_jobs.py:
+            #   296: ``WHERE size(malware_list) > 0 AND indicator_total > 0``).
+            #   A graph with ATTRIBUTED_TO edges but no active Indicators
+            #   is a LEGITIMATE zero-Campaign outcome — INV-1 firing on
+            #   that state would falsely block the DAG.
             #
-            # Fix: two independent count queries. Each returns exactly
-            # one row (count on empty label = 0, not no-rows). Cleaner
-            # to read, impossible to silently drop a branch.
+            # Fix: mirror ``build_campaign_nodes``'s exact qualifying-actor
+            # condition. Independent count queries (one row each, no
+            # silent-skip risk).
             row = session.run(
-                "MATCH (m:Malware)-[:ATTRIBUTED_TO]->(:ThreatActor) RETURN count(*) AS attrib_edges"
+                """
+                MATCH (a:ThreatActor)
+                WHERE EXISTS {
+                    MATCH (a)<-[:ATTRIBUTED_TO]-(:Malware)<-[:INDICATES]-(i:Indicator)
+                    WHERE i.active = true
+                }
+                RETURN count(a) AS qualifying_actors
+                """
             ).single()
-            attrib = int((row["attrib_edges"] if row else 0) or 0)
+            qualifying = int((row["qualifying_actors"] if row else 0) or 0)
 
             row = session.run("MATCH (c:Campaign) RETURN count(c) AS campaigns").single()
             camps = int((row["campaigns"] if row else 0) or 0)
 
-            if attrib > 0 and camps == 0:
+            if qualifying > 0 and camps == 0:
                 violations.append(
-                    f"[INV-1] {attrib} ATTRIBUTED_TO edges exist but Campaign count = 0. "
+                    f"[INV-1] {qualifying} qualifying ThreatActors exist (have Malware "
+                    "ATTRIBUTED_TO + active Indicator via INDICATES) but Campaign count = 0. "
                     "build_campaign_nodes silently produced no campaigns. "
                     "Check Airflow log for the underlying exception (PR-N21 made enrichment_jobs re-raise)."
                 )
