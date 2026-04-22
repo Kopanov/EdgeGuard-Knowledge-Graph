@@ -251,12 +251,59 @@ else
   warn "promtool not installed; skipping alerts parse check (install Prometheus tools)"
 fi
 
-# Quick structural pin — expect the edgeguard_pipeline_observability rule group with at least 6 alerts.
+# Quick structural pin — expect the edgeguard_pipeline_observability rule group with at least 9 alerts.
+# PR-N24 audit MED follow-up: bumped from ≥ 6 → ≥ 8 (PR-N21 Bravo-ops adds
+# EdgeGuardBuildRelationshipsSilentDeath + EdgeGuardApocBatchPartial), then
+# bumped again to ≥ 9 for PR-N24 H3 (EdgeGuardMispEventAttributesTruncated).
+# This is a defense-in-depth structural pin — promtool above does the real validation.
 ALERT_COUNT=$(grep -cE '^\s+- alert:' prometheus/alerts.yml 2>/dev/null || echo "0")
-if [[ "$ALERT_COUNT" -ge 6 ]]; then
-  pass "prometheus/alerts.yml has $ALERT_COUNT alert rules (≥ 6 required)"
+if [[ "$ALERT_COUNT" -ge 9 ]]; then
+  pass "prometheus/alerts.yml has $ALERT_COUNT alert rules (≥ 9 required)"
 else
-  fail "prometheus/alerts.yml has only $ALERT_COUNT alerts — expected ≥ 6 per PR-N11/N12/N18"
+  fail "prometheus/alerts.yml has only $ALERT_COUNT alerts — expected ≥ 9 (PR-N11/N12/N18/N21/N24)"
+fi
+
+# -----------------------------------------------------------------------------
+# [7b] PR-N24 BLOCKER B2: alertmanager pager wiring not still placeholder
+# -----------------------------------------------------------------------------
+# Pre-N24, ``prometheus/alertmanager.yml`` shipped with literal
+# ``service_key: '<YOUR_PAGERDUTY_KEY>'``. PagerDuty silently 403s on
+# every page. During the 26h baseline window, EVERY critical alert
+# (BatchPermanentFailure, IneffectiveBatch, BuildRelationshipsSilentDeath,
+# etc.) would have been emitted-but-unrouted — the on-call would never know.
+#
+# This check refuses to launch the baseline if a placeholder OR an
+# un-rendered ``${ENV_VAR}`` template is still in place.
+#
+# Bugbot round 1 (2026-04-23): the original PR-N24 fix replaced the
+# literal ``<YOUR_PAGERDUTY_KEY>`` with ``'${EDGEGUARD_PAGERDUTY_
+# INTEGRATION_KEY}'`` thinking Alertmanager would substitute the
+# env var. It does NOT — Alertmanager loads the YAML literally and
+# would send ``${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}`` as the
+# service key → same silent 403 as the original placeholder.
+# Operators must render alertmanager.yml from a template (envsubst,
+# helm, kustomize, etc.) BEFORE Alertmanager starts. This preflight
+# now refuses both shapes (literal placeholder + un-rendered env var).
+hdr "[7b] alertmanager pager wiring (PR-N24 B2)"
+if [ -f prometheus/alertmanager.yml ]; then
+  # Only fail when the placeholder appears as a YAML *value* (quoted
+  # scalar), NOT when it appears in an explanatory ``#`` comment. The
+  # comment block in alertmanager.yml documents the placeholder's
+  # history; matching that would fail-close unnecessarily. The actual
+  # failure mode is Alertmanager loading the placeholder as the
+  # ``service_key:`` value — that only happens when it's in quotes.
+  #
+  # sed strips the trailing ``#...`` portion of each line before grep;
+  # the placeholder / env-template patterns are then only matched
+  # against uncommented YAML content.
+  if sed 's/#.*$//' prometheus/alertmanager.yml | \
+     grep -qE "'<YOUR_PAGERDUTY_KEY>'|\"<YOUR_PAGERDUTY_KEY>\"|'<YOUR_API_KEY>'|\"<YOUR_API_KEY>\"|'<PLACEHOLDER>'|\"<PLACEHOLDER>\"|'XXXXXXXX-XXXX'|\"XXXXXXXX-XXXX\"|'\\\$\\{[A-Z_][A-Z0-9_]*\\}'|\"\\\$\\{[A-Z_][A-Z0-9_]*\\}\""; then
+    fail "prometheus/alertmanager.yml still contains a placeholder OR un-rendered \${...} env-var template as a YAML value — PagerDuty will silently 403 every alert (Alertmanager does NOT expand env vars in YAML). Render alertmanager.yml via envsubst/helm/kustomize before Alertmanager starts, OR insert a real PagerDuty integration key directly."
+  else
+    pass "alertmanager.yml has no placeholder or un-rendered env-template pager key values"
+  fi
+else
+  warn "prometheus/alertmanager.yml not found — pager routing not configured"
 fi
 
 # -----------------------------------------------------------------------------

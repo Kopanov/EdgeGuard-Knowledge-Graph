@@ -270,7 +270,7 @@ When `EdgeGuardApocBatchPartial` fires:
    - `MemoryLimitExceededException` → Neo4j TX memory cap hit. Lower batch size for that step, OR raise `NEO4J_TX_MEMORY_MAX` (but watch the ceiling — above 4g on 8 GB worker and you're eating worker RSS).
    - `DeadlockDetected` → transient, re-run the step.
    - Schema / constraint error → code bug, file an issue, do NOT re-run blindly.
-3. Option A — re-run just this step: invoke `python -m src.build_relationships --step <N>` (if the CLI supports it) or re-trigger the whole DAG from that step in Airflow UI.
+3. Option A — re-trigger the whole `edgeguard_baseline` DAG from `build_relationships` task in Airflow UI (Graph view → click `build_relationships` → "Clear" → confirm). It re-runs all 12 sub-steps, but the early-step MERGEs are idempotent so only the failed step's edges are re-created. There is currently NO per-step CLI flag — `src/build_relationships.py` runs all 12 steps as a single Python program. (See Issue #58 for the planned `--step N` CLI; until then, full-task re-run is the supported path.)
 4. Option B — if partial data is acceptable for the demo window, leave it. The next incremental sync will fill in most missed edges. Flag for follow-up.
 
 ### Post-run summary grep

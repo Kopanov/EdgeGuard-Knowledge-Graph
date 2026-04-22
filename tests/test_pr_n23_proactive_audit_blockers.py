@@ -277,21 +277,37 @@ class TestFix5IsProdFailsClosed:
     False, leaving introspection ENABLED in prod for any env typo."""
 
     def test_is_prod_uses_non_prod_allowlist(self):
-        src = (SRC / "graphql_api.py").read_text()
-        # The fix switches from ``== "prod"`` to a non-prod allowlist
-        # (dev/development/local/staging/test) with prod as the default.
-        assert "_NON_PROD_ENVS" in src or "non_prod" in src.lower(), (
-            "graphql_api must use a non-prod allowlist (fail-closed) rather than ``== 'prod'`` strict-equality"
+        # PR-N24 H1: the canonical helper now lives in src/config.py
+        # (single source of truth). Both src/graphql_api.py and
+        # src/query_api.py import ``is_production_env`` from there.
+        # The non-prod allowlist therefore lives in src/config.py — assert
+        # against the canonical implementation rather than the import site.
+        cfg_src = (SRC / "config.py").read_text()
+        assert "_NON_PROD_ENVS" in cfg_src or "non_prod" in cfg_src.lower(), (
+            "src/config.py must use a non-prod allowlist (fail-closed) rather than ``== 'prod'`` strict-equality"
+        )
+        # And graphql_api must consume the canonical helper, not redefine.
+        gql_src = (SRC / "graphql_api.py").read_text()
+        assert "from config import is_production_env" in gql_src, (
+            "graphql_api.py must import is_production_env from src.config (PR-N24 H1)"
         )
 
     def test_is_prod_not_equal_prod_only(self):
-        """The strict-equality regression pattern must NOT return directly."""
-        src = (SRC / "graphql_api.py").read_text()
-        # The pre-N23 shape was ``_IS_PROD = ... == "prod"`` at top level.
-        # Post-N23 it's a function call. Anchor on the presence of a
-        # ``def _is_prod_env`` function (structural change indicator).
-        assert "def _is_prod_env" in src, (
-            "graphql_api must define a _is_prod_env() function (not a one-liner strict-equality check)"
+        """The strict-equality regression pattern must NOT return directly.
+
+        PR-N24 H1 update: the structural anchor is no longer
+        ``def _is_prod_env`` inside graphql_api.py (it was moved to
+        ``src.config.is_production_env``). Anchor instead on the canonical
+        function in src/config.py."""
+        cfg_src = (SRC / "config.py").read_text()
+        assert "def is_production_env" in cfg_src, (
+            "src/config.py must define is_production_env() (PR-N24 H1 canonical helper)"
+        )
+        # Negative pin: the broken ``== 'prod'`` shape must not have come
+        # back at module load time.
+        gql_src = (SRC / "graphql_api.py").read_text()
+        assert '_IS_PROD = (os.getenv("EDGEGUARD_ENV") or "").strip().lower() == "prod"' not in gql_src, (
+            "graphql_api.py must not return to the strict-equality fails-open shape"
         )
 
     def test_api_key_gate_uses_is_prod_env(self):
@@ -317,52 +333,51 @@ class TestFix5IsProdFailsClosed:
         )
 
     def test_is_prod_behavior(self):
-        """Behavioral pin: call _is_prod_env() with various EDGEGUARD_ENV
-        values and assert the expected prod/non-prod classification."""
-        # Import fresh to pick up env-var changes
+        """Behavioral pin: call is_production_env() with various EDGEGUARD_ENV
+        values and assert the expected prod/non-prod classification.
+
+        PR-N24 H1 update: the function moved from graphql_api.py to
+        src/config.py (single source of truth). Same semantics, new
+        location."""
         import importlib
 
-        if "graphql_api" in sys.modules:
-            # Can't re-import easily due to FastAPI registration side-effects,
-            # so exec the _is_prod_env function in isolation.
-            pass
-
-        # We import the source and exec just the function definition to
-        # test it in isolation without triggering GraphQL/FastAPI imports.
-        src = (SRC / "graphql_api.py").read_text()
-        fn_start = src.find("def _is_prod_env")
-        fn_end = src.find("\n_IS_PROD = _is_prod_env()")
-        assert fn_start != -1 and fn_end != -1, "_is_prod_env function not found"
+        # Exec only the function definition from src/config.py in isolation
+        # so we can manipulate EDGEGUARD_ENV per case without re-importing
+        # the full config module (which triggers downstream side effects).
+        src = (SRC / "config.py").read_text()
+        fn_start = src.find("def is_production_env")
+        fn_end = src.find("IS_PROD = is_production_env()", fn_start)
+        assert fn_start != -1 and fn_end != -1, "is_production_env() not found in src/config.py"
         fn_src = src[fn_start:fn_end]
 
         ns: dict = {"os": importlib.import_module("os")}
         exec(fn_src, ns)
-        _is_prod_env = ns["_is_prod_env"]
+        is_production_env = ns["is_production_env"]
 
         # Test matrix
         try:
             saved = os.environ.get("EDGEGUARD_ENV")
             # Case 1: unset → prod (fail-closed)
             os.environ.pop("EDGEGUARD_ENV", None)
-            assert _is_prod_env() is True, "unset EDGEGUARD_ENV → prod (fail-closed)"
+            assert is_production_env() is True, "unset EDGEGUARD_ENV → prod (fail-closed)"
             # Case 2: "dev" → non-prod
             os.environ["EDGEGUARD_ENV"] = "dev"
-            assert _is_prod_env() is False, '"dev" → non-prod'
+            assert is_production_env() is False, '"dev" → non-prod'
             # Case 3: "production" (typo-ish) → prod
             os.environ["EDGEGUARD_ENV"] = "production"
-            assert _is_prod_env() is True, '"production" → prod (not in non-prod allowlist)'
+            assert is_production_env() is True, '"production" → prod (not in non-prod allowlist)'
             # Case 4: "prod" → prod
             os.environ["EDGEGUARD_ENV"] = "prod"
-            assert _is_prod_env() is True
+            assert is_production_env() is True
             # Case 5: empty string → prod
             os.environ["EDGEGUARD_ENV"] = ""
-            assert _is_prod_env() is True, "empty → prod (fail-closed)"
+            assert is_production_env() is True, "empty → prod (fail-closed)"
             # Case 6: random garbage → prod
             os.environ["EDGEGUARD_ENV"] = "asdfasdf"
-            assert _is_prod_env() is True
+            assert is_production_env() is True
             # Case 7: "staging" → non-prod (explicitly allowlisted)
             os.environ["EDGEGUARD_ENV"] = "staging"
-            assert _is_prod_env() is False
+            assert is_production_env() is False
         finally:
             if saved is None:
                 os.environ.pop("EDGEGUARD_ENV", None)

@@ -671,18 +671,31 @@ class OTXCollector:
                 _advance_otx_incremental_cursor()
                 return unique
 
+        # PR-N24 BLOCKER B3 (proactive audit 2026-04-22): on push_to_misp=False,
+        # the docstring says "return list of processed items" — but pre-N24
+        # all 4 exception handlers returned a status DICT regardless,
+        # which the alert-preview / test-harness / baseline-drain caller
+        # could not distinguish from a successful empty-list result.
+        # Same shape as the PR-N17 NVD bug + PR-N23 CISA fix. Mirroring
+        # CISA's resolution (cisa_collector.py:312-355): when
+        # push_to_misp=True still return status dict (Airflow contract);
+        # when False, re-raise so the caller sees the actual error.
         except requests.exceptions.Timeout as e:
             error_msg = f"Timeout: {e}"
             logger.error(f"OTX timeout: {e}")
             self.circuit_breaker.record_failure()
             record_collection_failure(self.source_name, error_msg)
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
         except requests.exceptions.ConnectionError as e:
             error_msg = f"Connection error: {e}"
             logger.error(f"OTX connection error: {e}")
             self.circuit_breaker.record_failure()
             record_collection_failure(self.source_name, error_msg)
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
         except requests.exceptions.HTTPError as e:
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"OTX: auth/access denied — skipping (optional): {e}")
@@ -699,13 +712,17 @@ class OTXCollector:
             logger.error(f"OTX HTTP error: {e}")
             self.circuit_breaker.record_failure()
             record_collection_failure(self.source_name, error_msg)
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}"
             logger.error(f"OTX collection error: {type(e).__name__}: {e}")
             self.circuit_breaker.record_failure()
             record_collection_failure(self.source_name, error_msg)
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
 
     def _return_status(self, success: bool, count: int, error: str = None, failed: int = 0) -> Dict[str, Any]:
         """Return standardized status dict."""

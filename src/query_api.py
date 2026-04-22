@@ -78,11 +78,25 @@ limiter = Limiter(key_func=get_remote_address)
 # API key for the public read endpoints.  Set EDGEGUARD_API_KEY to a non-empty
 # value to require authentication.  Leave unset only in local dev.
 _API_KEY = os.getenv("EDGEGUARD_API_KEY")
-_ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()
 
-if _ENV == "prod" and not _API_KEY:
+# PR-N24 audit HIGH (proactive 2026-04-22): pre-N24 this module used
+# ``_ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()`` then ``if _ENV
+# == "prod"`` — the fails-open pattern PR-N23 BLOCKER #5 fixed for
+# graphql_api but missed for query_api. Asymmetry: typo
+# ``EDGEGUARD_ENV=production`` would treat graphql_api as prod
+# (introspection blocked) but query_api as non-prod (API-key
+# enforcement skipped at startup). Maintainer Dev + Integration audit
+# agents both flagged this; lifting the canonical check to
+# ``src/config.py:is_production_env`` so both APIs share the same
+# fail-closed allowlist semantics.
+from config import is_production_env  # noqa: E402
+
+_IS_PROD = is_production_env()
+
+if _IS_PROD and not _API_KEY:
     raise RuntimeError(
-        "EDGEGUARD_API_KEY must be set when EDGEGUARD_ENV=prod. "
+        "EDGEGUARD_API_KEY must be set when EDGEGUARD_ENV is prod (or unset/typo'd "
+        "since PR-N24 secure defaults treat unrecognized values as prod). "
         "Set a strong random value before starting the API in production."
     )
 
@@ -399,7 +413,12 @@ async def query_threats(request: Request, q: ThreatQuery):
                 zone=q.zone.value if q.zone else None,
                 execution_time_ms=round(execution_time, 2),
                 # Only expose the generated Cypher in non-production builds.
-                cypher=cypher_query if (q.return_cypher and _ENV != "prod") else None,
+                # PR-N24 H1: use _IS_PROD (fail-closed allowlist from
+                # config.is_production_env()) instead of the pre-N24
+                # ``_ENV != "prod"`` strict-equality check, which would
+                # leak Cypher when EDGEGUARD_ENV='production' (typo) or
+                # any other non-allowlisted value.
+                cypher=cypher_query if (q.return_cypher and not _IS_PROD) else None,
             )
 
         except Exception as e:

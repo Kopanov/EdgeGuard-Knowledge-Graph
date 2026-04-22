@@ -76,8 +76,33 @@ receivers:
         send_resolved: true
 
   - name: 'on-call'
+    # PR-N24 BLOCKER B2 (proactive audit 2026-04-22): pre-N24 the
+    # service_key was the LITERAL placeholder ``<YOUR_PAGERDUTY_KEY>``.
+    # Alertmanager loaded it (it's a valid YAML string) and PagerDuty
+    # silently 403'd every page — meaning EVERY critical alert during
+    # the 26h baseline window WOULD HAVE GONE UNROUTED. The preflight
+    # script (`scripts/preflight_baseline.sh` check [7b], also added
+    # in PR-N24) now refuses to launch if either a placeholder OR an
+    # un-rendered ``${ENV_VAR}`` template is still in this YAML.
+    #
+    # ⚠️  IMPORTANT — Alertmanager does NOT perform env-var substitution
+    # in its YAML config files (Bugbot round 1 caught this:
+    # https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/pull/108).
+    # The ``${...}`` template below is intentionally INVALID for
+    # Alertmanager to consume directly — it MUST be rendered before
+    # Alertmanager starts. Two options:
+    #
+    #   1. Treat this file as a TEMPLATE and run ``envsubst`` (or
+    #      helm/kustomize) at deploy time:
+    #
+    #         envsubst < prometheus/alertmanager.yml \
+    #           > /etc/alertmanager/alertmanager.yml
+    #
+    #   2. Edit this file directly and replace the ``${...}`` with the
+    #      real PagerDuty Events-API v2 integration key (32-char hex
+    #      string from the PagerDuty service "Integrations" tab).
     pagerduty_configs:
-      - service_key: '<YOUR_PAGERDUTY_KEY>'
+      - service_key: '${EDGEGUARD_PAGERDUTY_INTEGRATION_KEY}'
         description: '{{ .GroupLabels.alertname }}'
         severity: '{{ .GroupLabels.severity }}'
 

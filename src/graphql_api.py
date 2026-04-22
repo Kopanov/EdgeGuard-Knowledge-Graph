@@ -67,46 +67,22 @@ MISP_URL = os.getenv("MISP_URL", "").rstrip("/")
 # ---------------------------------------------------------------------------
 EDGEGUARD_API_KEY = os.getenv("EDGEGUARD_API_KEY", "")
 
+# PR-N24 audit HIGH: import the canonical "is production env?" check
+# from src/config.py so graphql_api and query_api can never disagree on
+# the prod/non-prod classification. Pre-N24 each module defined its own
+# check (graphql_api.py had _is_prod_env, query_api.py had _ENV ==
+# "prod") — split state. See ``config.is_production_env`` for full
+# rationale + allowlist.
+from config import is_production_env  # noqa: E402
 
-def _is_prod_env() -> bool:
-    """Single source of truth for "is this a production env?".
-
-    PR-N23 BLOCKER #5 (proactive audit 2026-04-22): the pre-N23
-    ``_IS_PROD`` check used ``os.getenv("EDGEGUARD_ENV", "dev").strip().
-    lower() == "prod"`` — fails-open on:
-      - Typos: ``EDGEGUARD_ENV=production`` → "production" != "prod" →
-        introspection stays ENABLED in prod.
-      - Unset: ``EDGEGUARD_ENV`` missing → introspection ENABLED by default.
-
-    PR-N23 Bugbot round 1 (PR #107, MEDIUM follow-up): the original PR-N23
-    fix only patched ``_IS_PROD`` (line 718) but the ``_ENV`` variable at
-    line 69 — used to gate the API-key requirement at line 96 — still
-    used the OLD fails-open ``"dev"`` default. That created a split
-    state: introspection blocked when EDGEGUARD_ENV unset (good), but
-    API-key enforcement skipped (bad). Fix: define ``_is_prod_env()``
-    ONCE at the top of the module and use it for both gates.
-
-    Contract:
-      - Both env vars unset / empty → ``True`` (secure default)
-      - ``EDGEGUARD_ENV`` in {"dev","development","local","staging","test"}
-        → ``False`` (non-prod allowlist)
-      - Anything else (prod, production, prd, typos, unrecognized values)
-        → ``True``
-    """
-    raw = (os.getenv("EDGEGUARD_ENV") or "").strip().lower()
-    _NON_PROD_ENVS = frozenset({"dev", "development", "local", "staging", "test"})
-    return raw not in _NON_PROD_ENVS
-
-
-# Module-level prod flag — single source of truth for both the API-key
-# enforcement gate (below) AND the GraphQL introspection extension
-# (further down). Pre-N23-Bugbot-round-1 these used different checks
-# and could disagree (introspection blocked + API-key skipped).
-_IS_PROD = _is_prod_env()
+# Module-level prod flag — used by both the API-key enforcement gate
+# (below) AND the GraphQL introspection extension (further down).
+# Always agrees with src/query_api.py via the shared helper.
+_IS_PROD = is_production_env()
 # Backwards-compat: the legacy ``_ENV`` literal is still used by some
 # downstream readers / tests. Keep it for surface compatibility but
-# DON'T use it for security-relevant gating — _is_prod_env() is the
-# canonical check.
+# DON'T use it for security-relevant gating — is_production_env() is
+# the canonical check.
 _ENV = os.getenv("EDGEGUARD_ENV", "dev").lower()
 
 # PR (security A6) — Red Team Tier A: previously the API-key requirement
