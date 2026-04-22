@@ -2268,6 +2268,17 @@ class Neo4jClient:
             extra_props["severity"] = data["severity"]
         if data.get("attack_vector"):
             extra_props["attack_vector"] = data["attack_vector"]
+        # PR-N20 follow-up to PR-N19 Fix #1: preserve symmetry with
+        # ``merge_cve``. The single-row NVD path (``merge_vulnerability``)
+        # is used by alert-pipeline callers and the ``_sync_single_item``
+        # fallback; the batch path (``merge_vulnerabilities_batch``) writes
+        # dates via SOURCED_FROM edges, but the node itself would drop
+        # ``published`` / ``last_modified`` without this promotion — exactly
+        # the same bug shape PR-N19 Fix #1 closed for ``merge_cve``.
+        if data.get("published"):
+            extra_props["published"] = data["published"]
+        if data.get("last_modified"):
+            extra_props["last_modified"] = data["last_modified"]
         return self.merge_node_with_source("Vulnerability", key_props, data, source_id, extra_props=extra_props or None)
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:

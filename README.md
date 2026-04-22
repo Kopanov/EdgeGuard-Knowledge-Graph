@@ -415,6 +415,11 @@ docker compose up -d
 #    Quick 7-day smoke test: set EDGEGUARD_BASELINE_DAYS=7 and
 #      EDGEGUARD_BASELINE_COLLECTION_LIMIT=1000 in .env, restart airflow, then trigger.
 #      See docs/BASELINE_SMOKE_TEST.md
+#
+#    ⚠️  IMPORTANT — before you trigger the 730-day baseline, read the
+#        "Running the 730-day baseline" section below. The DAG path
+#        requires pausing 4 incremental DAGs first (Issue #57). The
+#        CLI path handles this automatically — see Option A below.
 
 # 3. Incremental cron DAGs start automatically after baseline:
 #    edgeguard_pipeline    → every 30 min  (OTX)
@@ -459,6 +464,110 @@ edgeguard version             # release CalVer + git short SHA (no .env)
 ```
 
 Release numbering uses **calendar versions** (`YYYY.M.D` in `pyproject.toml`). See [`docs/VERSIONING.md`](docs/VERSIONING.md).
+
+---
+
+## 🚀 Running the 730-day baseline
+
+The 730-day baseline ingests ~2 years of threat intelligence (~99K CVEs, ~115K indicators, ~350K nodes, ~700K relationships) in a single ~26-hour run. This section tells you **what to run, why, and which option to pick** — if you get the launch path wrong, you can lose data like the 2026-04-19 NVD-14.7% incident.
+
+### Why the launch path matters
+
+The Airflow `edgeguard_baseline` DAG does **not** currently acquire the in-process `baseline_lock` sentinel ([Issue #57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57)). Over the ~26h window, the 4 scheduled incremental DAGs (`edgeguard_daily`, `edgeguard_medium_freq`, `edgeguard_pipeline`, `edgeguard_low_freq`) will try to write to MISP + Neo4j in parallel with the baseline. That concurrent-writer pattern caused the 2026-04-19 MISP-PHP-FPM exhaustion and lost 14.7% of NVD data mid-run. Three regression xfails in `tests/test_tier1_sequential_robustness.py` pin this contract until the DB-backed mutex ships.
+
+**Until Issue #57 lands, pick one of the two safe launch paths below.** The decision is not optional — both are documented in depth in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#baseline-day-protocol).
+
+### Step 1 — Preflight check
+
+Run the preflight script first. It checks 10 readiness categories in ~5 seconds:
+
+```bash
+# For the CLI launch path (Option A below)
+./scripts/preflight_baseline.sh --launch-path=cli
+
+# For the DAG launch path (Option B below) — adds DAG-pause state verification
+./scripts/preflight_baseline.sh --launch-path=dag
+```
+
+Exit 0 = safe to launch. Exit 1 = read the ✗ items and fix them first. The script verifies: required env vars, Neo4j + APOC reachability, MISP API auth, Airflow DAG pause state (if `--launch-path=dag`), worker RAM ≥ 4 GB, Prometheus alerts parse, no stale `baseline_lock` sentinel, kill-switch defaults, pytest collection.
+
+### Step 2 — Pick your launch path
+
+#### Option A — CLI (recommended)
+
+The CLI path takes the in-process `baseline_lock` sentinel (`src/run_pipeline.py:1093`). Every scheduled DAG's `baseline_skip_reason()` check then returns a reason → they self-skip for the baseline's duration. **No manual DAG pausing needed.**
+
+```bash
+docker compose exec -T airflow-worker python -m edgeguard baseline --days 730
+```
+
+Or the fresh-baseline shape (wipes existing Neo4j data first — use for a clean re-baseline):
+
+```bash
+docker compose exec -T airflow-worker python -m edgeguard fresh-baseline --days 730
+```
+
+Confirm the sentinel is present mid-run:
+
+```bash
+docker compose exec airflow-worker ls /tmp/edgeguard/baseline_lock.sentinel
+# expected: file exists while baseline runs; auto-removed on completion
+```
+
+#### Option B — DAG + pre-pause the 4 incremental schedulers
+
+If you need the Airflow UI for operational reasons (monitoring, manual retry buttons, etc.), pause the 4 scheduled DAGs first so they can't fire during the ~26h window:
+
+```bash
+# 1. Pause all 4 incremental DAGs BEFORE triggering the baseline
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
+  docker compose exec airflow-worker airflow dags pause "$dag"
+done
+
+# 2. Trigger the baseline
+docker compose exec airflow-worker airflow dags trigger edgeguard_baseline
+
+# 3. AFTER the baseline_complete task fires (check Airflow UI), unpause all 4
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
+  docker compose exec airflow-worker airflow dags unpause "$dag"
+done
+```
+
+### Step 3 — Monitor during the run
+
+- **Prometheus**: watch the 6 `edgeguard_pipeline_observability` alerts. Any **critical** alert → pause the DAG, triage, resume.
+- **Logs**: `docker logs edgeguard-airflow-worker 2>&1 --follow | grep -vE 'DEBUG|INFO'`
+- **Grep tokens for silent failures**: `[MERGE-REJECT]`, `[MERGE-RETURNED-FALSE]`, `[MERGE-INEFFECTIVE]`, `[BATCH-PERMANENT-FAILURE]`, `[honest-NULL]` — each is documented in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#top-6-failure-modes).
+
+### Step 4 — Post-run validation
+
+Run the 5 validation Cypher queries in [`docs/RUNBOOK.md § "After the run"`](docs/RUNBOOK.md#after-the-run). Any non-zero on queries #1–#4 means a regression — file an issue before starting incremental syncs.
+
+### Retrieving raw MISP data from a Neo4j node
+
+Every MISP-sourced node carries three back-pointers, so analysts can always trace a Neo4j finding back to the raw MISP evidence. ⚠️ Note: `n.uuid` is a deterministic UUIDv5 for cross-environment identity + STIX parity — it is **NOT** a foreign key into MISP.
+
+| Retrieval path | Neo4j field | How to use |
+|---|---|---|
+| **Attribute-level** (most granular) | `n.misp_attribute_ids[]` — real MISP attribute UUIDs | `GET /attributes/<uuid>` on the MISP API |
+| **Event-level** (coarser, per-event) | `n.misp_event_ids[]` — stringified MISP event IDs | `GET /events/<id>` on the MISP API |
+| **Raw JSON on edge** (no network call) | `(n)-[r:SOURCED_FROM]->(:Source)` with `r.raw_data` | Full pickled MISP-attribute JSON, per-source |
+
+Example — fetch raw MISP data for an Indicator seen in Neo4j:
+
+```cypher
+MATCH (i:Indicator) WHERE i.value = '203.0.113.5'
+RETURN i.misp_attribute_ids, i.misp_event_ids;
+```
+
+```bash
+curl -H "Authorization: $MISP_API_KEY" -H "Accept: application/json" \
+     "$MISP_URL/attributes/<uuid-from-query-above>"
+```
+
+Coverage: Indicator / CVE / Vulnerability / Malware / ThreatActor / Technique / Tactic / Tool all carry all three paths. Campaign is reachable via inbound edges only; Sector is a fixed vocabulary (healthcare/energy/finance/global), so no MISP back-pointer.
+
+Full coverage matrix + operator protocol in [`docs/RUNBOOK.md § "Retrieving raw MISP data from a Neo4j node"`](docs/RUNBOOK.md#retrieving-raw-misp-data-from-a-neo4j-node).
 
 ---
 
