@@ -253,9 +253,7 @@ class TestFix3MergeNodeHasRetryDecorator:
                         assert idx != -1
                         # Within ~500 chars after the check, there must be a raise.
                         post = body[idx : idx + 500]
-                        assert "raise" in post, (
-                            "retryable branch must `raise` to let decorator retry"
-                        )
+                        assert "raise" in post, "retryable branch must `raise` to let decorator retry"
                         return
         raise AssertionError("merge_node_with_source not found")
 
@@ -276,6 +274,37 @@ class TestFix3MergeNodeHasRetryDecorator:
                 )
                 return
         raise AssertionError("merge_node_with_source not found")
+
+    def test_no_nested_retry_stacking_on_inner_helper(self):
+        """Cursor-bugbot 2026-04-22: ``_upsert_sourced_relationship``
+        is the inner-most retry-friendly helper, called only from
+        ``merge_node_with_source``. Pre-fix BOTH had
+        ``@retry_with_backoff`` decorators, so a transient triggered
+        4 outer × 4 inner = 16 retries with ~70s of cumulative wait.
+
+        Fix: removed the inner decorator from ``_upsert_sourced_relationship``.
+        Only the outer decorator on ``merge_node_with_source`` retries.
+        Regression pin: the inner method MUST NOT be decorated."""
+        src = (SRC / "neo4j_client.py").read_text()
+        # Find the def line. The lines immediately above must NOT
+        # include an @retry_with_backoff decorator. Walk up past
+        # blanks + comments.
+        lines = src.split("\n")
+        for i, line in enumerate(lines):
+            if "def _upsert_sourced_relationship(" in line:
+                j = i - 1
+                while j >= 0 and (lines[j].strip() == "" or lines[j].lstrip().startswith("#")):
+                    j -= 1
+                if j >= 0:
+                    prev = lines[j].strip()
+                    assert not prev.startswith("@retry_with_backoff"), (
+                        "REGRESSION: _upsert_sourced_relationship must NOT be "
+                        "decorated with @retry_with_backoff (would create nested "
+                        "retry stacking with merge_node_with_source's outer decorator). "
+                        "Cursor-bugbot 2026-04-22 caught this — see PR-N16 follow-up."
+                    )
+                return
+        raise AssertionError("_upsert_sourced_relationship not found")
 
 
 # ===========================================================================

@@ -2028,7 +2028,20 @@ class Neo4jClient:
             )
             return False
 
-    @retry_with_backoff(max_retries=3)
+    # PR-N16 follow-up (cursor-bugbot 2026-04-22): the inner
+    # @retry_with_backoff was REMOVED. Pre-fix this method had its
+    # own decorator AND was called from merge_node_with_source which
+    # ALSO has @retry_with_backoff (added in PR-N16 Fix #3). On a
+    # transient: inner decorator retries 3 times → propagates → outer
+    # decorator retries 3 times → each outer retry calls this method
+    # which retries 3 times internally. Total: 4 × 4 = 16 attempts
+    # with 14s × 4 = ~70s of waiting per upsert.
+    #
+    # Now: only the outer @retry_with_backoff on merge_node_with_source
+    # retries (4 attempts, ~14s max waiting). _upsert_sourced_relationship
+    # is private and only called from merge_node_with_source, so
+    # removing the inner decorator is safe — exception classification
+    # happens at the outer level via _is_retryable_neo4j_error.
     def _upsert_sourced_relationship(
         self,
         label: str,
