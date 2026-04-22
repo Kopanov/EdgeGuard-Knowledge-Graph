@@ -102,20 +102,31 @@ done
 # -----------------------------------------------------------------------------
 hdr "[2] Neo4j reachability + indexes"
 NEO4J_URL="${NEO4J_URL:-bolt://localhost:7687}"
+# NOTE (Bugbot round 2, Low): NEO4J_PASSWORD must NOT be interpolated into
+# the command line — it'd be visible via `ps aux` / /proc/*/cmdline to any
+# user on the system, plus risks word-splitting on spaces or shell
+# metacharacters. Instead:
+#   - Build the command as a bash ARRAY (preserves word boundaries).
+#   - For docker path: pass ``-e NEO4J_PASSWORD`` (by name, no =value) so
+#     docker compose exec forwards the var from the calling shell into the
+#     container env without ever putting the value in argv.
+#   - Omit ``-p`` entirely; cypher-shell reads NEO4J_PASSWORD from its env
+#     automatically when ``-p`` is absent.
+export NEO4J_PASSWORD  # ensure docker compose exec -e NEO4J_PASSWORD sees it
 if command -v docker >/dev/null 2>&1 && docker compose ps --services 2>/dev/null | grep -q neo4j; then
-  NEO4J_CMD="docker compose exec -T neo4j cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-test} --format plain"
+  NEO4J_CMD=(docker compose exec -T -e NEO4J_PASSWORD neo4j cypher-shell -u neo4j --format plain)
 else
-  # Fallback: assume cypher-shell is on PATH
-  NEO4J_CMD="cypher-shell -a ${NEO4J_URL} -u neo4j -p ${NEO4J_PASSWORD:-test} --format plain"
+  # Fallback: assume cypher-shell is on PATH (reads NEO4J_PASSWORD from env)
+  NEO4J_CMD=(cypher-shell -a "${NEO4J_URL}" -u neo4j --format plain)
 fi
 
-if $NEO4J_CMD "RETURN 1 AS ok;" >/dev/null 2>&1; then
+if "${NEO4J_CMD[@]}" "RETURN 1 AS ok;" >/dev/null 2>&1; then
   pass "Neo4j accepts auth + returns a query"
 else
   fail "Neo4j not reachable at $NEO4J_URL with current credentials"
 fi
 
-APOC_OK=$($NEO4J_CMD "CALL dbms.procedures() YIELD name WHERE name STARTS WITH 'apoc.coll' RETURN count(*) AS n;" 2>/dev/null | tail -1 || true)
+APOC_OK=$("${NEO4J_CMD[@]}" "CALL dbms.procedures() YIELD name WHERE name STARTS WITH 'apoc.coll' RETURN count(*) AS n;" 2>/dev/null | tail -1 || true)
 if [[ "$APOC_OK" =~ ^[1-9] ]]; then
   pass "APOC coll procedures present ($APOC_OK procs)"
 else
@@ -123,7 +134,7 @@ else
 fi
 
 # Critical uniqueness constraints + the n.uuid index (PR #33 when merged)
-INDEX_COUNT=$($NEO4J_CMD "SHOW INDEXES YIELD name WHERE name CONTAINS 'uuid' OR name CONTAINS 'indicator' OR name CONTAINS 'cve' RETURN count(*) AS n;" 2>/dev/null | tail -1 || true)
+INDEX_COUNT=$("${NEO4J_CMD[@]}" "SHOW INDEXES YIELD name WHERE name CONTAINS 'uuid' OR name CONTAINS 'indicator' OR name CONTAINS 'cve' RETURN count(*) AS n;" 2>/dev/null | tail -1 || true)
 if [[ "$INDEX_COUNT" =~ ^[1-9] ]]; then
   pass "Neo4j has $INDEX_COUNT baseline-relevant indexes"
 else
@@ -134,8 +145,26 @@ fi
 # [3] MISP API reachable + auth valid
 # -----------------------------------------------------------------------------
 hdr "[3] MISP API reachability"
+
+# NOTE (Bugbot round 2, Medium): honor EDGEGUARD_SSL_VERIFY / SSL_VERIFY so
+# the preflight TLS posture matches the rest of the stack. Pre-fix, ``curl
+# -k`` unconditionally disabled verification and sent MISP_API_KEY over an
+# unverified TLS connection — MitM risk even when SSL_VERIFY=true was set
+# project-wide. Semantics match src/config.py: only the literal string
+# "true" (case-insensitive, stripped) enables verification; anything else
+# disables (strict allow-list — typos default to disabled).
+SSL_VERIFY_RAW="${EDGEGUARD_SSL_VERIFY:-${SSL_VERIFY:-}}"
+SSL_VERIFY_NORM="$(printf '%s' "${SSL_VERIFY_RAW}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "")"
+if [[ "$SSL_VERIFY_NORM" == "true" ]]; then
+  CURL_TLS_FLAG=()
+  pass "TLS verification enabled (EDGEGUARD_SSL_VERIFY=true)"
+else
+  CURL_TLS_FLAG=(-k)
+  warn "TLS verification DISABLED (EDGEGUARD_SSL_VERIFY='${SSL_VERIFY_RAW:-unset}'); MISP_API_KEY will be sent over unverified TLS. Set EDGEGUARD_SSL_VERIFY=true for production."
+fi
+
 if [[ -n "${MISP_URL:-}" ]] && [[ -n "${MISP_API_KEY:-}" ]]; then
-  MISP_HTTP=$(curl -k -s -o /tmp/misp_preflight.out -w "%{http_code}" \
+  MISP_HTTP=$(curl "${CURL_TLS_FLAG[@]}" -s -o /tmp/misp_preflight.out -w "%{http_code}" \
     -H "Authorization: ${MISP_API_KEY}" \
     -H "Accept: application/json" \
     "${MISP_URL%/}/servers/getVersion" || echo "000")

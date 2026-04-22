@@ -199,6 +199,69 @@ class TestFix2PreflightScript:
             "env-var loop must report the VALUE length (e.g. ``${#var_value}``) after capturing the indirect reference"
         )
 
+    def test_preflight_does_not_embed_neo4j_password_in_command_line(self):
+        """Bugbot round 2 (PR #104, Low severity): NEO4J_PASSWORD was
+        interpolated directly into ``NEO4J_CMD`` (`-p ${NEO4J_PASSWORD:-test}`).
+        Visible to any user on the host via ``ps aux`` or
+        ``/proc/*/cmdline``, and risks word-splitting on spaces/metachars.
+
+        Fix: build NEO4J_CMD as a bash array without ``-p``. For docker
+        path use ``-e NEO4J_PASSWORD`` (by name, no =value) to forward the
+        env var; for host path cypher-shell reads NEO4J_PASSWORD from env.
+
+        Pin the absence of the regression shape."""
+        src = self._script()
+        # Negative: the exact regression shape (``-p`` followed by an
+        # interpolation of NEO4J_PASSWORD into the command string) must
+        # NOT appear.
+        assert "-p ${NEO4J_PASSWORD" not in src, (
+            "cypher-shell invocation must NOT interpolate NEO4J_PASSWORD into argv "
+            "(use ``-e NEO4J_PASSWORD`` + no ``-p`` flag; cypher-shell reads NEO4J_PASSWORD "
+            "from env automatically). Bugbot round 2, PR #104, Low severity."
+        )
+        assert '-p "$NEO4J_PASSWORD' not in src, (
+            "cypher-shell invocation must NOT take the password as a command-line argument — "
+            "use the NEO4J_PASSWORD env var forwarding instead"
+        )
+        # Positive: the new array-based invocation must use -e NEO4J_PASSWORD
+        # (env-var forwarding) for the docker path.
+        assert "-e NEO4J_PASSWORD" in src, (
+            "preflight must forward NEO4J_PASSWORD via ``docker compose exec -e NEO4J_PASSWORD`` "
+            "(by name, not by value) to keep it out of argv"
+        )
+
+    def test_preflight_honors_ssl_verify_for_misp_probe(self):
+        """Bugbot round 2 (PR #104, Medium severity): the MISP probe used
+        ``curl -k`` unconditionally, sending MISP_API_KEY over an
+        unverified TLS connection even when EDGEGUARD_SSL_VERIFY=true was
+        set project-wide. MitM risk for credential interception.
+
+        Fix: read EDGEGUARD_SSL_VERIFY / SSL_VERIFY, match project
+        semantics (only literal "true" enables verification; anything
+        else disables with a WARN), and only add ``-k`` when disabled."""
+        src = self._script()
+        # Positive: script must reference the canonical env var.
+        assert "EDGEGUARD_SSL_VERIFY" in src, (
+            "preflight must honor EDGEGUARD_SSL_VERIFY for the MISP probe (project canonical TLS-verify knob)"
+        )
+        # Positive: must also fall back to the legacy SSL_VERIFY name
+        # (matches src/config.py semantics).
+        assert "SSL_VERIFY" in src, "preflight must also respect the legacy SSL_VERIFY fallback"
+        # Positive: should only pass -k conditionally (not as a fixed
+        # curl arg). The fix uses a bash array CURL_TLS_FLAG that's
+        # empty when verification is enabled.
+        assert "CURL_TLS_FLAG" in src, (
+            "preflight must build a conditional TLS flag array (e.g. CURL_TLS_FLAG) "
+            "that stays empty when verification is enabled"
+        )
+        # Negative: the exact regression shape — curl -k as a hard-coded
+        # argument in the MISP probe — must NOT appear.
+        assert "curl -k -s -o" not in src, (
+            "preflight must NOT hard-code ``curl -k`` in the MISP probe — that would send "
+            "MISP_API_KEY over unverified TLS regardless of EDGEGUARD_SSL_VERIFY. "
+            "Bugbot round 2, PR #104, Medium severity."
+        )
+
 
 # ===========================================================================
 # Fix #3 — merge_vulnerability promotes published + last_modified (symmetry
