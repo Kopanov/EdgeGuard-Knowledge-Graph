@@ -262,6 +262,42 @@ class TestFix2PreflightScript:
             "Bugbot round 2, PR #104, Medium severity."
         )
 
+    def test_preflight_tls_flag_is_bash3_2_compatible(self):
+        """Bugbot round 3 (PR #104, Low severity): the earlier round-2
+        fix used a bash array ``CURL_TLS_FLAG=()`` expanded as
+        ``"${CURL_TLS_FLAG[@]}"``. Under bash < 4.4 with ``set -u``
+        active, an EMPTY-array expansion raises "unbound variable"
+        and aborts the script. This affects macOS's default bash 3.2
+        — a common operator workstation — on the RECOMMENDED
+        production path (``EDGEGUARD_SSL_VERIFY=true``).
+
+        Fix: plain string ``CURL_TLS_FLAG_STR`` (always set; empty
+        string when verification enabled) expanded UNQUOTED so empty
+        → nothing in argv. Safe across bash 3.2+.
+
+        Pin: (a) no empty-array regression shape present,
+        (b) the plain-string variant IS present."""
+        src = self._script()
+        # Strip comment-only lines so the rationale comment (which
+        # describes the regression shape) doesn't false-fail the
+        # negative assertion.
+        code_only = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
+        # Negative: the empty-array pattern ``CURL_TLS_FLAG=()`` must
+        # NOT appear in actual code.
+        assert "CURL_TLS_FLAG=()" not in code_only, (
+            "empty-array ``CURL_TLS_FLAG=()`` is the Bugbot round 3 regression shape "
+            "(crashes bash < 4.4 under set -u when expanded)"
+        )
+        # Also negative: the array expansion ``"${CURL_TLS_FLAG[@]}"``
+        # must not appear in code (same class of bug).
+        assert '"${CURL_TLS_FLAG[@]}"' not in code_only, (
+            "array expansion ``${CURL_TLS_FLAG[@]}`` on a possibly-empty array is unsafe under set -u in bash < 4.4"
+        )
+        # Positive: the string-variant must be present and USED in code.
+        assert "CURL_TLS_FLAG_STR" in code_only, (
+            "fix uses a plain string ``CURL_TLS_FLAG_STR`` (always set) that's safe to expand unquoted across bash 3.2+"
+        )
+
 
 # ===========================================================================
 # Fix #3 — merge_vulnerability promotes published + last_modified (symmetry

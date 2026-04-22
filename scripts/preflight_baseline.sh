@@ -155,16 +155,30 @@ hdr "[3] MISP API reachability"
 # disables (strict allow-list — typos default to disabled).
 SSL_VERIFY_RAW="${EDGEGUARD_SSL_VERIFY:-${SSL_VERIFY:-}}"
 SSL_VERIFY_NORM="$(printf '%s' "${SSL_VERIFY_RAW}" | tr '[:upper:]' '[:lower:]' | xargs 2>/dev/null || echo "")"
+# Bugbot round 3 (PR #104, Low): pre-fix used
+# ``CURL_TLS_FLAG=()`` (empty bash array) + ``"${CURL_TLS_FLAG[@]}"``
+# expansion. Under bash < 4.4 with ``set -u`` active, expanding an
+# EMPTY array via ``"${arr[@]}"`` raises "unbound variable" and aborts
+# the script. This affects macOS's default bash 3.2 — a common
+# operator workstation. The bug fired on the RECOMMENDED production
+# path (``EDGEGUARD_SSL_VERIFY=true``), causing the script to abort
+# with an unhelpful error instead of completing the MISP probe.
+#
+# Fix: use a plain string ``CURL_TLS_FLAG_STR`` (always set; empty
+# string when verification enabled, ``-k`` when disabled), then
+# expand unquoted so an empty value contributes nothing to argv.
+# Safe across bash 3.2+ and POSIX sh.
 if [[ "$SSL_VERIFY_NORM" == "true" ]]; then
-  CURL_TLS_FLAG=()
+  CURL_TLS_FLAG_STR=""
   pass "TLS verification enabled (EDGEGUARD_SSL_VERIFY=true)"
 else
-  CURL_TLS_FLAG=(-k)
+  CURL_TLS_FLAG_STR="-k"
   warn "TLS verification DISABLED (EDGEGUARD_SSL_VERIFY='${SSL_VERIFY_RAW:-unset}'); MISP_API_KEY will be sent over unverified TLS. Set EDGEGUARD_SSL_VERIFY=true for production."
 fi
 
 if [[ -n "${MISP_URL:-}" ]] && [[ -n "${MISP_API_KEY:-}" ]]; then
-  MISP_HTTP=$(curl "${CURL_TLS_FLAG[@]}" -s -o /tmp/misp_preflight.out -w "%{http_code}" \
+  # shellcheck disable=SC2086  # intentional unquoted: empty string must expand to nothing
+  MISP_HTTP=$(curl $CURL_TLS_FLAG_STR -s -o /tmp/misp_preflight.out -w "%{http_code}" \
     -H "Authorization: ${MISP_API_KEY}" \
     -H "Accept: application/json" \
     "${MISP_URL%/}/servers/getVersion" || echo "000")
