@@ -119,17 +119,25 @@ class TestPartOfEdgesDeterministic:
     def test_step3_has_order_by_before_collect(self, source: str) -> None:
         """The ``ORDER BY i.first_imported_at DESC, i.value ASC``
         clause MUST appear between the WHERE filter and the
-        ``collect(i)[0..100]`` slice."""
+        ``collect(i)[0..100]`` slice.
+
+        PR-N21 renamed the variable ``link_indicators`` →
+        ``link_indicators_batched`` and wrapped the inner query in
+        ``apoc.periodic.iterate`` for scale safety. Look for the
+        renamed anchor first; fall back to the legacy name for
+        forward/back compatibility."""
         start = source.find("def build_campaign_nodes")
         end = source.find("\ndef ", start + 1)
         body = source[start:end]
-        # Look for link_indicators query
-        assert "link_indicators = " in body
-        li_start = body.find("link_indicators = ")
-        li_end = body.find('"""', li_start + 20)  # end of triple-quoted block
-        # Skip the opening triple-quote to find the real end
-        li_end = body.find('"""', li_end + 3)
-        link_block = body[li_start:li_end]
+        # PR-N21: prefer the new anchor; fall back to legacy.
+        anchor = "link_indicators_batched = " if "link_indicators_batched = " in body else "link_indicators = "
+        assert anchor in body, "link_indicators query must be defined"
+        li_start = body.find(anchor)
+        # The query block is now wrapped in apoc.periodic.iterate; the
+        # inner Cypher is a string literal that extends until the
+        # outer `)` of the apoc call. Use a generous slice that
+        # covers both shapes.
+        link_block = body[li_start : li_start + 3000]
         assert "ORDER BY i.first_imported_at DESC, i.value ASC" in link_block, (
             "Step 3 must sort deterministically before the 100-slice"
         )
@@ -140,13 +148,16 @@ class TestPartOfEdgesDeterministic:
 
     def test_step3a_stamps_r_updated_at(self, source: str) -> None:
         """Every PART_OF MERGE MUST stamp ``r.updated_at = datetime()``
-        so Step 3b can use it as the freshness marker."""
+        so Step 3b can use it as the freshness marker.
+
+        PR-N21: anchor accepts both the legacy ``link_indicators = ``
+        name and the new ``link_indicators_batched = `` name."""
         start = source.find("def build_campaign_nodes")
         end = source.find("\ndef ", start + 1)
         body = source[start:end]
-        li_idx = body.find("link_indicators = ")
-        # The link_indicators query block extends roughly 2KB.
-        link_block = body[li_idx : li_idx + 2000]
+        anchor = "link_indicators_batched = " if "link_indicators_batched = " in body else "link_indicators = "
+        li_idx = body.find(anchor)
+        link_block = body[li_idx : li_idx + 3000]
         assert "r.updated_at = datetime()" in link_block, (
             "Step 3a MERGE must stamp r.updated_at so Step 3b can prune stale edges"
         )

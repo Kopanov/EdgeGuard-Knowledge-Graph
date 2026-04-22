@@ -2095,13 +2095,22 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         sess.__enter__ = lambda s: s
         sess.__exit__ = lambda *a: False
 
-        # 4 session.run calls in build_campaign_nodes:
-        # (1) qualifying_actors_query — return 1 actor
-        # (2) create_cypher (main MERGE) — return campaigns count
-        # (3) backfill_cypher — return non-zero
-        # (4) link_malware
-        # (5) link_indicators
-        # We give iter for the actors query and .single() for the rest.
+        # PR-N21: build_campaign_nodes makes 8 session.run() calls; the
+        # pre-N21 mock only covered 5 and silently relied on the broad
+        # ``except Exception`` swallower to eat the StopIteration on the
+        # 6th call. With the swallower removed (PR-N21), all 8 must be
+        # mocked correctly. The 5th call (link_indicators_batched) now
+        # returns ``apoc.periodic.iterate`` shape (committedOperations
+        # + errorMessages) instead of the legacy ``links`` int.
+        # Order:
+        #   (1) qualifying_actors_query           — returns iter of actors
+        #   (2) create_cypher (Step 1)            — .single() = {campaigns: N}
+        #   (3) backfill_cypher                   — .single() = {backfilled: N}
+        #   (4) link_malware (Step 2)             — .single() = {links: N}
+        #   (5) link_indicators_batched (Step 3a) — .single() = {committedOperations, errorMessages, ...}
+        #   (6) prune_query (Step 3b)             — .single() = {pruned: N}
+        #   (7) cleanup_query (Step 4)            — .single() = {orphans: N}
+        #   (8) reactivated_query (Step 5)        — .single() = {count: N}
         actors_iter = iter([{"name": "APT-Test"}])
         actors_result = MagicMock()
         actors_result.__iter__ = lambda self: actors_iter
@@ -2111,14 +2120,32 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         backfill_result.single.return_value = {"backfilled": 7}
         link_m_result = MagicMock()
         link_m_result.single.return_value = {"links": 0}
+        # PR-N21: link_indicators_batched returns apoc.periodic.iterate
+        # output shape — the implementation reads
+        # ``record.get("committedOperations")`` + ``record.get("errorMessages")``.
+        # ``errorMessages`` MUST be empty (or falsy) or the impl raises.
         link_i_result = MagicMock()
-        link_i_result.single.return_value = {"links": 0}
+        link_i_result.single.return_value = {
+            "committedOperations": 0,
+            "errorMessages": {},
+            "batches": 1,
+            "total": 0,
+        }
+        prune_result = MagicMock()
+        prune_result.single.return_value = {"pruned": 0}
+        cleanup_result = MagicMock()
+        cleanup_result.single.return_value = {"count": 0}
+        reactivated_result = MagicMock()
+        reactivated_result.single.return_value = {"count": 0}
         sess.run.side_effect = [
-            actors_result,
-            create_result,
-            backfill_result,
-            link_m_result,
-            link_i_result,
+            actors_result,  # 1
+            create_result,  # 2
+            backfill_result,  # 3
+            link_m_result,  # 4
+            link_i_result,  # 5 — PR-N21 batched shape
+            prune_result,  # 6
+            cleanup_result,  # 7
+            reactivated_result,  # 8
         ]
         client.driver.session.return_value = sess
 
