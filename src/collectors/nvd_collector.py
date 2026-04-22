@@ -515,9 +515,42 @@ class NVDCollector:
             logger.error("[NVD-BATCH-FETCH-ERROR] JSON parse: %s", e)
             raise NvdBatchFetchError(f"NVD response not JSON: {e}") from e
 
+        # PR-N17 follow-up (cursor-bugbot 2026-04-22 #3): NVD can
+        # return JSON that's valid but not the expected dict shape
+        # (maintenance page returning a JSON string / array / null).
+        # Pre-fix, ``data.get("vulnerabilities", [])`` on a non-dict
+        # raised AttributeError OUTSIDE the try/except above, bypassing
+        # the NvdBatchFetchError abort path — the baseline loop saw
+        # a raw AttributeError (not caught by its
+        # ``except NvdBatchFetchError``), which then propagated to the
+        # outer ``except Exception`` and got converted to a soft
+        # status dict. Same "error indistinguishable from success"
+        # class that PR-N17 was meant to close.
+        #
+        # Fix: explicit type check. Raise NvdBatchFetchError so the
+        # baseline loop's abort handler fires normally.
+        if not isinstance(data, dict):
+            logger.error(
+                "[NVD-BATCH-FETCH-ERROR] response is valid JSON but not a dict "
+                "(got %s) — likely a maintenance page or upstream proxy error",
+                type(data).__name__,
+            )
+            raise NvdBatchFetchError(f"NVD response JSON is {type(data).__name__}, expected dict")
+
         vulnerabilities = data.get("vulnerabilities", [])
-        # Legit empty list → returned normally. Caller's
-        # ``consecutive_empty`` counter handles end-of-window.
+        # Defense-in-depth: confirm ``vulnerabilities`` is a list.
+        # A legitimate empty response returns ``[]`` (caller's
+        # consecutive_empty counter handles end-of-window). A bad
+        # payload with ``vulnerabilities: "some string"`` would
+        # otherwise propagate as a non-list into downstream iteration.
+        if not isinstance(vulnerabilities, list):
+            logger.error(
+                "[NVD-BATCH-FETCH-ERROR] ``vulnerabilities`` field is %s, expected list",
+                type(vulnerabilities).__name__,
+            )
+            raise NvdBatchFetchError(
+                f"NVD ``vulnerabilities`` field is {type(vulnerabilities).__name__}, expected list"
+            )
         return vulnerabilities
 
     def collect(

@@ -182,6 +182,57 @@ class TestFix1FetchBatchDistinguishesEmptyFromError:
                     limit=2000,
                 )
 
+    def test_fetch_batch_raises_on_non_dict_json(self):
+        """Cursor-bugbot 2026-04-22 #3: NVD can return valid JSON that
+        ISN'T a dict (e.g. a maintenance page returning a JSON array
+        or string). Pre-fix, ``data.get("vulnerabilities", [])`` on a
+        non-dict raised AttributeError OUTSIDE the JSON-parse try/except,
+        bypassing NvdBatchFetchError. Now must raise."""
+        from collectors.nvd_collector import NvdBatchFetchError, NVDCollector
+
+        collector = NVDCollector.__new__(NVDCollector)
+        collector.api_key = None
+        collector.base_url = "http://fake"
+        collector.source_name = "nvd"
+        collector.session = MagicMock()
+
+        for bad_json in [["not", "a", "dict"], "string response", None, 42]:
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = bad_json
+            with patch("collectors.nvd_collector.request_with_rate_limit_retries", return_value=response):
+                with pytest.raises(NvdBatchFetchError, match="not a dict|expected dict"):
+                    collector._fetch_cves_batch(
+                        pub_start_iso="2024-01-01T00:00:00.000",
+                        pub_end_iso="2024-04-30T23:59:59.999",
+                        start_index=0,
+                        limit=2000,
+                    )
+
+    def test_fetch_batch_raises_on_non_list_vulnerabilities_field(self):
+        """Defense-in-depth: ``vulnerabilities`` field must be a list.
+        If NVD returns ``{"vulnerabilities": "garbage"}``, raise rather
+        than propagate a non-list to downstream iteration."""
+        from collectors.nvd_collector import NvdBatchFetchError, NVDCollector
+
+        collector = NVDCollector.__new__(NVDCollector)
+        collector.api_key = None
+        collector.base_url = "http://fake"
+        collector.source_name = "nvd"
+        collector.session = MagicMock()
+
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"vulnerabilities": "this should be a list"}
+        with patch("collectors.nvd_collector.request_with_rate_limit_retries", return_value=response):
+            with pytest.raises(NvdBatchFetchError, match="expected list"):
+                collector._fetch_cves_batch(
+                    pub_start_iso="2024-01-01T00:00:00.000",
+                    pub_end_iso="2024-04-30T23:59:59.999",
+                    start_index=0,
+                    limit=2000,
+                )
+
     def test_fetch_batch_returns_vulnerabilities_on_success(self):
         from collectors.nvd_collector import NVDCollector
 
