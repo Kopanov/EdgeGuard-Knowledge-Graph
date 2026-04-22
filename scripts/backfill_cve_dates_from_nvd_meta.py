@@ -429,39 +429,52 @@ def backfill(
                 time.sleep(min_interval - elapsed)
             last_fetch_at = time.monotonic()
 
-            # Fetch the first attribute (NVD CVE events are single-attribute
-            # in EdgeGuard's MISP layout; first UUID is the one we want).
-            attr = misp.get_attribute(attr_ids[0])
-            if attr is None:
-                summary["no_misp_attr"] += 1
-                continue
-
-            nvd_meta = parse_nvd_meta(attr.get("comment", ""))
-            if not nvd_meta:
-                summary["no_nvd_meta"] += 1
-                continue
-
-            published, last_modified = extract_dates(nvd_meta)
-            if not published and not last_modified:
-                summary["no_dates_in_meta"] += 1
-                continue
-
-            if dry_run:
-                logger.info(
-                    "[DRY-RUN] would write %s: published=%s last_modified=%s",
-                    cve_id,
-                    published,
-                    last_modified,
-                )
-                summary["backfilled"] += 1
-                continue
-
+            # Bugbot round 3 (PR #106, Medium): wrap the ENTIRE per-CVE
+            # processing path (MISP fetch + parse + extract + write) in
+            # a single try/except so an unexpected exception on ONE CVE
+            # (e.g., MISP returning a non-dict ``attr`` object that
+            # ``.get()`` chokes on, or any other AttributeError /
+            # KeyError mid-processing) skips that CVE and continues
+            # with the next one — instead of crashing the whole ~100K-
+            # CVE backfill. Pre-N23-Bugbot-round-3 only the ``write_dates``
+            # call was protected; everything between MISP fetch and
+            # write was unprotected.
             try:
+                # Fetch the first attribute (NVD CVE events are single-attribute
+                # in EdgeGuard's MISP layout; first UUID is the one we want).
+                attr = misp.get_attribute(attr_ids[0])
+                if attr is None:
+                    summary["no_misp_attr"] += 1
+                    continue
+
+                nvd_meta = parse_nvd_meta(attr.get("comment", ""))
+                if not nvd_meta:
+                    summary["no_nvd_meta"] += 1
+                    continue
+
+                published, last_modified = extract_dates(nvd_meta)
+                if not published and not last_modified:
+                    summary["no_dates_in_meta"] += 1
+                    continue
+
+                if dry_run:
+                    logger.info(
+                        "[DRY-RUN] would write %s: published=%s last_modified=%s",
+                        cve_id,
+                        published,
+                        last_modified,
+                    )
+                    summary["backfilled"] += 1
+                    continue
+
                 with neo4j_driver.session() as session:
                     write_dates(session, cve_id, published, last_modified)
                 summary["backfilled"] += 1
             except Exception as e:
-                logger.error("Failed to write %s: %s", cve_id, e)
+                # Per-CVE error containment. Logs with cve_id so
+                # operator can spot-check the offending node + decide
+                # whether to investigate or accept the skip.
+                logger.error("Failed to process %s: %s: %s", cve_id, type(e).__name__, e)
                 summary["errors"] += 1
 
         # Progress summary after each batch.
@@ -523,8 +536,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.batch_size <= 0 or args.rate_limit <= 0:
+        # ``parser.error`` internally calls ``sys.exit(2)`` and never
+        # returns — so a ``return 2`` after it would be dead code.
+        # Bugbot round 3 (PR #106, Low) flagged the dead-code shape.
         parser.error("--batch-size and --rate-limit must be positive")
-        return 2
 
     # Read env early so missing creds fail fast
     # NEO4J_URI defaults to localhost; NEO4J_USER defaults to "neo4j"
@@ -553,12 +568,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("  MISP URL:  %s", misp_url)
     logger.info("  Batch:     %d candidates / rate-limit %s req/s", args.batch_size, args.rate_limit)
 
-    # Connect to Neo4j
+    # Connect to Neo4j.
+    #
+    # Bugbot round 3 (PR #106, Low): pre-fix the ``except`` returned 1
+    # without closing the driver if ``GraphDatabase.driver(...)``
+    # SUCCEEDED but ``verify_connectivity()`` then raised. The driver
+    # holds a connection pool — leaking it accumulates sockets across
+    # repeated retries. Fix: split into two stages so a failure on
+    # connectivity-check correctly closes the half-initialized driver
+    # before returning.
     try:
         driver = GraphDatabase.driver(neo4j_uri, auth=(neo4j_user, neo4j_password))
+    except Exception as e:
+        logger.error("Neo4j driver init failed: %s", e)
+        return 1
+    try:
         driver.verify_connectivity()
     except Exception as e:
-        logger.error("Neo4j connection failed: %s", e)
+        logger.error("Neo4j connectivity check failed: %s", e)
+        driver.close()
         return 1
 
     misp = MispClient(misp_url, misp_api_key, ssl_verify=ssl_verify)

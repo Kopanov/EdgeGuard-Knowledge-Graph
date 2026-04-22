@@ -475,3 +475,68 @@ class TestBugbotRound2Fixes:
         # Dict payload → passes through
         result = backfill_module.parse_nvd_meta('NVD_META:{"published":"2021-01-01"}')
         assert result == {"published": "2021-01-01"}
+
+
+# ===========================================================================
+# Bugbot round 3 (PR #106) — 3 NEW findings addressed
+# ===========================================================================
+
+
+class TestBugbotRound3Fixes:
+    """Bugbot's review of round 2 fix commit flagged 3 new real bugs:
+    - LOW: unreachable dead code after parser.error()
+    - LOW: Neo4j driver not closed on connectivity check failure
+    - MEDIUM: per-CVE MISP parsing errors crash entire backfill
+    """
+
+    def _src(self) -> str:
+        return BACKFILL_SCRIPT.read_text()
+
+    def test_no_dead_return_after_parser_error(self):
+        """LOW: ``parser.error()`` calls ``sys.exit(2)`` and never
+        returns, so a ``return 2`` after it is unreachable dead code."""
+        src = self._src()
+        # The pre-fix shape: parser.error followed immediately by return 2
+        bad_pattern = 'parser.error("--batch-size and --rate-limit must be positive")\n        return 2'
+        assert bad_pattern not in src, (
+            "dead ``return 2`` after parser.error() — parser.error internally "
+            "calls sys.exit(2); the return statement is unreachable. "
+            "Bugbot round 3, PR #106, Low severity."
+        )
+
+    def test_driver_closed_on_connectivity_check_failure(self):
+        """LOW: pre-fix had ``try { driver=...; verify_connectivity() }
+        except: return 1`` — if driver init succeeded but verify
+        FAILED, the half-initialized driver leaked its connection pool."""
+        src = self._src()
+        # The fix splits driver init and verify_connectivity into
+        # two separate try blocks; the second (verify) closes the
+        # driver before returning 1.
+        verify_pos = src.find("driver.verify_connectivity()")
+        assert verify_pos != -1, "must call verify_connectivity"
+        block = src[verify_pos : verify_pos + 1000]
+        assert "driver.close()" in block, (
+            "verify_connectivity exception handler must call driver.close() "
+            "to release the connection pool before returning. "
+            "Bugbot round 3, PR #106, Low severity."
+        )
+
+    def test_per_cve_errors_dont_crash_run(self):
+        """MEDIUM: pre-fix only wrapped the ``write_dates`` call in
+        try/except. An exception during ``misp.get_attribute``,
+        ``parse_nvd_meta``, or ``extract_dates`` would crash the whole
+        ~100K-CVE backfill run instead of skipping that CVE."""
+        src = self._src()
+        # The misp.get_attribute call MUST be inside a try block.
+        loop_anchor = "for row in candidates:"
+        loop_pos = src.find(loop_anchor)
+        assert loop_pos != -1
+        loop_body = src[loop_pos : loop_pos + 4000]
+        try_pos = loop_body.find("            try:")
+        misp_pos = loop_body.find("misp.get_attribute(")
+        assert try_pos != -1 and misp_pos != -1, "loop must contain try + misp.get_attribute"
+        assert try_pos < misp_pos, (
+            "the per-CVE try/except must wrap misp.get_attribute (and the rest of "
+            "the per-CVE processing path), not just write_dates. "
+            "Bugbot round 3, PR #106, Medium severity."
+        )
