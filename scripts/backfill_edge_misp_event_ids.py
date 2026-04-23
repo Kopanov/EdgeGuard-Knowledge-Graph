@@ -152,8 +152,8 @@ PATTERNS: List[Tuple[str, str, str]] = [
              SET r.misp_event_ids = shared',
             {batchSize: $batch_size, parallel: false}
         )
-        YIELD batches, total, errorMessages
-        RETURN batches, total, errorMessages
+        YIELD batches, total, committedOperations, errorMessages
+        RETURN batches, total, committedOperations, errorMessages
         """,
     ),
     (
@@ -174,8 +174,8 @@ PATTERNS: List[Tuple[str, str, str]] = [
             'SET r.misp_event_ids = i.misp_event_ids',
             {batchSize: $batch_size, parallel: false}
         )
-        YIELD batches, total, errorMessages
-        RETURN batches, total, errorMessages
+        YIELD batches, total, committedOperations, errorMessages
+        RETURN batches, total, committedOperations, errorMessages
         """,
     ),
     (
@@ -194,8 +194,8 @@ PATTERNS: List[Tuple[str, str, str]] = [
             'SET r.misp_event_ids = i.misp_event_ids',
             {batchSize: $batch_size, parallel: false}
         )
-        YIELD batches, total, errorMessages
-        RETURN batches, total, errorMessages
+        YIELD batches, total, committedOperations, errorMessages
+        RETURN batches, total, committedOperations, errorMessages
         """,
     ),
     (
@@ -214,8 +214,8 @@ PATTERNS: List[Tuple[str, str, str]] = [
             'SET r.misp_event_ids = i.misp_event_ids',
             {batchSize: $batch_size, parallel: false}
         )
-        YIELD batches, total, errorMessages
-        RETURN batches, total, errorMessages
+        YIELD batches, total, committedOperations, errorMessages
+        RETURN batches, total, committedOperations, errorMessages
         """,
     ),
     (
@@ -236,8 +236,8 @@ PATTERNS: List[Tuple[str, str, str]] = [
             'SET r.misp_event_ids = v.misp_event_ids',
             {batchSize: $batch_size, parallel: false}
         )
-        YIELD batches, total, errorMessages
-        RETURN batches, total, errorMessages
+        YIELD batches, total, committedOperations, errorMessages
+        RETURN batches, total, committedOperations, errorMessages
         """,
     ),
 ]
@@ -287,8 +287,17 @@ def get_driver() -> Driver:
 def run_pattern(
     driver, name: str, count_query: str, write_query: str, batch_size: int, dry_run: bool
 ) -> Dict[str, int]:
-    """Execute one pattern. Returns {gap, batches, written, errors}."""
-    out = {"gap": 0, "batches": 0, "written": 0, "errors": 0}
+    """Execute one pattern. Returns {gap, batches, written, scanned, errors}.
+
+    ``written`` = rows actually MUTATED (apoc.periodic.iterate
+    ``committedOperations``) — accurate post-backfill count.
+
+    ``scanned`` = INPUT rows consumed from the outer query (apoc ``total``).
+    For patterns with an inner-query filter (e.g. indicates_cooccurrence
+    skips rows where ``size(shared) == 0``), ``scanned > written``. The
+    delta is logged as ``filter-skipped`` so operators can see the exact
+    filter impact."""
+    out = {"gap": 0, "batches": 0, "written": 0, "scanned": 0, "errors": 0}
     with driver.session() as session:
         # Always run the count to give the operator a scope readout.
         result = session.run(count_query)
@@ -304,12 +313,27 @@ def run_pattern(
             logger.info("[%s] nothing to do", name)
             return out
 
-        # Apply the backfill. apoc.periodic.iterate returns batches/total/errorMessages.
+        # Apply the backfill. apoc.periodic.iterate YIELDS:
+        #   batches — number of inner-query transactions committed
+        #   total — INPUT rows consumed from the outer query (per-batch * batch_size)
+        #   committedOperations — rows actually MUTATED by the inner statement
+        #   errorMessages — map of error-class → count (non-empty = per-row errors)
+        #
+        # Bugbot round 1 LOW (2026-04-23, PR #109): the original PR-N26 code
+        # reported ``total`` as the "written" count. For patterns with an
+        # inner-query filter (indicates_cooccurrence has
+        # ``WHERE size(shared) > 0`` to skip empty intersections), ``total``
+        # OVERCOUNTS because it reflects rows consumed, not rows mutated.
+        # ``committedOperations`` is the accurate write count — report both
+        # so operators can see the filter-skip delta (= total - committed).
         write_result = session.run(write_query, batch_size=batch_size)
         write_record = write_result.single()
         if write_record:
             out["batches"] = int(write_record["batches"])
-            out["written"] = int(write_record["total"])
+            # Accurate count of edges actually MUTATED.
+            out["written"] = int(write_record["committedOperations"])
+            # Input rows consumed (includes filter-skipped).
+            out["scanned"] = int(write_record["total"])
             err_messages = write_record["errorMessages"] or {}
             # apoc.periodic.iterate returns errorMessages as a map; non-empty
             # = at least one batch had a per-row error. Surface so operator
@@ -319,11 +343,15 @@ def run_pattern(
                 out["errors"] = sum(int(v) for v in err_messages.values() if isinstance(v, (int, float))) or 1
                 logger.warning("[%s] %d batch errors: %s", name, out["errors"], err_messages)
 
+        scanned = out.get("scanned", out["written"])
+        skipped = scanned - out["written"] if scanned >= out["written"] else 0
         logger.info(
-            "[%s] backfilled %d edges across %d batches (errors=%d)",
+            "[%s] backfilled %d edges across %d batches (scanned=%d, filter-skipped=%d, errors=%d)",
             name,
             out["written"],
             out["batches"],
+            scanned,
+            skipped,
             out["errors"],
         )
     return out

@@ -101,7 +101,7 @@ from typing import Any, Optional
 
 import pendulum
 from airflow import DAG
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowSkipException
 
 # Airflow 3.x: BashOperator / PythonOperator / ShortCircuitOperator moved
 # from airflow-core into the ``apache-airflow-providers-standard`` package.
@@ -2339,11 +2339,32 @@ def assert_baseline_postconditions(**context):
                     "To debug: inspect the failed upstream task's log first.",
                     upstream_states,
                 )
-                # Exit cleanly without raising. The DAG run state is
-                # already FAILED via the upstream task; double-firing
-                # AirflowException here would just add noise to the
-                # operator's triage view.
-                return
+                # PR-N27 Bugbot round 1 (2026-04-23, HIGH): bare ``return``
+                # lands postcheck in state=SUCCESS, which DEFEATS PR-N26
+                # Fix A's intent. ``baseline_complete`` uses
+                # ``NONE_FAILED_MIN_ONE_SUCCESS`` which evaluates ONLY its
+                # direct parent (postcheck). If postcheck is SUCCESS,
+                # baseline_complete runs and echoes "BASELINE Complete!"
+                # on top of an upstream-failed run — the exact silent-
+                # success regression Fix A was supposed to eliminate.
+                #
+                # Fix: raise ``AirflowSkipException`` so postcheck lands
+                # as ``skipped``. Then baseline_complete's
+                # NONE_FAILED_MIN_ONE_SUCCESS evaluates: "no direct parent
+                # failed (skipped ≠ failed), at least one succeeded
+                # (skipped ≠ success — FALSE)" → baseline_complete also
+                # gets skipped → DAG correctly marked FAILED via the
+                # original upstream failure state. No double-fire of
+                # AirflowException, just a clean state-machine propagation.
+                raise AirflowSkipException(
+                    f"[BASELINE-POSTCHECK-SKIPPED] upstream failure propagation: "
+                    f"{upstream_states}. Postcheck skipped so downstream "
+                    "baseline_complete also skips and DAG reflects the true upstream failure."
+                )
+        except AirflowSkipException:
+            # Let the skip propagate through Airflow's state machine —
+            # don't swallow it in the broad ``except`` below.
+            raise
         except Exception as _ctx_err:
             # Context introspection is best-effort — if Airflow internals
             # change shape we don't want to BLOCK the invariant check that

@@ -322,6 +322,38 @@ class TestBackfillScriptStructure:
         text = _BACKFILL.read_text()
         assert "--only" in text, "backfill must support --only <pattern> for incremental rollout"
 
+    def test_backfill_reports_committed_operations_not_total(self):
+        """PR-N26 Bugbot round 1 LOW (2026-04-23): apoc.periodic.iterate's
+        ``total`` field reports INPUT rows consumed from the outer query, not
+        rows actually MUTATED by the inner statement. For patterns with an
+        inner-query filter (indicates_cooccurrence has
+        ``WHERE size(shared) > 0`` to skip empty intersections), ``total``
+        OVERCOUNTS. Operators re-running the script would see misleading
+        "backfilled N edges" reports when zero were actually modified.
+
+        Fix: YIELD ``committedOperations`` and report that as the written
+        count. ``total`` is kept as ``scanned`` so operators can see the
+        filter-skip delta."""
+        text = _BACKFILL.read_text()
+        # All 5 write queries must YIELD committedOperations.
+        committed_yield_count = text.count("YIELD batches, total, committedOperations, errorMessages")
+        assert committed_yield_count >= 5, (
+            f"all 5 write queries must YIELD committedOperations for accurate write counts; "
+            f"found only {committed_yield_count} occurrences. "
+            "See Bugbot round 1 LOW finding on PR #109."
+        )
+        # And the Python driver must read the field (not total).
+        assert 'write_record["committedOperations"]' in text, (
+            "Python driver must read write_record['committedOperations'] to report "
+            "accurate write counts, not write_record['total'] which overcounts"
+        )
+        # The operator log must surface both scanned + written so the delta
+        # (filter-skipped) is visible.
+        assert "filter-skipped" in text, (
+            "operator-facing log must surface the scanned vs written delta as "
+            "``filter-skipped`` so ops can see the filter impact without re-querying"
+        )
+
 
 # ===========================================================================
 # Section 4 — operator runbook exists and references the script
@@ -486,22 +518,53 @@ class TestPRN27PostcheckUpstreamFailedSentinel:
                 f"PR-N27 sentinel must enumerate upstream task_id={task_id!r} for state inspection"
             )
 
-    def test_postcheck_callable_exits_cleanly_on_upstream_failure(self):
-        """The sentinel must NOT raise AirflowException on upstream failure —
-        the DAG is already FAILED via the upstream task state; double-firing
-        would just add noise to operator triage. Pin: a ``return`` exists
-        between the upstream-state check and the invariant queries."""
+    def test_postcheck_callable_raises_airflow_skip_on_upstream_failure(self):
+        """PR-N27 Bugbot round 1 (HIGH): the sentinel must raise
+        ``AirflowSkipException`` (NOT bare ``return``) so postcheck lands in
+        state=skipped. Bare ``return`` would land state=SUCCESS, and
+        ``baseline_complete``'s ``NONE_FAILED_MIN_ONE_SUCCESS`` trigger rule
+        (which evaluates only direct parents) would see postcheck SUCCESS
+        and still run — echoing "BASELINE Complete!" on a failed upstream
+        run. Exact silent-success regression Fix A was meant to eliminate.
+
+        Fix: AirflowSkipException propagates cleanly — postcheck SKIPPED
+        → baseline_complete sees "no direct-parent success" → also SKIPPED
+        → DAG correctly FAILED via the original upstream."""
         text = self.DAG_FILE.read_text()
-        # Find the sentinel block and verify the exit-cleanly behaviour
+        # Must import AirflowSkipException alongside AirflowException
+        assert "AirflowSkipException" in text, (
+            "dags/edgeguard_pipeline.py must import AirflowSkipException (PR-N27 Bugbot round 1 fix)"
+        )
+        # The sentinel must raise it after the log line
         idx = text.find("[BASELINE-POSTCHECK-SKIPPED]")
         assert idx != -1, "[BASELINE-POSTCHECK-SKIPPED] log token missing"
-        # Within ~1500 chars after the log line, we expect a bare ``return``
-        # that exits the function before AirflowException can fire.
-        block = text[idx : idx + 1500]
-        assert "\n                return\n" in block or "\n            return\n" in block, (
-            "PR-N27 sentinel must exit via a bare ``return`` after logging "
-            "[BASELINE-POSTCHECK-SKIPPED] — must NOT raise AirflowException "
-            "on top of an already-failed upstream"
+        block = text[idx : idx + 2000]
+        assert "raise AirflowSkipException" in block, (
+            "PR-N27 sentinel must ``raise AirflowSkipException`` after logging "
+            "[BASELINE-POSTCHECK-SKIPPED]. A bare ``return`` lands postcheck in "
+            "SUCCESS state, which defeats the PR-N26 Fix A contract "
+            "(baseline_complete still runs because its direct parent is SUCCESS). "
+            "AirflowSkipException correctly propagates as SKIPPED."
+        )
+
+    def test_airflow_skip_exception_not_swallowed_by_broad_except(self):
+        """Defensive: the broad ``except Exception`` around the
+        introspection block must NOT swallow AirflowSkipException (which
+        inherits from BaseException in modern Airflow but is sometimes
+        a subclass of Exception). Pin an explicit ``except AirflowSkipException:
+        raise`` clause ahead of the broad handler."""
+        text = self.DAG_FILE.read_text()
+        idx = text.find("[BASELINE-POSTCHECK-SKIPPED]")
+        assert idx != -1
+        # The ordering must be:
+        #   raise AirflowSkipException(...)
+        #   except AirflowSkipException: raise
+        #   except Exception as _ctx_err: log-and-continue
+        block = text[idx : idx + 2000]
+        assert "except AirflowSkipException:" in block, (
+            "PR-N27 sentinel must explicitly re-raise AirflowSkipException "
+            "so the broad ``except Exception`` below doesn't swallow it as "
+            "an introspection failure"
         )
 
     def test_postcheck_callable_handles_introspection_failure_gracefully(self):
