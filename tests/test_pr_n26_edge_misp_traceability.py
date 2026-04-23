@@ -370,16 +370,151 @@ class TestBaselineCompleteTriggerRule:
             "upstream task (sync / build_rels / enrichment / postcheck) fails."
         )
 
-    def test_postcheck_still_uses_none_failed_min_one_success(self):
-        """PR-N24 H2 already flipped the postcheck. Pin it stays that way —
-        a future refactor that reverts postcheck to ALL_SUCCESS would
-        re-introduce the "diagnostics skipped on partial failure" bug."""
+    def test_postcheck_uses_all_done_with_sentinel(self):
+        """PR-N26 Fix A pinned this as ``NONE_FAILED_MIN_ONE_SUCCESS`` (PR-N24 H2).
+        PR-N27 (Bravo's 2026-04-23 post-mortem) discovered that semantics
+        STILL skipped postcheck when ``full_neo4j_sync`` failed entirely
+        (downstream all upstream_failed → no upstream succeeded). PR-N27
+        flipped postcheck to ``ALL_DONE`` + added an upstream-state sentinel
+        inside the callable. Pin the new state."""
         dag_src = (REPO_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
-        idx = dag_src.find('task_id="baseline_postcheck"')
+        idx = dag_src.find("baseline_postcheck_task = PythonOperator")
         assert idx != -1
-        block = dag_src[idx : idx + 600]
-        assert "TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS" in block, (
-            "baseline_postcheck must keep trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS (PR-N24 H2)"
+        block = dag_src[idx : idx + 2500]
+        assert "TriggerRule.ALL_DONE" in block, "baseline_postcheck must use trigger_rule=ALL_DONE (PR-N27)"
+        # And the callable must have the upstream-state sentinel
+        assert "BASELINE-POSTCHECK-SKIPPED" in dag_src, (
+            "PR-N27 callable sentinel ([BASELINE-POSTCHECK-SKIPPED] log token) is missing"
+        )
+
+
+class TestPRN28PlaceholderRejectionsNotErrors:
+    """PR-N28 (Bravo's 2026-04-23 post-mortem): in
+    ``src/run_misp_to_neo4j.py::_sync_to_neo4j_chunk``, PR-N10
+    placeholder-name rejections (Malware/ThreatActor name == "unknown"/N/A/etc)
+    must NOT increment the ``errors`` counter. They're tracked separately
+    in ``self.stats["placeholder_rejections"]`` and surfaced in the sync
+    summary log so 4 defensive rejections don't fail the entire baseline."""
+
+    SRC_FILE = REPO_ROOT / "src" / "run_misp_to_neo4j.py"
+
+    def test_imports_is_placeholder_name(self):
+        text = self.SRC_FILE.read_text()
+        assert "from node_identity import is_placeholder_name" in text, (
+            "run_misp_to_neo4j.py must import is_placeholder_name to pre-check placeholder rejections (PR-N28)"
+        )
+
+    def test_malware_loop_uses_placeholder_pre_check(self):
+        text = self.SRC_FILE.read_text()
+        # The malware sync loop must call is_placeholder_name(raw_name)
+        # before incrementing errors. Anchor on the [MERGE-PLACEHOLDER-REJECTED]
+        # log token introduced by PR-N28.
+        assert "[MERGE-PLACEHOLDER-REJECTED] Malware" in text, (
+            "PR-N28 malware loop must emit [MERGE-PLACEHOLDER-REJECTED] log token "
+            "for placeholder names (instead of [MERGE-RETURNED-FALSE] which incremented errors)"
+        )
+
+    def test_actor_loop_uses_placeholder_pre_check(self):
+        text = self.SRC_FILE.read_text()
+        assert "[MERGE-PLACEHOLDER-REJECTED] ThreatActor" in text, (
+            "PR-N28 actor loop must emit [MERGE-PLACEHOLDER-REJECTED] log token for placeholder names"
+        )
+
+    def test_placeholder_rejections_tracked_in_stats(self):
+        text = self.SRC_FILE.read_text()
+        assert 'self.stats["placeholder_rejections"]' in text, (
+            "PR-N28 must track placeholder rejections in self.stats so they can "
+            "be surfaced in the sync summary log without conflating with errors"
+        )
+
+    def test_sync_summary_logs_placeholder_rejections(self):
+        text = self.SRC_FILE.read_text()
+        # The sync summary log must mention placeholder rejections separately
+        # so operators can see them without grepping per-event logs.
+        assert "Placeholder-name rejections" in text, (
+            "sync summary log must surface placeholder_rejections count separately "
+            "from total_errors so the operator can distinguish defensive rejects "
+            "from real failures"
+        )
+
+    def test_placeholder_rejections_do_not_increment_errors(self):
+        """Behavioural pin via AST inspection: in the malware/actor branches,
+        the ``[MERGE-PLACEHOLDER-REJECTED]`` block must use ``continue`` (skip
+        the rest of the loop body) rather than fall through to ``errors += 1``."""
+        text = self.SRC_FILE.read_text()
+        # Find the malware placeholder rejected block
+        idx = text.find("[MERGE-PLACEHOLDER-REJECTED] Malware")
+        assert idx != -1
+        # Within ~600 chars after the log line, we expect:
+        #   - increment placeholder_rejections
+        #   - call merge_malware (defense-in-depth metric increment)
+        #   - continue (skip the rest of the loop)
+        block = text[idx : idx + 1000]
+        assert "continue" in block, (
+            "PR-N28 placeholder block must use ``continue`` to skip the rest of "
+            "the loop iteration — otherwise it falls through to the merge-returned-False "
+            "branch which increments ``errors`` (the very bug PR-N28 closes)"
+        )
+
+
+class TestPRN27PostcheckUpstreamFailedSentinel:
+    """PR-N27 (Bravo's 2026-04-23 post-mortem follow-up): when an upstream
+    task fails, ``baseline_postcheck`` must emit a clean diagnostic instead
+    of being silently skipped (PR-N24 H2 trigger_rule semantics) OR
+    falsely firing INV-1/2/3 violations (which would be trivially true on
+    a half-filled graph for the wrong reason).
+
+    Implementation: trigger_rule=ALL_DONE so postcheck always runs; the
+    callable's sentinel inspects upstream task state via the Airflow context
+    and exits cleanly when an upstream task is in failed/upstream_failed/skipped
+    state, emitting a [BASELINE-POSTCHECK-SKIPPED] log token."""
+
+    DAG_FILE = REPO_ROOT / "dags" / "edgeguard_pipeline.py"
+
+    def test_postcheck_callable_inspects_dagrun_task_states(self):
+        text = self.DAG_FILE.read_text()
+        # Must reference get_dagrun + get_task_instance to look up upstream state
+        assert "get_dagrun" in text and "get_task_instance" in text, (
+            "PR-N27 sentinel must use ti.get_dagrun().get_task_instance(task_id) to inspect upstream task state"
+        )
+
+    def test_postcheck_callable_checks_known_upstream_task_ids(self):
+        text = self.DAG_FILE.read_text()
+        # The sentinel must enumerate the actual upstream task IDs in the chain
+        for task_id in ("full_neo4j_sync", "build_relationships", "run_enrichment_jobs"):
+            assert f'"{task_id}"' in text, (
+                f"PR-N27 sentinel must enumerate upstream task_id={task_id!r} for state inspection"
+            )
+
+    def test_postcheck_callable_exits_cleanly_on_upstream_failure(self):
+        """The sentinel must NOT raise AirflowException on upstream failure —
+        the DAG is already FAILED via the upstream task state; double-firing
+        would just add noise to operator triage. Pin: a ``return`` exists
+        between the upstream-state check and the invariant queries."""
+        text = self.DAG_FILE.read_text()
+        # Find the sentinel block and verify the exit-cleanly behaviour
+        idx = text.find("[BASELINE-POSTCHECK-SKIPPED]")
+        assert idx != -1, "[BASELINE-POSTCHECK-SKIPPED] log token missing"
+        # Within ~1500 chars after the log line, we expect a bare ``return``
+        # that exits the function before AirflowException can fire.
+        block = text[idx : idx + 1500]
+        assert "\n                return\n" in block or "\n            return\n" in block, (
+            "PR-N27 sentinel must exit via a bare ``return`` after logging "
+            "[BASELINE-POSTCHECK-SKIPPED] — must NOT raise AirflowException "
+            "on top of an already-failed upstream"
+        )
+
+    def test_postcheck_callable_handles_introspection_failure_gracefully(self):
+        """Defensive: if Airflow context introspection itself fails (API
+        change / missing field), the sentinel must log and continue to
+        the invariant checks rather than block them."""
+        text = self.DAG_FILE.read_text()
+        # The sentinel must be wrapped in try/except that logs the error
+        # and continues — find the warning log token.
+        assert "upstream-state introspection failed" in text, (
+            "PR-N27 sentinel must gracefully handle Airflow context-introspection "
+            "failures (try/except around get_dagrun/get_task_instance) and continue "
+            "to the invariant checks rather than block them"
         )
 
 

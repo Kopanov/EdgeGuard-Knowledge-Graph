@@ -2294,8 +2294,65 @@ def assert_baseline_postconditions(**context):
       [INV-3] Source > 0.
         Bootstrap created the Source nodes. Zero Sources means
         ``ensure_sources()`` never ran.
+
+    PR-N27 (Bravo's 2026-04-23 post-mortem follow-up): pre-N27 the task
+    was gated by ``trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS`` (PR-N24 H2)
+    which works for partial enrichment failures BUT NOT for upstream sync
+    failures. When ``full_neo4j_sync`` failed entirely, ALL downstream
+    tasks were ``upstream_failed`` and postcheck was silently skipped —
+    operators couldn't tell "Campaign=0 because invariant violated" from
+    "Campaign=0 because enrichment never ran". Now ``ALL_DONE`` + the
+    sentinel below: postcheck always runs, detects upstream-failed state,
+    emits a clean diagnostic, and exits without double-firing.
     """
     from neo4j_client import Neo4jClient
+
+    # PR-N27 sentinel: detect upstream-failed state and emit a clean
+    # operator-facing diagnostic instead of running invariants on a
+    # half-filled graph (which would trivially fire INV-1/2/3 with
+    # misleading messages — the cause is upstream, not a real breach).
+    ti = context.get("task_instance")
+    if ti is not None:
+        try:
+            dag_run = ti.get_dagrun()
+            upstream_states: dict[str, str] = {}
+            for upstream_task_id in (
+                "full_neo4j_sync",
+                "build_relationships",
+                "run_enrichment_jobs",
+            ):
+                try:
+                    upstream_ti = dag_run.get_task_instance(upstream_task_id)
+                    upstream_states[upstream_task_id] = getattr(upstream_ti, "state", None) or "<missing>"
+                except Exception as _ti_err:
+                    upstream_states[upstream_task_id] = f"<lookup-failed:{type(_ti_err).__name__}>"
+
+            failed_or_skipped = {
+                k: v for k, v in upstream_states.items() if v in ("failed", "upstream_failed", "skipped")
+            }
+            if failed_or_skipped:
+                logger.error(
+                    "[BASELINE-POSTCHECK-SKIPPED] upstream task(s) did not succeed — "
+                    "invariants would be trivially violated for upstream reasons, NOT "
+                    "a real data-integrity breach. State table: %s. The DAG is already "
+                    "FAILED via upstream — no need to raise AirflowException here. "
+                    "To debug: inspect the failed upstream task's log first.",
+                    upstream_states,
+                )
+                # Exit cleanly without raising. The DAG run state is
+                # already FAILED via the upstream task; double-firing
+                # AirflowException here would just add noise to the
+                # operator's triage view.
+                return
+        except Exception as _ctx_err:
+            # Context introspection is best-effort — if Airflow internals
+            # change shape we don't want to BLOCK the invariant check that
+            # would have run anyway. Log and continue.
+            logger.warning(
+                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); running invariants anyway.",
+                type(_ctx_err).__name__,
+                _ctx_err,
+            )
 
     client = Neo4jClient()
     violations = []
@@ -2853,7 +2910,21 @@ baseline_postcheck_task = PythonOperator(
     task_id="baseline_postcheck",
     python_callable=assert_baseline_postconditions,
     execution_timeout=timedelta(minutes=10),
-    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    # PR-N24 H2 used NONE_FAILED_MIN_ONE_SUCCESS — handles partial enrichment
+    # failure (some sibling task failed but at least one succeeded). PR-N27
+    # (Bravo's 2026-04-23 post-mortem follow-up) discovered that semantics
+    # STILL silently skipped postcheck when ``full_neo4j_sync`` failed
+    # entirely (downstream all upstream_failed → no upstream succeeded →
+    # postcheck skipped). Operators couldn't distinguish "Campaign=0 because
+    # invariant violated" from "Campaign=0 because enrichment never ran".
+    #
+    # ALL_DONE makes postcheck always run; the new sentinel inside
+    # ``assert_baseline_postconditions`` detects upstream-failed state, emits
+    # a clean diagnostic ([BASELINE-POSTCHECK-SKIPPED] log token), and exits
+    # cleanly without double-firing AirflowException on top of an already-
+    # failed upstream. Net: operators always get a postcheck log line for
+    # every baseline run, regardless of upstream outcome.
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=baseline_dag,
 )
 

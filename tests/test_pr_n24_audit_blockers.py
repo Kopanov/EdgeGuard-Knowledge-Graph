@@ -620,32 +620,60 @@ class TestH1IsProductionEnvCentralized:
 
 
 class TestH2BaselinePostcheckTriggerRule:
-    """``baseline_postcheck_task`` must use ``NONE_FAILED_MIN_ONE_SUCCESS``
-    (not ``ALL_SUCCESS``) so the INV-2 / INV-3 invariant probes still
-    run after partial enrichment failure — exactly when operators most
-    need them to triage."""
+    """``baseline_postcheck_task`` evolution:
 
-    def test_postcheck_uses_none_failed_min_one_success(self):
+    * PR-N24 H2 flipped ``ALL_SUCCESS`` → ``NONE_FAILED_MIN_ONE_SUCCESS``
+      to handle PARTIAL enrichment failures (some sibling task failed
+      but at least one upstream succeeded).
+    * PR-N27 (Bravo's 2026-04-23 post-mortem) flipped to ``ALL_DONE``
+      to also handle TOTAL upstream failure (sync crash → all downstream
+      upstream_failed → no upstream succeeded → postcheck silently
+      skipped under N24 H2 semantics). New sentinel inside the callable
+      detects the upstream-failed state and emits a clean diagnostic
+      without double-firing AirflowException.
+
+    The N24-H2 spirit is preserved (postcheck runs in more cases than
+    ALL_SUCCESS allowed), it just goes one step further to also cover
+    the total-failure case Bravo found in production."""
+
+    def test_postcheck_uses_all_done(self):
         text = (DAGS / "edgeguard_pipeline.py").read_text()
         # Find the baseline_postcheck_task definition + check trigger_rule.
-        idx = text.find("baseline_postcheck_task")
+        idx = text.find("baseline_postcheck_task = PythonOperator")
         assert idx != -1, "baseline_postcheck_task not found in edgeguard_pipeline.py"
         # Scan forward ~3000 chars to find its trigger_rule kwarg.
         block = text[idx : idx + 3000]
-        assert "NONE_FAILED_MIN_ONE_SUCCESS" in block, (
-            "baseline_postcheck_task must use trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS "
-            "(post-N24 H2). Pre-N24 ALL_SUCCESS skipped the diagnostics on partial failure."
+        assert "TriggerRule.ALL_DONE" in block, (
+            "baseline_postcheck_task must use trigger_rule=ALL_DONE "
+            "(post-N27, Bravo's 2026-04-23 post-mortem). The callable's "
+            "PR-N27 sentinel handles upstream_failed state cleanly."
         )
 
     def test_postcheck_no_longer_uses_all_success(self):
         text = (DAGS / "edgeguard_pipeline.py").read_text()
-        idx = text.find("baseline_postcheck_task")
+        idx = text.find("baseline_postcheck_task = PythonOperator")
         block = text[idx : idx + 3000]
         # The pre-N24 shape must NOT remain on the postcheck task.
         # (ALL_SUCCESS may still be the default for OTHER tasks — only
         # check inside the baseline_postcheck_task definition window.)
         assert "trigger_rule=TriggerRule.ALL_SUCCESS" not in block, (
             "baseline_postcheck_task must not use ALL_SUCCESS trigger_rule"
+        )
+
+    def test_postcheck_callable_has_upstream_failed_sentinel(self):
+        """PR-N27: the callable must check upstream task states and
+        emit a clean ``[BASELINE-POSTCHECK-SKIPPED]`` log line when an
+        upstream task failed, instead of trying to run invariants on a
+        half-filled graph (which would trivially fire for the wrong reason)."""
+        text = (DAGS / "edgeguard_pipeline.py").read_text()
+        assert "BASELINE-POSTCHECK-SKIPPED" in text, (
+            "assert_baseline_postconditions must emit a [BASELINE-POSTCHECK-SKIPPED] "
+            "log line when upstream task(s) failed (PR-N27 sentinel for ALL_DONE)"
+        )
+        # Must check task_instance state for upstream tasks
+        assert "upstream_failed" in text and "get_dagrun" in text, (
+            "PR-N27 sentinel must inspect upstream task state via "
+            "context['task_instance'].get_dagrun().get_task_instance(task_id).state"
         )
 
 
