@@ -331,6 +331,58 @@ class TestBackfillScriptStructure:
 _RUNBOOK = MIGRATIONS / "2026_05_edge_misp_event_ids_backfill_runbook.md"
 
 
+class TestBaselineCompleteTriggerRule:
+    """PR-N26 Fix A (Bravo's 2026-04-23 post-mortem): ``baseline_complete``
+    must NOT use ``trigger_rule=ALL_DONE``. That rationale (PR #35 "always
+    emit end-of-run marker") directly undermined the PR-N21 invariant-check
+    contract: postcheck raises AirflowException on Campaign=0 but ALL_DONE
+    on the final task let baseline_complete emit "BASELINE Complete!" to
+    stdout anyway → silent-success regression.
+
+    Fix: ``NONE_FAILED_MIN_ONE_SUCCESS`` — the final marker runs only when
+    everything upstream succeeded, making upstream failures + invariant
+    violations correctly propagate to the DAG-run state."""
+
+    def test_baseline_complete_does_not_use_all_done(self):
+        """ALL_DONE on the final task breaks the PR-N21 invariant-check
+        semantics: postcheck can intentionally raise, but ALL_DONE means
+        the 'Complete!' echo fires anyway."""
+        dag_src = (REPO_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
+        idx = dag_src.find('task_id="baseline_complete"')
+        assert idx != -1, "baseline_complete task not found in edgeguard_pipeline.py"
+        # Scan forward ~3000 chars (well past the BashOperator block) for
+        # the trigger_rule kwarg.
+        block = dag_src[idx : idx + 3000]
+        assert "TriggerRule.ALL_DONE" not in block, (
+            "baseline_complete must NOT use trigger_rule=ALL_DONE — that "
+            "rationale (PR #35) produces a silent-success regression when "
+            "postcheck raises AirflowException on invariant violations. "
+            "Use NONE_FAILED_MIN_ONE_SUCCESS (PR-N26 Fix A)."
+        )
+
+    def test_baseline_complete_uses_none_failed_min_one_success(self):
+        dag_src = (REPO_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
+        idx = dag_src.find('task_id="baseline_complete"')
+        block = dag_src[idx : idx + 3000]
+        assert "TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS" in block, (
+            "baseline_complete must use trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS "
+            "(PR-N26 Fix A) so the DAG is correctly marked FAILED when an "
+            "upstream task (sync / build_rels / enrichment / postcheck) fails."
+        )
+
+    def test_postcheck_still_uses_none_failed_min_one_success(self):
+        """PR-N24 H2 already flipped the postcheck. Pin it stays that way —
+        a future refactor that reverts postcheck to ALL_SUCCESS would
+        re-introduce the "diagnostics skipped on partial failure" bug."""
+        dag_src = (REPO_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
+        idx = dag_src.find('task_id="baseline_postcheck"')
+        assert idx != -1
+        block = dag_src[idx : idx + 600]
+        assert "TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS" in block, (
+            "baseline_postcheck must keep trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS (PR-N24 H2)"
+        )
+
+
 class TestRunbookExists:
     def test_runbook_file_exists(self):
         assert _RUNBOOK.exists(), f"operator runbook missing at {_RUNBOOK}"

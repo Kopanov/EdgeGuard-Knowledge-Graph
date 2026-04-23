@@ -2874,11 +2874,36 @@ baseline_complete = BashOperator(
         echo "=========================================="
     """,
     execution_timeout=timedelta(minutes=5),
-    # PR #35: ALL_DONE — the "complete" marker should ALWAYS run so the
-    # operator gets a clear "baseline finished" signal in the logs even
-    # if some upstream task failed. Useful when scrolling through Airflow
-    # logs to see "did the run terminate gracefully or hang?"
-    trigger_rule=TriggerRule.ALL_DONE,
+    # PR #35 ORIGINALLY used ``ALL_DONE`` — the rationale was "the 'complete'
+    # marker should always run so the operator gets a clear end-of-run signal
+    # in the logs even if some upstream task failed." That rationale was
+    # reasonable in isolation but turned out to DIRECTLY UNDERMINE the
+    # PR-N21 invariant-check contract: ``baseline_postcheck_task`` uses
+    # ``raise AirflowException`` on Campaign=0 / Indicator=0 etc. to FAIL
+    # the DAG on silent data loss. With ``ALL_DONE`` on ``baseline_complete``,
+    # the final task still emitted "BASELINE Complete!" to stdout even on
+    # invariant violation, producing the exact "silent success" pattern we
+    # had audited to eliminate.
+    #
+    # PR-N26 follow-up (Bravo's 2026-04-23 post-mortem on the 2026-04-22
+    # 21:56 UTC run): the cloud-Neo4j Campaign=0 finding was diagnosed as
+    # an upstream ``full_neo4j_sync`` failure (4 alienvault_otx placeholder
+    # MERGE-REJECTs bubbled up as a task exception) that left every
+    # downstream task in ``upstream_failed`` state — but ``baseline_complete``
+    # fired anyway under ALL_DONE, making the whole DAG run look green in
+    # one common monitoring view (final-task-state dashboards).
+    #
+    # Fix: ``NONE_FAILED_MIN_ONE_SUCCESS``. The task now only runs when
+    # everything upstream succeeded — so:
+    #   * Happy path: postcheck SUCCESS → baseline_complete runs → DAG SUCCESS
+    #   * Sync failed: downstream upstream_failed → baseline_complete SKIPPED → DAG FAILED
+    #   * Invariant failed: postcheck FAILED → baseline_complete SKIPPED → DAG FAILED
+    #
+    # Trade-off: on failed runs the bash echo is no longer emitted. Operators
+    # should rely on the Airflow UI (task-state view) for "did it finish?",
+    # not on grepping for the echo. The UI makes failure visible; the echo
+    # was just a nice-to-have that turned out to be a correctness regression.
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 
