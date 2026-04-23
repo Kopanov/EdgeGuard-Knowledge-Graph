@@ -2315,12 +2315,23 @@ def assert_baseline_postconditions(**context):
     if ti is not None:
         try:
             dag_run = ti.get_dagrun()
+            # PR-N26 multi-agent audit Cross-Checker LOW-2 + Maintainer M2
+            # (2026-04-23): originally enumerated a hardcoded list
+            # ``("full_neo4j_sync", "build_relationships", "run_enrichment_jobs")``.
+            # If a future PR inserts a 4th task into the chain, the sentinel
+            # silently misses its failure. Switch to ``ti.task.get_flat_relatives(
+            # upstream=True)`` which traverses the DAG topology dynamically
+            # — covers transitively-upstream tasks, not just direct parents.
+            #
+            # Edge case: ``get_flat_relatives`` returns Task objects (not
+            # task_ids); we map ``.task_id`` to look up state via dag_run.
+            # If the API changes shape (rare; this surface is stable), the
+            # outer ``except Exception`` falls through to the log-and-continue
+            # path which still runs invariants. Defense-in-depth.
+            upstream_tasks = ti.task.get_flat_relatives(upstream=True)
             upstream_states: dict[str, str] = {}
-            for upstream_task_id in (
-                "full_neo4j_sync",
-                "build_relationships",
-                "run_enrichment_jobs",
-            ):
+            for upstream_task in upstream_tasks:
+                upstream_task_id = upstream_task.task_id
                 try:
                     upstream_ti = dag_run.get_task_instance(upstream_task_id)
                     upstream_states[upstream_task_id] = getattr(upstream_ti, "state", None) or "<missing>"

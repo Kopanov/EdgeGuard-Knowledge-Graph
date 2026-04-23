@@ -181,7 +181,10 @@ Each entry: symptom → detection signal → remediation.
 
 ### 6. Placeholder-name MERGE spike (feed regression or attack)
 
-- **Symptom.** Growing volume of `[MERGE-REJECT]` WARN log lines;
+- **Symptom.** Growing volume of `[MERGE-REJECT]` WARN log lines OR
+  `[MERGE-PLACEHOLDER-REJECTED]` INFO log lines (the latter is the
+  PR-N28 sync-loop equivalent: per-event placeholder rejections that
+  are counted but no longer crash the sync — graph is SAFE);
   Malware / ThreatActor node count flatlined despite sync activity.
 - **Prom alert.** `EdgeGuardMergeRejectPlaceholderSpike` — warning
   (fires when `increase(edgeguard_merge_reject_placeholder_total[15m]) > 10` per (label, source)).
@@ -212,6 +215,37 @@ Each entry: symptom → detection signal → remediation.
      ```
   4. PR-N10's merge-time reject already blocked actual new writes —
      the graph is safe. Focus on WHY the collector started emitting.
+
+### 7. Baseline postcheck skipped due to upstream failure (PR-N27)
+
+- **Symptom.** Airflow `baseline_postcheck` task log contains a
+  `[BASELINE-POSTCHECK-SKIPPED]` ERROR line; postcheck task state =
+  `skipped` instead of `success` / `failed`.
+- **What it means.** An upstream task in the baseline chain
+  (`full_neo4j_sync`, `build_relationships`, or `run_enrichment_jobs`)
+  failed (or itself was upstream_failed / skipped). The PR-N27 sentinel
+  in `assert_baseline_postconditions` detected this state and raised
+  `AirflowSkipException` — INTENTIONALLY abstaining from running
+  invariants because they would trivially violate (Campaign=0,
+  Indicator=0, Source=0) for upstream reasons, NOT a real data-integrity
+  breach. The DAG is correctly marked FAILED via the original upstream
+  task state; `baseline_complete` is also skipped so the operator
+  doesn't see "BASELINE Complete!" on a failed run.
+- **What it does NOT mean.** It does NOT mean an invariant violation.
+  Don't investigate INV-1/2/3 (Campaign=0 etc.) as the root cause.
+- **Triage.**
+  1. Read the upstream-state table in the same log line:
+     `State table: {'full_neo4j_sync': 'failed', 'build_relationships':
+     'upstream_failed', ...}` — the FAILED entry is the actual cause.
+  2. Pull that task's log and triage from there.
+  3. If `full_neo4j_sync` failed with placeholder-rejection errors
+     (4-ish errors, all alienvault_otx-flavoured): pre-PR-N28 bug —
+     verify PR-N28 is deployed; placeholder rejections should now
+     surface as `[MERGE-PLACEHOLDER-REJECTED]` INFO logs and NOT crash
+     the sync.
+- **No alert needed.** The DAG-level FAILED state is already alerted
+  via `EdgeGuardDAGRunFailures`; `[BASELINE-POSTCHECK-SKIPPED]` is
+  documentation, not a separate-page-worthy event.
 
 ---
 

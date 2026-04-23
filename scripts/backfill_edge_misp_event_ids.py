@@ -74,9 +74,18 @@ export NEO4J_PASSWORD="<cloud-password>"
 
 | Var | Purpose |
 |---|---|
-| ``NEO4J_URI`` | Bolt URI |
-| ``NEO4J_PASSWORD`` | Neo4j password |
-| ``EDGEGUARD_SSL_VERIFY`` | (optional) ``true`` for strict TLS (default strict) |
+| ``NEO4J_URI`` | Bolt URI. Use ``bolt+s://`` for strict-TLS (system-CA trust); ``bolt+ssc://`` for self-signed; plain ``bolt://`` for unencrypted. |
+| ``NEO4J_PASSWORD`` | Neo4j password (read from env, never logged or echoed) |
+| ``NEO4J_USER`` | (optional) Neo4j user (default: ``neo4j``) |
+
+**Note on TLS:** TLS strictness is determined by the URI scheme, NOT by
+``EDGEGUARD_SSL_VERIFY``. Pre-PR-N26 audit (Red Team + Prod Readiness, 2026-04-23):
+the docstring previously claimed the env var was honored, but
+``get_driver()`` does not consult it (the rest of the codebase honors it
+via ``config.edgeguard_ssl_verify_from_env``, but this one-shot operator
+script delegates to neo4j-driver's URI-scheme defaults). For a
+self-signed cloud-staging instance use ``bolt+ssc://``; for production
+use ``bolt+s://``.
 
 ## Exit codes
 
@@ -101,6 +110,23 @@ import sys
 from typing import Dict, List, Tuple
 
 from neo4j import Driver, GraphDatabase
+
+# PR-N26 multi-agent audit Prod Readiness HIGH-2 (2026-04-23): the
+# backfill writes to the same edges a running baseline would write. Without
+# a concurrency guard, both writers contend on relationship properties →
+# TX-timeout and lock-acquisition errors. ``is_baseline_running()`` checks
+# the sentinel ``checkpoints/baseline_in_progress.lock`` written by
+# ``src/baseline_lock.py``. Importable here because ``src/`` is on PYTHONPATH
+# in the operator's runbook environment (see runbook pre-flight section).
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+try:
+    from baseline_lock import is_baseline_running  # type: ignore[import-not-found]
+except ImportError:
+    # Fallback — if baseline_lock can't be imported (e.g. invoked from a
+    # non-repo working directory), the operator gets a warning and the
+    # check is skipped. The check is defense-in-depth, not a hard
+    # requirement; the runbook documents the manual pre-flight too.
+    is_baseline_running = None  # type: ignore[assignment]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -268,6 +294,16 @@ def parse_args() -> argparse.Namespace:
         choices=[name for name, _, _ in PATTERNS],
         help="Run only one specific pattern (for incremental rollout).",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Skip the baseline-concurrency pre-flight check. ONLY use if you've "
+            "manually verified no baseline is currently writing to the same edges "
+            "(e.g. against a non-prod cloud instance with no incremental DAGs). "
+            "Without this flag the script aborts if checkpoints/baseline_in_progress.lock exists."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -359,6 +395,32 @@ def run_pattern(
 
 def main() -> int:
     args = parse_args()
+
+    # PR-N26 multi-agent audit Prod Readiness HIGH-2: refuse to write
+    # while a baseline is in progress. Both writers contend on the same
+    # relationship properties (TARGETS/EXPLOITS/INDICATES/AFFECTS edges),
+    # which produces TX-timeout / lock-acquisition errors and leaves the
+    # cloud graph in a partially-merged state. ``--force`` bypasses the
+    # check (operator's responsibility to verify safety).
+    if not args.force and is_baseline_running is not None:
+        sentinel = is_baseline_running()
+        if sentinel is not None:
+            logger.error(
+                "[BACKFILL-CONCURRENCY-BLOCK] baseline is currently in progress "
+                "(sentinel=%s). Backfill writes to the same edges a baseline "
+                "would write. Refusing to run; pass --force to override (only "
+                "if you've manually verified safety).",
+                sentinel,
+            )
+            return 1
+    elif is_baseline_running is None:
+        logger.warning(
+            "[BACKFILL-CONCURRENCY-CHECK-SKIPPED] baseline_lock module could "
+            "not be imported (running outside repo root?). Operator MUST "
+            "manually verify no baseline is writing to the same Neo4j before "
+            "proceeding. See migrations/2026_05_edge_misp_event_ids_backfill_runbook.md."
+        )
+
     driver = get_driver()
 
     selected = [(n, c, w) for n, c, w in PATTERNS if args.only is None or n == args.only]

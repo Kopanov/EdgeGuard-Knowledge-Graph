@@ -40,6 +40,14 @@ The script is **pure Cypher** — no MISP API needed. It walks the existing grap
 ## Pre-flight checks
 
 ```bash
+# 0. Confirm no baseline is currently writing (PR-N26 audit Prod Readiness HIGH-2).
+# The script auto-checks this and refuses to run while the sentinel exists,
+# but verifying manually saves a round-trip if the sentinel is stale.
+test ! -f checkpoints/baseline_in_progress.lock || {
+    echo "Baseline in progress — backfill would contend on the same edges. ABORT."
+    exit 1
+}
+
 # 1. Confirm APOC is loaded on the target Neo4j
 echo "RETURN apoc.version();" | cypher-shell -a "$NEO4J_URI" -u neo4j
 

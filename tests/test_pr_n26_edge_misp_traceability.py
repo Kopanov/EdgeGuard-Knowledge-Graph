@@ -510,13 +510,31 @@ class TestPRN27PostcheckUpstreamFailedSentinel:
             "PR-N27 sentinel must use ti.get_dagrun().get_task_instance(task_id) to inspect upstream task state"
         )
 
-    def test_postcheck_callable_checks_known_upstream_task_ids(self):
+    def test_postcheck_callable_uses_dynamic_upstream_enumeration(self):
+        """PR-N26 multi-agent audit Cross-Checker LOW-2 + Maintainer M2
+        (2026-04-23): the sentinel originally enumerated a hardcoded list
+        ``("full_neo4j_sync", "build_relationships", "run_enrichment_jobs")``.
+        If a future PR inserts a 4th task into the chain, the sentinel
+        silently misses its failure. Switched to ``ti.task.get_flat_relatives(
+        upstream=True)`` which traverses the DAG topology dynamically."""
         text = self.DAG_FILE.read_text()
-        # The sentinel must enumerate the actual upstream task IDs in the chain
-        for task_id in ("full_neo4j_sync", "build_relationships", "run_enrichment_jobs"):
-            assert f'"{task_id}"' in text, (
-                f"PR-N27 sentinel must enumerate upstream task_id={task_id!r} for state inspection"
-            )
+        assert "ti.task.get_flat_relatives(upstream=True)" in text, (
+            "PR-N27 sentinel must enumerate upstream tasks dynamically via "
+            "``ti.task.get_flat_relatives(upstream=True)`` so future DAG-topology "
+            "changes don't silently bypass the upstream-failure check (PR-N26 "
+            "audit Cross-Checker + Maintainer corroboration)"
+        )
+        # Negative pin: the old hardcoded tuple must NOT remain.
+        # (We only fail on the EXACT tuple shape; individual task_ids may
+        # legitimately appear elsewhere in the file as task definitions.)
+        assert (
+            'for upstream_task_id in (\n                "full_neo4j_sync",\n'
+            '                "build_relationships",\n                "run_enrichment_jobs",\n'
+            "            ):"
+        ) not in text, (
+            "the old hardcoded upstream-task tuple must be removed in favour of "
+            "dynamic ``get_flat_relatives`` enumeration"
+        )
 
     def test_postcheck_callable_raises_airflow_skip_on_upstream_failure(self):
         """PR-N27 Bugbot round 1 (HIGH): the sentinel must raise
@@ -578,6 +596,91 @@ class TestPRN27PostcheckUpstreamFailedSentinel:
             "PR-N27 sentinel must gracefully handle Airflow context-introspection "
             "failures (try/except around get_dagrun/get_task_instance) and continue "
             "to the invariant checks rather than block them"
+        )
+
+
+class TestPRN26AuditFollowupFixes:
+    """PR-N26 multi-agent audit (2026-04-23) corroborated findings folded
+    into this PR. Each test pins one of the 4 in-scope follow-up fixes:
+
+    * **H1** — SSL_VERIFY drift (Red Team LOW-2 + Prod Readiness HIGH-1):
+      docstring previously claimed ``EDGEGUARD_SSL_VERIFY`` was honored,
+      but ``get_driver()`` doesn't consult it. Fixed by dropping the
+      claim + documenting that TLS strictness comes from the URI scheme
+      (``bolt+s://`` for strict, ``bolt+ssc://`` for self-signed).
+    * **H2** — backfill needs baseline-concurrency check (Prod Readiness
+      HIGH-2): refuse to write while a baseline is in progress (both
+      writers contend on the same edges → TX timeouts). Wired
+      ``is_baseline_running()`` from ``src/baseline_lock.py`` + ``--force``
+      override flag.
+    * **MED** — hardcoded upstream task IDs (Cross-Checker + Maintainer
+      + Bug Hunter, 3-agent corroboration): switched to
+      ``ti.task.get_flat_relatives(upstream=True)`` for dynamic enumeration.
+    * **LOW** — ``[BASELINE-POSTCHECK-SKIPPED]`` token not in RUNBOOK
+      (Maintainer + Prod Readiness): added Section 7 to ``docs/RUNBOOK.md``.
+    """
+
+    BACKFILL = REPO_ROOT / "scripts" / "backfill_edge_misp_event_ids.py"
+    RUNBOOK_DOC = REPO_ROOT / "docs" / "RUNBOOK.md"
+    BACKFILL_RUNBOOK = REPO_ROOT / "migrations" / "2026_05_edge_misp_event_ids_backfill_runbook.md"
+
+    def test_h1_ssl_verify_claim_dropped_from_backfill_docstring(self):
+        """H1: docstring no longer claims EDGEGUARD_SSL_VERIFY is honored."""
+        text = self.BACKFILL.read_text()
+        # The old docstring entry was: EDGEGUARD_SSL_VERIFY | (optional) `true`
+        # for strict TLS (default strict)
+        # Verify it's gone (the env-var name may still appear in the
+        # explanatory note that explains WHY it's not honored).
+        # Pin: there must be no "(optional) `true` for strict TLS" claim.
+        assert "(optional) ``true`` for strict TLS" not in text, (
+            "H1 (Red Team + Prod Readiness): backfill docstring must not claim "
+            "EDGEGUARD_SSL_VERIFY is honored — the script doesn't actually consult it. "
+            "TLS strictness comes from the URI scheme (bolt+s://)."
+        )
+        # Positive pin: the docstring now documents the URI scheme behavior
+        assert "bolt+s://" in text and "bolt+ssc://" in text, (
+            "H1 fix: docstring must document that TLS strictness comes from "
+            "the URI scheme (bolt+s:// strict, bolt+ssc:// self-signed)"
+        )
+
+    def test_h2_backfill_imports_baseline_lock_check(self):
+        """H2: backfill script must wire ``is_baseline_running`` from
+        ``src/baseline_lock.py`` so concurrent writes are blocked."""
+        text = self.BACKFILL.read_text()
+        assert "from baseline_lock import is_baseline_running" in text, (
+            "H2 (Prod Readiness): backfill must import is_baseline_running from "
+            "src/baseline_lock.py and refuse to run while a baseline is writing"
+        )
+        # Also verify the operator-facing log token is present
+        assert "[BACKFILL-CONCURRENCY-BLOCK]" in text, (
+            "H2 fix: backfill must emit [BACKFILL-CONCURRENCY-BLOCK] log token "
+            "when refusing to run due to active baseline"
+        )
+
+    def test_h2_backfill_has_force_override_flag(self):
+        """H2: must support ``--force`` to override the concurrency check
+        (operator's responsibility to verify safety on non-prod targets)."""
+        text = self.BACKFILL.read_text()
+        assert "--force" in text, "H2: backfill must support --force flag to override the concurrency check"
+
+    def test_h2_runbook_documents_concurrency_preflight(self):
+        text = self.BACKFILL_RUNBOOK.read_text()
+        assert "baseline_in_progress.lock" in text, (
+            "H2: runbook must document the baseline_in_progress.lock pre-flight check"
+        )
+
+    def test_low_runbook_documents_baseline_postcheck_skipped_token(self):
+        """LOW: ``[BASELINE-POSTCHECK-SKIPPED]`` token now indexed in RUNBOOK
+        so on-call who sees it knows what it means without git-grep."""
+        text = self.RUNBOOK_DOC.read_text()
+        assert "[BASELINE-POSTCHECK-SKIPPED]" in text, (
+            "LOW (Maintainer + Prod Readiness): docs/RUNBOOK.md must index the "
+            "[BASELINE-POSTCHECK-SKIPPED] token introduced by PR-N27 so on-call "
+            "operators can find it via grep"
+        )
+        # Section header mentioning postcheck (Section 7 per the fix):
+        assert "Baseline postcheck skipped" in text, (
+            "LOW: RUNBOOK section header must reference baseline postcheck skip scenario for greppability"
         )
 
 
