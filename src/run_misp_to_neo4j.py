@@ -1041,7 +1041,43 @@ class MISPToNeo4jSync:
                     page_result = misp.search(controller="events", **search_kwargs)
                     if not page_result:
                         break
-                    page_rows = list(page_result)
+                    # PR-N29 Bugbot round 2 (2026-04-24, MED): PyMISP can
+                    # return a list, ``{"response": [...]}``, or
+                    # ``{"errors": ...}`` depending on version + error path.
+                    # ``list(dict)`` would yield the dict's KEYS as bare
+                    # strings ("response", "errors") — those then go into
+                    # ``events`` and downstream normalize drops them all
+                    # to zero, with the loop logging "successful pagination."
+                    # Mirror the requests-restSearch branch's explicit
+                    # unwrap below.
+                    if isinstance(page_result, dict):
+                        if "errors" in page_result:
+                            logger.error(
+                                "[MISP-FETCH-FALLBACK] PyMISP page %d returned "
+                                "errors payload: %s — aborting fallback (%d good "
+                                "pages already collected).",
+                                page,
+                                page_result.get("errors"),
+                                page - 1,
+                            )
+                            raise RuntimeError(
+                                f"MISP fallback PyMISP errors on page {page}: {page_result.get('errors')}"
+                            )
+                        page_rows = page_result.get("response") or []
+                    elif isinstance(page_result, list):
+                        page_rows = page_result
+                    else:
+                        logger.error(
+                            "[MISP-FETCH-FALLBACK] PyMISP page %d returned "
+                            "unexpected payload type %s — aborting fallback.",
+                            page,
+                            type(page_result).__name__,
+                        )
+                        raise RuntimeError(
+                            f"MISP fallback PyMISP unexpected payload type on page {page}: {type(page_result).__name__}"
+                        )
+                    if not page_rows:
+                        break
                     events.extend(page_rows)
                     logger.info(
                         "[MISP-FETCH-FALLBACK] PyMISP page %d returned %d row(s)",
@@ -1092,10 +1128,33 @@ class MISPToNeo4jSync:
                     )
 
                     if response.status_code != 200:
-                        # Propagate to the existing error path below by
-                        # breaking out here with the partial ``events`` and
-                        # letting the downstream handler run.
-                        break
+                        # PR-N29 Bugbot round 2 (2026-04-24, MED): pre-fix
+                        # this was a silent ``break`` that kept the partial
+                        # events list and downstream logged "collected N
+                        # rows across M pages" as if successful. A non-200
+                        # mid-pagination is a REAL error (3 good pages + a
+                        # 500 on page 4 silently dropped 25% of the
+                        # baseline). The ``EdgeGuardSyncCoverageGap`` alert
+                        # doesn't catch this either because the index path
+                        # isn't in play in fallback. Raise so the operator
+                        # SEES the failure, can investigate WHY MISP 5xx'd
+                        # mid-pagination, and the partial data isn't taken
+                        # as ground truth.
+                        logger.error(
+                            "[MISP-FETCH-FALLBACK] restSearch HTTP %d on page %d "
+                            "after %d good pages (%d events collected). NOT silently "
+                            "truncating — re-raising so this surfaces as a sync error.",
+                            response.status_code,
+                            page,
+                            page - 1,
+                            len(events),
+                        )
+                        raise RuntimeError(
+                            f"MISP fallback restSearch HTTP {response.status_code} on "
+                            f"page {page} after {page - 1} good pages "
+                            f"({len(events)} events collected). Investigate MISP backend; "
+                            f"do NOT treat partial fallback as complete."
+                        )
                     page_data = response.json()
                     # ``events`` may be a raw list OR wrapped in {"response": [...]}
                     if isinstance(page_data, dict):

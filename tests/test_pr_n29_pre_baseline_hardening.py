@@ -165,6 +165,53 @@ class TestPRN29H3MispFetchFallbackPaginated:
             "PR-N29 H3: requests-restSearch branch must log per-page progress"
         )
 
+    def test_pymisp_dict_payload_handled_via_unwrap(self):
+        """PR-N29 Bugbot round 2 (MED): PyMISP can return a list,
+        ``{"response": [...]}``, or ``{"errors": ...}`` depending on
+        version + error path. ``list(dict)`` would yield the dict's KEYS
+        as bare strings — those would then go into ``events`` and
+        downstream normalize would drop them all to zero. Mirror the
+        requests-restSearch branch's explicit unwrap."""
+        text = self.SRC_FILE.read_text()
+        # Must check isinstance(page_result, dict) before list(page_result)
+        assert "isinstance(page_result, dict)" in text, (
+            "PR-N29 Bugbot round 2: PyMISP fallback must check dict shape "
+            "before list() to avoid silently containing dict keys as event rows"
+        )
+        # Must look up "response" key (PyMISP's wrapper convention)
+        assert 'page_result.get("response")' in text, (
+            "PR-N29 Bugbot round 2: PyMISP dict-shape unwrap must use "
+            'page_result.get("response") (mirrors requests-restSearch branch)'
+        )
+        # Must explicitly handle "errors" payload (raise, don't silently truncate)
+        assert '"errors" in page_result' in text, (
+            "PR-N29 Bugbot round 2: PyMISP dict-shape must surface errors payload "
+            "rather than silently producing zero events"
+        )
+
+    def test_non200_mid_pagination_raises_not_silent_break(self):
+        """PR-N29 Bugbot round 2 (MED): a non-200 response on any page
+        after the first MUST raise (or otherwise surface as a sync error)
+        rather than silently truncate with the partial events list. Pre-
+        fix the ``break`` on non-200 left a positive log line "collected
+        N row(s) across M pages" while having silently dropped 25%+ of
+        the baseline."""
+        text = self.SRC_FILE.read_text()
+        # Find the non-200 branch in the requests-restSearch fallback
+        idx = text.find("response.status_code != 200")
+        assert idx != -1, "non-200 check must exist in the fallback"
+        block = text[idx : idx + 2000]
+        # Must explicitly raise (not just break)
+        assert "raise RuntimeError" in block, (
+            "PR-N29 Bugbot round 2: non-200 mid-pagination must raise "
+            "(explicit error surface), NOT silently break with partial events"
+        )
+        # The error message must be operator-actionable
+        assert "good pages" in block, (
+            "PR-N29 Bugbot round 2: error message must report the good-pages "
+            "count so operators can quickly assess scope of partial fetch"
+        )
+
     def test_no_singleshot_limit_1000_in_fallback(self):
         """Negative pin: the pre-N29 single-shot ``limit: 1000`` shape
         must not remain alongside the pagination loop — that would be a
@@ -301,6 +348,42 @@ class TestPRN29L1PlaceholderUnicodeHardening:
         assert is_placeholder_name("unknown\u200f"), "RLM appended bypass"
         assert is_placeholder_name("\u200funknown"), "RLM prepended bypass"
         assert is_placeholder_name("un\u200fknown"), "RLM inline bypass"
+
+    def test_mongolian_vowel_separator_bypass_blocked(self):
+        """PR-N29 Bugbot round 2 (LOW): MONGOLIAN VOWEL SEPARATOR
+        (U+180E) is zero-width but NFKC does not fold it. Pre-fix it
+        bypassed the filter."""
+        from node_identity import is_placeholder_name
+
+        assert is_placeholder_name("unknown\u180e"), "U+180E appended bypass"
+        assert is_placeholder_name("\u180eunknown"), "U+180E prepended bypass"
+
+    def test_line_separator_bypass_blocked(self):
+        """PR-N29 Bugbot round 2 (LOW): U+2028 LINE SEPARATOR is not
+        always stripped by ``str.strip()`` and not folded by NFKC."""
+        from node_identity import is_placeholder_name
+
+        assert is_placeholder_name("unknown\u2028"), "U+2028 appended bypass"
+        assert is_placeholder_name("un\u2028known"), "U+2028 inline bypass"
+
+    def test_paragraph_separator_bypass_blocked(self):
+        """PR-N29 Bugbot round 2 (LOW): U+2029 PARAGRAPH SEPARATOR —
+        sibling of U+2028, same bypass class."""
+        from node_identity import is_placeholder_name
+
+        assert is_placeholder_name("unknown\u2029"), "U+2029 appended bypass"
+        assert is_placeholder_name("\u2029unknown"), "U+2029 prepended bypass"
+
+    def test_nbsp_bypass_blocked_via_nfkc_then_strip(self):
+        """NBSP U+00A0 isn't in the translate table but NFKC folds it
+        to a regular space, then ``str.strip()`` removes it. Verify the
+        ordering (translate → NFKC → strip) actually catches NBSP."""
+        from node_identity import is_placeholder_name
+
+        assert is_placeholder_name("unknown\u00a0"), (
+            "NBSP appended must be normalised + stripped (translate→NFKC→strip ordering)"
+        )
+        assert is_placeholder_name("\u00a0unknown"), "NBSP prepended"
 
     def test_genuine_malware_name_not_rejected(self):
         """Negative pin: a real malware name that happens to contain a

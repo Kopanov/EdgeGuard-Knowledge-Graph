@@ -535,6 +535,16 @@ _ZERO_WIDTH_AND_BIDI_CHARS = (
     "\u200f"  # RIGHT-TO-LEFT MARK (RLM)
     "\u2060"  # WORD JOINER
     "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
+    # PR-N29 Bugbot round 2 (2026-04-24, LOW): non-standard whitespace/
+    # separator chars that ``str.strip()`` does NOT remove and that NFKC
+    # does NOT fold to a regular space. Without these in the translate
+    # table, an attacker can bypass the filter with e.g.
+    # ``"unknown\u180e"`` or ``"unknown\u2028"``. (NBSP U+00A0 is already
+    # handled because NFKC folds it to a regular space, then strip()
+    # removes it — but ONLY thanks to the translate→NFKC→strip ordering.)
+    "\u180e"  # MONGOLIAN VOWEL SEPARATOR (zero-width; not folded by NFKC)
+    "\u2028"  # LINE SEPARATOR (not stripped by str.strip on all platforms)
+    "\u2029"  # PARAGRAPH SEPARATOR (same)
     "\u202a"  # LEFT-TO-RIGHT EMBEDDING
     "\u202b"  # RIGHT-TO-LEFT EMBEDDING
     "\u202c"  # POP DIRECTIONAL FORMATTING
