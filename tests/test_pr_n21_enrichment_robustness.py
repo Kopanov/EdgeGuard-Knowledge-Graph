@@ -235,23 +235,28 @@ class TestFix6BaselinePostcheck:
 
     def test_postcheck_strict_trigger_rule(self):
         """The postcheck task's trigger_rule must let the diagnostics run
-        when at least one upstream succeeded.
+        on EVERY baseline run, regardless of upstream outcome.
 
-        PR-N21 originally pinned ``ALL_SUCCESS`` ("don't run on partial
-        failure"), but the proactive PR-N24 audit (Cross-Checker H2) flipped
-        this to ``NONE_FAILED_MIN_ONE_SUCCESS``: INV-2 (Indicator > 0) and
-        INV-3 (Source > 0) are UPSTREAM diagnostics — operators NEED them
-        to triage *why* an enrichment task failed. ``ALL_SUCCESS`` skipped
-        them in exactly the case they were most useful."""
+        Evolution of this pin:
+        - PR-N21 originally used ``ALL_SUCCESS`` ("don't run on partial failure")
+        - PR-N24 H2 flipped to ``NONE_FAILED_MIN_ONE_SUCCESS`` (handle
+          partial enrichment failure where some sibling succeeded)
+        - PR-N27 (Bravo's 2026-04-23 post-mortem) flipped to ``ALL_DONE``
+          (handle TOTAL upstream failure — sync crash cascading
+          upstream_failed to all downstream meant postcheck got silently
+          skipped). New sentinel inside ``assert_baseline_postconditions``
+          detects upstream_failed state and emits a clean diagnostic
+          without double-firing AirflowException."""
         src = self._dag_src()
         # Find the baseline_postcheck_task PythonOperator block
         anchor = src.find('task_id="baseline_postcheck"')
         assert anchor != -1
-        # Search forward for trigger_rule within the next ~500 chars (block size)
-        block = src[anchor : anchor + 600]
-        assert "TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS" in block, (
-            "baseline_postcheck must use NONE_FAILED_MIN_ONE_SUCCESS trigger_rule "
-            "(PR-N24 H2: diagnostics must run after partial-failure to help triage)"
+        # Search forward for trigger_rule within a generous window (the
+        # current block has a long PR-N27 explanatory comment).
+        block = src[anchor : anchor + 2500]
+        assert "TriggerRule.ALL_DONE" in block, (
+            "baseline_postcheck must use ALL_DONE trigger_rule "
+            "(PR-N27: postcheck always runs + sentinel detects upstream_failed)"
         )
 
 

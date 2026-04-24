@@ -196,9 +196,15 @@ def test_baseline_downstream_tasks_have_non_blocking_trigger_rules():
     assert _has_trigger_rule("run_enrichment_jobs", "NONE_FAILED_MIN_ONE_SUCCESS"), (
         "run_enrichment_jobs must use NONE_FAILED_MIN_ONE_SUCCESS"
     )
-    assert _has_trigger_rule("baseline_complete", "ALL_DONE"), (
-        "baseline_complete must use ALL_DONE so the operator gets a "
-        "termination signal even if some upstream task failed"
+    # PR-N26 Fix A (2026-04-23, Bravo's post-mortem) inverted the
+    # original PR #35 design: ``ALL_DONE`` made the "Complete!" echo fire
+    # even on failed runs (silent-success regression that masked Campaign=0
+    # invariant violations). The new contract is ``NONE_FAILED_MIN_ONE_SUCCESS``
+    # — the echo only fires on truly successful baselines, and Airflow UI
+    # task-state view is the source of truth for "did it finish?".
+    assert _has_trigger_rule("baseline_complete", "NONE_FAILED_MIN_ONE_SUCCESS"), (
+        "baseline_complete must use NONE_FAILED_MIN_ONE_SUCCESS (PR-N26 Fix A) — "
+        "ALL_DONE produced a silent-success regression on failed baselines."
     )
 
 

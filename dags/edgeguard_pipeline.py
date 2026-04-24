@@ -101,7 +101,7 @@ from typing import Any, Optional
 
 import pendulum
 from airflow import DAG
-from airflow.exceptions import AirflowException
+from airflow.exceptions import AirflowException, AirflowSkipException
 
 # Airflow 3.x: BashOperator / PythonOperator / ShortCircuitOperator moved
 # from airflow-core into the ``apache-airflow-providers-standard`` package.
@@ -1891,6 +1891,47 @@ _BASELINE_CONF_TYPO_MAP = {
 }
 
 
+# Critical-chain task IDs for the postcheck sentinel (PR-N27).
+#
+# Audit history that led here:
+# * PR-N21/N24/N27 originally used a hardcoded list inside the callable.
+# * PR-N26 multi-agent audit (Cross-Checker LOW-2 + Maintainer M2 + Bug
+#   Hunter implied — 3-agent corroboration) flagged the hardcoded list as
+#   a "bit-rot risk" and recommended switching to
+#   ``ti.task.get_flat_relatives(upstream=True)`` for dynamic enumeration.
+# * Bugbot round 2 (2026-04-23, HIGH) caught the overcorrection:
+#   ``get_flat_relatives(upstream=True)`` traverses ALL transitive
+#   ancestors, including Tier 1/Tier 2 collector tasks. Those use
+#   ``trigger_rule=ALL_DONE`` on purpose (non-blocking collectors —
+#   individual API flakes must NOT cascade). Under the dynamic-enumeration
+#   fix, a single collector failure → sentinel raises AirflowSkipException
+#   → baseline_complete skipped → DAG marked FAILED even though the
+#   critical chain succeeded. Alert fatigue + potentially aborted baselines.
+# * Second PR-N26 multi-agent audit (2026-04-23, 7 agents, 6-of-7
+#   corroboration including Bug Hunter BLOCK-MERGE, Cross-Checker HIGH-1,
+#   Prod Readiness HIGH-1, Test Coverage BLOCK-MERGE): revert to a
+#   hardcoded list at the module level. The bit-rot risk is real but
+#   theoretical (adding a 4th critical task is discoverable via grep for
+#   ``_BASELINE_CRITICAL_CHAIN``); the dynamic-enumeration regression is
+#   concrete and would fire on EVERY 730d baseline where at least one of
+#   10 collectors hits a transient error.
+#
+# Shape decision (from Maintainer L2): module-level frozenset (not
+# function-local) so:
+#   (a) tests can introspect via import
+#   (b) it lives next to the DAG topology it describes
+#   (c) the comment carries the WHY permanently
+#   (d) it's greppable — a future PR adding a 4th critical task
+#       will hit this constant via ``grep -r _BASELINE_CRITICAL_CHAIN``.
+_BASELINE_CRITICAL_CHAIN: frozenset[str] = frozenset(
+    {
+        "full_neo4j_sync",
+        "build_relationships",
+        "run_enrichment_jobs",
+    }
+)
+
+
 def _validate_baseline_dag_conf(conf: object, *, source_label: str = "dag_run.conf") -> None:
     """Emit a WARNING for each unrecognized key in the baseline DAG conf.
 
@@ -2294,8 +2335,90 @@ def assert_baseline_postconditions(**context):
       [INV-3] Source > 0.
         Bootstrap created the Source nodes. Zero Sources means
         ``ensure_sources()`` never ran.
+
+    PR-N27 (Bravo's 2026-04-23 post-mortem follow-up): pre-N27 the task
+    was gated by ``trigger_rule=NONE_FAILED_MIN_ONE_SUCCESS`` (PR-N24 H2)
+    which works for partial enrichment failures BUT NOT for upstream sync
+    failures. When ``full_neo4j_sync`` failed entirely, ALL downstream
+    tasks were ``upstream_failed`` and postcheck was silently skipped —
+    operators couldn't tell "Campaign=0 because invariant violated" from
+    "Campaign=0 because enrichment never ran". Now ``ALL_DONE`` + the
+    sentinel below: postcheck always runs, detects upstream-failed state,
+    emits a clean diagnostic, and exits without double-firing.
     """
     from neo4j_client import Neo4jClient
+
+    # PR-N27 sentinel: detect upstream-failed state and emit a clean
+    # operator-facing diagnostic instead of running invariants on a
+    # half-filled graph (which would trivially fire INV-1/2/3 with
+    # misleading messages — the cause is upstream, not a real breach).
+    ti = context.get("task_instance")
+    if ti is not None:
+        try:
+            dag_run = ti.get_dagrun()
+            # PR-N26 multi-agent audit ROUND 2 (2026-04-23, 6-of-7 agent
+            # corroboration): inspect ONLY the critical-chain tasks, NOT
+            # the full transitive upstream. See the
+            # ``_BASELINE_CRITICAL_CHAIN`` constant at the top of this
+            # module for the full history of why (short version: Bugbot
+            # round 2 caught that ``get_flat_relatives(upstream=True)``
+            # catches Tier 1/2 collector failures, which use
+            # ``trigger_rule=ALL_DONE`` on purpose and must NOT cascade).
+            upstream_states: dict[str, str] = {}
+            for upstream_task_id in _BASELINE_CRITICAL_CHAIN:
+                try:
+                    upstream_ti = dag_run.get_task_instance(upstream_task_id)
+                    upstream_states[upstream_task_id] = getattr(upstream_ti, "state", None) or "<missing>"
+                except Exception as _ti_err:
+                    upstream_states[upstream_task_id] = f"<lookup-failed:{type(_ti_err).__name__}>"
+
+            failed_or_skipped = {
+                k: v for k, v in upstream_states.items() if v in ("failed", "upstream_failed", "skipped")
+            }
+            if failed_or_skipped:
+                logger.error(
+                    "[BASELINE-POSTCHECK-SKIPPED] upstream task(s) did not succeed — "
+                    "invariants would be trivially violated for upstream reasons, NOT "
+                    "a real data-integrity breach. State table: %s. The DAG is already "
+                    "FAILED via upstream — no need to raise AirflowException here. "
+                    "To debug: inspect the failed upstream task's log first.",
+                    upstream_states,
+                )
+                # PR-N27 Bugbot round 1 (2026-04-23, HIGH): bare ``return``
+                # lands postcheck in state=SUCCESS, which DEFEATS PR-N26
+                # Fix A's intent. ``baseline_complete`` uses
+                # ``NONE_FAILED_MIN_ONE_SUCCESS`` which evaluates ONLY its
+                # direct parent (postcheck). If postcheck is SUCCESS,
+                # baseline_complete runs and echoes "BASELINE Complete!"
+                # on top of an upstream-failed run — the exact silent-
+                # success regression Fix A was supposed to eliminate.
+                #
+                # Fix: raise ``AirflowSkipException`` so postcheck lands
+                # as ``skipped``. Then baseline_complete's
+                # NONE_FAILED_MIN_ONE_SUCCESS evaluates: "no direct parent
+                # failed (skipped ≠ failed), at least one succeeded
+                # (skipped ≠ success — FALSE)" → baseline_complete also
+                # gets skipped → DAG correctly marked FAILED via the
+                # original upstream failure state. No double-fire of
+                # AirflowException, just a clean state-machine propagation.
+                raise AirflowSkipException(
+                    f"[BASELINE-POSTCHECK-SKIPPED] upstream failure propagation: "
+                    f"{upstream_states}. Postcheck skipped so downstream "
+                    "baseline_complete also skips and DAG reflects the true upstream failure."
+                )
+        except AirflowSkipException:
+            # Let the skip propagate through Airflow's state machine —
+            # don't swallow it in the broad ``except`` below.
+            raise
+        except Exception as _ctx_err:
+            # Context introspection is best-effort — if Airflow internals
+            # change shape we don't want to BLOCK the invariant check that
+            # would have run anyway. Log and continue.
+            logger.warning(
+                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); running invariants anyway.",
+                type(_ctx_err).__name__,
+                _ctx_err,
+            )
 
     client = Neo4jClient()
     violations = []
@@ -2853,7 +2976,21 @@ baseline_postcheck_task = PythonOperator(
     task_id="baseline_postcheck",
     python_callable=assert_baseline_postconditions,
     execution_timeout=timedelta(minutes=10),
-    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
+    # PR-N24 H2 used NONE_FAILED_MIN_ONE_SUCCESS — handles partial enrichment
+    # failure (some sibling task failed but at least one succeeded). PR-N27
+    # (Bravo's 2026-04-23 post-mortem follow-up) discovered that semantics
+    # STILL silently skipped postcheck when ``full_neo4j_sync`` failed
+    # entirely (downstream all upstream_failed → no upstream succeeded →
+    # postcheck skipped). Operators couldn't distinguish "Campaign=0 because
+    # invariant violated" from "Campaign=0 because enrichment never ran".
+    #
+    # ALL_DONE makes postcheck always run; the new sentinel inside
+    # ``assert_baseline_postconditions`` detects upstream-failed state, emits
+    # a clean diagnostic ([BASELINE-POSTCHECK-SKIPPED] log token), and exits
+    # cleanly without double-firing AirflowException on top of an already-
+    # failed upstream. Net: operators always get a postcheck log line for
+    # every baseline run, regardless of upstream outcome.
+    trigger_rule=TriggerRule.ALL_DONE,
     dag=baseline_dag,
 )
 
@@ -2874,11 +3011,36 @@ baseline_complete = BashOperator(
         echo "=========================================="
     """,
     execution_timeout=timedelta(minutes=5),
-    # PR #35: ALL_DONE — the "complete" marker should ALWAYS run so the
-    # operator gets a clear "baseline finished" signal in the logs even
-    # if some upstream task failed. Useful when scrolling through Airflow
-    # logs to see "did the run terminate gracefully or hang?"
-    trigger_rule=TriggerRule.ALL_DONE,
+    # PR #35 ORIGINALLY used ``ALL_DONE`` — the rationale was "the 'complete'
+    # marker should always run so the operator gets a clear end-of-run signal
+    # in the logs even if some upstream task failed." That rationale was
+    # reasonable in isolation but turned out to DIRECTLY UNDERMINE the
+    # PR-N21 invariant-check contract: ``baseline_postcheck_task`` uses
+    # ``raise AirflowException`` on Campaign=0 / Indicator=0 etc. to FAIL
+    # the DAG on silent data loss. With ``ALL_DONE`` on ``baseline_complete``,
+    # the final task still emitted "BASELINE Complete!" to stdout even on
+    # invariant violation, producing the exact "silent success" pattern we
+    # had audited to eliminate.
+    #
+    # PR-N26 follow-up (Bravo's 2026-04-23 post-mortem on the 2026-04-22
+    # 21:56 UTC run): the cloud-Neo4j Campaign=0 finding was diagnosed as
+    # an upstream ``full_neo4j_sync`` failure (4 alienvault_otx placeholder
+    # MERGE-REJECTs bubbled up as a task exception) that left every
+    # downstream task in ``upstream_failed`` state — but ``baseline_complete``
+    # fired anyway under ALL_DONE, making the whole DAG run look green in
+    # one common monitoring view (final-task-state dashboards).
+    #
+    # Fix: ``NONE_FAILED_MIN_ONE_SUCCESS``. The task now only runs when
+    # everything upstream succeeded — so:
+    #   * Happy path: postcheck SUCCESS → baseline_complete runs → DAG SUCCESS
+    #   * Sync failed: downstream upstream_failed → baseline_complete SKIPPED → DAG FAILED
+    #   * Invariant failed: postcheck FAILED → baseline_complete SKIPPED → DAG FAILED
+    #
+    # Trade-off: on failed runs the bash echo is no longer emitted. Operators
+    # should rely on the Airflow UI (task-state view) for "did it finish?",
+    # not on grepping for the echo. The UI makes failure visible; the echo
+    # was just a nice-to-have that turned out to be a correctness regression.
+    trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
 )
 

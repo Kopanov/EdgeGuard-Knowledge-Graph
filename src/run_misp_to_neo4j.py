@@ -50,6 +50,7 @@ from neo4j_client import (
     normalize_cve_id_for_graph,
     resolve_vulnerability_cve_id,
 )
+from node_identity import is_placeholder_name
 from query_pause import query_pause
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
@@ -2982,9 +2983,28 @@ class MISPToNeo4jSync:
         Relationship dicts are *not* aggregated here — the caller already collected them
         during parse; we optionally pop ``relationships`` from items after each chunk in
         ``sync_to_neo4j`` to reduce peak RAM.
+
+        Returns (success, errors). ``errors`` counts only REAL failures (terminal
+        Neo4j exceptions, malformed items). PR-N28 (Bravo's 2026-04-23
+        post-mortem): PR-N10 placeholder-name rejections (e.g. Malware
+        ``name="unknown"``) are graph-safe DEFENSIVE behaviour, NOT real
+        errors — they're tracked separately in ``self.stats[
+        "placeholder_rejections"]`` and surfaced via the
+        ``edgeguard_merge_reject_placeholder_total`` Prometheus counter (with
+        a paired ``EdgeGuardMergeRejectPlaceholderSpike`` alert) but they
+        no longer increment ``errors`` and therefore don't fail the sync.
+
+        Pre-N28: 4 alienvault_otx placeholder rejections in the
+        2026-04-22 21:56 UTC baseline failed the entire ``full_neo4j_sync``
+        Airflow task → cascade of ``upstream_failed`` → silent Campaign=0.
         """
         success = 0
         errors = 0
+        # PR-N28: tracked alongside ``errors`` but kept separate so the
+        # final ``return total_errors == 0`` verdict isn't poisoned by
+        # safe rejections.
+        if "placeholder_rejections" not in self.stats:
+            self.stats["placeholder_rejections"] = 0
 
         indicators = []
         vulnerabilities = []
@@ -3182,16 +3202,64 @@ class MISPToNeo4jSync:
             for malware in malware_items:
                 try:
                     source_id = malware.get("tag", "misp")
+                    raw_name = malware.get("name")
+                    # PR-N28 (Bravo's 2026-04-23 post-mortem): PRE-CHECK for
+                    # PR-N10 placeholder names so we can DISTINGUISH safe
+                    # rejections from real failures. Pre-N28 both paths
+                    # incremented ``errors`` and 4 placeholder rejections
+                    # could fail the entire baseline sync (cascading to
+                    # upstream_failed on every downstream task).
+                    if is_placeholder_name(raw_name):
+                        m_name = (raw_name or "?")[:30]
+                        # Single info-level log at the SYNC boundary; the
+                        # underlying merge_malware also logs WARN +
+                        # increments the Prometheus counter.
+                        logger.info(
+                            "[MERGE-PLACEHOLDER-REJECTED] Malware name=%s source=%s — "
+                            "PR-N10 defensive reject (graph safe, not a sync error). "
+                            "Spike alert: EdgeGuardMergeRejectPlaceholderSpike (>10/15min).",
+                            m_name,
+                            source_id,
+                        )
+                        self.stats["placeholder_rejections"] += 1
+                        # Still call merge_malware so the metric counter
+                        # increments (defense in depth + observability).
+                        # PR-N26 multi-agent audit round 2 (Bug Hunter H-2 +
+                        # Red Team M3, 2-agent corroboration): this call
+                        # MUST be wrapped in its own narrow try/except —
+                        # without it, a Neo4j deadlock/transient error on
+                        # the placeholder branch would bubble to the outer
+                        # ``except Exception as e: errors += 1`` and
+                        # re-introduce the exact PR-N28 cascade-fail bug
+                        # this branch was meant to prevent. Metric failure
+                        # must not poison the sync; log at WARN so the
+                        # operator sees it but no error counter increment.
+                        try:
+                            self.neo4j.merge_malware(malware, source_id=source_id)
+                        except Exception as _metric_err:
+                            logger.warning(
+                                "[MERGE-PLACEHOLDER-METRIC-FAIL] Malware name=%s source=%s: "
+                                "%s: %s — observability call failed, NOT counted as sync error.",
+                                m_name,
+                                source_id,
+                                type(_metric_err).__name__,
+                                _metric_err,
+                            )
+                        continue
                     if self.neo4j.merge_malware(malware, source_id=source_id):
                         self.stats["malware_synced"] += 1
                         success += 1
                     else:
                         # PR-N19 Fix #3: identify the malware on merge-returned-False.
-                        m_name = (malware.get("name") or "?")[:30]
+                        # PR-N28: this branch now ONLY fires for non-placeholder
+                        # returned-False cases (terminal Neo4j errors, malformed
+                        # data). Real errors. Increment ``errors`` so the sync
+                        # task fails appropriately.
+                        m_name = (raw_name or "?")[:30]
                         logger.warning(
-                            "[MERGE-RETURNED-FALSE] Malware %s source=%s — merge_malware returned False. "
-                            "Likely cause: placeholder-name reject (PR-N10 _REJECTED_PLACEHOLDER_NAMES), "
-                            "or terminal Neo4j error.",
+                            "[MERGE-RETURNED-FALSE] Malware %s source=%s — merge_malware returned False "
+                            "AFTER placeholder pre-check (so this is a TERMINAL error, not a defensive reject). "
+                            "Investigate Neo4j logs.",
                             m_name,
                             source_id,
                         )
@@ -3206,15 +3274,45 @@ class MISPToNeo4jSync:
             for actor in actors:
                 try:
                     source_id = actor.get("tag", "misp")
+                    raw_name = actor.get("name")
+                    # PR-N28: same placeholder pre-check as the malware loop.
+                    # ThreatActor placeholders ("unknown", "N/A") were the OTHER
+                    # PR-N10 reject site flagged in Bravo's post-mortem.
+                    if is_placeholder_name(raw_name):
+                        a_name = (raw_name or "?")[:30]
+                        logger.info(
+                            "[MERGE-PLACEHOLDER-REJECTED] ThreatActor name=%s source=%s — "
+                            "PR-N10 defensive reject (graph safe, not a sync error).",
+                            a_name,
+                            source_id,
+                        )
+                        self.stats["placeholder_rejections"] += 1
+                        # PR-N26 multi-agent audit round 2 Bug Hunter H-2:
+                        # same defense-in-depth wrap as the malware loop —
+                        # metric-only call must not poison the error counter.
+                        try:
+                            self.neo4j.merge_actor(actor, source_id=source_id)
+                        except Exception as _metric_err:
+                            logger.warning(
+                                "[MERGE-PLACEHOLDER-METRIC-FAIL] ThreatActor name=%s source=%s: "
+                                "%s: %s — observability call failed, NOT counted as sync error.",
+                                a_name,
+                                source_id,
+                                type(_metric_err).__name__,
+                                _metric_err,
+                            )
+                        continue
                     if self.neo4j.merge_actor(actor, source_id=source_id):
                         self.stats["actors_synced"] += 1
                         success += 1
                     else:
                         # PR-N19 Fix #3: identify the actor on merge-returned-False.
-                        a_name = (actor.get("name") or "?")[:30]
+                        # PR-N28: terminal-error-only branch (placeholder pre-check
+                        # already filtered defensive rejects above).
+                        a_name = (raw_name or "?")[:30]
                         logger.warning(
-                            "[MERGE-RETURNED-FALSE] ThreatActor %s source=%s — merge_actor returned False. "
-                            "Likely cause: placeholder-name reject (PR-N10), or terminal Neo4j error.",
+                            "[MERGE-RETURNED-FALSE] ThreatActor %s source=%s — merge_actor returned False "
+                            "AFTER placeholder pre-check (TERMINAL error, not a defensive reject).",
                             a_name,
                             source_id,
                         )
@@ -4089,6 +4187,20 @@ class MISPToNeo4jSync:
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
             logger.info(f"Relationships created: {self.stats['relationships_created']}")
             logger.info(f"Errors: {total_errors}")
+            # PR-N28: surface placeholder rejections separately so operators
+            # can distinguish "graph corrupted by adversarial input" from
+            # "PR-N10 working as intended" at-a-glance. Already counted by
+            # ``edgeguard_merge_reject_placeholder_total`` (Prometheus) +
+            # alerted by ``EdgeGuardMergeRejectPlaceholderSpike``; this is
+            # the inline grep-friendly version.
+            placeholder_rejections = int(self.stats.get("placeholder_rejections", 0))
+            if placeholder_rejections > 0:
+                logger.info(
+                    "Placeholder-name rejections (PR-N10 defensive, NOT errors): %d "
+                    "— grep '[MERGE-PLACEHOLDER-REJECTED]' for per-entity detail. "
+                    "These do NOT fail the sync.",
+                    placeholder_rejections,
+                )
             logger.info(
                 f"Circuit Breaker States: MISP={self.misp_circuit.state.name}, Neo4j={self.neo4j_circuit.state.name}"
             )

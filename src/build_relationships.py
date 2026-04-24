@@ -537,6 +537,23 @@ def build_relationships():
             '   r.source_id = "cve_tag_match", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
             '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"]), '
+            # PR-N26 (cloud-Neo4j audit 2026-04-23): propagate the originating
+            # MISP event ids from the indicator onto the EXPLOITS edge so
+            # backwards-traceability ("which MISP event(s) led EdgeGuard to
+            # assert this indicator exploits this CVE?") works for edges
+            # produced by build_relationships, not just edges produced by
+            # ``Neo4jClient.create_misp_relationships_batch``. Pre-N26 cloud
+            # showed 0% misp_event_ids coverage on 26,730 EXPLOITS edges
+            # (all from this Q3a/Q3b path) despite the cve_tag itself being
+            # MISP-derived. Propagating the indicator's full event list is a
+            # SUPERSET of the true provenance (the edge will carry every
+            # MISP event the indicator was seen in, not just the one that
+            # contributed the cve_tag) — acceptable for traceability and
+            # consistent with how Path A's _set_clause helper handles
+            # multi-event indicators.
+            "    r.misp_event_ids = apoc.coll.toSet("
+            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)"
         )
         # PR #34 round 20: count Indicator orphans (cve_id set but no
@@ -569,6 +586,13 @@ def build_relationships():
             '   r.source_id = "cve_tag_match", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
             '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"]), '
+            # PR-N26 (cloud-Neo4j audit 2026-04-23): see Q3a above — same fix
+            # for the CVE-typed EXPLOITS edge variant. Q3a/Q3b share semantics
+            # (Indicator's cve_tag → either Vulnerability or CVE node), so the
+            # SET clause shape stays uniform.
+            "    r.misp_event_ids = apoc.coll.toSet("
+            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
         )
         _q3b_skip = (
@@ -641,6 +665,17 @@ def build_relationships():
             # accumulation (see pre-reversal comments for rationale).
             "SET r.updated_at = datetime(), "
             '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["misp_cooccurrence"]), '
+            # PR-N26 (cloud-Neo4j audit 2026-04-23): the WHOLE POINT of this
+            # query is "Indicator and Malware share MISP event ``eid``" — so
+            # ``eid`` is exactly the originating MISP event id we want to
+            # stamp onto r.misp_event_ids[]. Pre-N26 the cloud showed only
+            # 6.6% (1,280/19,370) misp_event_ids coverage on INDICATES edges
+            # because Path A's create_misp_relationships_batch produced 1,280
+            # of them with the array, and this query (Q4) silently created
+            # the other ~18,090 without the wire-up despite having ``eid``
+            # in scope on line above. Adding the SET completes the
+            # backwards-traceability promise of PR #32.
+            "    r.misp_event_ids = apoc.coll.toSet(coalesce(r.misp_event_ids, []) + [eid]), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
@@ -740,7 +775,19 @@ def build_relationships():
             "      sec.last_updated = datetime() "
             "MERGE (i)-[r:TARGETS]->(sec) "
             "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
-            "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+            "SET r.updated_at = datetime(), "
+            # PR-N26 (cloud-Neo4j audit 2026-04-23): propagate the indicator's
+            # MISP event ids onto the TARGETS edge. The zone tag itself comes
+            # from MISP attribute parsing (zone-detection runs against MISP
+            # tags), so the edge IS MISP-derived even though the Sector node
+            # is auto-created here. Pre-N26 the cloud showed 0% misp_event_ids
+            # coverage on 36,480 TARGETS edges. See Q3a for the full rationale
+            # on propagating the indicator's full event list (superset of
+            # true provenance, acceptable for traceability).
+            "    r.misp_event_ids = apoc.coll.toSet("
+            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "    ), "
+            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
         if not _safe_run_batched(
             client, "Indicator -> Sector (TARGETS)", _q7a_outer, _q7a_inner, stats, "indicator_targets_sector"
@@ -766,7 +813,17 @@ def build_relationships():
             "      sec.last_updated = datetime() "
             "MERGE (v)-[r:AFFECTS]->(sec) "
             "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
-            "SET r.updated_at = datetime(), r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+            "SET r.updated_at = datetime(), "
+            # PR-N26 (cloud-Neo4j audit 2026-04-23): symmetric with Q7a — the
+            # zone tag on Vulnerability/CVE comes from MISP attribute parsing,
+            # so the AFFECTS edge IS MISP-derived. Pre-N26 only 0.1%
+            # (1/1,221) AFFECTS edges carried misp_event_ids — that single
+            # one was created via Path A's _set_clause helper. The other
+            # 1,220 came from this query without the wire-up.
+            "    r.misp_event_ids = apoc.coll.toSet("
+            "        coalesce(r.misp_event_ids, []) + coalesce(v.misp_event_ids, [])"
+            "    ), "
+            "    r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
         if not _safe_run_batched(
             client, "Vulnerability/CVE -> Sector (AFFECTS)", _q7b_outer, _q7b_inner, stats, "vuln_affects_sector"
@@ -921,6 +978,15 @@ def build_relationships():
             '    r.source_id = "malware_family_match", '
             '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["malware_family_match"]), '
             "    r.updated_at = datetime(), "
+            # PR-N26 (cloud-Neo4j audit 2026-04-23): same fix shape as Q4 but
+            # for the malware-family-match path. The malware_family field on
+            # Indicator originates from MISP attribute parsing, so the
+            # resulting INDICATES edge IS MISP-derived. We propagate the
+            # indicator's full event list (superset of true provenance) — see
+            # Q3a comment for the rationale on why superset is acceptable.
+            "    r.misp_event_ids = apoc.coll.toSet("
+            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
