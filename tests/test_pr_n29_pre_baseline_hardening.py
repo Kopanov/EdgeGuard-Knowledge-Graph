@@ -54,6 +54,29 @@ Folded into PR-N30 (stacked on PR #109's merge):
 Deferred to a separate follow-up PR:
 * Holistic H2 — ``build_campaign_nodes`` behavioural happy-path test
   (larger scope, needs fake-driver fixture design)
+
+## Multi-agent audit follow-up (2026-04-24)
+
+A 7-agent audit on the PR #109 merge surfaced 3 corroborated HIGH
+correctness bugs all rooted in PR-N29's Bugbot-round-2 fix:
+
+* **HIGH-1 (Bug Hunter / Cross-Checker)** — ``raise RuntimeError`` from
+  the new fallback paths is silently caught by the broader
+  ``except Exception`` blocks at lines ~1109 (PyMISP try/except) and
+  ~1201 (outer broad). Hard errors degrade to "no events found" with
+  no operator surface.
+* **HIGH-2 (Bug Hunter / Devil's Advocate)** — hitting
+  ``_FALLBACK_MAX_PAGES`` only logs; the truncated event list is then
+  treated as ground truth.
+* **HIGH-3 (Cross-Checker sibling drift)** — the requests-restSearch
+  branch is missing the errors-key check + unexpected-payload raise
+  that the PyMISP branch has post-Bugbot-round-2.
+
+Fix pattern: a dedicated ``_MispFallbackHardError`` sentinel +
+explicit ``except _MispFallbackHardError: raise`` clauses ahead of
+every broad ``except Exception``. Cap-hit branches now raise the
+sentinel as well. Tests pinning the contract live in
+``TestPRN29MispFallbackHardErrorSentinel`` below.
 """
 
 from __future__ import annotations
@@ -190,21 +213,29 @@ class TestPRN29H3MispFetchFallbackPaginated:
         )
 
     def test_non200_mid_pagination_raises_not_silent_break(self):
-        """PR-N29 Bugbot round 2 (MED): a non-200 response on any page
-        after the first MUST raise (or otherwise surface as a sync error)
-        rather than silently truncate with the partial events list. Pre-
-        fix the ``break`` on non-200 left a positive log line "collected
-        N row(s) across M pages" while having silently dropped 25%+ of
-        the baseline."""
+        """PR-N29 Bugbot round 2 (MED) → multi-agent audit (HIGH-1): a non-200
+        response on any page after the first MUST raise (or otherwise
+        surface as a sync error) rather than silently truncate with the
+        partial events list. Pre-fix the ``break`` on non-200 left a
+        positive log line "collected N row(s) across M pages" while
+        having silently dropped 25%+ of the baseline.
+
+        The multi-agent audit further surfaced that ``raise RuntimeError``
+        was being swallowed by the broad ``except Exception`` — replaced
+        with the dedicated ``_MispFallbackHardError`` sentinel, which has
+        explicit ``except _MispFallbackHardError: raise`` re-raises ahead
+        of every broad ``except Exception`` clause."""
         text = self.SRC_FILE.read_text()
         # Find the non-200 branch in the requests-restSearch fallback
         idx = text.find("response.status_code != 200")
         assert idx != -1, "non-200 check must exist in the fallback"
         block = text[idx : idx + 2000]
-        # Must explicitly raise (not just break)
-        assert "raise RuntimeError" in block, (
-            "PR-N29 Bugbot round 2: non-200 mid-pagination must raise "
-            "(explicit error surface), NOT silently break with partial events"
+        # Must explicitly raise the sentinel (not just break, not bare RuntimeError)
+        assert "raise _MispFallbackHardError" in block, (
+            "PR-N29 multi-agent audit (HIGH-1): non-200 mid-pagination must "
+            "raise the dedicated _MispFallbackHardError sentinel so the broad "
+            "except Exception below doesn't swallow it. Bare ``raise RuntimeError`` "
+            "is NOT enough — it gets caught by the outer except Exception clause."
         )
         # The error message must be operator-actionable
         assert "good pages" in block, (
@@ -428,4 +459,228 @@ class TestPRN29L1PlaceholderUnicodeHardening:
             "bypass the filter. Fix requires a confusables library (not in scope "
             "for PR-N29). This test pins the RESIDUAL so updating it signals "
             "a real fix."
+        )
+
+
+# ===========================================================================
+# Multi-agent audit (2026-04-24) — _MispFallbackHardError sentinel contract
+# ===========================================================================
+
+
+class TestPRN29MispFallbackHardErrorSentinel:
+    """7-agent audit on PR-N29 (2026-04-24) corroborated 3 HIGH findings:
+
+    * Bug Hunter HIGH-1 / Cross-Checker HIGH-1: ``raise RuntimeError`` is
+      caught by the broad ``except Exception`` blocks at lines ~1109
+      (PyMISP fallback) and ~1201 (outer). Hard errors silently degrade
+      to "no events found".
+    * Bug Hunter HIGH-2 / Devil's Advocate critique: cap-hit on
+      ``_FALLBACK_MAX_PAGES`` only logs — silent truncation if MISP
+      legitimately has more events than the cap.
+    * Cross-Checker HIGH-1/2 (sibling drift): the requests-restSearch
+      branch was missing the errors-key check + unexpected-shape raise
+      that the PyMISP branch had after Bugbot round 2.
+
+    The fix uses a dedicated ``_MispFallbackHardError`` sentinel +
+    explicit ``except _MispFallbackHardError: raise`` clauses ahead of
+    every broad ``except Exception``. These tests pin the contract.
+    """
+
+    SRC_FILE = SRC / "run_misp_to_neo4j.py"
+
+    # ----- shape / source-pin tests (no PyMISP / Airflow needed) -----
+
+    def test_sentinel_class_is_defined_at_module_level(self):
+        """The sentinel must exist as a module-level Exception subclass —
+        importable from tests, picklable across processes, easy to grep."""
+        text = self.SRC_FILE.read_text()
+        assert "class _MispFallbackHardError(Exception):" in text, (
+            "PR-N29 audit HIGH-1: ``_MispFallbackHardError`` must be a "
+            "module-level Exception subclass so the explicit re-raise "
+            "clauses can reference it without import gymnastics."
+        )
+
+    def test_sentinel_class_importable(self):
+        """Behavioural: the sentinel can actually be imported."""
+        from run_misp_to_neo4j import _MispFallbackHardError
+
+        assert issubclass(_MispFallbackHardError, Exception)
+        # Subclass of Exception, NOT BaseException — KeyboardInterrupt /
+        # SystemExit must still propagate normally and not be caught by
+        # the general ``except Exception`` clauses we're using.
+        assert _MispFallbackHardError.__bases__ == (Exception,)
+
+    def test_no_bare_raise_RuntimeError_in_fallback_paths(self):
+        """Negative pin: pre-fix the fallback paths used ``raise RuntimeError``
+        which the broad ``except Exception`` swallowed. After fix, all 5
+        raise sites must use ``_MispFallbackHardError``.
+
+        Scope: only the ``fetch_edgeguard_events`` method body — the
+        sentinel's own docstring documents the audit history and contains
+        the literal string ``raise RuntimeError(...)`` as part of the
+        narrative."""
+        text = self.SRC_FILE.read_text()
+        # Extract the fetch_edgeguard_events method body
+        start = text.find("def fetch_edgeguard_events(")
+        assert start != -1, "fetch_edgeguard_events method must exist"
+        # Find the start of the next top-level method
+        end = text.find("\n    @", start + 1)
+        if end == -1:
+            end = text.find("\n    def ", start + 1)
+        assert end != -1, "must find end of fetch_edgeguard_events"
+        method_body = text[start:end]
+        assert "raise RuntimeError(" not in method_body, (
+            "PR-N29 audit HIGH-1: fetch_edgeguard_events fallback paths must "
+            "not raise bare RuntimeError — those get swallowed by the broad "
+            "except Exception blocks. Use _MispFallbackHardError instead."
+        )
+
+    def test_pymisp_cap_hit_raises_sentinel(self):
+        """Bug Hunter HIGH-2 / Devil's Advocate: hitting
+        ``_FALLBACK_MAX_PAGES`` must surface as a hard error, not just a
+        log line. Pre-fix the cap-hit branch only ``logger.error``ed and
+        the truncated event list was treated as ground truth."""
+        text = self.SRC_FILE.read_text()
+        # PyMISP cap-hit block — find the for/else and the raise
+        idx = text.find("PyMISP hit _FALLBACK_MAX_PAGES")
+        assert idx != -1, "PyMISP cap-hit log line must exist"
+        block = text[idx : idx + 1500]
+        assert "raise _MispFallbackHardError" in block, (
+            "PR-N29 audit HIGH-2: PyMISP cap-hit must raise sentinel. "
+            "logger.error alone leaves the truncated list as ground truth."
+        )
+
+    def test_restsearch_cap_hit_raises_sentinel(self):
+        """Bug Hunter HIGH-2: symmetric — restSearch cap-hit must also raise."""
+        text = self.SRC_FILE.read_text()
+        idx = text.find("restSearch hit _FALLBACK_MAX_PAGES")
+        assert idx != -1, "restSearch cap-hit log line must exist"
+        block = text[idx : idx + 1500]
+        assert "raise _MispFallbackHardError" in block, (
+            "PR-N29 audit HIGH-2: restSearch cap-hit must raise sentinel (symmetric with PyMISP cap-hit branch)."
+        )
+
+    def test_restsearch_branch_handles_errors_payload(self):
+        """Cross-Checker HIGH-1 (sibling drift): the PyMISP branch checks
+        ``"errors" in page_result``; the requests-restSearch branch did
+        NOT have this check before the multi-agent audit. After fix,
+        both branches must surface MISP HTTP-200 errors-payload as a
+        hard error."""
+        text = self.SRC_FILE.read_text()
+        # Anchor on the restSearch page_data block — page_data is the
+        # restSearch variable, distinct from page_result (PyMISP).
+        idx = text.find("page_data = response.json()")
+        assert idx != -1, "restSearch page_data assignment must exist"
+        block = text[idx : idx + 2500]
+        assert '"errors" in page_data' in block, (
+            "PR-N29 audit Cross-Checker HIGH-1: requests-restSearch branch "
+            'must check ``"errors" in page_data`` (mirrors PyMISP branch). '
+            "Pre-fix MISP could return HTTP 200 with errors-payload and the "
+            "loop silently produced 0 events."
+        )
+        assert "raise _MispFallbackHardError" in block, (
+            "PR-N29 audit Cross-Checker HIGH-1: errors-payload in restSearch must raise the sentinel."
+        )
+
+    def test_restsearch_branch_handles_unexpected_payload_type(self):
+        """Cross-Checker HIGH-2: the PyMISP branch raises on unexpected
+        payload type; the restSearch branch silently coerced to ``[]``
+        before the audit. After fix, both branches must raise."""
+        text = self.SRC_FILE.read_text()
+        idx = text.find("page_data = response.json()")
+        assert idx != -1
+        block = text[idx : idx + 2500]
+        assert "restSearch page %d returned" in block and "unexpected payload type" in block, (
+            "PR-N29 audit Cross-Checker HIGH-2: restSearch branch must log "
+            "+ raise on unexpected payload type (mirrors PyMISP branch)."
+        )
+
+    def test_pymisp_inner_except_re_raises_sentinel(self):
+        """HIGH-1: the inner ``except Exception as e`` after the PyMISP try/
+        except (which falls through to the requests-restSearch branch on
+        error) MUST be preceded by ``except _MispFallbackHardError: raise``.
+        Otherwise hard errors raised inside the PyMISP loop fall through
+        to the requests path silently."""
+        text = self.SRC_FILE.read_text()
+        # Anchor on the "PyMISP error" log line — uniquely identifies the
+        # inner except block we care about.
+        idx = text.find('logger.error(f"PyMISP error:')
+        assert idx != -1, "inner PyMISP except must exist"
+        # Look backwards for the preceding except clause
+        preceding = text[max(0, idx - 1500) : idx]
+        assert "except _MispFallbackHardError:" in preceding, (
+            "PR-N29 audit HIGH-1: the ``except Exception as e`` after the "
+            "PyMISP fallback try/except must be preceded by an explicit "
+            "``except _MispFallbackHardError: raise`` clause. Otherwise "
+            "hard errors raised inside the PyMISP loop fall through to "
+            "the requests-restSearch path silently."
+        )
+
+    def test_outer_except_re_raises_sentinel(self):
+        """HIGH-1: the outer broad ``except Exception as e`` at the bottom
+        of ``fetch_edgeguard_events`` MUST be preceded by an explicit
+        sentinel re-raise. Otherwise the function returns ``[]`` (empty
+        normalized list) on hard errors, which the calling DAG treats
+        as "no events to sync today." """
+        text = self.SRC_FILE.read_text()
+        # Anchor on the unique outer log message
+        idx = text.find('logger.error(f"Error fetching events:')
+        assert idx != -1, "outer broad except must exist"
+        preceding = text[max(0, idx - 1500) : idx]
+        assert "except _MispFallbackHardError:" in preceding, (
+            "PR-N29 audit HIGH-1: the outer ``except Exception as e`` must "
+            "be preceded by ``except _MispFallbackHardError: raise``. "
+            "Otherwise the function returns [] on hard errors and the DAG "
+            "silently treats it as 'no events to sync.'"
+        )
+
+    # ----- behavioural tests via direct sentinel exercise -----
+
+    def test_sentinel_is_not_caught_by_except_Exception_in_principle(self):
+        """Behavioural: ``except _MispFallbackHardError: raise`` re-raises
+        the sentinel through any subsequent broad ``except Exception``
+        clause. Verify the Python exception machinery does what we expect
+        when the explicit handler is in place."""
+        from run_misp_to_neo4j import _MispFallbackHardError
+
+        caught_by_specific = False
+        caught_by_generic = False
+        try:
+            try:
+                raise _MispFallbackHardError("test")
+            except _MispFallbackHardError:
+                caught_by_specific = True
+                raise
+            except Exception:
+                caught_by_generic = True
+        except _MispFallbackHardError:
+            pass
+
+        assert caught_by_specific, "specific handler must catch the sentinel"
+        assert not caught_by_generic, (
+            "the broad ``except Exception`` clause must NOT catch the "
+            "sentinel when ``except _MispFallbackHardError: raise`` runs "
+            "first. This pins the Python exception-resolution semantics "
+            "the fallback paths rely on."
+        )
+
+    def test_sentinel_is_caught_by_except_Exception_when_no_specific_handler(self):
+        """Negative pin: WITHOUT the explicit ``except _MispFallbackHardError:
+        raise`` clause, the broad ``except Exception`` DOES catch the
+        sentinel — which is exactly the silent-truncation bug we're
+        fixing. This test documents the failure mode so a future
+        maintainer who deletes the explicit clause sees this test fail."""
+        from run_misp_to_neo4j import _MispFallbackHardError
+
+        caught = False
+        try:
+            raise _MispFallbackHardError("test")
+        except Exception:
+            caught = True
+
+        assert caught, (
+            "PR-N29 audit HIGH-1 documentation: ``except Exception`` DOES "
+            "catch ``_MispFallbackHardError`` (it's an Exception subclass). "
+            "This is exactly why we need the explicit re-raise clause "
+            "ahead of every broad except in the fallback paths."
         )

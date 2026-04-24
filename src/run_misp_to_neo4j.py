@@ -73,6 +73,41 @@ MISP_CONNECT_TIMEOUT = 30  # Connection timeout (seconds)
 MISP_REQUEST_TIMEOUT = 300  # Read timeout (seconds) — large events (95K+ attrs) need time
 
 
+class _MispFallbackHardError(Exception):
+    """Sentinel: a non-recoverable failure inside the MISP fetch fallback paths.
+
+    PR-N29 (multi-agent audit, 2026-04-24, HIGH-1/2/3): the PyMISP and
+    requests-restSearch fallback branches in ``fetch_edgeguard_events``
+    discovered three distinct hard-error paths during the audit:
+
+    1. PyMISP returning ``{"errors": ...}`` mid-pagination
+    2. PyMISP returning an unexpected payload type mid-pagination
+    3. requests-restSearch returning HTTP 5xx mid-pagination
+    4. EITHER branch hitting the ``_FALLBACK_MAX_PAGES`` safety cap
+
+    All four MUST surface to the operator. The previous fix (Bugbot
+    round 2) used a bare ``raise RuntimeError(...)`` — but the enclosing
+    ``except Exception as e: logger.error(...)`` blocks at lines ~1109
+    (PyMISP fallback → swallowed back to requests-restSearch path) and
+    ~1201 (outer broad) silently catch ``RuntimeError`` and turn the
+    failure into a partial-success "no events found" state, exactly
+    the silent-truncation failure mode PR-N29 H3 was meant to close.
+
+    A dedicated sentinel + explicit ``except _MispFallbackHardError:
+    raise`` clauses ahead of the broad ``except Exception`` give us a
+    clean fast-path to the calling DAG (which has retries=0 on the
+    critical chain — see PR-N29 H1) without touching the legitimate
+    transient-network catch above.
+
+    The sentinel is intentionally NOT in the ``retry_with_backoff``
+    retry set: a 500 mid-pagination is not a transient network issue
+    and re-trying immediately would only paper over the underlying
+    MISP backend problem.
+    """
+
+    pass
+
+
 def _pymisp_client_kwargs() -> Dict[str, Any]:
     """PyMISP constructor kwargs: SSL verify, HTTP timeouts, optional Host override.
 
@@ -1060,7 +1095,7 @@ class MISPToNeo4jSync:
                                 page_result.get("errors"),
                                 page - 1,
                             )
-                            raise RuntimeError(
+                            raise _MispFallbackHardError(
                                 f"MISP fallback PyMISP errors on page {page}: {page_result.get('errors')}"
                             )
                         page_rows = page_result.get("response") or []
@@ -1073,7 +1108,7 @@ class MISPToNeo4jSync:
                             page,
                             type(page_result).__name__,
                         )
-                        raise RuntimeError(
+                        raise _MispFallbackHardError(
                             f"MISP fallback PyMISP unexpected payload type on page {page}: {type(page_result).__name__}"
                         )
                     if not page_rows:
@@ -1088,14 +1123,24 @@ class MISPToNeo4jSync:
                         # Short read — we're at the end.
                         break
                 else:
-                    # Hit the safety cap
+                    # PR-N29 (multi-agent audit, 2026-04-24, HIGH-2): hitting the
+                    # safety cap means we may have legitimately MORE events in
+                    # MISP than the cap allows. Pre-fix this only logged; the
+                    # outer ``except Exception`` then silently treated the
+                    # truncated list as "all" events. Now raise so the operator
+                    # SEES the cap-hit. To intentionally raise the cap, edit
+                    # ``_FALLBACK_MAX_PAGES`` in this file.
                     logger.error(
-                        "[MISP-FETCH-FALLBACK] Hit _FALLBACK_MAX_PAGES=%d cap "
+                        "[MISP-FETCH-FALLBACK] PyMISP hit _FALLBACK_MAX_PAGES=%d cap "
                         "(~%d events). If MISP legitimately has more events, "
-                        "raise the cap in src/run_misp_to_neo4j.py. Silent data "
-                        "loss risk until this is addressed.",
+                        "raise the cap in src/run_misp_to_neo4j.py.",
                         _FALLBACK_MAX_PAGES,
                         _FALLBACK_MAX_PAGES * _FALLBACK_PAGE_SIZE,
+                    )
+                    raise _MispFallbackHardError(
+                        f"MISP fallback PyMISP hit _FALLBACK_MAX_PAGES={_FALLBACK_MAX_PAGES} cap "
+                        f"(~{_FALLBACK_MAX_PAGES * _FALLBACK_PAGE_SIZE} events collected). "
+                        f"Refusing to treat truncated fallback as complete."
                     )
 
                 if events:
@@ -1106,6 +1151,18 @@ class MISPToNeo4jSync:
                 else:
                     logger.info("No events found in MISP")
 
+            except _MispFallbackHardError:
+                # PR-N29 (multi-agent audit, 2026-04-24, HIGH-1): the sentinel
+                # raised inside the PyMISP loop above (errors payload, unexpected
+                # type, cap-hit) MUST escape this try/except — otherwise the
+                # broad ``except Exception`` below treats the hard failure as a
+                # transient PyMISP issue and falls through to the
+                # requests-restSearch path, masking the real underlying problem
+                # and producing a partial-success "no events found" outcome.
+                # Re-raising hands control to the outer try/except, which has
+                # its own sentinel re-raise that lets the failure surface to
+                # the calling DAG (retries=0 on critical chain — see PR-N29 H1).
+                raise
             except Exception as e:
                 logger.error(f"PyMISP error: {e}, falling back to requests restSearch")
                 # PR-N29 H3: same pagination for the requests-restSearch path.
@@ -1149,20 +1206,48 @@ class MISPToNeo4jSync:
                             page - 1,
                             len(events),
                         )
-                        raise RuntimeError(
+                        raise _MispFallbackHardError(
                             f"MISP fallback restSearch HTTP {response.status_code} on "
                             f"page {page} after {page - 1} good pages "
                             f"({len(events)} events collected). Investigate MISP backend; "
                             f"do NOT treat partial fallback as complete."
                         )
                     page_data = response.json()
-                    # ``events`` may be a raw list OR wrapped in {"response": [...]}
+                    # PR-N29 (multi-agent audit, 2026-04-24, HIGH-3 / Cross-Checker):
+                    # MISP can return HTTP 200 with an ``{"errors": ...}`` body
+                    # (e.g. ACL filter matched zero, broken sync user, malformed
+                    # query). Pre-fix this silently became ``[]`` via
+                    # ``.get("response") or []`` and the loop happily logged
+                    # "0 row(s)" → ``break`` → "successful pagination" with
+                    # zero events. Mirror the PyMISP branch above: errors is a
+                    # hard failure, unexpected payload type is a hard failure,
+                    # only list / wrapped-list payloads are accepted.
                     if isinstance(page_data, dict):
+                        if "errors" in page_data:
+                            logger.error(
+                                "[MISP-FETCH-FALLBACK] restSearch page %d returned "
+                                "errors payload: %s — aborting fallback (%d good "
+                                "pages already collected).",
+                                page,
+                                page_data.get("errors"),
+                                page - 1,
+                            )
+                            raise _MispFallbackHardError(
+                                f"MISP fallback restSearch errors on page {page}: {page_data.get('errors')}"
+                            )
                         page_rows = page_data.get("response") or []
                     elif isinstance(page_data, list):
                         page_rows = page_data
                     else:
-                        page_rows = []
+                        logger.error(
+                            "[MISP-FETCH-FALLBACK] restSearch page %d returned "
+                            "unexpected payload type %s — aborting fallback.",
+                            page,
+                            type(page_data).__name__,
+                        )
+                        raise _MispFallbackHardError(
+                            f"MISP fallback restSearch unexpected payload type on page {page}: {type(page_data).__name__}"
+                        )
                     if not page_rows:
                         break
                     events.extend(page_rows)
@@ -1174,9 +1259,21 @@ class MISPToNeo4jSync:
                     if len(page_rows) < _FALLBACK_PAGE_SIZE:
                         break
                 else:
+                    # PR-N29 (multi-agent audit, 2026-04-24, HIGH-2): symmetric
+                    # with the PyMISP cap-hit raise above. Hitting the safety
+                    # cap means truncated coverage; refuse to treat it as
+                    # complete.
                     logger.error(
-                        "[MISP-FETCH-FALLBACK] restSearch hit _FALLBACK_MAX_PAGES=%d cap",
+                        "[MISP-FETCH-FALLBACK] restSearch hit _FALLBACK_MAX_PAGES=%d cap "
+                        "(~%d events). If MISP legitimately has more events, "
+                        "raise the cap in src/run_misp_to_neo4j.py.",
                         _FALLBACK_MAX_PAGES,
+                        _FALLBACK_MAX_PAGES * _FALLBACK_PAGE_SIZE,
+                    )
+                    raise _MispFallbackHardError(
+                        f"MISP fallback restSearch hit _FALLBACK_MAX_PAGES={_FALLBACK_MAX_PAGES} cap "
+                        f"(~{_FALLBACK_MAX_PAGES * _FALLBACK_PAGE_SIZE} events collected). "
+                        f"Refusing to treat truncated fallback as complete."
                     )
 
                 # PR-N29: pagination already collected all events; downstream
@@ -1198,6 +1295,21 @@ class MISPToNeo4jSync:
             requests.exceptions.ChunkedEncodingError,
         ):
             raise  # let @retry_with_backoff handle transient errors
+        except _MispFallbackHardError:
+            # PR-N29 (multi-agent audit, 2026-04-24, HIGH-1): the sentinel
+            # marks a non-recoverable failure in the fallback paths
+            # (PyMISP errors payload, unexpected payload type, restSearch
+            # HTTP 5xx mid-pagination, OR safety-cap hit). Pre-fix the
+            # broad ``except Exception`` below caught these as a generic
+            # "Error fetching events", logged it, and returned an empty
+            # list — the calling DAG's ``EdgeGuardSyncCoverageGap`` alert
+            # then compared an empty processed-list to an empty
+            # events-index and saw "no gap." Re-raising lets the failure
+            # propagate to the DAG (which has retries=0 on the critical
+            # chain — see PR-N29 H1) so the operator sees the real error.
+            # Intentionally NOT in the @retry_with_backoff retry set:
+            # a 500 mid-pagination is not a transient network issue.
+            raise
         except Exception as e:
             logger.error(f"Error fetching events: {type(e).__name__}: {e}")
 
