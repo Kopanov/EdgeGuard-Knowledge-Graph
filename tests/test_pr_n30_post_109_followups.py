@@ -160,19 +160,34 @@ class TestPRN30CrossCheckerH2EventIdCap:
             "PR-N30 H-2: backfill script must define the sibling constant"
         )
 
-    def test_forward_write_cap_applied_to_i_sites(self):
-        """4 of the 5 PR-N26 SET clauses propagate i.misp_event_ids.
-        Each must apply the [0..CRITICAL_MAX_EVENT_IDS_PER_EDGE] slice."""
+    def test_forward_write_cap_applied_to_all_six_sites(self):
+        """All 6 forward-write Cypher cap sites use the canonical
+        ``CRITICAL_MAX_EVENT_IDS_PER_EDGE`` constant via f-string.
+
+        PR-N30 Bugbot round 1 (MED) caught: pre-fix Q4 still had a
+        hardcoded ``[0..200]`` even though PR-N30 introduced the
+        constant for the 5 OTHER PR-N26 SET clauses. A future bump
+        of the constant from 200 → e.g. 500 would silently leave Q4
+        at 200, re-introducing the exact "different content depending
+        on write path" drift the constant was created to prevent.
+        Total expected occurrences: 6 (Q3a, Q3b, Q4, Q7a, Q7b, Q9)."""
         text = self.BUILD_RELS.read_text()
         cap_pattern = "[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-        # Count of this literal should be >= 4 (one per i-source query:
-        # Q3a, Q3b, Q7a, Q9). Q4 uses its own [0..200] slice with a
-        # different shape (m.misp_event_ids filter, not i) so isn't counted here.
-        # We also expect 1 for Q7b (v.misp_event_ids) — so >= 5 total.
         occurrences = text.count(cap_pattern)
-        assert occurrences >= 5, (
-            f"PR-N30 H-2: f-string cap [0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear "
-            f"in at least 5 forward-write SET clauses (Q3a, Q3b, Q7a, Q7b, Q9); found {occurrences}"
+        assert occurrences >= 6, (
+            f"PR-N30 H-2 + Bugbot round 1: f-string cap "
+            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 6 "
+            f"forward-write Cypher cap sites (Q3a, Q3b, Q4, Q7a, Q7b, Q9); "
+            f"found {occurrences}"
+        )
+        # Negative pin: no hardcoded ``[0..200]`` should remain in actual
+        # code (comments may legitimately reference the literal in
+        # audit-history docs — strip those before scanning).
+        code_only = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
+        assert "[0..200]" not in code_only, (
+            "PR-N30 Bugbot round 1: no hardcoded [0..200] should remain in code — "
+            "use the f-string {CRITICAL_MAX_EVENT_IDS_PER_EDGE} constant for "
+            "symmetric cap maintenance"
         )
 
     def test_backfill_cap_applied_to_all_5_queries(self):

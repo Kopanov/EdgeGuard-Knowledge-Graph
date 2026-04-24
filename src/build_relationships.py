@@ -687,9 +687,16 @@ def build_relationships():
         _q4_outer = "MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND size(m.misp_event_ids) > 0 RETURN m"
         _q4_inner = (
             "WITH $m AS m "
-            # Cap per-malware event id fan-out at 200 (same cap as the
-            # pre-reversal form to match existing bounded behaviour).
-            "WITH m, [eid IN m.misp_event_ids WHERE eid IS NOT NULL AND size(eid) > 0][0..200] AS eids "
+            # PR-N30 Bugbot round 1 (2026-04-24, MED): use the canonical
+            # CRITICAL_MAX_EVENT_IDS_PER_EDGE constant instead of a
+            # hardcoded ``[0..200]``. Pre-N30 Q4 was the original site of
+            # the cap; PR-N30 introduced the constant + applied it to the
+            # 5 OTHER PR-N26 SET clauses + 5 backfill queries — but Q4
+            # itself was missed. Bugbot caught: a future bump from 200
+            # to e.g. 500 via the constant would silently leave Q4 at
+            # 200, re-introducing the exact "different content depending
+            # on write path" drift the constant was created to prevent.
+            f"WITH m, [eid IN m.misp_event_ids WHERE eid IS NOT NULL AND size(eid) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}] AS eids "
             "UNWIND eids AS eid "
             "WITH m, eid "
             "MATCH (i:Indicator) "
