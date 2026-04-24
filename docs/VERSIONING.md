@@ -30,4 +30,4 @@ For ad-hoc identification of an arbitrary checkout, use **`edgeguard version`** 
 
 ---
 
-_Last updated: 2026-03-20_
+_Last updated: 2026-04-24_
