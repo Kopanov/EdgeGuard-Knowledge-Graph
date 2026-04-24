@@ -281,6 +281,27 @@ class TestPRN29L1PlaceholderUnicodeHardening:
 
         assert is_placeholder_name("un\u2060known")
 
+    def test_lrm_bypass_blocked(self):
+        """PR-N29 Bugbot round 1 (MED): LEFT-TO-RIGHT MARK (U+200E) is
+        a zero-width directional mark in the same Unicode block as
+        U+200B–U+200D. Original PR-N29 missed it; Bugbot caught the gap.
+        ``"unknown\\u200e"`` must still be rejected."""
+        from node_identity import is_placeholder_name
+
+        assert is_placeholder_name("unknown\u200e"), "LRM appended bypass"
+        assert is_placeholder_name("\u200eunknown"), "LRM prepended bypass"
+        assert is_placeholder_name("un\u200eknown"), "LRM inline bypass"
+
+    def test_rlm_bypass_blocked(self):
+        """PR-N29 Bugbot round 1 (MED): RIGHT-TO-LEFT MARK (U+200F) —
+        same finding as LRM, U+200E + U+200F travel as a pair in
+        bidirectional-formatting attacks."""
+        from node_identity import is_placeholder_name
+
+        assert is_placeholder_name("unknown\u200f"), "RLM appended bypass"
+        assert is_placeholder_name("\u200funknown"), "RLM prepended bypass"
+        assert is_placeholder_name("un\u200fknown"), "RLM inline bypass"
+
     def test_genuine_malware_name_not_rejected(self):
         """Negative pin: a real malware name that happens to contain a
         zero-width char (unlikely but possible) shouldn't be over-rejected.

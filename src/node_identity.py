@@ -525,6 +525,14 @@ _ZERO_WIDTH_AND_BIDI_CHARS = (
     "\u200b"  # ZERO WIDTH SPACE
     "\u200c"  # ZERO WIDTH NON-JOINER
     "\u200d"  # ZERO WIDTH JOINER
+    # PR-N29 Bugbot round 1 (2026-04-24, MED): U+200E + U+200F are
+    # zero-width directional marks in the same Unicode block as
+    # U+200B–U+200D. NFKC + str.strip() do NOT remove them, so an
+    # attacker could bypass ``is_placeholder_name`` with
+    # ``"unknown\u200e"`` (LRM) or ``"unknown\u200f"`` (RLM). GitHub
+    # patched a similar @-mention bypass against the same vector.
+    "\u200e"  # LEFT-TO-RIGHT MARK (LRM)
+    "\u200f"  # RIGHT-TO-LEFT MARK (RLM)
     "\u2060"  # WORD JOINER
     "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
     "\u202a"  # LEFT-TO-RIGHT EMBEDDING
