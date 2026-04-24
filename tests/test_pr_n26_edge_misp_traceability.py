@@ -304,14 +304,20 @@ class TestBackfillScriptStructure:
         """For the ``misp_cooccurrence`` INDICATES edge specifically, we have
         BOTH endpoints' arrays available — so we can recover the EXACT
         historical event set (the intersection) rather than over-stamping
-        with a superset."""
+        with a superset.
+
+        PR-N30 (2026-04-24) added empty-string filter + cap, so the
+        comprehension's WHERE clause is now ``eid IS NOT NULL AND
+        size(eid) > 0 AND eid IN coalesce(m.misp_event_ids, [])`` —
+        the intersection check is preceded by the new filter."""
         text = _BACKFILL.read_text()
         # The intersection idiom: list comprehension filtering one array
-        # against the other.
-        assert "WHERE eid IN coalesce(m.misp_event_ids" in text, (
+        # against the other. Accept both pre-N30 form and post-N30 form
+        # (which has the null/empty filter prepended).
+        assert "eid IN coalesce(m.misp_event_ids" in text, (
             "indicates_cooccurrence pattern must compute "
-            "[eid IN coalesce(i.misp_event_ids, []) WHERE eid IN coalesce(m.misp_event_ids, [])] — "
-            "the exact intersection that originally produced the edge"
+            "[eid IN coalesce(i.misp_event_ids, []) WHERE ... eid IN coalesce(m.misp_event_ids, [])] — "
+            "the exact intersection that originally produced the edge (with PR-N30 null+empty filter)"
         )
 
     def test_backfill_supports_dry_run(self):
