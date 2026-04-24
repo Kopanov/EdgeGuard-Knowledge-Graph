@@ -1002,7 +1002,25 @@ class MISPToNeo4jSync:
                     logger.warning("[FETCH] Index returned rows but normalized to 0 events — check payload shape")
                 return normalized
 
-            logger.warning("[FETCH] Event index unavailable — falling back to PyMISP / restSearch (may be slow)")
+            # PR-N29 (Holistic H3, pre-baseline audit 2026-04-23): pre-N29
+            # this fallback used ``limit: 1000`` with NO pagination. For
+            # a 730d baseline against a populated MISP (empirically >1000
+            # events in the 2026-04-19 incident), the fallback silently
+            # truncated. ``EdgeGuardSyncCoverageGap`` alert compares
+            # processed vs ``edgeguard_sync_events_index_total`` which IS
+            # the truncated count — so no gap was visible. Fix: paginate
+            # both the PyMISP and requests-restSearch branches, matching
+            # the 500-per-page cadence of the primary index path.
+            logger.warning(
+                "[MISP-FETCH-FALLBACK-ACTIVE] Event index unavailable — falling "
+                "back to PyMISP / restSearch with pagination. This path is slower "
+                "than the index; investigate WHY the index failed. Grep this "
+                "token in logs to correlate with other failure modes."
+            )
+
+            # Pagination bounds (PR-N29 H3):
+            _FALLBACK_PAGE_SIZE = 500  # matches the primary index path cadence
+            _FALLBACK_MAX_PAGES = 200  # 100K-event safety cap; raise if needed
 
             # Fallback: PyMISP restSearch (can be expensive on very large instances).
             try:
@@ -1010,42 +1028,108 @@ class MISPToNeo4jSync:
 
                 misp = PyMISP(self.misp_url, self.misp_api_key, **_pymisp_client_kwargs())
 
-                search_kwargs: dict = {"limit": 1000, "search": MISP_EDGEGUARD_DISCOVERY_SEARCH}
-                if since:
-                    search_kwargs["timestamp"] = int(since.timestamp())
+                events = []
+                for page in range(1, _FALLBACK_MAX_PAGES + 1):
+                    search_kwargs: dict = {
+                        "limit": _FALLBACK_PAGE_SIZE,
+                        "page": page,
+                        "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
+                    }
+                    if since:
+                        search_kwargs["timestamp"] = int(since.timestamp())
 
-                misp_events = misp.search(controller="events", **search_kwargs)
-
-                if misp_events:
-                    events = list(misp_events)
+                    page_result = misp.search(controller="events", **search_kwargs)
+                    if not page_result:
+                        break
+                    page_rows = list(page_result)
+                    events.extend(page_rows)
                     logger.info(
-                        f"[FETCH] PyMISP returned {len(events)} row(s) (since={since}); normalizing to flat Event dicts"
+                        "[MISP-FETCH-FALLBACK] PyMISP page %d returned %d row(s)",
+                        page,
+                        len(page_rows),
+                    )
+                    if len(page_rows) < _FALLBACK_PAGE_SIZE:
+                        # Short read — we're at the end.
+                        break
+                else:
+                    # Hit the safety cap
+                    logger.error(
+                        "[MISP-FETCH-FALLBACK] Hit _FALLBACK_MAX_PAGES=%d cap "
+                        "(~%d events). If MISP legitimately has more events, "
+                        "raise the cap in src/run_misp_to_neo4j.py. Silent data "
+                        "loss risk until this is addressed.",
+                        _FALLBACK_MAX_PAGES,
+                        _FALLBACK_MAX_PAGES * _FALLBACK_PAGE_SIZE,
+                    )
+
+                if events:
+                    logger.info(
+                        f"[FETCH] PyMISP pagination returned {len(events)} row(s) total "
+                        f"across {page} page(s) (since={since}); normalizing"
                     )
                 else:
                     logger.info("No events found in MISP")
 
             except Exception as e:
                 logger.error(f"PyMISP error: {e}, falling back to requests restSearch")
-                rest_body: dict = {
-                    "returnFormat": "json",
-                    "limit": 1000,
-                    "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
-                }
-                if since:
-                    rest_body["timestamp"] = int(since.timestamp())
+                # PR-N29 H3: same pagination for the requests-restSearch path.
+                events = []
+                for page in range(1, _FALLBACK_MAX_PAGES + 1):
+                    rest_body: dict = {
+                        "returnFormat": "json",
+                        "limit": _FALLBACK_PAGE_SIZE,
+                        "page": page,
+                        "search": MISP_EDGEGUARD_DISCOVERY_SEARCH,
+                    }
+                    if since:
+                        rest_body["timestamp"] = int(since.timestamp())
 
-                response = self.session.post(
-                    f"{self.misp_url.rstrip('/')}/events/restSearch",
-                    json=rest_body,
-                    verify=SSL_VERIFY,
-                    timeout=(MISP_CONNECT_TIMEOUT, MISP_REQUEST_TIMEOUT),
-                )
+                    response = self.session.post(
+                        f"{self.misp_url.rstrip('/')}/events/restSearch",
+                        json=rest_body,
+                        verify=SSL_VERIFY,
+                        timeout=(MISP_CONNECT_TIMEOUT, MISP_REQUEST_TIMEOUT),
+                    )
 
-                if response.status_code == 200:
-                    events = response.json()
+                    if response.status_code != 200:
+                        # Propagate to the existing error path below by
+                        # breaking out here with the partial ``events`` and
+                        # letting the downstream handler run.
+                        break
+                    page_data = response.json()
+                    # ``events`` may be a raw list OR wrapped in {"response": [...]}
+                    if isinstance(page_data, dict):
+                        page_rows = page_data.get("response") or []
+                    elif isinstance(page_data, list):
+                        page_rows = page_data
+                    else:
+                        page_rows = []
+                    if not page_rows:
+                        break
+                    events.extend(page_rows)
                     logger.info(
-                        "[FETCH] events/restSearch fallback: payload type=%s — will normalize",
-                        type(events).__name__,
+                        "[MISP-FETCH-FALLBACK] restSearch page %d returned %d row(s)",
+                        page,
+                        len(page_rows),
+                    )
+                    if len(page_rows) < _FALLBACK_PAGE_SIZE:
+                        break
+                else:
+                    logger.error(
+                        "[MISP-FETCH-FALLBACK] restSearch hit _FALLBACK_MAX_PAGES=%d cap",
+                        _FALLBACK_MAX_PAGES,
+                    )
+
+                # PR-N29: pagination already collected all events; downstream
+                # normalization runs on the ``events`` variable. Pre-N29 this
+                # block had an ``if response.status_code == 200: events =
+                # response.json()`` re-assign on a single-shot response; now
+                # redundant because pagination loop already handled it.
+                if events:
+                    logger.info(
+                        "[FETCH] events/restSearch fallback (paginated): collected %d row(s) across %d page(s)",
+                        len(events),
+                        page,
                     )
 
         except (

@@ -1820,10 +1820,17 @@ baseline_dag = DAG(
     max_active_runs=1,  # Only one baseline at a time
     # Worst-case wall time: tier1 sequential (cisa 14s + mitre 28s + otx ~3h
     # + nvd ~5h ≈ 8h) + tier2 parallel (~2h) + full_sync (~6h) +
-    # build_rels (~5h) + enrich (~5h) = ~26h realistic, ~31h with a single
-    # retry on the longest task. 32h cap leaves ~1-6h of headroom; if real
-    # runs trend longer post-PR-F4 (sequential tier1 added ~3h), bump this
-    # via a follow-up rather than letting Airflow hard-kill at the cap.
+    # build_rels (~5h) + enrich (~5h) = ~26h realistic.
+    #
+    # PR-N29 (Holistic H1, pre-baseline audit 2026-04-23): each of the
+    # critical-chain tasks (full_neo4j_sync, build_relationships,
+    # run_enrichment_jobs) now has retries=0 — see their task definitions
+    # for the rationale. Pre-N29 a single retry on ANY of those tasks
+    # would have blown through the 32h dagrun_timeout mid-enrichment,
+    # leaving the graph in a partially-mutated state. With retries=0,
+    # 26h realistic + ~6h headroom = 32h is safe. Collectors still have
+    # retries=1 (inherited from default_args) — they're short and
+    # transient-flake-prone, so a single retry is cheap and well-justified.
     dagrun_timeout=timedelta(hours=32),
     is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
@@ -2784,6 +2791,17 @@ baseline_full_sync_task = PythonOperator(
     task_id="full_neo4j_sync",
     python_callable=run_baseline_full_sync,
     execution_timeout=timedelta(hours=6),
+    # PR-N29 (Holistic H1, pre-baseline audit 2026-04-23): inherit
+    # baseline_dag's ``retries: 1`` → override to 0 on the long, slow,
+    # idempotent critical-chain tasks. A 6h task retrying once eats
+    # 12h of the 32h dagrun_timeout — leaving insufficient headroom
+    # for build_rels (5h) + enrich (5h) + the rest of the chain. The
+    # sync task is idempotent (MERGEs with composite keys), so a
+    # retry doesn't meaningfully raise the chance of eventual success
+    # — it just doubles the wall-time cost. Better to fail cleanly
+    # and have the operator investigate than to silently re-run and
+    # crash the dagrun cap mid-enrichment.
+    retries=0,
     trigger_rule=TriggerRule.ALL_DONE,
     dag=baseline_dag,
 )
@@ -2807,6 +2825,9 @@ baseline_build_rels_task = PythonOperator(
     # bump in this same PR — without both, build_relationships
     # would still stall on transaction-memory exhaustion.
     execution_timeout=timedelta(hours=5),
+    # PR-N29 (Holistic H1): retries=0 on the critical chain. See
+    # full_neo4j_sync's retries=0 comment above for rationale.
+    retries=0,
     # PR #35: NONE_FAILED_MIN_ONE_SUCCESS — run if the upstream
     # full_neo4j_sync didn't crash (success OR skipped, but not failed).
     # Default ALL_SUCCESS would block this task even when the sync
@@ -2822,6 +2843,9 @@ baseline_enrichment_task = PythonOperator(
     task_id="run_enrichment_jobs",
     python_callable=run_baseline_enrichment,
     execution_timeout=timedelta(hours=5),
+    # PR-N29 (Holistic H1): retries=0 — same rationale as the two
+    # upstream critical-chain tasks.
+    retries=0,
     # PR #35: same rationale as build_relationships above.
     trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     dag=baseline_dag,
