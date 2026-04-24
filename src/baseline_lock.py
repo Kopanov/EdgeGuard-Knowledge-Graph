@@ -56,7 +56,17 @@ logger = logging.getLogger(__name__)
 # Max age before a sentinel is considered stale on cross-host setups.
 # PID-check covers local same-host stale detection; this catches the case
 # where the process holding the lock crashed on a different host.
-_BASELINE_LOCK_MAX_AGE_SEC_DEFAULT = 24 * 3600
+#
+# PR-N29 (Holistic M3, pre-baseline audit 2026-04-23): bumped 24h → 48h.
+# Rationale: the baseline DAG's ``dagrun_timeout`` is 32h (see
+# ``dags/edgeguard_pipeline.py:baseline_dag`` — ~26h realistic + 6h
+# headroom). Cross-host deployments (k8s / multi-host docker-compose)
+# where a different host writes the sentinel than reads it would have
+# the lock reaped 8h before the baseline finishes under the old 24h
+# default. Same-host deployments (the recommended CLI launch path per
+# preflight script) are unaffected — PID liveness check bypasses this
+# age cap. 48h gives 16h buffer above the dagrun_timeout ceiling.
+_BASELINE_LOCK_MAX_AGE_SEC_DEFAULT = 48 * 3600
 
 
 def _repo_root() -> str:

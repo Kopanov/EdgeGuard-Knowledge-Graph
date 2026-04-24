@@ -521,20 +521,79 @@ _REJECTED_PLACEHOLDER_NAMES: frozenset = frozenset(
 )
 
 
+_ZERO_WIDTH_AND_BIDI_CHARS = (
+    "\u200b"  # ZERO WIDTH SPACE
+    "\u200c"  # ZERO WIDTH NON-JOINER
+    "\u200d"  # ZERO WIDTH JOINER
+    # PR-N29 Bugbot round 1 (2026-04-24, MED): U+200E + U+200F are
+    # zero-width directional marks in the same Unicode block as
+    # U+200B–U+200D. NFKC + str.strip() do NOT remove them, so an
+    # attacker could bypass ``is_placeholder_name`` with
+    # ``"unknown\u200e"`` (LRM) or ``"unknown\u200f"`` (RLM). GitHub
+    # patched a similar @-mention bypass against the same vector.
+    "\u200e"  # LEFT-TO-RIGHT MARK (LRM)
+    "\u200f"  # RIGHT-TO-LEFT MARK (RLM)
+    "\u2060"  # WORD JOINER
+    "\ufeff"  # ZERO WIDTH NO-BREAK SPACE / BOM
+    # PR-N29 Bugbot round 2 (2026-04-24, LOW): non-standard whitespace/
+    # separator chars that ``str.strip()`` does NOT remove and that NFKC
+    # does NOT fold to a regular space. Without these in the translate
+    # table, an attacker can bypass the filter with e.g.
+    # ``"unknown\u180e"`` or ``"unknown\u2028"``. (NBSP U+00A0 is already
+    # handled because NFKC folds it to a regular space, then strip()
+    # removes it — but ONLY thanks to the translate→NFKC→strip ordering.)
+    "\u180e"  # MONGOLIAN VOWEL SEPARATOR (zero-width; not folded by NFKC)
+    "\u2028"  # LINE SEPARATOR (not stripped by str.strip on all platforms)
+    "\u2029"  # PARAGRAPH SEPARATOR (same)
+    "\u202a"  # LEFT-TO-RIGHT EMBEDDING
+    "\u202b"  # RIGHT-TO-LEFT EMBEDDING
+    "\u202c"  # POP DIRECTIONAL FORMATTING
+    "\u202d"  # LEFT-TO-RIGHT OVERRIDE
+    "\u202e"  # RIGHT-TO-LEFT OVERRIDE
+    "\u2066"  # LEFT-TO-RIGHT ISOLATE
+    "\u2067"  # RIGHT-TO-LEFT ISOLATE
+    "\u2068"  # FIRST STRONG ISOLATE
+    "\u2069"  # POP DIRECTIONAL ISOLATE
+)
+_ZERO_WIDTH_AND_BIDI_TRANSLATE = {ord(c): None for c in _ZERO_WIDTH_AND_BIDI_CHARS}
+
+
 def is_placeholder_name(value: Any) -> bool:
     """Return True if ``value`` canonicalizes to a known placeholder
     string. Used by merge_malware / merge_actor / merge_tool to reject
     MERGE on placeholder natural keys (PR-N10).
 
-    Canonicalization mirrors ``canonicalize_merge_key``'s name handling:
-    NFC-normalize, strip, lowercase. Non-string inputs (None, int, etc.)
-    return True (a non-string is definitionally not a meaningful name,
-    and returning True means "reject the MERGE" — the caller then treats
-    the item as having no valid identity).
+    Canonicalization steps (in order):
+      1. Strip zero-width + bidirectional-control characters (PR-N29 L1).
+         These are invisible but distinct under NFC — e.g.
+         ``"unknown\\u200b"`` would pass the pre-N29 check even though
+         it's visually identical to the rejected ``"unknown"``.
+      2. NFKC normalize (PR-N29 L1, upgrade from NFC). NFKC folds
+         compatibility characters (full-width Latin → half-width, ligatures,
+         etc.). Does NOT fold cross-script confusables (Cyrillic 'а' stays
+         distinct from Latin 'a') — those require a confusables library
+         and we accept the residual risk as LOW (no in-the-wild exploit).
+      3. Strip whitespace.
+      4. Lowercase.
+      5. Exact match against ``_REJECTED_PLACEHOLDER_NAMES``.
+
+    Non-string inputs (None, int, etc.) return True — a non-string is
+    definitionally not a meaningful name, and returning True means
+    "reject the MERGE" — the caller treats the item as having no valid
+    identity.
+
+    PR-N29 (Holistic L1, pre-baseline audit 2026-04-23): upgraded from
+    bare NFC to NFKC + zero-width/bidi strip. Pre-N29 an attacker with
+    MISP write access could craft ``Malware{name:"unknown\\u200b"}`` or
+    ``Malware{name:"unknоwn"}`` (Cyrillic 'о') to bypass the filter.
+    Cyrillic confusables still bypass — tracked but not exploited today.
     """
     if not isinstance(value, str):
         return True
-    canonical = unicodedata.normalize("NFC", value).strip().lower()
+    # Step 1: strip zero-width and bidi-control characters.
+    stripped_controls = value.translate(_ZERO_WIDTH_AND_BIDI_TRANSLATE)
+    # Steps 2-4: NFKC normalize, whitespace-strip, lowercase.
+    canonical = unicodedata.normalize("NFKC", stripped_controls).strip().lower()
     return canonical in _REJECTED_PLACEHOLDER_NAMES
 
 
