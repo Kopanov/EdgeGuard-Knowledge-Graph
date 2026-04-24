@@ -421,8 +421,13 @@ def main() -> int:
             "proceeding. See migrations/2026_05_edge_misp_event_ids_backfill_runbook.md."
         )
 
-    driver = get_driver()
-
+    # PR-N26 multi-agent audit ROUND 2 (2026-04-23, Bug Hunter H-1 + Red Team
+    # LOW-2 defense-in-depth): bind ``driver = None`` BEFORE the try so the
+    # ``finally: driver.close()`` can't NameError-mask an earlier
+    # ``get_driver()`` exception. This lets the operator see the original
+    # failure (e.g. ``neo4j.exceptions.ConfigurationError`` on a malformed
+    # URI) instead of a cryptic NameError traceback.
+    driver = None
     selected = [(n, c, w) for n, c, w in PATTERNS if args.only is None or n == args.only]
     if not selected:
         logger.error("No patterns selected — check --only argument")
@@ -431,24 +436,62 @@ def main() -> int:
     grand_total_written = 0
     grand_total_errors = 0
     grand_total_gap = 0
+    # PR-N26 audit round 2 (Bug Hunter H-1): if pattern N crashes mid-way,
+    # patterns N+1..end never run but the operator still needs to see the
+    # summary (how much got backfilled before the crash — idempotent re-runs
+    # pick up from there). ``aborted_at`` tracks which pattern (if any) ended
+    # the loop abnormally so the summary log can surface it.
+    aborted_at: str | None = None
 
     try:
+        driver = get_driver()
         for name, count_q, write_q in selected:
-            stats = run_pattern(driver, name, count_q, write_q, args.batch_size, args.dry_run)
-            grand_total_gap += stats["gap"]
-            grand_total_written += stats["written"]
-            grand_total_errors += stats["errors"]
+            try:
+                stats = run_pattern(driver, name, count_q, write_q, args.batch_size, args.dry_run)
+                grand_total_gap += stats["gap"]
+                grand_total_written += stats["written"]
+                grand_total_errors += stats["errors"]
+            except Exception:
+                # PR-N26 audit round 2 Bug Hunter H-1: don't swallow the
+                # error — but DO record which pattern died and still emit
+                # the summary below (see finally). Abort remaining patterns
+                # so a cascading Neo4j outage doesn't produce N misleading
+                # per-pattern errors. logger.exception() includes the
+                # traceback automatically; we don't need the bound name.
+                logger.exception(
+                    "[%s] FATAL — pattern crashed; aborting remaining patterns. "
+                    "Re-run is idempotent (count-query gate skips already-done rows).",
+                    name,
+                )
+                grand_total_errors += 1
+                aborted_at = name
+                break
     finally:
-        driver.close()
-
-    logger.info("=" * 60)
-    logger.info(
-        "Summary: gap=%d, backfilled=%d, errors=%d (dry_run=%s)",
-        grand_total_gap,
-        grand_total_written,
-        grand_total_errors,
-        args.dry_run,
-    )
+        if driver is not None:
+            driver.close()
+        # Summary ALWAYS runs, even on crash. Bug Hunter H-1: pre-fix, a
+        # mid-run pattern crash raised out of main() and the summary log
+        # was skipped entirely — operator saw a stack trace and no
+        # accounting of what completed.
+        logger.info("=" * 60)
+        if aborted_at is not None:
+            logger.warning(
+                "Summary (PARTIAL — aborted at pattern '%s'): gap=%d, backfilled=%d, "
+                "errors=%d (dry_run=%s). Idempotent re-run will resume.",
+                aborted_at,
+                grand_total_gap,
+                grand_total_written,
+                grand_total_errors,
+                args.dry_run,
+            )
+        else:
+            logger.info(
+                "Summary: gap=%d, backfilled=%d, errors=%d (dry_run=%s)",
+                grand_total_gap,
+                grand_total_written,
+                grand_total_errors,
+                args.dry_run,
+            )
 
     if grand_total_errors > 0:
         return 1

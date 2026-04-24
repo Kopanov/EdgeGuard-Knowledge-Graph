@@ -3224,8 +3224,27 @@ class MISPToNeo4jSync:
                         self.stats["placeholder_rejections"] += 1
                         # Still call merge_malware so the metric counter
                         # increments (defense in depth + observability).
-                        # Its return value is ignored here.
-                        self.neo4j.merge_malware(malware, source_id=source_id)
+                        # PR-N26 multi-agent audit round 2 (Bug Hunter H-2 +
+                        # Red Team M3, 2-agent corroboration): this call
+                        # MUST be wrapped in its own narrow try/except —
+                        # without it, a Neo4j deadlock/transient error on
+                        # the placeholder branch would bubble to the outer
+                        # ``except Exception as e: errors += 1`` and
+                        # re-introduce the exact PR-N28 cascade-fail bug
+                        # this branch was meant to prevent. Metric failure
+                        # must not poison the sync; log at WARN so the
+                        # operator sees it but no error counter increment.
+                        try:
+                            self.neo4j.merge_malware(malware, source_id=source_id)
+                        except Exception as _metric_err:
+                            logger.warning(
+                                "[MERGE-PLACEHOLDER-METRIC-FAIL] Malware name=%s source=%s: "
+                                "%s: %s — observability call failed, NOT counted as sync error.",
+                                m_name,
+                                source_id,
+                                type(_metric_err).__name__,
+                                _metric_err,
+                            )
                         continue
                     if self.neo4j.merge_malware(malware, source_id=source_id):
                         self.stats["malware_synced"] += 1
@@ -3268,7 +3287,20 @@ class MISPToNeo4jSync:
                             source_id,
                         )
                         self.stats["placeholder_rejections"] += 1
-                        self.neo4j.merge_actor(actor, source_id=source_id)
+                        # PR-N26 multi-agent audit round 2 Bug Hunter H-2:
+                        # same defense-in-depth wrap as the malware loop —
+                        # metric-only call must not poison the error counter.
+                        try:
+                            self.neo4j.merge_actor(actor, source_id=source_id)
+                        except Exception as _metric_err:
+                            logger.warning(
+                                "[MERGE-PLACEHOLDER-METRIC-FAIL] ThreatActor name=%s source=%s: "
+                                "%s: %s — observability call failed, NOT counted as sync error.",
+                                a_name,
+                                source_id,
+                                type(_metric_err).__name__,
+                                _metric_err,
+                            )
                         continue
                     if self.neo4j.merge_actor(actor, source_id=source_id):
                         self.stats["actors_synced"] += 1

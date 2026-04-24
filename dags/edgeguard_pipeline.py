@@ -1891,6 +1891,47 @@ _BASELINE_CONF_TYPO_MAP = {
 }
 
 
+# Critical-chain task IDs for the postcheck sentinel (PR-N27).
+#
+# Audit history that led here:
+# * PR-N21/N24/N27 originally used a hardcoded list inside the callable.
+# * PR-N26 multi-agent audit (Cross-Checker LOW-2 + Maintainer M2 + Bug
+#   Hunter implied — 3-agent corroboration) flagged the hardcoded list as
+#   a "bit-rot risk" and recommended switching to
+#   ``ti.task.get_flat_relatives(upstream=True)`` for dynamic enumeration.
+# * Bugbot round 2 (2026-04-23, HIGH) caught the overcorrection:
+#   ``get_flat_relatives(upstream=True)`` traverses ALL transitive
+#   ancestors, including Tier 1/Tier 2 collector tasks. Those use
+#   ``trigger_rule=ALL_DONE`` on purpose (non-blocking collectors —
+#   individual API flakes must NOT cascade). Under the dynamic-enumeration
+#   fix, a single collector failure → sentinel raises AirflowSkipException
+#   → baseline_complete skipped → DAG marked FAILED even though the
+#   critical chain succeeded. Alert fatigue + potentially aborted baselines.
+# * Second PR-N26 multi-agent audit (2026-04-23, 7 agents, 6-of-7
+#   corroboration including Bug Hunter BLOCK-MERGE, Cross-Checker HIGH-1,
+#   Prod Readiness HIGH-1, Test Coverage BLOCK-MERGE): revert to a
+#   hardcoded list at the module level. The bit-rot risk is real but
+#   theoretical (adding a 4th critical task is discoverable via grep for
+#   ``_BASELINE_CRITICAL_CHAIN``); the dynamic-enumeration regression is
+#   concrete and would fire on EVERY 730d baseline where at least one of
+#   10 collectors hits a transient error.
+#
+# Shape decision (from Maintainer L2): module-level frozenset (not
+# function-local) so:
+#   (a) tests can introspect via import
+#   (b) it lives next to the DAG topology it describes
+#   (c) the comment carries the WHY permanently
+#   (d) it's greppable — a future PR adding a 4th critical task
+#       will hit this constant via ``grep -r _BASELINE_CRITICAL_CHAIN``.
+_BASELINE_CRITICAL_CHAIN: frozenset[str] = frozenset(
+    {
+        "full_neo4j_sync",
+        "build_relationships",
+        "run_enrichment_jobs",
+    }
+)
+
+
 def _validate_baseline_dag_conf(conf: object, *, source_label: str = "dag_run.conf") -> None:
     """Emit a WARNING for each unrecognized key in the baseline DAG conf.
 
@@ -2315,23 +2356,16 @@ def assert_baseline_postconditions(**context):
     if ti is not None:
         try:
             dag_run = ti.get_dagrun()
-            # PR-N26 multi-agent audit Cross-Checker LOW-2 + Maintainer M2
-            # (2026-04-23): originally enumerated a hardcoded list
-            # ``("full_neo4j_sync", "build_relationships", "run_enrichment_jobs")``.
-            # If a future PR inserts a 4th task into the chain, the sentinel
-            # silently misses its failure. Switch to ``ti.task.get_flat_relatives(
-            # upstream=True)`` which traverses the DAG topology dynamically
-            # — covers transitively-upstream tasks, not just direct parents.
-            #
-            # Edge case: ``get_flat_relatives`` returns Task objects (not
-            # task_ids); we map ``.task_id`` to look up state via dag_run.
-            # If the API changes shape (rare; this surface is stable), the
-            # outer ``except Exception`` falls through to the log-and-continue
-            # path which still runs invariants. Defense-in-depth.
-            upstream_tasks = ti.task.get_flat_relatives(upstream=True)
+            # PR-N26 multi-agent audit ROUND 2 (2026-04-23, 6-of-7 agent
+            # corroboration): inspect ONLY the critical-chain tasks, NOT
+            # the full transitive upstream. See the
+            # ``_BASELINE_CRITICAL_CHAIN`` constant at the top of this
+            # module for the full history of why (short version: Bugbot
+            # round 2 caught that ``get_flat_relatives(upstream=True)``
+            # catches Tier 1/2 collector failures, which use
+            # ``trigger_rule=ALL_DONE`` on purpose and must NOT cascade).
             upstream_states: dict[str, str] = {}
-            for upstream_task in upstream_tasks:
-                upstream_task_id = upstream_task.task_id
+            for upstream_task_id in _BASELINE_CRITICAL_CHAIN:
                 try:
                     upstream_ti = dag_run.get_task_instance(upstream_task_id)
                     upstream_states[upstream_task_id] = getattr(upstream_ti, "state", None) or "<missing>"
