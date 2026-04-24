@@ -52,6 +52,32 @@ _PLACEHOLDER_NAMES_CYPHER_LIST = (
     "[" + ", ".join(f'"{_escape_cypher_double_quoted(name)}"' for name in sorted(_REJECTED_PLACEHOLDER_NAMES)) + "]"
 )
 
+
+# PR-N30 Cross-Checker H-2 (2026-04-24): canonical cap on per-edge
+# ``r.misp_event_ids[]`` fan-out.
+#
+# Pre-N30 Q4 (INDICATES cooccurrence) capped per-malware fan-out at
+# ``[0..200]`` (line 654) but the 5 other PR-N26 SET clauses (Q3a, Q3b,
+# Q7a, Q7b, Q9) and the 5 backfill queries in
+# ``scripts/backfill_edge_misp_event_ids.py`` had NO cap. Result: a
+# Malware with 250 event_ids that co-occur with an Indicator carrying all
+# 250 landed on the EXPLOITS edge as a 200-element array under Q4 but a
+# 250-element array under backfill. Same logical entity, different
+# ``r.misp_event_ids[]`` content depending on the write path.
+#
+# PR-N30 aligns: apply this cap symmetrically to all 5 forward-write SET
+# clauses AND the 5 backfill queries. The constant is referenced via
+# f-string substitution rather than hardcoded so a future bump to e.g.
+# 500 needs to change ONE line.
+#
+# Sibling constant in ``scripts/backfill_edge_misp_event_ids.py`` MUST
+# match this value. The backfill script can't cleanly import from
+# ``src/build_relationships.py`` without triggering its module-level
+# side effects (APOC + Sector UUID precomputation), so the constant is
+# duplicated with a cross-reference comment. Grep
+# ``CRITICAL_MAX_EVENT_IDS_PER_EDGE`` to find both sites.
+CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
+
 try:
     from metrics_server import record_neo4j_relationships
 
@@ -551,8 +577,14 @@ def build_relationships():
             # contributed the cve_tag) — acceptable for traceability and
             # consistent with how Path A's _set_clause helper handles
             # multi-event indicators.
+            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): filter nulls/
+            # empty strings (matches Path A's require_nonempty_string guard
+            # in neo4j_client.create_misp_relationships_batch) AND cap
+            # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
+            # semantics between forward-write and the backfill script.
             "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "        coalesce(r.misp_event_ids, []) + "
+            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
             "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)"
         )
@@ -590,8 +622,14 @@ def build_relationships():
             # for the CVE-typed EXPLOITS edge variant. Q3a/Q3b share semantics
             # (Indicator's cve_tag → either Vulnerability or CVE node), so the
             # SET clause shape stays uniform.
+            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): filter nulls/
+            # empty strings (matches Path A's require_nonempty_string guard
+            # in neo4j_client.create_misp_relationships_batch) AND cap
+            # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
+            # semantics between forward-write and the backfill script.
             "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "        coalesce(r.misp_event_ids, []) + "
+            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
             "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
         )
@@ -649,9 +687,16 @@ def build_relationships():
         _q4_outer = "MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND size(m.misp_event_ids) > 0 RETURN m"
         _q4_inner = (
             "WITH $m AS m "
-            # Cap per-malware event id fan-out at 200 (same cap as the
-            # pre-reversal form to match existing bounded behaviour).
-            "WITH m, [eid IN m.misp_event_ids WHERE eid IS NOT NULL AND size(eid) > 0][0..200] AS eids "
+            # PR-N30 Bugbot round 1 (2026-04-24, MED): use the canonical
+            # CRITICAL_MAX_EVENT_IDS_PER_EDGE constant instead of a
+            # hardcoded ``[0..200]``. Pre-N30 Q4 was the original site of
+            # the cap; PR-N30 introduced the constant + applied it to the
+            # 5 OTHER PR-N26 SET clauses + 5 backfill queries — but Q4
+            # itself was missed. Bugbot caught: a future bump from 200
+            # to e.g. 500 via the constant would silently leave Q4 at
+            # 200, re-introducing the exact "different content depending
+            # on write path" drift the constant was created to prevent.
+            f"WITH m, [eid IN m.misp_event_ids WHERE eid IS NOT NULL AND size(eid) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}] AS eids "
             "UNWIND eids AS eid "
             "WITH m, eid "
             "MATCH (i:Indicator) "
@@ -784,8 +829,14 @@ def build_relationships():
             # coverage on 36,480 TARGETS edges. See Q3a for the full rationale
             # on propagating the indicator's full event list (superset of
             # true provenance, acceptable for traceability).
+            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): filter nulls/
+            # empty strings (matches Path A's require_nonempty_string guard
+            # in neo4j_client.create_misp_relationships_batch) AND cap
+            # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
+            # semantics between forward-write and the backfill script.
             "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "        coalesce(r.misp_event_ids, []) + "
+            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
             "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
@@ -820,8 +871,12 @@ def build_relationships():
             # (1/1,221) AFFECTS edges carried misp_event_ids — that single
             # one was created via Path A's _set_clause helper. The other
             # 1,220 came from this query without the wire-up.
+            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): same filter +
+            # cap as the i.* sites above — Q7b uses v (Vulnerability/CVE)
+            # as the source endpoint for AFFECTS edges.
             "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + coalesce(v.misp_event_ids, [])"
+            "        coalesce(r.misp_event_ids, []) + "
+            f"        [x IN coalesce(v.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
             "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
@@ -984,8 +1039,14 @@ def build_relationships():
             # resulting INDICATES edge IS MISP-derived. We propagate the
             # indicator's full event list (superset of true provenance) — see
             # Q3a comment for the rationale on why superset is acceptable.
+            # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): filter nulls/
+            # empty strings (matches Path A's require_nonempty_string guard
+            # in neo4j_client.create_misp_relationships_batch) AND cap
+            # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
+            # semantics between forward-write and the backfill script.
             "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + coalesce(i.misp_event_ids, [])"
+            "        coalesce(r.misp_event_ids, []) + "
+            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
             "    ), "
             "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"

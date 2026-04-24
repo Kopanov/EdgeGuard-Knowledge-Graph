@@ -109,7 +109,7 @@ import os
 import sys
 from typing import Dict, List, Tuple
 
-from neo4j import Driver, GraphDatabase
+from neo4j import READ_ACCESS, WRITE_ACCESS, Driver, GraphDatabase
 
 # PR-N26 multi-agent audit Prod Readiness HIGH-2 (2026-04-23): the
 # backfill writes to the same edges a running baseline would write. Without
@@ -133,6 +133,23 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [backfill-edge-misp] %(message)s",
 )
 logger = logging.getLogger("backfill_edge_misp_event_ids")
+
+
+# PR-N30 Cross-Checker H-2 (2026-04-24): sibling constant to
+# ``src/build_relationships.py::CRITICAL_MAX_EVENT_IDS_PER_EDGE``.
+#
+# The cap MUST match the forward-write path. Pre-N30 Q4 (forward-write)
+# capped at 200 but the backfill cooccurrence path was uncapped — so the
+# same (i, m) edge could end up with different content depending on
+# whether it was produced by forward-write or backfill. This constant
+# documents + enforces the symmetric contract.
+#
+# The backfill script can't cleanly import from ``src/build_relationships``
+# without triggering its module-level side effects (APOC + Sector UUID
+# precomputation). So the constant is duplicated with a cross-reference
+# comment. Grep ``CRITICAL_MAX_EVENT_IDS_PER_EDGE`` to find both sites —
+# if you change one, change both.
+CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +182,11 @@ PATTERNS: List[Tuple[str, str, str]] = [
         # (Q4 in build_relationships iterates eid IN m.misp_event_ids and
         # MATCHes i WHERE eid IN i.misp_event_ids — so the intersection is
         # the historical set).
-        """
+        #
+        # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): filter nulls/empty
+        # strings (Path A parity) AND cap to CRITICAL_MAX_EVENT_IDS_PER_EDGE
+        # (forward-write Q4 parity). See module-level constant comment.
+        f"""
         CALL apoc.periodic.iterate(
             'MATCH (i:Indicator)-[r:INDICATES]->(m:Malware)
              WHERE coalesce(size(r.misp_event_ids), 0) = 0
@@ -173,10 +194,11 @@ PATTERNS: List[Tuple[str, str, str]] = [
              RETURN i, r, m',
             'WITH i, r, m,
                   [eid IN coalesce(i.misp_event_ids, [])
-                   WHERE eid IN coalesce(m.misp_event_ids, [])] AS shared
+                   WHERE eid IS NOT NULL AND size(eid) > 0
+                     AND eid IN coalesce(m.misp_event_ids, [])][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}] AS shared
              WHERE size(shared) > 0
              SET r.misp_event_ids = shared',
-            {batchSize: $batch_size, parallel: false}
+            {{batchSize: $batch_size, parallel: false}}
         )
         YIELD batches, total, committedOperations, errorMessages
         RETURN batches, total, committedOperations, errorMessages
@@ -190,15 +212,17 @@ PATTERNS: List[Tuple[str, str, str]] = [
           AND coalesce(r.match_type, '') = 'malware_family'
         RETURN count(r) AS gap
         """,
-        """
+        # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): same filter/cap as
+        # the indicates_cooccurrence pattern — see module-level constant.
+        f"""
         CALL apoc.periodic.iterate(
             'MATCH (i:Indicator)-[r:INDICATES]->(m:Malware)
              WHERE coalesce(size(r.misp_event_ids), 0) = 0
                AND coalesce(r.match_type, "") = "malware_family"
                AND coalesce(size(i.misp_event_ids), 0) > 0
              RETURN i, r',
-            'SET r.misp_event_ids = i.misp_event_ids',
-            {batchSize: $batch_size, parallel: false}
+            'SET r.misp_event_ids = [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]',
+            {{batchSize: $batch_size, parallel: false}}
         )
         YIELD batches, total, committedOperations, errorMessages
         RETURN batches, total, committedOperations, errorMessages
@@ -211,14 +235,15 @@ PATTERNS: List[Tuple[str, str, str]] = [
         WHERE coalesce(size(r.misp_event_ids), 0) = 0
         RETURN count(r) AS gap
         """,
-        """
+        # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24).
+        f"""
         CALL apoc.periodic.iterate(
             'MATCH (i:Indicator)-[r:EXPLOITS]->(target)
              WHERE coalesce(size(r.misp_event_ids), 0) = 0
                AND coalesce(size(i.misp_event_ids), 0) > 0
              RETURN i, r',
-            'SET r.misp_event_ids = i.misp_event_ids',
-            {batchSize: $batch_size, parallel: false}
+            'SET r.misp_event_ids = [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]',
+            {{batchSize: $batch_size, parallel: false}}
         )
         YIELD batches, total, committedOperations, errorMessages
         RETURN batches, total, committedOperations, errorMessages
@@ -231,14 +256,15 @@ PATTERNS: List[Tuple[str, str, str]] = [
         WHERE coalesce(size(r.misp_event_ids), 0) = 0
         RETURN count(r) AS gap
         """,
-        """
+        # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24).
+        f"""
         CALL apoc.periodic.iterate(
             'MATCH (i:Indicator)-[r:TARGETS]->(s:Sector)
              WHERE coalesce(size(r.misp_event_ids), 0) = 0
                AND coalesce(size(i.misp_event_ids), 0) > 0
              RETURN i, r',
-            'SET r.misp_event_ids = i.misp_event_ids',
-            {batchSize: $batch_size, parallel: false}
+            'SET r.misp_event_ids = [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]',
+            {{batchSize: $batch_size, parallel: false}}
         )
         YIELD batches, total, committedOperations, errorMessages
         RETURN batches, total, committedOperations, errorMessages
@@ -252,15 +278,18 @@ PATTERNS: List[Tuple[str, str, str]] = [
           AND coalesce(size(r.misp_event_ids), 0) = 0
         RETURN count(r) AS gap
         """,
-        """
+        # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): note this one
+        # reads ``v.misp_event_ids`` (Vulnerability/CVE source, not
+        # Indicator) — matches Q7b's forward-write source.
+        f"""
         CALL apoc.periodic.iterate(
             'MATCH (v)-[r:AFFECTS]->(s:Sector)
              WHERE (v:Vulnerability OR v:CVE)
                AND coalesce(size(r.misp_event_ids), 0) = 0
                AND coalesce(size(v.misp_event_ids), 0) > 0
              RETURN v, r',
-            'SET r.misp_event_ids = v.misp_event_ids',
-            {batchSize: $batch_size, parallel: false}
+            'SET r.misp_event_ids = [x IN coalesce(v.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]',
+            {{batchSize: $batch_size, parallel: false}}
         )
         YIELD batches, total, committedOperations, errorMessages
         RETURN batches, total, committedOperations, errorMessages
@@ -334,7 +363,16 @@ def run_pattern(
     delta is logged as ``filter-skipped`` so operators can see the exact
     filter impact."""
     out = {"gap": 0, "batches": 0, "written": 0, "scanned": 0, "errors": 0}
-    with driver.session() as session:
+    # PR-N30 Red Team H1 (2026-04-23, defense-in-depth): when dry-run is
+    # set, open the session in READ_ACCESS mode. Today the ``count_query``
+    # strings are read-only by inspection, but there's zero driver-side
+    # constraint preventing a future maintainer from adding a stray
+    # MERGE that would silently mutate on what the operator BELIEVED was
+    # a safe dry-run. READ_ACCESS on the server side rejects writes with
+    # ``neo4j.exceptions.ClientError`` — a LOUD failure instead of silent
+    # corruption. No behaviour change today; surfaces any future drift.
+    access_mode = READ_ACCESS if dry_run else WRITE_ACCESS
+    with driver.session(default_access_mode=access_mode) as session:
         # Always run the count to give the operator a scope readout.
         result = session.run(count_query)
         record = result.single()
