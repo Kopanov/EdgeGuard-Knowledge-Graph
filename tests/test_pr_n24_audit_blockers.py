@@ -288,12 +288,22 @@ class TestB2AlertmanagerNoPlaceholderPagerKey:
         assert "PLACEHOLDER_DETECTED" in result.stdout
 
     def test_preflight_alert_count_floor_bumped(self):
-        """PR-N24 H3 added EdgeGuardMispEventAttributesTruncated, so the
-        preflight defense-in-depth alert-count floor must be ≥ 9."""
+        """PR-N24 H3 added EdgeGuardMispEventAttributesTruncated; PR-N31
+        added EdgeGuardMispFetchFallbackActive + EdgeGuardMispFetchFallback
+        HardError. The preflight defense-in-depth alert-count floor
+        bumps with each PR that adds alerts so a future regression that
+        deletes alerts is caught.
+
+        The literal floor value is checked here (not just "≥ N for some N")
+        because PR-N31's TestPRN31FallbackAlerts.test_alert_count_floor_
+        pinned_in_preflight pins the symmetric direction — both must agree
+        on the current floor."""
         text = (SCRIPTS / "preflight_baseline.sh").read_text()
-        # Pre-N24 H3 the floor was 8; post-N24 H3 it must be 9+.
-        assert "ALERT_COUNT" in text and "-ge 9" in text, (
-            "preflight ALERT_COUNT floor must be ``-ge 9`` after PR-N24 H3 added EdgeGuardMispEventAttributesTruncated"
+        # Pre-N24 H3 the floor was 8; PR-N24 H3 → 9; PR-N31 → 11.
+        assert "ALERT_COUNT" in text and "-ge 11" in text, (
+            "preflight ALERT_COUNT floor must be ``-ge 11`` after PR-N31 added "
+            "EdgeGuardMispFetchFallbackActive + EdgeGuardMispFetchFallbackHardError. "
+            "If a future PR adds alerts, bump BOTH this test AND scripts/preflight_baseline.sh."
         )
 
 

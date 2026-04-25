@@ -251,16 +251,19 @@ else
   warn "promtool not installed; skipping alerts parse check (install Prometheus tools)"
 fi
 
-# Quick structural pin — expect the edgeguard_pipeline_observability rule group with at least 9 alerts.
+# Quick structural pin — expect the edgeguard_pipeline_observability rule group with at least 11 alerts.
 # PR-N24 audit MED follow-up: bumped from ≥ 6 → ≥ 8 (PR-N21 Bravo-ops adds
 # EdgeGuardBuildRelationshipsSilentDeath + EdgeGuardApocBatchPartial), then
 # bumped again to ≥ 9 for PR-N24 H3 (EdgeGuardMispEventAttributesTruncated).
+# PR-N31 (2026-04-25): bumped to ≥ 11 — added EdgeGuardMispFetchFallbackActive +
+# EdgeGuardMispFetchFallbackHardError (operator visibility for the PR-N29
+# fallback hardening; see prometheus/alerts.yml).
 # This is a defense-in-depth structural pin — promtool above does the real validation.
 ALERT_COUNT=$(grep -cE '^\s+- alert:' prometheus/alerts.yml 2>/dev/null || echo "0")
-if [[ "$ALERT_COUNT" -ge 9 ]]; then
-  pass "prometheus/alerts.yml has $ALERT_COUNT alert rules (≥ 9 required)"
+if [[ "$ALERT_COUNT" -ge 11 ]]; then
+  pass "prometheus/alerts.yml has $ALERT_COUNT alert rules (≥ 11 required)"
 else
-  fail "prometheus/alerts.yml has only $ALERT_COUNT alerts — expected ≥ 9 (PR-N11/N12/N18/N21/N24)"
+  fail "prometheus/alerts.yml has only $ALERT_COUNT alerts — expected ≥ 11 (PR-N11/N12/N18/N21/N24/N31)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -352,6 +355,68 @@ if [[ -x ".venv/bin/pytest" ]]; then
   fi
 else
   warn ".venv/bin/pytest not found; skipping collection check"
+fi
+
+# -----------------------------------------------------------------------------
+# [11] PR-N29 invariants — DAG retries=0, sentinel class, lock max-age
+# -----------------------------------------------------------------------------
+# Defense-in-depth source-pin: PR-N29 hardened the baseline against three
+# silent-failure modes (retries-budget overrun, MISP-fetch-fallback silent
+# truncation, cross-host lock TTL). PR-N31 (2026-04-25) adds this preflight
+# check so an inadvertent revert (rebase mishap, misguided "cleanup",
+# manual edit) is caught BEFORE the baseline launches — not by an
+# operator at hour 26 of a 32h dagrun.
+#
+# Fast-fail (grep, no Python). The full-fat invariant tests live in
+# tests/test_pr_n29_pre_baseline_hardening.py and are part of the [10]
+# pytest collection above.
+hdr "[11] PR-N29 invariants (retries=0, sentinel, lock max-age)"
+
+# (a) _MispFallbackHardError sentinel class is still defined
+if grep -q "^class _MispFallbackHardError(Exception):" src/run_misp_to_neo4j.py 2>/dev/null; then
+  pass "_MispFallbackHardError sentinel class present in src/run_misp_to_neo4j.py"
+else
+  fail "_MispFallbackHardError sentinel class missing — PR-N29 fallback hard-error surfacing reverted? (src/run_misp_to_neo4j.py)"
+fi
+
+# (b) baseline_lock max-age is at least 48h (cross-host buffer above 32h dagrun_timeout)
+if grep -q "_BASELINE_LOCK_MAX_AGE_SEC_DEFAULT = 48 \* 3600" src/baseline_lock.py 2>/dev/null; then
+  pass "baseline_lock max-age = 48h (PR-N29 M3)"
+else
+  fail "baseline_lock max-age != 48h — cross-host deployments may reap the sentinel mid-baseline (src/baseline_lock.py)"
+fi
+
+# (c) all three critical-chain tasks have retries=0 in the baseline DAG
+RETRIES_ZERO_COUNT=0
+for task in full_neo4j_sync build_relationships run_enrichment_jobs; do
+  # Find the PythonOperator block whose task_id matches; allow ~3000 chars of
+  # surrounding context (kwargs are spread out on multi-line definitions).
+  if .venv/bin/python -c "
+import re, sys
+text = open('dags/edgeguard_pipeline.py').read()
+anchor = 'task_id=\"$task\"'
+idx = text.find(anchor)
+if idx == -1:
+    sys.exit(2)  # task_id missing → DAG structurally broken
+start = text.rfind('PythonOperator(', 0, idx)
+block = text[start:idx + 3000]
+sys.exit(0 if 'retries=0' in block else 1)
+" 2>/dev/null; then
+    RETRIES_ZERO_COUNT=$((RETRIES_ZERO_COUNT+1))
+  else
+    fail "$task is missing retries=0 — a single retry on this 5-6h task would blow through the 32h dagrun_timeout (PR-N29 H1)"
+  fi
+done
+if [[ $RETRIES_ZERO_COUNT -eq 3 ]]; then
+  pass "all 3 critical-chain tasks have retries=0 (PR-N29 H1)"
+fi
+
+# (d) sentinel class is wired into the metric counter (PR-N31 follow-up)
+if grep -q 'record_misp_fetch_fallback("pymisp", "hard_error")' src/run_misp_to_neo4j.py 2>/dev/null \
+   && grep -q 'record_misp_fetch_fallback("rest_search", "hard_error")' src/run_misp_to_neo4j.py 2>/dev/null; then
+  pass "_MispFallbackHardError raises increment edgeguard_misp_fetch_fallback_active_total{outcome=hard_error} (PR-N31)"
+else
+  warn "PR-N31 fallback metric not wired in both branches — operator alerts may be silent on hard-error path"
 fi
 
 # -----------------------------------------------------------------------------

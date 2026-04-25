@@ -554,6 +554,26 @@ _ZERO_WIDTH_AND_BIDI_CHARS = (
     "\u2067"  # RIGHT-TO-LEFT ISOLATE
     "\u2068"  # FIRST STRONG ISOLATE
     "\u2069"  # POP DIRECTIONAL ISOLATE
+    # PR-N31 (post-PR-N29 follow-up, 2026-04-25): defense-in-depth additions
+    # for invisible / variation-modifying characters that NFKC does NOT
+    # fold and ``str.strip()`` does NOT remove. Each is a documented
+    # confusable-class bypass vector that doesn't yet have a real exploit
+    # but follows the same shape as the U+200E/U+200F gap Bugbot caught
+    # in PR-N29 round 1 — closing them now is cheaper than waiting for
+    # an in-the-wild bypass.
+    "\u034f"  # COMBINING GRAPHEME JOINER (CGJ): zero-width grapheme glue.
+    # Variation Selectors VS1–VS16 (U+FE00..U+FE0F): not folded by NFKC
+    # (they're meaningful for emoji + CJK variants, but harmless on Latin
+    # — and an attacker can stack them onto "unknown" to bypass equality).
+    "\ufe00\ufe01\ufe02\ufe03\ufe04\ufe05\ufe06\ufe07"
+    "\ufe08\ufe09\ufe0a\ufe0b\ufe0c\ufe0d\ufe0e\ufe0f"
+    # NOTE: Variation Selectors Supplement (U+E0100..U+E01EF, 240 chars)
+    # is NOT included here — they're outside the BMP and rare in practice;
+    # adding them would balloon the translate table 16× for marginal gain.
+    # If a real bypass shows up, switch to the Cf-category strip approach
+    # Bugbot autofix #2 suggested in round 2 (universal Unicode format-
+    # control filter via ``unicodedata.category(c) == "Cf"``).
+    "\u061c"  # ARABIC LETTER MARK (bidi-influencer; siblings of LRM/RLM)
 )
 _ZERO_WIDTH_AND_BIDI_TRANSLATE = {ord(c): None for c in _ZERO_WIDTH_AND_BIDI_CHARS}
 

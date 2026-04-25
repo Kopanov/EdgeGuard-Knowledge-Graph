@@ -67,7 +67,7 @@ promtool check rules prometheus/alerts.yml
 
 ---
 
-## Top 6 failure modes
+## Top 8 failure modes
 
 Each entry: symptom → detection signal → remediation.
 
@@ -246,6 +246,75 @@ Each entry: symptom → detection signal → remediation.
 - **No alert needed.** The DAG-level FAILED state is already alerted
   via `EdgeGuardDAGRunFailures`; `[BASELINE-POSTCHECK-SKIPPED]` is
   documentation, not a separate-page-worthy event.
+
+### 8. MISP fetch fallback (`_MispFallbackHardError`) — PR-N29 / PR-N31
+
+- **Symptom (alert path).** `EdgeGuardMispFetchFallbackHardError`
+  fires (severity=critical), OR `EdgeGuardMispFetchFallbackActive`
+  fires for >10 minutes (severity=warning), OR
+  `MISPToNeo4jSync.run()` traceback shows
+  `_MispFallbackHardError: MISP fallback ... on page N`.
+- **Symptom (log path).** Grep `[MISP-FETCH-FALLBACK-ACTIVE]` —
+  emitted when the primary `/events/index` path errors and the
+  PyMISP / requests-restSearch fallback engages. Grep
+  `[MISP-FETCH-FALLBACK]` for per-page activity / per-failure
+  detail (the sentinel raise's log line is here).
+- **What it means.** EdgeGuard's primary MISP `/events/index` path
+  failed (auth, 5xx, schema drift, broken sync user). The fallback
+  paginated through PyMISP / `restSearch` BUT hit one of four
+  hard-failure modes:
+  1. **errors-payload mid-pagination** — MISP returned HTTP 200 with
+     `{"errors": ...}` (typical: ACL filter matched zero, broken
+     sync user, malformed query).
+  2. **unexpected payload type** — MISP returned a non-list, non-
+     dict-with-response payload (typical: server-side schema bug or
+     proxy injecting an HTML error page).
+  3. **non-200 mid-pagination** — `response.status_code != 200` on
+     a page after the first (typical: MISP-PHP-FPM exhaustion partway
+     through a 50-page walk).
+  4. **safety-cap hit** — fallback paginated through
+     `_FALLBACK_MAX_PAGES = 200` (~100K events) without hitting a
+     short-read terminator. MISP legitimately has more events than
+     the cap allows.
+- **What it does NOT mean.** It does NOT mean the data was silently
+  truncated — that's exactly the failure mode the sentinel exists
+  to prevent. The Airflow task is FAILED (PR-N29 H1: critical-chain
+  tasks have `retries=0`), no partial baseline was committed.
+- **Triage.**
+  1. Identify which branch raised — the alert label `branch` is
+     `pymisp` or `rest_search`. Pipeline log line will reference the
+     same. PyMISP-only failures often indicate library/version
+     incompatibility; `rest_search` failures are pure HTTP/payload.
+  2. Pull the surrounding `[MISP-FETCH-FALLBACK]` log lines for
+     the page number + good-pages count + raw error payload.
+  3. **For mode (1) errors-payload:** check MISP user permissions,
+     ACL config, `EDGEGUARD_MISP_EVENT_SEARCH` env var (defaults to
+     "EdgeGuard" — empty string would match nothing).
+  4. **For mode (2) unexpected payload:** check upstream proxy
+     (Cloudflare / nginx) is not interposing an HTML error page on
+     5xx. Test directly: `curl -s -H "Authorization: $MISP_API_KEY"
+     "$MISP_URL/events/restSearch" -d '{"limit":1}' -H "Content-Type:
+     application/json" | head`.
+  5. **For mode (3) non-200 mid-pagination:** investigate MISP
+     backend health (PHP-FPM workers, MariaDB connection pool,
+     OOM). The 2026-04-19 incident was MISP-PHP-FPM exhaustion;
+     scale workers + reduce `EDGEGUARD_MISP_PAGE_SIZE` (default 500
+     → try 250).
+  6. **For mode (4) safety-cap hit:** if MISP legitimately has >100K
+     EdgeGuard events, raise `_FALLBACK_MAX_PAGES` in
+     `src/run_misp_to_neo4j.py` and redeploy. Otherwise (probably a
+     loop bug or a misconfigured `EDGEGUARD_MISP_EVENT_SEARCH`),
+     fix the root cause.
+- **Re-run.** After remediation, re-trigger the failed DAG run.
+  PR-N29 H1 set `retries=0` on the critical chain — there is no
+  auto-retry. The dagrun MUST be manually re-triggered to run.
+- **Why the sentinel exists.** Pre-PR-N29 the fallback silently
+  truncated at `limit=1000` with no pagination; the
+  `EdgeGuardSyncCoverageGap` alert compared a truncated processed-
+  count to a truncated index-total and saw "no gap." PR-N29 added
+  pagination + the sentinel; PR-N31 added the operator-visible
+  Prometheus counter. See PR #110 (PR-N29) and PR-N31 (this PR) for
+  the audit history.
 
 ---
 
