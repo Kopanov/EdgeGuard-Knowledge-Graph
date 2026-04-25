@@ -42,6 +42,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC = REPO_ROOT / "src"
@@ -262,6 +263,189 @@ class TestPRN32AuditOutput:
         assert _annotate_codepoints("‮unknown") == "<U+202E>unknown"
         # Clean strings pass through unchanged.
         assert _annotate_codepoints("Conti") == "Conti"
+
+
+class TestPRN32AuditLabelBehaviouralFakeDriver:
+    """PR-N32 Bugbot round 1 (2026-04-25, MED): the prior ``_count_query``
+    used ``UNWIND all_names AS name``. When a label had ZERO suspicious
+    matches (the expected happy-path), ``UNWIND []`` produced zero rows
+    and the entire downstream pipeline collapsed — including ``total``.
+    ``result.single()`` returned ``None`` and the audit_label fallback
+    reported ``total=0`` even when there were thousands of clean nodes.
+
+    The pre-Bugbot tests passed because they hand-crafted the
+    ``per_label`` dict and called ``render_human`` directly — they
+    NEVER exercised the real ``audit_label`` → ``_count_query`` path.
+
+    This class fills that gap: a fake driver / session / result that
+    exercises ``audit_label`` end-to-end with two scenarios:
+      * ZERO matches (the Bugbot-flagged case)
+      * N matches (sanity)
+
+    If a future maintainer reverts the Cypher fix, these tests fire
+    BEFORE Bugbot has to catch it again.
+    """
+
+    @staticmethod
+    def _build_fake_driver(rows: list[dict]) -> Any:
+        """Build a context-manager-shaped fake driver that returns
+        the supplied rows from session.run().single(). Mirrors the
+        neo4j Python driver's contract closely enough for audit_label
+        to consume it as if it were a real driver."""
+
+        class _FakeRecord:
+            def __init__(self, row: dict) -> None:
+                self._row = row
+
+            def __getitem__(self, key: str) -> Any:
+                return self._row[key]
+
+        class _FakeResult:
+            def __init__(self, rows: list[dict]) -> None:
+                self._rows = rows
+
+            def single(self) -> Any:
+                return _FakeRecord(self._rows[0]) if self._rows else None
+
+        class _FakeSession:
+            def __init__(self, rows: list[dict]) -> None:
+                self._rows = rows
+                self.last_query: str | None = None
+                self.last_params: dict | None = None
+                self.access_mode: str | None = None
+
+            def __enter__(self) -> "_FakeSession":
+                return self
+
+            def __exit__(self, *args: Any) -> None:
+                pass
+
+            def run(self, query: str, **params: Any) -> _FakeResult:
+                self.last_query = query
+                self.last_params = params
+                return _FakeResult(self._rows)
+
+        class _FakeDriver:
+            def __init__(self, rows: list[dict]) -> None:
+                self._rows = rows
+                self.last_session: _FakeSession | None = None
+
+            def session(self, default_access_mode: str | None = None) -> _FakeSession:
+                self.last_session = _FakeSession(self._rows)
+                self.last_session.access_mode = default_access_mode
+                return self.last_session
+
+            def close(self) -> None:
+                pass
+
+        return _FakeDriver(rows)
+
+    def test_audit_label_preserves_total_when_zero_suspicious(self):
+        """PR-N32 Bugbot round 1: ZERO suspicious matches must NOT
+        collapse the ``total`` count to 0. Pre-fix, ``UNWIND []`` killed
+        the whole pipeline and the audit reported every clean label as
+        ``total=0`` — which an operator would read as "the query found
+        nothing" rather than "12,000 clean nodes."""
+        from audit_legacy_unicode_bypass_nodes import audit_label
+
+        # Simulate: 12,000 Malware nodes, 0 of them suspicious.
+        # Post-fix ``_count_query`` always returns one row even with
+        # an empty suspicious_names list.
+        fake = self._build_fake_driver([{"total": 12000, "suspicious": 0, "samples": []}])
+        result = audit_label(fake, "Malware", sample_limit=5)
+        assert result == {
+            "label": "Malware",
+            "total": 12000,
+            "suspicious": 0,
+            "samples": [],
+        }, (
+            "PR-N32 Bugbot round 1: total must survive even when the "
+            "suspicious list is empty. Pre-fix UNWIND [] dropped the "
+            "whole pipeline."
+        )
+
+    def test_audit_label_returns_full_result_when_n_suspicious(self):
+        """Sanity: when there ARE matches, all three fields propagate."""
+        from audit_legacy_unicode_bypass_nodes import audit_label
+
+        fake = self._build_fake_driver([{"total": 12000, "suspicious": 3, "samples": ["unknown​", "n/a‎", "tbd‪"]}])
+        result = audit_label(fake, "Malware", sample_limit=5)
+        assert result["label"] == "Malware"
+        assert result["total"] == 12000
+        assert result["suspicious"] == 3
+        assert len(result["samples"]) == 3
+
+    def test_audit_label_uses_read_access_session(self):
+        """Behavioural: the session MUST be opened with READ_ACCESS.
+        Defense-in-depth pin — if a future maintainer changes the
+        access mode, this test fires loudly."""
+        from audit_legacy_unicode_bypass_nodes import audit_label
+
+        from neo4j import READ_ACCESS
+
+        fake = self._build_fake_driver([{"total": 0, "suspicious": 0, "samples": []}])
+        audit_label(fake, "Malware", sample_limit=5)
+        assert fake.last_session is not None
+        assert fake.last_session.access_mode == READ_ACCESS, (
+            "PR-N32: audit_label MUST open sessions with READ_ACCESS so "
+            "any future-maintainer drift adding a write hits a server-side "
+            "rejection rather than silently mutating production."
+        )
+
+    def test_audit_label_passes_regex_and_sample_limit_params(self):
+        """Behavioural: the canonical regex + sample_limit param land
+        on the query. Without this, the audit could silently use a stale
+        regex (missing recently-added chars from
+        _ZERO_WIDTH_AND_BIDI_CHARS)."""
+        from audit_legacy_unicode_bypass_nodes import _SUSPICIOUS_REGEX, audit_label
+
+        fake = self._build_fake_driver([{"total": 0, "suspicious": 0, "samples": []}])
+        audit_label(fake, "Malware", sample_limit=42)
+        assert fake.last_session is not None
+        params = fake.last_session.last_params or {}
+        assert params.get("regex") == _SUSPICIOUS_REGEX, (
+            "PR-N32: audit_label MUST pass the canonical _SUSPICIOUS_REGEX "
+            "to the Cypher query — otherwise the audit silently uses "
+            "whatever regex the future maintainer hard-codes."
+        )
+        assert params.get("sample_limit") == 42, "PR-N32: audit_label MUST forward the operator-supplied sample_limit"
+
+
+class TestPRN32CountQueryShape:
+    """PR-N32 Bugbot round 1 follow-up: the negative shape pin —
+    the new query must not contain the failed UNWIND pattern. If a
+    future maintainer reverts to the UNWIND approach, this test fires
+    BEFORE the bug surfaces in production."""
+
+    def test_count_query_does_not_use_unwind(self):
+        """Pre-fix _count_query used ``UNWIND all_names AS name`` —
+        which produced 0 rows when all_names was empty, dropping the
+        entire pipeline. The fix removes the UNWIND. Pin so a future
+        revert can't silently re-introduce the bug."""
+        from audit_legacy_unicode_bypass_nodes import _AUDITED_LABELS, _count_query
+
+        for label in _AUDITED_LABELS:
+            cypher = _count_query(label)
+            assert "UNWIND" not in cypher.upper(), (
+                f"PR-N32 Bugbot round 1: _count_query({label!r}) must not use "
+                f"UNWIND — when the suspicious list is empty, ``UNWIND []`` "
+                f"produces zero rows and drops the entire pipeline (including "
+                f"total). Use a single-row aggregation instead."
+            )
+
+    def test_count_query_returns_total_outside_any_loop(self):
+        """Belt-and-braces: the RETURN clause must include ``total``
+        as a top-level binding (not nested inside a list comprehension
+        or sub-query that could collapse on empty input)."""
+        from audit_legacy_unicode_bypass_nodes import _AUDITED_LABELS, _count_query
+
+        for label in _AUDITED_LABELS:
+            cypher = _count_query(label)
+            assert "RETURN total" in cypher, (
+                f"PR-N32: _count_query({label!r}) must RETURN total directly "
+                f"(not as part of a sub-query / list comprehension that could "
+                f"yield zero rows on the empty case)."
+            )
 
 
 # ===========================================================================

@@ -117,15 +117,22 @@ def _count_query(label: str) -> str:
 
     The label is interpolated server-side because Cypher doesn't support
     parameterised label names — we control the input via ``_AUDITED_LABELS``
-    so injection is not a vector."""
+    so injection is not a vector.
+
+    PR-N32 Bugbot round 1 (2026-04-25, MED): the prior version pipelined
+    via ``UNWIND all_names AS name``. When a label had ZERO suspicious
+    matches (the expected happy-path), ``all_names`` was the empty list,
+    ``UNWIND []`` produced zero rows, and the entire downstream pipeline
+    — including ``total`` — collapsed to 0 rows. ``result.single()``
+    then returned ``None`` and the audit_label fallback reported
+    ``total=0`` even when there were thousands of clean nodes. Fix:
+    Neo4j's ``collect()`` already skips NULLs, so the explicit UNWIND +
+    ``WHERE name IS NOT NULL`` + re-collect was redundant. Single-row
+    return regardless of match count."""
     return f"""
     MATCH (n:{label})
     WITH count(n) AS total,
-         collect(CASE WHEN n.name =~ $regex THEN n.name END) AS all_names
-    UNWIND all_names AS name
-    WITH total, name
-    WHERE name IS NOT NULL
-    WITH total, collect(name) AS suspicious_names
+         collect(CASE WHEN n.name =~ $regex THEN n.name END) AS suspicious_names
     RETURN total,
            size(suspicious_names) AS suspicious,
            suspicious_names[0..$sample_limit] AS samples
@@ -179,6 +186,13 @@ def audit_label(driver: Driver, label: str, sample_limit: int) -> Dict[str, Any]
         )
         record = result.single()
         if record is None:
+            # Defensive: post-Bugbot-round-1 fix, _count_query always
+            # returns exactly one row (count + collect always produce a
+            # single-row aggregation). This branch is only reachable on
+            # a degenerate driver-level error (e.g. transaction rolled
+            # back mid-query). Keep the fallback rather than silently
+            # KeyError — but operators should treat total=0 here as
+            # "couldn't get a real count" not "label is empty".
             return {"label": label, "total": 0, "suspicious": 0, "samples": []}
         return {
             "label": label,
