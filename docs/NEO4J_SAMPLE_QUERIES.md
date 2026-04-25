@@ -78,10 +78,15 @@ LIMIT 20
 
 ## Techniques
 
-### Find techniques by platform
+### Find techniques by tactic phase
 ```cypher
+// PR-N33 docs audit (2026-04-26): the previous `WHERE 'Windows' IN t.platforms`
+// query was broken — `merge_technique` in src/neo4j_client.py never sets
+// `t.platforms` (only `tactic_phases`, `detection`, `is_subtechnique`,
+// `name`, `description` are written), so the query silently returned
+// zero rows. Use `tactic_phases` instead, which IS populated:
 MATCH (t:Technique)
-WHERE 'Windows' IN t.platforms
+WHERE 'lateral-movement' IN t.tactic_phases
 RETURN t.mitre_id, t.name
 LIMIT 20
 ```
@@ -121,5 +126,49 @@ LIMIT 10
 ```
 
 ---
+
+## Edge provenance (PR-N26 — `r.misp_event_ids[]`)
+
+PR-N26 wired `r.misp_event_ids[]` onto edges from `build_relationships.py`
+for 4 edge types: `INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`.
+
+### Indicators with their MISP-event provenance edges
+
+```cypher
+MATCH (i:Indicator)-[r:INDICATES]->(m:Malware)
+WHERE size(coalesce(r.misp_event_ids, [])) > 0
+RETURN i.value, i.indicator_type, m.name,
+       r.misp_event_ids[0..5] AS misp_events_first5,
+       size(r.misp_event_ids) AS misp_event_count
+ORDER BY misp_event_count DESC
+LIMIT 25
+```
+
+### Find INDICATES edges that share MISP events with a known indicator
+
+```cypher
+// Use case: pivoting from one IoC to others co-mentioned in the same MISP event(s)
+MATCH (a:Indicator {value: $known_value})-[ra:INDICATES]->(:Malware)
+WITH ra.misp_event_ids AS shared_events
+MATCH (b:Indicator)-[rb:INDICATES]->(m:Malware)
+WHERE any(eid IN rb.misp_event_ids WHERE eid IN shared_events)
+RETURN b.value, m.name, rb.misp_event_ids
+LIMIT 50
+```
+
+### Backfill candidates — edges WITHOUT misp_event_ids
+
+```cypher
+// Run before scripts/backfill_edge_misp_event_ids.py to estimate scope.
+// Pre-PR-N26 edges have no array; post-PR-N26 edges always do.
+MATCH ()-[r]->()
+WHERE type(r) IN ['INDICATES', 'EXPLOITS', 'TARGETS', 'AFFECTS']
+  AND (r.misp_event_ids IS NULL OR size(r.misp_event_ids) = 0)
+RETURN type(r) AS edge_type, count(r) AS gap
+```
+
+---
+
+_Last updated: 2026-04-26 — PR-N33 docs audit: replaced broken `WHERE 'Windows' IN t.platforms` query (the `platforms` property is never written by `merge_technique`; query silently returned zero rows) with the correct `t.tactic_phases` filter; added "Edge provenance" section with three sample queries for the PR-N26 `r.misp_event_ids[]` array on the 4 wired edge types._
 
 *Save queries to test the prototype*

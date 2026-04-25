@@ -42,11 +42,22 @@ operators who have not yet configured the allowlist.
 
 ## Roadmap tiers
 
-### ✅ Tier 1 — Defense machinery (shipped, PR #44)
+### ✅ Tier 1 — Defense machinery (shipped, PR #44 + PR-N29 L1 + PR-N31)
 
 - `source_trust.py` implements the creator-org allowlist check
 - Unicode-aware name normalization (NFKC + casefold) defeats
   homoglyph attacks
+- **Zero-width / bidi-control / variation-selector character stripping
+  in natural-key canonicalization** (`src/node_identity.py:_ZERO_WIDTH_AND_BIDI_TRANSLATE`,
+  shipped PR-N29 L1 with 17 chars, extended PR-N31 to 35 chars
+  including CGJ U+034F + Variation Selectors VS1–VS16 + ALM U+061C).
+  Defeats invisible-character key poisoning (e.g. `"unknown​"`
+  bypassing the placeholder filter). The PR-N32 read-only audit
+  script `scripts/audit_legacy_unicode_bypass_nodes.py` checks for
+  legacy nodes that may have escaped this filter pre-PR-N29 L1.
+  Cross-script confusables (Cyrillic 'о' U+043E vs Latin 'o' U+006F)
+  are documented as residual — fixing requires a confusables library,
+  tracked in Tier 2.
 - Strict UUID validation defeats free-text spoofing
 - Log-injection-safe rejection logging (truncated, newline-stripped
   `Orgc.name`)
@@ -161,3 +172,15 @@ exposure to surface any unexpected interaction.
   logic and the new PR-I observability
 - `docs/PROMETHEUS_SETUP.md` — full metrics reference + alert rules
 - `.env.example` — env var templates
+- `docs/RUNBOOK.md` § 8 — operator triage tree for `_MispFallbackHardError` (PR-N31)
+- `docs/BASELINE_LAUNCH_CHECKLIST.md` step `[6]` — pre-launch unicode-bypass audit (PR-N32)
+- `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only audit
+  pairing with the `_ZERO_WIDTH_AND_BIDI_CHARS` Tier-1 defense above
+
+---
+
+_Last updated: 2026-04-26 — PR-N33 docs audit: added explicit Tier-1
+sub-bullet for the PR-N29 L1 + PR-N31 zero-width / bidi-control /
+variation-selector character stripping in natural-key canonicalization
+(35 chars total at HEAD; pairs with `scripts/audit_legacy_unicode_bypass_nodes.py`
+for legacy-graph audits). Cross-linked RUNBOOK § 8 + BASELINE_LAUNCH_CHECKLIST `[6]`._

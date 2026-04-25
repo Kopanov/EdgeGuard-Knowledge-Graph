@@ -503,10 +503,17 @@ Auth:    Configured via environment variables
 
 ## Constraints
 
-### UNIQUE Constraints (30 total)
+### UNIQUE Constraints (~26 total — see `Neo4jClient.create_constraints` in `src/neo4j_client.py:1320` for the canonical list)
+
+> **Note (PR-N33 doc audit, 2026-04-26):** previous versions of this section
+> showed composite `(prop, tag)` keys for the ResilMesh-topology constraints.
+> That was wrong — `tag` was removed from every constraint when we adopted
+> the SOURCED_FROM-edge provenance model. Constraints below mirror the live
+> Cypher in `src/neo4j_client.py:1323-1368`. **Single source of truth** is
+> the source file; this block is a snapshot and may drift between releases.
 
 ```cypher
-// EdgeGuard constraints (15) — tag removed; entities merge across sources
+// EdgeGuard constraints — single-key (no tag); entities merge across sources
 CREATE CONSTRAINT source_key FOR (s:Source) REQUIRE (s.source_id) IS UNIQUE;
 CREATE CONSTRAINT cve_key FOR (c:CVE) REQUIRE (c.cve_id) IS UNIQUE;
 CREATE CONSTRAINT vulnerability_key FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE;
@@ -524,29 +531,24 @@ CREATE CONSTRAINT cvssv30_key FOR (n:CVSSv30) REQUIRE (n.cve_id) IS UNIQUE;
 CREATE CONSTRAINT cvssv31_key FOR (n:CVSSv31) REQUIRE (n.cve_id) IS UNIQUE;
 CREATE CONSTRAINT cvssv40_key FOR (n:CVSSv40) REQUIRE (n.cve_id) IS UNIQUE;
 
-// ResilMesh topology constraints (15)
-CREATE CONSTRAINT ip_key FOR (ip:IP) REQUIRE (ip.address, ip.tag) IS UNIQUE;
-CREATE CONSTRAINT host_key FOR (h:Host) REQUIRE (h.hostname, h.tag) IS UNIQUE;
-CREATE CONSTRAINT device_key FOR (d:Device) REQUIRE (d.device_id, d.tag) IS UNIQUE;
-CREATE CONSTRAINT subnet_key FOR (s:Subnet) REQUIRE (s.range, s.tag) IS UNIQUE;
-CREATE CONSTRAINT node_key FOR (n:Node) REQUIRE (n.node_id, n.tag) IS UNIQUE;
-CREATE CONSTRAINT softwareversion_key FOR (sv:SoftwareVersion) REQUIRE (sv.version, sv.tag) IS UNIQUE;
-CREATE CONSTRAINT application_key FOR (app:Application) REQUIRE (app.name, app.tag) IS UNIQUE;
-CREATE CONSTRAINT networkservice_key FOR (ns:NetworkService) REQUIRE (ns.port, ns.protocol, ns.tag) IS UNIQUE;
-CREATE CONSTRAINT resilmesh_cve_key FOR (c:CVE) REQUIRE (c.cve_id, c.tag) IS UNIQUE;
-CREATE CONSTRAINT user_key FOR (u:User) REQUIRE (u.username, u.tag) IS UNIQUE;
-CREATE CONSTRAINT role_key FOR (r:Role) REQUIRE (r.role_name, r.tag) IS UNIQUE;
-CREATE CONSTRAINT component_key FOR (c:Component) REQUIRE (c.name, c.tag) IS UNIQUE;
-CREATE CONSTRAINT mission_key FOR (m:Mission) REQUIRE (m.name, m.tag) IS UNIQUE;
-CREATE CONSTRAINT organizationunit_key FOR (ou:OrganizationUnit) REQUIRE (ou.name, ou.tag) IS UNIQUE;
-CREATE CONSTRAINT resilmesh_vulnerability_key FOR (v:Vulnerability) REQUIRE (v.vuln_id, v.tag) IS UNIQUE;
+// ResilMesh topology constraints — single-key (no tag); shared across feeds
+CREATE CONSTRAINT ip_key FOR (n:IP) REQUIRE (n.address) IS UNIQUE;
+CREATE CONSTRAINT host_key FOR (n:Host) REQUIRE (n.hostname) IS UNIQUE;
+CREATE CONSTRAINT device_key FOR (n:Device) REQUIRE (n.device_id) IS UNIQUE;
+CREATE CONSTRAINT subnet_key FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE;
+CREATE CONSTRAINT networkservice_key FOR (n:NetworkService) REQUIRE (n.port, n.protocol) IS UNIQUE;
+CREATE CONSTRAINT softwareversion_key FOR (n:SoftwareVersion) REQUIRE (n.version) IS UNIQUE;
+CREATE CONSTRAINT application_key FOR (n:Application) REQUIRE (n.name) IS UNIQUE;
+CREATE CONSTRAINT role_key FOR (n:Role) REQUIRE (n.permission) IS UNIQUE;
+CREATE CONSTRAINT user_key FOR (n:User) REQUIRE (n.username, n.domain) IS UNIQUE;
+CREATE CONSTRAINT alert_key FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE;
 ```
 
 ---
 
 ## Indexes
 
-### Performance Indexes (43 total)
+### Performance Indexes (snapshot — see `Neo4jClient.create_indexes` in `src/neo4j_client.py` for the canonical list)
 
 ```cypher
 // EdgeGuard indexes (28)
@@ -706,7 +708,7 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 {
   "alert_id": "wazuh-001",
   "enriched": true,
-  "edgeguard_version": "2026.3.21",
+  "edgeguard_version": "2026.4.26",
   "latency_ms": 120,
   "enrichment": {
     "indicator": {
@@ -801,7 +803,17 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 | `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Pause (seconds) between each batch of 500 attributes pushed to MISP. Prevents memory exhaustion on large events. |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Pause (seconds) between fetching consecutive MISP events during sync. |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Events exceeding this attribute count are deferred to end of sync (small events first). `0` = disable. |
+| `EDGEGUARD_MISP_PAGE_SIZE` | `500` | MISP `/events/index` page size used by the **primary** index path in `run_misp_to_neo4j._fetch_edgeguard_events_via_requests_index`. |
+| `EDGEGUARD_MISP_MAX_PAGES` | `100` | MISP `/events/index` page cap on the primary index path. |
+| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48h) | Cross-host stale-lock TTL for the `baseline_lock` sentinel (PR-N29 M3, bumped from 24h → 48h to give a 16h buffer above the 32h `dagrun_timeout`). See `src/baseline_lock.py`. |
 | `LOG_LEVEL` | `INFO` | Logging level |
+
+**Internal constants (no env override today; tune by editing `src/run_misp_to_neo4j.py`):**
+
+| Constant | Value | Where | Why |
+|----------|-------|-------|-----|
+| `_FALLBACK_PAGE_SIZE` | `500` | `fetch_edgeguard_events` | PyMISP / requests-restSearch fallback per-page batch (PR-N29 H3) |
+| `_FALLBACK_MAX_PAGES` | `200` | `fetch_edgeguard_events` | 100K-event safety cap on fallback. Hitting it raises `_MispFallbackHardError` (PR-N29 audit HIGH-2). |
 
 **Collection vs sync limits (baseline caps, incremental caps, MISP prefetch, OTX/MITRE incremental env, MISP search `1000`, Neo4j chunk `500`, `MISPCollector` internals):** [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
@@ -812,4 +824,4 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the EMPLOYS_TECHNIQUE migration-script pointer with the heal-by-rebaseline contract (pre-release framework)._
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected ResilMesh constraint Cypher (single-key, no `tag`); replaced fixed "(N total)" counts with "snapshot — see source" pointers; added PR-N29/N31 env knobs (`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`, `_FALLBACK_PAGE_SIZE`, `_FALLBACK_MAX_PAGES`); refreshed sample `edgeguard_version`. Prior: 2026-04-18 PR #41 cleanup pass._

@@ -1,10 +1,17 @@
 # EdgeGuard Architecture Flow Diagrams
 
 End-to-end system flows rendered as Mermaid diagrams, ordered to
-de-risk the **730-day baseline production-test**. Every symbol name,
-env var, and file path referenced in a diagram is validated against
-`src/` by `tests/test_architecture_flow_pins.py` — diagrams cannot
-silently drift from the code.
+de-risk the **730-day baseline production-test**.
+
+> **Status (PR-N33 docs audit, 2026-04-26):** the long-term plan is for
+> every symbol name, env var, and file path referenced in a diagram to be
+> validated against `src/` by `tests/test_architecture_flow_pins.py` — but
+> that pin-test file does **NOT YET exist** at HEAD. Until it is built
+> (planned in PR-J1, see § "Pin / drift-detection roadmap"), this doc's
+> diagrams may drift silently from the code. Treat the diagrams as
+> _aspirational architecture_ rather than enforced contracts; cross-check
+> against `ARCHITECTURE.md` (which IS verified against the code by the
+> PR-N33 audit) when in doubt.
 
 ---
 
@@ -300,3 +307,7 @@ Target: complete before the next 730-day baseline attempt.
 4. Skip Mermaid keywords (`participant`, `activate`, etc.), Prometheus metric names (handled by separate test), and words in prose text (detected by being outside backticks or outside diagram code fences).
 
 This keeps the cost of lying in a diagram at exactly "CI fails," which is the only cost that changes behavior.
+
+---
+
+_Last updated: 2026-04-26 — PR-N33 docs audit: added "Status" callout up top noting the `tests/test_architecture_flow_pins.py` pin-test file does NOT yet exist at HEAD; treat diagrams as aspirational until PR-J1 builds the pin-test._

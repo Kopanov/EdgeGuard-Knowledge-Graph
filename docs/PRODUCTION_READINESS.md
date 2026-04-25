@@ -142,9 +142,9 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Manual: Relationship creation | ✅ Pass | 2026-03-05 | — |
 | **CI: Ruff lint (50 source files)** | ✅ Pass | 2026-03-17 | GitHub Actions |
 | **CI: Mypy type-check** | ✅ Pass | 2026-03-17 | GitHub Actions |
-| **CI: Unit tests (16 tests)** | ✅ Pass | 2026-03-17 | 14% coverage, threshold 10% |
-| **CI: Docker image build** | ✅ Pass | 2026-03-17 | Non-root user, no secrets baked in |
-| **CI: pip-audit security scan** | ✅ Pass | 2026-03-17 | 16 Airflow CVEs explicitly documented and ignored |
+| **CI: Unit tests (1814+ tests)** | ✅ Pass | 2026-04-25 | ≥30% coverage gate (`--cov-fail-under=30` in `pyproject.toml`) |
+| **CI: Docker image build** | ✅ Pass | 2026-04-25 | Non-root user, no secrets baked in |
+| **CI: pip-audit security scan** | ✅ Pass | 2026-04-25 | 16 Airflow 2.11 CVEs **resolved** by upgrade to 3.2.0 (2026-04-15) |
 
 ---
 
@@ -181,10 +181,10 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Set `ssl_verify: true` in `config.yaml` | Edit file | Required for production |
 | Fill optional API keys | `OTX_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, … in `.env` | Optional |
 | Large MISP→Neo4j backfill / OOM on sync | Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default `500`; try `250` if still OOM). **`0`** / **`all`** = single pass (OOM risk — not recommended for huge backfills); see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | If needed |
-| Start Neo4j | `docker-compose -f src/neo4j/docker-compose.yml up -d` | Required |
-| Run baseline | `python3 src/edgeguard.py --baseline` | First run |
-| Start monitoring stack | `docker-compose -f docker-compose.monitoring.yml up -d` | Recommended |
-| Start Airflow | `airflow webserver & airflow scheduler` | For automated collection |
+| Start full stack (Neo4j + Airflow + MISP) | `docker compose up -d` (root compose) | Required |
+| Run **launch-day pre-flight** | `EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh` — see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) | Before first baseline |
+| Run baseline (first run) | Trigger Airflow DAG `edgeguard_baseline` (Airflow UI or `airflow dags trigger edgeguard_baseline`) — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | First run |
+| Start monitoring stack | `docker compose -f docker-compose.monitoring.yml up -d` | Recommended |
 
 **Docker Compose (full stack):** root `docker-compose.yml` runs Airflow with **PostgreSQL** metadata (`airflow_postgres`). See `docs/AIRFLOW_DAGS.md` if DAG runs appear stuck.
 
@@ -192,10 +192,9 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 
 | Item | Priority | Effort |
 |------|----------|--------|
-| Increase test coverage beyond 14% | Medium | Ongoing |
-| Upgrade to Airflow 3.x (fixes all 2.11.x CVEs) | Medium | 1-2 weeks |
+| Increase test coverage beyond ~30% gate | Medium | Ongoing |
 | Query Engine (LLM) | Low | 1-2 weeks |
-| ResilMesh Integration | Low | 1-2 weeks |
+| ResilMesh Integration (NATS, TLP, RBAC) | Low | 1-2 weeks |
 | Premium feeds (VT, AbuseIPDB) | Low | Ongoing |
 
 ---
@@ -206,21 +205,27 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 # 1. Configure credentials
 cp .env.example .env
 cp credentials/config.example.yaml credentials/config.yaml
-# Edit both files — fill in MISP_URL, MISP_API_KEY, NEO4J_PASSWORD, API keys
+# Edit both files — fill in MISP_URL, MISP_API_KEY, NEO4J_PASSWORD, EDGEGUARD_API_KEY, API keys
 
-# 2. Start Neo4j
-docker-compose -f src/neo4j/docker-compose.yml up -d
+# 2. Start full stack (Neo4j + Airflow + MISP via root compose)
+docker compose up -d
 
-# 3. Build the baseline (first run)
-python3 src/edgeguard.py --baseline
+# 3. Run the launch-day pre-flight (catches missing creds, broken APOC,
+#    stale baseline_lock, PR-N29 invariants reverted — see [11] in
+#    docs/BASELINE_LAUNCH_CHECKLIST.md)
+EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
 
-# 4. Start monitoring
-docker-compose -f docker-compose.monitoring.yml up -d
+# 4. Trigger the baseline DAG (first run). Wraps full_neo4j_sync +
+#    build_relationships + run_enrichment_jobs — see AIRFLOW_DAGS.md.
+airflow dags trigger edgeguard_baseline
 
-# 5. (Optional) Start Airflow for automated recurring collection
-airflow webserver --port 8082 &
-airflow scheduler &
+# 5. Start monitoring
+docker compose -f docker-compose.monitoring.yml up -d
 ```
+
+Airflow runs as `airflow standalone` inside the compose stack (Airflow 3.x;
+the legacy `airflow webserver` command was split into `airflow api-server`
+in 3.x and is not what EdgeGuard uses).
 
 ---
 
@@ -233,8 +238,9 @@ All 5 CI checks pass cleanly. The codebase has been through 6 rounds of systemat
 **What's left:**
 - Phase 3: Query Engine (LLM integration)
 - ResilMesh Integration (NATS, TLP, RBAC)
-- Upgrade to Airflow 3.x to resolve the 16 known 2.11.x CVEs
+
+For the **launch-day pre-flight pass** that the operator must walk through before triggering a 730-day baseline, see [`BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md). It complements this doc — `PRODUCTION_READINESS.md` is the broader pre-deploy posture; `BASELINE_LAUNCH_CHECKLIST.md` is the focused operator pass right before kickoff. Cross-link in [`DEPLOYMENT_READINESS_CHECKLIST.md`](DEPLOYMENT_READINESS_CHECKLIST.md) for the full deployment workflow.
 
 ---
 
-*Last updated: 2026-04-06 — aligned with collector dedup env vars, Python 3.12 / `Dockerfile.airflow` docs; prior: 2026-03-17 CI/checklist.*
+*Last updated: 2026-04-26 — PR-N33 docs audit: replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands with the current root-compose / Airflow-DAG / `airflow standalone` workflow; removed stale "Upgrade to Airflow 3.x" remaining-TODO (shipped 2026-04-15); cross-linked `BASELINE_LAUNCH_CHECKLIST.md`. Prior: 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*

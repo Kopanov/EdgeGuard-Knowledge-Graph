@@ -8,23 +8,38 @@ When merging threat intelligence from multiple sources, quality management is cr
 
 **Canonical doc for the “deterministic workflow”:** how we **upsert** into Neo4j (**`MERGE`** + composite keys), preserve **provenance**, and why we prefer **exact** matching over **fuzzy** text/graph inference for production relationships (fewer **false-positive** links — see § fixes below). High-level pipeline placement: **[ARCHITECTURE.md](ARCHITECTURE.md)**; schema detail: **[KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md)**.
 
-**Code reference:** `src/neo4j_client.py` implements `MERGE` semantics, `Source` nodes, and optional **`SOURCED_FROM`** edges with per-source metadata — see `merge_indicator` / related helpers.
+**Code reference:** `src/neo4j_client.py` implements `MERGE` semantics, `Source` nodes, and **`SOURCED_FROM`** edges with per-source metadata — see `merge_node_with_source` (the canonical entry point post-PR-S5/PR-M2; the older `merge_indicator` / per-label helpers all funnel through it).
 
 **MISP→Neo4j ingest path:** **Per MISP event** — dedupe within the event, same-event cross-item edges, then batched UNWIND node merges plus optional Python-side chunking via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default **500**; **`0`** / **`all`** = single pass, OOM risk). Relationship writes are batched separately (**`EDGEGUARD_REL_BATCH_SIZE`**). Does not change merge semantics — only peak RAM / transaction size. See [README.md](../README.md) and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
 ## Merge Strategy
 
-### Current Logic
+### Current Logic (post-PR-S5/PR-M2 SOURCED_FROM model)
+
+Per-source provenance is **NOT** stored on the node itself — it lives on
+`(Node)-[r:SOURCED_FROM]->(Source)` edges, with the Source's
+`source_id` (`'nvd'`, `'otx'`, `'mitre_attck'`, …) plus per-source
+metadata (confidence, first_seen / last_seen, tags). The node's
+`n.source` field is an accumulated list (`apoc.coll.toSet`) for
+fast dashboard rollups, but **the canonical write path is via
+`Neo4jClient.merge_node_with_source` which writes both the node and
+the SOURCED_FROM edge in the same transaction**.
+
 ```cypher
-// Higher confidence always wins for primary
-SET n.source = CASE 
-  WHEN n.confidence_score IS NULL OR $confidence > n.confidence_score 
-  THEN $source_id 
-  ELSE n.source END
+// Schema (illustrative — actual write is via merge_node_with_source):
+//
+//   MERGE (n:Indicator {indicator_type: $type, value: $value})
+//     ON CREATE SET n.first_seen_at = datetime()
+//   MERGE (s:Source {source_id: $source_id})
+//   MERGE (n)-[r:SOURCED_FROM]->(s)
+//     ON CREATE SET r.first_seen = $first_seen, r.confidence = $confidence
+//     ON MATCH  SET r.last_seen  = $last_seen
+//   SET n.source = apoc.coll.toSet(coalesce(n.source, []) + $source_id)
+//   SET n.confidence_score = CASE WHEN ... END  // composite across edges
 ```
 
 ### Unique Key
-**Unique key is `(indicator_type, value)`** — same IOC from different sources merges into a single node. Source provenance is tracked via the `source` array, `tags` array, and `SOURCED_FROM` relationships.
+**Unique key is `(indicator_type, value)`** — same IOC from different sources merges into a single node. Source provenance is tracked via the **`SOURCED_FROM`** edge (canonical, with per-source metadata), accumulated `source` array (rollup), and `tags` array (legacy).
 
 ## Exact Matching Rules (March 2026)
 
@@ -100,4 +115,4 @@ Now reports average confidence per relationship type:
 
 ---
 
-_Last updated: 2026-03-28_
+_Last updated: 2026-04-26 — PR-N33 docs audit: replaced pre-SOURCED_FROM "Current Logic" Cypher (which set `n.source` directly) with the post-PR-S5/PR-M2 SOURCED_FROM-edge model; updated `merge_indicator` reference to canonical `merge_node_with_source` entry point. Prior: 2026-03-28._

@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-04-18** — PR #41 cleanup pass replaced the USES→specialized-edge "migration script" pointer with the heal-by-rebaseline contract (pre-release framework, no migration script ships).
+**Last updated: 2026-04-26** — PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Cross-link to [`BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md) for the operator pre-launch pass and to [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) (PR-N32) for the unicode-bypass audit. Prior: 2026-04-18 PR #41 cleanup pass.
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -99,10 +99,10 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability.** Malware or tool implements a MITRE technique (same STIX **`uses`** → `uses_techniques` on the source node; MISP **`MITRE_USES_TECHNIQUES:`** round-trip for Malware). *Split from a generic `USES` in 2026-04 — see below.* |
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |
 | `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor (`build_relationships.py`) |
-| `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Same `cve_id` on indicator and vuln/CVE node (`build_relationships.py`) |
-| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence — array-only on both ends (`eid IN n.misp_event_ids` for both Indicator and Malware; legacy scalar dropped PR #33 round 10) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`** |
-| `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`) |
-| `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`) |
+| `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Same `cve_id` on indicator and vuln/CVE node (`build_relationships.py`). **PR-N26:** edge carries `r.misp_event_ids[]`. |
+| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence — array-only on both ends (`eid IN n.misp_event_ids` for both Indicator and Malware; legacy scalar dropped PR #33 round 10) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`**. **PR-N26:** edge carries `r.misp_event_ids[]` for direct edge-level provenance. |
+| `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`). **PR-N26:** edge carries `r.misp_event_ids[]`. |
+| `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`). **PR-N26:** edge carries `r.misp_event_ids[]`. |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |
 
 #### ResilMesh-compatible relationships
@@ -701,3 +701,6 @@ RETURN
 | [`COLLECTORS.md`](COLLECTORS.md) | Per-collector documentation with MISP output format |
 | [`docs/DATA_SOURCES.md`](DATA_SOURCES.md) | All threat intelligence sources and what they provide |
 | [`docs/DATA_SOURCES_RATE_LIMITS.md`](DATA_SOURCES_RATE_LIMITS.md) | API rate limits and quotas |
+| [`docs/BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md) | **PR-N32:** the 6-section pre-launch operator pass that must be walked through before triggering a 730d baseline (preflight, smoke, Alertmanager wiring, MISP scale, RAM/disk, unicode-bypass audit) |
+| [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 | **PR-N31:** operator triage tree for `_MispFallbackHardError` (4 hard-failure modes: errors-payload, unexpected-shape, non-200, cap-hit) |
+| [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) | **PR-N32:** read-only audit of legacy `Malware`/`ThreatActor`/`Tool` nodes with zero-width / bidi-control / variation-selector chars in their `name` (created BEFORE the PR-N29 L1 placeholder filter landed) |

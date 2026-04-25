@@ -61,8 +61,9 @@ export VIRUSTOTAL_API_KEY="your-virustotal-key"
 For VirusTotal you can optionally also use `credentials/api_keys.yaml` (git‑ignored by default) with:
 
 ```yaml
-VIRUSTOTAL_API_KEY=your-virustotal-key
-VIRUSTOTAL_RATE_LIMIT=4
+# YAML mapping (key: value), NOT shell export syntax (KEY=value).
+VIRUSTOTAL_API_KEY: your-virustotal-key
+VIRUSTOTAL_RATE_LIMIT: 4
 ```
 
 The code prefers environment variables where present; the YAML file is a local convenience only.
@@ -107,16 +108,37 @@ X-Admin-Token: a-long-random-admin-token
 
 ---
 
+### 5.1 API + Airflow + monitoring secrets (production-required)
+
+Beyond the data-source API keys above, production deployments need
+several **infrastructure** secrets — all listed in `.env.example`:
+
+| Secret | Purpose |
+|---|---|
+| `EDGEGUARD_API_KEY` | EdgeGuard REST API auth (FastAPI on `:8000`). Required unless `EDGEGUARD_ALLOW_UNAUTH=true` (local dev only). |
+| `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | Source-truthful timestamp creator-org allow-list (PR #44 — defends against MISP tag impersonation). |
+| `AIRFLOW_API_AUTH_JWT_SECRET` | Airflow 3.x JWT signing key for the `api-server` (replaces 2.x `[webserver] secret_key`). |
+| `AIRFLOW_FERNET_KEY` | Airflow Fernet encryption for Variables / Connections. |
+| `GRAFANA_ADMIN_PASSWORD` | Grafana admin login (default user is admin). |
+| `PROMETHEUS_ADMIN_PASSWORD` | Prometheus admin (if basic-auth wrapper enabled). |
+| `EDGEGUARD_ADMIN_TOKEN` | `/admin/query` endpoint auth (when `EDGEGUARD_ENABLE_ADMIN_QUERY=true`). |
+
+Generate strong values for all of these — none have safe defaults. The `.env.example` file shows the variable names + recommended generation recipes (e.g. `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` for `AIRFLOW_FERNET_KEY`).
+
+---
+
 ### 6. Summary checklist
 
 - [ ] No API keys or passwords committed to git.
 - [ ] `MISP_API_KEY` and `NEO4J_PASSWORD` set via environment.
+- [ ] `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET`, `AIRFLOW_FERNET_KEY`, `GRAFANA_ADMIN_PASSWORD` set via environment (production).
 - [ ] `EDGEGUARD_SSL_VERIFY=true` in production.
-- [ ] Optional keys (`OTX_API_KEY`, `NVD_API_KEY`, `VIRUSTOTAL_API_KEY`) configured if corresponding collectors are enabled.
+- [ ] Optional keys (`OTX_API_KEY`, `NVD_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`) configured if corresponding collectors are enabled.
 - [ ] `/admin/query` enabled only when needed and protected with `EDGEGUARD_ADMIN_TOKEN` + network controls.
+- [ ] `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` / `_NAMES` populated for the MISP source-truthful timestamp defense (PR #44).
 
 
 
 ---
 
-_Last updated: 2026-03-17_
+_Last updated: 2026-04-26 — PR-N33 docs audit: fixed malformed YAML example for `credentials/api_keys.yaml` (was shell `KEY=value`, now YAML mapping `KEY: value`); added new § 5.1 "API + Airflow + monitoring secrets (production-required)" covering `EDGEGUARD_API_KEY`, `AIRFLOW_API_AUTH_JWT_SECRET`, `AIRFLOW_FERNET_KEY`, `GRAFANA_ADMIN_PASSWORD`, `PROMETHEUS_ADMIN_PASSWORD`, `EDGEGUARD_TRUSTED_MISP_ORG_*`; updated § 6 summary checklist to match. Prior: 2026-03-17._

@@ -119,7 +119,7 @@ def detect_sectors(self, text: str) -> List[str]:
     'tag': 'alienvault_otx',
     'sources': ['alienvault_otx'],
     'first_seen': '2024-01-15T10:30:00Z',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.5,
     'description': 'C2 beacon indicator',
     'pulse_id': '5f3a2b...',
@@ -158,7 +158,7 @@ def detect_sectors(self, text: str) -> List[str]:
     'tag': 'alienvault_otx',
     'sources': ['alienvault_otx'],
     'first_seen': '2024-01-15T10:30:00Z',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.5,
     'severity': 'UNKNOWN',
     'cvss_score': 0.0,
@@ -222,7 +222,7 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
     'tag': 'nvd',
     'sources': ['nvd'],
     'first_seen': '2024-01-10T00:00:00Z',
-    'last_updated': '2024-01-15T00:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.9,  # 0.9 when on CISA KEV, 0.6 otherwise
     'severity': 'HIGH',
     'cvss_score': 8.5,
@@ -272,7 +272,7 @@ def detect_sectors(self, text: str) -> list:
     'tag': 'cisa_kev',
     'sources': ['cisa_kev'],
     'first_seen': '2024-01-15',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.9,  # High confidence - confirmed exploited
     'severity': 'CRITICAL',
     'cvss_score': 9.0,
@@ -438,7 +438,7 @@ def _detect_zones_from_names(self, attrs):
     'tag': 'virustotal',
     'sources': ['virustotal'],
     'first_seen': '2024-01-01T00:00:00Z',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.85  # Based on malicious scan count
 }
 
@@ -449,7 +449,7 @@ def _detect_zones_from_names(self, attrs):
     'zone': ['global'],  # Array of all matching zones
     'tag': 'virustotal',
     'sources': ['virustotal'],
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.95,
     'vt_reputation': 0,
     'vt_last_analysis_stats': {'malicious': 65, 'suspicious': 5, 'harmless': 0}
@@ -500,7 +500,7 @@ zones = detect_zones_from_text(reason)
     'tag': 'feodo_tracker',
     'sources': ['feodo_tracker'],
     'first_seen': '2024-01-10',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.7,
     'malware_family': 'emotet',
     'port': '443',
@@ -515,7 +515,7 @@ zones = detect_zones_from_text(reason)
     'tag': 'ssl_blacklist',
     'sources': ['ssl_blacklist'],
     'first_seen': '2024-01-10',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.6,
     'listing_reason': 'dridex'
 }
@@ -573,7 +573,7 @@ zones = ['global']
     'sources': ['threatfox'],
     'first_seen': '2024-01-14T10:00:00Z',
     'last_seen': '2024-01-15T08:00:00Z',     # Most recent observation
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.75,
     'malware_family': 'emotet',
     'threat_type': 'botnet_cc',
@@ -591,7 +591,7 @@ zones = ['global']
     'tag': 'urlhaus',
     'sources': ['urlhaus'],
     'first_seen': '2024-01-14',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.6,
     'threat_type': 'malware_download',
     'tags': 'exe,windows'
@@ -605,7 +605,7 @@ zones = ['global']
     'tag': 'cybercure',
     'sources': ['cybercure'],
     'first_seen': '2024-01-15T12:00:00Z',
-    'last_updated': '2024-01-15T12:00:00Z',
+    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.5
 }
 ```
@@ -905,4 +905,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-04-18 — chip 5a refactor consolidated steps 1–4 of the legacy 8-step "adding a new reliable source" checklist into a single declarative `Source(...)` edit in `src/source_registry.py`._
+_Last updated: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._

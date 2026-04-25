@@ -1,7 +1,7 @@
 [project]
 name = "edgeguard"
 # CalVer: release date YYYY.M.D (PEP 440). Bump when you tag/publish a release — not on every commit.
-version = "2026.4.25"
+version = "2026.4.26"
 description = "Threat Intelligence Pipeline - Sources to MISP to Neo4j"
 authors = [
     {name = "EdgeGuard Team"}

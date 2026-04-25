@@ -275,15 +275,29 @@ tz-aware UTC), per-collector source-field mapping, STIX 2.1 export
 contract for Indicator vs. Vulnerability vs. Report SDOs, and the
 backwards-compatibility plan for pre-PR-M2 data.
 
-**MISP traceability on edges (2026-04):** every relationship MERGEd by
-`Neo4jClient.create_misp_relationships_batch` (i.e. all `EMPLOYS_TECHNIQUE`,
-`IMPLEMENTS_TECHNIQUE`, `ATTRIBUTED_TO`, `INDICATES`, `EXPLOITS`, `TARGETS`
-edges from the MISP path) accumulates `r.misp_event_ids[]` via
-`apoc.coll.toSet` — same shape as the node-level array. Edges built before
-this PR have no array set; the `apoc.coll.toSet(coalesce + CASE)` pattern
-fills it in on next re-sync. Per-attribute IDs are deliberately **not**
-stored on edges (cardinality blowup for marginal benefit) — attribute UUIDs
-live on the Indicator node only.
+**MISP traceability on edges (PR-N26, 2026-04-23):** the four edge types
+MERGEd by `build_relationships.py` from the MISP path —
+`INDICATES` (Indicator → Malware, both co-occurrence + family-match
+patterns), `EXPLOITS` (Indicator → CVE / Vulnerability), `TARGETS`
+(Indicator → Sector), and `AFFECTS` (Vulnerability → Sector) — accumulate
+`r.misp_event_ids[]` via `apoc.coll.toSet`, same shape as the node-level
+array. The `apoc.coll.toSet(coalesce + CASE)` write pattern is idempotent
+on re-sync. The `_misp_event_id` scalar field was deleted in PR-N17 —
+all readers now use list-membership predicates (`eid IN
+n.misp_event_ids`).
+
+Edges built BEFORE PR-N26 have no array set; backfill via
+[`scripts/backfill_edge_misp_event_ids.py`](../scripts/backfill_edge_misp_event_ids.py)
++ the [`migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`](../migrations/2026_05_edge_misp_event_ids_backfill_runbook.md)
+runbook. The other edge types created via
+`Neo4jClient.create_misp_relationships_batch` (`EMPLOYS_TECHNIQUE`,
+`IMPLEMENTS_TECHNIQUE`, `ATTRIBUTED_TO`) do **not** carry
+`r.misp_event_ids[]` today — those edges are derived from STIX
+relationships and the provenance flows through the endpoint nodes.
+
+Per-attribute IDs are deliberately **not** stored on edges (cardinality
+blowup for marginal benefit) — attribute UUIDs live on the Indicator
+node only as `i.misp_attribute_ids[]`.
 
 **MISP traceability on Indicator nodes:** `i.misp_attribute_ids[]` holds the
 originating MISP attribute UUIDs — the stable cross-instance identifiers
@@ -466,4 +480,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-04-18 — chip 5a refactor added the "single source of truth — `src/source_registry.py`" callout to the Data Sources section. PR #41 cleanup pass earlier the same day replaced the n.uuid backfill-script pointer with the heal-by-rebaseline contract (pre-release framework, no production graph) and reframed the USES→specialized-edge history as "fresh baseline writes the specialized edge type directly"._
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected the "MISP traceability on edges" section to reflect PR-N26's actual scope (4 edge types in `build_relationships.py`: INDICATES / EXPLOITS / TARGETS / AFFECTS), and clarified that the `create_misp_relationships_batch` edges (EMPLOYS_TECHNIQUE, IMPLEMENTS_TECHNIQUE, ATTRIBUTED_TO) do NOT carry `r.misp_event_ids[]` (provenance flows through endpoint nodes for those). Added cross-link to the `2026_05` backfill runbook. Prior: 2026-04-18 chip 5a + PR #41 cleanup._

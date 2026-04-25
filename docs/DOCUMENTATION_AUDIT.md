@@ -32,8 +32,8 @@
 
 | Document | Topic | Verified against | Status |
 |----------|--------|------------------|--------|
-| [README.md](../README.md) | Quick start, **upgrade**, ports, DAG overview, MISP index discovery + env, **`AIRFLOW_MEMORY_LIMIT`**, **HEARTBEAT.md**, **collection/sync limits** | `install.sh`, `docker-compose.yml`, `Dockerfile`, `Dockerfile.airflow`, `dags/edgeguard_pipeline.py`, `src/config.py`, `src/run_misp_to_neo4j.py`, `src/misp_health.py`, `docs/COLLECTION_AND_SYNC_LIMITS.md`, `docs/HEARTBEAT.md` | Verified (2026-03-24) |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | PR checklist, local CI parity, **Python 3.12+**, generated Airflow files | `.github/workflows/ci.yml`, `Makefile`, `.gitignore`, `pyproject.toml`, `tests/test_*cli*` | Verified (2026-03-24) |
+| [README.md](../README.md) | Quick start, **upgrade**, ports, DAG overview, MISP index discovery + env, **`AIRFLOW_MEMORY_LIMIT`**, **HEARTBEAT.md**, **collection/sync limits** | `install.sh`, `docker-compose.yml`, `Dockerfile`, `Dockerfile.airflow`, `dags/edgeguard_pipeline.py`, `src/config.py`, `src/run_misp_to_neo4j.py`, `src/misp_health.py`, `docs/COLLECTION_AND_SYNC_LIMITS.md`, `docs/HEARTBEAT.md` | Verified (2026-04-26) |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | PR checklist, local CI parity, **Python 3.12+**, generated Airflow files | `.github/workflows/ci.yml`, `Makefile`, `.gitignore`, `pyproject.toml`, `tests/test_*cli*` | Verified (2026-04-26) — root copy is canonical; `docs/CONTRIBUTING.md` is a stale duplicate slated for stub-replacement |
 
 ---
 
@@ -104,6 +104,24 @@
 | [DEMO.md](DEMO.md) | Mock publisher | `demo/mock_resilmesh_publisher.py` | Verified |
 | [sources/README.md](sources/README.md) | Source doc index | — | Narrative |
 | [sources/MISP/SETUP.md](sources/MISP/SETUP.md) | MISP setup | MISP product | Narrative |
+| [TIMESTAMPS.md](TIMESTAMPS.md) | Source-truthful first/last-seen architecture; honest-NULL contract; PR-S5/PR-M2 | `src/source_truthful_timestamps.py`, `src/collectors/*` | Verified (2026-04-15) |
+| [RUNBOOK.md](RUNBOOK.md) | Operator response playbook — **Top 8 failure modes** including PR-N31 § 8 (`_MispFallbackHardError`); kill-switches; baseline launch path | `prometheus/alerts.yml`, `dags/edgeguard_pipeline.py`, `src/run_misp_to_neo4j.py` | Verified (2026-04-26) |
+| [BACKUP.md](BACKUP.md) | Self-hosted + Aura backup procedure; PR-F2 backup-timestamp gate; restore worked example | `dags/`, `docs/RUNBOOK.md` | Verified (2026-04-15) |
+| [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) | **PR-N32:** 6-section pre-launch operator pass — preflight, smoke, Alertmanager wiring, MISP scale, RAM/disk, unicode-bypass audit | `scripts/preflight_baseline.sh`, `scripts/audit_legacy_unicode_bypass_nodes.py`, `prometheus/alerts.yml`, `src/run_misp_to_neo4j.py` | Verified (2026-04-26) |
+| [BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md) | 7-day mini-baseline procedure (DAG vs CLI vs Variables) | `dags/edgeguard_pipeline.py` (`edgeguard_baseline`), `src/config.py` (`EDGEGUARD_BASELINE_DAYS`, `EDGEGUARD_BASELINE_COLLECTION_LIMIT`) | Verified (2026-04-15) |
+| [MEMORY_TUNING.md](MEMORY_TUNING.md) | Per-component memory recommendations; `edgeguard doctor --memory` output | `docker-compose.yml`, `src/edgeguard.py` | Verified (2026-04-06) |
+| [MISP_TUNING.md](MISP_TUNING.md) | MISP PHP/MySQL settings for large baselines; adaptive scaling tiers | `src/run_misp_to_neo4j.py`, `src/collectors/misp_writer.py` | Verified (2026-04-15) |
+| [ARCHITECTURE_DIAGRAMS.md](ARCHITECTURE_DIAGRAMS.md) | Mermaid diagrams of pipeline + retry/fallback flows | `dags/edgeguard_pipeline.py`, `src/run_misp_to_neo4j.py` | Needs refresh (2026-04-06) — diagrams predate PR-N29 fallback hardening |
+| [ARCHITECTURE_FLOW.md](ARCHITECTURE_FLOW.md) | Roadmap for diagram/integrity-test pins (`tests/test_architecture_flow_pins.py` planned) | (planned) | Roadmap — pin-test not yet implemented |
+| [CLOUD_SYNC.md](CLOUD_SYNC.md) | Cross-environment sync via `n.uuid` + `r.src_uuid` / `r.trg_uuid`; cloud Neo4j replay recipe | `src/node_identity.py`, `src/neo4j_client.py`, `src/build_relationships.py`, `src/enrichment_jobs.py`, `src/stix_exporter.py` | Verified (2026-04-26) |
+| [DEPLOYMENT_READINESS_CHECKLIST.md](DEPLOYMENT_READINESS_CHECKLIST.md) | Broad pre-deploy posture; complement to `BASELINE_LAUNCH_CHECKLIST.md` (focused launch-day pre-flight) | `pyproject.toml`, `docker-compose.yml`, `scripts/preflight_baseline.sh` | Verified (2026-04-26) |
+| [GRAPH_EXPLORER.md](GRAPH_EXPLORER.md) | Per-zone Neo4j Browser views; API enum (`attacks` / `actors` / `indicators` / `vulnerabilities`) | `src/query_api.py` | Verified (2026-04-26) |
+| [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md) | STIX 2.1 quickstart (`/stix-flow` endpoint, content-deterministic bundle id) | `src/stix_exporter.py`, `src/query_api.py` | Verified (2026-04-26) |
+| [SECURITY_ROADMAP.md](SECURITY_ROADMAP.md) | Tiered security roadmap (NFKC + zero-width strip in PR-N29 L1 / PR-N31; trust-boundary defenses) | `src/node_identity.py`, `src/source_trust.py` | Verified (2026-04-26) |
+| [STIX21_EXPORTER_PROPOSAL.md](STIX21_EXPORTER_PROPOSAL.md) | STIX 2.1 exporter design + namespace parity + content-deterministic bundles | `src/stix_exporter.py`, `src/node_identity.py` | Verified (2026-04-26) |
+| [AIRFLOW_DAG_DESIGN.md](AIRFLOW_DAG_DESIGN.md) | DAG-design rationale (tier1/2/3, baseline carve-out for `retries=0`) | `dags/edgeguard_pipeline.py` | Verified (2026-04-26) |
+| [ADDING_A_NODE_LABEL.md](ADDING_A_NODE_LABEL.md) | Recipe for adding a new label (6 touchpoints + Unicode-safe natural keys) | `src/neo4j_client.py`, `src/node_identity.py` | Verified (2026-04-26) |
+| [MIGRATIONS.md](MIGRATIONS.md) | Operator runbooks + PR-N22 / N26 / N32 backfill / audit scripts under `scripts/` | `scripts/`, `migrations/` | Verified (2026-04-26) |
 
 ---
 
@@ -113,4 +131,44 @@ Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules)
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass marked the historical PR #32 "Backfill migration" reference as deleted (no production graph) and updated the PR #33 "deferred / follow-up" entry to reflect that topology mergers + Campaign uuid stamping have since shipped._
+_Last updated: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
+
+The PR-N26 → PR-N32 train added significant capabilities that earlier
+versions of this index did not cover. Added rows for: TIMESTAMPS,
+RUNBOOK, BACKUP, BASELINE_LAUNCH_CHECKLIST (PR-N32), BASELINE_SMOKE_TEST,
+MEMORY_TUNING, MISP_TUNING, ARCHITECTURE_DIAGRAMS, ARCHITECTURE_FLOW,
+CLOUD_SYNC, DEPLOYMENT_READINESS_CHECKLIST, GRAPH_EXPLORER,
+RESILMESH_QUICKSTART_STIX, SECURITY_ROADMAP, STIX21_EXPORTER_PROPOSAL,
+AIRFLOW_DAG_DESIGN, ADDING_A_NODE_LABEL, MIGRATIONS.
+
+Per-PR narrative for the train (cross-doc summary):
+
+* **PR-N26 (#109, 2026-04-23):** wired `r.misp_event_ids[]` provenance
+  onto edges from `build_relationships.py` (4 edge types: INDICATES,
+  EXPLOITS, TARGETS, AFFECTS). Backfill via
+  `scripts/backfill_edge_misp_event_ids.py` + the 2026_05 runbook.
+* **PR-N29 (#110, 2026-04-24):** pre-baseline hardening + multi-agent
+  audit findings — `_MispFallbackHardError` sentinel exception in
+  `src/run_misp_to_neo4j.py`; paginated MISP fetch fallback
+  (`_FALLBACK_PAGE_SIZE=500`, `_FALLBACK_MAX_PAGES=200`); DAG
+  `retries=0` on critical chain (4 baseline tasks); baseline_lock
+  max-age 24h → 48h; NFKC + 17-char unicode strip in
+  `is_placeholder_name`.
+* **PR-N30 (#111, 2026-04-24):** post-PR-#109 audit follow-ups —
+  `--dry-run` opens session in READ_ACCESS mode; uniform
+  `[0..200]`-cap on edge `misp_event_ids[]`.
+* **PR-N31 (#112, 2026-04-25):** observability + invariants —
+  `MISP_FETCH_FALLBACK_ACTIVE` Counter (labels: `branch`, `outcome`),
+  2 Prometheus alerts (`EdgeGuardMispFetchFallbackActive` warning,
+  `EdgeGuardMispFetchFallbackHardError` critical), `[11] PR-N29
+  invariants` section in `scripts/preflight_baseline.sh`, RUNBOOK § 8
+  operator triage tree, alert-count floor bumped 9 → 11.
+* **PR-N32 (#113, 2026-04-25):** read-only audit script
+  (`scripts/audit_legacy_unicode_bypass_nodes.py`) + the
+  `BASELINE_LAUNCH_CHECKLIST.md` operator pre-launch pass.
+* **PR-N33 (this audit, 2026-04-26):** 6-agent docs audit; ~30
+  drift findings fixed across the doc corpus; this index expanded
+  to cover all 46 docs in `docs/` plus the 2 root-level docs.
+
+Prior: 2026-04-18 PR #41 cleanup pass — historical PR #32 "Backfill
+migration" reference marked as deleted; PR #33 deferred items closed.

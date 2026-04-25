@@ -94,7 +94,7 @@ On some setups, Compose **ignores** `deploy` unless you use Swarm or a compatibl
 
 | Profile | Heap initial | Heap max | Pagecache | TX max | Container | Typical RSS peak | Headroom | Use case |
 |---------|-------------|----------|-----------|--------|-----------|------------------|----------|----------|
-| **Tiny dev** (compose defaults) | 512m | 2g | 1g | 4g | 4g | ~3g | 1g | Smoke tests, an empty container |
+| **Tiny dev** (compose defaults) | 512m | 2g | 1g | 8g | 8g | ~3g | 5g | Smoke tests, an empty container. Container default is **8g** per `docker-compose.yml:121` (`${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`) after the PR-A bump from 4g. |
 | **Mid box** | 4g | 4g | 4g | 4g | 16g | ~10g | 6g | Single-source incremental syncs |
 | **Baseline-capable** (recommended; `.env.example` has these uncommented as the default) | **12g** | 12g | 8g | 8g | **32g** | ~25g | 7g | Full 730-day baseline + 350K-node graph |
 
@@ -270,4 +270,6 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-_Last updated: 2026-04-19 — added Recommended Neo4j memory profiles table (Tiny dev / Mid box / Baseline-capable) after the 2026-04-19 overnight baseline regression. Baseline-capable profile bumped per Vanko's findings: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX per Neo4j Operations Manual; eliminates GC pauses from resizing), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). Memory-math note clarifies that `tx_memory` is a CAP on transaction allocations, not additive to heap+pagecache._
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
+
+Prior: 2026-04-19 — added Recommended Neo4j memory profiles table (Tiny dev / Mid box / Baseline-capable) after the 2026-04-19 overnight baseline regression. Baseline-capable profile bumped per Vanko's findings: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX per Neo4j Operations Manual; eliminates GC pauses from resizing), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). Memory-math note clarifies that `tx_memory` is a CAP on transaction allocations, not additive to heap+pagecache._

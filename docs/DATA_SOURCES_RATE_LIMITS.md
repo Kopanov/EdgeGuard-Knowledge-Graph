@@ -79,7 +79,7 @@
 ### 3. CISA KEV (Known Exploited Vulnerabilities)
 
 **Website:** https://www.cisa.gov/known-exploited-vulnerabilities-catalog  
-**Data Feed:** https://www.cisa.gov/known-exploited-vulnerabilities-catalog/json
+**Data Feed:** `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (this is what `src/collectors/cisa_collector.py:70` actually fetches; the `/json` URL the website used to redirect to no longer resolves).
 
 | Aspect | Details |
 |--------|---------|
@@ -109,9 +109,9 @@
 | **Format** | STIX 2.1 |
 | **Update Frequency** | Quarterly releases |
 
-**Data Download:**
-- Canonical dataset: https://github.com/mitre-attack/attack-stix-data (STIX 2.1) — what EdgeGuard ingests.
-- Legacy dataset: https://github.com/mitre/cti — kept for reference; the older STIX 2.0 export has been superseded by the STIX 2.1 dataset above.
+**Data Download (ground truth — this is what `src/collectors/mitre_collector.py:58` actually fetches at HEAD):**
+- **Currently used (legacy):** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` — the STIX 2.0/2.1 enterprise bundle from MITRE's `mitre/cti` repo.
+- **Recommended for future migration:** https://github.com/mitre-attack/attack-stix-data is MITRE's newer canonical STIX 2.1 dataset; planned for a follow-up PR but **not yet wired** into the collector. Don't update the docs to claim it's the "canonical dataset EdgeGuard ingests" until the collector actually points there.
 
 **Pricing:** Free
 
@@ -349,4 +349,4 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-03-27_
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._

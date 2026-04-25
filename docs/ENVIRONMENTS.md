@@ -27,6 +27,8 @@ export EDGEGUARD_ENV="dev"   # or "stage", "prod", "edge", etc.
 You can see the current environment in Python via:
 
 ```python
+# Requires src/ on PYTHONPATH (the editable `pip install -e .` does this;
+# alternately: PYTHONPATH=src python -c "from config import EDGEGUARD_ENV; print(EDGEGUARD_ENV)").
 from config import EDGEGUARD_ENV
 print(EDGEGUARD_ENV)
 ```
@@ -142,7 +144,7 @@ EdgeGuard does **not** require Docker. The same Python code paths read **`NEO4J_
 2. **Neo4j custom CA / mTLS**: The client uses `GraphDatabase.driver(self.uri, auth=…)` without extra SSL config. Standard `neo4j+s://` with a **public** CA works; **private CAs** may require JVM/Python trust store configuration on the host or future support for explicit trust material (not yet first-class env flags).
 3. **NATS**: The `NATSClient` helper exists for ResilMesh-style messaging; callers today pass server URLs in code. There is no single **`NATS_SERVERS`** env var wired through all entrypoints yet — treat NATS as integration-specific until standardized.
 4. **Airflow**: DAG tasks use the same env as the Airflow worker/scheduler container; ensure **`MISP_URL` / `NEO4J_*`** are set there, not only on your laptop shell. With **EdgeGuard `docker-compose.yml`**, Airflow’s metadata DB is **PostgreSQL** (`airflow_postgres`); override defaults via **`AIRFLOW_POSTGRES_*`** in `.env` if needed. **`EDGEGUARD_SSL_VERIFY`** is passed via **`x-common-env`** so Airflow, API, and GraphQL all see the same value; if it were missing from the Airflow service, `config.SSL_VERIFY` would default to **`true`** even when `.env` had `false` for other tooling.
-5. **MISP→Neo4j sync RAM**: The sync uses **Python-side chunked merges** (default **500** items per chunk via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, 3s pause between chunks). Large events (>5000 attributes) are automatically **streamed in pages** of 5000 with `gc.collect()` between pages. With Docker Compose, the **airflow** service has a **memory limit** (**`AIRFLOW_MEMORY_LIMIT`**, default **12g** in `docker-compose.yml`). Events with 100K+ attributes require **8-12GB** due to PyMISP loading the full event JSON. Lower to 4g only for small test deployments. **`0`** or **`all`** for chunk size forces a **single pass** (OOM risk).
+5. **MISP→Neo4j sync RAM**: The sync uses **Python-side chunked merges** (default **500** items per chunk via **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**). Inter-batch throttling is the separate **`EDGEGUARD_MISP_BATCH_THROTTLE_SEC`** (default **5.0s**) on the MISP-push side; there is no inter-chunk pause on the Neo4j-merge side. Large events are deferred end-of-sync at **`EDGEGUARD_MAX_EVENT_ATTRIBUTES`** (default **50000**). With Docker Compose, the **airflow** service has a **memory limit** (**`AIRFLOW_MEMORY_LIMIT`**, default **12g** in `docker-compose.yml`). Events with 100K+ attributes require **8-12GB** due to PyMISP loading the full event JSON. Lower to 4g only for small test deployments. **`0`** or **`all`** for chunk size forces a **single pass** (OOM risk).
 
 ---
 
@@ -174,4 +176,4 @@ for the operator runbook that references the baseline lock.
 
 ---
 
-_Last updated: 2026-04-15 — added MISP sync tuning + baseline mutex env vars; noted Airflow 3.2 upgrade._
+_Last updated: 2026-04-26 — PR-N33 docs audit: clarified `from config import …` requires `src/` on PYTHONPATH (or editable install); removed unverified "3s pause between chunks" claim from `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` description (the only documented inter-batch throttle is `EDGEGUARD_MISP_BATCH_THROTTLE_SEC=5.0` on the MISP-push side). Prior: 2026-04-15 MISP sync tuning + baseline mutex env vars._

@@ -62,7 +62,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 
 | DAG | Schedule | Tasks |
 |-----|----------|-------|
-| `edgeguard_baseline` | **None (manual only)** | `misp_health_check` → `baseline_start` → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_complete` |
+| `edgeguard_baseline` | **None (manual only)** | `baseline_misp_health` → `baseline_clean` (gated on `dag_run.conf={"fresh_baseline": true}` — PR-C) → `baseline_start` → `tier1_core` (TaskGroup) → `tier2_extended` (TaskGroup) → `tier3_low_freq` (TaskGroup) → `baseline_full_neo4j_sync` → `baseline_build_relationships` → `baseline_run_enrichment_jobs` → `baseline_complete`. **PR-N29 H1: the four critical-chain tasks (`baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`, `baseline_run_enrichment_jobs`) override `retries=0`** — see [`AIRFLOW_DAGS.md § Built-in Features`](AIRFLOW_DAGS.md). |
 | `edgeguard_pipeline` | Every 30 min | `check_containers` → `misp_health_check` → `high_frequency_collectors.collect_otx` → `log_summary` |
 | `edgeguard_medium_freq` | Every 4 hours | `misp_health_check` → `collect_cisa`, `collect_virustotal` → `log_summary` |
 | `edgeguard_low_freq` | Every 8 hours | `misp_health_check` → `collect_nvd` → `log_summary` |
@@ -504,11 +504,11 @@ EdgeGuard-Knowledge-Graph/
 - **`edgeguard_neo4j_sync`** uses a `ShortCircuitOperator` (`check_sync_needed` / `should_run_neo4j_sync`) so the
   heavy sync is skipped when nothing new is available in MISP.
 - All `python_callable` values are direct function references (no lambdas) — lambda functions
-  cannot be serialized by Airflow 2.x DAG serialization and cause `PicklingError` on workers.
+  cannot be serialized by Airflow's DAG serialization (the constraint persisted across the 2.x → 3.x upgrade) and cause `PicklingError` on workers.
 - Every task has an `execution_timeout` — see table above.
 - The Prometheus metrics server runs in `edgeguard_metrics_server.py`, not at DAG module level.
 
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass updated the 2026-04 USES→specialized-edge refactor note to reflect pre-release posture (no migration script ships; a fresh baseline rerun writes the specialized edge types). `Dockerfile.airflow` base **`apache/airflow:3.2.0-python3.12`** (Python 3.12), upgraded from 2.11.2 in the April 2026 Airflow 2→3 upgrade — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for the operational rollout._
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected the `edgeguard_baseline` task list to include `baseline_clean` (PR-C, gated on `dag_run.conf={"fresh_baseline": true}`) and `tier3_low_freq` (was missing); flagged the PR-N29 H1 `retries=0` carve-out for the 4 critical-chain tasks; reworded the "Airflow 2.x DAG serialization" caveat to note the constraint persisted across the 2→3 upgrade. Prior: 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._

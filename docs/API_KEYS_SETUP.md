@@ -81,8 +81,10 @@ export NEO4J_DATABASE="neo4j"  # Optional — explicit database name (multi-DB h
 | Type | URI Format | Use Case |
 |------|------------|----------|
 | Local | `bolt://localhost:7687` | Default local development |
-| Remote | `bolt://hostname:7687` | Single remote server |
-| Cluster | `bolt+routing://hostname:7687` | Neo4j Causal Cluster |
+| Remote (TCP) | `bolt://hostname:7687` | Single remote server, no TLS |
+| Remote (TLS, system CA) | `bolt+s://hostname:7687` | Single remote server with strict TLS |
+| Remote (TLS, self-signed) | `bolt+ssc://hostname:7687` | Single remote server with self-signed cert |
+| Cluster (auto-routing) | `neo4j://hostname:7687` (or `neo4j+s://` for TLS) | Neo4j 5.x cluster — replaces the deprecated `bolt+routing://` scheme (removed in driver 5.x; this repo pins `neo4j~=5.27`). |
 
 ### Option 3: Docker Compose
 
@@ -107,10 +109,14 @@ services:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MISP_URL` | MISP server URL | `https://localhost:8443` |
+| `MISP_URL` | MISP server URL | *(required, no default — Compose example: `https://misp.local`)* |
 | `MISP_API_KEY` | MISP API authentication | *(required)* |
+| `EDGEGUARD_API_KEY` | EdgeGuard REST API auth (production-required; `EDGEGUARD_ALLOW_UNAUTH=true` only for local dev) | *(required in production)* |
 | `OTX_API_KEY` | AlienVault OTX API key | *(optional)* |
 | `NVD_API_KEY` | NVD API key | *(optional)* |
+| `ABUSEIPDB_API_KEY` | AbuseIPDB API key (used by `src/collectors/abuseipdb_collector.py`) | *(optional)* |
+| `THREATFOX_API_KEY` | ThreatFox API key (used by `src/collectors/global_feed_collector.py`) | *(optional)* |
+| `VIRUSTOTAL_API_KEY` | VirusTotal API key | *(optional)* |
 | `NEO4J_URI` | Neo4j connection URI | `bolt://localhost:7687` |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j password | *(required, no default)* |
@@ -145,4 +151,4 @@ services:
 
 ---
 
-_Last updated: 2026-03-17_
+_Last updated: 2026-04-26 — PR-N33 docs audit: replaced deprecated `bolt+routing://` with `neo4j://` cluster URI scheme (driver 5.x); fixed `MISP_URL` "default" claim (it's required, no built-in default); added `EDGEGUARD_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, `VIRUSTOTAL_API_KEY` to the env-var summary; added `bolt+s://` / `bolt+ssc://` rows for TLS variants. Prior: 2026-03-17._

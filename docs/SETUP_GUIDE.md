@@ -65,7 +65,8 @@ The repo **`install.sh`** defaults to **path A** when Docker Compose v2 is avail
 - **Docker** + **Docker Compose v2** (`docker compose`, not legacy `docker-compose` only)
 - **Git** (or a release tarball — see § 7)
 - A running **MISP** instance (URL + auth key your org provides)
-- ~**8 GB+ RAM** recommended if you run baseline collection + MISP→Neo4j sync (tune Neo4j/Airflow limits in `docker-compose.yml` if needed)
+- **Tiny dev / smoke test:** ~**8 GB+ RAM** is enough.
+- **Full 730d baseline (350K+ nodes):** plan for **~32 GB host RAM** — Neo4j alone wants **8 GB heap + 4 GB pagecache** under load, Airflow worker default is **12 GB** (`AIRFLOW_MEMORY_LIMIT=12g`), plus MISP + Postgres + monitoring stack. See [`DOCKER_SETUP_GUIDE.md`](DOCKER_SETUP_GUIDE.md) "Recommended Neo4j memory profiles" + [`MEMORY_TUNING.md`](MEMORY_TUNING.md).
 
 For a **large Neo4j heap**, clean-slate volume resets, and MISP-on-Docker-desktop patterns, use [DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) alongside this section.
 
@@ -185,9 +186,9 @@ python src/health_check.py
 
 **Neo4j:** Use **`bolt://localhost:7687`** (or your server) in **`.env`**. Install **APOC** on that Neo4j — required for sync (see below).
 
-**Airflow (optional):** Install **`apache-airflow[postgres]~=2.11`**, configure **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`**, copy **`dags/`** into **`$AIRFLOW_HOME/dags`**, mount or copy **`src/`** so DAGs can import collectors. This is more manual; prefer Compose for orchestration.
+**Airflow (optional):** Install **`apache-airflow~=3.2`** (the repo upgraded from 2.11 → 3.2 on 2026-04-15 to resolve 16 stale 2.11.x CVEs — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)). Configure **`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`**, copy **`dags/`** into **`$AIRFLOW_HOME/dags`**, mount or copy **`src/`** so DAGs can import collectors. The Compose stack runs `airflow standalone` (Airflow 3.x) — the legacy `airflow webserver` was split into `airflow api-server` in 3.x and is **not** what EdgeGuard uses. This venv path is more manual; prefer Compose for orchestration.
 
-**CLI:** `python src/run_pipeline.py --baseline` or `edgeguard` after editable install.
+**CLI:** `python src/run_pipeline.py --baseline` or `edgeguard` after editable install. For 730d baseline launches see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md).
 
 ---
 
@@ -209,7 +210,7 @@ Sync code uses APOC (`apoc.coll.toSet`, etc.). Without APOC, merges fail.
 **Compose-specific (see `docker-compose.yml` header and service blocks):**
 
 - **`x-common-env`:** includes **`NEO4J_URI=bolt://neo4j:7687`**, **`MISP_URL`** (override in **`.env`** if **`misp.local`** doesn’t resolve in containers), collector keys, sync tuning vars.
-- **`airflow` service:** **`AIRFLOW_MEMORY_LIMIT`** (default **4g**) — raise if **`full_neo4j_sync`** gets **SIGKILL (-9)**; scheduler tuning **`AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD`**, **`LOCAL_TASK_JOB_HEARTBEAT_SEC`**, **`ZOMBIE_DETECTION_INTERVAL`** (defaults documented in [HEARTBEAT.md](HEARTBEAT.md)).
+- **`airflow` service:** **`AIRFLOW_MEMORY_LIMIT`** (default **12g** per `docker-compose.yml:284`) — raise if **`full_neo4j_sync`** gets **SIGKILL (-9)**; scheduler tuning **`AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD`**, **`LOCAL_TASK_JOB_HEARTBEAT_SEC`**, **`ZOMBIE_DETECTION_INTERVAL`** (defaults documented in [HEARTBEAT.md](HEARTBEAT.md)).
 - **`api` / `graphql` images:** **`Dockerfile`** runs as **`edgeguard`** and **`chown`s `/app/src`** so Uvicorn can read modules (see troubleshooting table §9).
 
 **Optional YAML / wizard:**
@@ -260,7 +261,7 @@ docker compose up -d
 | **`Unknown function 'apoc.coll.toSet'`** | Enable APOC on Neo4j |
 | **`ModuleNotFoundError: neo4j` / `pymisp` in Airflow** | Rebuild Airflow image: **`docker compose build airflow`** — deps come from **`Dockerfile.airflow`**, not manual pip in the container |
 | **API / GraphQL crash loop:** **`PermissionError: ... '/app/src/query_api.py'`** (or **`graphql_api.py`**) | Image runs as **`edgeguard` (uid 1001)**; **`COPY src/`** was root-owned with tight modes (**600**). Rebuild **`edgeguard-kg`** from current **`Dockerfile`** (includes **`chown -R edgeguard:edgeguard /app/src`**) — **`docker compose build api graphql --no-cache`** |
-| **`full_neo4j_sync` / MISP→Neo4j exits -9 (SIGKILL)** mid-run | Usually **container memory**, not a Python traceback: host can have free RAM while **Docker’s cgroup** limit is hit. Check **`docker inspect edgeguard_airflow --format '{{.State.OOMKilled}}'`** and **`docker stats`**. Compose defaults **`AIRFLOW_MEMORY_LIMIT=4g`** for **airflow**; raise in **`.env`** or lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. On **Docker Desktop**, raise the **VM memory** cap too. See **[HEARTBEAT.md](HEARTBEAT.md)**. |
+| **`full_neo4j_sync` / MISP→Neo4j exits -9 (SIGKILL)** mid-run | Usually **container memory**, not a Python traceback: host can have free RAM while **Docker's cgroup** limit is hit. Check **`docker inspect edgeguard_airflow --format '{{.State.OOMKilled}}'`** and **`docker stats`**. Compose defaults **`AIRFLOW_MEMORY_LIMIT=12g`** for **airflow** (per `docker-compose.yml:284`); raise in **`.env`** or lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. On **Docker Desktop**, raise the **VM memory** cap too. See **[HEARTBEAT.md](HEARTBEAT.md)**. |
 
 More: [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) troubleshooting, [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
@@ -286,4 +287,4 @@ Follow the **same operator path** as at the top of this guide:
 
 ---
 
-_Last updated: 2026-04-06 — Compose **`x-common-env`** / **`AIRFLOW_MEMORY_LIMIT`** / scheduler tuning; MISP preflight + index-based sync discovery; troubleshooting (zombie, SIGKILL, PermissionError)._
+_Last updated: 2026-04-26 — PR-N33 docs audit: fixed venv-path Airflow install (was `~=2.11`, now `~=3.2` after the 2026-04-15 upgrade); corrected `AIRFLOW_MEMORY_LIMIT` default (was 4g, actual default is 12g); split RAM recommendation into "tiny dev" (8 GB) vs "full 730d baseline" (~32 GB); cross-linked `BASELINE_LAUNCH_CHECKLIST.md` and `MEMORY_TUNING.md`. Prior: 2026-04-06 Compose `x-common-env` / scheduler tuning._

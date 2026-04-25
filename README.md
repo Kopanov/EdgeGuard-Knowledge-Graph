@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/neo4j-2026.03-green.svg" alt="Neo4j 2026.03">
   <img src="https://img.shields.io/badge/license-MIT-brightgreen.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/version-2026.4.4-orange.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-2026.4.26-orange.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -1230,5 +1230,7 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ---
 
-_Last updated: 2026-04-19 — PR-C (CLI ↔ DAG parity + fresh-baseline): closed 3 CLI/DAG drift gaps; CLI baseline now invokes `enrichment_jobs` + `build_relationships` via subprocess to match DAG; new `baseline_clean` Airflow task gated on `dag_run.conf={"fresh_baseline": true}`; new `edgeguard fresh-baseline` and `edgeguard baseline` CLI commands; shared `src/baseline_clean.py` helper (atomic 3-step wipe + settle + verify-poll + fail-fast); 35 behavioural tests bring `baseline_clean.py` coverage from 21% → 72%. PR-D landed earlier the same day (env-vars documentation sync — ~40 vars added to README from `docker-compose.yml`'s `x-common-env` block + `.env.example`). PR-A: install.sh auto-generates `EDGEGUARD_API_KEY` so `docker compose up` succeeds out of the box. PR-B: supply-chain refresh; Trivy gate weakening tracked in issue #52. Recommended-memory bumps from PR #45 reflected throughout: `NEO4J_TX_MEMORY_MAX` 4g→8g (CAP, not additive), `NEO4J_HEAP_INITIAL` 4g→12g (= MAX), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g — see DOCKER_SETUP_GUIDE.md._
+_Last updated: 2026-04-26 — PR-N33 docs audit: bumped version badge `2026.4.4` → `2026.4.26` (matches `pyproject.toml`); see [`docs/BASELINE_LAUNCH_CHECKLIST.md`](docs/BASELINE_LAUNCH_CHECKLIST.md) for the operator pre-launch pass before triggering a 730d baseline (added in PR-N32). N26→N32 train added: `r.misp_event_ids[]` edge provenance (PR-N26), `_MispFallbackHardError` sentinel + paginated MISP fetch fallback + `retries=0` on critical chain + 48h baseline_lock + 35-char unicode strip (PR-N29), `MISP_FETCH_FALLBACK_ACTIVE` Counter + 2 Prometheus alerts + `[11] PR-N29 invariants` preflight section + RUNBOOK § 8 (PR-N31), read-only legacy-unicode audit script + `BASELINE_LAUNCH_CHECKLIST.md` (PR-N32).
+
+Prior: 2026-04-19 — PR-C (CLI ↔ DAG parity + fresh-baseline): closed 3 CLI/DAG drift gaps; CLI baseline now invokes `enrichment_jobs` + `build_relationships` via subprocess to match DAG; new `baseline_clean` Airflow task gated on `dag_run.conf={"fresh_baseline": true}`; new `edgeguard fresh-baseline` and `edgeguard baseline` CLI commands; shared `src/baseline_clean.py` helper (atomic 3-step wipe + settle + verify-poll + fail-fast); 35 behavioural tests bring `baseline_clean.py` coverage from 21% → 72%. PR-D landed earlier the same day (env-vars documentation sync — ~40 vars added to README from `docker-compose.yml`'s `x-common-env` block + `.env.example`). PR-A: install.sh auto-generates `EDGEGUARD_API_KEY` so `docker compose up` succeeds out of the box. PR-B: supply-chain refresh; Trivy gate weakening tracked in issue #52. Recommended-memory bumps from PR #45 reflected throughout: `NEO4J_TX_MEMORY_MAX` 4g→8g (CAP, not additive), `NEO4J_HEAP_INITIAL` 4g→12g (= MAX), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g — see DOCKER_SETUP_GUIDE.md._
 
