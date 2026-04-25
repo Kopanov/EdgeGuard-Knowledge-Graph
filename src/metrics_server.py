@@ -277,6 +277,65 @@ SYNC_EVENTS_INDEX_TOTAL = Gauge(
     "Total events returned by MISP events index for the most recent sync run",
 )
 
+# PR-N31 (post-PR-N29 follow-up, 2026-04-25): MISP fetch fallback activity.
+# The PyMISP / requests-restSearch fallback is engaged ONLY when the
+# primary ``/events/index`` path errors out (auth, 5xx, malformed
+# payload). Pre-PR-N29 the fallback silently truncated at 1000 events;
+# PR-N29 added pagination + the ``_MispFallbackHardError`` sentinel that
+# raises on errors-payload, unexpected-shape, non-200 mid-pagination,
+# and cap-hit. We now want operator-visible signal for BOTH events:
+#
+#   * fallback ENGAGED at all (signals primary index path is degraded)
+#   * fallback raised the sentinel (signals real upstream MISP problem)
+#
+# Without these counters, the only signal was the
+# ``[MISP-FETCH-FALLBACK-ACTIVE]`` log token — invisible to Prometheus,
+# easy to miss in noisy logs. Pairing with the
+# ``EdgeGuardMispFetchFallbackActive`` alert in prometheus/alerts.yml
+# means any sustained fallback usage pages the operator within 10 min.
+#
+# Why Counter not Gauge: fallback-engaged is a discrete event, not a
+# state. ``rate()`` over the counter answers "how often are we falling
+# back" — which is the question that drives the alert and a future
+# Grafana panel. A Gauge would only reflect the most-recent run.
+#
+# Labels:
+#   branch — ``pymisp`` or ``rest_search``. Both branches paginate
+#            independently and can fail independently; per-branch counts
+#            help diagnose whether the issue is PyMISP-version-specific
+#            or HTTP-layer.
+#   outcome — ``engaged`` (fallback ran at all), ``hard_error`` (the
+#             sentinel was raised — i.e. genuine truncation refusal).
+#             Allows the alert to distinguish "fallback works fine, just
+#             active" from "fallback also failing."
+MISP_FETCH_FALLBACK_ACTIVE = Counter(
+    "edgeguard_misp_fetch_fallback_active_total",
+    "MISP fetch fallback engaged (primary /events/index path failed). "
+    "Labels: branch={pymisp,rest_search}, outcome={engaged,hard_error}. "
+    "engaged = fallback path ran; hard_error = _MispFallbackHardError raised "
+    "(errors payload, unexpected shape, non-200 mid-pagination, or cap-hit). "
+    "See PR-N29 + PR-N31 + docs/RUNBOOK.md § 'MISP fetch fallback'.",
+    ["branch", "outcome"],
+)
+
+
+def record_misp_fetch_fallback(branch: str, outcome: str) -> None:
+    """Record one MISP fetch fallback event.
+
+    Defensive wrapper so call-sites in run_misp_to_neo4j don't have to
+    care whether prometheus_client is installed (the
+    ``_METRICS_AVAILABLE`` flag in run_misp_to_neo4j gates this; this
+    function's existence here lets the caller import-once at module
+    load and call without conditionals later).
+
+    branch: 'pymisp' or 'rest_search'
+    outcome: 'engaged' or 'hard_error'
+    """
+    if not PROMETHEUS_AVAILABLE:  # pragma: no cover — Prometheus is required in CI
+        return
+    MISP_FETCH_FALLBACK_ACTIVE.labels(branch=branch, outcome=outcome).inc()
+
+
 # PR-I (2026-04-20 multi-agent audit Red Team #4): MISP tag-impersonation
 # defense can be configured OFF (both allowlists empty). Prior to PR-I,
 # that state was signalled only by a startup log line that fired ONLY in

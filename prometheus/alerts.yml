@@ -319,6 +319,61 @@ groups:
             means events were SILENTLY SKIPPED — the exact failure pattern
             of the 2026-04-14 NVD regression. Investigate immediately.
 
+      # PR-N31 (post-PR-N29 follow-up, 2026-04-25): MISP fetch fallback
+      # alerts. The PyMISP / requests-restSearch fallback in
+      # ``fetch_edgeguard_events`` is engaged only when the primary
+      # ``/events/index`` path errors. PR-N29 made the fallback paginate
+      # + raise ``_MispFallbackHardError`` on hard failures (errors-payload,
+      # unexpected-shape, non-200 mid-pagination, cap-hit). PR-N31 adds the
+      # Prometheus counter + this alert pair so the operator gets paged
+      # rather than learning about it from a missed baseline window.
+      - alert: EdgeGuardMispFetchFallbackActive
+        # Fires when ANY fallback engagement happens at all. Severity warning
+        # because the fallback itself is functional — but sustained activity
+        # signals the primary index path is broken (auth, 5xx, schema drift).
+        # 10m window is the smallest that doesn't fire on a one-off retry.
+        expr: |
+          sum(rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: sync
+        annotations:
+          summary: "MISP fetch fallback active for >10m — primary /events/index path is broken"
+          description: |
+            EdgeGuard's MISP fetcher has fallen back to the slower
+            PyMISP / requests-restSearch path for >10 minutes. The
+            primary ``/events/index`` path is returning errors. This is
+            functional but slower; sustained activity is operator-visible
+            evidence of upstream MISP problems. Grep
+            ``[MISP-FETCH-FALLBACK-ACTIVE]`` in pipeline logs to correlate
+            with the underlying failure mode (HTTP status, auth, payload
+            shape). See docs/RUNBOOK.md § "MISP fetch fallback".
+
+      - alert: EdgeGuardMispFetchFallbackHardError
+        # Fires the moment a sentinel raise lands. CRITICAL because
+        # _MispFallbackHardError is the "I refuse to silently truncate"
+        # signal — it means a baseline run just failed in a way that
+        # would otherwise have been invisible (silent data loss). 1m
+        # window because we want this paged immediately, not 10m later.
+        expr: |
+          sum(rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: sync
+        annotations:
+          summary: "MISP fetch fallback raised _MispFallbackHardError ({{ $labels.branch }})"
+          description: |
+            EdgeGuard's MISP fetch fallback raised a hard error in the
+            ``{{ $labels.branch }}`` branch. The sentinel exception means
+            the fallback REFUSED to silently truncate — the baseline /
+            sync run failed visibly rather than producing partial data
+            that would have looked like a successful "no events" sync.
+            See docs/RUNBOOK.md § "_MispFallbackHardError" for the
+            diagnosis tree. The dagrun has already failed (PR-N29 H1 set
+            retries=0 on the critical chain).
+
       - alert: EdgeGuardNeo4jLabelDropBig
         # Per-label 1-day drop > 50% of yesterday's value. Uses offset so
         # the comparison is against the same time yesterday — robust to
