@@ -92,10 +92,14 @@ URLs work too, but encoding is safer across proxies.)
 
 Every bundle carries:
 
-- `type: "bundle"` + a random UUIDv4 `id` (one per request, so two
-  calls for the same seed will have **different bundle IDs** but
-  **identical object IDs** — object IDs are deterministic UUIDv5 over
-  the node's natural key, so diffing across versions is safe)
+- `type: "bundle"` + a **content-deterministic UUIDv5** `id`. The
+  bundle id is `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted SDO ids))`
+  — two calls for the same seed yield **identical bundle IDs**
+  (and identical object IDs, because object IDs are also deterministic
+  UUIDv5 over the node's natural key, sharing the same namespace UUID).
+  This makes diffing + content-addressed caching safe across versions.
+  The `EDGEGUARD_DETERMINISTIC_BUNDLE` env var freezes
+  `x_edgeguard_source.generated_at` for fully reproducible output
 - `objects: [...]` — SDOs + SROs for the seed and its neighborhood
 - `x_edgeguard_source` — EdgeGuard-specific provenance (see below)
 
@@ -226,4 +230,4 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-04-17_
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._

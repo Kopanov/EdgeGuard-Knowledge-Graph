@@ -48,8 +48,11 @@ Accept: application/stix+json;version=2.1
 
 Response body is a STIX 2.1 `bundle` SDO, JSON-encoded. The media type
 is `application/stix+json;version=2.1` (OASIS section 3.1). Bundle ID
-is random UUIDv4 per request; every object inside the bundle has a
-**deterministic** UUIDv5 ID (see §6).
+is **content-deterministic UUIDv5** —
+`uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted SDO ids))` — so two
+calls for the same seed yield identical bundle IDs (PR #33 work; see
+§6). Every object inside the bundle has a **deterministic** UUIDv5
+ID over its natural key, sharing the same namespace UUID.
 
 Example:
 
@@ -167,10 +170,20 @@ Consequences:
 - Re-exporting the same graph state produces byte-identical object IDs
   → ResilMesh can diff bundles and cache.
 - Two different EdgeGuard environments (dev vs prod) emit the **same**
-  IDs for the same entities. If that turns out to be a problem, we
-  namespace per environment by hashing `ENV` into the namespace UUID.
-- The bundle envelope ID is a random UUIDv4 per request — bundles
-  themselves are not deterministic; only the objects inside them are.
+  IDs for the same entities. **This is now a SHIPPED behavior with a
+  runtime parity check** at module import time:
+  `EDGEGUARD_STIX_NAMESPACE` (in `src/stix_exporter.py`) and
+  `EDGEGUARD_NODE_UUID_NAMESPACE` (in `src/node_identity.py`) MUST
+  equal — a `RuntimeError` is raised on import drift. This guarantees
+  the UUID portion of any STIX SDO id matches the corresponding
+  Neo4j `n.uuid` for the same entity. See `docs/CLOUD_SYNC.md` for
+  the cross-environment sync contract this enables.
+- The bundle envelope ID is **content-deterministic UUIDv5** —
+  `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted SDO ids))` — so
+  bundles are reproducible up to the `x_edgeguard_source.generated_at`
+  timestamp (frozen via `EDGEGUARD_DETERMINISTIC_BUNDLE` for fully
+  byte-identical output). This was promoted from "random UUIDv4 per
+  request" in earlier drafts.
 
 ## 7. Open semantic questions (confirm with ResilMesh before merge)
 
@@ -272,7 +285,11 @@ driver with `MagicMock`. They verify:
 - Indicator `INDICATES` malware → `indicates` SRO
 - Deterministic IDs stable across exporter instances
 - Technique `kill_chain_phases` emitted as property, not as SRO
-- Legacy `USES` rel type still matched (backward compat)
+<!-- Removed in PR-N33 docs audit (2026-04-26): the legacy `USES` rel type
+shim was REMOVED in PR-N1 — no backward-compat matching to test for.
+The exporter only matches the specialized triple
+(EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE / USES_TECHNIQUE). See
+RESILMESH_INTEROPERABILITY.md § 3.2.1. -->
 - `edgeguard_managed` filter present in Cypher (no ResilMesh leakage)
 - Empty bundle when seed is not found
 
@@ -291,4 +308,4 @@ intentionally does not add Docker fixtures.
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass marked PR #24 as shipped (no longer a pending dependency) and date-stamped the §9 TODO list to make its open-vs-closed status legible at a glance._
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected bundle-id determinism (was "random UUIDv4", actually content-deterministic UUIDv5 over sorted SDO ids); promoted the dev-vs-prod namespace claim from "if it turns out to be a problem we'll fix" to "shipped behavior with import-time parity check between EDGEGUARD_STIX_NAMESPACE and node_identity.EDGEGUARD_NODE_UUID_NAMESPACE"; removed §11 test bullet "Legacy USES rel type still matched" (USES shim was removed in PR-N1, contradicted by RESILMESH_INTEROPERABILITY.md § 3.2.1). Prior: 2026-04-18 PR #41 cleanup._

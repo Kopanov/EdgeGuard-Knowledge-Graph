@@ -225,8 +225,14 @@ We use UNIQUE constraints as deduplication keys — `tag` removed from all entit
 | Campaign | `(name)` |
 | Sector | `(name)` |
 
-`tag` is the source-collection label (e.g., `'nvd'`, `'otx'`, `'mitre_attck'`) and scopes
-the dedup key so the same CVE or indicator can exist once per source tag without collision.
+**Note (PR-N33 docs audit, 2026-04-26):** `tag` was REMOVED from every
+EdgeGuard threat-intel constraint in earlier passes (the keys above are
+the current truth — single-key `(name)` / `(cve_id)` / `(mitre_id)` /
+`(indicator_type, value)`). The same entity now MERGEs across sources
+into one node, with per-source provenance carried on
+`(Node)-[:SOURCED_FROM]->(Source)` edges (see `merge_node_with_source`
+in `src/neo4j_client.py`). Do not re-introduce `tag` into a constraint
+without re-architecting the SOURCED_FROM model.
 
 ### 4.2 Merge Logic
 
@@ -403,7 +409,7 @@ def enrich_alert_with_rag(ip_address):
 
 ```cypher
 // Constraints (unique)
-CREATE CONSTRAINT vulnerability_cve IF NOT EXISTS FOR (v:Vulnerability) REQUIRE (v.cve_id, v.tag) IS UNIQUE
+CREATE CONSTRAINT vulnerability_key IF NOT EXISTS FOR (v:Vulnerability) REQUIRE (v.cve_id) IS UNIQUE
 
 // Indexes (for speed)
 CREATE INDEX indicator_value IF NOT EXISTS FOR (i:Indicator) ON (i.value)
@@ -439,4 +445,4 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-03-28_
+_Last updated: 2026-04-26 — PR-N33 docs audit: removed contradictory "tag scopes the dedup key" sentence (tag was removed from all EdgeGuard constraints; per-source provenance lives on SOURCED_FROM edges); fixed stale Cypher example for `vulnerability_key` (was `(v.cve_id, v.tag)`, actual is `(v.cve_id)`). Prior: 2026-03-28._

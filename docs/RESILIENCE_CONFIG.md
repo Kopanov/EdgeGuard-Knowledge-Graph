@@ -129,4 +129,4 @@ Use these in Grafana dashboards and alert rules to detect and respond to degrade
 
 ---
 
-_Last updated: 2026-03-17_
+_Last updated: 2026-04-26 — PR-N33 docs audit: verified — circuit-breaker behaviour described here is unchanged by the N26→N32 train (those PRs added new sentinel + alerts but did not modify circuit-breaker semantics). Footer refresh as part of the audit pass. Prior: 2026-03-17._

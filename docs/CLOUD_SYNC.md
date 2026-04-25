@@ -734,4 +734,4 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass rewrote the operator runbook and Rollback D recipe to reflect the no-backfill-script posture (pre-release framework; fresh baseline rerun stamps every uuid at write time)._
+_Last updated: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._

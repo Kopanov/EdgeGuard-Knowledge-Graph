@@ -4,7 +4,7 @@ Interactive browser-based visualization for the EdgeGuard knowledge graph. Built
 
 **File:** [`docs/visualization.html`](visualization.html)
 **API endpoint:** `GET /graph/explore`
-**Last updated:** 2026-03-27
+**Last updated:** 2026-04-26 — PR-N33 docs audit: clarified that the "Malware (default)" view's API enum value is `attacks` (was confusing — heading said "Malware" but the API parameter says `attacks`). Prior: 2026-03-27.
 
 ---
 
@@ -45,7 +45,7 @@ If your deployment uses Neo4j Enterprise or Aura, Bloom can be used alongside or
 
 The explorer offers four pre-built views, each running a different Cypher query against the live Neo4j database.
 
-### Malware (default)
+### Malware (API enum value: `attacks` — the default)
 
 **What it shows:** Malware families linked to their indicators (IOCs), grouped by target sector.
 

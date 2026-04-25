@@ -235,7 +235,7 @@ CREATE INDEX campaign_zone IF NOT EXISTS FOR (c:Campaign) ON (c.zone);
 
 ## MISP Integration
 
-**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_ids[]` for tracing back to every MISP event that has observed them. **Indicator** nodes additionally carry `misp_attribute_ids[]` — the MISP **attribute UUIDs** (`attr.uuid`), which are the *stable cross-instance identifiers*. The legacy numeric `attr.id` was deliberately not chosen because it is per-instance auto-increment and not portable across MISP instances or restores. With `misp_attribute_ids[]` populated you can resolve a Neo4j Indicator directly back to its MISP attributes without joining via event id. Edges built from the MISP path carry `r.misp_event_ids[]` for per-edge provenance.
+**Data split:** Sources --> MISP (raw + full history) --> Neo4j (metadata + relationships for fast queries). Neo4j nodes carry `misp_event_ids[]` for tracing back to every MISP event that has observed them. **Indicator** nodes additionally carry `misp_attribute_ids[]` — the MISP **attribute UUIDs** (`attr.uuid`), which are the *stable cross-instance identifiers*. The legacy numeric `attr.id` was deliberately not chosen because it is per-instance auto-increment and not portable across MISP instances or restores. With `misp_attribute_ids[]` populated you can resolve a Neo4j Indicator directly back to its MISP attributes without joining via event id. **PR-N26 (2026-04-23):** the four `build_relationships.py` edge types — `INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS` — also carry `r.misp_event_ids[]` for per-edge provenance. Backfill via `scripts/backfill_edge_misp_event_ids.py` for graphs created before PR-N26.
 
 ### Sync throughput (Airflow worker memory)
 
@@ -399,4 +399,4 @@ ORDER BY i.last_updated DESC
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the USES→specialized-edge "migration script" pointer with the heal-by-rebaseline contract (pre-release framework)._
+_Last updated: 2026-04-26 — PR-N33 docs audit: enumerated PR-N26's 4 wired edge types (INDICATES, EXPLOITS, TARGETS, AFFECTS) for `r.misp_event_ids[]` and cross-linked the backfill script. Prior: 2026-04-18 PR #41 cleanup pass._

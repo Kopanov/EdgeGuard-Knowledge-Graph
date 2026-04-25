@@ -4,7 +4,7 @@
 
 We use **calendar versioning** for the distributable package:
 
-- **Format:** `YYYY.M.D` (e.g. `2026.3.20` for 20 March 2026).
+- **Format:** `YYYY.M.D` (e.g. `2026.4.26` for 26 April 2026).
 - **PEP 440 / PyPI:** Dotted segments are compared numerically (`2026.3.20` is valid).
 
 `2026.03.20` with zero-padded month/day is also fine in many tools, but **PyPI normalization** tends toward `2026.3.20`; we standardize on **no unnecessary leading zeros** in `pyproject.toml` for consistency with PEP 440 examples.
@@ -30,4 +30,4 @@ For ad-hoc identification of an arbitrary checkout, use **`edgeguard version`** 
 
 ---
 
-_Last updated: 2026-04-24_
+_Last updated: 2026-04-26 — PR-N33 docs audit: refreshed example version. Prior: 2026-04-24._

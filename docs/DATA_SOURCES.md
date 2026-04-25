@@ -102,7 +102,7 @@
 
 | Attribute | Value |
 |-----------|-------|
-| URL | https://www.cisa.gov/known-exploited-vulnerabilities-catalog/json |
+| URL | `https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json` (per `src/collectors/cisa_collector.py:70`) |
 | Format | JSON |
 | Auth | None (public) |
 | Update | Daily |
@@ -124,7 +124,7 @@
 
 | Attribute | Value |
 |-----------|-------|
-| URL | https://attack.mitre.org/resources/working-attack-files/ |
+| URL | `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` (per `src/collectors/mitre_collector.py:58`) |
 | Format | STIX 2.1 JSON |
 | Auth | None (public) |
 | Update | Periodic |
@@ -244,4 +244,4 @@ Used for: Feodo Tracker (always finance)
 
 ---
 
-_Last updated: 2026-03-28_
+_Last updated: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

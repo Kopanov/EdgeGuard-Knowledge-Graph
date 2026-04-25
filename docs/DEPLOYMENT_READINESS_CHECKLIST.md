@@ -121,4 +121,4 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-04-06_
+_Last updated: 2026-04-26 — PR-N33 docs audit: cross-link [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) (PR-N32) — that doc is the focused **launch-day** pre-flight; this checklist remains the broader **pre-deploy** posture (env, infra, monitoring readiness). Prior: 2026-04-06._

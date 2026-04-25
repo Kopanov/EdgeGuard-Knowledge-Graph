@@ -155,8 +155,8 @@ client.merge_resilmesh_cve({
 | Component is App | `create_component_has_identity_application()` | `(:Component)-[:HAS_IDENTITY]->(:Application)` | Component identity |
 | Vuln refers to CVE | `create_vulnerability_refers_to_cve()` | `(:Vulnerability)-[:REFERS_TO]->(:CVE)` | Vuln mapping |
 | CVE refers to Vuln | `create_cve_refers_to_vulnerability()` | `(:CVE)-[:REFERS_TO]->(:Vulnerability)` | CVE mapping |
-| CVE has CVSS | `create_cve_has_cvss()` | `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` | Scoring link |
-| Indicator → IP (planned) | *(no method yet — see INTEROP § cross-layer bridges)* | `INDICATOR_RESOLVES_TO` planned | Use **`IP.address`** for future matching |
+| CVE has CVSS | *(internal: `_merge_cvss_node` inside `merge_cve()`)* | `(:CVE)-[:HAS_CVSSv*]->(:CVSSv*)` | Scoring link — created automatically by `Neo4jClient.merge_cve()` when CVSS data is present in the input. There is **no** standalone `create_cve_has_cvss()` helper today (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12 because the relationship is fully derived from CVSS sub-node creation in `_merge_cvss_node`). |
+| Indicator → IP (planned) | *(no method yet — see INTEROP § cross-layer bridges)* | `INDICATOR_RESOLVES_TO` planned | Use **`IP.address`** for future matching. Note: the planned edge name is **`INDICATOR_RESOLVES_TO`** (NOT `RESOLVES_TO`) to avoid collision with ISIM's `(IP)-[:RESOLVES_TO]->(DomainName)`. |
 | Vuln ↔ CVE bridge | `create_vulnerability_refers_to_cve()` / `create_cve_refers_to_vulnerability()` | `(:Vulnerability)-[:REFERS_TO]->(:CVE)` (+ reverse) | Also created by **`enrichment_jobs.bridge_vulnerability_cve()`** |
 | Malware → Host | *(not implemented)* | `(:Malware)-[:TARGETS]->(:Host)` | Listed in INTEROP as **not** in scheduled pipeline |
 
@@ -192,14 +192,31 @@ client.create_networkservice_on_host(
 ```
 
 #### CVE to CVSS
+
+CVSS sub-nodes (`CVSSv2`, `CVSSv30`, `CVSSv31`, `CVSSv40`) and the
+matching `(:CVE)-[:HAS_CVSSv*]->(:CVSSv*)` edges are created
+**automatically** by `Neo4jClient.merge_cve()` when the input dict
+contains CVSS data. There is no standalone helper to call:
+
 ```python
-client.create_cve_has_cvss(
+# CVSS data flows through merge_cve, not via a separate helper.
+client.merge_cve(
     cve_id="CVE-2021-43297",
-    vector_string="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
-    cvss_version="v3.1",
-    tag="nvd"
+    description="Apache Log4j2 JNDI features...",
+    cvss_v31_data={
+        "vector_string": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "base_score": 9.8,
+    },
+    source_id="nvd",
 )
+# → MERGE the CVSSv31 node + the (:CVE)-[:HAS_CVSSv31]->(:CVSSv31) edge
+#   inside _merge_cvss_node, in the same transaction as the CVE itself.
 ```
+
+The four standalone `create_cve_has_cvss_v2/v30/v31/v40` helpers were
+removed in PR #33 round 12 because the relationship is fully derived
+from CVSS sub-node creation. Calling them on the current API will
+raise `AttributeError`.
 
 ---
 
@@ -244,7 +261,7 @@ client.create_cve_has_cvss(
 │ 5. RELATIONSHIP CREATION                                        │
 │    Creates relationships:                                       │
 │    - (Alert)-[:INVOLVES]->(Indicator)                          │
-│    - (Indicator)-[:RESOLVES_TO]->(IP) [if applicable]          │
+│    - (Indicator)-[:INDICATOR_RESOLVES_TO]->(IP) [planned]      │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -523,25 +540,25 @@ ORDER BY count DESC;
 
 -- Verify ResilMesh relationships
 MATCH ()-[r]->()
-WHERE type(r) IN ['ON', 'TO', 'ASSIGNED_TO', 'HAS_IDENTITY', 'IS_A', 
-                  'HAS_ASSIGNED', 'PART_OF', 'FOR', 'SUPPORTS', 
+WHERE type(r) IN ['ON', 'TO', 'ASSIGNED_TO', 'HAS_IDENTITY', 'IS_A',
+                  'HAS_ASSIGNED', 'PART_OF', 'FOR', 'SUPPORTS',
                   'PROVIDED_BY', 'FROM', 'IS_CONNECTED_TO', 'REFERS_TO',
-                  'HAS_CVSS_v2', 'HAS_CVSS_v31']
+                  'HAS_CVSSv2', 'HAS_CVSSv30', 'HAS_CVSSv31', 'HAS_CVSSv40']
 RETURN type(r) as relationship_type, count(r) as count
 ORDER BY count DESC;
 
--- Verify bridge relationships
-MATCH (i:Indicator)-[r:RESOLVES_TO]->(ip:IP)
-RETURN i.value as indicator, ip.address as resolved_ip;
+-- Verify bridge relationships (planned: Indicator → IP via INDICATOR_RESOLVES_TO,
+-- distinct from ISIM's IP → DomainName RESOLVES_TO. The edge is not yet created
+-- by EdgeGuard at HEAD — see RESILMESH_INTEROPERABILITY.md § cross-layer bridges.)
+-- MATCH (i:Indicator)-[r:INDICATOR_RESOLVES_TO]->(ip:IP)
+-- RETURN i.value as indicator, ip.address as resolved_ip;
 
--- Test enrichment chain
+-- Test enrichment chain (uses CVE → Vulnerability bridge created by
+-- enrichment_jobs.bridge_vulnerability_cve)
 MATCH (i:Indicator {value: '192.168.1.100'})
 OPTIONAL MATCH (i)-[:ATTRIBUTED_TO]->(m:Malware)
-OPTIONAL MATCH (i)-[:RESOLVES_TO]->(ip:IP)
-OPTIONAL MATCH (ip)<-[:HAS_ASSIGNED]-(n:Node)
-OPTIONAL MATCH (n)-[:IS_A]->(h:Host)
-RETURN i.value, collect(DISTINCT m.name), collect(DISTINCT ip.address), 
-       collect(DISTINCT h.hostname);
+OPTIONAL MATCH (i)-[:EXPLOITS]->(v:Vulnerability)-[:REFERS_TO]->(c:CVE)
+RETURN i.value, collect(DISTINCT m.name), collect(DISTINCT c.cve_id);
 
 -- Clean up test data
 MATCH (n) WHERE n.tag = 'test' DETACH DELETE n;
@@ -699,4 +716,4 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass replaced the deprecated `n.first_seen` write example with the source-truthful node + edge model (see `migrations/2026_04_first_seen_at_source.md`)._
+_Last updated: 2026-04-26 — PR-N33 docs audit: removed calls to deleted `create_cve_has_cvss()` helper (now internal to `merge_cve()` via `_merge_cvss_node`); fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` (planned name avoids ISIM `(IP)-[:RESOLVES_TO]->(DomainName)` collision); updated `HAS_CVSS_v*` → `HAS_CVSSv*` (matches actual edge type names). Prior: 2026-04-18 PR #41 cleanup pass._

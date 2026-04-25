@@ -86,7 +86,7 @@ flowchart LR
     end
 
     subgraph Step 3: Sync
-        MISP_DB -->|paginated<br/>index fetch| FETCH[Fetch Events<br/>500/page, max 100 pages]
+        MISP_DB -->|paginated<br/>index fetch| FETCH[Fetch Events<br/>primary index: 500/page × 100 pages<br/>fallback PyMISP/restSearch: 500/page × 200 pages<br/>+ _MispFallbackHardError on cap-hit PR-N29]
         FETCH --> PARSE[Parse Attributes<br/>per event]
         PARSE -->|< 5000 attrs| NORMAL[Normal Path]
         PARSE -->|> 5000 attrs| PAGED[Paged Streaming<br/>5000/page + gc.collect]
@@ -186,7 +186,7 @@ gantt
 flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_preflight<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 4h timeout]
-    C --> D[build_relationships<br/>11 edge types]
+    C --> D[build_relationships<br/>12 link queries → many edge types incl. INDICATES, EXPLOITS, TARGETS, AFFECTS]
     D --> E[run_enrichment_jobs<br/>4 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
@@ -303,4 +303,4 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-04-06*
+*Last updated: 2026-04-26 — PR-N33 docs audit: corrected MISP fetch flow to show the primary index path (500/page × 100 pages) vs the PR-N29 paginated fallback (500/page × 200 pages) + `_MispFallbackHardError` sentinel on cap-hit. Refined "11 edge types" → "12 link queries → many edge types" since `build_relationships.py` numbers its operations 1–12 (with sub-steps like 7a/7b). Prior: 2026-04-06.*

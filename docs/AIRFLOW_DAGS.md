@@ -1,6 +1,6 @@
 # EdgeGuard Airflow DAGs (operations guide)
 
-**Last Updated:** 2026-04-15 (Airflow 2.11 → 3.2 upgrade)
+**Last Updated:** 2026-04-26 (PR-N33 docs audit — see footer)
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
 **Airflow version:** Apache Airflow 3.2.x (upgraded from 2.11 in April 2026 — see [§ Airflow 2 to 3 upgrade](#airflow-2-to-3-upgrade) if you are migrating an existing deployment).
@@ -374,7 +374,16 @@ Constraints (from `src/neo4j_client.py:749-792`):
 - ✅ Container health verification
 - ✅ Rate limit awareness (each source group has its own DAG schedule)
 - ✅ Incremental sync support
-- ✅ Error handling and retry logic (`retries=2`, `retry_delay=5min`; baseline: `retries=1`)
+- ✅ Error handling and retry logic (`retries=2`, `retry_delay=5min`; baseline DAG default: `retries=1`).
+  **PR-N29 H1 carve-out (2026-04-23):** the four baseline critical-chain tasks
+  — `baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`,
+  `baseline_run_enrichment_jobs` — override to **`retries=0`**. A single retry on
+  any 5–6h task would burn 12h of the 32h `dagrun_timeout` cap and could leave
+  the graph in a partially-mutated state mid-enrichment. With `retries=0` a
+  failure surfaces immediately to the operator (and to the
+  `EdgeGuardMispFetchFallbackHardError` alert in PR-N31) instead of silently
+  re-running for 6 more hours. See `dags/edgeguard_pipeline.py:2772, 2927,
+  2953, 2971` for the four sites + their PR-N29 explanatory comments.
 - ✅ Execution timeouts on all tasks (prevents hung workers)
 - ✅ `dagrun_timeout` on all DAGs (prevents entire DAG runs from hanging indefinitely)
 - ✅ `max_active_runs=1` on all DAGs (prevents concurrent run pile-up)
@@ -700,4 +709,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-04-06_
+_Last updated: 2026-04-26 — PR-N33 docs audit: documented the PR-N29 H1 `retries=0` carve-out for the 4 baseline critical-chain tasks; reconciled header/footer dates (was 2026-04-15 / 2026-04-06). Prior: 2026-04-15 Airflow 2.11 → 3.2 upgrade._

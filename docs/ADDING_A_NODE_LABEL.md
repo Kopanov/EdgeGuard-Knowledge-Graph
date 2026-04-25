@@ -187,7 +187,7 @@ Before opening a PR with the new label, run:
 ```
 
 If any test fails, the message tells you which touchpoint is missing.
-Fix that, re-run, repeat until all 7 invariants pass.
+Fix that, re-run, repeat until all 6 invariants pass.
 
 For end-to-end uuid parity (Neo4j ↔ STIX), also run:
 
@@ -266,11 +266,30 @@ as a Cypher function.
 | 4. UNIQUE constraint | ✅ `test_every_natural_key_label_has_a_unique_constraint` | No |
 | 5. uuid index | None — but cloud-side O(n) MATCH at scale flags it | Yes |
 | 6. Merge function | ✅ `test_merge_key_dict_matches_natural_keys_for_every_helper` (key match) + `test_every_session_run_has_explicit_timeout` (timeout) | Partial |
-| 7. EDGES_TO_BACKFILL | None — silent skip in backfill log | Yes |
+
+(Pre-PR-#41 there was a 7th row "EDGES_TO_BACKFILL" — dropped together with
+the backfill script; current contract is 6 touchpoints.)
 
 The "manual check needed" items are good candidates for future invariant
 tests if the same anti-pattern recurs.
 
 ---
 
-_Last updated: 2026-04-18 — PR #41 cleanup pass dropped Step 7 (no backfill script); the 6-touchpoint contract is enforced entirely by write-time invariants pinned in `tests/test_round26_invariants.py`._
+### Unicode-safe natural keys (PR-N29 L1 + PR-N31)
+
+If your new label's natural key is a free-form **string** field (e.g.
+`name`, `tag`, `label`), apply the same `_ZERO_WIDTH_AND_BIDI_TRANSLATE`
++ `unicodedata.normalize("NFKC", ...)` + `.strip().lower()` ordering
+that `is_placeholder_name` in `src/node_identity.py` uses. Without
+this, an attacker (or buggy upstream feed) can MERGE distinct nodes
+that look identical to the operator (`"Conti"` vs `"Conti​"` with a
+zero-width space). The 35-char `_ZERO_WIDTH_AND_BIDI_CHARS` filter is
+the single source of truth — see `src/node_identity.py:524`.
+
+For natural keys that are NOT free-form strings (`mitre_id`, `cve_id`,
+`source_id`, integer `port`, IP address) — no canonicalization needed,
+the input shape already constrains the value space.
+
+---
+
+_Last updated: 2026-04-26 — PR-N33 docs audit: removed contradictory "all 7 invariants" / Step-7 row (current contract is 6 touchpoints — Step 7 was dropped in PR #41 with the backfill script); added "Unicode-safe natural keys" subsection pointing at `_ZERO_WIDTH_AND_BIDI_TRANSLATE` for any new label whose natural key includes free-form strings (PR-N29 L1 + PR-N31). Prior: 2026-04-18 PR #41 cleanup pass._

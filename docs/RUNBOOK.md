@@ -58,6 +58,8 @@ the change to take effect. Revert by unsetting + restarting.
 | `EdgeGuardMergeRejectPlaceholderSpike` | warning | `increase(edgeguard_merge_reject_placeholder_total[15m]) > 10` for 15m |
 | `EdgeGuardBuildRelationshipsSilentDeath` | critical | `absent(build_rels_completions) or rate == 0` for 6h after baseline start (PR-N21 Bravo-ops) |
 | `EdgeGuardApocBatchPartial` | warning | `increase(edgeguard_apoc_batch_partial_total[15m]) > 0` (PR-N21 Bravo-ops) |
+| `EdgeGuardMispFetchFallbackActive` | warning | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0` for 10m (PR-N31 — sustained fallback engagement signals primary `/events/index` is broken) |
+| `EdgeGuardMispFetchFallbackHardError` | **critical** | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0` for 1m (PR-N31 — `_MispFallbackHardError` sentinel raised; baseline run already failed since `retries=0` on critical chain) |
 
 Verify alerts load cleanly on baseline day:
 
@@ -324,7 +326,7 @@ After the 2026-04-04 baseline was OOM-killed (exit 137) during
 `build_relationships`, and the 2026-04-22 baseline silently returned
 `Campaign = 0` due to a downstream enrichment swallower (now fixed in
 PR-N21), these are the memory settings and alerts that should guard
-the next 26h baseline run:
+the next 32h baseline run (per `dagrun_timeout` in the baseline DAG):
 
 ### Memory ceilings (reconcile BEFORE kickoff)
 
@@ -394,7 +396,8 @@ Absence of this line = silent subprocess death (the exact scenario the
 
 ### ⚠️ Baseline launch path — PICK ONE (CLI or DAG+pause)
 
-The 730-day baseline runs for ~26h. Over that window, the 4 scheduled
+The 730-day baseline runs for ~32h (matches the baseline DAG's
+`dagrun_timeout`). Over that window, the 4 scheduled
 incremental DAGs will try to write to MISP + Neo4j in parallel with the
 baseline unless you stop them. This is Issue #57 (documented in
 `docs/flow_audits/01_baseline_sequence.md` Finding 1) and was the
@@ -433,7 +436,7 @@ docker compose exec airflow-worker ls /tmp/edgeguard/baseline_lock.sentinel
 #### Option B — DAG + pre-pause the 4 incremental schedulers
 
 If you must use the Airflow UI trigger, pause the 4 scheduled DAGs
-first so they cannot fire during the ~26h window:
+first so they cannot fire during the ~32h window:
 
 ```bash
 docker compose exec airflow-worker airflow dags pause edgeguard_daily
@@ -479,8 +482,11 @@ incrementals race.
    6 pre-baseline alerts green, spot-check 10 random Indicators via
    Neo4j Browser or `graphql_api`.
 4. **Prometheus rules loaded.** Verify the `edgeguard_pipeline_observability`
-   rule group has all 8 alerts (4 from PR-N11/N12 + 2 added in PR-N18 +
-   2 Bravo-ops added in PR-N21):
+   rule group has at least 11 alerts (4 from PR-N11/N12 + 2 added in PR-N18 +
+   2 Bravo-ops added in PR-N21 + 2 MISP-fetch-fallback added in PR-N31 +
+   1 PR-N24 H3 placeholder-pager). The full `prometheus/alerts.yml` has more
+   rules than this — `[11] PR-N29 invariants` in `scripts/preflight_baseline.sh`
+   enforces a floor of `≥ 11` against the canonical YAML.:
    ```bash
    promtool check rules prometheus/alerts.yml
    curl -s localhost:9090/api/v1/rules | \
@@ -500,7 +506,11 @@ incrementals race.
 
 ### During the run
 
-- Monitor the 6 `edgeguard_pipeline_observability` alerts continuously.
+- Monitor the `edgeguard_pipeline_observability` rule group continuously
+  (≥ 11 alerts at HEAD; floor enforced by preflight `[11]` — see PR-N31).
+  The two PR-N31 fallback alerts (`EdgeGuardMispFetchFallbackActive`,
+  `EdgeGuardMispFetchFallbackHardError`) should be SILENT for the entire
+  run if everything is healthy.
 - Any **critical** alert → pause the DAG, triage, then resume. Do NOT let
   it continue silently.
 - Any **warning** alert → investigate, continue unless you see compounding.
@@ -636,7 +646,7 @@ is fixed in code, but any CVE ingested before PR-N19 deployed has NULL
 date fields in Neo4j. Run this script when:
 
 - You want to demo/export graph data with proper CVE timelines
-- You don't have 26h for a fresh full baseline
+- You don't have 32h for a fresh full baseline
 - You want to preserve existing edge counts / confidence scores (a
   backfill is non-destructive; a re-baseline would rebuild everything)
 
@@ -713,3 +723,10 @@ means re-runs are safe:
 - `src/collectors/nvd_collector.py:NvdBatchFetchError` — NVD silent-window-drop guard (PR-N17)
 - `src/node_identity.py:_REJECTED_PLACEHOLDER_NAMES` — placeholder blocklist (PR-N10 + PR-N10-followup)
 - `scripts/backfill_cve_dates_from_nvd_meta.py` — historical CVE date backfill migration (PR-N22)
+- `scripts/backfill_edge_misp_event_ids.py` — edge `r.misp_event_ids[]` backfill (PR-N26; pairs with `migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`)
+- `scripts/audit_legacy_unicode_bypass_nodes.py` — read-only audit of legacy unicode-bypass nodes (PR-N32; surface for `BASELINE_LAUNCH_CHECKLIST.md` item `[6]`)
+- `src/run_misp_to_neo4j.py:_MispFallbackHardError` — sentinel exception raised by the paginated MISP fetch fallback on any of 4 hard-failure modes (errors-payload, unexpected-shape, non-200, cap-hit; PR-N29 audit HIGH-1/2/3 + PR-N31 metric/alert wiring; see § 8 above)
+
+---
+
+_Last updated: 2026-04-26 — PR-N33 docs audit: added the two PR-N31 fallback alerts to the paging-severity table; bumped "8 alerts" → "≥ 11" + "6 alerts" → ">= 11" in the baseline-day pre-flight + during-the-run sections; reconciled "26h baseline" → "32h baseline" (matches `dagrun_timeout`); added cross-refs to the PR-N26 / PR-N32 backfill + audit scripts and the `_MispFallbackHardError` sentinel symbol._
