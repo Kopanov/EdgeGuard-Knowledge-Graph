@@ -332,23 +332,32 @@ groups:
         # because the fallback itself is functional — but sustained activity
         # signals the primary index path is broken (auth, 5xx, schema drift).
         # 10m window is the smallest that doesn't fire on a one-off retry.
+        #
+        # PR-N31 Bugbot round 1 (2026-04-25, MED): use ``sum by (branch)``
+        # rather than bare ``sum`` so the ``branch`` label survives
+        # aggregation. Symmetric with the HardError alert below (which
+        # NEEDS the label for its annotation template) — matching shape
+        # makes operator queries / Grafana panels uniform and future-
+        # proofs the annotation if we ever want to reference ``branch``
+        # in this alert too.
         expr: |
-          sum(rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0
+          sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0
         for: 10m
         labels:
           severity: warning
           component: sync
         annotations:
-          summary: "MISP fetch fallback active for >10m — primary /events/index path is broken"
+          summary: "MISP fetch fallback active for >10m on {{ $labels.branch }} branch — primary /events/index path is broken"
           description: |
             EdgeGuard's MISP fetcher has fallen back to the slower
-            PyMISP / requests-restSearch path for >10 minutes. The
-            primary ``/events/index`` path is returning errors. This is
-            functional but slower; sustained activity is operator-visible
-            evidence of upstream MISP problems. Grep
-            ``[MISP-FETCH-FALLBACK-ACTIVE]`` in pipeline logs to correlate
-            with the underlying failure mode (HTTP status, auth, payload
-            shape). See docs/RUNBOOK.md § "MISP fetch fallback".
+            PyMISP / requests-restSearch path ({{ $labels.branch }}
+            branch) for >10 minutes. The primary ``/events/index`` path
+            is returning errors. This is functional but slower; sustained
+            activity is operator-visible evidence of upstream MISP
+            problems. Grep ``[MISP-FETCH-FALLBACK-ACTIVE]`` in pipeline
+            logs to correlate with the underlying failure mode (HTTP
+            status, auth, payload shape). See docs/RUNBOOK.md §
+            "MISP fetch fallback".
 
       - alert: EdgeGuardMispFetchFallbackHardError
         # Fires the moment a sentinel raise lands. CRITICAL because
@@ -356,8 +365,16 @@ groups:
         # signal — it means a baseline run just failed in a way that
         # would otherwise have been invisible (silent data loss). 1m
         # window because we want this paged immediately, not 10m later.
+        #
+        # PR-N31 Bugbot round 1 (2026-04-25, MED): the ``$labels.branch``
+        # template references in the annotations REQUIRE the ``branch``
+        # label to survive aggregation. Pre-fix the bare ``sum(rate(...))``
+        # collapsed all labels — the annotation would have rendered as
+        # ``raised _MispFallbackHardError ()`` (empty parens) and the
+        # RUNBOOK § 8 triage step ("identify which branch raised") would
+        # have nothing to read. Use ``sum by (branch)``.
         expr: |
-          sum(rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0
+          sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0
         for: 1m
         labels:
           severity: critical

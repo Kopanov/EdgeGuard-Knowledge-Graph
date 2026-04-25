@@ -265,6 +265,42 @@ class TestPRN31FallbackAlerts:
         preflight = (SCRIPTS / "preflight_baseline.sh").read_text()
         assert 'ALERT_COUNT" -ge 11' in preflight, "PR-N31: preflight alert-count floor must be ≥ 11 (was 9 pre-N31)"
 
+    def test_both_alerts_preserve_branch_label_via_sum_by(self):
+        """PR-N31 Bugbot round 1 (2026-04-25, MED): the alert annotations
+        reference ``{{ $labels.branch }}`` — but bare ``sum(rate(...))``
+        collapses ALL labels, so the template would render as empty
+        parens. Both alerts must use ``sum by (branch) (rate(...))``
+        to preserve the label.
+
+        Pinning BOTH alerts (not just HardError which is the one Bugbot
+        flagged) because PR-N31 fixed both for shape consistency — a
+        future maintainer dropping the by-clause from either one would
+        regress the operator UX.
+        """
+        import re
+
+        text = self.ALERTS_FILE.read_text()
+        for alert_name in ("EdgeGuardMispFetchFallbackActive", "EdgeGuardMispFetchFallbackHardError"):
+            idx = text.find(alert_name)
+            assert idx != -1, f"alert {alert_name} must exist"
+            block = text[idx : idx + 1500]
+            # Positive pin: the expr line must use ``sum by (branch) (rate(``.
+            # Anchored with the leading whitespace (YAML expr block scalar
+            # indentation) so the in-comment narrative reference doesn't
+            # accidentally satisfy the assertion.
+            assert re.search(r"^ {8,}sum by \(branch\) \(rate\(", block, re.MULTILINE), (
+                f"PR-N31 Bugbot round 1: {alert_name} expr must use ``sum by (branch) (rate(...))`` "
+                f"to preserve the branch label for the annotation template. Bare ``sum(rate(...))`` "
+                f"collapses all labels and the annotation would render with empty branch interpolation."
+            )
+            # Negative pin: the expr line must NOT use bare ``sum(rate(`` (regex
+            # again anchored on YAML indentation so the comment narrative is
+            # excluded from the match).
+            assert not re.search(r"^ {8,}sum\(rate\(", block, re.MULTILINE), (
+                f"PR-N31 Bugbot round 1: {alert_name} expr must not be bare "
+                f"``sum(rate(...))`` — that drops the branch label."
+            )
+
 
 # ===========================================================================
 # Fix N31-C — extended Unicode chars in placeholder filter
