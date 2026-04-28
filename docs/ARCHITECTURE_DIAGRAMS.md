@@ -31,16 +31,16 @@ graph TB
     subgraph EdgeGuard Pipeline
         COLL[Collectors<br/>11 sources]
         MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
-        SYNC[MISP-to-Neo4j Sync<br/>Paged streaming<br/>OOM-safe chunking]
+        SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
-        BREL[build_relationships<br/>11 relationship types]
-        ENRICH[Enrichment Jobs<br/>Decay / Campaigns /<br/>Calibration / CVE Bridge]
+        BREL["build_relationships<br/>12 link queries → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ PR-N26 r.misp_event_ids array on edges"]
+        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns /<br/>Calibration / Decay]
     end
 
     subgraph APIs
         REST[FastAPI REST<br/>port 8000]
         GQL[Strawberry GraphQL<br/>port 4001]
-        METRICS[Prometheus Metrics<br/>port 8001]
+        METRICS[Prometheus Metrics<br/>port 8001<br/>+ 2 PR-N31 fallback alerts:<br/>EdgeGuardMispFetchFallbackActive warning<br/>EdgeGuardMispFetchFallbackHardError critical]
     end
 
     subgraph Orchestration
@@ -127,7 +127,7 @@ graph TB
     V -->|AFFECTS| S
     V -->|REFERS_TO| CVE
     CVE -->|REFERS_TO| V
-    CVE -->|HAS_CVSS| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
+    CVE -->|HAS_CVSS_v*| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
     T -->|IN_TACTIC| TAC[Tactic]
     TOOL[Tool] -->|IMPLEMENTS_TECHNIQUE| T
 
@@ -136,6 +136,18 @@ graph TB
     %%   IMPLEMENTS_TECHNIQUE = capability   (what the code/tool can do)
     %%   USES_TECHNIQUE       = observation  (indicator observed tied to a TTP)
     %% Split from a generic USES edge in the 2026-04 refactor.
+    %%
+    %% HAS_CVSS_v* expands to four concrete edge types written by
+    %% _merge_cvss_node inside merge_cve(): HAS_CVSS_v2, HAS_CVSS_v30,
+    %% HAS_CVSS_v31, HAS_CVSS_v40 (per neo4j_client.py — note the
+    %% underscore + lowercase v + version).
+    %%
+    %% PR-N26 (2026-04-23): the four edge types created by
+    %% build_relationships.py — INDICATES, EXPLOITS, TARGETS, AFFECTS —
+    %% additionally carry r.misp_event_ids[] for per-edge MISP-event
+    %% provenance (intersection of the endpoint nodes' arrays). Backfill
+    %% via scripts/backfill_edge_misp_event_ids.py for graphs that
+    %% pre-date PR-N26.
 
     classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff
     classDef vuln fill:#dc2626,stroke:#b91c1c,color:#fff
@@ -209,17 +221,29 @@ flowchart TD
     FN -->|transient error<br/>ServiceUnavailable<br/>TransientError<br/>ConnectionError<br/>TimeoutError| DEC
     FN -->|non-transient error<br/>DatabaseError<br/>CypherSyntaxError| ERR[Log + return default]
 
-    DEC -->|retries exhausted<br/>neo4j: 5 retries, 2s base<br/>misp: 4 retries, 10s base| RAISE[Re-raise exception]
+    DEC -->|retries exhausted<br/>neo4j: 3 retries, 2s base<br/>misp: 4 retries, 10s base| RAISE[Re-raise exception]
     RAISE --> CALLER{Caller handles}
     CALLER -->|run_pipeline| RECONNECT[Reconnect loop<br/>3 attempts]
     CALLER -->|run_misp_to_neo4j| CIRCUIT[Circuit breaker<br/>record_failure]
-    CALLER -->|Airflow DAG| AIRFLOW[AirflowException<br/>task marked FAILED]
+    CALLER -->|Airflow DAG<br/>incremental tasks: retries=2| AIRFLOW[AirflowException<br/>task marked FAILED]
+    CALLER -->|Airflow DAG<br/>baseline critical chain<br/>PR-N29 H1: retries=0| BASELINE_FAIL[AirflowException<br/>FAILS IMMEDIATELY<br/>no retry — operator pages<br/>via EdgeGuardMispFetchFallbackHardError]
 
     style DEC fill:#7c3aed,stroke:#6d28d9,color:#fff
     style RAISE fill:#dc2626,stroke:#b91c1c,color:#fff
     style RECONNECT fill:#f59e0b,stroke:#d97706,color:#fff
     style CIRCUIT fill:#f59e0b,stroke:#d97706,color:#fff
+    style BASELINE_FAIL fill:#dc2626,stroke:#b91c1c,color:#fff
 ```
+
+**PR-N29 H1 carve-out (operator-relevant):** the four baseline critical-chain
+tasks — `baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`,
+`baseline_run_enrichment_jobs` — override `retries=0` (`dags/edgeguard_pipeline.py:2772,
+2927, 2953, 2971`). A single failure on any of these tasks immediately marks
+the DAG run FAILED rather than auto-retrying. This is intentional: a 5–6h
+critical-chain task that retries once would burn 12h of the 32h `dagrun_timeout`
+cap and could leave the graph mid-mutated. Combined with the
+`EdgeGuardMispFetchFallbackHardError` Prometheus alert (PR-N31), the operator
+gets paged immediately when the `_MispFallbackHardError` sentinel raises.
 
 ---
 
@@ -303,4 +327,13 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-04-26 — PR-N33 docs audit: corrected MISP fetch flow to show the primary index path (500/page × 100 pages) vs the PR-N29 paginated fallback (500/page × 200 pages) + `_MispFallbackHardError` sentinel on cap-hit. Refined "11 edge types" → "12 link queries → many edge types" since `build_relationships.py` numbers its operations 1–12 (with sub-steps like 7a/7b). Prior: 2026-04-06.*
+*Last updated: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
+
+- *§6 (HIGH): `neo4j: 5 retries, 2s base` → `3 retries, 2s base` (matches `_run_with_retries` and `_retry_db_op` in `src/neo4j_client.py`).*
+- *§6 (MED): added new branch + explanatory note for the PR-N29 H1 `retries=0` carve-out on the 4 baseline critical-chain tasks (`baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`, `baseline_run_enrichment_jobs`); operator now sees the immediate-fail path that pages via `EdgeGuardMispFetchFallbackHardError`.*
+- *§1 (MED): aligned BREL block with §5's wording — "11 relationship types" → "12 link queries → many edge types incl. INDICATES, EXPLOITS, TARGETS, AFFECTS + PR-N26 r.misp_event_ids array on edges". Reordered ENRICH job list to match actual execution order in `run_all_enrichment_jobs` (Bridge → Campaigns → Calibration → Decay).*
+- *§1 (LOW): added PR-N31 observability annotations on the SYNC node (`MISP_FETCH_FALLBACK_ACTIVE` Counter + `_MispFallbackHardError` sentinel) and METRICS node (the 2 fallback alerts).*
+- *§3 (LOW): added comment block at the bottom of the schema explaining (a) `HAS_CVSS_v*` expands to four concrete edge types and (b) PR-N26 wired `r.misp_event_ids[]` onto the 4 build_relationships edges.*
+- *§3 (LOW): edge label `HAS_CVSS` → `HAS_CVSS_v*` (matches `neo4j_client.py:_merge_cvss_node` which writes `HAS_CVSS_v2 / v30 / v31 / v40` with underscore + lowercase v + version).*
+
+*Prior: 2026-04-26 PR-N33 docs audit; 2026-04-06.*

@@ -155,7 +155,7 @@ client.merge_resilmesh_cve({
 | Component is App | `create_component_has_identity_application()` | `(:Component)-[:HAS_IDENTITY]->(:Application)` | Component identity |
 | Vuln refers to CVE | `create_vulnerability_refers_to_cve()` | `(:Vulnerability)-[:REFERS_TO]->(:CVE)` | Vuln mapping |
 | CVE refers to Vuln | `create_cve_refers_to_vulnerability()` | `(:CVE)-[:REFERS_TO]->(:Vulnerability)` | CVE mapping |
-| CVE has CVSS | *(internal: `_merge_cvss_node` inside `merge_cve()`)* | `(:CVE)-[:HAS_CVSSv*]->(:CVSSv*)` | Scoring link — created automatically by `Neo4jClient.merge_cve()` when CVSS data is present in the input. There is **no** standalone `create_cve_has_cvss()` helper today (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12 because the relationship is fully derived from CVSS sub-node creation in `_merge_cvss_node`). |
+| CVE has CVSS | *(internal: `_merge_cvss_node` inside `merge_cve()`)* | `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` | Scoring link — created automatically by `Neo4jClient.merge_cve()` when CVSS data is present in the input. There is **no** standalone `create_cve_has_cvss()` helper today (the four `create_cve_has_cvss_v*` helpers were removed in PR #33 round 12 because the relationship is fully derived from CVSS sub-node creation in `_merge_cvss_node`). |
 | Indicator → IP (planned) | *(no method yet — see INTEROP § cross-layer bridges)* | `INDICATOR_RESOLVES_TO` planned | Use **`IP.address`** for future matching. Note: the planned edge name is **`INDICATOR_RESOLVES_TO`** (NOT `RESOLVES_TO`) to avoid collision with ISIM's `(IP)-[:RESOLVES_TO]->(DomainName)`. |
 | Vuln ↔ CVE bridge | `create_vulnerability_refers_to_cve()` / `create_cve_refers_to_vulnerability()` | `(:Vulnerability)-[:REFERS_TO]->(:CVE)` (+ reverse) | Also created by **`enrichment_jobs.bridge_vulnerability_cve()`** |
 | Malware → Host | *(not implemented)* | `(:Malware)-[:TARGETS]->(:Host)` | Listed in INTEROP as **not** in scheduled pipeline |
@@ -194,7 +194,7 @@ client.create_networkservice_on_host(
 #### CVE to CVSS
 
 CVSS sub-nodes (`CVSSv2`, `CVSSv30`, `CVSSv31`, `CVSSv40`) and the
-matching `(:CVE)-[:HAS_CVSSv*]->(:CVSSv*)` edges are created
+matching `(:CVE)-[:HAS_CVSS_v*]->(:CVSSv*)` edges are created
 **automatically** by `Neo4jClient.merge_cve()` when the input dict
 contains CVSS data. There is no standalone helper to call:
 
@@ -209,7 +209,7 @@ client.merge_cve(
     },
     source_id="nvd",
 )
-# → MERGE the CVSSv31 node + the (:CVE)-[:HAS_CVSSv31]->(:CVSSv31) edge
+# → MERGE the CVSSv31 node + the (:CVE)-[:HAS_CVSS_v31]->(:CVSSv31) edge
 #   inside _merge_cvss_node, in the same transaction as the CVE itself.
 ```
 
@@ -543,7 +543,7 @@ MATCH ()-[r]->()
 WHERE type(r) IN ['ON', 'TO', 'ASSIGNED_TO', 'HAS_IDENTITY', 'IS_A',
                   'HAS_ASSIGNED', 'PART_OF', 'FOR', 'SUPPORTS',
                   'PROVIDED_BY', 'FROM', 'IS_CONNECTED_TO', 'REFERS_TO',
-                  'HAS_CVSSv2', 'HAS_CVSSv30', 'HAS_CVSSv31', 'HAS_CVSSv40']
+                  'HAS_CVSS_v2', 'HAS_CVSS_v30', 'HAS_CVSS_v31', 'HAS_CVSS_v40']
 RETURN type(r) as relationship_type, count(r) as count
 ORDER BY count DESC;
 
@@ -716,4 +716,4 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: removed calls to deleted `create_cve_has_cvss()` helper (now internal to `merge_cve()` via `_merge_cvss_node`); fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` (planned name avoids ISIM `(IP)-[:RESOLVES_TO]->(DomainName)` collision); updated `HAS_CVSS_v*` → `HAS_CVSSv*` (matches actual edge type names). Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._
