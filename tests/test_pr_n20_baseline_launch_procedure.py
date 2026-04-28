@@ -424,12 +424,20 @@ class TestFix5ReadmeLaunchProcedure:
         )
 
     def test_readme_documents_cli_and_dag_options(self):
+        """PR-J1 docs audit (2026-04-28): the original PR-N20 test pinned
+        ``Option A`` + ``Option B`` + ``python -m edgeguard baseline`` —
+        but the CLI baseline subcommand NEVER EXISTED in
+        ``src/edgeguard.py`` (verified by ``grep "add_parser"``). PR-J1
+        fixed the README to document the DAG-only launch path. Test
+        updated to match: README must document the DAG launch path with
+        ``airflow dags pause`` (defense-in-depth) followed by
+        ``airflow dags trigger edgeguard_baseline``. The CLI subcommand
+        pin is dropped (it never matched code reality at HEAD)."""
         rd = self._readme()
-        # Both options must be visible; colleague should be able to pick
-        # without having to open RUNBOOK.md first.
-        assert "Option A" in rd and "Option B" in rd, "README must show both launch options (CLI + DAG)"
-        assert "python -m edgeguard baseline" in rd, "README must show the CLI launch command"
         assert "airflow dags pause" in rd, "README must show the DAG pause command"
+        assert "airflow dags trigger edgeguard_baseline" in rd, (
+            "README must show the DAG trigger command (the canonical baseline launch path)"
+        )
 
     def test_readme_references_preflight_script(self):
         rd = self._readme()

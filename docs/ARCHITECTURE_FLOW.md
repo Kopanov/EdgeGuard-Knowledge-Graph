@@ -3,15 +3,19 @@
 End-to-end system flows rendered as Mermaid diagrams, ordered to
 de-risk the **730-day baseline production-test**.
 
-> **Status (PR-N33 docs audit, 2026-04-26):** the long-term plan is for
-> every symbol name, env var, and file path referenced in a diagram to be
-> validated against `src/` by `tests/test_architecture_flow_pins.py` — but
-> that pin-test file does **NOT YET exist** at HEAD. Until it is built
-> (planned in PR-J1, see § "Pin / drift-detection roadmap"), this doc's
-> diagrams may drift silently from the code. Treat the diagrams as
-> _aspirational architecture_ rather than enforced contracts; cross-check
-> against `ARCHITECTURE.md` (which IS verified against the code by the
-> PR-N33 audit) when in doubt.
+> **Status (PR-J1, 2026-04-28): pin-test SHIPPED.** Every concrete claim
+> referenced in a doc — env vars, CLI subcommands, container names,
+> `src/*.py` file paths — is now validated against `src/`, `dags/`,
+> `scripts/`, `tests/`, `.env.example`, and `docker-compose.yml` /
+> `docker-compose.monitoring.yml` by `tests/test_architecture_flow_pins.py`.
+> CI fails on broken doc references. The pin-test surfaced 4 real
+> drift items in its first run that the PR-N33 6-agent audit and the
+> PR-N34 / PR-N35 / PR-N36 solo-deep verification all missed (most
+> notably: a stale `python -m edgeguard baseline` block in `README.md`
+> that the entire audit train walked past). Adding new symbols to docs
+> that don't exist in code now requires either (a) fixing the doc, (b)
+> adding the symbol to code, or (c) explicitly allowlisting it in the
+> test with a clear reason.
 
 ---
 
@@ -310,4 +314,4 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: added "Status" callout up top noting the `tests/test_architecture_flow_pins.py` pin-test file does NOT yet exist at HEAD; treat diagrams as aspirational until PR-J1 builds the pin-test._
+_Last updated: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._

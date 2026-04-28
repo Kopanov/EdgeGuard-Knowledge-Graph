@@ -579,8 +579,8 @@ Error: Neo4j connection failed: ServiceUnavailable
 # Check Neo4j is running
 docker ps | grep neo4j
 
-# Check logs
-docker logs neo4j
+# Check logs (container name is `edgeguard_neo4j` per docker-compose.yml)
+docker logs edgeguard_neo4j
 
 # Verify credentials
 echo $NEO4J_PASSWORD
