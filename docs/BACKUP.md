@@ -261,3 +261,7 @@ update into a wrapper.
 - [docs/DOCKER_SETUP_GUIDE.md](DOCKER_SETUP_GUIDE.md) — Neo4j memory + storage sizing (relevant for dump sizing)
 - [Issue #53](../../issues/53) — operational hardening backlog (audit trail, automated backup hook)
 - [README.md § Roadmap & Status](../README.md#-roadmap--status) — current production-ready vs in-progress scope
+
+---
+
+_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: verified — no factual drift. All commands (`docker compose exec neo4j neo4j-admin database dump …`) match the live `docker-compose.yml` `neo4j:` service; `EDGEGUARD_BACKUP_MAX_AGE_HOURS` env var exists and is read at `src/edgeguard.py:2341` (default 240h). Footer added as part of the audit trail._

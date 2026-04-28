@@ -708,7 +708,7 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 {
   "alert_id": "wazuh-001",
   "enriched": true,
-  "edgeguard_version": "2026.4.26",
+  "edgeguard_version": "2026.4.28",
   "latency_ms": 120,
   "enrichment": {
     "indicator": {
@@ -824,4 +824,4 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: corrected ResilMesh constraint Cypher (single-key, no `tag`); replaced fixed "(N total)" counts with "snapshot — see source" pointers; added PR-N29/N31 env knobs (`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`, `_FALLBACK_PAGE_SIZE`, `_FALLBACK_MAX_PAGES`); refreshed sample `edgeguard_version`. Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._

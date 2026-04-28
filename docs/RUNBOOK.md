@@ -8,7 +8,21 @@ kill-switches added in PR-N10 through PR-N18 to let on-call revert
 a specific PR-Nx semantic change without a code revert.
 
 **Deployment assumption:** this RUNBOOK targets the shipped `docker-compose.yml`
-topology (services: `edgeguard-neo4j`, `edgeguard-misp`, `edgeguard-airflow-*`).
+topology. Container names (per `container_name:` in compose):
+
+| Service in compose | Container name |
+|---|---|
+| `neo4j` | `edgeguard_neo4j` |
+| `airflow` | `edgeguard_airflow` (single Airflow standalone container — webserver + scheduler + worker bundled per Airflow 3.x) |
+| `airflow_postgres` | `edgeguard_airflow_postgres` |
+| `api` | `edgeguard_api` |
+| `graphql` | `edgeguard_graphql` |
+
+**MISP is NOT in this compose stack** — it's deployed separately and accessed
+via `MISP_URL` (typically a sibling container or external host). MISP-side
+operations below assume `docker logs <misp-container>` against your MISP
+deployment, not a service in this compose file.
+
 Kubernetes deployments should substitute `kubectl` for `docker` below.
 
 ---
@@ -21,15 +35,15 @@ Each kill-switch is a process environment variable read at request time
 | Env var | Default | When to set | What it reverts |
 |---|---|---|---|
 | `EDGEGUARD_RESPECT_CALIBRATOR` | unset (guard active) | Calibrator demotions causing false negatives after PR-N10; operator wants pre-N10 overwrite behaviour | `_confidence_respect_calibrator` emits bare literal (pre-PR-N10), not CASE guard |
-| `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` | unset (inspection active) | Result-counter inspection itself throwing (driver API drift, double-consume) — mid-baseline | `_record_batch_counters` short-circuits to no-op (pre-PR-N9 B6). Emits a `[KILL-SWITCH-ACTIVE]` WARN at module import when set so on-call can confirm the flag took effect via `docker logs edgeguard-airflow-worker 2>&1 \| grep -m1 '\[KILL-SWITCH-ACTIVE\]'`. |
+| `EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION` | unset (inspection active) | Result-counter inspection itself throwing (driver API drift, double-consume) — mid-baseline | `_record_batch_counters` short-circuits to no-op (pre-PR-N9 B6). Emits a `[KILL-SWITCH-ACTIVE]` WARN at module import when set so on-call can confirm the flag took effect via `docker logs edgeguard_airflow 2>&1 \| grep -m1 '\[KILL-SWITCH-ACTIVE\]'`. |
 | `EDGEGUARD_EARLIEST_IOC_DATE` | `1995-01-01` | Importing pre-1995 corpora; seeing ingest silently drop historical IOCs with a `before earliest-allowed` WARN | Loosens the `_clamp_future_to_now` earliest-date floor. Accepts ISO date (e.g. `1970-01-01`). Invalid values fall back to default with a WARN. |
 
 Set via task env (one-off):
 
 ```bash
 # Docker Compose deployment — pass through the airflow worker env
-EDGEGUARD_RESPECT_CALIBRATOR=0 docker compose exec airflow-worker \
-  airflow tasks run edgeguard_incremental sync …
+EDGEGUARD_RESPECT_CALIBRATOR=0 docker compose exec airflow \
+  airflow tasks run edgeguard_pipeline collect_otx …
 ```
 
 or persistent in `.env` at repo root (same env is read by all services
@@ -41,7 +55,7 @@ EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION=1
 EDGEGUARD_EARLIEST_IOC_DATE=1970-01-01
 ```
 
-Restart the affected service (`docker compose restart airflow-worker`) for
+Restart the affected service (`docker compose restart airflow`) for
 the change to take effect. Revert by unsetting + restarting.
 
 ---
@@ -79,26 +93,26 @@ Each entry: symptom → detection signal → remediation.
   `MATCH (i:Indicator {source: 'otx'}) RETURN count(i)` is lower than
   `edgeguard_indicators_collected_total{source="otx"}` counter value.
 - **Prom alert.** `EdgeGuardMispBatchPermanentFailure` — critical.
-- **Log probe.** `docker logs edgeguard-airflow-worker 2>&1 | grep "\[MISP-PUSH-FAILURE\]" | tail -20`
+- **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep "\[MISP-PUSH-FAILURE\]" | tail -20`
 - **Root cause.** MISPWriter's `@retry_with_backoff(max_retries=4)` gave
   up after four attempts. Typical triggers: MISP PHP memory_limit below
   event-size threshold, MySQL `innodb_buffer_pool_size` too small for
   working set, MISP worker OOM.
 - **Remediation.**
-  1. Check MISP container memory: `docker stats edgeguard-misp --no-stream`
+  1. Check MISP container memory: `docker stats <your-misp-container> --no-stream`
   2. Check MISP logs for OOM/segfault:
-     `docker logs edgeguard-misp 2>&1 | grep -iE "out of memory|segfault|killed"`
+     `docker logs <your-misp-container> 2>&1 | grep -iE "out of memory|segfault|killed"`
   3. Tune per `docs/MISP_TUNING.md § TL;DR — Apply these on the MISP container`
   4. No scripted batch-replay exists. Re-triggering the source collector DAG
      re-harvests from upstream and dedups against existing MISP events:
-     `docker compose exec airflow-worker airflow dags trigger edgeguard_daily`
+     `docker compose exec airflow airflow dags trigger edgeguard_daily`
 
 ### 2. MISP sustained backoff (flap vs overload)
 
 - **Symptom.** Ingest stalling in 5-minute waves; nightly incremental
   runs exceeding 1-hour SLO.
 - **Prom alert.** `EdgeGuardMispSustainedBackoff` — warning.
-- **Log probe.** `docker logs edgeguard-airflow-worker 2>&1 | grep "\[MISP-BACKOFF\]" | tail -20`
+- **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep "\[MISP-BACKOFF\]" | tail -20`
 - **Root cause.** MISP backend is sustained-degraded (not a transient
   flap — the adaptive backoff distinguishes them).
 - **Remediation.** Same as (1) — this is usually the early-warning
@@ -113,7 +127,7 @@ Each entry: symptom → detection signal → remediation.
   when a specific (source, field) pair exceeds 100 violations/hour).
 - **Log probe.**
   ```bash
-  docker logs edgeguard-airflow-worker 2>&1 | grep "\[honest-NULL\]" | tail -50
+  docker logs edgeguard_airflow 2>&1 | grep "\[honest-NULL\]" | tail -50
   ```
   (the log prefix is literally `[honest-NULL]` per
   `src/collectors/misp_writer.py:143`)
@@ -133,7 +147,7 @@ Each entry: symptom → detection signal → remediation.
 - **Symptom.** Incremental sync task reports success, but post-run
   `MATCH (n:Label) RETURN count(n)` shows no growth for that label.
 - **Prom alert.** `EdgeGuardNeo4jIneffectiveBatch` — critical.
-- **Log probe.** `docker logs edgeguard-airflow-worker 2>&1 | grep "\[MERGE-INEFFECTIVE\]" | tail -20`
+- **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep "\[MERGE-INEFFECTIVE\]" | tail -20`
 - **Root cause.** Three common triggers:
   1. Source node missing (the SOURCED_FROM MATCH returns zero rows; the
      per-row edge MERGE silently never runs).
@@ -147,12 +161,15 @@ Each entry: symptom → detection signal → remediation.
      ```
      If empty, re-run `ensure_sources()` via the standalone CLI:
      ```bash
-     docker compose exec airflow-worker python -m src.neo4j_client --bootstrap-sources
+     docker compose exec airflow python src/neo4j_client.py --bootstrap-sources
      ```
-     (flag added in PR-N18; if using an older image, the equivalent Python:
-     `python -c "from neo4j_client import Neo4jClient; c=Neo4jClient(); c.connect(); c.create_constraints(); c.create_indexes(); c.ensure_sources(); c.close()"`)
+     (the `--bootstrap-sources` flag was added in PR-N18 — runs
+     `ensure_sources() + create_constraints() + create_indexes()` as a
+     one-shot. Note the invocation is `python src/neo4j_client.py …`,
+     not `python -m src.neo4j_client …` — the latter requires an
+     `src/__init__.py` that doesn't exist at HEAD.)
   2. Tail Neo4j log for constraint violations:
-     `docker logs edgeguard-neo4j 2>&1 | grep -i constraint | tail -20`
+     `docker logs edgeguard_neo4j 2>&1 | grep -i constraint | tail -20`
   3. For schema drift: diff the failing Cypher against
      `src/neo4j_client.py` MERGE site; add the missing property coalesce.
 
@@ -166,8 +183,8 @@ Each entry: symptom → detection signal → remediation.
   or `non_retryable`.
 - **Log probe.**
   ```bash
-  docker logs edgeguard-airflow-worker 2>&1 | grep "\[BATCH-PERMANENT-FAILURE\]" | tail -20
-  docker logs edgeguard-airflow-worker 2>&1 | grep "\[BATCH-RETRY\]" | tail -20  # see retry attempts preceding
+  docker logs edgeguard_airflow 2>&1 | grep "\[BATCH-PERMANENT-FAILURE\]" | tail -20
+  docker logs edgeguard_airflow 2>&1 | grep "\[BATCH-RETRY\]" | tail -20  # see retry attempts preceding
   ```
 - **Root cause by reason label.**
   - `retries_exhausted` → Neo4j overloaded. Three retries (2s→4s→8s) didn't recover. GC pause, lock contention, cluster failover.
@@ -178,7 +195,7 @@ Each entry: symptom → detection signal → remediation.
      heap (`NEO4J_dbms_memory_heap_max__size`) and `innodb_buffer_pool_size`
      on MISP's MySQL.
   2. If `non_retryable`: check Neo4j logs for the actual error:
-     `docker logs edgeguard-neo4j --tail=200 | grep -iE "error|exception"`.
+     `docker logs edgeguard_neo4j --tail=200 | grep -iE "error|exception"`.
      This is a code bug — file an issue + hotfix PR.
 
 ### 6. Placeholder-name MERGE spike (feed regression or attack)
@@ -192,7 +209,7 @@ Each entry: symptom → detection signal → remediation.
   (fires when `increase(edgeguard_merge_reject_placeholder_total[15m]) > 10` per (label, source)).
 - **Log probe.**
   ```bash
-  docker logs edgeguard-airflow-worker 2>&1 | grep "\[MERGE-REJECT\]" | \
+  docker logs edgeguard_airflow 2>&1 | grep "\[MERGE-REJECT\]" | \
     awk '{print $NF}' | sort | uniq -c | sort -rn | head
   ```
 - **Root cause.** A collector is emitting Malware / ThreatActor nodes
@@ -341,7 +358,7 @@ dev/staging topology):
 | `NEO4J_PAGECACHE` | `4g` | Enough for 350K-node working set without eating heap |
 
 Worker resident set: baseline should peak around 6 GB. **If
-`docker stats edgeguard-airflow-worker` shows RSS > 6 GB before the
+`docker stats edgeguard_airflow` shows RSS > 6 GB before the
 baseline even kicks off, raise `AIRFLOW_MEMORY_LIMIT` first or the
 baseline will OOM mid-run.**
 
@@ -369,7 +386,7 @@ When `EdgeGuardApocBatchPartial` fires:
 
 1. Find the step and first few error messages:
    ```bash
-   docker logs edgeguard-airflow-worker 2>&1 | grep -E '\[PARTIAL\]' | tail -5
+   docker logs edgeguard_airflow 2>&1 | grep -E '\[PARTIAL\]' | tail -5
    ```
 2. Classify the root cause from the logged `errorMessages`:
    - `MemoryLimitExceededException` → Neo4j TX memory cap hit. Lower batch size for that step, OR raise `NEO4J_TX_MEMORY_MAX` (but watch the ceiling — above 4g on 8 GB worker and you're eating worker RSS).
@@ -383,7 +400,7 @@ When `EdgeGuardApocBatchPartial` fires:
 A successful baseline should always emit this line:
 
 ```bash
-docker logs edgeguard-airflow-worker 2>&1 | grep -E '\[BUILD_RELATIONSHIPS SUMMARY\]'
+docker logs edgeguard_airflow 2>&1 | grep -E '\[BUILD_RELATIONSHIPS SUMMARY\]'
 # expected: total_edges=N failures=0/12 per_query=[...]
 ```
 
@@ -408,50 +425,38 @@ Issue #57 ships a DB-backed mutex.
 
 **Until Issue #57 lands, pick one of the two safe launch paths below.**
 
-#### Option A — CLI (recommended)
+> **PR-N35 docs audit (2026-04-28) correction:** earlier versions of this
+> RUNBOOK described an Option A "CLI baseline launch" path
+> (`python -m edgeguard baseline --days 730`). **No `baseline` or
+> `fresh-baseline` subcommand exists** in `src/edgeguard.py` at HEAD
+> (the available subcommands are `doctor`, `heal`, `validate`, `monitor`,
+> `dag`, `checkpoint`, `clear`, `stats`, `preflight`, `source`).
+> Baseline launch is **DAG-only** today via `airflow dags trigger
+> edgeguard_baseline`. The mutex against the 4 incremental schedulers
+> is the `baseline_in_progress.lock` sentinel at
+> `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
+> which the baseline DAG itself writes; the 4 incremental DAGs check
+> it and self-skip via `baseline_skip_reason()`.
 
-The CLI path acquires an in-process `baseline_lock` sentinel
-(`src/run_pipeline.py:1093`) that makes every `baseline_skip_reason()`
-check on the scheduled DAGs return a reason — they self-skip.
-
-```bash
-docker compose exec -T airflow-worker \
-  python -m edgeguard baseline --days 730
-```
-
-Or for the fresh-baseline shape (wipes existing Neo4j data first):
-
-```bash
-docker compose exec -T airflow-worker \
-  python -m edgeguard fresh-baseline --days 730
-```
-
-Confirm the lock sentinel is present during tier-1:
-
-```bash
-docker compose exec airflow-worker ls /tmp/edgeguard/baseline_lock.sentinel
-# expect: /tmp/edgeguard/baseline_lock.sentinel  (file present while baseline runs)
-```
-
-#### Option B — DAG + pre-pause the 4 incremental schedulers
+#### Option A — DAG + pre-pause the 4 incremental schedulers (recommended)
 
 If you must use the Airflow UI trigger, pause the 4 scheduled DAGs
 first so they cannot fire during the ~32h window:
 
 ```bash
-docker compose exec airflow-worker airflow dags pause edgeguard_daily
-docker compose exec airflow-worker airflow dags pause edgeguard_medium_freq
-docker compose exec airflow-worker airflow dags pause edgeguard_pipeline
-docker compose exec airflow-worker airflow dags pause edgeguard_low_freq
+docker compose exec airflow airflow dags pause edgeguard_daily
+docker compose exec airflow airflow dags pause edgeguard_medium_freq
+docker compose exec airflow airflow dags pause edgeguard_pipeline
+docker compose exec airflow airflow dags pause edgeguard_low_freq
 
 # trigger the baseline
-docker compose exec airflow-worker airflow dags trigger edgeguard_baseline
+docker compose exec airflow airflow dags trigger edgeguard_baseline
 
 # AFTER baseline + enrichment complete (watch the baseline_complete task):
-docker compose exec airflow-worker airflow dags unpause edgeguard_daily
-docker compose exec airflow-worker airflow dags unpause edgeguard_medium_freq
-docker compose exec airflow-worker airflow dags unpause edgeguard_pipeline
-docker compose exec airflow-worker airflow dags unpause edgeguard_low_freq
+docker compose exec airflow airflow dags unpause edgeguard_daily
+docker compose exec airflow airflow dags unpause edgeguard_medium_freq
+docker compose exec airflow airflow dags unpause edgeguard_pipeline
+docker compose exec airflow airflow dags unpause edgeguard_low_freq
 ```
 
 Alternatively, run the preflight helper which verifies the 4 DAGs are
@@ -464,18 +469,23 @@ are satisfied before returning exit 0:
 
 Exit non-zero = do NOT launch. Exit zero + green summary = safe to trigger.
 
-#### Why not both CLI + DAG?
+#### What happened to the CLI launch path?
 
-CLI delegates to the DAG via `_trigger_baseline_dag` in recent releases
-(`src/edgeguard.py:2377`) but takes the in-process lock FIRST. If you
-trigger the DAG directly without pausing, nothing takes the lock →
-incrementals race.
+Earlier RUNBOOK versions described a `python -m edgeguard baseline` /
+`fresh-baseline` CLI path. That CLI doesn't exist at HEAD — see the
+PR-N35 callout at the top of this section. Today the only baseline
+launch is via the `edgeguard_baseline` Airflow DAG. Pausing the
+4 incremental schedulers BEFORE triggering is the operator's job
+until Issue #57 ships a DB-backed mutex.
 
 ---
 
 ### Before a 730d baseline run
 
-1. **Launch path decided.** Per the section above (CLI vs DAG+pause).
+1. **Launch path decided.** Per Option A above — DAG trigger via
+   `airflow dags trigger edgeguard_baseline` AFTER pausing the 4
+   incremental schedulers (see PR-N35 callout — there is no CLI
+   baseline subcommand at HEAD).
 2. **Preflight green.** `./scripts/preflight_baseline.sh` returns exit 0.
 3. **Smoke test.** Run a 7-day window first (`baseline=True, baseline_days=7`
    in the baseline DAG config). Success criteria: no ERROR lines, all
@@ -496,8 +506,8 @@ incrementals race.
    actually reaches the on-call pager/inbox. Manual metric injection:
    `curl -X POST localhost:9091/metrics/job/manual -d 'edgeguard_neo4j_batch_permanent_failure_total{label="test",source="test",reason="test"} 1'`
 6. **Worker RAM sized.** NVD baseline holds ~1-2 GB of CVE dicts in
-   memory (HIGH gap tracked for follow-up). Ensure `airflow-worker`
-   container has ≥ 4 GB RAM: `docker inspect edgeguard-airflow-worker | grep -i mem`.
+   memory (HIGH gap tracked for follow-up). Ensure the `airflow`
+   container has ≥ 4 GB RAM: `docker inspect edgeguard_airflow | grep -i mem`.
 7. **Kill-switches staged.** Decide in advance what signal would make
    you set each:
    - `EDGEGUARD_RESPECT_CALIBRATOR=0` → if edges flap confidence 0.3 ↔ 0.8 nightly (PR-N10 Fix #2 regression signal).
@@ -514,7 +524,7 @@ incrementals race.
 - Any **critical** alert → pause the DAG, triage, then resume. Do NOT let
   it continue silently.
 - Any **warning** alert → investigate, continue unless you see compounding.
-- Heartbeat log: `docker logs edgeguard-airflow-worker 2>&1 --follow | grep -vE 'DEBUG|INFO'`
+- Heartbeat log: `docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'`
 
 ### After the run
 
@@ -729,4 +739,10 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: added the two PR-N31 fallback alerts to the paging-severity table; bumped "8 alerts" → "≥ 11" + "6 alerts" → ">= 11" in the baseline-day pre-flight + during-the-run sections; reconciled "26h baseline" → "32h baseline" (matches `dagrun_timeout`); added cross-refs to the PR-N26 / PR-N32 backfill + audit scripts and the `_MispFallbackHardError` sentinel symbol._
+_Last updated: 2026-04-28 — PR-N35 Tier-1 deep verification fixes:_
+
+- _**Container/service names** (BLOCK):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
+- _**Baseline launch path** (BLOCK):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
+- _**`--bootstrap-sources` flag** (BLOCK):_ replaced with the inline-Python equivalent calling `Neo4jClient.ensure_sources()` directly (the flag doesn't exist on the CLI)._
+
+_Prior: 2026-04-26 PR-N33 docs audit (added the two PR-N31 fallback alerts to the paging-severity table; bumped "8 alerts" → "≥ 11"; reconciled "26h baseline" → "32h"; added cross-refs to PR-N26 / PR-N32 scripts and `_MispFallbackHardError`)._

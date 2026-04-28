@@ -178,7 +178,8 @@ the `dag_run.conf` JSON when triggered:
 | **Additive** (default) | `airflow dags trigger edgeguard_baseline` (no conf) OR Airflow UI Trigger DAG with empty conf | `baseline_clean` task is a **no-op**; collectors run on top of existing graph + MISP state | Adding historical depth to an existing baseline; first-time setup on an empty graph |
 | **Destructive (fresh-baseline)** | `airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true, "baseline_days": 730}'` OR Airflow UI Trigger DAG with config `{"fresh_baseline": true}` | `baseline_clean` task **wipes Neo4j + MISP EdgeGuard events + checkpoints** before collectors run | Schema migration; recovering from a corrupted baseline; clean-slate re-collection |
 
-**Task chain:** `baseline_misp_health` → `baseline_clean` (no-op or wipe) → `baseline_start` → `tier1_core` → `tier2_extended` → `tier3_low_freq` → `baseline_full_neo4j_sync` → `baseline_build_relationships` → `baseline_enrichment` → `baseline_complete`.
+**Task chain (verified against `dags/edgeguard_pipeline.py` at HEAD):**
+`misp_health_check` → `baseline_start` → `baseline_clean` (no-op or wipe — gated on `dag_run.conf`) → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete`. **There is no `tier3_low_freq` TaskGroup** in the baseline DAG (PR-N35 docs audit correction); the daily-tier collectors live in the `edgeguard_daily` *incremental* DAG, not the baseline. **Top-level task IDs do not carry a `baseline_` prefix** — `airflow tasks state edgeguard_baseline full_neo4j_sync` is the right shape (NOT `baseline_full_neo4j_sync`).
 
 > **Note (PR-F4, 2026-04-20):** the four tier-1 collectors inside
 > `tier1_core` run **sequentially** (`cisa → mitre → otx → nvd`),
@@ -192,7 +193,7 @@ the `dag_run.conf` JSON when triggered:
 
 - Reads `dag_run.conf.fresh_baseline`. Accepts Python `True`, integer `1`, or strings `"true"`/`"True"`/`"1"`/`"yes"`/`"on"` (case- and whitespace-insensitive). Anything else (including the explicit-falsy strings `"false"`/`"0"`) is treated as additive — a typo in the JSON config does NOT trigger destruction.
 - Calls `src.baseline_clean.reset_baseline_data()` — atomic 3-step wipe (checkpoints → Neo4j `clear_all` → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero.
-- Has `retries=0` and `trigger_rule=ALL_SUCCESS` — destructive task does NOT auto-retry on failure (would re-execute the wipe), and ONLY runs after `baseline_misp_health` has fully succeeded.
+- Has `retries=0` and `trigger_rule=ALL_SUCCESS` — destructive task does NOT auto-retry on failure (would re-execute the wipe), and ONLY runs after `misp_health_check` has fully succeeded.
 
 **Baseline DAG conf — accepted keys (PR-F5, 2026-04-20):**
 
@@ -376,8 +377,9 @@ Constraints (from `src/neo4j_client.py:749-792`):
 - ✅ Incremental sync support
 - ✅ Error handling and retry logic (`retries=2`, `retry_delay=5min`; baseline DAG default: `retries=1`).
   **PR-N29 H1 carve-out (2026-04-23):** the four baseline critical-chain tasks
-  — `baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`,
-  `baseline_run_enrichment_jobs` — override to **`retries=0`**. A single retry on
+  — `baseline_clean`, `full_neo4j_sync`, `build_relationships`,
+  `run_enrichment_jobs` (top-level task IDs in the baseline DAG; **no
+  `baseline_` prefix** at HEAD) — override to **`retries=0`**. A single retry on
   any 5–6h task would burn 12h of the 32h `dagrun_timeout` cap and could leave
   the graph in a partially-mutated state mid-enrichment. With `retries=0` a
   failure surfaces immediately to the operator (and to the
@@ -709,4 +711,9 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: documented the PR-N29 H1 `retries=0` carve-out for the 4 baseline critical-chain tasks; reconciled header/footer dates (was 2026-04-15 / 2026-04-06). Prior: 2026-04-15 Airflow 2.11 → 3.2 upgrade._
+_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit:_
+
+- _Baseline task chain corrected (BLOCK):_ `baseline_misp_health` → `misp_health_check`; `tier2_extended` → `tier2_feeds`; removed `tier3_low_freq` (does NOT exist as a baseline TaskGroup at HEAD — daily-tier collectors live in the incremental `edgeguard_daily` DAG); `baseline_full_neo4j_sync` / `baseline_build_relationships` / `baseline_enrichment` → `full_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` (**top-level task IDs do NOT carry a `baseline_` prefix** at HEAD — verified against `dags/edgeguard_pipeline.py`)._
+- _PR-N29 H1 carve-out task names also corrected to drop the `baseline_` prefix._
+
+_Prior: 2026-04-26 PR-N33 docs audit (documented PR-N29 H1 `retries=0` carve-out; reconciled header/footer dates); 2026-04-15 Airflow 2.11 → 3.2 upgrade._

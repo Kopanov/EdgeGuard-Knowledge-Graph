@@ -181,7 +181,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Set `ssl_verify: true` in `config.yaml` | Edit file | Required for production |
 | Fill optional API keys | `OTX_API_KEY`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, `THREATFOX_API_KEY`, … in `.env` | Optional |
 | Large MISP→Neo4j backfill / OOM on sync | Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** (default `500`; try `250` if still OOM). **`0`** / **`all`** = single pass (OOM risk — not recommended for huge backfills); see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | If needed |
-| Start full stack (Neo4j + Airflow + MISP) | `docker compose up -d` (root compose) | Required |
+| Start full stack (Neo4j + Airflow + Postgres + REST + GraphQL) | `docker compose up -d` (root compose). **MISP is NOT in this compose** — run/connect to a separate MISP deployment via `MISP_URL`. | Required |
 | Run **launch-day pre-flight** | `EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh` — see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) | Before first baseline |
 | Run baseline (first run) | Trigger Airflow DAG `edgeguard_baseline` (Airflow UI or `airflow dags trigger edgeguard_baseline`) — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | First run |
 | Start monitoring stack | `docker compose -f docker-compose.monitoring.yml up -d` | Recommended |
@@ -207,7 +207,8 @@ cp .env.example .env
 cp credentials/config.example.yaml credentials/config.yaml
 # Edit both files — fill in MISP_URL, MISP_API_KEY, NEO4J_PASSWORD, EDGEGUARD_API_KEY, API keys
 
-# 2. Start full stack (Neo4j + Airflow + MISP via root compose)
+# 2. Start the EdgeGuard stack (Neo4j + Airflow + Postgres + REST + GraphQL).
+#    MISP is NOT in this compose — point MISP_URL at a separate MISP deployment.
 docker compose up -d
 
 # 3. Run the launch-day pre-flight (catches missing creds, broken APOC,
@@ -243,4 +244,4 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-*Last updated: 2026-04-26 — PR-N33 docs audit: replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands with the current root-compose / Airflow-DAG / `airflow standalone` workflow; removed stale "Upgrade to Airflow 3.x" remaining-TODO (shipped 2026-04-15); cross-linked `BASELINE_LAUNCH_CHECKLIST.md`. Prior: 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*
+*Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*
