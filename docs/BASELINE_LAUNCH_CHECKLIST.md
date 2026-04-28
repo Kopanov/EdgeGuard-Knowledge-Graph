@@ -54,8 +54,8 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
 * `[2] Neo4j reachable + APOC + indexes`
 * `[3] MISP API reachable + auth valid`
-* `[4] launch-path decision confirmed` (CLI vs DAG+pause)
-* `[5] IF DAG path: 4 incremental DAGs PAUSED` (Issue #57)
+* `[4] launch-path decision confirmed` (DAG-only at HEAD — there is no CLI baseline subcommand; see RUNBOOK § "Baseline launch path" for the correction history)
+* `[5] IF DAG path: 4 incremental DAGs PAUSED` (Issue #57 — required to prevent incremental DAGs racing the baseline)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[8] no stale baseline_lock sentinel`
@@ -245,16 +245,24 @@ in and what to do.
 
 ## Launch decision
 
-If all 6 items pass, you are cleared to run `edgeguard_baseline`. Pick
-your launch path per RUNBOOK § "Baseline launch path":
+If all 6 items pass, you are cleared to run `edgeguard_baseline`.
+Launch path is **DAG-only** (the CLI baseline subcommand referenced in
+older RUNBOOK versions doesn't exist at HEAD — verified by PR-N35
+docs audit). See RUNBOOK § "Baseline launch path" for the full
+procedure:
 
-* **Option A (recommended):** CLI invocation — see RUNBOOK § "Option A"
-* **Option B:** DAG + pre-pause the 4 incremental schedulers — see
-  RUNBOOK § "Option B"
+1. Pause the 4 incremental DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
+   `edgeguard_pipeline`, `edgeguard_low_freq`) so they don't race the baseline.
+2. `airflow dags trigger edgeguard_baseline`
+3. Watch the `baseline_complete` task. After it completes, unpause
+   the 4 incremental schedulers.
 
-**Do not pick both.** The DAG and CLI paths share the `baseline_lock`
-sentinel; concurrent invocation will (correctly) fail-fast with
-`BaselineAlreadyRunning`, but it's a confusing state to debug.
+The `baseline_in_progress.lock` sentinel at
+`checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`) is
+written by the baseline DAG itself; the 4 incremental DAGs check it
+and self-skip via `baseline_skip_reason()` — pausing is the
+defense-in-depth on top of the sentinel. Issue #57 tracks the
+DB-backed mutex that will replace the manual-pause step.
 
 ---
 
@@ -289,4 +297,13 @@ queries, sector-stats reconciliation, alert mute window cleanup.
 
 ---
 
-_Last updated: 2026-04-25 — added in PR-N32 alongside the legacy unicode-bypass audit script._
+_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit:_
+
+- _Item `[4]` description: "CLI vs DAG+pause" → "DAG-only at HEAD" (the
+  CLI baseline subcommand referenced in older RUNBOOK versions doesn't
+  exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._
+- _"Launch decision" section: removed Option A "CLI invocation" reference,
+  rewrote as DAG-only 3-step procedure with explicit sentinel + Issue
+  #57 cross-link._
+
+_Prior: 2026-04-25 — added in PR-N32 alongside the legacy unicode-bypass audit script._

@@ -121,4 +121,4 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: cross-link [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) (PR-N32) — that doc is the focused **launch-day** pre-flight; this checklist remains the broader **pre-deploy** posture (env, infra, monitoring readiness). Prior: 2026-04-06._
+_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: verified `python src/edgeguard.py preflight`, `python src/health_check.py`, `make health`, `EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS` all exist at HEAD. The "All 7 checks pass" wording is approximate (the actual `cmd_preflight` count varies by configuration); operators should rely on green/red signal rather than count. Prior: 2026-04-26 PR-N33 docs audit (cross-linked BASELINE_LAUNCH_CHECKLIST as the launch-day pre-flight); 2026-04-06._

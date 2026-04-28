@@ -137,26 +137,39 @@ class TestPartBRunbookDriftFixed:
     def test_real_log_paths_used(self):
         """``/var/log/airflow/*.log`` was wrong. The RUNBOOK should use
         either ``/opt/airflow/logs/**/*.log`` (filesystem path on the
-        worker container) OR ``docker logs edgeguard-airflow-worker``
-        (which is what we actually use — cleaner for docker-compose)."""
+        worker container) OR ``docker logs edgeguard_airflow``
+        (which is what we actually use — cleaner for docker-compose).
+
+        PR-N35 docs audit (2026-04-28): updated container name from
+        ``edgeguard-airflow-worker`` (hyphen, never existed in compose)
+        to ``edgeguard_airflow`` (the actual `container_name:` per
+        ``docker-compose.yml:204``)."""
         runbook = self._runbook()
         assert "/var/log/airflow" not in runbook, "regression: wrong log path reintroduced"
         # Must have at least one of the valid log-access patterns.
-        uses_docker_logs = "docker logs edgeguard-airflow-worker" in runbook
+        uses_docker_logs = "docker logs edgeguard_airflow" in runbook
         uses_filesystem = "/opt/airflow/logs" in runbook
         assert uses_docker_logs or uses_filesystem, (
-            "RUNBOOK must document a valid log-access method "
-            "(docker logs edgeguard-airflow-worker or /opt/airflow/logs)"
+            "RUNBOOK must document a valid log-access method (docker logs edgeguard_airflow or /opt/airflow/logs)"
         )
 
     def test_docker_compose_container_names_used(self):
         """RUNBOOK mixed `kubectl` (not applicable to docker-compose
-        deployment) and `docker`. Should be consistent."""
+        deployment) and `docker`. Should be consistent.
+
+        PR-N35 docs audit (2026-04-28): updated to the ACTUAL container
+        names from ``docker-compose.yml`` (with underscores). MISP is
+        explicitly NOT in the compose stack — there is no
+        ``edgeguard_misp`` container; MISP is deployed separately and
+        accessed via ``MISP_URL``."""
         runbook = self._runbook()
-        # At least mentions docker compose names.
-        assert "edgeguard-neo4j" in runbook
-        assert "edgeguard-misp" in runbook
-        assert "edgeguard-airflow-worker" in runbook
+        # Mention the real compose container names.
+        assert "edgeguard_neo4j" in runbook
+        assert "edgeguard_airflow" in runbook
+        # MISP is NOT in this compose; the runbook explicitly notes that.
+        assert "MISP is NOT in this compose stack" in runbook or "MISP is NOT in the compose" in runbook, (
+            "RUNBOOK must explicitly note that MISP is NOT a compose service"
+        )
 
     def test_kill_switch_table_has_three_entries(self):
         """Pre-PR-N18 only 2 kill-switches were documented. PR-N14
