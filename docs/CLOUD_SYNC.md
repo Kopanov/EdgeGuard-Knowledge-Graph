@@ -13,7 +13,7 @@ explains:
 
 ## TL;DR — the contract
 
-- Every documented node carries `n.uuid` = `uuid5(EDGEGUARD_NAMESPACE, canonical(label, natural_key))`.
+- Every documented node carries `n.uuid` = `uuid5(EDGEGUARD_NODE_UUID_NAMESPACE, canonical(label, natural_key))`.
 - Every documented edge carries `r.src_uuid` and `r.trg_uuid` — the same
   deterministic uuids as the connected nodes.
 - The same `(label, natural_key)` produces the **same UUID on every Neo4j

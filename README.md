@@ -493,51 +493,46 @@ Exit 0 = safe to launch. Exit 1 = read the ✗ items and fix them first. The scr
 
 ### Step 2 — Pick your launch path
 
-#### Option A — CLI (recommended)
+#### Baseline launch — DAG + pre-pause the 4 incremental schedulers
 
-The CLI path takes the in-process `baseline_lock` sentinel (`src/run_pipeline.py:1093`). Every scheduled DAG's `baseline_skip_reason()` check then returns a reason → they self-skip for the baseline's duration. **No manual DAG pausing needed.**
+> **PR-J1 docs audit (2026-04-28) correction:** earlier README versions
+> described an Option A "CLI baseline launch" (`python -m edgeguard
+> baseline --days 730`). That subcommand does NOT exist in
+> `src/edgeguard.py` — verified by `grep "add_parser"`. The actual
+> subcommands are `doctor`, `heal`, `validate`, `monitor`, `dag`,
+> `checkpoint`, `clear`, `stats`, `preflight`, `source`, `setup`,
+> `update`. Baseline launch is **DAG-only** today. The
+> `baseline_in_progress.lock` sentinel at
+> `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
+> is written by the baseline DAG itself; the 4 incremental DAGs check
+> it and self-skip via `baseline_skip_reason()`. Pause-then-trigger is
+> still the recommended pattern as defense-in-depth. Issue #57 tracks
+> the DB-backed mutex that will replace the manual-pause step.
 
-```bash
-docker compose exec -T airflow-worker python -m edgeguard baseline --days 730
-```
-
-Or the fresh-baseline shape (wipes existing Neo4j data first — use for a clean re-baseline):
-
-```bash
-docker compose exec -T airflow-worker python -m edgeguard fresh-baseline --days 730
-```
-
-Confirm the sentinel is present mid-run:
-
-```bash
-docker compose exec airflow-worker ls /tmp/edgeguard/baseline_lock.sentinel
-# expected: file exists while baseline runs; auto-removed on completion
-```
-
-#### Option B — DAG + pre-pause the 4 incremental schedulers
-
-If you need the Airflow UI for operational reasons (monitoring, manual retry buttons, etc.), pause the 4 scheduled DAGs first so they can't fire during the ~26h window:
+Pause the 4 scheduled DAGs first so they can't fire during the ~32h baseline window (see [`docs/RUNBOOK.md`](docs/RUNBOOK.md) § Baseline launch path for the full procedure):
 
 ```bash
 # 1. Pause all 4 incremental DAGs BEFORE triggering the baseline
 for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
-  docker compose exec airflow-worker airflow dags pause "$dag"
+  docker compose exec airflow airflow dags pause "$dag"
 done
 
-# 2. Trigger the baseline
-docker compose exec airflow-worker airflow dags trigger edgeguard_baseline
+# 2. Trigger the baseline (the DAG runs `baseline_clean → baseline_start →
+#    tier1_core → tier2_feeds → full_neo4j_sync → build_relationships →
+#    run_enrichment_jobs → baseline_postcheck → baseline_complete`)
+docker compose exec airflow airflow dags trigger edgeguard_baseline
 
 # 3. AFTER the baseline_complete task fires (check Airflow UI), unpause all 4
 for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
-  docker compose exec airflow-worker airflow dags unpause "$dag"
+  docker compose exec airflow airflow dags unpause "$dag"
 done
 ```
 
 ### Step 3 — Monitor during the run
 
-- **Prometheus**: watch the 6 `edgeguard_pipeline_observability` alerts. Any **critical** alert → pause the DAG, triage, resume.
-- **Logs**: `docker logs edgeguard-airflow-worker 2>&1 --follow | grep -vE 'DEBUG|INFO'`
-- **Grep tokens for silent failures**: `[MERGE-REJECT]`, `[MERGE-RETURNED-FALSE]`, `[MERGE-INEFFECTIVE]`, `[BATCH-PERMANENT-FAILURE]`, `[honest-NULL]` — each is documented in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#top-6-failure-modes).
+- **Prometheus**: watch the `edgeguard_pipeline_observability` rule group (≥ 11 alerts at HEAD, post-PR-N31). Any **critical** alert → pause the DAG, triage, resume.
+- **Logs**: `docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'` (single Airflow standalone container per Airflow 3.x — see `docker-compose.yml`).
+- **Grep tokens for silent failures**: `[MERGE-REJECT]`, `[MERGE-RETURNED-FALSE]`, `[MERGE-INEFFECTIVE]`, `[BATCH-PERMANENT-FAILURE]`, `[honest-NULL]`, `[MISP-FETCH-FALLBACK-ACTIVE]` — each is documented in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#top-8-failure-modes).
 
 ### Step 4 — Post-run validation
 
