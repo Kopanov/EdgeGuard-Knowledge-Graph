@@ -129,8 +129,9 @@ Each entry: symptom → detection signal → remediation.
   ```bash
   docker logs edgeguard_airflow 2>&1 | grep "\[honest-NULL\]" | tail -50
   ```
-  (the log prefix is literally `[honest-NULL]` per
-  `src/collectors/misp_writer.py:143`)
+  (the log prefix is literally `[honest-NULL]` — search
+  `src/collectors/misp_writer.py` for `[honest-NULL]` to find the
+  emit site; line numbers drift, the prefix doesn't.)
 - **Root cause.** PR-N5 C7 validator caught a collector calling
   `datetime.now()` as a fallback when the source feed was silent on a
   timestamp. The violation log line names the source + field.
@@ -583,7 +584,8 @@ STIX SDO id equals `n.uuid`). It is NOT a foreign key into MISP.
 
 Every MISP-sourced node carries `n.misp_attribute_ids[]` — the real
 MISP attribute UUID(s) captured at ingest
-(`src/run_misp_to_neo4j.py:2311`).
+(written by `parse_attribute` in `src/run_misp_to_neo4j.py` — search
+for `misp_attribute_id` to find the emit sites).
 
 ```cypher
 MATCH (i:Indicator) WHERE i.value = '203.0.113.5'
@@ -739,10 +741,11 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 deep verification fixes:_
+_Last updated: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 
-- _**Container/service names** (BLOCK):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
-- _**Baseline launch path** (BLOCK):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
-- _**`--bootstrap-sources` flag** (BLOCK):_ replaced with the inline-Python equivalent calling `Neo4jClient.ensure_sources()` directly (the flag doesn't exist on the CLI)._
+- _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
+- _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
+- _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._
+- _**Stale line-number references** (MED, PR-N36):_ replaced `src/collectors/misp_writer.py:143` and `src/run_misp_to_neo4j.py:2311` with grep-target descriptions (line numbers drift constantly; symbol/prefix references survive)._
 
 _Prior: 2026-04-26 PR-N33 docs audit (added the two PR-N31 fallback alerts to the paging-severity table; bumped "8 alerts" → "≥ 11"; reconciled "26h baseline" → "32h"; added cross-refs to PR-N26 / PR-N32 scripts and `_MispFallbackHardError`)._

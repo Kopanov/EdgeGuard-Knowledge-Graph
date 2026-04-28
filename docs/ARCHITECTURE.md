@@ -480,4 +480,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: corrected the "MISP traceability on edges" section to reflect PR-N26's actual scope (4 edge types in `build_relationships.py`: INDICATES / EXPLOITS / TARGETS / AFFECTS), and clarified that the `create_misp_relationships_batch` edges (EMPLOYS_TECHNIQUE, IMPLEMENTS_TECHNIQUE, ATTRIBUTED_TO) do NOT carry `r.misp_event_ids[]` (provenance flows through endpoint nodes for those). Added cross-link to the `2026_05` backfill runbook. Prior: 2026-04-18 chip 5a + PR #41 cleanup._
+_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._

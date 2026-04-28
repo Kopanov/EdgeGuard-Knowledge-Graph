@@ -35,7 +35,7 @@ LIMIT 20
 ```
 
 ### Find healthcare-tagged vulnerabilities
-Sectors are stored on the **`zone`** property (list of strings), not as extra labels — see `neo4j_client.merge_vulnerability` / ResilMesh schema.
+Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (see `src/neo4j_client.py:1580`), nodes ALSO get secondary labels (e.g. `:Vulnerability :Healthcare`). For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
 
 ```cypher
 MATCH (v:Vulnerability)
@@ -169,6 +169,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: replaced broken `WHERE 'Windows' IN t.platforms` query (the `platforms` property is never written by `merge_technique`; query silently returned zero rows) with the correct `t.tactic_phases` filter; added "Edge provenance" section with three sample queries for the PR-N26 `r.misp_event_ids[]` array on the 4 wired edge types._
+_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*

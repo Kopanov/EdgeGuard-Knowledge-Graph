@@ -260,11 +260,14 @@ def merge_node(existing, new):
 
 | Source | Base Confidence | Rationale |
 |--------|---------------|-----------|
-| MITRE ATT&CK | 0.8-0.9 | Authoritative, well-documented |
-| CISA KEV | 0.9 | Government-confirmed exploitation |
-| NVD | 0.7 | CVE database |
-| AlienVault OTX | 0.5-0.7 | Community-driven |
-| MISP | 0.5 | Depends on event quality |
+| MITRE ATT&CK | 0.8 / 0.9 | Authoritative; `mitre_collector.py` writes 0.8 or 0.9 depending on relationship type |
+| CISA KEV | 0.9 (also affects NVD) | Government-confirmed exploitation. NVD CVEs ALSO get 0.9 when listed in CISA KEV (`nvd_collector.py`: `0.9 if cisa_exploit_add else 0.6`) |
+| NVD | 0.6 (default) / 0.9 (on CISA KEV) | CVE database; bumps to 0.9 when the same CVE is listed in CISA KEV |
+| AlienVault OTX | 0.5 | Community-driven, all 4 OTX emit sites use 0.5 |
+| MISP (push side) | 0.8 | `misp_writer.py` baseline confidence for EdgeGuard-pushed indicators |
+| MISP (collector / read side) | 0.5–0.8 | `misp_collector.py` per-attribute (0.5 for raw, 0.6/0.7/0.8 for tagged tiers) |
+| AbuseIPDB | `abuseConfidenceScore / 100.0` | Vendor-supplied 0-100 score divided to 0-1 range |
+| ThreatFox / global feeds | 0.5 / 0.6 / vendor-supplied | `global_feed_collector.py`; vendor-supplied takes precedence |
 
 **Confidence Calculation:**
 ```
@@ -445,4 +448,4 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: removed contradictory "tag scopes the dedup key" sentence (tag was removed from all EdgeGuard constraints; per-source provenance lives on SOURCED_FROM edges); fixed stale Cypher example for `vulnerability_key` (was `(v.cve_id, v.tag)`, actual is `(v.cve_id)`). Prior: 2026-03-28._
+_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._

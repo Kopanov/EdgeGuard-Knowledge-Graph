@@ -399,4 +399,21 @@ ORDER BY i.last_updated DESC
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: enumerated PR-N26's 4 wired edge types (INDICATES, EXPLOITS, TARGETS, AFFECTS) for `r.misp_event_ids[]` and cross-linked the backfill script. Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification:_
+
+- _Verified all confidence values match `src/build_relationships.py`:
+  EMPLOYS_TECHNIQUE = 0.95 (line 5/12), IMPLEMENTS_TECHNIQUE = 0.95
+  (lines 6/12 and 10/12), USES_TECHNIQUE = 0.85 (8/12 — OTX
+  attack_ids), INDICATES co-occurrence = 0.5 (4/12), INDICATES
+  family-match = 0.8 (9/12)._
+- _Verified relationships exist in code: `RUNS` and `PART_OF` in
+  `src/enrichment_jobs.py:184-186` (build_campaign_nodes); `INVOLVES`
+  in `src/neo4j_client.py:6142`; `HAS_CVSS_v2/v30/v31/v40`
+  bidirectional in `src/neo4j_client.py:2470` (\_merge_cvss_node
+  writes BOTH `(cve)-[r1]->(cvss)` AND `(cvss)-[r2]->(cve)`)._
+- _Verified SOURCED_FROM property names + sector dual-labeling
+  pattern (`apply_sector_labels` at `src/neo4j_client.py:1582`)._
+- _No drift found. Footer refresh._
+
+_Prior: 2026-04-26 PR-N33 docs audit (enumerated PR-N26's 4 wired
+edge types for `r.misp_event_ids[]`); 2026-04-18 PR #41 cleanup pass._
