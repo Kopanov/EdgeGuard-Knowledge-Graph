@@ -1,29 +1,23 @@
-# Contributing & pull requests
+# Contributing
 
-## Before you open a PR
+This file is a **stub**. The canonical contributor guide lives at
+**[`/CONTRIBUTING.md`](../CONTRIBUTING.md)** in the repo root.
 
-Use **Python 3.12+** (see `pyproject.toml` `requires-python`; CI uses 3.12).
+Why two locations? Until PR-N37 (2026-04-28) `docs/CONTRIBUTING.md`
+was a byte-identical duplicate of the root file. Two source-of-truth
+copies invite drift. The duplicate has been replaced with this stub
+so:
 
-1. **Install dev deps:** `pip install -r requirements-dev.txt`
-2. **Lint & format:** `make lint` (or `ruff check` / `ruff format --check` as in CI)
-3. **Types (optional but recommended):** `make type-check`
-4. **Tests:** `make test` — same env vars as CI (`NEO4J_*`, `MISP_*` dummies are set by the Makefile)
+1. Operators landing on `docs/CONTRIBUTING.md` (e.g. via stale
+   bookmarks or doc-internal cross-references) reach the canonical
+   guide via one click.
+2. There's only one file to update when contribution conventions
+   change.
 
-CI runs **Ruff**, **Mypy**, **pytest** (with coverage floor 30%), **Docker build**, and **pip-audit** — see [`.github/workflows/ci.yml`](../.github/workflows/ci.yml).
-
-## New CLI / version behavior
-
-- **`edgeguard version`** / **`edgeguard update`** — covered by `tests/test_edgeguard_cli_light.py` (update path mocks `subprocess.call` so `install.sh` is not executed in CI).
-- **CalVer** — bump `[project].version` in `pyproject.toml` only when cutting a release; see [`VERSIONING.md`](VERSIONING.md).
-
-## Commits
-
-Use clear messages (e.g. `test: add CLI smoke tests`, `ci: run PR workflow for all branches`). No secrets or real API keys in commits.
-
-## Generated Airflow files (local installs)
-
-If you run Airflow on the host (not only via repo `docker-compose.yml`), **do not commit** local metadata database files (Apache Airflow may create one in `AIRFLOW_HOME`), or any generated secrets/config you copy out of the container. Prefer Docker Compose metadata (**`airflow_postgres`**) for a clean, team-aligned setup. `airflow.cfg` and `webserver_config.py` remain listed in `.gitignore` for typical local layouts.
+If you arrived here looking for the contributor checklist, dev
+setup, lint/format/test commands, or PR conventions —
+**→ [open `/CONTRIBUTING.md`](../CONTRIBUTING.md).**
 
 ---
 
-_Last updated: 2026-03-20_
+_Last updated: 2026-04-28 — PR-N37 Tier-3 docs audit: replaced byte-identical duplicate with this stub. Originally flagged by PR-N33's 6-agent docs audit; deferred. Now fixed._

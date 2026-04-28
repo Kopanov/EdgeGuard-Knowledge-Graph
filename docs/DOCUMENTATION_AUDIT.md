@@ -166,9 +166,53 @@ Per-PR narrative for the train (cross-doc summary):
 * **PR-N32 (#113, 2026-04-25):** read-only audit script
   (`scripts/audit_legacy_unicode_bypass_nodes.py`) + the
   `BASELINE_LAUNCH_CHECKLIST.md` operator pre-launch pass.
-* **PR-N33 (this audit, 2026-04-26):** 6-agent docs audit; ~30
+* **PR-N33 (#114, 2026-04-26):** 6-agent docs audit; ~50
   drift findings fixed across the doc corpus; this index expanded
   to cover all 46 docs in `docs/` plus the 2 root-level docs.
+* **PR-N34 (#115, 2026-04-28):** ARCHITECTURE_DIAGRAMS solo-deep
+  verification — 6 drift findings missed by PR-N33's batched audit
+  (wrong neo4j retry count, BREL count drift, missing PR-N29 H1
+  carve-out, missing PR-N31 observability annotation, missing
+  `r.misp_event_ids[]` schema note, `HAS_CVSS` → `HAS_CVSS_v*`).
+* **PR-N35 (#116, 2026-04-28):** Tier-1 deep verification of 8
+  operator-critical docs — surfaced wrong container names
+  (`edgeguard-airflow-worker` doesn't exist; actual is
+  `edgeguard_airflow`), non-existent CLI baseline subcommand,
+  wrong `python -m src.neo4j_client` invocation form, wrong task
+  IDs (`baseline_*`-prefixed don't exist; `tier3_low_freq` doesn't
+  exist), missing-MISP-from-compose claim. Also fixed PR-N18 test
+  pinning the WRONG container names.
+* **PR-N36 (#117, 2026-04-28):** Tier-2 deep verification of 10
+  reference docs — fixed wrong source confidence values in
+  METHODOLOGY (NVD 0.7 → 0.6/0.9; OTX range → flat 0.5; missing
+  AbuseIPDB + ThreatFox rows); clarified dual-storage of
+  sectors (zone property + secondary labels) in NEO4J_SAMPLE_QUERIES;
+  rewrote 3 deferred MEDs from PR-N35.
+* **PR-J1 (#118, 2026-04-28):** SHIPPED `tests/test_architecture_flow_pins.py`
+  — CI-side drift defense for env vars + CLI subcommands +
+  container names + `src/*.py` file paths. The first run surfaced
+  4 real drift items the audit train missed: README references to
+  the non-existent CLI baseline subcommand + wrong container names;
+  `EDGEGUARD_NAMESPACE` in CLOUD_SYNC (should be `_NODE_UUID_NAMESPACE`);
+  bare `docker logs neo4j` in INTEGRATION_GUIDE. Plus a stale PR-N20
+  test wrongly pinning `python -m edgeguard baseline` (the subcommand
+  never existed) as required README content — fixed to assert the
+  actual DAG-only launch path.
+* **PR-N37 (this audit, 2026-04-28):** Tier-3 deep verification of
+  ~22 setup/reference/process docs that PR-N33 only spot-checked.
+  Verified all setup-batch (SETUP_GUIDE, DOCKER_SETUP_GUIDE,
+  ENVIRONMENTS, API_KEYS_SETUP, SECRETS_MANAGEMENT) + collectors-batch
+  + reference-batch + process-batch + misc-batch concrete claims
+  against code at HEAD. Replaced the `docs/CONTRIBUTING.md`
+  byte-identical duplicate (flagged by PR-N33, deferred) with a stub
+  pointing to the canonical root file. No new drift found in the
+  Tier-3 sweep itself — confirms PR-J1's CI-side defense + PR-N33's
+  6-agent batch already addressed the bulk of drift.
+
+**Audit cadence going forward (post-PR-J1):** the pin-test catches
+broken doc references on every PR. Tier-1-style deep verification is
+only needed after major code-shape changes (DAG renames, container
+renames, CLI changes). Tier-2/Tier-3 sweeps quarterly are sufficient.
 
 Prior: 2026-04-18 PR #41 cleanup pass — historical PR #32 "Backfill
 migration" reference marked as deleted; PR #33 deferred items closed.
