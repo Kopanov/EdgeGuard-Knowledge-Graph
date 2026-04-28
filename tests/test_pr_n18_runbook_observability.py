@@ -150,8 +150,7 @@ class TestPartBRunbookDriftFixed:
         uses_docker_logs = "docker logs edgeguard_airflow" in runbook
         uses_filesystem = "/opt/airflow/logs" in runbook
         assert uses_docker_logs or uses_filesystem, (
-            "RUNBOOK must document a valid log-access method "
-            "(docker logs edgeguard_airflow or /opt/airflow/logs)"
+            "RUNBOOK must document a valid log-access method (docker logs edgeguard_airflow or /opt/airflow/logs)"
         )
 
     def test_docker_compose_container_names_used(self):
