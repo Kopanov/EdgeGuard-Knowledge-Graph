@@ -97,9 +97,10 @@ airflow dags trigger edgeguard_baseline
 * Post-run, the 7-day graph has the expected node + relationship counts
   for the smoke window
 
-**If the smoke ran AT LEAST 7 days ago against a different commit:**
-re-run it. PR-N31's metric wiring is too new to trust without a fresh
-smoke against the post-PR-N31 codebase.
+**If the most recent smoke is older than 7 days OR ran against a
+commit before PR-N31 / PR-N32 landed:** re-run it. PR-N31's metric
+wiring + PR-N32's audit script are too new to trust without a fresh
+smoke against the post-PR-N32 codebase.
 
 **If it fails:** the smoke run failure mode itself is the diagnostic.
 Map to RUNBOOK § "Top 8 failure modes":
@@ -297,13 +298,17 @@ queries, sector-stats reconciliation, alert mute window cleanup.
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit:_
+_Last updated: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 
-- _Item `[4]` description: "CLI vs DAG+pause" → "DAG-only at HEAD" (the
+- _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._
-- _"Launch decision" section: removed Option A "CLI invocation" reference,
+- _"Launch decision" section (PR-N35): removed Option A "CLI invocation" reference,
   rewrote as DAG-only 3-step procedure with explicit sentinel + Issue
   #57 cross-link._
+- _Item `[2]` smoke-rerun wording (PR-N36): "AT LEAST 7 days ago against a
+  different commit" → "older than 7 days OR ran against a commit before
+  PR-N31 / PR-N32 landed" (cleaner OR-condition rather than the awkward
+  AT-LEAST phrasing)._
 
 _Prior: 2026-04-25 — added in PR-N32 alongside the legacy unicode-bypass audit script._

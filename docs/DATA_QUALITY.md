@@ -115,4 +115,4 @@ Now reports average confidence per relationship type:
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: replaced pre-SOURCED_FROM "Current Logic" Cypher (which set `n.source` directly) with the post-PR-S5/PR-M2 SOURCED_FROM-edge model; updated `merge_indicator` reference to canonical `merge_node_with_source` entry point. Prior: 2026-03-28._
+_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The historical Fix 1-4 narrative describes past code states accurately; the SOURCED_FROM-edge "Current Logic" matches `Neo4jClient.merge_node_with_source` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (replaced pre-SOURCED_FROM Cypher); 2026-03-28._
