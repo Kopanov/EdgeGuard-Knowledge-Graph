@@ -3029,6 +3029,31 @@ class Neo4jClient:
                     if item.get("threat_label"):
                         batch_item["threat_label"] = item["threat_label"]
 
+                    # Parity with the single-item ``merge_indicator`` (neo4j_client.py
+                    # ~L2329): promote the OTX / ThreatFox enrichment fields it promotes.
+                    # Pre-fix the batch path (the baseline + scheduled-sync path) dropped
+                    # these — they survived only inside the SOURCED_FROM edge's raw_data
+                    # JSON, never as queryable node properties. That silently zeroed
+                    # ``Indicator.attack_ids`` (so build_relationships step 8 USES_TECHNIQUE
+                    # built 0 edges) and ``Indicator.malware_family`` (so step 9 INDICATES
+                    # family-match matched nothing) for every batch-ingested Indicator.
+                    # Confirmed against the 2026-05 baseline: attack_ids / malware_family /
+                    # targeted_countries = 0/146,185, while indicator_role (which IS in the
+                    # SET clause below) = 41. ``coalesce(item.x, n.x)`` keeps any existing
+                    # value when a later (e.g. non-OTX) source omits the field.
+                    for _enrich_field in (
+                        "attack_ids",
+                        "targeted_countries",
+                        "malware_family",
+                        "malware_malpedia",
+                        "reference",
+                        "reporter",
+                        "domain",
+                        "hostnames",
+                    ):
+                        if item.get(_enrich_field):
+                            batch_item[_enrich_field] = item[_enrich_field]
+
                     batch_data.append(batch_item)
 
                 # PR #34 round 24: zone-accumulation now applies the
@@ -3068,7 +3093,15 @@ class Neo4jClient:
                     n.abuse_categories = {_dedup_concat_clause("n.abuse_categories", "coalesce(item.abuse_categories, [])")},
                     n.yara_rules = {_dedup_concat_clause("n.yara_rules", "coalesce(item.yara_rules, [])")},
                     n.sigma_rules = {_dedup_concat_clause("n.sigma_rules", "coalesce(item.sigma_rules, [])")},
-                    n.threat_label = coalesce(item.threat_label, n.threat_label)
+                    n.threat_label = coalesce(item.threat_label, n.threat_label),
+                    n.attack_ids = coalesce(item.attack_ids, n.attack_ids),
+                    n.targeted_countries = coalesce(item.targeted_countries, n.targeted_countries),
+                    n.malware_family = coalesce(item.malware_family, n.malware_family),
+                    n.malware_malpedia = coalesce(item.malware_malpedia, n.malware_malpedia),
+                    n.reference = coalesce(item.reference, n.reference),
+                    n.reporter = coalesce(item.reporter, n.reporter),
+                    n.domain = coalesce(item.domain, n.domain),
+                    n.hostnames = coalesce(item.hostnames, n.hostnames)
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)

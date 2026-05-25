@@ -25,22 +25,24 @@ ORDER BY count DESC
 
 ## Vulnerabilities
 
-### Find critical vulnerabilities
+> **Label note (verified 2026-05-25 against the live graph):** the MISP→Neo4j sync routes every CVE through `merge_cve()` → the **`:CVE`** label (`src/run_misp_to_neo4j.py:3415`). The older **`:Vulnerability`** label is legacy and is **empty** on current baselines (the production snapshot held 99,757 `:CVE` and 0 `:Vulnerability`), so query `:CVE`. If a graph may still hold legacy nodes, use the portable form `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
+
+### Find critical CVEs
 ```cypher
-MATCH (v:Vulnerability)
-WHERE v.cvss_score >= 9.0
-RETURN v.cve_id, v.cvss_score, v.severity, v.zone
-ORDER BY v.cvss_score DESC
+MATCH (c:CVE)
+WHERE c.cvss_score >= 9.0
+RETURN c.cve_id, c.cvss_score, c.severity, c.zone
+ORDER BY c.cvss_score DESC
 LIMIT 20
 ```
 
-### Find healthcare-tagged vulnerabilities
-Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (see `src/neo4j_client.py:1580`), nodes ALSO get secondary labels (e.g. `:Vulnerability :Healthcare`). For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
+### Find healthcare-tagged CVEs
+Sectors are stored on the **`zone`** property (list of strings) at MERGE time. After the post-sync `apply_sector_labels()` call (see `src/neo4j_client.py:1580`), nodes ALSO get secondary labels (e.g. `:CVE :Healthcare`). For portable queries — pre or post `apply_sector_labels` — use the `zone` property:
 
 ```cypher
-MATCH (v:Vulnerability)
-WHERE 'healthcare' IN coalesce(v.zone, [])
-RETURN v.cve_id, v.cvss_score, v.description
+MATCH (c:CVE)
+WHERE 'healthcare' IN coalesce(c.zone, [])
+RETURN c.cve_id, c.cvss_score, c.description
 LIMIT 20
 ```
 
@@ -169,6 +171,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+_Last updated: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*

@@ -349,13 +349,17 @@ EdgeGuard uses a **weighted scoring system** to detect sectors from threat data,
 
 > **Scope:** The first queries use labels and properties written by **EdgeGuard’s default MISP→Neo4j pipeline** (`neo4j_client`, `build_relationships`). Patterns involving `Host`, `SoftwareVersion`, `IP`, `DomainName`, or sector **secondary labels** are **ResilMesh-shaped illustrations** — they are valid Cypher for a full CRUSOE graph but may not return rows until those node types are populated by your deployment.
 
-### Healthcare-related CVEs / vulnerabilities (zone property)
+### Healthcare-related CVEs (zone property)
+
+The sync writes CVEs under the **`:CVE`** label (`:Vulnerability` is legacy and empty on
+current baselines — see NEO4J_SAMPLE_QUERIES.md). Use the portable form if a graph may
+still hold legacy nodes: `MATCH (v) WHERE v:CVE OR v:Vulnerability`.
 
 ```cypher
-MATCH (v:Vulnerability)
-WHERE 'healthcare' IN coalesce(v.zone, []) AND coalesce(v.cvss_score, 0) >= 7.0
-RETURN v.cve_id, v.description, v.cvss_score
-ORDER BY v.cvss_score DESC
+MATCH (c:CVE)
+WHERE 'healthcare' IN coalesce(c.zone, []) AND coalesce(c.cvss_score, 0) >= 7.0
+RETURN c.cve_id, c.description, c.cvss_score
+ORDER BY c.cvss_score DESC
 ```
 
 ### Alert enrichment: trace indicator to actor
@@ -368,13 +372,13 @@ OPTIONAL MATCH (tech)-[:IN_TACTIC]->(tactic:Tactic)
 RETURN ind.value, m.name, ta.name, collect(DISTINCT tech.name) AS techniques, collect(DISTINCT tactic.name) AS tactics
 ```
 
-### Cross-zone: critical vulnerabilities (`zone` list contains `global`)
+### Cross-zone: critical CVEs (`zone` list contains `global`)
 
 ```cypher
-MATCH (v:Vulnerability)
-WHERE 'global' IN coalesce(v.zone, []) AND coalesce(v.cvss_score, 0) >= 9.0
-RETURN v.cve_id, v.description, v.first_seen
-ORDER BY v.first_seen DESC
+MATCH (c:CVE)
+WHERE 'global' IN coalesce(c.zone, []) AND coalesce(c.cvss_score, 0) >= 9.0
+RETURN c.cve_id, c.description, c.cvss_score
+ORDER BY c.cvss_score DESC
 ```
 
 ### Query all indicators in a Campaign
