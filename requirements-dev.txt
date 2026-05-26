@@ -10,3 +10,4 @@ pytest-asyncio~=0.24
 httpx~=0.28        # async test client for FastAPI
 ruff~=0.9          # linter / formatter
 mypy~=1.14         # static type checker
+websocket-client~=1.9  # Bolt-over-WSS bridge for Cloudflare-fronted Neo4j (scripts/neo4j_wss_bridge.py)
