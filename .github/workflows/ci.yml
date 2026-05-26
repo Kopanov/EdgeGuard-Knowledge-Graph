@@ -204,7 +204,23 @@ jobs:
           # entries as a temporary measure when the fix version is not yet
           # available, and always include a code comment explaining why
           # and a tracking ticket.
-          pip-audit -r requirements.txt --output json -o pip-audit.json
+          #
+          # IGNORED: PYSEC-2026-161 (CVE-2026-48710 / GHSA-86qp-5c8j-p5mr) —
+          # Starlette Host-header auth-bypass: a forged Host poisons
+          # request.url.path, bypassing PATH-BASED auth middleware. Fixed in
+          # starlette>=1.0.1.
+          #   WHY (temporary): the fix is NOT installable. apache-airflow-core
+          #   3.2.1 (latest stable; pulled via apache-airflow[postgres]~=3.2,
+          #   requirements.txt:81) pins `starlette<1,>=0.45.0`, and no stable
+          #   Airflow release yet permits starlette>=1.0.1. FastAPI (0.136.x,
+          #   `starlette>=0.46.0`) does NOT block it — a FastAPI bump is a no-op.
+          #   NOT EXPLOITABLE here: EdgeGuard's REST + GraphQL APIs authenticate
+          #   via an X-API-Key header (hmac.compare_digest), NOT path-based
+          #   middleware, and bind to 127.0.0.1 by default (refusing to start
+          #   unauthenticated on a non-loopback host). REMOVE this ignore once
+          #   Airflow permits starlette>=1.0.1.
+          #   Tracking: https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/121
+          pip-audit -r requirements.txt --ignore-vuln PYSEC-2026-161 --output json -o pip-audit.json
 
       - name: Upload audit results
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
