@@ -390,7 +390,15 @@ if MISP_API_KEY in _MISP_KEY_PLACEHOLDERS:
 
 
 class _SessionLike(Protocol):
-    headers: MutableMapping[str, str]
+    # Read-only property → the attribute is COVARIANT. requests 2.34.2 ships
+    # py.typed and types ``Session.headers`` as ``CaseInsensitiveDict[str]`` (a
+    # ``MutableMapping[str, str]`` *subtype*); an invariant *mutable attribute*
+    # would reject it (the type-check drift that broke CI's mypy job).
+    # ``apply_misp_http_host_header`` only mutates the mapping
+    # (``session.headers["Host"] = ...``) and never reassigns it, so a read-only
+    # property is sufficient and keeps ``requests.Session`` structurally matching.
+    @property
+    def headers(self) -> MutableMapping[str, str]: ...
 
 
 def get_edgeguard_misp_http_host() -> str:

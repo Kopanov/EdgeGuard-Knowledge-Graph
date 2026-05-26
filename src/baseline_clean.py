@@ -254,9 +254,10 @@ def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int
             with warnings.catch_warnings():
                 if not ssl_verify:
                     warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+                params: dict[str, str | int] = {"searchall": "EdgeGuard", "limit": 500, "page": page}
                 resp = sess.get(
                     f"{misp_url}/events/index",
-                    params={"searchall": "EdgeGuard", "limit": 500, "page": page},
+                    params=params,
                     verify=ssl_verify,
                     timeout=(10, 30),
                     allow_redirects=False,  # Red Team H1 — defense-in-depth
@@ -463,9 +464,10 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
         with warnings.catch_warnings():
             if not ssl_verify:
                 warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+            params: dict[str, str | int] = {"searchall": "EdgeGuard", "limit": 500, "page": page}
             resp = sess.get(
                 f"{misp_url}/events/index",
-                params={"searchall": "EdgeGuard", "limit": 500, "page": page},
+                params=params,
                 verify=ssl_verify,
                 timeout=(15, 60),
                 allow_redirects=False,  # Red Team H1
