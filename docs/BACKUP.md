@@ -3,7 +3,14 @@
 > **Status: ✅ Production-ready.** This procedure is the operator pre-requisite
 > for `edgeguard fresh-baseline` (the destructive command). Without an
 > up-to-date `EDGEGUARD_LAST_BACKUP_AT` timestamp, the CLI refuses to run
-> (PR-F2 backup-timestamp gate).
+> (PR-F2 backup-timestamp gate). **Since 2026-06 the same gate is also
+> enforced by the `baseline_clean` DAG task** for Airflow UI/API triggers
+> with `{"fresh_baseline": true}` — those used to bypass it entirely. The
+> DAG-side gate reads `EDGEGUARD_LAST_BACKUP_AT` from the **airflow
+> container environment** (passed through by docker-compose), auto-skips on
+> a clean install (Neo4j and MISP reachable and empty), and accepts an
+> explicit `{"skip_backup_check": true}` conf bypass (loudly logged; mirrors
+> the CLI `--skip-backup-check` flag).
 
 ## Why this exists
 
@@ -24,9 +31,12 @@ threat-intel collection. This document is the recovery story.
 docker compose exec neo4j neo4j-admin database dump neo4j --to-path=/backups
 docker compose exec misp /var/www/MISP/app/Console/cake admin event export json /backups/misp-events.json
 
-# 2. Update the freshness timestamp the CLI gate checks
+# 2. Update the freshness timestamp the gate checks.
+#    `up -d` (RECREATE), not `restart` — compose interpolates .env into the
+#    container environment at CREATE time only; a plain restart keeps the
+#    stale value and the DAG-side gate would still refuse.
 echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env
-docker compose restart api graphql airflow
+docker compose up -d api graphql airflow
 
 # 3. NOW you can run the destructive command
 edgeguard fresh-baseline --days 730

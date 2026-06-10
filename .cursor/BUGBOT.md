@@ -894,9 +894,9 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
 Flag any `Counter(...)` / `Gauge(...)` / `Histogram(...)` at module level that is not inside this guard.
 
 ### Metrics server binds to `0.0.0.0` by default
-`EDGEGUARD_METRICS_HOST` must default to `127.0.0.1` so the Prometheus metrics endpoint is not reachable from other hosts on the shared ResilMesh server.
+For **bare-metal / host runs**, `EDGEGUARD_METRICS_HOST` must default to `127.0.0.1` so the Prometheus metrics endpoint is not reachable from other hosts on the shared ResilMesh server.
 `0.0.0.0` is only acceptable when Prometheus runs on a separate machine and the override is explicitly documented in `.env.example`.
-Flag any change to `METRICS_HOST` that sets the default to `0.0.0.0`.
+**Docker exception (2026-06):** inside a compose service, container-loopback is unreachable by ANY scraper (it is not the host's loopback), so the airflow service defaults `EDGEGUARD_METRICS_HOST` to `0.0.0.0` **in-container** while host exposure stays loopback-only via a `127.0.0.1:8001:8001` port mapping — that pattern (in-container any-addr + host-loopback publish) is correct. Flag instead: (a) a metrics port mapping that binds `0.0.0.0` on the HOST side, or (b) a bare-metal default of `0.0.0.0`. The in-container bind is reachable by peer containers on `edgeguard_net`; the endpoint serves only Prometheus counters/gauges (no secrets) and `EDGEGUARD_ENABLE_METRICS` defaults to `false`.
 
 ### Health endpoint does not reflect actual dependency status
 The `/health` endpoint in both `src/query_api.py` and `src/graphql_api.py` must verify that Neo4j is reachable before returning `{"status": "ok"}`.

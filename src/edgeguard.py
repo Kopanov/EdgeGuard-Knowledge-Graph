@@ -2295,83 +2295,14 @@ def _check_recent_backup_timestamp() -> Optional[str]:
     production data unless a recent backup is recorded. See
     ``docs/BACKUP.md`` for the operator procedure.
 
-    Accepted timestamp formats:
-      - ISO 8601 ``YYYY-MM-DDTHH:MM:SSZ`` (recommended; UTC)
-      - ISO 8601 with ``+HH:MM`` timezone offset
-      - Unix epoch (integer seconds; treated as UTC)
+    The implementation moved to ``baseline_clean.check_recent_backup_timestamp``
+    (2026-06) so the destructive DAG task ``_baseline_clean`` enforces the
+    same gate — UI/API triggers used to bypass it entirely. This wrapper
+    keeps the established import path (and its tests) stable.
     """
-    from datetime import datetime, timezone
+    from baseline_clean import check_recent_backup_timestamp
 
-    raw = os.getenv("EDGEGUARD_LAST_BACKUP_AT", "").strip()
-    if not raw:
-        return (
-            "EDGEGUARD_LAST_BACKUP_AT is not set in the environment.\n"
-            "This must be set to the ISO timestamp (UTC) of your most recent\n"
-            "Neo4j + MISP backup before fresh-baseline will proceed."
-        )
-
-    # Try ISO 8601 first (the documented format)
-    parsed: Optional[datetime] = None
-    try:
-        # Accept "Z" suffix as +00:00 alias (per ISO 8601-1:2019)
-        normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        # Fall back to unix epoch (integer seconds)
-        try:
-            parsed = datetime.fromtimestamp(int(raw), tz=timezone.utc)
-        except (ValueError, OSError):
-            return (
-                f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is not parseable.\n"
-                "Expected ISO 8601 (e.g. ``2026-04-19T14:30:00Z``) or unix epoch seconds.\n"
-                'Set with: ``echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env``'
-            )
-
-    # Naive datetime → assume UTC (operators may forget the trailing Z)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-
-    # Default freshness window: 240h = 10 days. Operators can tighten via
-    # ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` env var (e.g. 24h for strict-RPO
-    # production). 240h reflects the typical operator cadence: take a
-    # backup once per ~10 days during which fresh-baseline can be
-    # re-triggered freely without re-backing-up. See docs/BACKUP.md for
-    # the operator workflow + RPO trade-off discussion.
-    try:
-        max_age_hours = float(os.getenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", "240"))
-    except (ValueError, TypeError):
-        max_age_hours = 240.0
-
-    age = datetime.now(timezone.utc) - parsed
-    age_hours = age.total_seconds() / 3600.0
-
-    if age_hours < 0:
-        return (
-            f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is in the future "
-            f"(by {-age_hours:.1f}h). Check your system clock or the env var value."
-        )
-    if age_hours > max_age_hours:
-        return (
-            f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is {age_hours:.1f}h old "
-            f"(max allowed: {max_age_hours:.1f}h via EDGEGUARD_BACKUP_MAX_AGE_HOURS, "
-            f"default 240h = 10 days).\n"
-            "Take a fresh backup and update the env var before proceeding."
-        )
-
-    # Gate passes — log the freshness state so operators can see WHY the
-    # gate accepted (and how much window is left before the next backup
-    # is required). Also helps debug "I just took a backup but the gate
-    # is rejecting" → the parsed/now math is exposed.
-    remaining_hours = max_age_hours - age_hours
-    logger.info(
-        "Backup-timestamp gate passed: backup is %.1fh old "
-        "(max %.1fh via EDGEGUARD_BACKUP_MAX_AGE_HOURS; %.1fh remaining "
-        "before next backup required).",
-        age_hours,
-        max_age_hours,
-        remaining_hours,
-    )
-    return None
+    return check_recent_backup_timestamp()
 
 
 def _trigger_baseline_dag(conf_json: str, *, timeout: int = 60) -> tuple[int, str]:
@@ -2558,7 +2489,10 @@ def cmd_fresh_baseline(args) -> int:
                 '    echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env',
                 file=sys.stderr,
             )
-            print("    docker compose restart api graphql airflow", file=sys.stderr)
+            # `up -d` (recreate), NOT `restart`: compose interpolates .env into
+            # the container environment at CREATE time only — a plain restart
+            # keeps the stale value and the gate would refuse again.
+            print("    docker compose up -d api graphql airflow", file=sys.stderr)
             print(file=sys.stderr)
             print("Or bypass for dev/test ONLY (data loss acceptable):", file=sys.stderr)
             print("  edgeguard fresh-baseline --skip-backup-check", file=sys.stderr)
@@ -2613,7 +2547,20 @@ def cmd_fresh_baseline(args) -> int:
     # Trigger the DAG via gh-style airflow CLI invocation.
     # Conf carries fresh_baseline=true (gates the new baseline_clean task)
     # AND baseline_days=N (resolved by the DAG's get_baseline_config).
-    conf_json = json.dumps({"fresh_baseline": True, "baseline_days": days})
+    # The third key tells the DAG-side backup gate (2026-06,
+    # _enforce_dag_backup_gate) why it must not re-check — the Airflow
+    # container env may legitimately lack EDGEGUARD_LAST_BACKUP_AT in the
+    # CLI flow. Honest audit trail: backup_check_passed_cli ONLY when the
+    # gate actually ran above (passed or clean-install auto-skip);
+    # an operator --skip-backup-check bypass propagates AS the bypass key,
+    # so the DAG logs it with the same WARNING framing as a UI bypass
+    # instead of a false "gate passed" attestation.
+    _conf: dict = {"fresh_baseline": True, "baseline_days": days}
+    if getattr(args, "skip_backup_check", False):
+        _conf["skip_backup_check"] = True
+    else:
+        _conf["backup_check_passed_cli"] = True
+    conf_json = json.dumps(_conf)
     info("Triggering edgeguard_baseline DAG with conf:")
     info(f"  {conf_json}")
 
@@ -3056,8 +3003,9 @@ Examples:
     fresh_baseline_p.add_argument(
         "--skip-backup-check",
         action="store_true",
-        help="Bypass the backup-timestamp gate (EDGEGUARD_LAST_BACKUP_AT must be < 24h "
-        "old, OR pass this flag). Use ONLY for dev/test where data loss is acceptable; "
+        help="Bypass the backup-timestamp gate (EDGEGUARD_LAST_BACKUP_AT must be within "
+        "EDGEGUARD_BACKUP_MAX_AGE_HOURS, default 240h, OR pass this flag). Use ONLY for "
+        "dev/test where data loss is acceptable; "
         "production runs MUST take a backup first (see docs/BACKUP.md)",
     )
 

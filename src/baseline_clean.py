@@ -154,6 +154,110 @@ class BaselineCleanError(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
+# Backup-timestamp gate — shared by the CLI wrapper AND the DAG wipe path
+# --------------------------------------------------------------------------- #
+
+
+def check_recent_backup_timestamp() -> Optional[str]:
+    """Verify ``EDGEGUARD_LAST_BACKUP_AT`` is set and within the freshness
+    window (default 240h / 10 days, override via
+    ``EDGEGUARD_BACKUP_MAX_AGE_HOURS``). See ``docs/BACKUP.md`` for the
+    rationale on the 240h default (operator cadence vs strict-RPO).
+
+    Returns:
+        ``None`` if the gate passes (operator has a recent backup);
+        a human-readable error message string if the gate fails.
+
+    PR-F2 audit fix (Devil's Advocate #1 + Prod Readiness BLOCK 1.1,
+    post-PR-C-merge): refuse to run ``edgeguard fresh-baseline`` against
+    production data unless a recent backup is recorded.
+
+    Moved here from ``src/edgeguard.py`` (2026-06) so the destructive DAG
+    task ``_baseline_clean`` can enforce the same gate — previously an
+    Airflow UI/API trigger with ``{"fresh_baseline": true}`` bypassed the
+    gate entirely because it only ran in the CLI wrapper. ``edgeguard.py``
+    keeps a thin delegating wrapper for backward compatibility.
+
+    Accepted timestamp formats:
+      - ISO 8601 ``YYYY-MM-DDTHH:MM:SSZ`` (recommended; UTC)
+      - ISO 8601 with ``+HH:MM`` timezone offset
+      - Unix epoch (integer seconds; treated as UTC)
+    """
+    from datetime import datetime, timezone
+
+    raw = os.getenv("EDGEGUARD_LAST_BACKUP_AT", "").strip()
+    if not raw:
+        return (
+            "EDGEGUARD_LAST_BACKUP_AT is not set in the environment.\n"
+            "This must be set to the ISO timestamp (UTC) of your most recent\n"
+            "Neo4j + MISP backup before fresh-baseline will proceed."
+        )
+
+    # Try ISO 8601 first (the documented format)
+    parsed: Optional[datetime] = None
+    try:
+        # Accept "Z" suffix as +00:00 alias (per ISO 8601-1:2019)
+        normalized = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        # Fall back to unix epoch (integer seconds)
+        try:
+            parsed = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        except (ValueError, OSError):
+            return (
+                f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is not parseable.\n"
+                "Expected ISO 8601 (e.g. ``2026-04-19T14:30:00Z``) or unix epoch seconds.\n"
+                'Set with: ``echo "EDGEGUARD_LAST_BACKUP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .env``'
+            )
+
+    # Naive datetime → assume UTC (operators may forget the trailing Z)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    # Default freshness window: 240h = 10 days. Operators can tighten via
+    # ``EDGEGUARD_BACKUP_MAX_AGE_HOURS`` env var (e.g. 24h for strict-RPO
+    # production). 240h reflects the typical operator cadence: take a
+    # backup once per ~10 days during which fresh-baseline can be
+    # re-triggered freely without re-backing-up. See docs/BACKUP.md for
+    # the operator workflow + RPO trade-off discussion.
+    try:
+        max_age_hours = float(os.getenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", "240"))
+    except (ValueError, TypeError):
+        max_age_hours = 240.0
+
+    age = datetime.now(timezone.utc) - parsed
+    age_hours = age.total_seconds() / 3600.0
+
+    if age_hours < 0:
+        return (
+            f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is in the future "
+            f"(by {-age_hours:.1f}h). Check your system clock or the env var value."
+        )
+    if age_hours > max_age_hours:
+        return (
+            f"EDGEGUARD_LAST_BACKUP_AT={raw!r} is {age_hours:.1f}h old "
+            f"(max allowed: {max_age_hours:.1f}h via EDGEGUARD_BACKUP_MAX_AGE_HOURS, "
+            f"default 240h = 10 days).\n"
+            "Take a fresh backup and update the env var before proceeding."
+        )
+
+    # Gate passes — log the freshness state so operators can see WHY the
+    # gate accepted (and how much window is left before the next backup
+    # is required). Also helps debug "I just took a backup but the gate
+    # is rejecting" → the parsed/now math is exposed.
+    remaining_hours = max_age_hours - age_hours
+    logger.info(
+        "Backup-timestamp gate passed: backup is %.1fh old "
+        "(max %.1fh via EDGEGUARD_BACKUP_MAX_AGE_HOURS; %.1fh remaining "
+        "before next backup required).",
+        age_hours,
+        max_age_hours,
+        remaining_hours,
+    )
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Probes — inline (no separate module; see header rationale)
 # --------------------------------------------------------------------------- #
 

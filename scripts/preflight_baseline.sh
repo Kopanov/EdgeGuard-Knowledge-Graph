@@ -207,12 +207,16 @@ else
   if ! command -v docker >/dev/null 2>&1; then
     warn "docker not found; cannot verify Airflow DAG pause state automatically"
   else
+    # Service name is `airflow` (single standalone container, docker-compose.yml)
+    # — the earlier worker-suffixed service name never existed in the shipped
+    # compose and made this check permanently inert (PR-N35 fixed the docs;
+    # this fixes the executable).
     for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
-      STATE=$(docker compose exec -T airflow-worker airflow dags details "$dag" 2>/dev/null | grep -iE '^is_paused' | awk '{print $NF}' || echo "")
+      STATE=$(docker compose exec -T airflow airflow dags details "$dag" 2>/dev/null | grep -iE '^is_paused' | awk '{print $NF}' || echo "")
       if [[ "$STATE" == "True" ]]; then
         pass "DAG $dag is PAUSED"
       elif [[ -z "$STATE" ]]; then
-        warn "DAG $dag state not queryable (airflow-worker unresponsive?)"
+        warn "DAG $dag state not queryable (airflow service unresponsive?)"
       else
         fail "DAG $dag is NOT paused — pause it before baseline (docs/RUNBOOK.md Option B). Issue #57."
       fi
@@ -225,13 +229,16 @@ fi
 # -----------------------------------------------------------------------------
 hdr "[6] Airflow worker RAM"
 if command -v docker >/dev/null 2>&1; then
-  MEM_BYTES=$(docker inspect edgeguard-airflow-worker 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); m=d[0].get('HostConfig',{}).get('Memory',0) or 0; print(m)" 2>/dev/null || echo "0")
+  # Container name per docker-compose.yml: `edgeguard_airflow` (underscore;
+  # the earlier hyphenated worker-suffixed name never existed — this check
+  # always read 0 bytes and could only WARN, never verify).
+  MEM_BYTES=$(docker inspect edgeguard_airflow 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); m=d[0].get('HostConfig',{}).get('Memory',0) or 0; print(m)" 2>/dev/null || echo "0")
   if [[ "$MEM_BYTES" -ge 4294967296 ]]; then
-    pass "airflow-worker memory limit $(($MEM_BYTES / 1024 / 1024)) MB (≥ 4 GB)"
+    pass "edgeguard_airflow memory limit $(($MEM_BYTES / 1024 / 1024)) MB (≥ 4 GB)"
   elif [[ "$MEM_BYTES" -eq 0 ]]; then
-    warn "airflow-worker has no Docker memory limit set — baseline might get OOM-killed by host"
+    warn "edgeguard_airflow has no Docker memory limit set — baseline might get OOM-killed by host"
   else
-    fail "airflow-worker memory limit $(($MEM_BYTES / 1024 / 1024)) MB is below 4 GB baseline minimum"
+    fail "edgeguard_airflow memory limit $(($MEM_BYTES / 1024 / 1024)) MB is below 4 GB baseline minimum"
   fi
 else
   warn "docker not available; skipping memory check"
@@ -313,21 +320,25 @@ fi
 # [8] no stale baseline_lock sentinel
 # -----------------------------------------------------------------------------
 hdr "[8] baseline_lock sentinel"
-if command -v docker >/dev/null 2>&1; then
-  if docker compose exec -T airflow-worker test -f /tmp/edgeguard/baseline_lock.sentinel 2>/dev/null; then
-    SENTINEL_AGE=$(docker compose exec -T airflow-worker stat -c %Y /tmp/edgeguard/baseline_lock.sentinel 2>/dev/null || echo "0")
-    NOW=$(date +%s)
-    AGE_H=$(( (NOW - SENTINEL_AGE) / 3600 ))
-    if [[ $AGE_H -gt 48 ]]; then
-      fail "stale baseline_lock.sentinel (age ${AGE_H}h) — previous baseline crashed; see baseline_lock.py:corrupt-sentinel-probe"
-    else
-      warn "baseline_lock.sentinel present (age ${AGE_H}h) — another baseline may be running"
-    fi
+# The real sentinel is `checkpoints/baseline_in_progress.lock` on the HOST
+# repo (written by the CLI baseline path — src/baseline_lock.py; override via
+# EDGEGUARD_BASELINE_LOCK_PATH). The earlier check docker-exec'd into a
+# nonexistent worker service and probed a tmp-dir sentinel path that appears
+# nowhere in the code — it could never detect a real stale lock. Check the
+# host file directly.
+LOCK_PATH="${EDGEGUARD_BASELINE_LOCK_PATH:-$ROOT/checkpoints/baseline_in_progress.lock}"
+if [[ -f "$LOCK_PATH" ]]; then
+  # GNU stat (Linux) first; BSD stat (macOS) fallback.
+  SENTINEL_AGE=$(stat -c %Y "$LOCK_PATH" 2>/dev/null || stat -f %m "$LOCK_PATH" 2>/dev/null || echo "0")
+  NOW=$(date +%s)
+  AGE_H=$(( (NOW - SENTINEL_AGE) / 3600 ))
+  if [[ $AGE_H -gt 48 ]]; then
+    fail "stale baseline lock $LOCK_PATH (age ${AGE_H}h) — previous baseline crashed; see baseline_lock.py:corrupt-sentinel-probe"
   else
-    pass "no stale baseline_lock sentinel"
+    warn "baseline lock $LOCK_PATH present (age ${AGE_H}h) — another baseline may be running"
   fi
 else
-  warn "docker not available; skipping sentinel check"
+  pass "no stale baseline_lock sentinel ($LOCK_PATH)"
 fi
 
 # -----------------------------------------------------------------------------

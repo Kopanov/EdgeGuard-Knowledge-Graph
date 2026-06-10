@@ -117,7 +117,7 @@ EdgeGuard **intentionally** uses **deterministic identity and merge rules** (Neo
 ### 🚧 In Progress
 
 - **Local operational hardening** — see [Issue #53](../../issues/53) (PR-E backlog) and post-merge audit follow-ups:
-  - ~~Backup + recovery procedure documentation~~ ✅ shipped in PR-F2 — see [docs/BACKUP.md](docs/BACKUP.md). `edgeguard fresh-baseline` now refuses to run unless `EDGEGUARD_LAST_BACKUP_AT` records a backup within 24h.
+  - ~~Backup + recovery procedure documentation~~ ✅ shipped in PR-F2 — see [docs/BACKUP.md](docs/BACKUP.md). `edgeguard fresh-baseline` refuses to run unless `EDGEGUARD_LAST_BACKUP_AT` records a backup within the freshness window (default 240h via `EDGEGUARD_BACKUP_MAX_AGE_HOURS`). Since 2026-06 the same gate is enforced by the `baseline_clean` DAG task, so UI/API-triggered destructive wipes can no longer bypass it.
   - Audit-trail JSONL for destructive operations
   - Prometheus counters for the destructive code path
   - MISP session helper consolidation (10 sites → single helper)
@@ -1210,7 +1210,7 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 
 ### 🛠️ Operator commands (added 2026-04-19, see PR-C)
 
-- **`edgeguard fresh-baseline --days N`** — destructive baseline trigger. Probes Neo4j + MISP for blast radius, shows counts ("you will permanently delete 347,197 nodes / 8,247 events / 12 checkpoints"), asks for typed confirmation (`FRESH-BASELINE`), then triggers the Airflow `edgeguard_baseline` DAG with `dag_run.conf={"fresh_baseline": true, "baseline_days": N}`. Refuses to proceed if Neo4j or MISP is unreachable (exit 2 = preflight failed; informed-consent principle).
+- **`edgeguard fresh-baseline --days N`** — destructive baseline trigger. Probes Neo4j + MISP for blast radius, shows counts ("you will permanently delete 347,197 nodes / 8,247 events / 12 checkpoints"), asks for typed confirmation (`FRESH-BASELINE`), then triggers the Airflow `edgeguard_baseline` DAG with `dag_run.conf={"fresh_baseline": true, "baseline_days": N, "backup_check_passed_cli": true}` (the third key attests the CLI-side backup gate ran; with `--skip-backup-check` it sends `"skip_backup_check": true` instead so the DAG logs the bypass — see `docs/AIRFLOW_DAGS.md` conf table). Refuses to proceed if Neo4j or MISP is unreachable (exit 2 = preflight failed; informed-consent principle).
 - **`edgeguard baseline --days N`** — additive baseline trigger. Existing data preserved. No confirmation prompt. Triggers the same DAG with `dag_run.conf={"baseline_days": N}` (no `fresh_baseline` key → DAG runs in additive mode).
 
 ### 🚧 In Progress / Planned
