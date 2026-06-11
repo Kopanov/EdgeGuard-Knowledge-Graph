@@ -27,6 +27,7 @@ from slowapi.util import get_remote_address
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from ioc_normalize import canonicalize_lookup, normalize_cve_id, normalize_mitre_technique_id
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -307,6 +308,10 @@ class IndicatorResponse(BaseModel):
     indicator: Optional[Dict[str, Any]] = None
     related: List[Dict[str, Any]] = []
     zone: Optional[str] = None
+    normalized_value: Optional[str] = Field(
+        default=None,
+        description="Canonical form of `value` bound into the graph MATCH (refanged + NFC + case-folded).",
+    )
 
 
 class ZoneThreatsResponse(BaseModel):
@@ -331,6 +336,33 @@ class GraphQueryRequest(BaseModel):
 
     cypher: str = Field(..., description="Cypher query to execute")
     parameters: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class ActorTechniqueSummary(BaseModel):
+    """One employed technique in an actor summary."""
+
+    mitre_id: Optional[str] = None
+    name: Optional[str] = None
+
+
+class ActorSummaryResponse(BaseModel):
+    """Threat-actor profile + top-N related entities with total counts."""
+
+    name: str
+    aliases: List[str] = []
+    description: Optional[str] = None
+    sophistication: Optional[str] = None
+    motivation: Optional[str] = None
+    confidence_score: Optional[float] = None
+    zone: List[str] = []
+    source: List[str] = []
+    resolved_by: str = Field(description="How the actor was matched: 'name' (canonical) or 'alias'.")
+    malware: List[str] = Field(default=[], description="Attributed malware names (up to 10).")
+    malware_total: int = 0
+    techniques: List[ActorTechniqueSummary] = Field(default=[], description="Employed techniques (up to 15).")
+    technique_total: int = 0
+    campaigns: List[str] = Field(default=[], description="Campaign names run by the actor (up to 5).")
+    campaign_total: int = 0
 
 
 # ============================================================================
@@ -440,6 +472,26 @@ async def search_indicator(request: Request, s: IndicatorSearch):
         raise HTTPException(status_code=503, detail="Neo4j not connected")
 
     try:
+        # READ-side canonicalization (src/ioc_normalize.py): infer the type
+        # when the caller omits it, then refang + NFC + case-fold so analyst
+        # paste variants ("EvIl[.]CoM", "EVIL.COM" with no type) hit the
+        # write-side MERGE keys — the SAME shared path the alert enrichment
+        # uses, so a value that enriches on ingest also resolves on search.
+        # Raw value stays echoed in the response.
+        _resolved_type, normalized_value = canonicalize_lookup(
+            s.indicator_type.value if s.indicator_type else None,
+            s.value,
+        )
+        # An empty/whitespace/zero-width-only input normalizes to "" — there
+        # is no graph key to look up, and MATCH {value: ""} could false-match
+        # a legacy empty-key node. Treat as not-found without querying.
+        if not normalized_value:
+            return IndicatorResponse(
+                value=s.value,
+                found=False,
+                zone=s.zone.value if s.zone else None,
+                normalized_value=normalized_value,
+            )
         with neo4j_client.driver.session() as session:
             # Find the indicator
             query = """
@@ -447,11 +499,16 @@ async def search_indicator(request: Request, s: IndicatorSearch):
                 WHERE n.edgeguard_managed = true
                 RETURN n LIMIT 1
             """
-            result = session.run(query, value=s.value, timeout=_NEO4J_QUERY_TIMEOUT)
+            result = session.run(query, value=normalized_value, timeout=_NEO4J_QUERY_TIMEOUT)
             record = result.single()
 
             if not record:
-                return IndicatorResponse(value=s.value, found=False, zone=s.zone.value if s.zone else None)
+                return IndicatorResponse(
+                    value=s.value,
+                    found=False,
+                    zone=s.zone.value if s.zone else None,
+                    normalized_value=normalized_value,
+                )
 
             indicator = dict(record["n"])
 
@@ -461,11 +518,16 @@ async def search_indicator(request: Request, s: IndicatorSearch):
                 WHERE n.edgeguard_managed = true
                 RETURN related LIMIT 10
             """
-            related_result = session.run(related_query, value=s.value, timeout=_NEO4J_QUERY_TIMEOUT)
+            related_result = session.run(related_query, value=normalized_value, timeout=_NEO4J_QUERY_TIMEOUT)
             related = [dict(r["related"]) for r in related_result]
 
             return IndicatorResponse(
-                value=s.value, found=True, indicator=indicator, related=related, zone=s.zone.value if s.zone else None
+                value=s.value,
+                found=True,
+                indicator=indicator,
+                related=related,
+                zone=s.zone.value if s.zone else None,
+                normalized_value=normalized_value,
             )
 
     except Exception:
@@ -1023,13 +1085,33 @@ async def stix_export(
     try:
         ot = object_type.lower()
         if ot == "indicator":
-            bundle = exporter.export_indicator(identifier, depth=depth)
+            # READ-side canonicalization: infer type from the value shape and
+            # refang + NFC + case-fold so a defanged / mixed-case IOC path
+            # ("EvIl[.]CoM", "EVIL.COM") resolves to the stored node — same
+            # shared path as /search/indicator and alert enrichment.
+            # canonicalize_lookup yields "" only for empty / whitespace /
+            # zero-width-only input — there is no graph key to export, so
+            # reject (same empty-key guard as /search/indicator) instead of
+            # running a MATCH on a meaningless value.
+            _t, _norm = canonicalize_lookup(None, identifier)
+            if not _norm:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Indicator identifier is empty after normalization.",
+                )
+            bundle = exporter.export_indicator(_norm, depth=depth)
         elif ot == "actor":
             bundle = exporter.export_threat_actor(identifier, depth=depth)
         elif ot == "technique":
-            bundle = exporter.export_technique(identifier, depth=depth)
+            # READ-side canonicalization (parity with the cve/indicator
+            # branches): 't1059' / 'T 1059' → 'T1059' (the graph stores the
+            # canonical uppercase Tnnnn(.nnn) form). Raw fallback when the
+            # paste isn't a recognizable technique id.
+            bundle = exporter.export_technique(normalize_mitre_technique_id(identifier) or identifier, depth=depth)
         elif ot == "cve":
-            bundle = exporter.export_cve(identifier, depth=depth)
+            # READ-side canonicalization: 'cve 2021 44228' / en-dash paste
+            # variants → 'CVE-2021-44228' (graph stores uppercase CVE ids).
+            bundle = exporter.export_cve(normalize_cve_id(identifier) or identifier, depth=depth)
         else:
             # Static error string (no f-string interpolation of the URL
             # path parameter). Every other HTTPException in this file uses
@@ -1050,6 +1132,111 @@ async def stix_export(
         content=bundle,
         media_type=StixExporter.MEDIA_TYPE,
     )
+
+
+# Alias-aware actor resolution + fenced aggregation, modeled on
+# stix_exporter.export_threat_actor: a ``WITH … collect(DISTINCT …)`` step
+# between every OPTIONAL MATCH keeps the row count bounded by one
+# collection at a time instead of the Cartesian product of all four.
+# Actor names are stored LOWERCASE at write time
+# (node_identity.canonicalize_merge_key); aliases keep display case — hence
+# toLower(trim(…)) on both the input and each alias. $name is ALWAYS a
+# bound parameter (Cypher-injection rule), never interpolated.
+_ACTOR_SUMMARY_CYPHER = """
+    MATCH (a:ThreatActor)
+    WHERE a.edgeguard_managed = true
+      AND (a.name = toLower(trim($name))
+           OR any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim($name))))
+    // Deterministic tiebreak: a canonical-NAME hit always wins over an
+    // alias-only hit, then by name for stability — so when two managed
+    // actors share the same alias string, we never return the wrong
+    // profile nondeterministically (Bugbot 2026-06).
+    WITH a, (CASE WHEN a.name = toLower(trim($name)) THEN 0 ELSE 1 END) AS _match_rank
+    ORDER BY _match_rank, a.name
+    LIMIT 1
+    OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
+      WHERE m.edgeguard_managed = true
+    WITH a, collect(DISTINCT m.name) AS malware_names
+    OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
+      WHERE t.edgeguard_managed = true
+    WITH a, malware_names, collect(DISTINCT t {.mitre_id, .name}) AS technique_rows
+    OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
+      WHERE c.edgeguard_managed = true
+    WITH a, malware_names, technique_rows, collect(DISTINCT c.name) AS campaign_names
+    RETURN a {.name, .aliases, .description, .sophistication, .motivation,
+              .primary_motivation, .confidence_score, .zone, .source} AS actor,
+           a.name = toLower(trim($name)) AS resolved_by_name,
+           malware_names[0..10] AS malware,
+           size(malware_names) AS malware_total,
+           technique_rows[0..15] AS techniques,
+           size(technique_rows) AS technique_total,
+           campaign_names[0..5] AS campaigns,
+           size(campaign_names) AS campaign_total
+"""
+
+
+def _as_str_list(val: Any) -> List[str]:
+    """Coerce a Neo4j property (scalar, list, or None) to a list of strings."""
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        return [str(v) for v in val]
+    return [str(val)]
+
+
+@app.get(
+    "/actors/{name}/summary",
+    response_model=ActorSummaryResponse,
+    dependencies=[Depends(_verify_api_key)],
+)
+@limiter.limit(_RATE_LIMIT_READ)
+async def actor_summary(request: Request, name: str):
+    """Summarize a threat actor: profile + attributed malware, employed
+    techniques, and campaigns (top-N lists with total counts).
+
+    Resolution is alias-aware and case-insensitive — ``name`` may be the
+    canonical (lowercase-stored) actor name or any alias in its observed
+    display case. Returns 404 when no actor matches.
+    """
+    if not neo4j_client or not neo4j_client.is_connected():
+        raise HTTPException(status_code=503, detail="Neo4j not connected")
+
+    try:
+        with neo4j_client.driver.session(default_access_mode="READ") as session:
+            record = session.run(_ACTOR_SUMMARY_CYPHER, name=name, timeout=_NEO4J_QUERY_TIMEOUT).single()
+
+        if not record:
+            raise HTTPException(status_code=404, detail="Threat actor not found")
+
+        actor = dict(record["actor"] or {})
+        techniques = [
+            ActorTechniqueSummary(mitre_id=t.get("mitre_id"), name=t.get("name"))
+            for t in (record["techniques"] or [])
+            if t
+        ]
+        return ActorSummaryResponse(
+            name=actor.get("name", ""),
+            aliases=_as_str_list(actor.get("aliases")),
+            description=actor.get("description"),
+            sophistication=actor.get("sophistication"),
+            motivation=actor.get("motivation") or actor.get("primary_motivation"),
+            confidence_score=actor.get("confidence_score"),
+            zone=_as_str_list(actor.get("zone")),
+            source=_as_str_list(actor.get("source")),
+            resolved_by="name" if record["resolved_by_name"] else "alias",
+            malware=[m for m in (record["malware"] or []) if m],
+            malware_total=record["malware_total"] or 0,
+            techniques=techniques,
+            technique_total=record["technique_total"] or 0,
+            campaigns=[c for c in (record["campaigns"] or []) if c],
+            campaign_total=record["campaign_total"] or 0,
+        )
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Actor summary failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error — see server logs")
 
 
 @app.post("/admin/query", dependencies=[Depends(_verify_api_key)])

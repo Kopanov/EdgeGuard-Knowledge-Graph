@@ -75,21 +75,23 @@ class TestFixANullEmptyAliasFilter:
     def _src(self) -> str:
         return (SRC / "build_relationships.py").read_text()
 
-    def test_q2_inner_list_comprehensions_filter_null_and_whitespace(self):
-        """Q2 inner has two list comprehensions (a.aliases + m.aliases).
-        Both must carry the ``WHERE x IS NOT NULL AND size(trim(x)) > 0``
-        filter."""
+    def test_q2_inner_list_comprehension_filters_null_and_whitespace(self):
+        """Q2 inner has ONE alias list comprehension since Branch 3
+        (a.name ∈ m.aliases) was removed 2026-06 as a forgery vector — only
+        Branch 2's a.aliases comprehension remains, and it must carry the
+        ``WHERE x IS NOT NULL AND size(trim(x)) > 0`` filter."""
         src = self._src()
         # Find Q2 block
         step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
         step3_idx = src.find("[LINK] 3a/12", step2_idx)
         block = src[step2_idx:step3_idx]
 
-        # Must have filter in both a.aliases and m.aliases comprehensions
         a_alias_filter = "x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"
-        m_alias_filter = "x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"
         assert a_alias_filter in block, "Q2 a.aliases comprehension must filter NULL/whitespace entries"
-        assert m_alias_filter in block, "Q2 m.aliases comprehension must filter NULL/whitespace entries"
+        # Branch 3's m.aliases comprehension must stay REMOVED (forgery vector).
+        assert "coalesce(m.aliases, [])" not in block, (
+            "Q2 must NOT read m.aliases — Branch 3 was removed as an attribution-forgery vector"
+        )
 
     def test_q9_inner_list_comprehension_filters_null_and_whitespace(self):
         """Q9 inner has one list comprehension (m.aliases). Must carry

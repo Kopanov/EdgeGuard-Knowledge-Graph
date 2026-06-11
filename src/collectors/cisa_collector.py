@@ -286,6 +286,20 @@ class CISACollector:
                         "known_ransomware_use": known_ransomware,
                         "cisa_cwes": vuln.get("cwes", []),
                         "cisa_notes": vuln.get("notes", ""),
+                        # KEV marker round-trip (2026-06): every CVE in this
+                        # feed IS the KEV list, but only NVD-sourced CVEs used
+                        # to get a queryable ``cisa_exploit_add`` property (via
+                        # NVD's cisaExploitAdd enrichment). CVEs known ONLY
+                        # from this collector reached Neo4j with no KEV marker
+                        # — 480 such CVEs on the 2026-04 baseline were
+                        # invisible to the ``ti-cve-kev`` query family. Emit
+                        # the same four cisa_* fields the NVD path emits;
+                        # misp_writer embeds them in the META comment and
+                        # run_misp_to_neo4j rehydrates them onto the CVE node.
+                        "cisa_exploit_add": date_added or "",
+                        "cisa_action_due": due_date or "",
+                        "cisa_required_action": required_action or "",
+                        "cisa_vulnerability_name": vuln.get("vulnerabilityName", "") or "",
                     }
                 )
 

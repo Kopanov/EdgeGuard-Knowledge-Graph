@@ -715,6 +715,40 @@ def normalize_misp_tag_list(tags: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
+    """Rehydrate ``alias:<name>`` MISP tags into an aliases list.
+
+    The MISP-side carrier is written by MISPWriter for ThreatActor and
+    Malware attributes (capped at 20 tags / 100 chars each at write time).
+    This is the read half of the alias round-trip (2026-06) — before it
+    existed, parse_attribute hardcoded ``aliases: []`` and every
+    MISP-sourced actor/malware lost its aliases, disabling the
+    alias-matching branches in build_relationships Q2/Q9.
+
+    Entries are NFC-normalized (parity with node_identity name handling —
+    build_relationships Q2/Q9 compare via ``toLower(trim(...))`` which does
+    NOT unicode-normalize, so a non-NFC alias like NFD "Café" would never
+    match an NFC-stored actor name without this). Order-preserving
+    case-insensitive dedup. Not otherwise filtered here — merge_actor /
+    merge_malware apply the PR-N14 sanitizer (50-item cap, placeholder
+    filter, 200-char truncation) downstream, keeping one enforcement point.
+    """
+    import unicodedata
+
+    aliases: List[str] = []
+    seen: set = set()
+    for tag in tags:
+        tag_name = tag.get("name", "")
+        if not isinstance(tag_name, str) or not tag_name.startswith("alias:"):
+            continue
+        alias = unicodedata.normalize("NFC", tag_name[len("alias:") :]).strip()
+        key = alias.lower()
+        if alias and key not in seen:
+            seen.add(key)
+            aliases.append(alias)
+    return aliases
+
+
 # STIX 2.1 Cyber-observable Objects (SCOs) — the spec does not define ``labels`` on these types.
 # Manual conversion uses ``x_edgeguard_zones`` for SCOs; PyMISP ``to_stix2()`` output must be patched the same way.
 STIX_21_SCO_TYPES: FrozenSet[str] = frozenset(
@@ -2859,6 +2893,16 @@ class MISPToNeo4jSync:
                     }
                 )
 
+            # Alias round-trip (2026-06): MISPWriter exports actor aliases as
+            # ``alias:<name>`` tags, but this parser used to hardcode
+            # ``aliases: []`` — every MISP-sourced actor reached Neo4j with
+            # zero aliases (0/917 on the 2026-04 baseline), silently disabling
+            # the alias-matching branches in build_relationships Q2 and any
+            # alias-based lookup ("Cozy Bear" → APT29). Rehydrate here;
+            # merge_actor sanitizes downstream (PR-N14: 50-item cap,
+            # placeholder filter, 200-char truncation).
+            actor_aliases = _extract_alias_tags(tags)
+
             # PR (S5): source-truthful timestamps when source is on the
             # reliable allowlist (NVD/CISA/MITRE/etc.). Returns (None, None)
             # for unreliable sources so first_seen_at_source stays NULL.
@@ -2866,7 +2910,7 @@ class MISPToNeo4jSync:
             item = {
                 "type": "actor",
                 "name": actor_name,
-                "aliases": [],
+                "aliases": actor_aliases,
                 "description": actor_description,
                 "uses_techniques": uses_techniques,
                 "zone": zones,
@@ -2927,11 +2971,21 @@ class MISPToNeo4jSync:
                     }
                 )
 
+            # Alias round-trip (2026-06): same carrier as actors — MISPWriter
+            # exports ATT&CK malware aliases (x_mitre_aliases) as ``alias:``
+            # tags; rehydrate so build_relationships Q9 INDICATES
+            # (i.malware_family ∈ m.aliases) has data. merge_malware
+            # sanitizes downstream. (Malware aliases no longer feed actor
+            # attribution — the Q2 Branch-3 path was removed as a forgery
+            # vector; only the actor's OWN aliases drive ATTRIBUTED_TO.)
+            malware_aliases = _extract_alias_tags(tags)
+
             # PR (S5): source-truthful timestamps via allowlist-gated helper.
             _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "malware",
                 "name": malware_name,
+                "aliases": malware_aliases,
                 "malware_types": malware_types if malware_types else ["unknown"],
                 "family": value,
                 "description": description,

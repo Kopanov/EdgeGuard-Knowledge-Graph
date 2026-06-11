@@ -178,6 +178,55 @@ class TestActorPropertyPromotion:
         assert "n.resource_level = $resource_level" in cypher_text
 
 
+class TestAliasPersistence:
+    """End-to-end (merge-level) assertion that the alias round-trip's
+    rehydrated aliases actually land as a queryable ``aliases`` node
+    property — the round-trip tests in test_alias_kev_roundtrip stop at
+    parse_attribute and mock the merge, so this closes that gap (audit #10).
+    The aliases property is what build_relationships Q2/Q9 read."""
+
+    def _merge_cypher_and_params(self, session):
+        cypher_call = session.run.call_args_list[1]  # [0] pre-check, [1] merge
+        return cypher_call[0][0], (cypher_call[1] if len(cypher_call) > 1 else {})
+
+    def test_actor_aliases_persisted_via_dedup_concat(self, mock_neo4j_client):
+        client, session = mock_neo4j_client
+        client.merge_actor(
+            {
+                "name": "apt29",
+                "aliases": ["Cozy Bear", "The Dukes"],
+                "source": ["mitre_attck"],
+                "zone": ["global"],
+                "confidence_score": 0.9,
+            },
+            source_id="mitre_attck",
+        )
+        cypher_text, params = self._merge_cypher_and_params(session)
+        # aliases must reach the SET clause via the dedup-concat helper
+        # (apoc.coll.toSet), and the sanitized list must be a bound param.
+        assert "n.aliases" in cypher_text and "apoc.coll.toSet" in cypher_text, (
+            "ThreatActor.aliases must be promoted via the dedup-concat SET form"
+        )
+        assert params.get("aliases") == ["Cozy Bear", "The Dukes"]
+
+    def test_malware_aliases_persisted(self, mock_neo4j_client):
+        client, session = mock_neo4j_client
+        client.merge_malware(
+            {
+                "name": "wellmess",
+                "aliases": ["WellMess", "BOTLIB"],
+                "malware_types": ["backdoor"],
+                "source": ["mitre_attck"],
+                "zone": ["global"],
+                "confidence_score": 0.8,
+            },
+            source_id="mitre_attck",
+        )
+        cypher_text, params = self._merge_cypher_and_params(session)
+        assert "n.aliases" in cypher_text and "apoc.coll.toSet" in cypher_text
+        assert params.get("aliases") == ["WellMess", "BOTLIB"]
+
+
 class TestCVSSNullFiltering:
     """CVSS nodes must filter None/empty values before SET."""
 
