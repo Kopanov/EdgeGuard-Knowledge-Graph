@@ -269,15 +269,30 @@ def merge_node(existing, new):
 | AbuseIPDB | `abuseConfidenceScore / 100.0` | Vendor-supplied 0-100 score divided to 0-1 range |
 | ThreatFox / global feeds | 0.5 / 0.6 / vendor-supplied | `global_feed_collector.py`; vendor-supplied takes precedence |
 
-**Confidence Calculation:**
-```
-final_confidence = source_confidence * data_quality_factor
+**Confidence Calculation (as actually implemented):**
 
-# data_quality_factor accounts for:
-# - Completeness of attributes (0.8-1.0)
-# - Age of data (newer = higher)
-# - Number of sources confirming (more = higher)
-```
+> **Docs correction (2026-06):** earlier versions described a
+> `final_confidence = source_confidence * data_quality_factor` formula.
+> No `data_quality_factor` exists anywhere in the code — that formula was
+> aspirational and is removed so downstream consumers (including the
+> Stage-2 fine-tuning dataset) don't learn semantics the system doesn't
+> have. The real model is three independent layers:
+
+1. **Source prior at ingest** — the per-source values in the table above,
+   set by each collector when the item is created.
+2. **Co-occurrence calibration** (post-sync, `enrichment_jobs.py`
+   `calibrate_cooccurrence`): co-occurrence-derived `INDICATES` edges from
+   large bulk-feed MISP events are down-weighted (event-size based) into
+   the 0.30-0.50 band; calibrated edges carry `r.calibrated_at`.
+3. **Time decay** (post-sync, `enrichment_jobs.py` `decay_ioc_confidence`):
+   Indicator/Vulnerability confidence x0.85 at 90-180 days, x0.70 at
+   180-365 days (floor 0.10), `active=false` retirement past 365 days;
+   decayed nodes carry `last_decayed_tier`.
+
+When explaining a score, cite the layer that produced it (source prior vs
+`r.calibrated_at` vs `last_decayed_tier`) — multi-source corroboration is
+visible through per-source `SOURCED_FROM` edges, not folded into a single
+multiplier.
 
 ---
 
@@ -448,4 +463,4 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._
+_Last updated: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._

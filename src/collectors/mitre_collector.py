@@ -425,6 +425,14 @@ class MITRECollector:
                         {
                             "type": "malware",
                             "name": obj.get("name", ""),
+                            # ATT&CK malware SDOs carry aliases in the MITRE
+                            # extension field ``x_mitre_aliases`` (the plain
+                            # ``aliases`` key only exists on intrusion-sets).
+                            # Load-bearing for build_relationships Q2 branch 3
+                            # (actor name ∈ malware.aliases) and Q9
+                            # (i.malware_family ∈ m.aliases) — added 2026-06
+                            # with the alias round-trip fix.
+                            "aliases": obj.get("x_mitre_aliases", []) or obj.get("aliases", []),
                             # STIX 2 uses ``labels``; some bundles also use ``malware_types``.
                             "malware_types": obj.get("malware_types", []) or obj.get("labels", []),
                             "family": obj.get("name", ""),

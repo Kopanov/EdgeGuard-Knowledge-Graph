@@ -426,6 +426,15 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
         "sha1",
         "sha256",
         "sha512",
+        # The sync pipeline's TYPE_MAPPING (run_misp_to_neo4j.py) collapses
+        # md5/sha1/sha256/sha512 → "hash" and btc → "bitcoin" BEFORE merge,
+        # so the granular names above never reach the graph as
+        # indicator_type — only these collapsed names do. Without them here
+        # (2026-06 fix), file hashes were stored with whatever case the
+        # source emitted and an uppercase-pasted SHA256 lookup missed.
+        # Granular names are kept for callers that canonicalize pre-mapping.
+        "hash",
+        "bitcoin",
         "ssdeep",
         "imphash",
         "ja3",

@@ -1183,6 +1183,13 @@ class MISPWriter:
                 nvd_fields["cvss_v31_data"],
                 nvd_fields["cvss_v30_data"],
                 nvd_fields["cvss_v2_data"],
+                # KEV marker round-trip (2026-06): CISA-collector CVEs carry
+                # cisa_exploit_add but none of the NVD enrichment fields above,
+                # so the META comment was skipped and the KEV marker silently
+                # dropped between MISP and Neo4j (480 KEV-only CVEs on the
+                # 2026-04 baseline had no queryable KEV property). The KEV date
+                # alone now qualifies the attribute for the META carrier.
+                nvd_fields["cisa_exploit_add"],
             ]
         )
 
@@ -1259,6 +1266,17 @@ class MISPWriter:
         if family and family != name:
             tags.append(f"malware-family:{family}")
 
+        # Add alias tags (2026-06, alias round-trip): same carrier as actors.
+        # ATT&CK malware aliases (x_mitre_aliases) are load-bearing for
+        # build_relationships Q2 branch 3 (actor name ∈ m.aliases) and Q9
+        # (i.malware_family ∈ m.aliases) — without this tag the aliases
+        # never survived the MISP round-trip. Cap matches the actor path.
+        aliases = malware.get("aliases", [])
+        for alias in aliases[:20]:
+            alias_s = sanitize_value(str(alias), max_length=100)
+            if alias_s:
+                tags.append(f"alias:{alias_s}")
+
         # Add MITRE ATT&CK galaxy tag for malware - CRITICAL for STIX conversion
         tags.append(f'misp-galaxy:malware="{name}"')
 
@@ -1327,9 +1345,16 @@ class MISPWriter:
         else:
             tags.append(f"source:{source}")
 
-        # Add alias tags
+        # Add alias tags — the MISP-side carrier for the alias round-trip:
+        # run_misp_to_neo4j.parse_attribute rehydrates ``alias:`` tags into
+        # item["aliases"], which merge_actor persists (PR-N14 sanitizer
+        # downstream: 50-item cap + placeholder filter + 200-char truncation).
+        # Cap raised 5 → 20 (2026-06): MITRE intrusion-sets commonly carry
+        # 5-10 aliases and the old cap could drop the very alias an analyst
+        # searches by ("Cozy Bear" vs "APT29"); 20 covers the ATT&CK p99
+        # while still bounding MISP tag growth from a hostile feed.
         aliases = actor.get("aliases", [])
-        for alias in aliases[:5]:  # Limit to 5 aliases
+        for alias in aliases[:20]:
             alias_s = sanitize_value(str(alias), max_length=100)
             if alias_s:
                 tags.append(f"alias:{alias_s}")
