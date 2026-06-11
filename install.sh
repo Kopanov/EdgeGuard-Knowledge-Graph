@@ -258,7 +258,7 @@ PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
 REQUIRED="3.12"
 
 if ! python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)"; then
-    error "Python $REQUIRED+ required (found $PYTHON_VERSION). Apache Airflow 2.11 supports 3.11+ upstream; EdgeGuard standardizes on 3.12+ (see pyproject.toml)."
+    error "Python $REQUIRED+ required (found $PYTHON_VERSION). Apache Airflow 3.2 supports 3.10-3.14 upstream (see Dockerfile.airflow); EdgeGuard standardizes on 3.12+ (see pyproject.toml)."
     exit 1
 fi
 info "Python $PYTHON_VERSION"
@@ -292,10 +292,16 @@ info "EdgeGuard installed"
 # Airflow is heavy — offer it separately
 echo ""
 warn "Airflow not installed by default (large dependency). To add it:"
-echo "    pip install -e '.[airflow]'    # or: pip install apache-airflow~=2.11"
+echo "    pip install -e '.[airflow]'"
+echo "    # (installs apache-airflow[postgres]~=3.2 + apache-airflow-providers-standard~=1.5 —"
+echo "    #  the standard provider is REQUIRED: the DAGs import BashOperator/PythonOperator/"
+echo "    #  ShortCircuitOperator from it on Airflow 3.x)"
 echo ""
-warn "Airflow webserver must run on port 8082 (not 8080) alongside ResilMesh:"
-echo "    export AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8082"
+warn "Airflow API server must run on port 8082 (not 8080) alongside ResilMesh:"
+echo "    # Airflow 3.x: the port moved from [webserver] to [api] — the old"
+echo "    # AIRFLOW__WEBSERVER__WEB_SERVER_PORT key silently does nothing (PR #26)."
+echo "    export AIRFLOW__API__PORT=8082"
+echo "    export AIRFLOW__API__BASE_URL=http://localhost:8082   # task-execution API derives from base_url, not port"
 
 section "Verifying installation"
 if python3 -c "import edgeguard" 2>/dev/null; then
