@@ -725,18 +725,23 @@ def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
     MISP-sourced actor/malware lost its aliases, disabling the
     alias-matching branches in build_relationships Q2/Q9.
 
-    Order-preserving dedup (case-insensitive); entries are NOT otherwise
-    filtered here — merge_actor/merge_malware apply the PR-N14 sanitizer
-    (50-item cap, placeholder filter, 200-char truncation) downstream,
-    keeping a single enforcement point.
+    Entries are NFC-normalized (parity with node_identity name handling —
+    build_relationships Q2/Q9 compare via ``toLower(trim(...))`` which does
+    NOT unicode-normalize, so a non-NFC alias like NFD "Café" would never
+    match an NFC-stored actor name without this). Order-preserving
+    case-insensitive dedup. Not otherwise filtered here — merge_actor /
+    merge_malware apply the PR-N14 sanitizer (50-item cap, placeholder
+    filter, 200-char truncation) downstream, keeping one enforcement point.
     """
+    import unicodedata
+
     aliases: List[str] = []
     seen: set = set()
     for tag in tags:
         tag_name = tag.get("name", "")
         if not isinstance(tag_name, str) or not tag_name.startswith("alias:"):
             continue
-        alias = tag_name[len("alias:") :].strip()
+        alias = unicodedata.normalize("NFC", tag_name[len("alias:") :]).strip()
         key = alias.lower()
         if alias and key not in seen:
             seen.add(key)

@@ -55,8 +55,14 @@ _DEFANG_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\[:\]"), ":"),
     # Bracketed at-sign: user[@]example.com → user@example.com
     (re.compile(r"\[@\]"), "@"),
-    # Spelled-out at-sign (optional surrounding spaces): user [at] example → user@example
-    (re.compile(r"\s*[\[(]at[\])]\s*", re.IGNORECASE), "@"),
+    # Spelled-out at-sign — BALANCED bracket pairs only ([at] or (at), not
+    # the mismatched [at) / (at]). Surrounding whitespace IS consumed
+    # because the email defang convention is "user [at] example [dot] com";
+    # the filename-corruption risk the review flagged ("data [at] rest.txt"
+    # → "data@rest.txt") is handled upstream by type-scoping in
+    # normalize_indicator_value (refang only runs for network/email types,
+    # never filename/regkey/cmdline).
+    (re.compile(r"\s*(?:\[at\]|\(at\))\s*", re.IGNORECASE), "@"),
     # Defanged schemes — only with an explicit ``://`` following, so plain
     # words containing "hxxp" are never rewritten.
     (re.compile(r"hxxps(?=://)", re.IGNORECASE), "https"),
@@ -77,8 +83,13 @@ def refang(value: str) -> str:
     (``node_identity._ZERO_WIDTH_AND_BIDI_TRANSLATE`` — parity guarantee),
     and strips surrounding whitespace.
 
-    Idempotent (substitutions run to a bounded fixpoint) and never raises:
-    non-``str`` input is returned unchanged.
+    Idempotent for realistic inputs: substitutions run to a fixpoint
+    bounded at ``_REFANG_MAX_PASSES`` passes, which resolves any practical
+    nesting depth (each pass peels one bracket level). Pathologically deep
+    adversarial nesting (>8 levels) may stop one pass short of the fixpoint
+    — acceptable because the only consequence is a lookup miss, never a
+    crash (all patterns are linear-time; no ReDoS). Never raises: non-``str``
+    input is returned unchanged.
     """
     if not isinstance(value, str):
         return value
@@ -90,6 +101,14 @@ def refang(value: str) -> str:
         if out == prev:
             break
     return out.strip()
+
+
+# Indicator types where defanging is a real analyst convention, so refang
+# is safe to apply. Brackets/`(at)` in any OTHER type (filename, regkey,
+# cmdline, …) may be literal content, so refang is NOT applied there.
+_REFANGABLE_INDICATOR_TYPES = frozenset(
+    {"ipv4", "ipv6", "ip", "domain", "hostname", "url", "email", "email-src", "email-dst"}
+)
 
 
 # Indicator types where case IS meaningful — mirror of the exclusion list
@@ -107,27 +126,37 @@ _HEX_VALUE_RE = re.compile(r"[0-9a-fA-F]+")
 def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     """Normalize an analyst-supplied indicator value for graph lookup.
 
-    Pipeline: :func:`refang` → NFC-normalize + strip → lowercase IFF the
-    type is in ``node_identity._CASE_INSENSITIVE_INDICATOR_TYPES`` (the
-    exact set the write side consults in ``canonicalize_merge_key`` — this
-    is the write-side parity guarantee: the value bound into a read-side
-    ``MATCH`` equals the value the write side used as its MERGE key).
+    Pipeline: :func:`refang` (only for network types where defanging is a
+    convention — see ``_REFANGABLE_INDICATOR_TYPES``) → NFC-normalize +
+    strip → lowercase IFF the type is in
+    ``node_identity._CASE_INSENSITIVE_INDICATOR_TYPES`` (the exact set the
+    write side consults in ``canonicalize_merge_key`` — the write-side
+    parity guarantee: the value bound into a read-side ``MATCH`` equals the
+    value the write side used as its MERGE key). ``hash`` is in that set
+    today, so file hashes fold via set membership.
 
-    When ``indicator_type`` is None or not a recognized type (neither
-    case-insensitive nor known case-sensitive — e.g. ``hash``,
-    ``file_hash``), a hex-hash heuristic applies: a pure-hex value of
-    length 32/40/64/128 (md5/sha1/sha256/sha512) is lowercased, matching
-    how the write side stores those digests under their concrete types.
-    The generic ``hash`` type is intentionally routed through the
-    heuristic rather than the set membership (a parallel change may add
-    ``hash`` to the write-side set; both routes converge on lowercase).
+    Type-name reconciliation: the ResilMesh/Wazuh alert vocab uses ``ip``
+    and ``file_hash``; these are mapped to the write-side equivalents
+    (``ipv4``/``ipv6`` are both case-insensitive so ``ip`` folds; ``hash``
+    folds) so an uppercase IPv6 or hash from an alert still matches the
+    lowercased stored node.
+
+    For an unknown/None type a hex-hash heuristic is the last resort: a
+    pure-hex value of length 32/40/64/128 is lowercased.
 
     Never raises: non-``str`` ``value`` is returned unchanged.
     """
     if not isinstance(value, str):
         return value
-    out = unicodedata.normalize("NFC", refang(value)).strip()
     itype = indicator_type.strip().lower() if isinstance(indicator_type, str) else None
+    base = refang(value) if (itype is None or itype in _REFANGABLE_INDICATOR_TYPES) else value
+    out = unicodedata.normalize("NFC", base).strip()
+    # Alert-vocab → write-vocab: 'ip' covers ipv4+ipv6 (both case-insensitive);
+    # 'file_hash'/'filehash' → 'hash' (in the case-insensitive set).
+    if itype == "ip":
+        return out.lower()
+    if itype in ("file_hash", "filehash"):
+        itype = "hash"
     if itype in _CASE_INSENSITIVE_INDICATOR_TYPES:
         return out.lower()
     if itype is None or itype not in _KNOWN_CASE_SENSITIVE_INDICATOR_TYPES:

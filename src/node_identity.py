@@ -427,14 +427,19 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
         "sha256",
         "sha512",
         # The sync pipeline's TYPE_MAPPING (run_misp_to_neo4j.py) collapses
-        # md5/sha1/sha256/sha512 → "hash" and btc → "bitcoin" BEFORE merge,
-        # so the granular names above never reach the graph as
-        # indicator_type — only these collapsed names do. Without them here
-        # (2026-06 fix), file hashes were stored with whatever case the
-        # source emitted and an uppercase-pasted SHA256 lookup missed.
-        # Granular names are kept for callers that canonicalize pre-mapping.
+        # md5/sha1/sha256/sha512 → "hash" BEFORE merge, so the granular
+        # names above never reach the graph as indicator_type — only the
+        # collapsed "hash" does. Without it here (2026-06 fix), file hashes
+        # were stored with whatever case the source emitted and an
+        # uppercase-pasted SHA256 lookup missed. Hex digests are genuinely
+        # case-insensitive, so folding is safe.
+        # NOTE: btc → "bitcoin" is also collapsed by TYPE_MAPPING but is
+        # DELIBERATELY excluded — legacy Base58 BTC addresses are
+        # case-sensitive (lowercasing breaks the Base58 checksum and the
+        # value no longer identifies any on-chain address). The pre-existing
+        # "btc"/"xmr"/"eth" entries below predate this fix and are left
+        # untouched (out of scope), but no NEW crypto-address type folding.
         "hash",
-        "bitcoin",
         "ssdeep",
         "imphash",
         "ja3",

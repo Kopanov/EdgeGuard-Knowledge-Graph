@@ -53,7 +53,7 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `EMPLOYS_TECHNIQUE` | ThreatActor → Technique | **Attribution.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
 | `IMPLEMENTS_TECHNIQUE` | Malware → Technique | **Capability.** MITRE STIX explicit `uses` relationship via `uses_techniques` (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
 | `IMPLEMENTS_TECHNIQUE` | Tool → Technique | **Capability.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
-| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` name matching |
+| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` name matching — `m.attributed_to` exact match, OR alias match against `a.aliases` / `m.aliases`. ThreatActor and Malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06 fix); ATT&CK malware aliases come from `x_mitre_aliases`. |
 | `INDICATES` | Indicator → Malware | MISP event co-occurrence (confidence 0.5) **and** malware_family name match from ThreatFox/VT (confidence 0.8) |
 | `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag exact match (confidence 1.0) |
 | `REFERS_TO` | Vulnerability ↔ CVE | `bridge_vulnerability_cve()` |
@@ -191,6 +191,11 @@ CREATE INDEX indicator_zone IF NOT EXISTS FOR (i:Indicator) ON (i.zone);
 CREATE INDEX malware_name IF NOT EXISTS FOR (m:Malware) ON (m.name);
 CREATE INDEX actor_name IF NOT EXISTS FOR (a:ThreatActor) ON (a.name);
 CREATE INDEX technique_mitre IF NOT EXISTS FOR (t:Technique) ON (t.mitre_id);
+
+// CVE prioritization range scans (2026-06, GraphRAG): CVSS-threshold
+// filters and the CISA-KEV (cisa_exploit_add IS NOT NULL) query family.
+CREATE INDEX cve_cvss_score IF NOT EXISTS FOR (c:CVE) ON (c.cvss_score);
+CREATE INDEX cve_cisa_exploit_add IF NOT EXISTS FOR (c:CVE) ON (c.cisa_exploit_add);
 
 // Original source tracking
 CREATE INDEX indicator_original_source IF NOT EXISTS FOR (i:Indicator) ON (i.original_source);
@@ -403,8 +408,7 @@ ORDER BY i.last_updated DESC
 
 ---
 
-_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification:_
-
+_Last updated: 2026-06-11 — PR #126: documented the alias round-trip (ThreatActor/Malware `aliases` survive the MISP round-trip via `alias:` tags; ATT&CK malware aliases from `x_mitre_aliases`) on the ATTRIBUTED_TO matching note, and added the cve_cvss_score + cve_cisa_exploit_add range indexes. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification:_
 - _Verified all confidence values match `src/build_relationships.py`:
   EMPLOYS_TECHNIQUE = 0.95 (line 5/12), IMPLEMENTS_TECHNIQUE = 0.95
   (lines 6/12 and 10/12), USES_TECHNIQUE = 0.85 (8/12 — OTX

@@ -22,11 +22,13 @@ time (which is why they ship before the planned fresh baseline):
    emits the four cisa_* fields and misp_writer's META-carrier gate now
    accepts ``cisa_exploit_add`` alone as qualification.
 
-3. **Hash/bitcoin case canonicalization.** The sync pipeline's
-   TYPE_MAPPING collapses md5/sha1/sha256/sha512 → "hash" and
-   btc → "bitcoin" BEFORE merge, but _CASE_INSENSITIVE_INDICATOR_TYPES
-   only listed the granular names — file hashes were stored with
-   source-supplied case and an uppercase-pasted SHA256 lookup missed.
+3. **Hash case canonicalization.** The sync pipeline's TYPE_MAPPING
+   collapses md5/sha1/sha256/sha512 → "hash" BEFORE merge, but
+   _CASE_INSENSITIVE_INDICATOR_TYPES only listed the granular names —
+   file hashes were stored with source-supplied case and an
+   uppercase-pasted SHA256 lookup missed. Only "hash" is added; "bitcoin"
+   (also collapsed by TYPE_MAPPING) is DELIBERATELY excluded because
+   Base58 BTC addresses are case-sensitive (folding breaks the checksum).
 """
 
 from __future__ import annotations
@@ -225,10 +227,20 @@ class TestKevMarkerRoundTrip:
         assert item.get("cisa_vulnerability_name") == "Example RCE Vulnerability"
 
     def test_cisa_collector_emits_kev_fields(self, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+
         from collectors.cisa_collector import CISACollector
 
         collector = CISACollector.__new__(CISACollector)
-        collector.tag = "cisa"
+        # Real __init__ resolves the tag via SOURCE_TAGS["cisa"] == "cisa_kev";
+        # mirror that canonical value so the fake doesn't drift from prod.
+        collector.tag = "cisa_kev"
+        # dateAdded must stay inside the collector's now()-relative
+        # incremental window (default 30 days) — hardcoding a fixed date
+        # would silently expire and fail CI ~30 days after merge. Use
+        # "yesterday" so it's always within any sane window.
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        due = (datetime.now(timezone.utc) + timedelta(days=20)).strftime("%Y-%m-%d")
         monkeypatch.setattr(
             collector,
             "_fetch_kev",
@@ -240,8 +252,8 @@ class TestKevMarkerRoundTrip:
                     "vulnerabilityName": "Example RCE Vulnerability",
                     "shortDescription": "RCE in example product",
                     "requiredAction": "Apply updates per vendor instructions.",
-                    "dateAdded": "2026-05-30",
-                    "dueDate": "2026-06-20",
+                    "dateAdded": recent,
+                    "dueDate": due,
                     "knownRansomwareCampaignUse": "Known",
                     "cwes": ["CWE-94"],
                     "notes": "",
@@ -252,14 +264,14 @@ class TestKevMarkerRoundTrip:
         items = result if isinstance(result, list) else (result.get("items") or [])
         assert items, f"expected processed items from collect(), got: {type(result).__name__}"
         item = items[0]
-        assert item["cisa_exploit_add"] == "2026-05-30"
-        assert item["cisa_action_due"] == "2026-06-20"
+        assert item["cisa_exploit_add"] == recent
+        assert item["cisa_action_due"] == due
         assert item["cisa_required_action"] == "Apply updates per vendor instructions."
         assert item["cisa_vulnerability_name"] == "Example RCE Vulnerability"
 
 
 # ---------------------------------------------------------------------------
-# 3. Hash / bitcoin case canonicalization
+# 3. Hash case canonicalization (bitcoin DELIBERATELY excluded)
 # ---------------------------------------------------------------------------
 
 
@@ -271,14 +283,18 @@ class TestCollapsedTypeCaseCanonicalization:
             "TYPE_MAPPING stores file hashes as indicator_type='hash' — it must canonicalize like sha256"
         )
 
-    def test_bitcoin_type_is_case_insensitive(self):
+    def test_bitcoin_type_stays_case_sensitive(self):
+        """Base58 BTC addresses are case-sensitive — lowercasing breaks the
+        checksum and the value no longer identifies any on-chain address.
+        'bitcoin' must NOT be in the case-insensitive set (review caught an
+        earlier draft that wrongly folded it)."""
         upper = canonicalize_merge_key(
-            "Indicator", {"indicator_type": "bitcoin", "value": "1A1ZP1EP5QGEFI2DMPTFTL5SLMV7DIVFNA"}
+            "Indicator", {"indicator_type": "bitcoin", "value": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"}
         )
         lower = canonicalize_merge_key(
             "Indicator", {"indicator_type": "bitcoin", "value": "1a1zp1ep5qgefi2dmptftl5slmv7divfna"}
         )
-        assert upper == lower
+        assert upper != lower, "bitcoin Base58 addresses must NOT be case-folded"
 
     def test_url_stays_case_sensitive(self):
         a = canonicalize_merge_key("Indicator", {"indicator_type": "url", "value": "http://x/PATH"})
@@ -292,16 +308,35 @@ class TestCollapsedTypeCaseCanonicalization:
 
 
 class TestMitreMalwareAliasExtraction:
-    def test_source_extracts_x_mitre_aliases(self):
-        """Source pin: ATT&CK malware SDOs carry aliases ONLY in
-        x_mitre_aliases (plain `aliases` exists on intrusion-sets) — the
-        malware branch must read the extension field."""
+    def test_malware_item_dict_assigns_aliases_from_x_mitre_aliases(self):
+        """Source pin (parsing is inline in collect(), no isolatable method
+        to drive — so pin the exact assignment, not just substring presence
+        which a comment could satisfy). ATT&CK malware SDOs carry aliases
+        ONLY in x_mitre_aliases (the plain `aliases` key is intrusion-set
+        only), so the malware item dict must read the extension field with
+        the documented fallback."""
+        import re as _re
+
         with open(os.path.join(_SRC, "collectors", "mitre_collector.py")) as fh:
             src = fh.read()
-        assert "x_mitre_aliases" in src
         idx = src.find("malware.append(")
         assert idx > 0
-        block = src[idx : idx + 800]
-        assert '"aliases"' in block and "x_mitre_aliases" in block, (
-            "the malware item dict must emit an aliases field (from x_mitre_aliases) for the MISP round-trip"
+        block = src[idx : idx + 1200]
+        # The actual code line: "aliases": obj.get("x_mitre_aliases", []) or obj.get("aliases", [])
+        assert _re.search(r'"aliases"\s*:\s*obj\.get\(\s*"x_mitre_aliases"', block), (
+            "malware item dict must assign aliases from obj.get('x_mitre_aliases', ...)"
+        )
+
+    def test_actor_item_dict_keeps_plain_aliases(self):
+        """Counterpart pin: intrusion-sets DO use the plain `aliases` key —
+        the actor branch must not be switched to x_mitre_aliases."""
+        import re as _re
+
+        with open(os.path.join(_SRC, "collectors", "mitre_collector.py")) as fh:
+            src = fh.read()
+        idx = src.find("actors.append(")
+        assert idx > 0
+        block = src[idx : idx + 1200]
+        assert _re.search(r'"aliases"\s*:\s*obj\.get\(\s*"aliases"', block), (
+            "actor item dict must keep obj.get('aliases', ...) (intrusion-set key)"
         )

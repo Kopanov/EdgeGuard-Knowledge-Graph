@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-04-26** — PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Cross-link to [`BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md) for the operator pre-launch pass and to [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) (PR-N32) for the unicode-bypass audit. Prior: 2026-04-18 PR #41 cleanup pass.
+**Last updated: 2026-06-11** — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -500,6 +500,8 @@ ResilMesh exposes two query interfaces:
 
 **EdgeGuard GraphQL** (`src/graphql_api.py`, Strawberry + FastAPI) also listens on **4001** by default (`EDGEGUARD_GRAPHQL_PORT`). **Auth:** when `EDGEGUARD_API_KEY` is set in the environment, requests must include header **`X-Api-Key`**. **GraphiQL** is off unless `EDGEGUARD_GRAPHQL_PLAYGROUND=true`. **Rate limiting:** default **120 requests/minute** per IP (`slowapi`). **Health:** `GET /health` — **HTTP 200** only when Neo4j is healthy (ping + APOC); **503** otherwise. (REST API on port 8000 always returns **200** with `neo4j_connected` in JSON — see [README.md](../README.md) § *HTTP APIs*.)
 
+**SOC-analyst REST endpoints (port 8000):** `GET /actors/{name}/summary` (2026-06) resolves a threat actor by canonical name **or alias** (case-insensitive; `resolved_by` reports which) and returns an aggregated profile — attributed malware, employed techniques, campaigns, with counts — backing analyst "tell me about this actor" queries. Analyst-supplied IOC/CVE/technique inputs at the REST and GraphQL boundaries are refanged + canonicalized to graph form via `src/ioc_normalize.py` (write-side parity), so defanged paste (`1.2.3[.]4`, `hxxp://`), uppercase hashes, and en-dash CVE ids resolve to the stored nodes.
+
 **Real example from ISIM README** — query an IP address and trace to its missions:
 ```graphql
 query IPaddresses {
@@ -704,3 +706,4 @@ RETURN
 | [`docs/BASELINE_LAUNCH_CHECKLIST.md`](BASELINE_LAUNCH_CHECKLIST.md) | **PR-N32:** the 6-section pre-launch operator pass that must be walked through before triggering a 730d baseline (preflight, smoke, Alertmanager wiring, MISP scale, RAM/disk, unicode-bypass audit) |
 | [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 | **PR-N31:** operator triage tree for `_MispFallbackHardError` (4 hard-failure modes: errors-payload, unexpected-shape, non-200, cap-hit) |
 | [`scripts/audit_legacy_unicode_bypass_nodes.py`](../scripts/audit_legacy_unicode_bypass_nodes.py) | **PR-N32:** read-only audit of legacy `Malware`/`ThreatActor`/`Tool` nodes with zero-width / bidi-control / variation-selector chars in their `name` (created BEFORE the PR-N29 L1 placeholder filter landed) |
+

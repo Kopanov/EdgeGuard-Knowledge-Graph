@@ -536,6 +536,25 @@ def build_relationships():
             # real-actor names). Deferred pending design discussion.
             # See: 7-agent pre-baseline audit Red-Team BLOCK #19
             # (2026-04-21), PR-N14 body.
+            #
+            # TODO (2026-06 UPDATE to Red-Team BLOCK #19) — surface change,
+            # NOT yet fixed: before the alias round-trip fix, MISP-sourced
+            # Malware reached Neo4j with ``aliases=[]`` (parse_attribute
+            # hardcoded it), so branch 3 could never fire on the EdgeGuard
+            # MISP round-trip path — the vector was dormant there and only
+            # reachable via direct Neo4j writes. Now that
+            # ``_extract_alias_tags`` rehydrates ``alias:`` tags, a malware
+            # attribute carrying ``alias:APT29`` WILL forge attribution.
+            # This is the SAME trust model the rest of the pipeline already
+            # lives under (an untrusted MISP writer can already forge zones /
+            # source-truthful timestamps), governed by the staged MISP trust
+            # boundary ``EDGEGUARD_TRUSTED_MISP_ORG_UUIDS`` / ``_NAMES``
+            # (src/source_trust.py; Tier-3 fail-closed boot refusal is the
+            # roadmapped close — docs/SECURITY_ROADMAP.md). Operators
+            # federating an untrusted MISP MUST set that allowlist. Closing
+            # branch 3 (option c) or gating alias-derived attribution on the
+            # trusted-org check (option a) is now higher priority given the
+            # path is live; tracked for the post-baseline hardening pass.
             f"   OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]"
             ") "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "

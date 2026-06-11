@@ -281,18 +281,21 @@ def merge_node(existing, new):
 1. **Source prior at ingest** — the per-source values in the table above,
    set by each collector when the item is created.
 2. **Co-occurrence calibration** (post-sync, `enrichment_jobs.py`
-   `calibrate_cooccurrence`): co-occurrence-derived `INDICATES` edges from
-   large bulk-feed MISP events are down-weighted (event-size based) into
-   the 0.30-0.50 band; calibrated edges carry `r.calibrated_at`.
+   `calibrate_cooccurrence_confidence`): co-occurrence-derived `INDICATES`
+   **and** `EXPLOITS` edges from large bulk-feed MISP events are
+   down-weighted by event size into the 0.30–0.50 band (≤10 → 0.50,
+   ≤20 → 0.45, ≤100 → 0.40, ≤500 → 0.35, >500 → 0.30); only edges marked
+   `misp_cooccurrence` / `misp_correlation` are touched.
 3. **Time decay** (post-sync, `enrichment_jobs.py` `decay_ioc_confidence`):
-   Indicator/Vulnerability confidence x0.85 at 90-180 days, x0.70 at
-   180-365 days (floor 0.10), `active=false` retirement past 365 days;
-   decayed nodes carry `last_decayed_tier`.
+   tiered by label — **Indicator** ×0.85 at 90–180 days, ×0.70 at
+   180–365 days; **Vulnerability** ×0.90 at 90–180 days, ×0.80 at
+   180–365 days; both retire (`active=false`) past 365 days. Decayed
+   nodes carry `last_decayed_tier`.
 
-When explaining a score, cite the layer that produced it (source prior vs
-`r.calibrated_at` vs `last_decayed_tier`) — multi-source corroboration is
-visible through per-source `SOURCED_FROM` edges, not folded into a single
-multiplier.
+When explaining a score, cite the layer that produced it (source prior, the
+co-occurrence calibration band, or the `last_decayed_tier`) — multi-source
+corroboration is visible through per-source `SOURCED_FROM` edges, not
+folded into a single multiplier.
 
 ---
 

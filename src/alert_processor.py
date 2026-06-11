@@ -223,21 +223,28 @@ class AlertProcessor:
             logger.error("[ERR] Cannot process alert - Neo4j not connected")
             return self._create_error_response(alert, "Neo4j connection failed")
 
+        # Canonicalize the indicator ONCE, BEFORE the write — refang + NFC +
+        # case-fold (src/ioc_normalize.py, write-side parity). This must run
+        # before process_complete_resilmesh_alert so the WRITE path
+        # (create_indicator_from_alert MERGEs (:Indicator {value:$value}))
+        # and the READ path (enrichment MATCH below) agree on the same
+        # canonical value. Normalizing only the read key (the earlier
+        # 2026-06 version) created a read-after-write split: a defanged or
+        # uppercase alert value was persisted raw, then looked up canonical,
+        # so the enrichment never found the node it had just written.
+        # Propagate into both alert_data["threat"] (consumed by the write)
+        # and alert.threat (consumed below).
+        _raw_indicator = alert.threat.get("indicator")
+        if not _raw_indicator:
+            return self._create_error_response(alert, "No indicator in alert")
+        indicator_type = alert.threat.get("type", "unknown")
+        indicator = normalize_indicator_value(alert.threat.get("type"), _raw_indicator)
+        alert.threat["indicator"] = indicator
+        if isinstance(alert_data.get("threat"), dict):
+            alert_data["threat"]["indicator"] = indicator
+
         # Step 1-7: Process complete ResilMesh alert (create all nodes and relationships)
         self.neo4j.process_complete_resilmesh_alert(alert_data)
-
-        # Extract indicator from threat
-        indicator = alert.threat.get("indicator")
-        indicator_type = alert.threat.get("type", "unknown")
-
-        if not indicator:
-            return self._create_error_response(alert, "No indicator in alert")
-
-        # READ-side canonicalization (src/ioc_normalize.py): refang + NFC +
-        # case-fold so every $indicator bound into the enrichment Cypher
-        # below matches the write-side MERGE keys. The enrichment payload
-        # echoes the normalized form (it is the graph-canonical identity).
-        indicator = normalize_indicator_value(alert.threat.get("type"), indicator)
 
         # Step 8: Query Neo4j for enrichment
         enrichment_data = self._enrich_indicator(indicator, indicator_type, alert)
