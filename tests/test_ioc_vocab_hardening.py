@@ -137,6 +137,31 @@ class TestCreateIndicatorFromAlertVocabParity:
         client.create_indicator_from_alert("EvIl[.]CoM", None, "global")
         assert _merged_params(session) == ("domain", "evil.com")
 
+    def test_uninferable_unknown_type_keys_unknown_not_null(self, mock_neo4j_client):
+        # Bugbot (PR #130): "unknown" type + a value no shape claims resolves
+        # to None — a null MERGE-key property raises in Neo4j and the
+        # indicator would be silently dropped. Must coalesce to the graph's
+        # "unknown" sentinel (the same key TYPE_MAPPING stores for MISP
+        # text attributes, and the same coalesce alert_processor applies).
+        client, session = mock_neo4j_client
+        assert client.create_indicator_from_alert("randomstring123", "unknown", "global") is True
+        itype, value = _merged_params(session)
+        assert itype == "unknown"
+        assert value == "randomstring123"
+
+    def test_uninferable_none_type_keys_unknown_not_null(self, mock_neo4j_client):
+        client, session = mock_neo4j_client
+        client.create_indicator_from_alert("randomstring123", None, "global")
+        itype, _ = _merged_params(session)
+        assert itype == "unknown"
+
+    def test_inferable_unknown_type_still_infers(self, mock_neo4j_client):
+        # The coalesce must NOT defeat inference: "unknown" + an IP-shaped
+        # value still keys ipv4 (the PR #126 domain-parity behavior).
+        client, session = mock_neo4j_client
+        client.create_indicator_from_alert("192.168.1.100", "unknown", "global")
+        assert _merged_params(session) == ("ipv4", "192.168.1.100")
+
     def test_empty_value_never_merges(self, mock_neo4j_client):
         client, session = mock_neo4j_client
         assert client.create_indicator_from_alert("   ", "domain", "global") is False

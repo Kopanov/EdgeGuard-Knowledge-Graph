@@ -6267,6 +6267,14 @@ class Neo4jClient:
                 f"(type={indicator_type!r}) — skipping Indicator MERGE"
             )
             return False
+        # Bugbot (PR #130): a blank/"unknown" type whose value is NOT
+        # shape-inferable resolves to None — and a null MERGE-key property
+        # raises in Neo4j, silently dropping the indicator. Coalesce to the
+        # graph's "unknown" sentinel: the exact key the sync stores for
+        # un-typeable values (TYPE_MAPPING "text" → "unknown") and the same
+        # coalesce alert_processor applies (`resolved_type or "unknown"`),
+        # so the alert path keys the node sync data already uses.
+        normalized_type = normalized_type or "unknown"
 
         # zone is now an array
         zone_array = zones if zones else (zone if isinstance(zone, list) else [zone])
