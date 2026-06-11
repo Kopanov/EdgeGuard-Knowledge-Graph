@@ -149,6 +149,13 @@ def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     if not isinstance(value, str):
         return value
     itype = indicator_type.strip().lower() if isinstance(indicator_type, str) else None
+    # "unknown" is EdgeGuard's sentinel for "no type given" (the default the
+    # alert path fills in), so treat it identically to a missing type — both
+    # get refang + the hex-hash heuristic. Without this, a missing-type alert
+    # (itype=None → refang) and an explicit type="unknown" alert (refang
+    # skipped) normalized the SAME value differently.
+    if itype == "unknown":
+        itype = None
     base = refang(value) if (itype is None or itype in _REFANGABLE_INDICATOR_TYPES) else value
     out = unicodedata.normalize("NFC", base).strip()
     # Alert-vocab → write-vocab: 'ip' covers ipv4+ipv6 (both case-insensitive);

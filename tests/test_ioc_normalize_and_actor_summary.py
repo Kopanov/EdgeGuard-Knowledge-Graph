@@ -488,3 +488,26 @@ class TestAlertProcessorNormalization:
         session, _result = self._process({"indicator": "D" * 64, "type": "file_hash"})
         bound = [params["indicator"] for _q, params in session.calls if "indicator" in params]
         assert bound and all(v == "d" * 64 for v in bound)
+
+    def test_missing_type_and_unknown_type_normalize_identically(self):
+        """Bugbot: a defanged value with NO type vs an explicit
+        type='unknown' must produce the same canonical indicator (both are
+        'no type given' — refang applies to both)."""
+        s_missing, _ = self._process({"indicator": "EvIl[.]CoM"})
+        s_unknown, _ = self._process({"indicator": "EvIl[.]CoM", "type": "unknown"})
+        miss = [p["indicator"] for _q, p in s_missing.calls if "indicator" in p]
+        unk = [p["indicator"] for _q, p in s_unknown.calls if "indicator" in p]
+        assert miss and unk
+        # Both refang (→ "EvIl.CoM") but neither case-folds: an unknown type
+        # isn't known case-insensitive (and this isn't a hex hash). The point
+        # is they AGREE — no missing-vs-"unknown" divergence.
+        assert miss == unk == ["EvIl.CoM"] * len(miss)
+
+    def test_whitespace_only_indicator_is_rejected_after_normalization(self):
+        """Bugbot: a whitespace/zero-width-only value passes the raw
+        truthiness check but normalizes to '' — it must be rejected, not
+        reported enriched against an empty key, and must NOT write a node."""
+        session, result = self._process({"indicator": "  ​ \t ", "type": "domain"})
+        assert result.enriched is False
+        bound = [p["indicator"] for _q, p in session.calls if "indicator" in p]
+        assert all(v.strip() for v in bound), "no Cypher should bind an empty/whitespace $indicator"

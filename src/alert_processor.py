@@ -233,12 +233,16 @@ class AlertProcessor:
         # uppercase alert value was persisted raw, then looked up canonical,
         # so the enrichment never found the node it had just written.
         # Propagate into both alert_data["threat"] (consumed by the write)
-        # and alert.threat (consumed below).
-        _raw_indicator = alert.threat.get("indicator")
-        if not _raw_indicator:
-            return self._create_error_response(alert, "No indicator in alert")
+        # and alert.threat (consumed below). Validate AFTER normalization:
+        # a whitespace/zero-width-only value passes a raw-truthiness check
+        # but normalizes to "" — which would skip node creation yet still
+        # report enriched=True against an empty lookup key. The same resolved
+        # type feeds normalization and enrichment so "unknown" vs missing
+        # type can't diverge.
         indicator_type = alert.threat.get("type", "unknown")
-        indicator = normalize_indicator_value(alert.threat.get("type"), _raw_indicator)
+        indicator = normalize_indicator_value(indicator_type, alert.threat.get("indicator"))
+        if not isinstance(indicator, str) or not indicator.strip():
+            return self._create_error_response(alert, "No indicator in alert")
         alert.threat["indicator"] = indicator
         if isinstance(alert_data.get("threat"), dict):
             alert_data["threat"]["indicator"] = indicator
