@@ -79,9 +79,14 @@ def refang(value: str) -> str:
 
     Rewrites only the common defang vocabulary (``hxxp(s)://``, ``[.]``,
     ``(.)``, ``{.}``, ``[:]``, ``[at]``/``(at)``/``[@]``), strips the
-    zero-width/bidi control characters via the write-side translate table
-    (``node_identity._ZERO_WIDTH_AND_BIDI_TRANSLATE`` — parity guarantee),
-    and strips surrounding whitespace.
+    zero-width/bidi control characters using
+    ``node_identity._ZERO_WIDTH_AND_BIDI_TRANSLATE`` (the SAME table the
+    write side uses — but only to REJECT such values via
+    ``is_placeholder_name``, not to scrub them out of a stored value). So
+    the zero-width strip here is a READ-side defense for analyst paste; it
+    is NOT a two-way parity guarantee — a feed that managed to persist a
+    value with embedded zero-width chars would not be found by a stripped
+    lookup. Also strips surrounding whitespace.
 
     Idempotent for realistic inputs: substitutions run to a fixpoint
     bounded at ``_REFANG_MAX_PASSES`` passes, which resolves any practical
@@ -181,6 +186,56 @@ _IPV4_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
 _IPV6_RE = re.compile(r"(?=.*:)[0-9A-Fa-f:]+(?:%[0-9A-Za-z]+)?")
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 _DOMAIN_RE = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+# Final labels that are common file/document extensions, NOT real TLDs —
+# guards against a bare typeless filename ("pos-malware.exe", "report.pdf")
+# being mislabeled a domain (→ wrong block-recommendation + mistyped node).
+# A single-label value like "evil.exe" is rejected; a genuinely multi-label
+# host ("mail.evil.com") is unaffected. (.zip/.mov ARE real TLDs now, so
+# they are deliberately NOT here — folding their case is harmless anyway.)
+_FILE_EXTENSION_FINAL_LABELS = frozenset(
+    {
+        "exe",
+        "dll",
+        "sys",
+        "bin",
+        "dat",
+        "scr",
+        # NOTE: ".com" is deliberately EXCLUDED — it is overwhelmingly the
+        # most common domain TLD; the legacy DOS .com executable is
+        # vanishingly rare in modern CTI, and treating .com as a file
+        # extension would mislabel every .com DOMAIN as untyped.
+        "bat",
+        "cmd",
+        "ps1",
+        "vbs",
+        "js",
+        "jar",
+        "msi",
+        "tmp",
+        "log",
+        "ini",
+        "cfg",
+        "txt",
+        "csv",
+        "pdf",
+        "doc",
+        "docx",
+        "xls",
+        "xlsx",
+        "ppt",
+        "pptx",
+        "rtf",
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "bmp",
+        "iso",
+        "img",
+        "lnk",
+        "hta",
+    }
+)
 
 
 def _is_ipv4(value: str) -> bool:
@@ -225,12 +280,43 @@ def infer_indicator_type(value: str) -> Optional[str]:
         return "ipv6"
     if len(v) in _HEX_HASH_LENGTHS and _HEX_VALUE_RE.fullmatch(v):
         return "hash"
-    # Domain/hostname: dotted labels, alpha TLD, and none of the characters
-    # that would make it a URL / email / path (so "data.txt" with no path is
-    # the only realistic false positive — and folding its case is harmless).
+    # Domain/hostname: dotted labels, alpha TLD, none of the URL/email/path
+    # characters — AND the final label is not a common file extension (so a
+    # bare typeless filename "pos-malware.exe" stays unknown rather than
+    # being mislabeled a domain and given a bogus DNS-sinkhole recommendation).
     if not any(c in v for c in "/\\@ \t") and _DOMAIN_RE.fullmatch(v):
-        return "domain"
+        if v.rsplit(".", 1)[-1].lower() not in _FILE_EXTENSION_FINAL_LABELS:
+            return "domain"
     return None
+
+
+def canonicalize_lookup(indicator_type: Optional[str], value: str) -> tuple[Optional[str], str]:
+    """Read-side lookup canonicalization shared by every entrypoint that
+    resolves an analyst/sensor-supplied indicator against the graph (REST
+    /search/indicator, STIX indicator export, alert enrichment).
+
+    Returns ``(resolved_type, normalized_value)``:
+      - ``resolved_type`` is the given type, or — when it is missing /
+        ``"unknown"`` — the type inferred from the value's shape
+        (:func:`infer_indicator_type`), or ``None`` if uninferable.
+      - ``normalized_value`` is :func:`normalize_indicator_value` applied
+        with the resolved type (refang + NFC + case-fold to the write-side
+        MERGE key), stripped. May be ``""`` when the input is empty /
+        whitespace / non-str — callers MUST treat ``""`` as "no usable
+        lookup key" and not run a graph query against it.
+
+    Centralizing this prevents the per-entrypoint drift where one path
+    inferred + folded while another bound the raw value, so identical paste
+    enriched on ingest yet returned not-found on search.
+    """
+    itype = indicator_type
+    if (itype is None or (isinstance(itype, str) and itype.strip().lower() == "unknown")) and isinstance(value, str):
+        inferred = infer_indicator_type(value)
+        if inferred:
+            itype = inferred
+    normalized = normalize_indicator_value(itype, value)
+    normalized = normalized.strip() if isinstance(normalized, str) else ""
+    return itype, normalized
 
 
 # Accepts analyst paste variants: 'CVE-2021-44228', 'cve 2021 44228',
@@ -258,7 +344,12 @@ def normalize_cve_id(value: str) -> Optional[str]:
     return f"CVE-{match.group(1)}-{match.group(2)}"
 
 
-_MITRE_TECHNIQUE_RE = re.compile(r"t\s*(\d{4})(\.(\d{3}))?", re.IGNORECASE)
+# Trailing ``(?![.\d])`` guard: after the (optional) sub-technique, the next
+# char must not be a digit or a dot. So an over-long run ("T10590") or a
+# malformed sub ("T1059.0012", "T1059.01") fails to match outright rather
+# than silently truncating to a DIFFERENT real technique ("T1059"). Groups:
+# 1 = 4-digit base, 2 = 3-digit sub (or None).
+_MITRE_TECHNIQUE_RE = re.compile(r"t\s*(\d{4})(?:\.(\d{3}))?(?![.\d])", re.IGNORECASE)
 
 
 def normalize_mitre_technique_id(value: str) -> Optional[str]:
@@ -277,5 +368,5 @@ def normalize_mitre_technique_id(value: str) -> Optional[str]:
     match = _MITRE_TECHNIQUE_RE.search(refang(value))
     if not match:
         return None
-    sub = match.group(3)
+    sub = match.group(2)
     return f"T{match.group(1)}.{sub}" if sub else f"T{match.group(1)}"

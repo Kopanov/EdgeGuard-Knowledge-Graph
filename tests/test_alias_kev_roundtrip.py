@@ -191,8 +191,10 @@ class TestKevMarkerRoundTrip:
         "cve_id": "CVE-2026-12345",
         "description": "Known exploited vulnerability",
         "zone": ["global"],
-        "tag": "cisa",
-        "source": ["cisa"],
+        # Mirror the real collector: CISACollector emits tag/source =
+        # SOURCE_TAGS["cisa"] which resolves to the canonical "cisa_kev".
+        "tag": "cisa_kev",
+        "source": ["cisa_kev"],
         "confidence_score": 0.9,
         "severity": "CRITICAL",
         "cvss_score": 9.0,

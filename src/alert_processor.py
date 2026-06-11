@@ -9,6 +9,7 @@ This module aligns EdgeGuard's Neo4j schema with ResilMesh alert format:
 - Returns enriched responses on: resilmesh.enriched.alerts
 """
 
+import copy
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ from typing import Any, Dict, List, Optional
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ioc_normalize import infer_indicator_type, normalize_indicator_value
+from ioc_normalize import canonicalize_lookup
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -214,6 +215,12 @@ class AlertProcessor:
         """
         start_time = datetime.now(timezone.utc)
 
+        # Snapshot the RAW alert before any normalization mutates it — the
+        # response's original_alert must be the verbatim incoming payload
+        # (e.g. the defanged "hxxp://evil[.]com" the sensor sent), not the
+        # canonicalized form this method writes back into alert_data below.
+        original_alert_snapshot = copy.deepcopy(alert_data)
+
         # Parse alert
         alert = ResilMeshAlert.from_dict(alert_data)
         logger.info(f"🚨 Processing alert: {alert.alert_id} (zone: {alert.zone})")
@@ -237,35 +244,38 @@ class AlertProcessor:
         # Without inference, a typeless domain alert persists as
         # (indicator_type="unknown", value="EvIl.CoM") while MISP sync stores
         # the same host as (domain, "evil.com") — two nodes, and a
-        # type=domain search misses the alert one. Inferring "domain" gives
-        # both the right MERGE-key type AND case-folding parity.
-        _raw_indicator = alert.threat.get("indicator")
-        indicator_type = alert.threat.get("type") or "unknown"
-        if indicator_type == "unknown" and isinstance(_raw_indicator, str):
-            inferred = infer_indicator_type(_raw_indicator)
-            if inferred:
-                indicator_type = inferred
-
-        # Canonicalize ONCE, BEFORE the write — refang + NFC + case-fold
-        # (src/ioc_normalize.py, write-side parity) so the WRITE path
-        # (create_indicator_from_alert) and the READ path (enrichment MATCH)
-        # share one canonical value. Validate AFTER normalization: a
-        # whitespace/zero-width-only value passes a raw-truthiness check but
-        # normalizes to "" (would skip node creation yet still report
-        # enriched=True against an empty key). Propagate the canonical value
-        # AND the resolved type into alert_data["threat"] (consumed by the
-        # write) and alert.threat (consumed below).
-        indicator = normalize_indicator_value(indicator_type, _raw_indicator)
-        if not isinstance(indicator, str) or not indicator.strip():
-            return self._create_error_response(alert, "No indicator in alert")
+        # type=domain search misses the alert one. canonicalize_lookup (the
+        # SAME shared read-side path used by /search/indicator and STIX
+        # export) infers "domain" and folds the value, giving both the right
+        # MERGE-key type AND case-folding parity. An empty/whitespace result
+        # is coerced to "" so the indicator MERGE no-ops (guarded by
+        # ``if indicator:`` in create_indicator_from_alert) while the Alert
+        # node is STILL written. Propagate value + resolved type into
+        # alert_data["threat"] (consumed by the write) and alert.threat
+        # (consumed by enrichment).
+        resolved_type, indicator = canonicalize_lookup(alert.threat.get("type"), alert.threat.get("indicator"))
+        indicator_type = resolved_type or "unknown"
         alert.threat["indicator"] = indicator
         alert.threat["type"] = indicator_type
         if isinstance(alert_data.get("threat"), dict):
             alert_data["threat"]["indicator"] = indicator
             alert_data["threat"]["type"] = indicator_type
 
-        # Step 1-7: Process complete ResilMesh alert (create all nodes and relationships)
+        # Step 1-7: Process complete ResilMesh alert (create all nodes and
+        # relationships). This ALWAYS runs — even for a host-only / CVE-only
+        # alert with no IOC indicator — so the Alert node, zone link, and
+        # forensic context are recorded (create_alert_node is unconditional;
+        # the indicator MERGE inside no-ops on the empty value). Moving the
+        # empty-indicator guard ahead of this write (an earlier 2026-06
+        # draft) silently dropped legitimate indicatorless alerts.
         self.neo4j.process_complete_resilmesh_alert(alert_data)
+
+        # Enrichment requires a concrete indicator — a whitespace/zero-width
+        # or absent value normalizes to "" and has no graph key to look up.
+        # The Alert node is already persisted above, so this is a degraded
+        # (un-enriched) response, not a lost alert.
+        if not indicator:
+            return self._create_error_response(alert, "No indicator in alert")
 
         # Step 8: Query Neo4j for enrichment
         enrichment_data = self._enrich_indicator(indicator, indicator_type, alert)
@@ -286,7 +296,7 @@ class AlertProcessor:
             latency_ms=round(latency_ms, 2),
             query_metadata=enrichment_data["metadata"],
             enrichment=enrichment_data["enrichment"],
-            original_alert=alert_data,
+            original_alert=original_alert_snapshot,
         )
 
     def _enrich_indicator(self, indicator: str, indicator_type: str, alert: ResilMeshAlert) -> Dict:

@@ -472,15 +472,19 @@ class TestBugbotFollowupQ2InnerAttributedToFilter:
             "PR-N8 R1 forbids coalesce(m.attributed_to, ...); use IS NOT NULL + per-branch gate"
         )
 
-    def test_q2_inner_alias_comprehensions_filter_placeholders(self):
-        """Both alias-side comprehensions (actor.aliases and malware.aliases)
-        drop placeholder entries before matching."""
+    def test_q2_inner_alias_comprehension_filters_placeholders(self):
+        """The remaining Q2 alias comprehension (Branch 2, actor.aliases)
+        drops placeholder entries before matching. Branch 3's malware.aliases
+        comprehension was removed 2026-06 (attribution-forgery vector), so
+        exactly one such guard is expected."""
         inner = self._q2_block()
-        # Count occurrences of the placeholder NOT IN guard in alias comprehensions
-        # Two comprehensions, each should have one guard
         comprehension_guard = "AND NOT toLower(trim(x)) IN"
         count = inner.count(comprehension_guard)
-        assert count >= 2, f"both alias comprehensions must filter placeholders; found {count} of 2 expected"
+        assert count >= 1, f"the actor.aliases comprehension must filter placeholders; found {count}"
+        # Branch 3 (malware.aliases) must stay removed.
+        assert "coalesce(m.aliases, [])" not in inner, (
+            "Q2 must NOT read m.aliases — Branch 3 was removed as an attribution-forgery vector"
+        )
 
 
 class TestBugbotFollowupCypherStringEscaping:

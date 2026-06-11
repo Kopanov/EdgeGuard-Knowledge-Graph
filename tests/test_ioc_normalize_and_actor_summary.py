@@ -315,9 +315,29 @@ class TestInferIndicatorType:
         assert infer_indicator_type("/etc/passwd") is None
         assert infer_indicator_type("C:\\\\Windows\\\\System32") is None
 
+    def test_bare_filename_is_not_a_domain(self):
+        """#5: a typeless filename must NOT be mislabeled 'domain' (would
+        yield a bogus DNS-sinkhole recommendation + a mistyped node)."""
+        for fn in ("pos-malware.exe", "emotet-payload.dll", "report.pdf", "invoice.docx", "dropper.bin"):
+            assert infer_indicator_type(fn) is None, fn
+        # …but a real multi-label host is still a domain.
+        assert infer_indicator_type("mail.evil.com") == "domain"
+
     def test_non_str_returns_none(self):
         assert infer_indicator_type(None) is None
         assert infer_indicator_type(1234) is None
+
+
+class TestMitreTechniqueBoundary:
+    def test_overlong_input_does_not_truncate_to_a_different_technique(self):
+        """#8: 'T10590' must NOT silently resolve to the real technique
+        'T1059' — over-long numeric runs fail to match instead."""
+        assert normalize_mitre_technique_id("T10590") is None
+        assert normalize_mitre_technique_id("T1059.0012") is None
+
+    def test_valid_ids_still_parse(self):
+        assert normalize_mitre_technique_id("T1059") == "T1059"
+        assert normalize_mitre_technique_id("T1059.001") == "T1059.001"
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +368,31 @@ class TestSearchIndicatorNormalization:
         resp = client.post("/search/indicator", json={"value": "A" * 64})
         assert resp.status_code == 200
         assert session.calls[0][1]["value"] == "a" * 64
+
+    def test_typeless_uppercase_domain_is_inferred_and_folded(self, monkeypatch):
+        """#3 (Bugbot 'search skips type inference'): a typeless uppercase
+        domain must infer 'domain' and fold to the stored lowercase key —
+        so the same paste that enriches on ingest also resolves on search."""
+        session = _FakeSession(results=[_FakeResult(single_record=None)])
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(session))
+
+        resp = client.post("/search/indicator", json={"value": "EVIL.COM"})
+        assert resp.status_code == 200
+        assert resp.json()["normalized_value"] == "evil.com"
+        assert session.calls[0][1]["value"] == "evil.com"
+
+    def test_empty_value_short_circuits_without_query(self, monkeypatch):
+        """#3 (Bugbot 'search allows empty normalized key'): a whitespace/
+        zero-width-only value normalizes to '' — must return found=false
+        WITHOUT running a MATCH {value: ''} that could false-match a legacy
+        empty-key node."""
+        session = _FakeSession(results=[_FakeResult(single_record=None)])
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(session))
+
+        resp = client.post("/search/indicator", json={"value": "  ​ \t "})
+        assert resp.status_code == 200
+        assert resp.json()["found"] is False
+        assert not session.calls, "no Cypher should run for an empty normalized key"
 
 
 # ---------------------------------------------------------------------------
@@ -574,14 +619,25 @@ class TestAlertProcessorNormalization:
             "typeless domain alert must be written as (domain, folded value) to dedup with MISP"
         )
 
-    def test_whitespace_only_indicator_is_rejected_after_normalization(self):
-        """Bugbot: a whitespace/zero-width-only value passes the raw
-        truthiness check but normalizes to '' — it must be rejected, not
-        reported enriched against an empty key, and must NOT write a node."""
-        session, result = self._process({"indicator": "  ​ \t ", "type": "domain"})
+    def test_whitespace_only_indicator_is_not_enriched(self):
+        """A whitespace/zero-width-only value normalizes to '' — enrichment
+        must be skipped (no empty-key lookup), but the Alert node is still
+        written (the indicator MERGE no-ops on the empty value)."""
+        _session, result = self._process({"indicator": "  ​ \t ", "type": "domain"})
         assert result.enriched is False
-        bound = [p["indicator"] for _q, p in session.calls if "indicator" in p]
-        assert all(v.strip() for v in bound), "no Cypher should bind an empty/whitespace $indicator"
+        # Alert node still recorded; the indicator written is empty.
+        assert self._last_fake.written_alert == {"type": "domain", "indicator": ""}
+
+    def test_indicatorless_alert_still_writes_alert_node(self):
+        """#2 regression: a host-only / CVE-only alert (no IOC indicator)
+        must still persist its Alert node — moving the empty guard ahead of
+        the write silently dropped legitimate indicatorless alerts."""
+        _session, result = self._process({"hostname": "srv-01", "cve": "CVE-2021-44228", "severity": 9})
+        assert result.enriched is False  # nothing to enrich
+        assert self._last_fake.written_alert is not None, (
+            "process_complete_resilmesh_alert must run so the Alert node is recorded"
+        )
+        assert self._last_fake.written_alert.get("indicator") in (None, "")
 
     def test_inferred_ipv4_still_gets_block_recommendation(self):
         """Bugbot 'inferred types skip recommendations': a typeless IP alert

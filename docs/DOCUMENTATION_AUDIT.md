@@ -209,6 +209,17 @@ Per-PR narrative for the train (cross-doc summary):
   Tier-3 sweep itself — confirms PR-J1's CI-side defense + PR-N33's
   6-agent batch already addressed the bulk of drift.
 
+* **PR #126 (2026-06-11):** Stage-2 GraphRAG readiness (alias round-trip,
+  KEV marker, `ioc_normalize` read-side layer, `/actors/{name}/summary`,
+  19 catalog queries). Per BUGBOT.md §11, updated the core graph docs for
+  the touched code paths: METHODOLOGY.md (real three-layer confidence
+  model — the aspirational `data_quality_factor` formula removed),
+  KNOWLEDGE_GRAPH.md (ATTRIBUTED_TO alias note + the two new CVE range
+  indexes), RESILMESH_INTEROPERABILITY.md (new REST endpoint + read-side
+  normalization), ARCHITECTURE.md (ATTRIBUTED_TO row: alias round-trip +
+  Q2 Branch-3 removal). Driven by an 8-agent proactive audit, not a
+  reactive sweep.
+
 **Audit cadence going forward (post-PR-J1):** the pin-test catches
 broken doc references on every PR. Tier-1-style deep verification is
 only needed after major code-shape changes (DAG renames, container

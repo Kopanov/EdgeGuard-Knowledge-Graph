@@ -619,11 +619,15 @@ _TI_GRAPHRAG = [
         "ti-cve-by-id",
         "threat_intel",
         "Point lookup: one CVE with every CVSS version's score",
+        # Directed (c)->(cvss) legs: _merge_cvss_node creates BOTH reciprocal
+        # edges per link, so an UNDIRECTED match would return up to 2^4
+        # value-identical rows for one CVE. Pin the (cve)->(cvss) direction
+        # (always created) so this point lookup yields exactly one row.
         "MATCH (c:CVE {cve_id: $cve_id}) "
-        "OPTIONAL MATCH (c)-[:HAS_CVSS_v2]-(v2:CVSSv2) "
-        "OPTIONAL MATCH (c)-[:HAS_CVSS_v30]-(v30:CVSSv30) "
-        "OPTIONAL MATCH (c)-[:HAS_CVSS_v31]-(v31:CVSSv31) "
-        "OPTIONAL MATCH (c)-[:HAS_CVSS_v40]-(v40:CVSSv40) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v2]->(v2:CVSSv2) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v30]->(v30:CVSSv30) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v31]->(v31:CVSSv31) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v40]->(v40:CVSSv40) "
         "RETURN c.cve_id AS cve, c.cvss_score AS cvss, c.severity AS severity, "
         "c.cisa_exploit_add AS kev_added, v2.base_score AS v2_score, "
         "v30.base_score AS v30_score, v30.base_severity AS v30_severity, "

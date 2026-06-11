@@ -483,12 +483,16 @@ def build_relationships():
         # the end with AND would make NULL-propagation kill those
         # legitimate rows (NULL IN […] → NULL → falsy → AND … → falsy).
         # Inner separately rejects placeholder ``a.name``.
+        # Branch 3 removal (2026-06): the outer no longer needs the
+        # alias-only ``OR size(m.aliases) > 0`` arm — every remaining inner
+        # branch (1 + 2) reads ``m.attributed_to``, so a malware with only
+        # aliases and no attributed_to can never match. Dropping that arm
+        # avoids fanning the inner over malware rows that produce zero edges.
         _outer = (
             "MATCH (m:Malware) "
-            "WHERE (m.attributed_to IS NOT NULL "
-            "       AND size(trim(m.attributed_to)) > 0 "
-            f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST}) "
-            "   OR size(coalesce(m.aliases, [])) > 0 "
+            "WHERE m.attributed_to IS NOT NULL "
+            "  AND size(trim(m.attributed_to)) > 0 "
+            f"  AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "RETURN m"
         )
         # PR-N10 follow-up (cursor-bugbot 2026-04-21, Medium): placeholder
@@ -513,49 +517,34 @@ def build_relationships():
             f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "       AND toLower(trim(m.attributed_to)) = toLower(trim(a.name))) "
             # Branch 2: m.attributed_to ∈ actor.aliases — same gate,
-            # plus aliases comprehension drops placeholder entries.
+            # plus aliases comprehension drops placeholder entries. This is
+            # the load-bearing alias path (e.g. malware attributed_to
+            # "Cozy Bear" matches ThreatActor APT29 whose aliases include
+            # "Cozy Bear"): it keys on the MALWARE's OWN attributed_to claim
+            # against the ACTOR's OWN aliases — both authored by the same
+            # MISP attribute as the malware, so it carries no cross-entity
+            # spoofing surface.
             "   OR (m.attributed_to IS NOT NULL AND size(trim(m.attributed_to)) > 0 "
             f"       AND NOT toLower(trim(m.attributed_to)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             f"       AND toLower(trim(m.attributed_to)) IN [x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]) "
-            # Branch 3: a.name ∈ malware.aliases — doesn't read
-            # attributed_to, reachable when attributed_to is NULL.
-            #
-            # TODO (PR-N16+): Red-Team attribution-hijack vector left open.
-            # A compromised MISP peer can ship ``Malware{name:"benign",
-            # aliases:["APT29","Cozy Bear"]}``. Branch 3 then matches
-            # real APT29 (a.name) against the forged aliases entry,
-            # creating a false ATTRIBUTED_TO edge. PR-N14 Fix #3
-            # capped aliases cardinality + dropped placeholder entries,
-            # but DOES NOT block real-actor-name injection. The full
-            # fix needs either (a) source-allowlist (only trusted
-            # sources can write aliases), (b) multi-source
-            # corroboration (require 2+ sources agreeing on the
-            # alias before it attributes), or (c) disabling branch 3
-            # entirely (current mitigation: branch 3's aliases
-            # comprehension drops placeholder entries, but not
-            # real-actor names). Deferred pending design discussion.
-            # See: 7-agent pre-baseline audit Red-Team BLOCK #19
-            # (2026-04-21), PR-N14 body.
-            #
-            # TODO (2026-06 UPDATE to Red-Team BLOCK #19) — surface change,
-            # NOT yet fixed: before the alias round-trip fix, MISP-sourced
-            # Malware reached Neo4j with ``aliases=[]`` (parse_attribute
-            # hardcoded it), so branch 3 could never fire on the EdgeGuard
-            # MISP round-trip path — the vector was dormant there and only
-            # reachable via direct Neo4j writes. Now that
-            # ``_extract_alias_tags`` rehydrates ``alias:`` tags, a malware
-            # attribute carrying ``alias:APT29`` WILL forge attribution.
-            # This is the SAME trust model the rest of the pipeline already
-            # lives under (an untrusted MISP writer can already forge zones /
-            # source-truthful timestamps), governed by the staged MISP trust
-            # boundary ``EDGEGUARD_TRUSTED_MISP_ORG_UUIDS`` / ``_NAMES``
-            # (src/source_trust.py; Tier-3 fail-closed boot refusal is the
-            # roadmapped close — docs/SECURITY_ROADMAP.md). Operators
-            # federating an untrusted MISP MUST set that allowlist. Closing
-            # branch 3 (option c) or gating alias-derived attribution on the
-            # trusted-org check (option a) is now higher priority given the
-            # path is live; tracked for the post-baseline hardening pass.
-            f"   OR toLower(trim(a.name)) IN [x IN coalesce(m.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0 AND NOT toLower(trim(x)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} | toLower(trim(x))]"
+            # Branch 3 (a.name ∈ malware.aliases) was REMOVED 2026-06
+            # (Red-Team BLOCK #19, proactive PR #126 audit). It attributed a
+            # malware to an actor whenever the actor's name appeared in the
+            # MALWARE's aliases — a cross-entity match with no legitimate
+            # signal (ATT&CK malware aliases are alternate malware NAMES,
+            # never actor names, so it created ~0 real edges) but a live
+            # forgery vector once the alias round-trip began rehydrating
+            # MISP ``alias:`` tags into m.aliases: an untrusted/federated
+            # MISP writer could ship ``Malware{name:"benign", alias:"APT29"}``
+            # and forge ``(benign)-[:ATTRIBUTED_TO {confidence 1.0,
+            # match_type:"exact"}]->(APT29)`` into the GraphRAG dataset. The
+            # PR-N14 sanitizer drops placeholders but NOT real actor names,
+            # and the EDGEGUARD_TRUSTED_MISP_ORG_UUIDS allowlist is fail-open
+            # and never gated this path. Removal closes the vector outright
+            # while preserving every legitimate attribution path (Branches
+            # 1+2 above, which key on the malware's OWN attributed_to claim).
+            # Malware-alias signal is still used — safely — by Q9 INDICATES
+            # (indicator.malware_family ∈ m.aliases) at calibrated confidence.
             ") "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
             'ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() '

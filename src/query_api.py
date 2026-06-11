@@ -27,7 +27,7 @@ from slowapi.util import get_remote_address
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ioc_normalize import normalize_cve_id, normalize_indicator_value
+from ioc_normalize import canonicalize_lookup, normalize_cve_id
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -472,13 +472,26 @@ async def search_indicator(request: Request, s: IndicatorSearch):
         raise HTTPException(status_code=503, detail="Neo4j not connected")
 
     try:
-        # READ-side canonicalization (src/ioc_normalize.py): refang + NFC +
-        # case-fold so analyst paste variants ("EvIl[.]CoM") hit the
-        # write-side MERGE keys. Raw value stays echoed in the response.
-        normalized_value = normalize_indicator_value(
+        # READ-side canonicalization (src/ioc_normalize.py): infer the type
+        # when the caller omits it, then refang + NFC + case-fold so analyst
+        # paste variants ("EvIl[.]CoM", "EVIL.COM" with no type) hit the
+        # write-side MERGE keys — the SAME shared path the alert enrichment
+        # uses, so a value that enriches on ingest also resolves on search.
+        # Raw value stays echoed in the response.
+        _resolved_type, normalized_value = canonicalize_lookup(
             s.indicator_type.value if s.indicator_type else None,
             s.value,
         )
+        # An empty/whitespace/zero-width-only input normalizes to "" — there
+        # is no graph key to look up, and MATCH {value: ""} could false-match
+        # a legacy empty-key node. Treat as not-found without querying.
+        if not normalized_value:
+            return IndicatorResponse(
+                value=s.value,
+                found=False,
+                zone=s.zone.value if s.zone else None,
+                normalized_value=normalized_value,
+            )
         with neo4j_client.driver.session() as session:
             # Find the indicator
             query = """
@@ -1072,7 +1085,13 @@ async def stix_export(
     try:
         ot = object_type.lower()
         if ot == "indicator":
-            bundle = exporter.export_indicator(identifier, depth=depth)
+            # READ-side canonicalization: infer type from the value shape and
+            # refang + NFC + case-fold so a defanged / mixed-case IOC path
+            # ("EvIl[.]CoM", "EVIL.COM") resolves to the stored node — same
+            # shared path as /search/indicator and alert enrichment. Falls
+            # back to the raw identifier when normalization yields nothing.
+            _t, _norm = canonicalize_lookup(None, identifier)
+            bundle = exporter.export_indicator(_norm or identifier, depth=depth)
         elif ot == "actor":
             bundle = exporter.export_threat_actor(identifier, depth=depth)
         elif ot == "technique":

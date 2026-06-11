@@ -300,20 +300,20 @@ class TestPartDPrometheusAlerts:
 
 
 class TestPartEDeferredItemsHaveInTreeTodos:
-    def test_aliases_hijack_todo_in_q2_branch_3(self):
-        """Red-Team BLOCK #19 (aliases attribution hijack) was deferred
-        to post-baseline. The Q2 branch-3 Cypher must have an inline
-        TODO so the deferral survives team rotation."""
+    def test_q2_branch3_aliases_hijack_vector_is_removed(self):
+        """Red-Team BLOCK #19 (aliases attribution hijack) was CLOSED in the
+        PR #126 proactive audit by removing Q2 Branch 3 entirely — the
+        malware-alias → actor-attribution path. This pins that the hijack
+        Cypher does NOT come back (it would re-open a live forgery vector
+        once aliases round-trip from MISP), and that the removal is
+        documented in-tree so the rationale survives team rotation."""
         src = (SRC / "build_relationships.py").read_text()
-        # Find Q2 branch 3 area — match the toLower(trim(a.name))
-        # IN [x IN coalesce(m.aliases ...] pattern.
-        idx = src.find("toLower(trim(a.name)) IN [x IN coalesce(m.aliases")
-        assert idx != -1, "Q2 branch 3 not found at expected location"
-        # Search upward for the TODO.
-        block = src[max(0, idx - 2000) : idx + 500]
-        assert "TODO" in block and "Red-Team" in block, (
-            "aliases attribution hijack (BLOCK #19) must have an inline "
-            "TODO marker near Q2 branch 3 so deferral survives rotation"
+        assert "toLower(trim(a.name)) IN [x IN coalesce(m.aliases" not in src, (
+            "Q2 Branch 3 (a.name ∈ m.aliases → ATTRIBUTED_TO) must stay REMOVED — "
+            "it is the alias attribution-hijack vector (Red-Team BLOCK #19)"
+        )
+        assert "Branch 3" in src and "Red-Team BLOCK #19" in src, (
+            "the Branch-3 removal rationale must remain documented near Q2"
         )
 
     def test_execute_write_migration_todo_in_retry_decorator(self):

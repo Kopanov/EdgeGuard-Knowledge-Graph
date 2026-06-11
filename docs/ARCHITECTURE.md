@@ -243,7 +243,7 @@ When data is pushed to MISP, it gets tagged with:
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` on malware/tool (MISP **`MITRE_USES_TECHNIQUES:`** round-trip for malware) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
-| `ATTRIBUTED_TO` | Malware → ThreatActor | MITRE / MISP event data |
+| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` exact match on the malware's own `attributed_to` claim against the actor's `name` OR the actor's `aliases` (the "Cozy Bear → APT29" path). Actor/malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06). The inverse path (actor name ∈ malware aliases) was **removed** 2026-06 as an attribution-forgery vector — see `build_relationships.py` Q2. |
 | `INDICATES` | Indicator → Malware | MISP event co-occurrence (`misp_event_ids[]` array IN-membership match) |
 | `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
@@ -480,4 +480,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._
+_Last updated: 2026-06-11 — PR #126: ATTRIBUTED_TO row now documents the alias round-trip (actor/malware aliases survive the MISP round-trip via `alias:` tags) and the removal of the alias attribution-forgery branch (Q2 Branch 3). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._
