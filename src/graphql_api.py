@@ -54,6 +54,7 @@ from graphql_schema import (
     Vulnerability,
     VulnerabilityFilter,
 )
+from ioc_normalize import normalize_cve_id
 from neo4j_client import NEO4J_READ_TIMEOUT, Neo4jClient
 from package_meta import package_version
 
@@ -475,7 +476,10 @@ def _get_client() -> Neo4jClient:
 class Query:
     @strawberry.field(description="Fetch a single CVE by ID, including nested CVSS scores.")
     def cve(self, cve_id: str) -> Optional[CVE]:
-        return _resolve_cve(_get_client(), cve_id)
+        # READ-side canonicalization (src/ioc_normalize.py): analyst paste
+        # variants ('cve 2021 44228', en-dash) → 'CVE-2021-44228'; fall back
+        # to the raw input when no CVE id is recognized.
+        return _resolve_cve(_get_client(), normalize_cve_id(cve_id) or cve_id)
 
     @strawberry.field(description="List vulnerabilities with optional zone / status / CVSS filters.")
     def vulnerabilities(

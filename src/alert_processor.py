@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from ioc_normalize import normalize_indicator_value
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -231,6 +232,12 @@ class AlertProcessor:
 
         if not indicator:
             return self._create_error_response(alert, "No indicator in alert")
+
+        # READ-side canonicalization (src/ioc_normalize.py): refang + NFC +
+        # case-fold so every $indicator bound into the enrichment Cypher
+        # below matches the write-side MERGE keys. The enrichment payload
+        # echoes the normalized form (it is the graph-canonical identity).
+        indicator = normalize_indicator_value(alert.threat.get("type"), indicator)
 
         # Step 8: Query Neo4j for enrichment
         enrichment_data = self._enrich_indicator(indicator, indicator_type, alert)
