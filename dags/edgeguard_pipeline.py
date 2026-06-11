@@ -2771,19 +2771,29 @@ def _enforce_dag_backup_gate(conf: dict) -> None:
     # Clean-install auto-skip (PR-F3 parity with the CLI path,
     # src/edgeguard.py cmd_fresh_baseline): both data stores empty → a
     # backup gate would only block first-time setup. Mirrors the CLI
-    # exactly: neo4j_count==0 and misp_count==0, with checkpoint state
-    # deliberately NOT considered (leftover cursor files on an emptied
-    # graph are exactly the case to allow without ceremony). The ok-flags
-    # MUST be checked too: probe_baseline_state() reports unreachable
-    # stores via neo4j_ok/misp_ok=False with count=0 (it catches connect
-    # failures internally rather than raising), and an unreachable store
-    # is NOT evidence of a clean install — fail-closed.
+    # exactly: neo4j_count==0 and misp_count==0, with the checkpoint
+    # COUNT deliberately NOT considered (leftover cursor files on an
+    # emptied graph are exactly the case to allow without ceremony).
+    # ALL THREE ok-flags MUST be checked: probe_baseline_state() reports
+    # failed probes via ok=False with count=0 (it catches failures
+    # internally rather than raising), and a failed probe is NOT evidence
+    # of a clean install — fail-closed. checkpoint_ok is included even
+    # though checkpoint_count is ignored (Bugbot, PR #125): the CLI path
+    # refuses on ANY failed probe via its earlier all_reachable
+    # informed-consent check, so skipping the gate here with an unknown
+    # checkpoint state would be weaker than the CLI it claims parity with.
     try:
         state = probe_baseline_state()
-        if state.neo4j_ok and state.misp_ok and state.neo4j_count == 0 and state.misp_count == 0:
+        if (
+            state.neo4j_ok
+            and state.misp_ok
+            and state.checkpoint_ok
+            and state.neo4j_count == 0
+            and state.misp_count == 0
+        ):
             logger.info(
-                "BACKUP GATE: clean install detected (Neo4j and MISP reachable "
-                "and empty) — EDGEGUARD_LAST_BACKUP_AT not required."
+                "BACKUP GATE: clean install detected (all probes succeeded; "
+                "Neo4j and MISP empty) — EDGEGUARD_LAST_BACKUP_AT not required."
             )
             return
     except Exception as e:

@@ -272,14 +272,21 @@ class TestRunNeo4jSyncWindowAndStamp:
 from baseline_clean import BaselineState  # noqa: E402  (after sys.path setup)
 
 
-def _real_state(*, reachable: bool, neo4j_count: int, misp_count: int, checkpoint_count: int = 0) -> BaselineState:
+def _real_state(
+    *,
+    reachable: bool,
+    neo4j_count: int,
+    misp_count: int,
+    checkpoint_count: int = 0,
+    checkpoint_ok: bool | None = None,
+) -> BaselineState:
     return BaselineState(
         neo4j_count=neo4j_count,
         neo4j_ok=reachable,
         misp_count=misp_count,
         misp_ok=reachable,
         checkpoint_count=checkpoint_count,
-        checkpoint_ok=reachable,
+        checkpoint_ok=reachable if checkpoint_ok is None else checkpoint_ok,
     )
 
 
@@ -384,6 +391,17 @@ class TestDagBackupGate:
         fake_baseline_clean.probe_state = _real_state(reachable=True, neo4j_count=0, misp_count=0, checkpoint_count=7)
         _run_baseline_clean(dag_module, {"fresh_baseline": True})
         assert fake_baseline_clean.reset_called is True
+
+    def test_failed_checkpoint_probe_blocks_autoskip(self, dag_module, fake_baseline_clean):
+        """Bugbot (PR #125): the checkpoint COUNT is ignored, but a FAILED
+        checkpoint probe must still block the auto-skip — the CLI path
+        refuses on any failed probe via all_reachable, and the DAG gate
+        claims parity with it. Empty-but-unprobeable ≠ clean install."""
+        fake_baseline_clean.gate_error = self.GATE_FAIL_MSG
+        fake_baseline_clean.probe_state = _real_state(reachable=True, neo4j_count=0, misp_count=0, checkpoint_ok=False)
+        with pytest.raises(Exception, match="BASELINE_CLEAN refused"):
+            _run_baseline_clean(dag_module, {"fresh_baseline": True})
+        assert fake_baseline_clean.reset_called is False
 
     def test_unreachable_stores_are_not_clean_install(self, dag_module, fake_baseline_clean):
         """probe_baseline_state reports unreachable stores via ok-flags with
