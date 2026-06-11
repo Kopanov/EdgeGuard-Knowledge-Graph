@@ -1459,6 +1459,11 @@ class Neo4jClient:
             "CREATE INDEX campaign_last_seen IF NOT EXISTS FOR (c:Campaign) ON (c.last_seen)",
             # build_relationships performance: CVE.cve_id needed for EXPLOITS query
             "CREATE INDEX cve_cve_id IF NOT EXISTS FOR (c:CVE) ON (c.cve_id)",
+            # GraphRAG retrieval shapes (2026-06, Stage-2 dataset): CVSS range scans
+            # (cvss_score >= $min_cvss) + KEV filters (cisa_exploit_add IS NOT NULL /
+            # >= $since) — see tests/test_cypher_query_catalog.py _TI_GRAPHRAG.
+            "CREATE INDEX cve_cvss_score IF NOT EXISTS FOR (c:CVE) ON (c.cvss_score)",
+            "CREATE INDEX cve_cisa_exploit_add IF NOT EXISTS FOR (c:CVE) ON (c.cisa_exploit_add)",
             # Deterministic per-node UUID indexes — added 2026-04 for delta-sync
             # local→cloud (cloud MERGEs by uuid) and self-describing edge serialization
             # (xAI / RAG consumers resolve r.src_uuid / r.trg_uuid back to nodes by uuid).

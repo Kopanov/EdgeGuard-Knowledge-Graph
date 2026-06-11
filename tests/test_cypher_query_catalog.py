@@ -527,6 +527,229 @@ _TI_PATHS = [
     ),
 ]
 
+# --- GraphRAG point-lookup & analyst-question shapes (2026-06, Stage-2 dataset) ---
+# Each query is the canonical retrieval shape for one analyst question class.
+# Point lookups whose parameter value can't be known ahead of time (a specific
+# IOC value / CVE id / actor name) set expect_rows=False — EXPLAIN-only — while
+# ranked/filtered shapes keep expect_rows=True and rely on skip-on-0 semantics.
+# Property facts verified 2026-06-11 against src/neo4j_client.py:
+#   * Source.reliability is written by ensure_sources (s.reliability = $reliability)
+#   * SOURCED_FROM carries r.confidence + r.source_reported_first_at/_last_at
+#     (native DateTime via datetime($param)) + r.imported_at
+#   * CVE.cisa_exploit_add is stored as the raw NVD cisaExploitAdd STRING
+#     ("YYYY-MM-DD", only set when truthy) — so KEV recency compares as string
+#   * Indicator.last_updated is a native datetime() — duration arithmetic works
+_TI_GRAPHRAG = [
+    # -- Cat 1: IOC triage -------------------------------------------------- #
+    CatalogQuery(
+        "ti-indicator-by-value",
+        "threat_intel",
+        "Point lookup: one indicator by exact value",
+        "MATCH (i:Indicator {value: $value}) "
+        "RETURN i.value AS value, i.indicator_type AS type, i.confidence_score AS confidence, "
+        "i.zone AS zone, i.last_updated AS last_updated",
+        params={"value": "8.8.8.8"},
+        expect_rows=False,
+        expect_keys=("value", "type", "confidence", "zone", "last_updated"),
+    ),
+    CatalogQuery(
+        "ti-indicator-deepdive",
+        "threat_intel",
+        "All edges around one indicator (parameterized)",
+        "MATCH (i:Indicator {value: $value})-[r]-(x) "
+        "RETURN type(r) AS rel, labels(x)[0] AS label, count(*) AS count ORDER BY count DESC",
+        params={"value": "8.8.8.8"},
+        expect_rows=False,
+        expect_keys=("rel", "label", "count"),
+    ),
+    CatalogQuery(
+        "ti-indicator-recent",
+        "threat_intel",
+        "Indicators updated in the last $days days",
+        "MATCH (i:Indicator) WHERE i.last_updated >= datetime() - duration({days: $days}) "
+        "RETURN i.value AS value, i.indicator_type AS type, i.last_updated AS last_updated "
+        "ORDER BY i.last_updated DESC LIMIT 20",
+        params={"days": 30},
+        expect_keys=("value", "type", "last_updated"),
+    ),
+    CatalogQuery(
+        "ti-indicator-provenance",
+        "threat_intel",
+        "Who reported this indicator, when, and how reliably",
+        "MATCH (i:Indicator {value: $value})-[r:SOURCED_FROM]->(s:Source) "
+        "RETURN s.name AS source, s.reliability AS reliability, "
+        "r.source_reported_first_at AS first_reported, r.source_reported_last_at AS last_reported, "
+        "r.confidence AS confidence",
+        params={"value": "8.8.8.8"},
+        expect_rows=False,
+        expect_keys=("source", "reliability", "first_reported", "last_reported", "confidence"),
+    ),
+    # -- Cat 2: sector / zone ----------------------------------------------- #
+    CatalogQuery(
+        "ti-indicator-zone-param",
+        "threat_intel",
+        "Indicators in a given zone (parameterized ti-indicator-zone)",
+        "MATCH (i:Indicator) WHERE $zone IN coalesce(i.zone, []) "
+        "RETURN i.value AS value, i.indicator_type AS type, i.confidence_score AS confidence LIMIT 10",
+        params={"zone": "healthcare"},
+        expect_keys=("value", "type"),
+    ),
+    CatalogQuery(
+        "ti-actor-by-zone",
+        "threat_intel",
+        "Actors in a zone ranked by technique coverage",
+        "MATCH (a:ThreatActor) WHERE $zone IN coalesce(a.zone, []) "
+        "OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique) "
+        "RETURN a.name AS actor, count(t) AS techniques ORDER BY techniques DESC LIMIT 10",
+        params={"zone": "healthcare"},
+        expect_keys=("actor", "techniques"),
+    ),
+    CatalogQuery(
+        "ti-cve-affects-sector",
+        "threat_intel",
+        "High-CVSS CVEs affecting a sector (parameterized)",
+        "MATCH (c:CVE)-[:AFFECTS]->(s:Sector {name: $sector}) WHERE c.cvss_score >= $min_cvss "
+        "RETURN c.cve_id AS cve, c.cvss_score AS cvss, c.severity AS severity "
+        "ORDER BY c.cvss_score DESC LIMIT 15",
+        params={"sector": "healthcare", "min_cvss": 7.0},
+        expect_keys=("cve", "cvss"),
+    ),
+    # -- Cat 3: CVE prioritization ------------------------------------------ #
+    CatalogQuery(
+        "ti-cve-by-id",
+        "threat_intel",
+        "Point lookup: one CVE with every CVSS version's score",
+        "MATCH (c:CVE {cve_id: $cve_id}) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v2]-(v2:CVSSv2) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v30]-(v30:CVSSv30) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v31]-(v31:CVSSv31) "
+        "OPTIONAL MATCH (c)-[:HAS_CVSS_v40]-(v40:CVSSv40) "
+        "RETURN c.cve_id AS cve, c.cvss_score AS cvss, c.severity AS severity, "
+        "c.cisa_exploit_add AS kev_added, v2.base_score AS v2_score, "
+        "v30.base_score AS v30_score, v30.base_severity AS v30_severity, "
+        "v31.base_score AS v31_score, v31.base_severity AS v31_severity, "
+        "v40.base_score AS v40_score, v40.base_severity AS v40_severity",
+        params={"cve_id": "CVE-2021-44228"},
+        expect_rows=False,
+        expect_keys=("cve", "cvss", "severity", "kev_added", "v31_score", "v40_score"),
+    ),
+    CatalogQuery(
+        "ti-cve-most-exploited",
+        "threat_intel",
+        "CVEs ranked by exploiting-indicator fan-in",
+        "MATCH (c:CVE)<-[:EXPLOITS]-(i:Indicator) "
+        "RETURN c.cve_id AS cve, c.cvss_score AS cvss, count(i) AS indicators "
+        "ORDER BY indicators DESC LIMIT 10",
+        expect_keys=("cve", "indicators"),
+    ),
+    # -- Cat 4: exploited-in-the-wild (CISA KEV) ----------------------------- #
+    CatalogQuery(
+        "ti-cve-kev-exploited",
+        "threat_intel",
+        "KEV-listed CVEs with live exploiting indicators",
+        "MATCH (c:CVE)<-[:EXPLOITS]-(i:Indicator) WHERE c.cisa_exploit_add IS NOT NULL "
+        "RETURN c.cve_id AS cve, c.cisa_exploit_add AS kev_added, count(i) AS indicators "
+        "ORDER BY indicators DESC LIMIT 15",
+        expect_keys=("cve", "kev_added", "indicators"),
+    ),
+    CatalogQuery(
+        "ti-cve-kev-recent",
+        "threat_intel",
+        "CVEs added to the KEV list since $since (string ISO date)",
+        "MATCH (c:CVE) WHERE c.cisa_exploit_add >= $since "
+        "RETURN c.cve_id AS cve, c.cisa_exploit_add AS kev_added, c.cisa_action_due AS action_due, "
+        "c.cisa_vulnerability_name AS name ORDER BY c.cisa_exploit_add DESC LIMIT 15",
+        params={"since": "2026-01-01"},
+        expect_keys=("cve", "kev_added"),
+    ),
+    CatalogQuery(
+        "ti-cve-exploit-provenance",
+        "threat_intel",
+        "Which sources report exploitation of one CVE",
+        "MATCH (c:CVE {cve_id: $cve_id})<-[:EXPLOITS]-(i:Indicator)-[:SOURCED_FROM]->(s:Source) "
+        "RETURN s.name AS source, count(DISTINCT i) AS indicators ORDER BY indicators DESC",
+        params={"cve_id": "CVE-2021-44228"},
+        expect_rows=False,
+        expect_keys=("source", "indicators"),
+    ),
+    # -- Cat 5: MITRE ATT&CK ------------------------------------------------- #
+    CatalogQuery(
+        "ti-technique-family",
+        "threat_intel",
+        "A technique plus its sub-techniques (T1059 → T1059.*)",
+        "MATCH (t:Technique) WHERE t.mitre_id = $tid OR t.mitre_id STARTS WITH $tid + '.' "
+        "RETURN t.mitre_id AS mitre_id, t.name AS name ORDER BY t.mitre_id",
+        params={"tid": "T1059"},
+        expect_keys=("mitre_id", "name"),
+    ),
+    CatalogQuery(
+        "ti-technique-deepdive",
+        "threat_intel",
+        "Who uses one technique: actor/malware/tool/indicator counts",
+        "MATCH (t:Technique {mitre_id: $mitre_id}) "
+        "RETURN t.mitre_id AS mitre_id, t.name AS name, "
+        "COUNT { (:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t) } AS actors, "
+        "COUNT { (:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t) } AS malware, "
+        "COUNT { (:Tool)-[:IMPLEMENTS_TECHNIQUE]->(t) } AS tools, "
+        "COUNT { (:Indicator)-[:USES_TECHNIQUE]->(t) } AS indicators",
+        params={"mitre_id": "T1059"},
+        expect_rows=False,
+        expect_keys=("mitre_id", "name", "actors", "malware", "tools", "indicators"),
+    ),
+    CatalogQuery(
+        "ti-phase-actors",
+        "threat_intel",
+        "Actors employing techniques in a kill-chain phase",
+        "MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t:Technique) "
+        "WHERE $phase IN coalesce(t.tactic_phases, []) "
+        "RETURN a.name AS actor, count(DISTINCT t) AS techniques ORDER BY techniques DESC LIMIT 10",
+        params={"phase": "defense-evasion"},
+        expect_keys=("actor", "techniques"),
+    ),
+    CatalogQuery(
+        "ti-technique-prevalence",
+        "threat_intel",
+        "Techniques ranked by total fan-in (actors+malware+tools+indicators)",
+        "MATCH (t:Technique)<-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]-() "
+        "RETURN t.mitre_id AS mitre_id, t.name AS name, count(r) AS fan_in "
+        "ORDER BY fan_in DESC LIMIT 10",
+        expect_keys=("mitre_id", "fan_in"),
+    ),
+    # -- Cat 6: actor / campaign --------------------------------------------- #
+    CatalogQuery(
+        "ti-actor-resolve",
+        "threat_intel",
+        "Alias-aware actor lookup (name is lowercase, aliases display-case)",
+        "MATCH (a:ThreatActor) WHERE a.name = toLower(trim($name)) "
+        "OR any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim($name))) "
+        "RETURN a.name AS name, a.aliases AS aliases, a.zone AS zone LIMIT 5",
+        params={"name": "APT28"},
+        expect_rows=False,
+        expect_keys=("name", "aliases", "zone"),
+    ),
+    CatalogQuery(
+        "ti-campaign-graph",
+        "threat_intel",
+        "Campaign membership: actor RUNS campaign, members PART_OF it",
+        "MATCH (a:ThreatActor)-[:RUNS]->(c:Campaign)<-[:PART_OF]-(x) "
+        "RETURN c.name AS campaign, a.name AS actor, labels(x)[0] AS member_label, "
+        "count(*) AS members ORDER BY members DESC LIMIT 15",
+        expect_keys=("campaign", "actor", "member_label", "members"),
+    ),
+    CatalogQuery(
+        "ti-actor-iocs",
+        "threat_intel",
+        "IOCs attributable to one actor (alias-aware, via malware)",
+        "MATCH (i:Indicator)-[:INDICATES]->(:Malware)-[:ATTRIBUTED_TO]->(a:ThreatActor) "
+        "WHERE a.name = toLower(trim($name)) "
+        "OR any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim($name))) "
+        "RETURN i.value AS value, i.indicator_type AS type, i.confidence_score AS confidence LIMIT 20",
+        params={"name": "APT28"},
+        expect_rows=False,
+        expect_keys=("value", "type", "confidence"),
+    ),
+]
+
 # --------------------------------------------------------------------------- #
 # 4. Asset / ISIM topology — single node
 # --------------------------------------------------------------------------- #
@@ -750,7 +973,7 @@ _ASSET_HOPS = [
     ),
 ]
 
-QUERY_CATALOG = _SCHEMA + _TI_NODES + _TI_HOPS + _TI_PATHS + _ASSET_NODES + _ASSET_HOPS
+QUERY_CATALOG = _SCHEMA + _TI_NODES + _TI_HOPS + _TI_PATHS + _TI_GRAPHRAG + _ASSET_NODES + _ASSET_HOPS
 
 
 # --------------------------------------------------------------------------- #
@@ -827,6 +1050,13 @@ def test_catalog_ids_unique():
 def test_catalog_covers_both_layers():
     layers = {q.layer for q in QUERY_CATALOG}
     assert {"threat_intel", "asset"}.issubset(layers)
+
+
+def test_catalog_expect_keys_nonempty():
+    """Every entry must name its RETURN aliases — the row-presence test (and the
+    Stage-2 GraphRAG dataset built from this catalog) depend on stable keys."""
+    missing = [q.id for q in QUERY_CATALOG if not q.expect_keys]
+    assert not missing, f"catalog entries with empty expect_keys: {missing}"
 
 
 # --------------------------------------------------------------------------- #
