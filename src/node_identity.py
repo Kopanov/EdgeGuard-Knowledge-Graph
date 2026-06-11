@@ -436,9 +436,14 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
         # NOTE: btc → "bitcoin" is also collapsed by TYPE_MAPPING but is
         # DELIBERATELY excluded — legacy Base58 BTC addresses are
         # case-sensitive (lowercasing breaks the Base58 checksum and the
-        # value no longer identifies any on-chain address). The pre-existing
-        # "btc"/"xmr"/"eth" entries below predate this fix and are left
-        # untouched (out of scope), but no NEW crypto-address type folding.
+        # value no longer identifies any on-chain address). The legacy
+        # raw-vocab entries "btc"/"xmr"/"eth" were REMOVED (2026-06,
+        # post-#126 hardening): dormant in every current path (callers
+        # collapse btc→bitcoin via TYPE_MAPPING / _GRAPH_TYPE_MAP first),
+        # but a future direct caller passing the raw type would have
+        # lowercase-corrupted the address on write. Cryptocurrency
+        # addresses are case-sensitive across the board (Base58 BTC/XMR,
+        # EIP-55 checksummed ETH) — no crypto-address type belongs here.
         "hash",
         "ssdeep",
         "imphash",
@@ -446,9 +451,6 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
         "ja3s",
         "jarm",
         "mutex",
-        "btc",
-        "xmr",
-        "eth",
     }
 )
 

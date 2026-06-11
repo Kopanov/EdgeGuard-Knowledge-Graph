@@ -34,6 +34,9 @@ except ImportError:
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
 import source_registry  # noqa: E402  — single-source-of-truth for SOURCES dict (chip 5a refactor)
+from ioc_normalize import (
+    canonicalize_lookup,  # noqa: E402  — alert-path (type, value) parity with the sync vocabulary (post-#126 hardening)
+)
 from node_identity import (  # noqa: E402
     canonicalize_merge_key,
     compute_node_uuid,
@@ -6243,24 +6246,34 @@ class Neo4jClient:
         """Create an Indicator node from a ResilMesh alert."""
         now = datetime.now(timezone.utc).isoformat()
 
-        type_mapping = {
-            "ip": "ipv4",
-            "ipv4": "ipv4",
-            "ipv6": "ipv6",
-            "domain": "domain",
-            "file_hash": "hash",
-            "hash": "hash",
-            "sha256": "sha256",
-            "md5": "md5",
-        }
-        normalized_type = type_mapping.get(indicator_type, indicator_type)
+        # Post-#126 hardening: resolve (type, value) through the SAME
+        # canonicalization layer every other entrypoint uses
+        # (ioc_normalize wraps the sync's TYPE_MAPPING vocabulary) instead
+        # of a private local map. The old map here was the last unguarded
+        # copy of the type vocabulary and had ALREADY drifted: it kept
+        # sha256/md5 as distinct graph types (the sync collapses both to
+        # "hash") and blanket-mapped ip→ipv4 (IPv6 alerts got the wrong
+        # type) — since the Indicator MERGE key is (indicator_type, value),
+        # any caller bypassing alert_processor's pre-resolution MERGEd a
+        # duplicate node beside the sync-written one. alert_processor
+        # already pre-canonicalizes, so this is idempotent on that path.
+        normalized_type, normalized_value = canonicalize_lookup(indicator_type, indicator_value)
+        if not normalized_value:
+            # Same contract as the read paths: "" means no usable merge key
+            # (empty / whitespace / zero-width / bare defang token). Never
+            # MERGE an empty-key Indicator node.
+            logger.warning(
+                f"create_indicator_from_alert: no usable merge key after canonicalization "
+                f"(type={indicator_type!r}) — skipping Indicator MERGE"
+            )
+            return False
 
         # zone is now an array
         zone_array = zones if zones else (zone if isinstance(zone, list) else [zone])
 
         data = {
             "indicator_type": normalized_type,
-            "value": indicator_value,
+            "value": normalized_value,
             "tag": f"{zone_array[0]}_{normalized_type}",
             "zone": zone_array,
             # PR (S5) (bugbot 6543da4 LOW): dropped the stale
