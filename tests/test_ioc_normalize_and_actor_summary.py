@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 import alert_processor
 import query_api
 from ioc_normalize import (
+    infer_indicator_type,
     normalize_cve_id,
     normalize_indicator_value,
     normalize_mitre_technique_id,
@@ -92,8 +93,17 @@ class _FakeAlertNeo4jClient(_FakeNeo4jClient):
     def connect(self):
         return True
 
+    def __init__(self, session):
+        super().__init__(session)
+        self.written_alert = None
+
     def process_complete_resilmesh_alert(self, alert_data):
-        pass
+        # Capture the payload the real write path consumes — the indicator
+        # type + value that create_indicator_from_alert would MERGE.
+        self.written_alert = {
+            "type": alert_data.get("threat", {}).get("type"),
+            "indicator": alert_data.get("threat", {}).get("indicator"),
+        }
 
     def update_alert_enrichment_status(self, **kwargs):
         pass
@@ -272,6 +282,42 @@ class TestNormalizeMitreTechniqueId:
     def test_non_str_returns_none(self):
         assert normalize_mitre_technique_id(None) is None
         assert normalize_mitre_technique_id(1059) is None
+
+
+class TestInferIndicatorType:
+    def test_domain(self):
+        assert infer_indicator_type("evil.com") == "domain"
+        assert infer_indicator_type("sub.domain.co.uk") == "domain"
+        assert infer_indicator_type("EvIl[.]CoM") == "domain"  # refanged first
+
+    def test_ipv4(self):
+        assert infer_indicator_type("1.2.3.4") == "ipv4"
+        assert infer_indicator_type("1.2.3[.]4") == "ipv4"
+
+    def test_ipv6(self):
+        assert infer_indicator_type("2001:db8::1") == "ipv6"
+
+    def test_url(self):
+        assert infer_indicator_type("https://evil.com/path") == "url"
+        assert infer_indicator_type("hxxp://evil[.]com/x") == "url"
+
+    def test_email(self):
+        assert infer_indicator_type("user@evil.com") == "email"
+
+    def test_hash(self):
+        assert infer_indicator_type("D" * 64) == "hash"
+        assert infer_indicator_type("a" * 32) == "hash"
+
+    def test_ambiguous_returns_none(self):
+        # A bare word, an IP-with-bad-octet, a path — none claimed.
+        assert infer_indicator_type("justaword") is None
+        assert infer_indicator_type("999.999.999.999") is None
+        assert infer_indicator_type("/etc/passwd") is None
+        assert infer_indicator_type("C:\\\\Windows\\\\System32") is None
+
+    def test_non_str_returns_none(self):
+        assert infer_indicator_type(None) is None
+        assert infer_indicator_type(1234) is None
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +510,8 @@ class TestActorSummary:
 class TestAlertProcessorNormalization:
     def _process(self, threat):
         session = _FakeSession()
-        processor = alert_processor.AlertProcessor(neo4j_client=_FakeAlertNeo4jClient(session))
+        fake = _FakeAlertNeo4jClient(session)
+        processor = alert_processor.AlertProcessor(neo4j_client=fake)
         alert = {
             "alert_id": "test-norm-001",
             "source": "wazuh",
@@ -473,6 +520,7 @@ class TestAlertProcessorNormalization:
             "threat": threat,
         }
         result = processor.process_alert(alert)
+        self._last_fake = fake
         return session, result
 
     def test_domain_indicator_refanged_and_lowercased(self):
@@ -491,17 +539,26 @@ class TestAlertProcessorNormalization:
 
     def test_missing_type_and_unknown_type_normalize_identically(self):
         """Bugbot: a defanged value with NO type vs an explicit
-        type='unknown' must produce the same canonical indicator (both are
-        'no type given' — refang applies to both)."""
+        type='unknown' must produce the same canonical indicator — and with
+        type inference, a domain-shaped value resolves to a folded domain so
+        it dedups with MISP-synced (domain, value) nodes."""
         s_missing, _ = self._process({"indicator": "EvIl[.]CoM"})
         s_unknown, _ = self._process({"indicator": "EvIl[.]CoM", "type": "unknown"})
         miss = [p["indicator"] for _q, p in s_missing.calls if "indicator" in p]
         unk = [p["indicator"] for _q, p in s_unknown.calls if "indicator" in p]
         assert miss and unk
-        # Both refang (→ "EvIl.CoM") but neither case-folds: an unknown type
-        # isn't known case-insensitive (and this isn't a hex hash). The point
-        # is they AGREE — no missing-vs-"unknown" divergence.
-        assert miss == unk == ["EvIl.CoM"] * len(miss)
+        # Inferred as a domain → folded; both paths agree.
+        assert miss == unk == ["evil.com"] * len(miss)
+
+    def test_unknown_type_domain_inferred_and_node_typed(self):
+        """Bugbot 'unknown alert type breaks domain parity': a typeless
+        domain alert must persist under (indicator_type='domain', folded
+        value), matching MISP sync — not (unknown, mixed-case)."""
+        self._process({"indicator": "EvIl.CoM", "type": "unknown"})
+        written = self._last_fake.written_alert
+        assert written == {"type": "domain", "indicator": "evil.com"}, (
+            "typeless domain alert must be written as (domain, folded value) to dedup with MISP"
+        )
 
     def test_whitespace_only_indicator_is_rejected_after_normalization(self):
         """Bugbot: a whitespace/zero-width-only value passes the raw

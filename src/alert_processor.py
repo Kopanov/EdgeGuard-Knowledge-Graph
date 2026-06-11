@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ioc_normalize import normalize_indicator_value
+from ioc_normalize import infer_indicator_type, normalize_indicator_value
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -232,20 +232,37 @@ class AlertProcessor:
         # 2026-06 version) created a read-after-write split: a defanged or
         # uppercase alert value was persisted raw, then looked up canonical,
         # so the enrichment never found the node it had just written.
-        # Propagate into both alert_data["threat"] (consumed by the write)
-        # and alert.threat (consumed below). Validate AFTER normalization:
-        # a whitespace/zero-width-only value passes a raw-truthiness check
-        # but normalizes to "" — which would skip node creation yet still
-        # report enriched=True against an empty lookup key. The same resolved
-        # type feeds normalization and enrichment so "unknown" vs missing
-        # type can't diverge.
-        indicator_type = alert.threat.get("type", "unknown")
-        indicator = normalize_indicator_value(indicator_type, alert.threat.get("indicator"))
+        # Resolve the indicator type, INFERRING it from the value shape when
+        # the alert gives none ("unknown"/missing — the ResilMesh default).
+        # Without inference, a typeless domain alert persists as
+        # (indicator_type="unknown", value="EvIl.CoM") while MISP sync stores
+        # the same host as (domain, "evil.com") — two nodes, and a
+        # type=domain search misses the alert one. Inferring "domain" gives
+        # both the right MERGE-key type AND case-folding parity.
+        _raw_indicator = alert.threat.get("indicator")
+        indicator_type = alert.threat.get("type") or "unknown"
+        if indicator_type == "unknown" and isinstance(_raw_indicator, str):
+            inferred = infer_indicator_type(_raw_indicator)
+            if inferred:
+                indicator_type = inferred
+
+        # Canonicalize ONCE, BEFORE the write — refang + NFC + case-fold
+        # (src/ioc_normalize.py, write-side parity) so the WRITE path
+        # (create_indicator_from_alert) and the READ path (enrichment MATCH)
+        # share one canonical value. Validate AFTER normalization: a
+        # whitespace/zero-width-only value passes a raw-truthiness check but
+        # normalizes to "" (would skip node creation yet still report
+        # enriched=True against an empty key). Propagate the canonical value
+        # AND the resolved type into alert_data["threat"] (consumed by the
+        # write) and alert.threat (consumed below).
+        indicator = normalize_indicator_value(indicator_type, _raw_indicator)
         if not isinstance(indicator, str) or not indicator.strip():
             return self._create_error_response(alert, "No indicator in alert")
         alert.threat["indicator"] = indicator
+        alert.threat["type"] = indicator_type
         if isinstance(alert_data.get("threat"), dict):
             alert_data["threat"]["indicator"] = indicator
+            alert_data["threat"]["type"] = indicator_type
 
         # Step 1-7: Process complete ResilMesh alert (create all nodes and relationships)
         self.neo4j.process_complete_resilmesh_alert(alert_data)

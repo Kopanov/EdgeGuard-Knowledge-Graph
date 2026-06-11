@@ -172,6 +172,67 @@ def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     return out
 
 
+# Value-shape detectors for inferring an indicator type when the source
+# gives none (ResilMesh/Wazuh alerts default threat type to "unknown").
+# Conservative on purpose — only UNAMBIGUOUS shapes are claimed; anything
+# else returns None so the caller leaves the value untyped rather than
+# guessing wrong.
+_IPV4_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
+_IPV6_RE = re.compile(r"(?=.*:)[0-9A-Fa-f:]+(?:%[0-9A-Za-z]+)?")
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_DOMAIN_RE = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+
+
+def _is_ipv4(value: str) -> bool:
+    if not _IPV4_RE.fullmatch(value):
+        return False
+    return all(0 <= int(o) <= 255 for o in value.split("."))
+
+
+def infer_indicator_type(value: str) -> Optional[str]:
+    """Best-effort indicator-type inference from a value's shape.
+
+    For typeless inputs (an alert whose ``type`` is missing or the
+    ``"unknown"`` sentinel) this lets the caller store the indicator under
+    the SAME ``(indicator_type, value)`` MERGE key — and apply the same
+    case-folding — that the MISP sync would use, so the two don't become
+    duplicate nodes for the same host.
+
+    Only unambiguous shapes are claimed: ``url`` (has ``://``), ``email``
+    (``local@domain``), ``ipv4``/``ipv6``, ``hash`` (hex of 32/40/64/128),
+    and ``domain`` (dotted hostname with an alpha TLD, no path/space/@).
+    Returns ``None`` for anything ambiguous (e.g. a bare word, a file path)
+    so the caller keeps it untyped rather than mislabeling it.
+
+    Never raises: non-``str`` input returns ``None``. Input is refanged
+    first so defanged alerts (``1.2.3[.]4``, ``hxxp://``) classify.
+    """
+    if not isinstance(value, str):
+        return None
+    v = refang(value).strip()
+    if not v:
+        return None
+    low = v.lower()
+    if low.startswith(("http://", "https://", "ftp://")):
+        return "url"
+    if _EMAIL_RE.fullmatch(v):
+        return "email"
+    if _is_ipv4(v):
+        return "ipv4"
+    # IPv6 must contain a colon and be all hex/colon (avoid matching a bare
+    # hex hash, which has no colon).
+    if ":" in v and _IPV6_RE.fullmatch(v):
+        return "ipv6"
+    if len(v) in _HEX_HASH_LENGTHS and _HEX_VALUE_RE.fullmatch(v):
+        return "hash"
+    # Domain/hostname: dotted labels, alpha TLD, and none of the characters
+    # that would make it a URL / email / path (so "data.txt" with no path is
+    # the only realistic false positive — and folding its case is harmless).
+    if not any(c in v for c in "/\\@ \t") and _DOMAIN_RE.fullmatch(v):
+        return "domain"
+    return None
+
+
 # Accepts analyst paste variants: 'CVE-2021-44228', 'cve 2021 44228',
 # 'cve_2021_44228', en-dash/em-dash separators (PDF copy artifacts).
 _CVE_RE = re.compile(r"cve[\s_–—-]*(\d{4})[\s_–—-]+(\d{4,})", re.IGNORECASE)
