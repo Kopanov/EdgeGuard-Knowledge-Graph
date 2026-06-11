@@ -345,18 +345,38 @@ class TestTypeVocabReconciliation:
     EdgeGuard graph type the write side stores, or duplicate nodes appear."""
 
     def test_graph_type_map_mirrors_write_side_TYPE_MAPPING(self):
-        """Drift guard: every entry in the canonical write-side TYPE_MAPPING
+        """Drift guard: EVERY entry in the canonical write-side TYPE_MAPPING
         (run_misp_to_neo4j) must resolve to the same graph type on the read
-        side, so a read lookup keys the node the write side MERGEd."""
+        side, so a read lookup keys the node the write side MERGEd. This
+        includes ``text`` → ``unknown``: the write side stores free-text MISP
+        attributes under graph type ``unknown`` (not shape-inferred), so the
+        read side must key the literal ``unknown`` to hit them — earlier this
+        entry was skipped here and silently drifted (Bugbot)."""
         from ioc_normalize import _GRAPH_TYPE_MAP
         from run_misp_to_neo4j import MISPToNeo4jSync
 
         for misp_type, graph_type in MISPToNeo4jSync.TYPE_MAPPING.items():
-            if graph_type == "unknown":
-                continue  # 'text' → 'unknown' is the no-type sentinel, handled separately
             assert _GRAPH_TYPE_MAP.get(misp_type) == graph_type, (
                 f"read-side _GRAPH_TYPE_MAP['{misp_type}'] must equal write-side '{graph_type}'"
             )
+
+    def test_misp_text_type_resolves_to_unknown_without_inference(self):
+        """MISP ``text`` → graph type ``unknown`` (write-side parity), and it
+        must NOT shape-infer: a free-text value that happens to look like an
+        IP still keys ``unknown`` (the node the write side MERGEd), unlike a
+        BLANK/``"unknown"`` input which collapses to None and infers."""
+        from ioc_normalize import _resolve_graph_type, canonicalize_lookup
+
+        # Explicit MISP 'text' vocab → literal 'unknown', no inference even
+        # when the value's shape would otherwise infer (here, an IP-shaped
+        # string). Value is left untouched (text is not refanged/folded).
+        assert _resolve_graph_type("text", "192.168.0.1") == "unknown"
+        assert _resolve_graph_type("text", "free form note") == "unknown"
+        assert canonicalize_lookup("text", "192.168.0.1") == ("unknown", "192.168.0.1")
+        # Contrast: a BLANK / "unknown" *input* still infers by shape, so it
+        # does NOT collapse to the 'unknown' graph type for an IP-shaped value.
+        assert _resolve_graph_type("unknown", "192.168.0.1") == "ipv4"
+        assert _resolve_graph_type("", "192.168.0.1") == "ipv4"
 
     def test_hostname_resolves_to_domain_and_folds(self):
         from ioc_normalize import canonicalize_lookup

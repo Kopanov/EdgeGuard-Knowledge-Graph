@@ -162,6 +162,13 @@ _GRAPH_TYPE_MAP = {
     "snort": "snort",
     "btc": "bitcoin",
     "bitcoin": "bitcoin",
+    # MISP free-text attributes (``text``) are stored by the write side as
+    # graph type ``unknown`` (TYPE_MAPPING["text"]="unknown"), NOT shape-
+    # inferred — so a read-side lookup must key the literal ``unknown`` to hit
+    # that node. Distinct from a BLANK/``"unknown"`` *input*, which
+    # ``_blank_type_to_none`` collapses to None → shape inference; only the
+    # explicit MISP ``text`` vocab maps here.
+    "text": "unknown",
 }
 
 # md5 / sha1 / sha256 / sha512 hex-digest lengths.
