@@ -1267,10 +1267,12 @@ class MISPWriter:
             tags.append(f"malware-family:{family}")
 
         # Add alias tags (2026-06, alias round-trip): same carrier as actors.
-        # ATT&CK malware aliases (x_mitre_aliases) are load-bearing for
-        # build_relationships Q2 branch 3 (actor name ∈ m.aliases) and Q9
-        # (i.malware_family ∈ m.aliases) — without this tag the aliases
-        # never survived the MISP round-trip. Cap matches the actor path.
+        # ATT&CK malware aliases (x_mitre_aliases) feed build_relationships
+        # Q9 INDICATES (i.malware_family ∈ m.aliases) — without this tag the
+        # aliases never survived the MISP round-trip. (They do NOT feed actor
+        # attribution: the old Q2 Branch-3 path that read m.aliases was
+        # removed 2026-06 as a forgery vector — see build_relationships.py.)
+        # Cap matches the actor path.
         aliases = malware.get("aliases", [])
         for alias in aliases[:20]:
             alias_s = sanitize_value(str(alias), max_length=100)

@@ -53,7 +53,7 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `EMPLOYS_TECHNIQUE` | ThreatActor → Technique | **Attribution.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
 | `IMPLEMENTS_TECHNIQUE` | Malware → Technique | **Capability.** MITRE STIX explicit `uses` relationship via `uses_techniques` (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
 | `IMPLEMENTS_TECHNIQUE` | Tool → Technique | **Capability.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
-| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` name matching — `m.attributed_to` exact match, OR alias match against `a.aliases` / `m.aliases`. ThreatActor and Malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06 fix); ATT&CK malware aliases come from `x_mitre_aliases`. |
+| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` name matching — the malware's own `m.attributed_to` claim, matched exactly against the actor's `a.name` OR the actor's `a.aliases` (the "Cozy Bear → APT29" path). Actor/Malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06 fix; ATT&CK malware aliases from `x_mitre_aliases`). The inverse path (actor name ∈ malware `aliases`) was **removed** 2026-06 as an attribution-forgery vector — see `build_relationships.py` Q2. |
 | `INDICATES` | Indicator → Malware | MISP event co-occurrence (confidence 0.5) **and** malware_family name match from ThreatFox/VT (confidence 0.8) |
 | `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag exact match (confidence 1.0) |
 | `REFERS_TO` | Vulnerability ↔ CVE | `bridge_vulnerability_cve()` |

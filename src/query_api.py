@@ -27,7 +27,7 @@ from slowapi.util import get_remote_address
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ioc_normalize import canonicalize_lookup, normalize_cve_id
+from ioc_normalize import canonicalize_lookup, normalize_cve_id, normalize_mitre_technique_id
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -1103,7 +1103,11 @@ async def stix_export(
         elif ot == "actor":
             bundle = exporter.export_threat_actor(identifier, depth=depth)
         elif ot == "technique":
-            bundle = exporter.export_technique(identifier, depth=depth)
+            # READ-side canonicalization (parity with the cve/indicator
+            # branches): 't1059' / 'T 1059' → 'T1059' (the graph stores the
+            # canonical uppercase Tnnnn(.nnn) form). Raw fallback when the
+            # paste isn't a recognizable technique id.
+            bundle = exporter.export_technique(normalize_mitre_technique_id(identifier) or identifier, depth=depth)
         elif ot == "cve":
             # READ-side canonicalization: 'cve 2021 44228' / en-dash paste
             # variants → 'CVE-2021-44228' (graph stores uppercase CVE ids).

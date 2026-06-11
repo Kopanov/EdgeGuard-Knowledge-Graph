@@ -2973,8 +2973,11 @@ class MISPToNeo4jSync:
 
             # Alias round-trip (2026-06): same carrier as actors — MISPWriter
             # exports ATT&CK malware aliases (x_mitre_aliases) as ``alias:``
-            # tags; rehydrate so build_relationships Q2 branch 3 and Q9
-            # alias-matching have data. merge_malware sanitizes downstream.
+            # tags; rehydrate so build_relationships Q9 INDICATES
+            # (i.malware_family ∈ m.aliases) has data. merge_malware
+            # sanitizes downstream. (Malware aliases no longer feed actor
+            # attribution — the Q2 Branch-3 path was removed as a forgery
+            # vector; only the actor's OWN aliases drive ATTRIBUTED_TO.)
             malware_aliases = _extract_alias_tags(tags)
 
             # PR (S5): source-truthful timestamps via allowlist-gated helper.

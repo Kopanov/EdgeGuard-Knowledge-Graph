@@ -418,6 +418,10 @@ class TestStixCveExportNormalization:
                 captured["indicator_value"] = value
                 return {"type": "bundle", "objects": []}
 
+            def export_technique(self, mid, depth=2):
+                captured["mitre_id"] = mid
+                return {"type": "bundle", "objects": []}
+
         monkeypatch.setattr(stix_exporter, "StixExporter", _FakeExporter)
 
     def test_spaced_lowercase_identifier_uppercased(self, monkeypatch):
@@ -470,6 +474,17 @@ class TestStixCveExportNormalization:
         resp = client.get("/stix/export/indicator/%20%20")
         assert resp.status_code == 400
         assert "indicator_value" not in captured, "exporter must not be called for an empty key"
+
+    def test_technique_export_canonicalizes_identifier(self, monkeypatch):
+        """Pre-merge audit: the technique branch must canonicalize like the
+        cve/indicator siblings — 't 1059' → 'T1059' (the stored form)."""
+        captured = {}
+        self._install_fake_exporter(monkeypatch, captured)
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(_FakeSession()))
+
+        resp = client.get("/stix/export/technique/t%201059")
+        assert resp.status_code == 200
+        assert captured["mitre_id"] == "T1059"
 
 
 # ---------------------------------------------------------------------------
