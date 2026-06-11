@@ -288,6 +288,41 @@ replace the manual-pause step.
 Follow [`docs/RUNBOOK.md`](RUNBOOK.md) § "After the run" — postcheck
 queries, sector-stats reconciliation, alert mute window cleanup.
 
+### GraphRAG readiness verification (post-#126)
+
+Several PR #126 fixes change what is *written*, so they only materialize
+on a fresh baseline — and several analyst-facing query shapes depend on
+`build_relationships.py` having run after the sync. Verify in this order
+(all read-only; Neo4j Browser or the HTTP runner):
+
+1. **Aliases populated** — the alias round-trip fix. The pre-June
+   snapshot had **0/917** actors with aliases, which silently disabled
+   alias-based attribution and lookups ("Cozy Bear" → APT29):
+   ```cypher
+   MATCH (a:ThreatActor) WHERE size(coalesce(a.aliases, [])) > 0
+   RETURN count(a)  // expect hundreds, not 0
+   ```
+2. **KEV markers populated** — CISA-only CVEs (~480 on the old
+   snapshot) previously got no `cisa_exploit_add` property:
+   ```cypher
+   MATCH (c:CVE) WHERE c.cisa_exploit_add IS NOT NULL RETURN count(c)
+   ```
+3. **`build_relationships.py` ran** — `IMPLEMENTS_TECHNIQUE`,
+   `USES_TECHNIQUE`, and `IN_TACTIC` edges come ONLY from this job
+   (deliberately deferred out of the sync). All three edge types were
+   entirely absent from the pre-June snapshot because the job never ran:
+   ```cypher
+   MATCH ()-[r:IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE|IN_TACTIC]->()
+   RETURN type(r) AS rel, count(r)  // all three must be non-zero
+   ```
+4. **Expected-empty is not a bug** — `Campaign` nodes are materialized
+   by `enrichment_jobs.py`, not the sync; campaign queries return 0 rows
+   until that job runs.
+
+The full analyst-question catalog (19 test-pinned shapes) lives in
+`tests/test_cypher_query_catalog.py::_TI_GRAPHRAG`, runnable against the
+live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_catalog_http.py).
+
 ---
 
 ## Cross-references
@@ -301,7 +336,7 @@ queries, sector-stats reconciliation, alert mute window cleanup.
 
 ---
 
-_Last updated: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._

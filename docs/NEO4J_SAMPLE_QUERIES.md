@@ -2,6 +2,12 @@
 
 Run these in Neo4j Browser (e.g. `http://localhost:7474`).
 
+> This is an illustrative operator cookbook. The full **test-pinned analyst
+> query catalog** (19 GraphRAG shapes: IOC triage, sector relevance, CVE/KEV
+> prioritization, ATT&CK hunting, actor investigation) lives in
+> `tests/test_cypher_query_catalog.py::_TI_GRAPHRAG` and runs against the
+> live graph via `scripts/run_cypher_catalog_http.py`.
+
 ---
 
 ## Basic Stats
@@ -46,6 +52,19 @@ RETURN c.cve_id, c.cvss_score, c.description
 LIMIT 20
 ```
 
+### Find actively exploited CVEs (CISA KEV)
+`cisa_exploit_add` (date added to the CISA Known Exploited Vulnerabilities
+list) is range-indexed (PR #126). On pre-June-2026 baselines only
+NVD-enriched CVEs carry it; after a fresh baseline CISA-only CVEs do too.
+
+```cypher
+MATCH (c:CVE)
+WHERE c.cisa_exploit_add IS NOT NULL
+RETURN c.cve_id, c.cisa_exploit_add, c.cisa_vulnerability_name, c.cvss_score
+ORDER BY c.cisa_exploit_add DESC
+LIMIT 20
+```
+
 ---
 
 ## Indicators
@@ -74,6 +93,21 @@ LIMIT 20
 MATCH (a:ThreatActor)
 RETURN a.name, a.aliases, a.confidence_score
 LIMIT 20
+```
+
+### Resolve an actor by name OR alias ("Cozy Bear" → APT29)
+`aliases` is populated by the PR #126 alias round-trip — on baselines from
+before June 2026 the property is empty (0/917 actors), so this query only
+resolves canonical names there. `a.name` is stored lowercase; aliases keep
+display case.
+
+```cypher
+WITH 'Cozy Bear' AS name
+MATCH (a:ThreatActor)
+WHERE a.name = toLower(trim(name))
+   OR any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim(name)))
+RETURN a.name, a.aliases, a.zone
+LIMIT 5
 ```
 
 ---
@@ -171,6 +205,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+_Last updated: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*
