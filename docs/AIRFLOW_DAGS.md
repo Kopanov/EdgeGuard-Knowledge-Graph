@@ -1,6 +1,6 @@
 # EdgeGuard Airflow DAGs (operations guide)
 
-**Last Updated:** 2026-04-26 (PR-N33 docs audit — see footer)
+**Last Updated:** 2026-06-11 (PR #125 — sync-cadence fix + backup-gate conf keys; see footer)
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
 **Airflow version:** Apache Airflow 3.2.x (upgraded from 2.11 in April 2026 — see [§ Airflow 2 to 3 upgrade](#airflow-2-to-3-upgrade) if you are migrating an existing deployment).
@@ -713,8 +713,7 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit:_
-
+_Last updated: 2026-06-11 — PR #125: documented the sync-cadence fix (start-time stamp + EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN + state-derived incremental window) in the edgeguard_neo4j_sync task walkthrough, and added the backup_check_passed_cli / skip_backup_check rows to the baseline conf-key table (DAG-side backup gate). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit:_
 - _Baseline task chain corrected (BLOCK):_ `baseline_misp_health` → `misp_health_check`; `tier2_extended` → `tier2_feeds`; removed `tier3_low_freq` (does NOT exist as a baseline TaskGroup at HEAD — daily-tier collectors live in the incremental `edgeguard_daily` DAG); `baseline_full_neo4j_sync` / `baseline_build_relationships` / `baseline_enrichment` → `full_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` (**top-level task IDs do NOT carry a `baseline_` prefix** at HEAD — verified against `dags/edgeguard_pipeline.py`)._
 - _PR-N29 H1 carve-out task names also corrected to drop the `baseline_` prefix._
 

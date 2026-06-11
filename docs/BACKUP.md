@@ -274,4 +274,4 @@ update into a wrapper.
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: verified — no factual drift. All commands (`docker compose exec neo4j neo4j-admin database dump …`) match the live `docker-compose.yml` `neo4j:` service; `EDGEGUARD_BACKUP_MAX_AGE_HOURS` env var exists and is read at `src/edgeguard.py:2341` (default 240h). Footer added as part of the audit trail._
+_Last updated: 2026-06-11 — PR #125: the backup-timestamp gate is now ALSO enforced by the baseline_clean DAG task for UI/API triggers (previously CLI-only); quick-reference step 2 corrected to `docker compose up -d` (recreate) — plain `restart` does not re-read .env interpolations. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified — no factual drift. All commands (`docker compose exec neo4j neo4j-admin database dump …`) match the live `docker-compose.yml` `neo4j:` service; `EDGEGUARD_BACKUP_MAX_AGE_HOURS` env var exists and is read at `src/edgeguard.py:2341` (default 240h). Footer added as part of the audit trail._
