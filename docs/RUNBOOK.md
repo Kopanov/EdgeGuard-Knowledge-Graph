@@ -426,29 +426,32 @@ Issue #57 ships a DB-backed mutex.
 
 **Until Issue #57 lands, pick one of the two safe launch paths below.**
 
-> **PR-N35 docs audit (2026-04-28) correction:** earlier versions of this
-> RUNBOOK described an Option A "CLI baseline launch" path
-> (`python -m edgeguard baseline --days 730`). **No `baseline` or
-> `fresh-baseline` subcommand exists** in `src/edgeguard.py` at HEAD
-> (the available subcommands are `doctor`, `heal`, `validate`, `monitor`,
-> `dag`, `checkpoint`, `clear`, `stats`, `preflight`, `source`).
-> Baseline launch is **DAG-only** today via `airflow dags trigger
-> edgeguard_baseline`. The mutex against the 4 incremental schedulers
-> is the `baseline_in_progress.lock` sentinel at
+> **Docs correction (2026-06, supersedes the PR-N35 note):** two claims in
+> the earlier PR-N35 callout were wrong at the time they were written:
+> (1) the `edgeguard baseline` / `edgeguard fresh-baseline` subcommands
+> DO exist (shipped in PR-C, 2026-04-19) — but they are thin wrappers
+> that trigger this same `edgeguard_baseline` DAG and do NOT pause
+> anything for you; (2) the `baseline_in_progress.lock` sentinel at
 > `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
-> which the baseline DAG itself writes; the 4 incremental DAGs check
-> it and self-skip via `baseline_skip_reason()`.
+> is **NOT written by the baseline DAG** — the DAG-side lock tasks were
+> de-scoped in PR-F2 (Issue #57); only the legacy in-process
+> `python src/run_pipeline.py --baseline` path writes it. Net effect:
+> for every practical launch flow, the manual pause below is the ONLY
+> mutex against the scheduled DAGs.
 
-#### Option A — DAG + pre-pause the 4 incremental schedulers (recommended)
+#### Option A — DAG + pre-pause the 5 scheduled DAGs (recommended)
 
-If you must use the Airflow UI trigger, pause the 4 scheduled DAGs
-first so they cannot fire during the ~32h window:
+Whether you trigger via the Airflow UI, the API, or the CLI wrappers,
+pause the 5 scheduled DAGs first so they cannot fire during the ~32h
+window (this includes `edgeguard_neo4j_sync` — a full MISP→Neo4j sync
+firing mid-baseline is the same concurrent-writer hazard):
 
 ```bash
 docker compose exec airflow airflow dags pause edgeguard_daily
 docker compose exec airflow airflow dags pause edgeguard_medium_freq
 docker compose exec airflow airflow dags pause edgeguard_pipeline
 docker compose exec airflow airflow dags pause edgeguard_low_freq
+docker compose exec airflow airflow dags pause edgeguard_neo4j_sync
 
 # trigger the baseline
 docker compose exec airflow airflow dags trigger edgeguard_baseline
@@ -458,26 +461,28 @@ docker compose exec airflow airflow dags unpause edgeguard_daily
 docker compose exec airflow airflow dags unpause edgeguard_medium_freq
 docker compose exec airflow airflow dags unpause edgeguard_pipeline
 docker compose exec airflow airflow dags unpause edgeguard_low_freq
+docker compose exec airflow airflow dags unpause edgeguard_neo4j_sync
 ```
 
-Alternatively, run the preflight helper which verifies the 4 DAGs are
+Alternatively, run the preflight helper which verifies the 5 DAGs are
 paused AND the MISP/Neo4j endpoints respond AND env-var prerequisites
 are satisfied before returning exit 0:
 
 ```bash
-./scripts/preflight_baseline.sh
+./scripts/preflight_baseline.sh --launch-path=dag
 ```
 
 Exit non-zero = do NOT launch. Exit zero + green summary = safe to trigger.
 
-#### What happened to the CLI launch path?
+#### What about the CLI commands?
 
-Earlier RUNBOOK versions described a `python -m edgeguard baseline` /
-`fresh-baseline` CLI path. That CLI doesn't exist at HEAD — see the
-PR-N35 callout at the top of this section. Today the only baseline
-launch is via the `edgeguard_baseline` Airflow DAG. Pausing the
-4 incremental schedulers BEFORE triggering is the operator's job
-until Issue #57 ships a DB-backed mutex.
+`edgeguard baseline --days N` (additive) and `edgeguard fresh-baseline`
+(destructive — typed confirmation + backup-timestamp gate) trigger the
+same `edgeguard_baseline` DAG; they add safety UX, not a mutex. The
+only path that holds the `baseline_in_progress.lock` sentinel is the
+legacy in-process `python src/run_pipeline.py --baseline` run. Pausing
+the 5 scheduled DAGs BEFORE triggering is the operator's job until
+Issue #57 ships a DB-backed mutex.
 
 ---
 
@@ -741,8 +746,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
-
+_Last updated: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._

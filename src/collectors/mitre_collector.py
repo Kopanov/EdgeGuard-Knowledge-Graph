@@ -40,10 +40,16 @@ MITRE_RATE_LIMITER = RateLimiter(min_interval=1.0)  # 1 request per second max
 
 # Maximum number of ATT&CK relationships to store for Neo4j graph building.
 # ATT&CK v14+ contains 11,000+ relationships; setting this to 0 means no cap.
-# Override via the MITRE_MAX_RELATIONSHIPS environment variable.
+# Override via EDGEGUARD_MITRE_MAX_RELATIONSHIPS — the name README/.env.example
+# have documented since PR-D, which previously was read by nothing (2026-06
+# README audit). The bare legacy name MITRE_MAX_RELATIONSHIPS still works as a
+# fallback so existing deployments don't silently lose their cap. `or` chains
+# (not getenv defaults) so a compose-style set-but-empty value means "unset".
 import os as _os
 
-MITRE_MAX_RELATIONSHIPS: int = int(_os.getenv("MITRE_MAX_RELATIONSHIPS", "0"))
+MITRE_MAX_RELATIONSHIPS: int = int(
+    _os.getenv("EDGEGUARD_MITRE_MAX_RELATIONSHIPS") or _os.getenv("MITRE_MAX_RELATIONSHIPS") or "0"
+)
 
 
 class MITRECollector:

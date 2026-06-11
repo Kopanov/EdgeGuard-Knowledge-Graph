@@ -60,3 +60,11 @@ opentelemetry-exporter-otlp~=1.41
 # (see .github/workflows/ci.yml:131) confirms apache/airflow ships a
 # base image with litellm>=1.83.0.
 litellm>=1.83.0
+
+# Same pattern (Trivy CRITICAL on PR #125, 2026-06-11): redshift-connector
+# 2.1.7 ships with apache/airflow:3.2.0's bundled amazon provider and is
+# vulnerable to CVE-2026-8838 (CRITICAL — RCE via eval() injection).
+# EdgeGuard never talks to Redshift; the pin only upgrades the bundled
+# copy so the image scan gate stays meaningful. Tracked with the other
+# base-image CVEs in issue #124; remove when the base image catches up.
+redshift-connector>=2.1.14

@@ -41,9 +41,15 @@ USER root
 # down), the build now fails loudly — operator can re-run or pin a
 # specific bookworm point release. TODO(issue #52): drop this entire
 # RUN once Debian backports CVE-2026-28390 into the airflow base.
+#
+# libgnutls30 added 2026-06-11 (PR #125, tracked in issue #124): the base
+# image ships 3.7.9-2+deb12u6, CRITICAL-vulnerable to CVE-2026-33845 (DTLS
+# DoS) + CVE-2026-42010 (auth bypass via NUL in username); the deb12u7 fix
+# is already in the bookworm archive — same upgrade-in-place pattern as
+# openssl above.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
- && apt-get install -y --no-install-recommends --only-upgrade openssl libssl3 \
+ && apt-get install -y --no-install-recommends --only-upgrade openssl libssl3 libgnutls30 \
  && rm -rf /var/lib/apt/lists/*
 
 USER airflow

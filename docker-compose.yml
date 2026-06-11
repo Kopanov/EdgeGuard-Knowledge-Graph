@@ -213,6 +213,10 @@ services:
     init: true
     ports:
       - "127.0.0.1:8082:8082"   # Airflow UI — loopback only
+      # Prometheus metrics endpoint (when EDGEGUARD_ENABLE_METRICS=true) —
+      # loopback only; prometheus/prometheus.yml scrapes host.docker.internal:8001.
+      # Without this mapping the documented scrape target could never connect.
+      - "127.0.0.1:8001:8001"
     environment:
       <<: *common-env
       # Mounted repo src at /opt/airflow/src — ensure all PythonOperator imports resolve without relying only on DAG sys.path hacks.
@@ -262,10 +266,31 @@ services:
       #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW_CONN_NEO4J_DEFAULT: ${AIRFLOW_CONN_NEO4J_DEFAULT:-}
-      # Prometheus metrics (optional — disabled when metrics server is not started)
+      # Prometheus metrics (optional — disabled when metrics server is not started).
+      # METRICS_HOST was a hardcoded "127.0.0.1" literal (not overridable from
+      # .env, contradicting .env.example) — and container-loopback is unreachable
+      # from any scraper anyway. Default 0.0.0.0 binds inside the container only;
+      # host exposure stays loopback-only via the 127.0.0.1:8001 port mapping
+      # below, which is what prometheus/prometheus.yml's host.docker.internal:8001
+      # target scrapes. NOTE: per-task pipeline metrics still need the
+      # multiprocess-registry work (PR-H) to be fully visible; this fixes the
+      # transport so the long-running metrics-server DAG/process is scrapeable.
       EDGEGUARD_ENABLE_METRICS: ${EDGEGUARD_ENABLE_METRICS:-false}
-      EDGEGUARD_METRICS_HOST: "127.0.0.1"
+      EDGEGUARD_METRICS_HOST: ${EDGEGUARD_METRICS_HOST:-0.0.0.0}
       EDGEGUARD_METRICS_PORT: "8001"
+      # Slack alerting on task failures (dags/edgeguard_pipeline.py callbacks).
+      # Both webhook var spellings pass through — .env.example documents
+      # "either var works" and send_slack_alert checks both.
+      EDGEGUARD_ENABLE_SLACK_ALERTS: ${EDGEGUARD_ENABLE_SLACK_ALERTS:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      AIRFLOW__SLACK__WEBHOOK_URL: ${AIRFLOW__SLACK__WEBHOOK_URL:-}
+      # Neo4j-sync cadence guard (see should_run_neo4j_sync): tolerance window
+      # subtracted from NEO4J_SYNC_INTERVAL when deciding whether to skip.
+      EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN: ${EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN:-}
+      # Backup-timestamp gate for the destructive baseline_clean DAG task
+      # (UI/API triggers; the CLI wrapper checks these on the host instead).
+      EDGEGUARD_LAST_BACKUP_AT: ${EDGEGUARD_LAST_BACKUP_AT:-}
+      EDGEGUARD_BACKUP_MAX_AGE_HOURS: ${EDGEGUARD_BACKUP_MAX_AGE_HOURS:-}
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro

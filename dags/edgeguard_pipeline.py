@@ -17,15 +17,15 @@ Config:
 ================================================================================
                            CONFIGURATION FLAGS
 ================================================================================
-Toggle these features by changing True/False:
+Both flags are env-driven (set in .env; docker-compose passes them through):
 
-ENABLE_PROMETHEUS_METRICS: Set to True to export Prometheus metrics
+ENABLE_PROMETHEUS_METRICS: EDGEGUARD_ENABLE_METRICS=true to export Prometheus metrics
     - Exports: edgeguard_indicators_total, edgeguard_sync_duration_seconds, etc.
-    - Default: False
+    - Default: false
 
-ENABLE_SLACK_ALERTS: Set to True to send alerts to Slack on failure
+ENABLE_SLACK_ALERTS: EDGEGUARD_ENABLE_SLACK_ALERTS=1 to send alerts to Slack on failure
     - Requires: SLACK_WEBHOOK_URL or AIRFLOW__SLACK__WEBHOOK_URL env var
-    - Default: False
+    - Default: false (off — Slack is an optional integration)
 
 ENABLE_METRICS_EXPORT: Legacy flag (use ENABLE_PROMETHEUS_METRICS)
 
@@ -151,8 +151,18 @@ logger = logging.getLogger(__name__)
 # Prometheus metrics export
 ENABLE_PROMETHEUS_METRICS = os.getenv("EDGEGUARD_ENABLE_METRICS", "false").lower() == "true"
 
-# Slack alerting on failures (disabled for now)
-ENABLE_SLACK_ALERTS = False  # Set to True and configure SLACK_WEBHOOK_URL to enable
+# Slack alerting on failures — enable with EDGEGUARD_ENABLE_SLACK_ALERTS=1
+# plus SLACK_WEBHOOK_URL (or AIRFLOW__SLACK__WEBHOOK_URL). The env var has
+# been documented in .env.example since PR #35, but this flag used to be a
+# hardcoded ``False`` that silently ignored it — for a pipeline whose key
+# DAG runs every 3 days, that meant repeated sync failures were visible
+# only to operators who opened the Airflow UI.
+ENABLE_SLACK_ALERTS = os.getenv("EDGEGUARD_ENABLE_SLACK_ALERTS", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # Metrics settings
 METRICS_PORT = int(os.getenv("EDGEGUARD_METRICS_PORT", "8001"))
@@ -449,7 +459,11 @@ def send_slack_alert(message: str, channel: str = None):
         else:
             logger.warning(f"Failed to send Slack alert: {response.status_code}")
     except Exception as e:
-        logger.warning(f"Failed to send Slack alert: {e}")
+        # Log the exception TYPE only — never str(e). requests/urllib3
+        # connection errors embed the full request URL, and a Slack
+        # incoming-webhook URL path IS the bearer credential; str(e) would
+        # persist the secret into Airflow task logs on every send failure.
+        logger.warning("Failed to send Slack alert: %s", type(e).__name__)
 
 
 def _on_task_failure(context):
@@ -1156,6 +1170,34 @@ def should_run_neo4j_sync():
         logger.warning(f"Failed to get NEO4J_SYNC_INTERVAL, using default: {e}")
         interval_hours = 72
 
+    # Deterministic-skip fix (2026-06): the cron (`0 3 */3 * *`) fires exactly
+    # interval_hours apart mid-month, while ``last_sync`` used to be stamped at
+    # sync COMPLETION. At the next fire ``elapsed`` was therefore always
+    # ``interval − (preflight + sync duration)`` — strictly under the interval —
+    # so the ShortCircuit skipped every other scheduled run and the effective
+    # cadence silently doubled (144h against a 96h incremental fetch window
+    # ≈ 48h of MISP events dropped per cycle). Two-part fix: ``run_neo4j_sync``
+    # now stamps the sync START time, and this check subtracts a tolerance so
+    # scheduler/task-startup drift can never push ``elapsed`` just under the
+    # interval. Tolerance is clamped to half the interval so the skip check
+    # still suppresses genuinely-early fires (e.g. the 24h month-boundary
+    # gap of a ``*/3`` day-of-month cron).
+    # `or "60"` (not just a getenv default): docker-compose passes the var
+    # through as `${...:-}`, so an unconfigured deployment sees it SET but
+    # EMPTY — int("") would raise and spam a bogus "invalid config" warning
+    # on every scheduled check. Empty/whitespace means "unset" here.
+    _raw_tolerance = (os.getenv("EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN") or "").strip() or "60"
+    try:
+        tolerance_minutes = int(_raw_tolerance)
+    except ValueError:
+        logger.warning(
+            "Invalid EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN=%r — using default 60",
+            _raw_tolerance,
+        )
+        tolerance_minutes = 60
+    tolerance_minutes = max(0, min(tolerance_minutes, (interval_hours * 60) // 2))
+    effective_interval = timedelta(hours=interval_hours) - timedelta(minutes=tolerance_minutes)
+
     try:
         if os.path.exists(state_file):
             with open(state_file, "r") as f:
@@ -1163,8 +1205,11 @@ def should_run_neo4j_sync():
                 _raw = state.get("last_sync", "2000-01-01T00:00:00+00:00")
                 last_sync = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
 
-                if datetime.now(timezone.utc) - last_sync < timedelta(hours=interval_hours):
-                    logger.info(f"Skipping Neo4j sync - last sync was {last_sync}, interval is {interval_hours}h")
+                if datetime.now(timezone.utc) - last_sync < effective_interval:
+                    logger.info(
+                        f"Skipping Neo4j sync - last sync was {last_sync}, "
+                        f"interval is {interval_hours}h (tolerance {tolerance_minutes}min)"
+                    )
                     return False
     except (json.JSONDecodeError, OSError, ValueError) as e:
         logger.error(f"Corrupted sync state file ({state_file}): {e} — running sync to be safe")
@@ -1187,6 +1232,9 @@ def run_neo4j_sync():
 
         start_time = time.time()
         task_start = start_time
+        # Stamped into the state file on success INSTEAD of completion time —
+        # half of the deterministic-skip fix (see should_run_neo4j_sync).
+        sync_started_at = datetime.now(timezone.utc)
 
         from run_misp_to_neo4j import MISPToNeo4jSync
 
@@ -1226,8 +1274,36 @@ def run_neo4j_sync():
         else:
             logger.info("Running incremental sync (last 3 days)")
 
+        # Window fix (same bug family as the tolerance fix in
+        # should_run_neo4j_sync): derive the incremental fetch window from the
+        # state file's last successful sync (+1 day MERGE-idempotent overlap)
+        # instead of relying only on the fixed EDGEGUARD_SYNC_INTERVAL_DAYS
+        # default. This guarantees coverage of everything since the last
+        # successful run — across skipped runs, paused DAGs, or an Airflow
+        # outage — where the fixed 3d+1d window would silently drop the
+        # excess. Falls back to the fixed window when the state file is
+        # unreadable (and a missing state file already forces a full sync).
+        since = None
+        if incremental:
+            try:
+                with open(state_file, "r") as f:
+                    _raw = json.load(f).get("last_sync", "")
+                _last_sync_dt = datetime.fromisoformat(_raw if "+" in _raw or "Z" in _raw else _raw + "+00:00")
+                since = _last_sync_dt - timedelta(days=1)
+                logger.info(
+                    "Incremental window derived from state file: since %s (last_sync %s − 1d overlap)",
+                    since.isoformat(),
+                    _raw,
+                )
+            except (OSError, ValueError, json.JSONDecodeError) as e:
+                logger.warning(
+                    "Could not derive sync window from state file (%s) — "
+                    "falling back to the fixed EDGEGUARD_SYNC_INTERVAL_DAYS window",
+                    e,
+                )
+
         sync = MISPToNeo4jSync()
-        success = sync.run(incremental=incremental)
+        success = sync.run(incremental=incremental, since=since)
 
         if success:
             duration = time.time() - start_time
@@ -1257,7 +1333,11 @@ def run_neo4j_sync():
 
             try:
                 with open(state_file, "w") as f:
-                    json.dump({"last_sync": datetime.now(timezone.utc).isoformat()}, f)
+                    # START time, not completion time — see should_run_neo4j_sync
+                    # (deterministic every-other-run skip fix). Also keeps the
+                    # derived incremental window anchored at the moment the data
+                    # fetch began, so nothing modified mid-run is ever skipped.
+                    json.dump({"last_sync": sync_started_at.isoformat()}, f)
                 logger.info("Neo4j sync state persisted to %s", state_file)
             except OSError as e:
                 logger.error(
@@ -1671,8 +1751,11 @@ check_neo4j_quality_task = BashOperator(
         trap 'rm -f "$CURL_CFG"' EXIT HUP INT TERM
 
         # Escape password for curl config's quoted-string format:
-        #   \ → \\   " → \"
-        # (curl config supports these escape sequences inside double-quoted values)
+        #   backslash → double-backslash, double-quote → backslash-quote
+        # (curl config supports these escape sequences inside double-quoted
+        # values; spelled out in words because a literal backslash-space in
+        # this non-raw Python triple-quoted string emits SyntaxWarning:
+        # invalid escape sequence — a hard SyntaxError in future CPython)
         NEO4J_PWD_ESC="${NEO4J_PWD//\\\\/\\\\\\\\}"
         NEO4J_PWD_ESC="${NEO4J_PWD_ESC//\\\"/\\\\\\\"}"
 
@@ -1870,6 +1953,10 @@ _KNOWN_BASELINE_CONF_KEYS = frozenset(
         "baseline_days",  # historical depth (consumed by get_baseline_config)
         "baseline_collection_limit",  # legacy per-source cap (back-compat)
         "collection_limit",  # current per-source cap (SSoT)
+        # Backup-timestamp gate on the DAG wipe path (2026-06; closes the
+        # bypass where UI/API triggers skipped the CLI-side PR-F2 gate):
+        "backup_check_passed_cli",  # set by `edgeguard fresh-baseline` AFTER its own gate ran
+        "skip_backup_check",  # explicit, audited operator bypass (mirrors the CLI flag)
         # PR-K1 Bugbot round-2 (Medium): the ``clear_checkpoints`` key
         # used to be consumed by ``_baseline_start_summary`` to choose
         # between baseline-only and full wipe. PR-K1 §1-8 removed that
@@ -2630,6 +2717,104 @@ baseline_start = PythonOperator(
 )
 
 
+def _enforce_dag_backup_gate(conf: dict) -> None:
+    """Backup-timestamp gate for the destructive DAG path (2026-06).
+
+    The PR-F2 gate (refuse a fresh-baseline wipe without a recent backup
+    recorded in ``EDGEGUARD_LAST_BACKUP_AT``) used to run ONLY inside the
+    CLI wrapper ``edgeguard fresh-baseline``. Anyone triggering the DAG
+    directly (Airflow UI "Trigger w/ Config", REST API, ``airflow dags
+    trigger``) bypassed it entirely — the documented trigger path in this
+    DAG's own docstring was ungated. This helper closes that hole while
+    keeping every legitimate path working:
+
+      - ``backup_check_passed_cli`` conf key → the CLI wrapper already ran
+        the gate (or its audited ``--skip-backup-check`` bypass) client-side
+        before triggering; honor it. The container env may legitimately
+        lack ``EDGEGUARD_LAST_BACKUP_AT`` in that flow.
+      - ``skip_backup_check`` conf key → explicit operator bypass for
+        UI/API triggers, mirroring the CLI flag. Logged loudly.
+      - clean-install auto-skip (PR-F3 parity): when Neo4j AND MISP AND
+        checkpoints all probe empty-and-reachable there is nothing to lose,
+        so no backup is required. A FAILED probe does NOT auto-skip —
+        fail-closed, exactly like the CLI's informed-consent path.
+      - otherwise: enforce ``baseline_clean.check_recent_backup_timestamp``
+        against the container environment (compose passes
+        ``EDGEGUARD_LAST_BACKUP_AT`` through ``x-common-env``).
+
+    Raises ``AirflowException`` when the gate refuses.
+    """
+    if _is_truthy_conf_value(conf.get("backup_check_passed_cli", False)):
+        # WARNING (not INFO) on purpose: this is an UNVERIFIABLE attestation —
+        # a bare conf key the gate must take on faith. The legitimate setter is
+        # `edgeguard fresh-baseline` after its host-side gate ran, but the key
+        # is replayable from any past dag_run's conf in the Airflow UI, so the
+        # bypass must be visible to log-level-based audit review just like
+        # skip_backup_check below.
+        logger.warning(
+            "BACKUP GATE SKIPPED on conf attestation backup_check_passed_cli=true "
+            "(normally set by `edgeguard fresh-baseline` after its host-side gate "
+            "ran — NOT verifiable here). If this trigger was hand-crafted or a "
+            "replayed conf, make sure a recent backup actually exists (docs/BACKUP.md)."
+        )
+        return
+    if _is_truthy_conf_value(conf.get("skip_backup_check", False)):
+        logger.warning(
+            "BACKUP GATE BYPASSED via dag_run.conf {'skip_backup_check': true}. "
+            "Proceeding WITHOUT a verified backup — this is an audited operator "
+            "decision; make sure a restore path exists (docs/BACKUP.md)."
+        )
+        return
+
+    from baseline_clean import check_recent_backup_timestamp, probe_baseline_state
+
+    # Clean-install auto-skip (PR-F3 parity with the CLI path,
+    # src/edgeguard.py cmd_fresh_baseline): both data stores empty → a
+    # backup gate would only block first-time setup. Mirrors the CLI
+    # exactly: neo4j_count==0 and misp_count==0, with the checkpoint
+    # COUNT deliberately NOT considered (leftover cursor files on an
+    # emptied graph are exactly the case to allow without ceremony).
+    # ALL THREE ok-flags MUST be checked: probe_baseline_state() reports
+    # failed probes via ok=False with count=0 (it catches failures
+    # internally rather than raising), and a failed probe is NOT evidence
+    # of a clean install — fail-closed. checkpoint_ok is included even
+    # though checkpoint_count is ignored (Bugbot, PR #125): the CLI path
+    # refuses on ANY failed probe via its earlier all_reachable
+    # informed-consent check, so skipping the gate here with an unknown
+    # checkpoint state would be weaker than the CLI it claims parity with.
+    try:
+        state = probe_baseline_state()
+        if (
+            state.neo4j_ok
+            and state.misp_ok
+            and state.checkpoint_ok
+            and state.neo4j_count == 0
+            and state.misp_count == 0
+        ):
+            logger.info(
+                "BACKUP GATE: clean install detected (all probes succeeded; "
+                "Neo4j and MISP empty) — EDGEGUARD_LAST_BACKUP_AT not required."
+            )
+            return
+    except Exception as e:
+        # Backstop only — probe failures normally surface via ok-flags, not
+        # exceptions. Either way: probe failure ≠ clean install (fail-closed).
+        logger.warning("BACKUP GATE: clean-install probe failed (%s) — enforcing the gate.", e)
+
+    gate_error = check_recent_backup_timestamp()
+    if gate_error is not None:
+        raise AirflowException(
+            "BASELINE_CLEAN refused: the destructive wipe requires a recent backup.\n"
+            f"{gate_error}\n"
+            "Options: set EDGEGUARD_LAST_BACKUP_AT in .env and RECREATE the "
+            "container (`docker compose up -d airflow` — plain `restart` does "
+            "NOT re-read .env interpolations; see docs/BACKUP.md), trigger via "
+            "`edgeguard fresh-baseline` (which runs this gate with blast-radius "
+            "display + typed confirmation), or — only if you accept the risk — "
+            're-trigger with conf {"fresh_baseline": true, "skip_backup_check": true}.'
+        )
+
+
 def _baseline_clean(**context):
     """Optional baseline_clean step — runs the destructive 3-step wipe
     (Neo4j + MISP + checkpoints) IFF ``dag_run.conf={"fresh_baseline": true}``.
@@ -2731,6 +2916,11 @@ def _baseline_clean(**context):
         logger.info("Or via the CLI wrapper: edgeguard fresh-baseline --days <N>")
         logger.info("=" * 70)
         return
+
+    # Backup-timestamp gate (2026-06): UI/API-triggered destructive wipes
+    # used to bypass the PR-F2 gate that the CLI wrapper enforces. Raises
+    # AirflowException when no recent backup is recorded (see helper).
+    _enforce_dag_backup_gate(conf)
 
     # Lazy import — keep DAG-parse-time minimal, only load the destructive
     # helper when actually used.

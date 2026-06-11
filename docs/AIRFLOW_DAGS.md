@@ -1,6 +1,6 @@
 # EdgeGuard Airflow DAGs (operations guide)
 
-**Last Updated:** 2026-04-26 (PR-N33 docs audit — see footer)
+**Last Updated:** 2026-06-11 (PR #125 — sync-cadence fix + backup-gate conf keys; see footer)
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
 **Airflow version:** Apache Airflow 3.2.x (upgraded from 2.11 in April 2026 — see [§ Airflow 2 to 3 upgrade](#airflow-2-to-3-upgrade) if you are migrating an existing deployment).
@@ -206,6 +206,8 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | `collection_limit` | int | Per-source item cap. `0` = unlimited. | `get_baseline_config` → all collectors |
 | `baseline_collection_limit` | int | Legacy alias for `collection_limit` (kept for back-compat). | `get_baseline_config` |
 | `clear_checkpoints` | `"all"` | Wipe incremental cursors too (default: keep them). | `_baseline_start_summary` |
+| `backup_check_passed_cli` | bool-ish (same parse as `fresh_baseline`) | Set automatically by `edgeguard fresh-baseline` AFTER its client-side backup gate ran — tells the DAG-side gate not to re-check (the container env may lack `EDGEGUARD_LAST_BACKUP_AT` in the CLI flow). Do not set by hand; use `skip_backup_check` instead. | `_baseline_clean` (gate, 2026-06) |
+| `skip_backup_check` | bool-ish (same parse as `fresh_baseline`) | Explicit, loudly-logged operator bypass of the backup-timestamp gate for UI/API triggers — mirrors the CLI `--skip-backup-check` flag. Dev/test only; production wipes MUST take a backup first (docs/BACKUP.md). | `_baseline_clean` (gate, 2026-06) |
 
 **Unknown keys are SILENTLY IGNORED** by Airflow's conf-passing mechanism, but PR-F5 emits a `WARNING [BASELINE_CONF]` log line for each unrecognized key, with a "did you mean?" suggestion for common typos (e.g. `days` → `baseline_days`). This catches the 2026-04-19 incident where an operator triggered with `{"days": 730}` (missing the `baseline_` prefix) and silently fell through to defaults — additive mode with the wrong window depth, no visible error. Grep your DAG logs for `[BASELINE_CONF]` to spot misconfigured triggers.
 
@@ -321,8 +323,8 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 
 ### Airflow task: `run_neo4j_sync` (`edgeguard_neo4j_sync` DAG)
 
-1. **`check_sync_needed`** (`ShortCircuitOperator`) — if the last successful sync (state file under `EDGEGUARD_STATE_DIR` / `dags/`) is newer than **`NEO4J_SYNC_INTERVAL`** hours (Airflow Variable, default 72), it **short-circuits** and **skips** `run_neo4j_sync` and **all downstream tasks** (`build_relationships`, `run_enrichment_jobs`, …). So a “green” DAG run can mean **sync did not run** (skipped).
-2. **`run_neo4j_sync`** — imports **`MISPToNeo4jSync`**, chooses **full** vs **incremental** sync (first-ever run or Airflow Variable **`NEO4J_FULL_SYNC=true`** → full; otherwise incremental, default window last 3 days), calls **`sync.run()`**, then on success updates the state file and metrics.
+1. **`check_sync_needed`** (`ShortCircuitOperator`) — if the last successful sync (state file under `EDGEGUARD_STATE_DIR` / `dags/`) is newer than **`NEO4J_SYNC_INTERVAL`** hours (Airflow Variable, default 72) **minus a tolerance** (`EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN`, default 60 min, clamped to half the interval), it **short-circuits** and **skips** `run_neo4j_sync` and **all downstream tasks** (`build_relationships`, `run_enrichment_jobs`, …). So a “green” DAG run can mean **sync did not run** (skipped). The tolerance + the start-time stamp (below) exist because the cron fires exactly 72h apart: pre-2026-06 the completion-time stamp made `elapsed` always land just under 72h, deterministically skipping **every other** scheduled sync (effective cadence 144h vs the 96h fetch window = ~48h of MISP events silently dropped per cycle).
+2. **`run_neo4j_sync`** — imports **`MISPToNeo4jSync`**, chooses **full** vs **incremental** sync (first-ever run or Airflow Variable **`NEO4J_FULL_SYNC=true`** → full; otherwise incremental). The incremental window is **derived from the state file** (`last_sync` − 1 day MERGE-idempotent overlap), so it covers everything since the last successful sync even across skipped runs, paused DAGs, or an Airflow outage; if the state file is unreadable it falls back to the fixed `EDGEGUARD_SYNC_INTERVAL_DAYS`+1d window. Calls **`sync.run()`**, then on success stamps the state file with the sync **start** time (not completion — see the cadence note above) and updates metrics.
    - **OOM on very large attribute sets:** `sync_to_neo4j()` merges in **Python-side chunks** (default **500** items per chunk, 3s pause between chunks). Events with **>5000 attributes** are automatically **streamed in pages** of 5000 with `gc.collect()` between pages. Set **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** lower on the Airflow worker if the process is still killed. Default **`AIRFLOW_MEMORY_LIMIT`** is **12g** (100K+ attribute events need 8-12GB for PyMISP JSON parsing).
 3. **Downstream** — `build_relationships` materializes cross-node edges (e.g. **`EMPLOYS_TECHNIQUE`** ThreatActor→Technique and **`IMPLEMENTS_TECHNIQUE`** Malware/Tool→Technique from MITRE **`uses_techniques`** — previously a single `USES`, split in 2026-04; **`INDICATES`** from MISP co-occurrence, …); `run_enrichment_jobs` runs decay/campaign/bridge jobs. Both can succeed with little effect if the sync wrote no nodes.
 
@@ -711,8 +713,7 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit:_
-
+_Last updated: 2026-06-11 — PR #125: documented the sync-cadence fix (start-time stamp + EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN + state-derived incremental window) in the edgeguard_neo4j_sync task walkthrough, and added the backup_check_passed_cli / skip_backup_check rows to the baseline conf-key table (DAG-side backup gate). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit:_
 - _Baseline task chain corrected (BLOCK):_ `baseline_misp_health` → `misp_health_check`; `tier2_extended` → `tier2_feeds`; removed `tier3_low_freq` (does NOT exist as a baseline TaskGroup at HEAD — daily-tier collectors live in the incremental `edgeguard_daily` DAG); `baseline_full_neo4j_sync` / `baseline_build_relationships` / `baseline_enrichment` → `full_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` (**top-level task IDs do NOT carry a `baseline_` prefix** at HEAD — verified against `dags/edgeguard_pipeline.py`)._
 - _PR-N29 H1 carve-out task names also corrected to drop the `baseline_` prefix._
 
