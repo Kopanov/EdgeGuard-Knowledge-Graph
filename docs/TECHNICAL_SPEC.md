@@ -551,7 +551,9 @@ CREATE CONSTRAINT alert_key FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE;
 ### Performance Indexes (snapshot — see `Neo4jClient.create_indexes` in `src/neo4j_client.py` for the canonical list)
 
 ```cypher
-// EdgeGuard indexes (28)
+// EdgeGuard indexes (24 shown — query-performance subset; the per-node
+// uuid indexes and delta-sync timestamp indexes are omitted here. The
+// canonical list is Neo4jClient.create_indexes: 46 EdgeGuard statements.)
 CREATE INDEX source_id_idx FOR (s:Source) ON (s.source_id);
 CREATE INDEX vulnerability_cve FOR (v:Vulnerability) ON (v.cve_id);
 CREATE INDEX indicator_value FOR (i:Indicator) ON (i.value);
@@ -580,6 +582,10 @@ CREATE INDEX campaign_zone FOR (c:Campaign) ON (c.zone);
 CREATE INDEX indicator_last_updated FOR (i:Indicator) ON (i.last_updated);
 CREATE INDEX vulnerability_last_updated FOR (v:Vulnerability) ON (v.last_updated);
 CREATE INDEX cve_cve_id FOR (c:CVE) ON (c.cve_id);
+// GraphRAG retrieval shapes (PR #126, 2026-06): CVSS range scans
+// (cvss_score >= $min) + KEV filters (cisa_exploit_add IS NOT NULL / >= $since)
+CREATE INDEX cve_cvss_score FOR (c:CVE) ON (c.cvss_score);
+CREATE INDEX cve_cisa_exploit_add FOR (c:CVE) ON (c.cisa_exploit_add);
 
 // ResilMesh indexes (15)
 CREATE INDEX ip_address FOR (ip:IP) ON (ip.address);
@@ -605,32 +611,42 @@ CREATE INDEX organizationunit_name FOR (ou:OrganizationUnit) ON (ou.name);
 
 ### FastAPI Query Engine
 
+All endpoints except `GET /health` require the `X-API-Key` header
+(`_verify_api_key`, constant-time compare) and are rate-limited (shared
+read limit; `POST /admin/query` has its own stricter admin limit and
+additionally requires `X-Admin-Token`). Routes verified against
+`src/query_api.py` at HEAD — alert *enrichment* is **not** a REST
+endpoint; it is NATS-based via `src/alert_processor.py` (see *NATS
+Topics* below).
+
 | Method | Path | Description | Parameters |
 |--------|------|-------------|------------|
 | GET | `/health` | Health check — **HTTP 200** always; JSON includes `status` (`ok`/`degraded`), `neo4j_connected` (from `Neo4jClient.health_check()`: ping + APOC). | - |
-| POST | `/query` | Natural language query | query, zone, limit |
-| POST | `/search/indicator` | Search by indicator | value, type |
-| GET | `/zone/{zone}` | Get threats by zone | zone, limit, active_only |
-| GET | `/indicators` | List indicators | skip, limit, zone |
-| GET | `/vulnerabilities` | List CVEs | skip, limit, severity |
-| GET | `/stats` | Graph statistics | - |
-| POST | `/enrich` | Enrich alert | alert_data |
+| POST | `/query` | Natural-language threat query | `query`, `zone`, `limit` (body) |
+| POST | `/search/indicator` | Search a single indicator. Input is canonicalized via `ioc_normalize.canonicalize_lookup` (refang, NFC, case-fold, type resolution) before querying — see *Type Mapping* below. | `value`, `type` (body) |
+| GET | `/zone/{zone}` | Threats for a zone/sector | `zone` (path), `limit`, `severity` |
+| GET | `/indicators` | List indicators with filters | `indicator_type`, `zone`, `source`, `limit`, `offset` |
+| GET | `/vulnerabilities` | List CVEs | `severity`, `zone`, `limit` |
+| GET | `/graph/explore` | Cytoscape.js-formatted graph data for the interactive Graph Explorer (4 views) | `view`, `zone`, `limit` |
+| GET | `/stix/types` | Discovery — list supported STIX export object types | - |
+| GET | `/stix/export/{object_type}/{identifier}` | STIX 2.1 bundle centred on a threat-intel object; CVE / technique / indicator identifiers are normalized before lookup | `object_type`, `identifier` (path), `depth` |
+| GET | `/actors/{name}/summary` | SOC-analyst actor summary: profile + attributed malware, employed techniques, indicators. Alias-aware, case-insensitive; deterministic canonical-name-over-alias resolution (PR #126). | `name` (path) |
+| POST | `/admin/query` | Raw Cypher (admin-gated: `X-Admin-Token` + admin rate limit) | `query` (body) |
 
 **GraphQL service (default port 4001):** `GET /health` returns **HTTP 200** when Neo4j `health_check()` passes, else **503** — see [README.md](../README.md) § *HTTP APIs*.
 
 ### Example Queries
 
-#### Enrich Alert
+#### Search Indicator
 ```bash
-curl -X POST http://localhost:8000/enrich \
+# Defanged/mixed-case paste is fine — the value is canonicalized
+# (refang + NFC + case-fold) to the graph's merge key before lookup.
+curl -X POST http://localhost:8000/search/indicator \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $EDGEGUARD_API_KEY" \
   -d '{
-    "alert_id": "test-001",
-    "zone": "healthcare",
-    "threat": {
-      "indicator": "192.168.1.100",
-      "type": "ip"
-    }
+    "value": "hxxp://evil[.]com/payload",
+    "type": "url"
   }'
 ```
 
@@ -638,6 +654,7 @@ curl -X POST http://localhost:8000/enrich \
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $EDGEGUARD_API_KEY" \
   -d '{
     "query": "Find malware targeting energy sector",
     "zone": "energy",
@@ -647,8 +664,13 @@ curl -X POST http://localhost:8000/query \
 
 #### Get Zone Threats
 ```bash
-curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
+curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
+  "http://localhost:8000/zone/healthcare?limit=20"
 ```
+
+> Alert enrichment has no REST endpoint — ResilMesh alerts arrive on the
+> NATS subjects below and enriched responses are published to
+> `resilmesh.enriched.alerts` (`src/alert_processor.py`).
 
 ---
 
@@ -777,6 +799,20 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 | `url` | `url` | Direct mapping |
 | `email` | `email` | Direct mapping |
 
+**Read-side lookup canonicalization (PR #126, 2026-06):** the table above
+describes the *write* side. Since PR #126, every read entrypoint that
+resolves analyst/sensor input against the graph — REST
+`POST /search/indicator`, the STIX export
+(`/stix/export/{object_type}/{identifier}`), and NATS alert enrichment —
+first passes the input through `src/ioc_normalize.py::canonicalize_lookup`:
+defang reversal (`hxxp://` → `http://`, `1.2.3[.]4` → `1.2.3.4`), Unicode
+NFC, case-folding to the write-side merge key, and full write-side
+`TYPE_MAPPING` parity (e.g. `hostname` → `domain`, `btc` → `bitcoin`, MISP
+`text` → `unknown`; blank/`unknown` types are shape-inferred). This
+guarantees a lookup keys the same `(indicator_type, value)` node the MISP
+sync MERGEd; a parity test pins the read- and write-side vocabularies
+together so they cannot drift.
+
 ---
 
 ## Configuration
@@ -824,4 +860,4 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 
 ---
 
-_Last updated: 2026-06-11 — PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._

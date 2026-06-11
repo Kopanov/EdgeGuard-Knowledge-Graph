@@ -131,7 +131,7 @@ Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules)
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
+_Last updated: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
 
 The PR-N26 → PR-N32 train added significant capabilities that earlier
 versions of this index did not cover. Added rows for: TIMESTAMPS,
