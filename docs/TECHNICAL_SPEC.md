@@ -708,7 +708,7 @@ curl "http://localhost:8000/zone/healthcare?limit=20&active_only=true"
 {
   "alert_id": "wazuh-001",
   "enriched": true,
-  "edgeguard_version": "2026.4.28",
+  "edgeguard_version": "2026.6.11",
   "latency_ms": 120,
   "enrichment": {
     "indicator": {
