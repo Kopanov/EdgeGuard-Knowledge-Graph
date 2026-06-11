@@ -35,6 +35,7 @@ those modules import this one (cycle guard).
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import unicodedata
 from typing import Optional
@@ -108,12 +109,11 @@ def refang(value: str) -> str:
     return out.strip()
 
 
-# Indicator types where defanging is a real analyst convention, so refang
-# is safe to apply. Brackets/`(at)` in any OTHER type (filename, regkey,
-# cmdline, …) may be literal content, so refang is NOT applied there.
-_REFANGABLE_INDICATOR_TYPES = frozenset(
-    {"ipv4", "ipv6", "ip", "domain", "hostname", "url", "email", "email-src", "email-dst"}
-)
+# Graph (EdgeGuard) indicator types where defanging is a real analyst
+# convention, so refang is safe. Brackets/`(at)` in any OTHER type
+# (filename, registry, cmdline, …) may be literal content. These are the
+# POST-mapping (graph) names — type reconciliation runs first.
+_REFANGABLE_INDICATOR_TYPES = frozenset({"ipv4", "ipv6", "domain", "url", "email"})
 
 
 # Indicator types where case IS meaningful — mirror of the exclusion list
@@ -121,7 +121,48 @@ _REFANGABLE_INDICATOR_TYPES = frozenset(
 # (URL paths, file/registry paths, RFC email local-parts). Anything in
 # neither set is treated as *unknown* and falls through to the hex-hash
 # heuristic below.
-_KNOWN_CASE_SENSITIVE_INDICATOR_TYPES = frozenset({"url", "email", "filename", "filepath", "regkey", "cmdline"})
+_KNOWN_CASE_SENSITIVE_INDICATOR_TYPES = frozenset(
+    {"url", "email", "filename", "filepath", "registry", "regkey", "cmdline", "bitcoin", "monero", "ethereum"}
+)
+
+# Alert/MISP-attribute type vocab → EdgeGuard graph type. MUST mirror
+# ``run_misp_to_neo4j.MISPToNeo4jSync.TYPE_MAPPING`` so a read-side
+# (indicator_type, value) lookup keys the SAME node the write side MERGEd —
+# without this, an alert typed "hostname" / "btc" / "regkey" / "email-src"
+# created DUPLICATE nodes (the write side stored domain / bitcoin / registry
+# / email). ``ip`` is resolved by VALUE shape (ipv4 vs ipv6) since one
+# label can't cover both. ``file_hash``/``filehash`` are ResilMesh aliases
+# for "hash". A parity test (tests/test_ioc_normalize_*) pins this against
+# the real TYPE_MAPPING so the two can't silently drift.
+_GRAPH_TYPE_MAP = {
+    "ip-dst": "ipv4",
+    "ip-src": "ipv4",
+    "ipv4": "ipv4",
+    "ipv6": "ipv6",
+    "domain": "domain",
+    "hostname": "domain",
+    "url": "url",
+    "md5": "hash",
+    "sha1": "hash",
+    "sha256": "hash",
+    "sha512": "hash",
+    "hash": "hash",
+    "file_hash": "hash",
+    "filehash": "hash",
+    "email-src": "email",
+    "email-dst": "email",
+    "email": "email",
+    "vulnerability": "cve",
+    "filename": "filename",
+    "regkey": "registry",
+    "registry": "registry",
+    "mutex": "mutex",
+    "yara": "yara",
+    "sigma": "sigma",
+    "snort": "snort",
+    "btc": "bitcoin",
+    "bitcoin": "bitcoin",
+}
 
 # md5 / sha1 / sha256 / sha512 hex-digest lengths.
 _HEX_HASH_LENGTHS = frozenset({32, 40, 64, 128})
@@ -144,43 +185,51 @@ def _blank_type_to_none(indicator_type: Optional[str]) -> Optional[str]:
     return None if stripped in ("", "unknown") else stripped
 
 
+def _resolve_graph_type(indicator_type: Optional[str], value: str) -> Optional[str]:
+    """Resolve an analyst/sensor/MISP type to the EdgeGuard GRAPH type the
+    write side actually stores (via ``_GRAPH_TYPE_MAP``), so read-side
+    lookups key the same node. A blank type is inferred from the value
+    shape; the special ResilMesh ``"ip"`` is resolved to ipv4/ipv6 by shape;
+    an unmapped type passes through unchanged. Returns ``None`` when nothing
+    can be resolved.
+    """
+    itype = _blank_type_to_none(indicator_type)
+    if itype is None:
+        return infer_indicator_type(value) if isinstance(value, str) else None
+    if itype == "ip":
+        return _classify_ip(refang(value).strip()) if isinstance(value, str) else None
+    return _GRAPH_TYPE_MAP.get(itype, itype)
+
+
 def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     """Normalize an analyst-supplied indicator value for graph lookup.
 
-    Pipeline: :func:`refang` (only for network types where defanging is a
-    convention — see ``_REFANGABLE_INDICATOR_TYPES``) → NFC-normalize +
-    strip → lowercase IFF the type is in
-    ``node_identity._CASE_INSENSITIVE_INDICATOR_TYPES`` (the exact set the
-    write side consults in ``canonicalize_merge_key`` — the write-side
+    Pipeline: resolve the GRAPH type (:func:`_resolve_graph_type` — maps the
+    alert/MISP vocab to what the write side stores) → :func:`refang` (only
+    for network/email graph types) → NFC-normalize + strip → lowercase IFF
+    the graph type is in ``node_identity._CASE_INSENSITIVE_INDICATOR_TYPES``
+    (the exact set ``canonicalize_merge_key`` consults — the write-side
     parity guarantee: the value bound into a read-side ``MATCH`` equals the
-    value the write side used as its MERGE key). ``hash`` is in that set
-    today, so file hashes fold via set membership.
+    value the write side used as its MERGE key).
 
-    Type-name reconciliation: the ResilMesh/Wazuh alert vocab uses ``ip``
-    and ``file_hash``; these are mapped to the write-side equivalents
-    (``ipv4``/``ipv6`` are both case-insensitive so ``ip`` folds; ``hash``
-    folds) so an uppercase IPv6 or hash from an alert still matches the
-    lowercased stored node.
+    Resolving the graph type FIRST is what keeps e.g. a ``btc`` alert
+    (write side stores ``bitcoin``, case-SENSITIVE Base58) from being
+    wrongly lowercased, and a ``hostname`` alert (→ ``domain``) folding the
+    same way the write side did.
 
-    For an unknown/None type a hex-hash heuristic is the last resort: a
-    pure-hex value of length 32/40/64/128 is lowercased.
+    For an unknown/uninferable type a hex-hash heuristic is the last resort:
+    a pure-hex value of length 32/40/64/128 is lowercased.
 
     Never raises: non-``str`` ``value`` is returned unchanged.
     """
     if not isinstance(value, str):
         return value
-    itype = _blank_type_to_none(indicator_type)
-    base = refang(value) if (itype is None or itype in _REFANGABLE_INDICATOR_TYPES) else value
+    gtype = _resolve_graph_type(indicator_type, value)
+    base = refang(value) if (gtype is None or gtype in _REFANGABLE_INDICATOR_TYPES) else value
     out = unicodedata.normalize("NFC", base).strip()
-    # Alert-vocab → write-vocab: 'ip' covers ipv4+ipv6 (both case-insensitive);
-    # 'file_hash'/'filehash' → 'hash' (in the case-insensitive set).
-    if itype == "ip":
+    if gtype in _CASE_INSENSITIVE_INDICATOR_TYPES:
         return out.lower()
-    if itype in ("file_hash", "filehash"):
-        itype = "hash"
-    if itype in _CASE_INSENSITIVE_INDICATOR_TYPES:
-        return out.lower()
-    if itype is None or itype not in _KNOWN_CASE_SENSITIVE_INDICATOR_TYPES:
+    if gtype is None or gtype not in _KNOWN_CASE_SENSITIVE_INDICATOR_TYPES:
         if len(out) in _HEX_HASH_LENGTHS and _HEX_VALUE_RE.fullmatch(out):
             return out.lower()
     return out
@@ -191,10 +240,17 @@ def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
 # Conservative on purpose — only UNAMBIGUOUS shapes are claimed; anything
 # else returns None so the caller leaves the value untyped rather than
 # guessing wrong.
-_IPV4_RE = re.compile(r"(?:\d{1,3}\.){3}\d{1,3}")
-_IPV6_RE = re.compile(r"(?=.*:)[0-9A-Fa-f:]+(?:%[0-9A-Za-z]+)?")
 _EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
-_DOMAIN_RE = re.compile(r"(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}")
+# Domain shape: dotted labels + alpha TLD, with an OPTIONAL trailing root
+# dot (FQDN form "evil.com."). Label/TLD classes include Unicode letters
+# (``¡-￿``) so IDN/homograph domains ("münchen.de", "россия.рф")
+# classify the same as their punycode form — the write side stores IDN
+# domains NFC-folded, so this keeps read/write parity. (Django's URL host
+# pattern uses the same Unicode range.)
+_DOMAIN_RE = re.compile(
+    r"(?:[A-Za-z0-9¡-￿](?:[A-Za-z0-9¡-￿-]{0,61}[A-Za-z0-9¡-￿])?\.)+"
+    r"[A-Za-z¡-￿]{2,63}\.?"
+)
 # Final labels that are common file/document extensions, NOT real TLDs —
 # guards against a bare typeless filename ("pos-malware.exe", "report.pdf")
 # being mislabeled a domain (→ wrong block-recommendation + mistyped node).
@@ -247,10 +303,21 @@ _FILE_EXTENSION_FINAL_LABELS = frozenset(
 )
 
 
-def _is_ipv4(value: str) -> bool:
-    if not _IPV4_RE.fullmatch(value):
-        return False
-    return all(0 <= int(o) <= 255 for o in value.split("."))
+def _classify_ip(value: str) -> Optional[str]:
+    """Return 'ipv4' / 'ipv6' for a STRICTLY valid IP literal, else None.
+
+    Uses the stdlib ``ipaddress`` validator instead of a loose regex — a
+    hex+colon shape check wrongly accepted non-addresses like ``dead:beef``
+    and MAC addresses (``00:1a:2b:3c:4d:5e``) as IPv6, mislabeling the node
+    type and breaking MISP-sync key parity. ``%zone`` scope-id suffixes
+    (``fe80::1%eth0``) are stripped before validation since the graph stores
+    the bare address.
+    """
+    candidate = value.split("%", 1)[0] if "%" in value else value
+    try:
+        return "ipv4" if ipaddress.ip_address(candidate).version == 4 else "ipv6"
+    except ValueError:
+        return None
 
 
 def infer_indicator_type(value: str) -> Optional[str]:
@@ -278,15 +345,21 @@ def infer_indicator_type(value: str) -> Optional[str]:
         return None
     low = v.lower()
     if low.startswith(("http://", "https://", "ftp://")):
-        return "url"
+        # Well-formedness: a real URL has a non-empty host after ``://`` and
+        # NO interior whitespace. Without this, a space-corrupted paste
+        # ("http:// evil.com") was confidently mislabeled 'url' and bound a
+        # space-containing value that can never match a stored node (and the
+        # embedded host was never recovered). A scheme-bearing-but-malformed
+        # value resolves to None here (it isn't a domain/ip/hash either).
+        after = v.split("://", 1)[1].strip()
+        return "url" if (after and not any(c.isspace() for c in v)) else None
     if _EMAIL_RE.fullmatch(v):
         return "email"
-    if _is_ipv4(v):
-        return "ipv4"
-    # IPv6 must contain a colon and be all hex/colon (avoid matching a bare
-    # hex hash, which has no colon).
-    if ":" in v and _IPV6_RE.fullmatch(v):
-        return "ipv6"
+    # Strict IP validation (ipaddress) — rejects non-addresses like
+    # "dead:beef" / MAC addresses that a loose hex+colon shape accepted.
+    ip_type = _classify_ip(v)
+    if ip_type:
+        return ip_type
     if len(v) in _HEX_HASH_LENGTHS and _HEX_VALUE_RE.fullmatch(v):
         return "hash"
     # Domain/hostname: dotted labels, alpha TLD, none of the URL/email/path
@@ -294,7 +367,10 @@ def infer_indicator_type(value: str) -> Optional[str]:
     # bare typeless filename "pos-malware.exe" stays unknown rather than
     # being mislabeled a domain and given a bogus DNS-sinkhole recommendation).
     if not any(c in v for c in "/\\@ \t") and _DOMAIN_RE.fullmatch(v):
-        if v.rsplit(".", 1)[-1].lower() not in _FILE_EXTENSION_FINAL_LABELS:
+        # Final label ignoring an optional trailing root dot ("report.pdf."
+        # is still a filename, not a domain).
+        final_label = v.rstrip(".").rsplit(".", 1)[-1].lower()
+        if final_label not in _FILE_EXTENSION_FINAL_LABELS:
             return "domain"
     return None
 
@@ -319,14 +395,15 @@ def canonicalize_lookup(indicator_type: Optional[str], value: str) -> tuple[Opti
     inferred + folded while another bound the raw value, so identical paste
     enriched on ingest yet returned not-found on search.
     """
-    itype = _blank_type_to_none(indicator_type)
-    if itype is None and isinstance(value, str):
-        inferred = infer_indicator_type(value)
-        if inferred:
-            itype = inferred
-    normalized = normalize_indicator_value(itype, value)
+    resolved_type = _resolve_graph_type(indicator_type, value)
+    normalized = normalize_indicator_value(indicator_type, value)
     normalized = normalized.strip() if isinstance(normalized, str) else ""
-    return itype, normalized
+    # A value that refangs/normalizes to pure punctuation (e.g. a bare
+    # defang token "[.]" → ".") has no usable lookup key — treat as empty so
+    # callers short-circuit instead of MATCHing a junk single-char value.
+    if not any(ch.isalnum() for ch in normalized):
+        normalized = ""
+    return resolved_type, normalized
 
 
 # Accepts analyst paste variants: 'CVE-2021-44228', 'cve 2021 44228',

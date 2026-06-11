@@ -296,6 +296,18 @@ class TestInferIndicatorType:
 
     def test_ipv6(self):
         assert infer_indicator_type("2001:db8::1") == "ipv6"
+        assert infer_indicator_type("::1") == "ipv6"
+        assert infer_indicator_type("fe80::1%eth0") == "ipv6"  # zone-id stripped
+
+    def test_loose_hex_colon_is_not_ipv6(self):
+        """Bugbot: strict ipaddress validation — a hex+colon shape that is
+        NOT a valid IP (incl. MAC addresses) must NOT be labeled ipv6."""
+        assert infer_indicator_type("dead:beef") is None
+        assert infer_indicator_type("00:1a:2b:3c:4d:5e") is None  # MAC, not IPv6
+
+    def test_malformed_ipv4_is_not_ipv4(self):
+        assert infer_indicator_type("1.2.3.4.5") is None
+        assert infer_indicator_type("256.1.1.1") is None
 
     def test_url(self):
         assert infer_indicator_type("https://evil.com/path") == "url"
@@ -328,6 +340,76 @@ class TestInferIndicatorType:
         assert infer_indicator_type(1234) is None
 
 
+class TestTypeVocabReconciliation:
+    """Fuzz batch: the read side must map the alert/MISP type vocab to the
+    EdgeGuard graph type the write side stores, or duplicate nodes appear."""
+
+    def test_graph_type_map_mirrors_write_side_TYPE_MAPPING(self):
+        """Drift guard: every entry in the canonical write-side TYPE_MAPPING
+        (run_misp_to_neo4j) must resolve to the same graph type on the read
+        side, so a read lookup keys the node the write side MERGEd."""
+        from ioc_normalize import _GRAPH_TYPE_MAP
+        from run_misp_to_neo4j import MISPToNeo4jSync
+
+        for misp_type, graph_type in MISPToNeo4jSync.TYPE_MAPPING.items():
+            if graph_type == "unknown":
+                continue  # 'text' → 'unknown' is the no-type sentinel, handled separately
+            assert _GRAPH_TYPE_MAP.get(misp_type) == graph_type, (
+                f"read-side _GRAPH_TYPE_MAP['{misp_type}'] must equal write-side '{graph_type}'"
+            )
+
+    def test_hostname_resolves_to_domain_and_folds(self):
+        from ioc_normalize import canonicalize_lookup
+
+        # Write side maps hostname→domain (case-insensitive) → folds.
+        assert canonicalize_lookup("hostname", "Web01.Corp.LOCAL") == ("domain", "web01.corp.local")
+
+    def test_btc_resolves_to_bitcoin_and_does_NOT_fold(self):
+        from ioc_normalize import canonicalize_lookup
+
+        # Write side maps btc→bitcoin (case-SENSITIVE Base58) → value preserved.
+        addr = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        assert canonicalize_lookup("btc", addr) == ("bitcoin", addr)
+
+    def test_regkey_and_email_aliases_reconcile(self):
+        from ioc_normalize import canonicalize_lookup
+
+        assert canonicalize_lookup("regkey", "HKLM\\Software\\Run")[0] == "registry"
+        assert canonicalize_lookup("email-src", "Abuse@Evil.COM") == ("email", "Abuse@Evil.COM")
+
+
+class TestInferUrlAndDomainEdgeCases:
+    """Fuzz batch: URL well-formedness + IDN/trailing-dot domains."""
+
+    def test_url_with_interior_space_is_not_url(self):
+        # Space-corrupted scheme paste must NOT be mislabeled 'url'.
+        assert infer_indicator_type("http:// evil.com") is None
+        assert infer_indicator_type("https:// 1.2.3.4") is None
+        assert infer_indicator_type("hxxp://evil .com/path") is None
+
+    def test_valid_url_still_inferred(self):
+        assert infer_indicator_type("http://evil.com/path") == "url"
+        assert infer_indicator_type("hxxp://evil[.]com/x") == "url"
+
+    def test_idn_unicode_domain_inferred(self):
+        assert infer_indicator_type("münchen.de") == "domain"
+        assert infer_indicator_type("café.fr") == "domain"
+        # Same host's punycode form classifies the same way.
+        assert infer_indicator_type("xn--mnchen-3ya.de") == "domain"
+
+    def test_trailing_dot_fqdn_inferred_as_domain(self):
+        assert infer_indicator_type("evil.com.") == "domain"
+        # …but a trailing-dot filename is still not a domain.
+        assert infer_indicator_type("report.pdf.") is None
+
+    def test_punctuation_only_value_has_empty_lookup_key(self):
+        from ioc_normalize import canonicalize_lookup
+
+        # A bare defang token refangs to pure punctuation → no usable key.
+        assert canonicalize_lookup(None, "[.]")[1] == ""
+        assert canonicalize_lookup(None, "[@]")[1] == ""
+
+
 class TestCanonicalizeLookupBlankType:
     """Bugbot 'blank type skips inference refang': every 'no type given'
     form — None, '', '  ', 'unknown' — must infer + refang + fold
@@ -341,10 +423,15 @@ class TestCanonicalizeLookupBlankType:
         # All collapse to the same inferred-domain + refanged + folded result.
         assert set(results.values()) == {("domain", "evil.com")}, results
 
-    def test_blank_type_normalize_still_refangs(self):
-        # An explicit empty type must not bypass refang (the bug).
-        assert normalize_indicator_value("", "EvIl[.]CoM") == "EvIl.CoM"  # refanged, not case-folded (unknown type)
+    def test_blank_type_normalize_refangs_and_infers(self):
+        # An empty type must not bypass refang OR inference: a defanged
+        # domain value resolves to the domain graph type and folds (parity
+        # with how the write side stores it), exactly like None/"unknown".
+        assert normalize_indicator_value("", "EvIl[.]CoM") == "evil.com"
         assert normalize_indicator_value("   ", "1.2.3[.]4") == "1.2.3.4"
+        # A value that refangs but ISN'T a recognizable shape stays
+        # case-preserved (no spurious fold).
+        assert normalize_indicator_value("", "Plain-Text[.]Token-No-TLD-x") == "Plain-Text.Token-No-TLD-x"
 
 
 class TestMitreTechniqueBoundary:
