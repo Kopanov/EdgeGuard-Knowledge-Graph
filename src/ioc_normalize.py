@@ -128,6 +128,22 @@ _HEX_HASH_LENGTHS = frozenset({32, 40, 64, 128})
 _HEX_VALUE_RE = re.compile(r"[0-9a-fA-F]+")
 
 
+def _blank_type_to_none(indicator_type: Optional[str]) -> Optional[str]:
+    """Collapse every "no type given" form to ``None``: actual ``None``,
+    an empty / whitespace-only string, and EdgeGuard's ``"unknown"``
+    sentinel. Returns the stripped-lowercased type otherwise.
+
+    Single source of truth so inference + refang fire identically whether
+    the caller passes ``None``, ``""``, ``"  "``, or ``"unknown"`` — without
+    this, a ``type: ""`` alert was treated as a distinct real type and
+    skipped both inference and refang.
+    """
+    if not isinstance(indicator_type, str):
+        return None
+    stripped = indicator_type.strip().lower()
+    return None if stripped in ("", "unknown") else stripped
+
+
 def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     """Normalize an analyst-supplied indicator value for graph lookup.
 
@@ -153,14 +169,7 @@ def normalize_indicator_value(indicator_type: Optional[str], value: str) -> str:
     """
     if not isinstance(value, str):
         return value
-    itype = indicator_type.strip().lower() if isinstance(indicator_type, str) else None
-    # "unknown" is EdgeGuard's sentinel for "no type given" (the default the
-    # alert path fills in), so treat it identically to a missing type — both
-    # get refang + the hex-hash heuristic. Without this, a missing-type alert
-    # (itype=None → refang) and an explicit type="unknown" alert (refang
-    # skipped) normalized the SAME value differently.
-    if itype == "unknown":
-        itype = None
+    itype = _blank_type_to_none(indicator_type)
     base = refang(value) if (itype is None or itype in _REFANGABLE_INDICATOR_TYPES) else value
     out = unicodedata.normalize("NFC", base).strip()
     # Alert-vocab → write-vocab: 'ip' covers ipv4+ipv6 (both case-insensitive);
@@ -296,9 +305,10 @@ def canonicalize_lookup(indicator_type: Optional[str], value: str) -> tuple[Opti
     /search/indicator, STIX indicator export, alert enrichment).
 
     Returns ``(resolved_type, normalized_value)``:
-      - ``resolved_type`` is the given type, or — when it is missing /
-        ``"unknown"`` — the type inferred from the value's shape
-        (:func:`infer_indicator_type`), or ``None`` if uninferable.
+      - ``resolved_type`` is the given type, or — when it is "blank"
+        (``None`` / empty / whitespace / the ``"unknown"`` sentinel) — the
+        type inferred from the value's shape (:func:`infer_indicator_type`),
+        or ``None`` if uninferable.
       - ``normalized_value`` is :func:`normalize_indicator_value` applied
         with the resolved type (refang + NFC + case-fold to the write-side
         MERGE key), stripped. May be ``""`` when the input is empty /
@@ -309,8 +319,8 @@ def canonicalize_lookup(indicator_type: Optional[str], value: str) -> tuple[Opti
     inferred + folded while another bound the raw value, so identical paste
     enriched on ingest yet returned not-found on search.
     """
-    itype = indicator_type
-    if (itype is None or (isinstance(itype, str) and itype.strip().lower() == "unknown")) and isinstance(value, str):
+    itype = _blank_type_to_none(indicator_type)
+    if itype is None and isinstance(value, str):
         inferred = infer_indicator_type(value)
         if inferred:
             itype = inferred

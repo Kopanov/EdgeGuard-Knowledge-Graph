@@ -328,6 +328,25 @@ class TestInferIndicatorType:
         assert infer_indicator_type(1234) is None
 
 
+class TestCanonicalizeLookupBlankType:
+    """Bugbot 'blank type skips inference refang': every 'no type given'
+    form — None, '', '  ', 'unknown' — must infer + refang + fold
+    identically, so an alert with threat.type='' isn't persisted
+    non-canonical and missing MISP-synced nodes."""
+
+    def test_all_blank_type_forms_infer_and_fold(self):
+        from ioc_normalize import canonicalize_lookup
+
+        results = {repr(t): canonicalize_lookup(t, "EVIL[.]COM") for t in (None, "", "  ", "unknown", "UNKNOWN")}
+        # All collapse to the same inferred-domain + refanged + folded result.
+        assert set(results.values()) == {("domain", "evil.com")}, results
+
+    def test_blank_type_normalize_still_refangs(self):
+        # An explicit empty type must not bypass refang (the bug).
+        assert normalize_indicator_value("", "EvIl[.]CoM") == "EvIl.CoM"  # refanged, not case-folded (unknown type)
+        assert normalize_indicator_value("   ", "1.2.3[.]4") == "1.2.3.4"
+
+
 class TestMitreTechniqueBoundary:
     def test_overlong_input_does_not_truncate_to_a_different_technique(self):
         """#8: 'T10590' must NOT silently resolve to the real technique
