@@ -481,6 +481,20 @@ class TestActorSummary:
         assert "APT28" not in cypher  # never interpolated (Cypher-injection rule)
         assert "toLower(trim($name))" in cypher
 
+    def test_query_prefers_canonical_name_over_alias_match(self, monkeypatch):
+        """Bugbot 'actor summary picks arbitrary match': when two actors
+        share an alias, a canonical-NAME hit must deterministically win.
+        Pin the rank-then-name ORDER BY (not the old bare ORDER BY a.name)."""
+        session = _FakeSession(results=[_FakeResult(single_record=_actor_record())])
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(session))
+        client.get("/actors/apt28/summary")
+        cypher, _params = session.calls[0]
+        assert "_match_rank" in cypher and "ORDER BY _match_rank" in cypher, (
+            "actor-summary tiebreak must rank canonical-name matches before alias-only matches"
+        )
+        # The bare nondeterministic form must be gone.
+        assert "WITH a ORDER BY a.name LIMIT 1" not in cypher
+
     def test_404_when_no_actor_matches(self, monkeypatch):
         session = _FakeSession(results=[_FakeResult(single_record=None)])
         monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(session))
@@ -568,3 +582,17 @@ class TestAlertProcessorNormalization:
         assert result.enriched is False
         bound = [p["indicator"] for _q, p in session.calls if "indicator" in p]
         assert all(v.strip() for v in bound), "no Cypher should bind an empty/whitespace $indicator"
+
+    def test_inferred_ipv4_still_gets_block_recommendation(self):
+        """Bugbot 'inferred types skip recommendations': a typeless IP alert
+        infers type 'ipv4' — _generate_recommendations must recognize the
+        canonical name, not only the legacy 'ip' label, or the primary
+        block guidance silently disappears."""
+        _session, result = self._process({"indicator": "203.0.113.7"})
+        recs = result.enrichment.get("recommendations", [])
+        assert any("Block IP 203.0.113.7" in r for r in recs), recs
+
+    def test_inferred_hash_still_gets_block_recommendation(self):
+        _session, result = self._process({"indicator": "d" * 64})
+        recs = result.enrichment.get("recommendations", [])
+        assert any("Block file hash" in r for r in recs), recs

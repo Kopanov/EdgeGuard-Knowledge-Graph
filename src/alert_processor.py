@@ -582,13 +582,20 @@ class AlertProcessor:
         """Generate security recommendations based on enrichment"""
         recommendations = []
 
-        # Base recommendation: block the indicator
-        if indicator_type == "ip":
+        # Base recommendation: block the indicator. Accept BOTH the legacy
+        # ResilMesh alert labels (ip / file_hash) AND the canonical
+        # write-side / inferred type names (ipv4 / ipv6 / hash) — since
+        # typeless alerts now resolve their type via infer_indicator_type
+        # (e.g. "ipv4", "hash"), this block must recognize those or an
+        # inferred IP/hash alert would silently lose its primary guidance.
+        if indicator_type in ("ip", "ipv4", "ipv6"):
             recommendations.append(f"Block IP {indicator} at perimeter firewall")
-        elif indicator_type == "domain":
+        elif indicator_type in ("domain", "hostname"):
             recommendations.append(f"Block domain {indicator} via DNS sinkhole")
-        elif indicator_type == "file_hash":
+        elif indicator_type in ("file_hash", "hash"):
             recommendations.append(f"Block file hash {indicator} on endpoints")
+        elif indicator_type == "url":
+            recommendations.append(f"Block URL {indicator} at web proxy / gateway")
 
         # Host-based recommendations
         hostname = alert.threat.get("hostname")

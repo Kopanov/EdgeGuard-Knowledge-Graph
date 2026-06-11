@@ -1116,7 +1116,13 @@ _ACTOR_SUMMARY_CYPHER = """
     WHERE a.edgeguard_managed = true
       AND (a.name = toLower(trim($name))
            OR any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim($name))))
-    WITH a ORDER BY a.name LIMIT 1
+    // Deterministic tiebreak: a canonical-NAME hit always wins over an
+    // alias-only hit, then by name for stability — so when two managed
+    // actors share the same alias string, we never return the wrong
+    // profile nondeterministically (Bugbot 2026-06).
+    WITH a, (CASE WHEN a.name = toLower(trim($name)) THEN 0 ELSE 1 END) AS _match_rank
+    ORDER BY _match_rank, a.name
+    LIMIT 1
     OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
       WHERE m.edgeguard_managed = true
     WITH a, collect(DISTINCT m.name) AS malware_names
