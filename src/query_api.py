@@ -1088,10 +1088,18 @@ async def stix_export(
             # READ-side canonicalization: infer type from the value shape and
             # refang + NFC + case-fold so a defanged / mixed-case IOC path
             # ("EvIl[.]CoM", "EVIL.COM") resolves to the stored node — same
-            # shared path as /search/indicator and alert enrichment. Falls
-            # back to the raw identifier when normalization yields nothing.
+            # shared path as /search/indicator and alert enrichment.
+            # canonicalize_lookup yields "" only for empty / whitespace /
+            # zero-width-only input — there is no graph key to export, so
+            # reject (same empty-key guard as /search/indicator) instead of
+            # running a MATCH on a meaningless value.
             _t, _norm = canonicalize_lookup(None, identifier)
-            bundle = exporter.export_indicator(_norm or identifier, depth=depth)
+            if not _norm:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Indicator identifier is empty after normalization.",
+                )
+            bundle = exporter.export_indicator(_norm, depth=depth)
         elif ot == "actor":
             bundle = exporter.export_threat_actor(identifier, depth=depth)
         elif ot == "technique":

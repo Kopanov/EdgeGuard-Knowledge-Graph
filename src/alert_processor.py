@@ -228,7 +228,7 @@ class AlertProcessor:
         # Ensure connection
         if not self.connect():
             logger.error("[ERR] Cannot process alert - Neo4j not connected")
-            return self._create_error_response(alert, "Neo4j connection failed")
+            return self._create_error_response(alert, "Neo4j connection failed", original_alert_snapshot)
 
         # Canonicalize the indicator ONCE, BEFORE the write — refang + NFC +
         # case-fold (src/ioc_normalize.py, write-side parity). This must run
@@ -275,7 +275,7 @@ class AlertProcessor:
         # The Alert node is already persisted above, so this is a degraded
         # (un-enriched) response, not a lost alert.
         if not indicator:
-            return self._create_error_response(alert, "No indicator in alert")
+            return self._create_error_response(alert, "No indicator in alert", original_alert_snapshot)
 
         # Step 8: Query Neo4j for enrichment
         enrichment_data = self._enrich_indicator(indicator, indicator_type, alert)
@@ -644,8 +644,16 @@ class AlertProcessor:
 
         return recommendations
 
-    def _create_error_response(self, alert: ResilMeshAlert, error_message: str) -> EnrichedAlert:
-        """Create an error response when enrichment fails"""
+    def _create_error_response(
+        self, alert: ResilMeshAlert, error_message: str, original_alert: Optional[Dict] = None
+    ) -> EnrichedAlert:
+        """Create an error/degraded response when enrichment fails.
+
+        ``original_alert`` should be the RAW pre-normalization snapshot when
+        the caller has one — degraded responses (e.g. an indicatorless alert
+        whose Alert node WAS persisted) carry the same verbatim payload the
+        success path returns, not an empty dict.
+        """
         return EnrichedAlert(
             alert_id=alert.alert_id,
             enriched=False,
@@ -653,7 +661,7 @@ class AlertProcessor:
             latency_ms=0.0,
             query_metadata={"error": error_message},
             enrichment={},
-            original_alert={},
+            original_alert=original_alert if original_alert is not None else {},
         )
 
     def close(self):

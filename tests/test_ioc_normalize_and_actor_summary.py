@@ -414,6 +414,10 @@ class TestStixCveExportNormalization:
                 captured["cve_id"] = cve_id
                 return {"type": "bundle", "objects": []}
 
+            def export_indicator(self, value, depth=2):
+                captured["indicator_value"] = value
+                return {"type": "bundle", "objects": []}
+
         monkeypatch.setattr(stix_exporter, "StixExporter", _FakeExporter)
 
     def test_spaced_lowercase_identifier_uppercased(self, monkeypatch):
@@ -442,6 +446,30 @@ class TestStixCveExportNormalization:
         resp = client.get("/stix/export/cve/not-a-cve")
         assert resp.status_code == 200
         assert captured["cve_id"] == "not-a-cve"
+
+    def test_indicator_export_normalizes_identifier(self, monkeypatch):
+        """Bugbot: object_type=indicator must go through the same
+        canonicalize_lookup path as /search/indicator — defanged/mixed-case
+        IOC paste resolves to the stored key."""
+        captured = {}
+        self._install_fake_exporter(monkeypatch, captured)
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(_FakeSession()))
+
+        resp = client.get("/stix/export/indicator/EvIl[.]CoM")
+        assert resp.status_code == 200
+        assert captured["indicator_value"] == "evil.com"
+
+    def test_indicator_export_rejects_empty_normalized_key(self, monkeypatch):
+        """Bugbot: a whitespace-only identifier normalizes to '' — must be
+        rejected (400) without calling the exporter, mirroring the
+        /search/indicator empty-key guard."""
+        captured = {}
+        self._install_fake_exporter(monkeypatch, captured)
+        monkeypatch.setattr(query_api, "neo4j_client", _FakeNeo4jClient(_FakeSession()))
+
+        resp = client.get("/stix/export/indicator/%20%20")
+        assert resp.status_code == 400
+        assert "indicator_value" not in captured, "exporter must not be called for an empty key"
 
 
 # ---------------------------------------------------------------------------
@@ -638,6 +666,17 @@ class TestAlertProcessorNormalization:
             "process_complete_resilmesh_alert must run so the Alert node is recorded"
         )
         assert self._last_fake.written_alert.get("indicator") in (None, "")
+
+    def test_degraded_response_carries_verbatim_original_alert(self):
+        """Bugbot: enriched=False responses (e.g. indicatorless alert whose
+        Alert node WAS persisted) must carry the RAW original_alert snapshot
+        like the success path — not an empty dict, and not the
+        normalization-mutated payload."""
+        _session, result = self._process({"hostname": "srv-01", "indicator": "  ", "type": "domain"})
+        assert result.enriched is False
+        assert result.original_alert, "degraded response must include the original alert payload"
+        # Verbatim pre-normalization value, not the mutated "" form.
+        assert result.original_alert["threat"]["indicator"] == "  "
 
     def test_inferred_ipv4_still_gets_block_recommendation(self):
         """Bugbot 'inferred types skip recommendations': a typeless IP alert
