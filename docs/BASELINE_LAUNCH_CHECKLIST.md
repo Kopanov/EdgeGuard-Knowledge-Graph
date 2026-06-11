@@ -54,8 +54,8 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
 * `[2] Neo4j reachable + APOC + indexes`
 * `[3] MISP API reachable + auth valid`
-* `[4] launch-path decision confirmed` (DAG-only at HEAD — there is no CLI baseline subcommand; see RUNBOOK § "Baseline launch path" for the correction history)
-* `[5] IF DAG path: 4 incremental DAGs PAUSED` (Issue #57 — required to prevent incremental DAGs racing the baseline)
+* `[4] launch-path decision confirmed` (the `edgeguard baseline`/`fresh-baseline` CLI wrappers trigger the same DAG — see RUNBOOK § "Baseline launch path"; `--launch-path=cli` refers only to the legacy in-process `run_pipeline.py --baseline` path)
+* `[5] IF DAG path: 5 scheduled DAGs PAUSED` (Issue #57 — required to prevent the incremental collectors AND `edgeguard_neo4j_sync` racing the baseline)
 * `[6] Airflow worker RAM ≥ 4 GB`
 * `[7] Prometheus alerts.yml parses + ≥ 11 rules loaded`
 * `[8] no stale baseline_lock sentinel`
@@ -246,24 +246,27 @@ in and what to do.
 
 ## Launch decision
 
-If all 6 items pass, you are cleared to run `edgeguard_baseline`.
-Launch path is **DAG-only** (the CLI baseline subcommand referenced in
-older RUNBOOK versions doesn't exist at HEAD — verified by PR-N35
-docs audit). See RUNBOOK § "Baseline launch path" for the full
-procedure:
+If the items above pass, you are cleared to run `edgeguard_baseline`.
+Every launch flow goes through the DAG — `edgeguard baseline` /
+`edgeguard fresh-baseline` are wrappers that trigger it (PR-C,
+2026-04-19); they add confirmation + backup-gate UX, **not** a mutex.
+See RUNBOOK § "Baseline launch path" for the full procedure:
 
-1. Pause the 4 incremental DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
-   `edgeguard_pipeline`, `edgeguard_low_freq`) so they don't race the baseline.
+1. Pause the 5 scheduled DAGs (`edgeguard_daily`, `edgeguard_medium_freq`,
+   `edgeguard_pipeline`, `edgeguard_low_freq`, `edgeguard_neo4j_sync`)
+   so they don't race the baseline.
 2. `airflow dags trigger edgeguard_baseline`
 3. Watch the `baseline_complete` task. After it completes, unpause
-   the 4 incremental schedulers.
+   the 5 scheduled DAGs.
 
-The `baseline_in_progress.lock` sentinel at
-`checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`) is
-written by the baseline DAG itself; the 4 incremental DAGs check it
-and self-skip via `baseline_skip_reason()` — pausing is the
-defense-in-depth on top of the sentinel. Issue #57 tracks the
-DB-backed mutex that will replace the manual-pause step.
+**Docs correction (2026-06):** the `baseline_in_progress.lock` sentinel
+at `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
+is **NOT** written by the baseline DAG (the DAG-side lock tasks were
+de-scoped in PR-F2; Issue #57) — only the legacy in-process
+`python src/run_pipeline.py --baseline` path writes it. For DAG-launched
+baselines the manual pause above is therefore the ONLY mutex, not
+defense-in-depth. Issue #57 tracks the DB-backed mutex that will
+replace the manual-pause step.
 
 ---
 

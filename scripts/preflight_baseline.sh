@@ -19,7 +19,7 @@
 #   [2] Neo4j reachable + APOC available + baseline-critical indexes present
 #   [3] MISP API reachable + auth valid + server version ≥ 2.4
 #   [4] launch-path decision confirmed (CLI or DAG+pause) — see RUNBOOK
-#   [5] IF DAG launch path: the 4 incremental DAGs are PAUSED (Issue #57)
+#   [5] IF DAG launch path: the 5 scheduled DAGs are PAUSED (Issue #57)
 #   [6] Airflow worker RAM ≥ 4 GB
 #   [7] Prometheus alerts.yml parses + edgeguard rule group loaded
 #   [8] no stale baseline_lock sentinel from a previous aborted run
@@ -201,9 +201,9 @@ fi
 hdr "[4][5] launch-path = $LAUNCH_PATH"
 if [[ "$LAUNCH_PATH" == "cli" ]]; then
   pass "CLI launch path — in-process baseline_lock will gate incrementals (src/run_pipeline.py:1093)"
-  pass "No DAG pausing needed; baseline_skip_reason() will self-skip the 4 incrementals"
+  pass "No DAG pausing needed; baseline_skip_reason() will self-skip the scheduled DAGs"
 else
-  # DAG path — verify the 4 incrementals are paused
+  # DAG path — verify the 5 scheduled DAGs are paused
   if ! command -v docker >/dev/null 2>&1; then
     warn "docker not found; cannot verify Airflow DAG pause state automatically"
   else
@@ -211,7 +211,10 @@ else
     # — the earlier worker-suffixed service name never existed in the shipped
     # compose and made this check permanently inert (PR-N35 fixed the docs;
     # this fixes the executable).
-    for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
+    # All 5 scheduled DAGs — including edgeguard_neo4j_sync (every 3 days):
+    # a full MISP→Neo4j sync firing mid-baseline is the same concurrent-writer
+    # hazard as the collector DAGs (its baseline mutex only sees CLI-held locks).
+    for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
       STATE=$(docker compose exec -T airflow airflow dags details "$dag" 2>/dev/null | grep -iE '^is_paused' | awk '{print $NF}' || echo "")
       if [[ "$STATE" == "True" ]]; then
         pass "DAG $dag is PAUSED"

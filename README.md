@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/neo4j-2026.03-green.svg" alt="Neo4j 2026.03">
   <img src="https://img.shields.io/badge/license-MIT-brightgreen.svg" alt="MIT License">
-  <img src="https://img.shields.io/badge/version-2026.4.26-orange.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-2026.4.28-orange.svg" alt="Version">
 </p>
 
 <p align="center">
@@ -224,7 +224,7 @@ Driven by the 2026-04-20 comprehensive multi-agent audit. Four merged PRs (F9 #6
 
 - **PR-G2 — OOM-safe streaming reads for large MISP events.** `src/collectors/misp_writer.py` and `src/run_misp_to_neo4j.py` currently read full event payloads into memory; events with tens of thousands of attributes can balloon to multi-GB objects. Refactor hot paths to generator-based streaming so peak memory stays bounded during the 2-year historical baseline.
 - **PR-H — Observability polish.** (a) Clamp `task_id` Prometheus label cardinality (currently unbounded → Prometheus performance degrades over months of uptime). (b) Rewrite `EdgeGuardDAGRunStuck` alert rule from duration-based (false-positives on legit long-running baselines) to heartbeat-based per-DAG thresholds.
-- **Architecture flow diagrams (PR-J).** Staged Mermaid-based system flows in [`docs/ARCHITECTURE_FLOW.md`](docs/ARCHITECTURE_FLOW.md) — eight diagrams covering baseline sequence, checkpoint state machine, collector→MISP→Neo4j data flow, MISP↔Neo4j traceability, incremental sync, deployment topology, STIX export, and zone detection. Each diagram is symbol-validated via `tests/test_architecture_flow_pins.py` so the docs can't silently drift from the code. Prioritized for **730-day baseline production-test readiness**.
+- **Architecture flow diagrams (PR-J).** PR-J1 **shipped** (#118): `tests/test_architecture_flow_pins.py` CI-validates the symbol references (env vars, CLI subcommands, container names, `src/` paths) in [`docs/ARCHITECTURE_FLOW.md`](docs/ARCHITECTURE_FLOW.md) so the doc can't silently drift from the code. Still queued (PR-J2/J3): authoring the eight Mermaid diagrams themselves — the doc currently holds scoped placeholders for baseline sequence, checkpoint state machine, collector→MISP→Neo4j data flow, MISP↔Neo4j traceability, incremental sync, deployment topology, STIX export, and zone detection.
 
 #### 🏗️ Separate architectural tracks
 
@@ -267,7 +267,7 @@ python src/edgeguard.py doctor     # checks MISP, Neo4j, Airflow, NATS, schema, 
 python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pipeline runs
 ```
 
-`preflight` runs 7 check categories (env vars, API connectivity, Neo4j schema, MISP health, Airflow, disk, circuit breakers) and exits 0 = ready or 1 = issues found. `stats` shows what data is in the system right now.
+`preflight` runs 7 check categories (env vars/API keys, Neo4j + APOC, MISP health, Airflow, disk space, checkpoint state, circuit breakers) and exits 0 = ready or 1 = issues found. `stats` shows what data is in the system right now.
 
 **EdgeGuard CLI quick reference:**
 
@@ -283,6 +283,8 @@ python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pi
 | `edgeguard dag kill` | Force-fail stuck DAG runs (preserves checkpoints, `--dry-run`) |
 | `edgeguard checkpoint status` | Per-source baseline progress + incremental cursors |
 | `edgeguard checkpoint clear` | Clear baseline state (preserves incremental by default) |
+| `edgeguard baseline --days N` | Additive baseline trigger — triggers the `edgeguard_baseline` DAG, no wipe |
+| `edgeguard fresh-baseline --days N` | **Destructive** wipe + rebuild — typed confirmation, blast-radius display, backup-timestamp gate |
 | `edgeguard clear neo4j` | Delete all graph data from Neo4j (keeps constraints) |
 | `edgeguard clear misp` | Delete all EdgeGuard events from MISP |
 | `edgeguard clear all` | Full reset: Neo4j + MISP + checkpoints (`--force` skips confirmation) |
@@ -332,7 +334,7 @@ Airflow’s scheduler/UI state uses **`airflow_postgres`**; override credentials
 ```bash
 git clone https://github.com/Kopanov/EdgeGuard-Knowledge-Graph.git
 cd EdgeGuard-Knowledge-Graph
-./install.sh --python           # creates .venv, pip installs all extras
+./install.sh --python           # creates .venv, installs api+graphql+monitoring extras (airflow extra is optional — install separately)
 # or equivalently:
 make install-py                 # same thing via Makefile
 # or manually:
@@ -399,7 +401,7 @@ After `direnv allow`, `python` points to `.venv/bin/python`, all `.env` variable
 
 ### Airflow DAG-based workflow (recommended for production)
 
-EdgeGuard ships **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline + five incremental/sync schedules). Optional **metrics** DAGs live in `dags/edgeguard_metrics_server.py` (`edgeguard_metrics_server`, `edgeguard_metrics_server_scheduled`). Once deployed:
+EdgeGuard ships **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline + five incremental/sync schedules). Optional **metrics** DAGs live in `dags/edgeguard_metrics_server.py` (`edgeguard_metrics_server`, `edgeguard_metrics_server_scheduled`, plus the manual `edgeguard_metrics_helpers` test/health DAG). Once deployed:
 
 ```bash
 # 1. Start the stack (includes Airflow + airflow_postgres)
@@ -417,9 +419,11 @@ docker compose up -d
 #      See docs/BASELINE_SMOKE_TEST.md
 #
 #    ⚠️  IMPORTANT — before you trigger the 730-day baseline, read the
-#        "Running the 730-day baseline" section below. The DAG path
-#        requires pausing 4 incremental DAGs first (Issue #57). The
-#        CLI path handles this automatically — see Option A below.
+#        "Running the 730-day baseline" section below. ALL launch flows
+#        (Airflow UI, API, or the `edgeguard baseline` / `fresh-baseline`
+#        CLI wrappers — which trigger this same DAG) require pausing the
+#        5 scheduled DAGs first (Issue #57): the baseline DAG holds no
+#        lock, so nothing else stops them from writing concurrently.
 
 # 3. Incremental cron DAGs start automatically after baseline:
 #    edgeguard_pipeline    → every 30 min  (OTX)
@@ -473,47 +477,41 @@ The 730-day baseline ingests ~2 years of threat intelligence (~99K CVEs, ~115K i
 
 ### Why the launch path matters
 
-The Airflow `edgeguard_baseline` DAG does **not** currently acquire the in-process `baseline_lock` sentinel ([Issue #57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57)). Over the ~26h window, the 4 scheduled incremental DAGs (`edgeguard_daily`, `edgeguard_medium_freq`, `edgeguard_pipeline`, `edgeguard_low_freq`) will try to write to MISP + Neo4j in parallel with the baseline. That concurrent-writer pattern caused the 2026-04-19 MISP-PHP-FPM exhaustion and lost 14.7% of NVD data mid-run. Three regression xfails in `tests/test_tier1_sequential_robustness.py` pin this contract until the DB-backed mutex ships.
+The Airflow `edgeguard_baseline` DAG does **not** acquire the `baseline_lock` sentinel ([Issue #57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57) — the lock-task pair was de-scoped after Bugbot caught two architectural flaws; only the legacy in-process `python src/run_pipeline.py --baseline` path writes it). Over the ~26h window, the **5 scheduled DAGs** (`edgeguard_daily`, `edgeguard_medium_freq`, `edgeguard_pipeline`, `edgeguard_low_freq`, and the every-3-days `edgeguard_neo4j_sync`) will fire and write to MISP + Neo4j in parallel with the baseline. That concurrent-writer pattern caused the 2026-04-19 MISP-PHP-FPM exhaustion and lost 14.7% of NVD data mid-run. Three regression xfails in `tests/test_tier1_sequential_robustness.py` pin this contract until the DB-backed mutex ships.
 
-**Until Issue #57 lands, pick one of the two safe launch paths below.** The decision is not optional — both are documented in depth in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#baseline-day-protocol).
+**Until Issue #57 lands, manually pausing the 5 scheduled DAGs before any baseline launch is mandatory** — this applies equally to Airflow UI/API triggers and to the `edgeguard baseline` / `edgeguard fresh-baseline` CLI wrappers (which trigger the same DAG; they do **not** pause anything for you). The full procedure is in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#baseline-day-protocol).
 
 ### Step 1 — Preflight check
 
-Run the preflight script first. It checks 10 readiness categories in ~5 seconds:
+Run the preflight script first. It runs 12 readiness check sections in ~5 seconds:
 
 ```bash
-# For the CLI launch path (Option A below)
-./scripts/preflight_baseline.sh --launch-path=cli
-
-# For the DAG launch path (Option B below) — adds DAG-pause state verification
+# Standard (DAG-triggered) launch — includes DAG-pause state verification
 ./scripts/preflight_baseline.sh --launch-path=dag
+
+# Legacy in-process CLI baseline (python src/run_pipeline.py --baseline) —
+# skips the pause check because that path holds the baseline_lock sentinel
+./scripts/preflight_baseline.sh --launch-path=cli
 ```
 
-Exit 0 = safe to launch. Exit 1 = read the ✗ items and fix them first. The script verifies: required env vars, Neo4j + APOC reachability, MISP API auth, Airflow DAG pause state (if `--launch-path=dag`), worker RAM ≥ 4 GB, Prometheus alerts parse, no stale `baseline_lock` sentinel, kill-switch defaults, pytest collection.
+Exit 0 = safe to launch. Exit 1 = read the ✗ items and fix them first. The script verifies: required env vars, Neo4j + APOC reachability, MISP API auth, Airflow DAG pause state (if `--launch-path=dag`), worker RAM ≥ 4 GB, Prometheus alerts parse + alertmanager pager wiring not placeholder, no stale `baseline_lock` sentinel, kill-switch defaults, pytest collection, and the PR-N29 invariants (retries=0 on the critical chain, fallback sentinel class, 48h lock max-age).
 
-### Step 2 — Pick your launch path
+### Step 2 — Launch (DAG + pre-pause the 5 scheduled DAGs)
 
-#### Baseline launch — DAG + pre-pause the 4 incremental schedulers
+> **Docs correction (2026-06):** an earlier PR-J1 note here claimed the
+> `edgeguard baseline` subcommand does not exist and that the baseline
+> DAG writes the lock sentinel itself. Both claims were wrong at the
+> time of writing: `edgeguard baseline` and `edgeguard fresh-baseline`
+> shipped in PR-C (2026-04-19) as thin wrappers that trigger this DAG,
+> and the DAG-side lock tasks were de-scoped in PR-F2 (Issue #57) — the
+> sentinel is written only by the legacy in-process CLI path. Net
+> effect: **no launch flow pauses the scheduled DAGs for you.**
 
-> **PR-J1 docs audit (2026-04-28) correction:** earlier README versions
-> described an Option A "CLI baseline launch" (`python -m edgeguard
-> baseline --days 730`). That subcommand does NOT exist in
-> `src/edgeguard.py` — verified by `grep "add_parser"`. The actual
-> subcommands are `doctor`, `heal`, `validate`, `monitor`, `dag`,
-> `checkpoint`, `clear`, `stats`, `preflight`, `source`, `setup`,
-> `update`. Baseline launch is **DAG-only** today. The
-> `baseline_in_progress.lock` sentinel at
-> `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
-> is written by the baseline DAG itself; the 4 incremental DAGs check
-> it and self-skip via `baseline_skip_reason()`. Pause-then-trigger is
-> still the recommended pattern as defense-in-depth. Issue #57 tracks
-> the DB-backed mutex that will replace the manual-pause step.
-
-Pause the 4 scheduled DAGs first so they can't fire during the ~32h baseline window (see [`docs/RUNBOOK.md`](docs/RUNBOOK.md) § Baseline launch path for the full procedure):
+Pause the 5 scheduled DAGs first so they can't fire during the ~32h baseline window (see [`docs/RUNBOOK.md`](docs/RUNBOOK.md) § Baseline launch path for the full procedure):
 
 ```bash
-# 1. Pause all 4 incremental DAGs BEFORE triggering the baseline
-for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
+# 1. Pause all 5 scheduled DAGs BEFORE triggering the baseline
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
   docker compose exec airflow airflow dags pause "$dag"
 done
 
@@ -522,15 +520,15 @@ done
 #    run_enrichment_jobs → baseline_postcheck → baseline_complete`)
 docker compose exec airflow airflow dags trigger edgeguard_baseline
 
-# 3. AFTER the baseline_complete task fires (check Airflow UI), unpause all 4
-for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq; do
+# 3. AFTER the baseline_complete task fires (check Airflow UI), unpause all 5
+for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
   docker compose exec airflow airflow dags unpause "$dag"
 done
 ```
 
 ### Step 3 — Monitor during the run
 
-- **Prometheus**: watch the `edgeguard_pipeline_observability` rule group (≥ 11 alerts at HEAD, post-PR-N31). Any **critical** alert → pause the DAG, triage, resume.
+- **Prometheus**: watch the `edgeguard` alert groups (35 rules at HEAD across 9 groups) — especially `edgeguard_pipeline_observability` (9 alerts) and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. Any **critical** alert → pause the DAG, triage, resume.
 - **Logs**: `docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'` (single Airflow standalone container per Airflow 3.x — see `docker-compose.yml`).
 - **Grep tokens for silent failures**: `[MERGE-REJECT]`, `[MERGE-RETURNED-FALSE]`, `[MERGE-INEFFECTIVE]`, `[BATCH-PERMANENT-FAILURE]`, `[honest-NULL]`, `[MISP-FETCH-FALLBACK-ACTIVE]` — each is documented in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#top-8-failure-modes).
 
@@ -655,12 +653,12 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Campaign`
 - Relationships: `INDICATES`, `EXPLOITS`, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
-- All edges carry `confidence_score`, `sources[]`, `imported_at`, `match_type`
+- Edges carry `confidence_score` plus provenance fields — `sources[]`/`imported_at` on sync-created edges, `match_type` on relationship-builder edges
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 
 ### 8. Real-Time Alerts
 - NATS integration for instant notifications
-- Zone-based topic routing (`resilmesh.threats.zone.healthcare.*`)
+- Zone-based topic routing — exact subject `resilmesh.threats.zone.<zone>` (e.g. `resilmesh.threats.zone.healthcare`); wildcard consumers subscribe to `resilmesh.threats.zone.*`
 - Multi-zone threat detection
 
 ### 9. Production-Ready CLI
@@ -704,20 +702,27 @@ EdgeGuard/
 │   ├── resilience.py           # Circuit breakers and retry logic
 │   ├── edgeguard.py            # CLI: preflight / stats / dag / checkpoint / doctor / heal / validate / monitor
 │   ├── airflow_client.py       # Airflow REST API wrapper (used by CLI dag commands)
+│   ├── stix_exporter.py        # Graph → STIX 2.1 bundles (deterministic UUIDv5 IDs)
+│   ├── nats_client.py          # NATS pub/sub client (resilmesh.* topics, TLS)
+│   ├── alert_processor.py      # Inbound ResilMesh alert enrichment (NATS → graph context)
 │   └── collectors/             # One module per data source
 │       ├── otx_collector.py
-│       ├── nvd_collector.py    # Extracts CVSSv2, CVSSv31, CVSSv40
+│       ├── nvd_collector.py    # Extracts CVSSv2, CVSSv30, CVSSv31, CVSSv40
 │       ├── cisa_collector.py
 │       ├── mitre_collector.py
 │       ├── vt_collector.py
+│       ├── virustotal_collector.py    # Optional VT enrichment variant (separate allowlist entry)
 │       ├── abuseipdb_collector.py
 │       ├── global_feed_collector.py   # ThreatFox, URLhaus, CyberCure
 │       ├── finance_feed_collector.py  # Feodo, SSL Blacklist
+│       ├── misp_collector.py          # Reads existing MISP events (optional; not in default baseline)
+│       ├── energy_feed_collector.py   # Sector feed placeholder (returns skipped=True)
+│       ├── healthcare_feed_collector.py  # Sector feed placeholder (returns skipped=True)
 │       └── misp_writer.py
 ├── dags/
 │   ├── edgeguard_pipeline.py       # 6 DAGs: baseline, high/med/low/daily collectors, Neo4j sync
 │   └── edgeguard_metrics_server.py # Optional Prometheus metrics DAG(s)
-├── tests/                      # Pytest test suite (35 tests, CI-gated at 30% coverage)
+├── tests/                      # Pytest test suite (115+ modules / 1,800+ tests, CI-gated at 30% coverage)
 ├── docs/                       # Full documentation set (architecture, collectors, Airflow, …)
 ├── docker-compose.yml          # Full stack: Neo4j + airflow_postgres + Airflow + REST + GraphQL
 ├── docker-compose.monitoring.yml  # Prometheus + Grafana overlay
@@ -818,7 +823,7 @@ This README stays the **short** entry (quick start, ports, env vars). Deep onboa
 ## 🔒 Security
 
 - API keys stored in environment variables (never hardcoded)
-- All Cypher queries are **parameterised** — no string interpolation, injection-safe
+- All Cypher **values** are parameterised; labels/relationship types/property names (which Cypher cannot parameterise) are interpolated only through strict allowlist/regex validators (`_validate_label` / `_validate_prop_name`) — injection-safe
 - SSL/TLS: see **[SSL/TLS (MISP vs Neo4j)](#ssltls-misp-https-vs-neo4j-bolt)** below — `EDGEGUARD_SSL_VERIFY` controls **HTTPS** to MISP and collectors, **not** Neo4j Bolt trust
 - Credentials gitignored; Docker image never bakes in secrets
 - Prometheus metrics endpoint bound to **loopback only** (`127.0.0.1:8001`) by default
@@ -854,7 +859,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 |-------|----------------|-------|
 | **Baseline collectors** (Airflow `edgeguard_baseline`, `run_pipeline --baseline`) | **`BASELINE_COLLECTION_LIMIT`** / **`EDGEGUARD_BASELINE_COLLECTION_LIMIT`** — max **items per external source** (OTX, NVD, CISA, MITRE, feeds, …). **`0`** = unlimited. | Does **not** configure MISP→Neo4j sync. The baseline DAG does **not** run **`MISPCollector`**. |
 | **Incremental collectors** (cron DAGs) | **`EDGEGUARD_INCREMENTAL_LIMIT`** (default **200**/source), optional **`EDGEGUARD_MAX_ENTRIES`** override | Per-source item cap each scheduled run |
-| **MISP → Neo4j sync** (`run_misp_to_neo4j`) | **Event list:** **`GET /events/index`** (then **`/events`**) with pagination (**500** rows/page, up to **100** pages) + client filter (**`info`** substring from **`EDGEGUARD_MISP_EVENT_SEARCH`**, default **EdgeGuard**, or **`org.name` == EdgeGuard**). **Fallback:** PyMISP **`restSearch`** + **`limit: 1000`**. **Per event:** parse → dedupe → **cross-item edges** → node merges → relationship batches. **Neo4j RAM:** **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. | Index page size ≠ Neo4j merge chunk **500** — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md) |
+| **MISP → Neo4j sync** (`run_misp_to_neo4j`) | **Event list:** **`GET /events/index`** (then **`/events`**) with pagination (**500** rows/page, up to **100** pages) + client filter (**`info`** substring from **`EDGEGUARD_MISP_EVENT_SEARCH`**, default **EdgeGuard**, or **`org.name` == EdgeGuard**). **Fallback:** PyMISP/requests **`restSearch`**, paginated **500**/page up to **200** pages (~100K events; `_MispFallbackHardError` past the cap). **Per event:** parse → dedupe → **cross-item edges** → node merges → relationship batches. **Neo4j RAM:** **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. | Index page size ≠ Neo4j merge chunk **500** — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md) |
 | **`MISPCollector`** (optional / not in default baseline step 2) | **`/events`** index cap **`min(3×limit, 2000)`** or **2000**; **500** attrs/event | Uses incremental-style **`resolve_collection_limit(..., baseline=False)`** — **not** baseline Airflow Variable |
 
 **Full detail:** [docs/COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md).
@@ -887,7 +892,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC` | Subtract from stored OTX cursor when querying **`modified_since`** (clock skew / missed edge pulses). | `300` |
 | `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` | Max OTX API pages per incremental run (each page then **2s** delay). | `25` |
 | `EDGEGUARD_MITRE_CONDITIONAL_GET` | MITRE STIX bundle: send **`If-None-Match`** on scheduled runs; **HTTP 304** skips re-parse/re-push. Baseline always full download. | `true` |
-| `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | **MISP→Neo4j sync** (`run_misp_to_neo4j`): max **parsed graph items** merged **per Python chunk** (limits Airflow worker **RAM** during Neo4j writes). **Not** the MISP **event index** page size (**500** per page in code) or **`restSearch` `limit: 1000`** fallback — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md). Default **`500`**. Lower (e.g. `250`) if **OOM** / **SIGKILL** after parse. **`0`** or **`all`** = **single pass** (high OOM risk). | `500` |
+| `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | **MISP→Neo4j sync** (`run_misp_to_neo4j`): max **parsed graph items** merged **per Python chunk** (limits Airflow worker **RAM** during Neo4j writes). **Not** the MISP **event index** page size (**500** per page in code) or the paginated **`restSearch`** fallback (500/page) — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md). Default **`500`**. Lower (e.g. `250`) if **OOM** / **SIGKILL** after parse. **`0`** or **`all`** = **single pass** (high OOM risk). | `500` |
 | `EDGEGUARD_REL_BATCH_SIZE` | Max **relationship definitions** per **`create_misp_relationships_batch`** UNWIND round-trip (embedded + cross-item edges). Lower if Neo4j **transaction timeouts** on huge events. | `500` |
 | `EDGEGUARD_DEBUG_GC` | If set to a **truthy** value, run **`gc.collect()`** after each Neo4j **node** merge chunk (diagnostics only; can **increase** peak RSS on tight workers — leave unset in production unless profiling). | *(unset)* |
 | `EDGEGUARD_INCREMENTAL_LIMIT` | Max items **per source** for regular cron runs. `0` = unlimited. | `200` |
@@ -917,7 +922,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_GRAPHQL_HOST` | GraphQL API bind address (parity with `EDGEGUARD_API_HOST`) | `127.0.0.1` (host) / `0.0.0.0` (Compose) |
 | `EDGEGUARD_GRAPHQL_WORKERS` | Uvicorn worker count for GraphQL API | `1` (host) / `2` (Compose) |
 | `EDGEGUARD_ALLOW_UNAUTH` | **Opt-in escape hatch** — set to `1` to start an unauthenticated API/GraphQL bound to non-loopback. **Not recommended for any environment**; documented for completeness. | *(unset)* |
-| `EDGEGUARD_ENV` | Deployment environment label (`dev`, `stage`, `prod`, `edge`). When `prod`, the API/GraphQL refuse to start without `EDGEGUARD_API_KEY`. | `dev` |
+| `EDGEGUARD_ENV` | Deployment environment label. **Fail-closed:** the API/GraphQL require `EDGEGUARD_API_KEY` unless this is one of `dev`/`development`/`local`/`staging`/`test` — anything else (including unset, `stage`, `edge`) is treated as **prod**. | *(unset — treated as prod)* |
 | `EDGEGUARD_MAX_BODY_BYTES` | Max HTTP request body size (DoS defense; `413 Payload Too Large` above) | `1048576` (1 MiB) |
 | `EDGEGUARD_GRAPHQL_MAX_DEPTH` | Max nesting depth for GraphQL queries (DoS defense) | `8` |
 
@@ -939,15 +944,15 @@ These were previously documented only in the "Recommended Memory Settings" table
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EDGEGUARD_BASELINE_LOCK_PATH` | Cross-process baseline mutex lock file | `<EDGEGUARD_BASE_DIR>/checkpoints/baseline_in_progress.lock` |
-| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | Stale-lock auto-clear timeout. After this, a leftover lock from a crashed baseline is treated as releasable. | `86400` (24h) |
+| `EDGEGUARD_BASELINE_LOCK_PATH` | Cross-process baseline mutex lock file (written only by the in-process CLI baseline path) | `<repo_root>/checkpoints/baseline_in_progress.lock` (derived from the module location — independent of `EDGEGUARD_BASE_DIR`) |
+| `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | Stale-lock auto-clear timeout. After this, a leftover lock from a crashed baseline is treated as releasable (same-host PID-liveness check bypasses the age cap). | `172800` (48h — bumped from 24h in PR-N29; the 32h baseline window outlives 24h) |
 | `EDGEGUARD_CHECKPOINT_DIR` | Override default checkpoint directory (path-traversal guarded — must stay inside project root) | `<project_root>/checkpoints/` |
 | `EDGEGUARD_STATE_DIR` | Override default state directory | `<project_root>/state/` |
 | `EDGEGUARD_BASE_DIR` | Override project root directory (used by DAGs for path resolution) | `<directory containing dags/>` |
-| `EDGEGUARD_VERSION` | Release version (CalVer; surfaced in metrics + log lines) | from `package_meta.package_version()` |
+| `EDGEGUARD_VERSION` | Sets only the `version` label on the Prometheus `APP_INFO` metric. Everywhere else (APIs, logs) the version comes from `package_meta.package_version()` (pyproject CalVer) and ignores this var. | `1.0.0` (metrics label fallback) |
 | `EDGEGUARD_ENABLE_SLACK_ALERTS` | Enable Slack notifications on collector failure | *(unset)* |
 | `SLACK_WEBHOOK_URL` / `AIRFLOW__SLACK__WEBHOOK_URL` | Slack incoming webhook URL for collector-failure alerts | *(unset)* |
-| `NATS_URL` | NATS server URL (real-time alert publishing; ResilMesh integration) | *(unset)* |
+| `NATS_URL` | NATS server URL — used only by the `edgeguard` CLI preflight reachability check. Actual NATS publishing (`src/nats_client.py`) is configured via `NATSClient(servers=...)` and does not read this var. | *(unset)* |
 | `EDGEGUARD_TRUSTED_MISP_ORG_UUIDS` | Comma-separated MISP org UUIDs trusted to set source-truthful timestamp claims (PR #44 chip 5e — tag-impersonation defense) | *(unset)* |
 | `EDGEGUARD_TRUSTED_MISP_ORG_NAMES` | Comma-separated MISP org names trusted (case-insensitive + NFKC; fallback when UUID allowlist isn't set) | *(unset)* |
 
@@ -969,7 +974,7 @@ These are typically set by `docker-compose.yml`; bare-metal Airflow operators se
 | `AIRFLOW__SCHEDULER__LOCAL_TASK_JOB_HEARTBEAT_SEC` | Heartbeat interval for local task monitoring | `30` |
 | `AIRFLOW__SCHEDULER__ZOMBIE_DETECTION_INTERVAL` | How often to check for zombies (seconds) | `60` |
 | `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` | Airflow API basic-auth credentials (used by `edgeguard dag` CLI) | `airflow` / *(unset, required to call API)* |
-| `AIRFLOW_WEBSERVER_URL` | Airflow web base URL (for CLI/script access from outside the container) | `http://edgeguard_airflow:8082` (Compose) / `http://localhost:8082` (host) |
+| `AIRFLOW_WEBSERVER_URL` | Airflow web base URL for the `edgeguard dag` CLI backend. Its default is the Docker-DNS name `http://edgeguard_airflow:8082`, which does NOT resolve outside Compose — host/bare-metal users must set `http://localhost:8082` explicitly (only the separate `edgeguard preflight` check defaults to localhost). | `http://edgeguard_airflow:8082` |
 
 #### Monitoring stack (Grafana / Prometheus — `docker-compose.monitoring.yml`)
 
@@ -978,10 +983,10 @@ These are typically set by `docker-compose.yml`; bare-metal Airflow operators se
 | `GRAFANA_ADMIN_USER` (alias `GF_SECURITY_ADMIN_USER`) | Grafana admin username | `admin` |
 | `GRAFANA_ADMIN_PASSWORD` (alias `GF_SECURITY_ADMIN_PASSWORD`) | Grafana admin password — **required**, no insecure fallback in production | *(required)* |
 | `GRAFANA_ROOT_URL` (alias `GF_SERVER_ROOT_URL`) | Grafana root URL for back-links + alert payloads | `http://localhost:3000` |
-| `GF_USERS_ALLOW_SIGN_UP` | Allow user self-signup in Grafana | `false` |
-| `GF_INSTALL_PLUGINS` | Grafana plugins to install on startup. PR-B dropped `grafana-simple-json-datasource` — Grafana 11 blocks Angular plugins by default. | `grafana-clock-panel` |
-| `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` | Default home dashboard | `/var/lib/grafana/dashboards/edgeguard-overview.json` |
-| `PROMETHEUS_ADMIN_PASSWORD` | Prometheus basic-auth password (optional; only needed if `--web.enable-admin-api` is enabled, which compose disables by default) | *(unset)* |
+| `GF_USERS_ALLOW_SIGN_UP` | Allow user self-signup in Grafana. **Fixed in compose** (hardcoded literal — edit `docker-compose.monitoring.yml` to change; setting it in `.env` has no effect). | `false` |
+| `GF_INSTALL_PLUGINS` | Grafana plugins to install on startup. PR-B dropped `grafana-simple-json-datasource` — Grafana 11 blocks Angular plugins by default. **Fixed in compose** (edit `docker-compose.monitoring.yml` to change). | `grafana-clock-panel` |
+| `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` | Default home dashboard. **Fixed in compose** (edit `docker-compose.monitoring.yml` to change). | `/var/lib/grafana/dashboards/edgeguard-overview.json` |
+| `PROMETHEUS_ADMIN_PASSWORD` | **Not wired** — nothing in the repo consumes it (Prometheus basic auth needs a `--web.config.file` with bcrypt hashes, which is not shipped). Kept as a placeholder; to protect the admin API add a Prometheus web-config file or an auth proxy. | *(unset / unused)* |
 
 #### MISP advanced sync (added to env table 2026-04-19)
 
@@ -990,14 +995,14 @@ These are typically set by `docker-compose.yml`; bare-metal Airflow operators se
 | `EDGEGUARD_MISP_PAGE_SIZE` | MISP `/events/index` page size for sync | `500` |
 | `EDGEGUARD_MISP_MAX_PAGES` | Max pages to fetch from MISP event index per sync run (caps total events) | `100` |
 | `EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES` | Max attribute value length before truncation | `4096` |
-| `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | Attributes per batch when pushing to MISP | `1000` |
-| `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | Cool-off between retries on MISP push failures | `15.0` |
+| `EDGEGUARD_MISP_PUSH_BATCH_SIZE` | Attributes per batch when pushing to MISP (adaptive scaling shrinks this on large events — see docs/MISP_TUNING.md) | `500` |
+| `EDGEGUARD_MISP_RETRY_COOLDOWN_SEC` | Cool-off before the MISP→Neo4j **sync** retries events that failed on the first pass (not the collector→MISP push path) | `15.0` |
 
 #### MITRE ATT&CK collector
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EDGEGUARD_MITRE_MAX_RELATIONSHIPS` | Max relationship edges per MITRE ATT&CK sync (`0` = unlimited) | `0` |
+| `EDGEGUARD_MITRE_MAX_RELATIONSHIPS` | Max relationship edges per MITRE ATT&CK sync (`0` = unlimited; legacy alias `MITRE_MAX_RELATIONSHIPS` still honored) | `0` |
 | `MITRE_FORCE_REFETCH` | Bypass cache on MITRE STIX bundle fetch (debug only) | *(unset)* |
 
 #### SSL_VERIFY env-var resolution
@@ -1017,21 +1022,21 @@ A full 730-day baseline processes ~99K CVEs + ~115K indicators + CVSS sub-nodes.
 | **`NEO4J_HEAP_INITIAL`** | `12g` | `.env` | Set EQUAL to `HEAP_MAX` (Neo4j docs guidance — eliminates GC pauses caused by mid-run heap resizing). |
 | **`NEO4J_HEAP_MAX`** | `12g` | `.env` | Neo4j JVM heap — handles 350K+ nodes and relationship building |
 | **`NEO4J_PAGECACHE`** | `8g` | `.env` | Graph data caching for fast queries |
-| **`NEO4J_TX_MEMORY_MAX`** | `8g` | `.env` | Per-transaction cap for `apoc.periodic.iterate` batches in `build_relationships` (the 2026-04-19 baseline regression hit OOM at the previous 4g default — see [DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles)) |
+| **`NEO4J_TX_MEMORY_MAX`** | `8g` | `.env` | Per-transaction cap for `apoc.periodic.iterate` batches in `build_relationships` (the 2026-04-19 baseline regression hit OOM at the compose default of 4g — still the shipped default, so you must set 8g in `.env` for baselines — see [DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md#recommended-neo4j-memory-profiles)) |
 | **`NEO4J_CONTAINER_MEMORY_LIMIT`** | `32g` | `.env` or `docker-compose.yml` | cgroup ceiling. Typical RSS during baseline is ~25g (12g heap + 8g pagecache + ~5g off-heap for Bolt buffers, thread stacks, Lucene mmap, metaspace, transaction off-heap); 32g gives ~7g headroom — comfortable, no OOM risk. NOTE: `tx_memory` is a CAP, not additive to heap+pagecache. |
 
 Run `python src/edgeguard.py doctor` to verify settings before triggering a baseline. Full tuning guide: [docs/DOCKER_SETUP_GUIDE.md](docs/DOCKER_SETUP_GUIDE.md).
 
 **MISP→Neo4j memory:** If sync **dies during Neo4j writes** with exit **-9**, check **Docker cgroup** limits. Raise **`AIRFLOW_MEMORY_LIMIT`** in **`.env`** or reduce **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** / **`EDGEGUARD_REL_BATCH_SIZE`**. See [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md), [docs/HEARTBEAT.md](docs/HEARTBEAT.md), [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md). Do **not** set **`0`** / **`all`** for chunk size unless you understand the OOM tradeoff.
 
-**Baseline collection** is controlled by Airflow Variables (not env vars). These caps apply to **each external collector** in the baseline DAG (OTX, NVD, …) — **not** to the MISP→Neo4j sync’s MISP event search (see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md)).
+**Baseline collection** is controlled by Airflow Variables, with optional env-var overrides (precedence: `dag_run.conf` > env var > Airflow Variable > default). These caps apply to **each external collector** in the baseline DAG (OTX, NVD, …) — **not** to the MISP→Neo4j sync’s MISP event search (see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md)).
 
 | Airflow Variable | Description | Default |
 |-----------------|-------------|---------|
 | `BASELINE_COLLECTION_LIMIT` | Items **per external source** for baseline run. `0` = unlimited. | `0` |
 | `BASELINE_DAYS` | How many days of history to fetch (NVD, OTX). | `730` |
-| `EDGEGUARD_BASELINE_DAYS` | *(optional)* Overrides `BASELINE_DAYS` in the baseline DAG when set (e.g. `7` for smoke test). | *(unset)* |
-| `EDGEGUARD_BASELINE_COLLECTION_LIMIT` | *(optional)* Overrides `BASELINE_COLLECTION_LIMIT` in the baseline DAG when set. | *(unset)* |
+| `EDGEGUARD_BASELINE_DAYS` | *(optional, **environment variable** — set in `.env`/scheduler env, not an Airflow Variable)* Overrides `BASELINE_DAYS` in the baseline DAG when set (e.g. `7` for smoke test). | *(unset)* |
+| `EDGEGUARD_BASELINE_COLLECTION_LIMIT` | *(optional, **environment variable** — set in `.env`/scheduler env, not an Airflow Variable)* Overrides `BASELINE_COLLECTION_LIMIT` in the baseline DAG when set. | *(unset)* |
 
 ### SSL/TLS: MISP (HTTPS) vs Neo4j (Bolt)
 
@@ -1185,11 +1190,11 @@ Metrics are persisted to `data/metrics.json` for durability across restarts.
 
 ## 📈 Current Status
 
-EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Docker (Mac Mini), all CI green, BugBot clean.
+EdgeGuard v2026.4.28 is **production-test ready**. Full pipeline validated on Docker (Mac Mini); unit tests + lint + type-check + BugBot green (Trivy on the apache/airflow base image and the pip-audit starlette advisory are known-red — tracked in issues #52/#121/#124).
 
 ### ✅ Implemented
 
-- **11 active source collectors** with enriched fields (+ optional VirusTotal enrichment module, + sector feed placeholders): OTX, NVD (CVSSv2/v31/v40 + CISA KEV + version constraints), CISA, MITRE ATT&CK (Techniques + Actors + Malware + **Tools**), VirusTotal (YARA rules, Sigma rules, sandbox verdicts), AbuseIPDB (abuse categories), ThreatFox, URLhaus (url_status, reporter), CyberCure, Feodo (last_online), SSL Blacklist
+- **11 active source collectors** with enriched fields (+ optional VirusTotal enrichment module, + sector feed placeholders): OTX, NVD (CVSSv2/v30/v31/v40 + CISA KEV + version constraints), CISA, MITRE ATT&CK (Techniques + Actors + Malware + **Tools**), VirusTotal (YARA rules, Sigma rules, sandbox verdicts), AbuseIPDB (abuse categories), ThreatFox, URLhaus (url_status, reporter), CyberCure, Feodo (last_online), SSL Blacklist
 - **MISP as Single Source of Truth**: All collectors write to MISP first with full provenance tagging; OTX_META/TF_META/NVD_META comment prefixes for metadata round-trip
 - **Neo4j Knowledge Graph**: Production-ready graph with MERGE deduplication, 11 deterministic relationship types with single-key MERGE deduplication across sources
 - **ResilMesh schema alignment**: `CVE`, `Vulnerability` (with `status: LIST`), `CVSSv2/v30/v31/v40` (bidirectional), `Tool`, `REFERS_TO` bridge, `edgeguard_managed` on all node types (including 13 ResilMesh asset-layer methods), IP.tag as LIST — all matching the official ResilMesh data model
@@ -1197,12 +1202,12 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 - **Baseline + Incremental Modes**: One-time deep historical load and scheduled 2-3 day incremental updates; checkpoint file locking for concurrent Airflow workers
 - **6 primary Airflow DAGs** in `edgeguard_pipeline.py` (+ optional metrics DAGs); UI on port **8082** (intentional vs Temporal); sync conflict guard between baseline and incremental
 - **Post-Sync Enrichment**: IOC confidence decay, Campaign node materialisation (with cleanup for retired indicators), Vulnerability↔CVE bridge, co-occurrence confidence calibration
-- **Multi-Zone Sector Filtering**: Healthcare, Energy, Finance, Global — 147 weighted keywords with negative exclusions, zone validation whitelist in Sector node creation
+- **Multi-Zone Sector Filtering**: Healthcare, Energy, Finance, Global — ~150 weighted keywords with negative exclusions, zone validation whitelist in Sector node creation
 - **GraphQL API** (port 4001): Strawberry/FastAPI with CORS; all node types queryable including Tool; 14 enrichment fields resolved; GraphiQL opt-in via `EDGEGUARD_GRAPHQL_PLAYGROUND=true`
 - **FastAPI REST API** (port 8000): Sector-filtered, rate-limited, authenticated endpoints; `/graph/explore` with 4 views (Malware, Actors, Indicators, CVEs)
 - **Interactive Graph Explorer**: Browser-based Cytoscape.js visualization with live Neo4j data, CISA KEV highlighting, search, zone filtering ([docs/GRAPH_EXPLORER.md](docs/GRAPH_EXPLORER.md))
 - **Full-stack Docker Compose**: Neo4j + Airflow + REST API + GraphQL in one `docker compose up -d`; also supports conda/venv/bare-metal with external MISP+Neo4j
-- **CI/CD**: Lint (ruff), type-check (mypy), pytest (161 tests, 30% coverage gate), Docker build, pip-audit, BugBot — all green
+- **CI/CD**: Lint (ruff), type-check (mypy), full pytest suite (1,800+ tests, 30% coverage gate), Docker build, pip-audit, BugBot
 - **Health Checks + Metrics**: MISP (with PyMISP version compatibility detection), Neo4j (with 30s timeout), Airflow, NATS; Prometheus/Grafana monitoring stack
 - **Production CLI** (19 commands): `preflight` (7-category readiness check), `stats --full` (node counts by zone/source + MISP breakdown), `dag status/kill` (Airflow run monitoring + stuck-run recovery), `checkpoint status/clear` (baseline progress + incremental cursors), `clear neo4j/misp/all`, `source list/add/remove`, `doctor`, `heal`, `validate`, `monitor`, `setup`, `update`, `version`
 - **Circuit Breakers + Retry**: Fixed HALF_OPEN deadlock, monotonic time, resilience patterns for all external service calls
@@ -1220,8 +1225,8 @@ EdgeGuard v2026.4.4 is **production-test ready**. Full pipeline validated on Doc
 - **Neo4j role separation**: Currently shared credentials; Neo4j Enterprise roles or GraphQL as the access layer are the target state
 - **Real-time NATS alerting**: Demo implemented (`demo/mock_resilmesh_publisher.py`), production hardening in progress
 - **Healthcare and Energy sector-specific feed collectors**: HC3, E-ISAC — requires ISAC membership; placeholder collectors ready
-- **`apoc.coll.toSet` → native-Cypher migration (Phase 3, follow-up PR)**: Phase 2 (this PR) centralized 47+ list-accumulator SET clauses through two helper functions in `src/neo4j_client.py` (`_dedup_concat_clause` / `_dedup_concat_optional_clause`) and added a Prometheus list-size histogram (`edgeguard_neo4j_list_dedup_size`, populated by `scrape_list_dedup_sizes`). The helper internals still emit `apoc.coll.toSet(...)` — **zero behavior change** in this PR. Phase 3 will flip those internals to native Cypher (likely `CASE WHEN $x IN coalesce(prop, []) THEN prop ELSE prop + $x END` for append-of-one, which is O(n) and matches our usage shape — `reduce(...)` is O(n²) and the prod-readiness audit measured a 120× regression at n=500). The Phase-2 instrumentation is what validates the flip: the dedup-tripwire + order-preservation tests added in `tests/test_dedup_clause_helpers.py` pin the contract any replacement must satisfy, and the new Prometheus histogram surfaces the live p50/p95/p99 of `r.misp_event_ids` in production so we can confirm the O(n) form is sufficient before shipping. Driver: Neo4j 2026.x deprecates `apoc.coll.toSet` (warns; will be removed in a future major). Also deferred to Phase 4: `enrichment_jobs.py:238` (Pattern E `apoc.coll.toSet` wrapping `reduce()`), `enrichment_jobs.py:246` (Pattern D single-list dedup), `query_api.py:837` (read-side projection), and the load-bearing health check at `src/neo4j_client.py:524`.
-- **Phase 3 health-check update**: when the helpers flip, the APOC liveness probe at `src/neo4j_client.py:520-527` (currently `RETURN size(apoc.coll.toSet([1, 2, 2]))`) must be updated in the same commit — replace with a smoke test of the chosen native-Cypher pattern, plus a separate `apoc.create.addLabels(...)` probe so we keep guarding the OTHER APOC dependency (sector labels).
+- **`apoc.coll.toSet` → native-Cypher migration (Phase 3, follow-up PR)**: Phase 2 (this PR) centralized 47+ list-accumulator SET clauses through two helper functions in `src/neo4j_client.py` (`_dedup_concat_clause` / `_dedup_concat_optional_clause`) and added a Prometheus list-size histogram (`edgeguard_neo4j_list_dedup_size`, populated by `scrape_list_dedup_sizes`). The helper internals still emit `apoc.coll.toSet(...)` — **zero behavior change** in this PR. Phase 3 will flip those internals to native Cypher (likely `CASE WHEN $x IN coalesce(prop, []) THEN prop ELSE prop + $x END` for append-of-one, which is O(n) and matches our usage shape — `reduce(...)` is O(n²) and the prod-readiness audit measured a 120× regression at n=500). The Phase-2 instrumentation is what validates the flip: the dedup-tripwire + order-preservation tests added in `tests/test_dedup_clause_helpers.py` pin the contract any replacement must satisfy, and the new Prometheus histogram surfaces the live p50/p95/p99 of `r.misp_event_ids` in production so we can confirm the O(n) form is sufficient before shipping. Driver: Neo4j 2026.x deprecates `apoc.coll.toSet` (warns; will be removed in a future major). Also deferred to Phase 4: the Pattern E `apoc.coll.toSet`-wrapping-`reduce()` and Pattern D single-list dedup sites in `enrichment_jobs.py` (campaign alias merge), the read-side zone projection in `query_api.py`, and the load-bearing APOC liveness probe inside `Neo4jClient`'s connection verification (stable symbol references on purpose — raw line numbers rotted in an earlier revision of this list).
+- **Phase 3 health-check update**: when the helpers flip, the APOC liveness probe in `Neo4jClient`'s connection verification (currently `RETURN size(apoc.coll.toSet([1, 2, 2]))`) must be updated in the same commit — replace with a smoke test of the chosen native-Cypher pattern, plus a separate `apoc.create.addLabels(...)` probe so we keep guarding the OTHER APOC dependency (sector labels).
 
 ---
 

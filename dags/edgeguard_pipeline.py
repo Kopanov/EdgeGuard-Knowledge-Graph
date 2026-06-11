@@ -17,15 +17,15 @@ Config:
 ================================================================================
                            CONFIGURATION FLAGS
 ================================================================================
-Toggle these features by changing True/False:
+Both flags are env-driven (set in .env; docker-compose passes them through):
 
-ENABLE_PROMETHEUS_METRICS: Set to True to export Prometheus metrics
+ENABLE_PROMETHEUS_METRICS: EDGEGUARD_ENABLE_METRICS=true to export Prometheus metrics
     - Exports: edgeguard_indicators_total, edgeguard_sync_duration_seconds, etc.
-    - Default: False
+    - Default: false
 
-ENABLE_SLACK_ALERTS: Set to True to send alerts to Slack on failure
+ENABLE_SLACK_ALERTS: EDGEGUARD_ENABLE_SLACK_ALERTS=1 to send alerts to Slack on failure
     - Requires: SLACK_WEBHOOK_URL or AIRFLOW__SLACK__WEBHOOK_URL env var
-    - Default: False
+    - Default: false (off — Slack is an optional integration)
 
 ENABLE_METRICS_EXPORT: Legacy flag (use ENABLE_PROMETHEUS_METRICS)
 
