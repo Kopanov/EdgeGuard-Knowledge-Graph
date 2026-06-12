@@ -408,6 +408,24 @@ docker logs edgeguard_airflow 2>&1 | grep -E '\[BUILD_RELATIONSHIPS SUMMARY\]'
 Absence of this line = silent subprocess death (the exact scenario the
 `EdgeGuardBuildRelationshipsSilentDeath` alert guards against).
 
+Every collector run also emits one grep-able push summary (Issue #62,
+2026-06):
+
+```bash
+docker logs edgeguard_airflow 2>&1 | grep "COLLECTOR_SUMMARY"
+# expected per source: COLLECTOR_SUMMARY source=nvd items=N pushed=S failed=F \
+#                      attempted=A success_rate=R min_success_rate=T
+```
+
+A `success_rate` below `EDGEGUARD_MISP_MIN_SUCCESS_RATE` (default **0.95**,
+`0` disables) now marks the collector run **failed** — the Airflow task goes
+RED with the rate in the error instead of the pre-2026-06 behavior where one
+successful attribute out of 92k made the run green (how the 2026-04-19
+baseline silently lost 14.7% of NVD attributes). Rate is computed over
+**attempted** pushes only — deduplicated re-runs are unaffected. Remediation
+for a tripped gate = failure mode 1 above (MISP batch permanent failure);
+the re-trigger is dedup-safe.
+
 ---
 
 ## Baseline-day protocol
@@ -746,7 +764,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._

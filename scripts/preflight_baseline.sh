@@ -126,11 +126,17 @@ else
   fail "Neo4j not reachable at $NEO4J_URL with current credentials"
 fi
 
-APOC_OK=$("${NEO4J_CMD[@]}" "CALL dbms.procedures() YIELD name WHERE name STARTS WITH 'apoc.coll' RETURN count(*) AS n;" 2>/dev/null | tail -1 || true)
-if [[ "$APOC_OK" =~ ^[1-9] ]]; then
-  pass "APOC coll procedures present ($APOC_OK procs)"
+# apoc.coll.sort is an APOC *function* (not a procedure), and dbms.procedures()
+# was REMOVED in Neo4j 5.x (the pinned server is neo4j:2026.03.1-community) —
+# the old `CALL dbms.procedures()` probe errored on a healthy stack, came back
+# empty (stderr discarded), and hard-failed preflight with a phantom "APOC
+# missing". Probe by actually CALLING the function this pipeline depends on;
+# still fail-closed when APOC is genuinely absent.
+APOC_OK=$("${NEO4J_CMD[@]}" "RETURN apoc.coll.sort([2,1])[0] AS n;" 2>/dev/null | tail -1 || true)
+if [[ "$APOC_OK" == "1" ]]; then
+  pass "APOC functions present (apoc.coll.sort smoke test passed)"
 else
-  fail "APOC procedures missing (apoc.coll.sort is required for PR-N19 Fix #2 canonical zone ordering)"
+  fail "APOC missing or broken (apoc.coll.sort is required for PR-N19 Fix #2 canonical zone ordering)"
 fi
 
 # Critical uniqueness constraints + the n.uuid index (PR #33 when merged)

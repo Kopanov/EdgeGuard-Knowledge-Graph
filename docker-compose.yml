@@ -67,6 +67,9 @@ x-common-env: &common-env
   EDGEGUARD_DEBUG_GC: ${EDGEGUARD_DEBUG_GC:-}
   # restSearch substring for EdgeGuard event discovery (default EdgeGuard in code if unset).
   EDGEGUARD_MISP_EVENT_SEARCH: ${EDGEGUARD_MISP_EVENT_SEARCH:-}
+  # Issue #62: min fraction of ATTEMPTED MISP pushes that must succeed or the
+  # collector task fails RED (default 0.95 in code; 0 disables the gate).
+  EDGEGUARD_MISP_MIN_SUCCESS_RATE: ${EDGEGUARD_MISP_MIN_SUCCESS_RATE:-}
 
 services:
   # ─────────────────────────────────────────────────────────────────────────────

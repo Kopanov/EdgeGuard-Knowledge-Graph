@@ -10,6 +10,7 @@ across every collector:
 """
 
 import logging
+import os
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -441,6 +442,42 @@ def is_auth_or_access_denied(exc: BaseException) -> bool:
     return False
 
 
+# Issue #62 (silent MISP push loss): minimum fraction of ATTEMPTED pushes
+# (success / (success + failed); dedup-skipped items are not attempts) that
+# must succeed for a collector run to count as success. Below the threshold
+# the run is marked failed so the Airflow task goes RED instead of the
+# 2026-04-19 failure mode (14.7% NVD loss under a green DAG — the old rule
+# was "1 success out of 92k attempts = success"). Set to 0 to disable.
+_DEFAULT_MISP_MIN_SUCCESS_RATE = 0.95
+
+
+def _misp_min_success_rate() -> float:
+    """Parse ``EDGEGUARD_MISP_MIN_SUCCESS_RATE`` (float in [0, 1]).
+
+    Empty/unset → default. Junk or out-of-range → default with a WARNING
+    (fail-safe: a typo must not silently disable the loss gate). ``0``
+    explicitly disables the gate (legacy any-success-is-success behavior).
+    Read per call, not at import — Airflow tasks inherit env at fork time
+    and tests monkeypatch it.
+    """
+    raw = os.environ.get("EDGEGUARD_MISP_MIN_SUCCESS_RATE", "").strip()
+    if not raw:
+        return _DEFAULT_MISP_MIN_SUCCESS_RATE
+    try:
+        val = float(raw)
+    except ValueError:
+        logger.warning(
+            f"EDGEGUARD_MISP_MIN_SUCCESS_RATE={raw!r} is not a float — using default {_DEFAULT_MISP_MIN_SUCCESS_RATE}"
+        )
+        return _DEFAULT_MISP_MIN_SUCCESS_RATE
+    if not 0.0 <= val <= 1.0:
+        logger.warning(
+            f"EDGEGUARD_MISP_MIN_SUCCESS_RATE={val} outside [0, 1] — using default {_DEFAULT_MISP_MIN_SUCCESS_RATE}"
+        )
+        return _DEFAULT_MISP_MIN_SUCCESS_RATE
+    return val
+
+
 def status_after_misp_push(
     source: str,
     num_items: int,
@@ -449,15 +486,42 @@ def status_after_misp_push(
 ) -> Dict[str, Any]:
     """Build a standard ``make_status`` dict after ``push_items`` / ``push_indicators``.
 
-    Mirrors MITRE collector semantics: empty batch is success; at least one successful
-    MISP write counts as success; all writes failed yields ``success=False`` and an error.
+    Mirrors MITRE collector semantics: empty batch is success; all items
+    deduplicated (0 pushed, 0 failed) is success. A run with failures must
+    additionally clear the Issue-#62 success-rate gate (see
+    ``_misp_min_success_rate``): partial loss below the threshold marks the
+    run FAILED so the DAG task goes red (dags/edgeguard_pipeline.py gates on
+    ``success=False``) instead of silently passing.
+
+    Always emits one grep-able ``COLLECTOR_SUMMARY`` log line per run —
+    the at-a-glance operator surface Issue #62 asked for.
     """
     if num_items == 0:
         return make_status(source, True, count=0, failed=0)
+    attempted = push_success_count + push_failed_count
     # All items deduplicated (0 pushed, 0 failed) = success, not failure.
     # This is the normal case on re-runs where MISP already has all items.
+    # Rate over ATTEMPTED pushes only — a mostly-deduplicated re-run with a
+    # handful of new items is judged on those items alone.
+    rate = (push_success_count / attempted) if attempted else 1.0
+    min_rate = _misp_min_success_rate()
+    logger.info(
+        f"COLLECTOR_SUMMARY source={source} items={num_items} pushed={push_success_count} "
+        f"failed={push_failed_count} attempted={attempted} success_rate={rate:.3f} "
+        f"min_success_rate={min_rate:.2f}"
+    )
     ok = push_success_count > 0 or (push_success_count == 0 and push_failed_count == 0)
     err: Optional[str] = None
     if not ok and push_failed_count:
         err = f"MISP push failed for all or part of batch ({push_failed_count} failures, 0 successes)"
+    elif ok and attempted > 0 and min_rate > 0.0 and rate < min_rate:
+        # Issue #62 gate: partial silent loss. rate == min_rate passes.
+        ok = False
+        err = (
+            f"MISP push success rate {rate:.3f} below EDGEGUARD_MISP_MIN_SUCCESS_RATE="
+            f"{min_rate:.2f} ({push_success_count} pushed, {push_failed_count} failed, "
+            f"{attempted} attempted) — partial silent loss; see the COLLECTOR_SUMMARY "
+            f"line above and Issue #62"
+        )
+        logger.error(f"{source}: {err}")
     return make_status(source, ok, count=num_items, failed=push_failed_count, error=err)
