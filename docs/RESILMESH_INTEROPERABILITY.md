@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-06-11** — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
+**Last updated: 2026-06-12** — Wazuh integration phase 1: documented `GET /export/wazuh/cdb` (sector IOC/CVE intelligence as Wazuh CDB lists — export-lists-first per the 2026-06 team decision). Prior: 2026-06-11 — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -433,7 +433,7 @@ The ResilMesh platform exposes several services that directly consume or benefit
 | **IOB STIX** (Indicator of Behavior) | 3400 | Processes STIX-format IoB. EdgeGuard's STIX exports (`run_pipeline.py`) can feed IOB directly. |
 | **THF** (Threat Hunting Framework) | 8030 / 8501 | Uses Anthropic Claude Sonnet for LLM-assisted threat hunting. EdgeGuard's enriched graph — ThreatActors linked to Techniques, Indicators linked to CVEs — is the ideal context injection for THF queries. |
 | **Shuffle** (SOAR) | 3443 | Playbook automation. High-confidence, critical-sector indicators from EdgeGuard can trigger automated response playbooks. |
-| **Wazuh SIEM** | 4433 | Wazuh detects events; EdgeGuard enriches them with CVE/IoC context via the NATS alert bridge. |
+| **Wazuh SIEM** | 4433 | Two directions (2026-06 team decision): (1) **EdgeGuard exports CTI to Wazuh** — `GET /export/wazuh/cdb` serves sector-specific IOC/CVE intelligence as Wazuh CDB lists (`key:value` lines, active entries only, `list=indicators\|cves`, zone/type/confidence filters) for use in Wazuh rules via `<list lookup="match_key">`; url/ipv6 keys are skipped (CDB keys cannot contain `:`) — match those via the enrichment path instead. (2) Wazuh detects events; EdgeGuard enriches them with CVE/IoC context via the NATS alert bridge (later phase). |
 
 ### Deployment note — Port Allocation & Intentional Separation
 

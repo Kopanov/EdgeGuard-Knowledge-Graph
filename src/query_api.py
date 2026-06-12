@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 # OpenTelemetry imports
 from opentelemetry import trace
@@ -605,6 +605,49 @@ async def get_zone_threats(
         raise HTTPException(status_code=500, detail="Internal error — see server logs")
 
 
+def _indicator_filter_conditions(
+    indicator_type: Optional[str],
+    zone: Optional[str],
+    source: Optional[str],
+) -> "tuple[list[str], dict[str, Any]]":
+    """Shared Indicator WHERE conditions for ``/indicators`` AND the Wazuh
+    CDB export — single source so a filter fix in one cannot silently miss
+    the other (always includes the ``edgeguard_managed`` scope)."""
+    conditions: list[str] = []
+    params: Dict[str, Any] = {}
+    if indicator_type:
+        conditions.append("n.indicator_type = $indicator_type")
+        params["indicator_type"] = indicator_type
+    if zone:
+        conditions.append("$zone IN n.zone")
+        params["zone"] = zone
+    if source:
+        conditions.append("$source IN n.source")
+        params["source"] = source
+    conditions.append("n.edgeguard_managed = true")
+    return conditions, params
+
+
+def _vulnerability_filter_conditions(
+    severity: Optional[str],
+    zone: Optional[str],
+) -> "tuple[list[str], dict[str, Any]]":
+    """Shared CVE/Vulnerability WHERE conditions for ``/vulnerabilities``
+    AND the Wazuh CDB export (same single-source rationale as above)."""
+    conditions = [
+        "(n:Vulnerability OR n:CVE OR n.type = 'vulnerability')",
+        "n.edgeguard_managed = true",
+    ]
+    params: Dict[str, Any] = {}
+    if severity:
+        conditions.append("n.severity = $severity")
+        params["severity"] = severity.upper()
+    if zone:
+        conditions.append("$zone IN n.zone")
+        params["zone"] = zone
+    return conditions, params
+
+
 @app.get("/indicators", dependencies=[Depends(_verify_api_key)])
 @limiter.limit(_RATE_LIMIT_READ)
 async def list_indicators(
@@ -625,21 +668,12 @@ async def list_indicators(
 
     try:
         with neo4j_client.driver.session() as session:
-            # Build dynamic WHERE clause
-            conditions = []
-            params = {"limit": limit, "offset": offset}
-
-            if indicator_type:
-                conditions.append("n.indicator_type = $indicator_type")
-                params["indicator_type"] = indicator_type.value
-            if zone:
-                conditions.append("$zone IN n.zone")
-                params["zone"] = zone.value
-            if source:
-                conditions.append("$source IN n.source")
-                params["source"] = source
-
-            conditions.append("n.edgeguard_managed = true")
+            conditions, filter_params = _indicator_filter_conditions(
+                indicator_type.value if indicator_type else None,
+                zone.value if zone else None,
+                source,
+            )
+            params = {**filter_params, "limit": limit, "offset": offset}
             where_clause = " AND ".join(conditions) if conditions else "1=1"
 
             query = f"""
@@ -660,8 +694,7 @@ async def list_indicators(
                 WHERE {where_clause}
                 RETURN count(n) as total
             """
-            count_params = {k: v for k, v in params.items() if k not in ["limit", "offset"]}
-            count_result = session.run(count_query, **count_params, timeout=_NEO4J_QUERY_TIMEOUT)
+            count_result = session.run(count_query, **filter_params, timeout=_NEO4J_QUERY_TIMEOUT)
             total = count_result.single()["total"]
 
             return {"indicators": indicators, "total": total, "limit": limit, "offset": offset}
@@ -689,16 +722,11 @@ async def list_vulnerabilities(
 
     try:
         with neo4j_client.driver.session() as session:
-            conditions = ["(n:Vulnerability OR n:CVE OR n.type = 'vulnerability')", "n.edgeguard_managed = true"]
-            params = {"limit": limit}
-
-            if severity:
-                conditions.append("n.severity = $severity")
-                params["severity"] = severity.value.upper()
-            if zone:
-                conditions.append("$zone IN n.zone")
-                params["zone"] = zone.value
-
+            conditions, filter_params = _vulnerability_filter_conditions(
+                severity.value if severity else None,
+                zone.value if zone else None,
+            )
+            params = {**filter_params, "limit": limit}
             where_clause = " AND ".join(conditions)
 
             query = f"""
@@ -716,6 +744,142 @@ async def list_vulnerabilities(
 
     except Exception:
         logger.error("List vulnerabilities failed", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+
+
+class CdbListEnum(str, Enum):
+    indicators = "indicators"
+    cves = "cves"
+
+
+# Wazuh CDB export: hard cap on exported entries. One bounded query — CDB
+# lists of this size load fine in wazuh-analysisd; raise deliberately (with
+# a Wazuh-side memory check) if a deployment ever needs more.
+_CDB_EXPORT_MAX_ENTRIES = 50_000
+
+# CDB keys: the file format splits each line on the FIRST ':' — a key
+# containing ':' silently truncates, so such values are SKIPPED (count
+# surfaced in the X-EdgeGuard-Skipped response header). In practice this
+# excludes ``url`` (scheme colon) and ``ipv6`` (address colons) indicator
+# types — match those in Wazuh via rules on the enriched alert path
+# instead of CDB lookups. Embedded newlines would likewise corrupt the
+# line-oriented format.
+_CDB_KEY_FORBIDDEN_CHARS = (":", "\n", "\r")
+
+
+def _cdb_value_sanitize(text: str) -> str:
+    """Sanitize a CDB VALUE fragment: the value side may not contain line
+    breaks (line-oriented format); ':' is technically legal after the first
+    separator but trips naive parsers — normalize both to '_'."""
+    out = str(text)
+    for ch in (":", "\n", "\r"):
+        out = out.replace(ch, "_")
+    return out
+
+
+@app.get("/export/wazuh/cdb", dependencies=[Depends(_verify_api_key)])
+@limiter.limit(_RATE_LIMIT_READ)
+async def export_wazuh_cdb(
+    request: Request,
+    list_name: CdbListEnum = Query(
+        CdbListEnum.indicators, alias="list", description="Which intelligence list to export"
+    ),
+    zone: Optional[ZoneEnum] = Query(None, description="Sector/zone filter (omit for all zones)"),
+    indicator_type: Optional[IndicatorTypeEnum] = Query(
+        None, description="Indicator-type filter (indicators list only)"
+    ),
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0, description="Minimum confidence_score"),
+):
+    """Export sector-specific IOC/CVE intelligence as a Wazuh CDB list.
+
+    The agreed first Wazuh integration (2026-06, Stage-2): EdgeGuard exports
+    CTI that Wazuh rules consume via ``<list lookup="match_key">`` CDB
+    lookups. Format: one ``key:value`` entry per line — the IOC (or CVE id)
+    is the key; the value carries human-readable context (type, confidence,
+    severity, KEV date).
+
+    Semantics (documented deviations from the JSON listing endpoints):
+      * Only ACTIVE entries are exported (``coalesce(n.active, true)``) —
+        this is an operational blocklist feed; indicators retired by the
+        confidence-decay job must drop out of Wazuh on the next pull.
+      * Keys containing ':' / line breaks are skipped (see
+        ``_CDB_KEY_FORBIDDEN_CHARS`` — excludes url/ipv6 types), count in
+        the ``X-EdgeGuard-Skipped`` header.
+      * Output is sorted by key for deterministic diffs between pulls.
+
+    Filter logic is shared with ``/indicators`` and ``/vulnerabilities``
+    via ``_indicator_filter_conditions`` / ``_vulnerability_filter_conditions``
+    — not forked.
+    """
+    if not neo4j_client or not neo4j_client.is_connected():
+        raise HTTPException(status_code=503, detail="Neo4j not connected")
+
+    try:
+        zone_value = zone.value if zone else None
+        if list_name is CdbListEnum.indicators:
+            conditions, params = _indicator_filter_conditions(
+                indicator_type.value if indicator_type else None, zone_value, None
+            )
+            match_clause = "MATCH (n:Indicator)"
+            return_clause = (
+                "RETURN n.value AS key, n.indicator_type AS type, "
+                "n.confidence_score AS confidence ORDER BY key LIMIT $cap"
+            )
+        else:
+            conditions, params = _vulnerability_filter_conditions(None, zone_value)
+            match_clause = "MATCH (n)"
+            return_clause = (
+                "RETURN n.cve_id AS key, n.severity AS severity, n.cvss_score AS cvss, "
+                "n.cisa_exploit_add AS kev ORDER BY key LIMIT $cap"
+            )
+
+        # Operational blocklist: decay-retired entries must drop out.
+        conditions.append("coalesce(n.active, true) = true")
+        if min_confidence is not None:
+            conditions.append("n.confidence_score >= $min_confidence")
+            params["min_confidence"] = min_confidence
+        params["cap"] = _CDB_EXPORT_MAX_ENTRIES
+
+        query = f"{match_clause} WHERE {' AND '.join(conditions)} {return_clause}"
+
+        lines: list[str] = []
+        skipped = 0
+        with neo4j_client.driver.session() as session:
+            result = session.run(query, **params, timeout=_NEO4J_QUERY_TIMEOUT)
+            for r in result:
+                key = r["key"]
+                if not isinstance(key, str) or not key.strip():
+                    skipped += 1
+                    continue
+                key = key.strip()
+                if any(ch in key for ch in _CDB_KEY_FORBIDDEN_CHARS):
+                    skipped += 1
+                    continue
+                if list_name is CdbListEnum.indicators:
+                    itype = _cdb_value_sanitize(r["type"] or "unknown")
+                    conf = r["confidence"]
+                    value = f"type={itype} confidence={conf:.2f}" if isinstance(conf, (int, float)) else f"type={itype}"
+                else:
+                    sev = _cdb_value_sanitize(r["severity"] or "unknown")
+                    cvss = r["cvss"]
+                    value = f"severity={sev} cvss={cvss}" if isinstance(cvss, (int, float)) else f"severity={sev}"
+                    if r["kev"]:
+                        value += f" kev={_cdb_value_sanitize(r['kev'])}"
+                lines.append(f"{key}:{value}")
+
+        body = "\n".join(lines) + ("\n" if lines else "")
+        filename = f"edgeguard_{zone_value or 'all'}_{list_name.value}.cdb"
+        return PlainTextResponse(
+            body,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "X-EdgeGuard-Entries": str(len(lines)),
+                "X-EdgeGuard-Skipped": str(skipped),
+            },
+        )
+
+    except Exception:
+        logger.error("Wazuh CDB export failed", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal error — see server logs")
 
 
