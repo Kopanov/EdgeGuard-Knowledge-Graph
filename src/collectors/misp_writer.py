@@ -181,6 +181,69 @@ def _validate_honest_null(item: Dict[str, Any], source_hint: Optional[str] = Non
                 )
 
 
+# Traffic Light Protocol labels MISP's ``tlp`` taxonomy accepts (TLP 1.0 + 2.0).
+_VALID_TLP = frozenset({"white", "clear", "green", "amber", "amber+strict", "red"})
+
+
+def _tlp_tag(item: Dict[str, Any]) -> str:
+    """Return the ``tlp:<level>`` tag for an item (2026-10, fresh-baseline PR).
+
+    The proposal commits EdgeGuard to TLP handling, but no attribute carried a TLP
+    tag before this change. Every source EdgeGuard collects today is open
+    (``config.EDGEGUARD_DEFAULT_TLP``, default ``white``); a source that states
+    its own level (OTX pulses carry ``pulse_tlp``, or an item may set ``tlp``)
+    overrides the default when the value is a known TLP label.
+    """
+    from config import EDGEGUARD_DEFAULT_TLP
+
+    raw = item.get("tlp") or item.get("pulse_tlp") or ""
+    level = str(raw).strip().lower().replace("tlp:", "")
+    if level not in _VALID_TLP:
+        level = EDGEGUARD_DEFAULT_TLP
+    return f"tlp:{level}"
+
+
+def _attack_domain(item: Dict[str, Any]) -> str:
+    """ATT&CK domain of a technique / tactic item (2026-10): ``enterprise`` or ``ics``.
+
+    The MITRE collector stamps ``attack_domain`` on every item; anything else
+    (or an unknown value) is treated as Enterprise so pre-existing data keeps
+    its meaning. Carried as the ``attack-domain:<domain>`` MISP tag so the sync
+    can keep ICS techniques linked to ICS tactics only (9 of the 12 ICS tactic
+    short names are identical to Enterprise ones).
+    """
+    domain = str(item.get("attack_domain") or "enterprise").strip().lower()
+    return domain if domain in ("enterprise", "ics", "mobile") else "enterprise"
+
+
+def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the ``MITRE_USES_TECHNIQUES:`` JSON block for malware / actor / tool items.
+
+    Keys (all optional; the block is omitted entirely when none applies):
+      ``t``   — ``uses_techniques``: ATT&CK technique ids from MITRE's explicit
+                ``uses`` relationships (the MITRE collector is the only producer).
+      ``rt``  — ``reported_techniques`` (2026-10): technique ids a source *report*
+                lists for the entity — today the OTX pulse ``attack_ids``. Downstream
+                these become ``EMPLOYS_TECHNIQUE`` / ``IMPLEMENTS_TECHNIQUE`` edges with
+                ``match_type = "otx_pulse"`` and a lower confidence than ``t``.
+      ``pid`` — ``pulse_id`` (2026-10): the OTX pulse the entity came from, so the
+                MISP→Neo4j sync can link items of the same report and the node can
+                keep ``pulse_ids`` provenance.
+    Lists are capped so the comment stays within MISP field limits.
+    """
+    meta: Dict[str, Any] = {}
+    uses = item.get("uses_techniques") or []
+    if uses:
+        meta["t"] = [str(x) for x in list(uses)[:400]]
+    reported = item.get("reported_techniques") or []
+    if reported:
+        meta["rt"] = [str(x) for x in list(reported)[:400]]
+    pulse_id = item.get("pulse_id")
+    if pulse_id:
+        meta["pid"] = str(pulse_id)[:64]
+    return meta
+
+
 def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str, Any]) -> None:
     """Forward the collector's ``first_seen`` / ``last_seen`` (or
     ``last_modified``) into the MISP attribute dict via the MISP
@@ -951,6 +1014,7 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(indicator))  # 2026-10: TLP on every attribute
 
         # Add confidence tag
         confidence = indicator.get("confidence_score", 0.5)
@@ -1103,6 +1167,7 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(vuln))  # 2026-10: TLP on every attribute
 
         # Add severity tag
         severity = sanitize_value(vuln.get("severity", "UNKNOWN"), max_length=20)
@@ -1253,6 +1318,7 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(malware))  # 2026-10: TLP on every attribute
 
         # Add malware type tags
         malware_types = malware.get("malware_types", [])
@@ -1283,15 +1349,16 @@ class MISPWriter:
         tags.append(f'misp-galaxy:malware="{name}"')
 
         description = sanitize_value(malware.get("description", ""), max_length=400)
-        uses_techniques = malware.get("uses_techniques") or []
 
-        # Preserve malware→technique IDs through MISP (same idea as NVD_META for CVEs).
-        # ``run_misp_to_neo4j.parse_attribute`` reads this prefix into ``uses_techniques`` on Malware nodes.
-        if uses_techniques:
+        # Preserve technique IDs and the source report id through MISP (same idea as
+        # NVD_META for CVEs). ``run_misp_to_neo4j.parse_attribute`` reads the keys back:
+        #   "t"   MITRE-explicit ``uses_techniques``  (ATT&CK ``uses`` relationships)
+        #   "rt"  ``reported_techniques``              (2026-10: pulse-level ATT&CK ids, OTX)
+        #   "pid" ``pulse_id``                         (2026-10: OTX pulse = source report)
+        meta = _technique_meta(malware)
+        if meta:
             import json as _json
 
-            # Cap list length so comment stays within typical MISP field limits.
-            meta = {"t": list(uses_techniques)[:400]}
             comment = "MITRE_USES_TECHNIQUES:" + _json.dumps(meta, separators=(",", ":"))
             if description:
                 comment = comment + "\n" + description
@@ -1346,6 +1413,7 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(actor))  # 2026-10: TLP on every attribute
 
         # Add alias tags — the MISP-side carrier for the alias round-trip:
         # run_misp_to_neo4j.parse_attribute rehydrates ``alias:`` tags into
@@ -1365,14 +1433,13 @@ class MISPWriter:
         tags.append(f'misp-galaxy:threat-actor="{name}"')
 
         description = sanitize_value(actor.get("description", ""), max_length=255)
-        uses_techniques = actor.get("uses_techniques") or []
 
-        # Preserve actor→technique IDs through MISP (same pattern as malware/tool).
-        # ``run_misp_to_neo4j.parse_attribute`` reads this prefix into ``uses_techniques``.
-        if uses_techniques:
+        # Preserve technique IDs + source report id through MISP (same keys as the
+        # malware path: "t" explicit, "rt" reported, "pid" pulse id).
+        meta = _technique_meta(actor)
+        if meta:
             import json as _json
 
-            meta = {"t": list(uses_techniques)[:400]}
             comment = "MITRE_USES_TECHNIQUES:" + _json.dumps(meta, separators=(",", ":"))
             if description:
                 comment = comment + "\n" + description
@@ -1430,6 +1497,8 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(technique))  # 2026-10: TLP on every attribute
+        tags.append(f"attack-domain:{_attack_domain(technique)}")  # 2026-10: enterprise | ics
 
         # Add platform tags
         platforms = technique.get("platforms", [])
@@ -1499,6 +1568,8 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(tactic))  # 2026-10: TLP on every attribute
+        tags.append(f"attack-domain:{_attack_domain(tactic)}")  # 2026-10: enterprise | ics
 
         if shortname:
             tags.append(f"mitre-tactic:{shortname.lower()}")
@@ -1545,6 +1616,7 @@ class MISPWriter:
             tags.append(self.SOURCE_TAGS[source])
         else:
             tags.append(f"source:{source}")
+        tags.append(_tlp_tag(tool))  # 2026-10: TLP on every attribute
 
         # Tag as tool type for MISP galaxy compatibility
         tags.append(f'misp-galaxy:tool="{name}"')

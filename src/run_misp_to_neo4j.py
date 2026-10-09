@@ -32,6 +32,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import requests
 import urllib3
 
+from actor_name_hygiene import clean_actor_names
+
 # Import resilience utilities
 from collectors.collector_utils import TransientServerError
 from config import (
@@ -416,6 +418,7 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     """
     seen = set()
     unique_items: List[Dict] = []
+    _kept_by_key: Dict[str, Dict] = {}  # 2026-10: first item per key, to collect extra report ids
     # PR #33 round 13: track drop reasons separately so the Prometheus counter
     # has labelled buckets ("missing_cve_id" vs "missing_key") for alerting.
     _dropped_by_reason: Dict[str, int] = {}
@@ -446,6 +449,17 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
         if key not in seen:
             seen.add(key)
             unique_items.append(item)
+            _kept_by_key[key] = item
+        else:
+            # 2026-10: the same entity listed in several OTX pulses of one event keeps
+            # every report id, so report-scoped linking links it to all of them
+            # (``_build_cross_item_relationships`` reads ``pulse_id`` + ``report_ids``).
+            dup_pid = item.get("pulse_id")
+            kept = _kept_by_key.get(key)
+            if dup_pid and kept is not None and dup_pid != kept.get("pulse_id"):
+                extra = kept.setdefault("report_ids", [])
+                if dup_pid not in extra:
+                    extra.append(dup_pid)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -482,6 +496,11 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
 # Max relationship definitions per Neo4j UNWIND batch (see ``Neo4jClient.create_misp_relationships_batch``).
 # 500 rows per UNWIND batch — smaller batches reduce lock contention on shared nodes.
 _RELATIONSHIP_BATCH_DEFAULT = 500
+
+# ``r.source_id`` stamped on relationships built from items that share the same
+# source report (today: the OTX pulse). Replaces the pre-2026-10 whole-event
+# ``misp_cooccurrence`` edges — see ``_build_cross_item_relationships``.
+_REPORT_SCOPED_SOURCE_ID = "otx_pulse"
 
 # Cap how many exception-failed events we retry. Beyond this, MISP is almost
 # certainly broken and retrying more events just burns wall-clock against the
@@ -715,6 +734,34 @@ def normalize_misp_tag_list(tags: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _extract_tlp_tag(tags: List[Dict[str, Any]]) -> str:
+    """Rehydrate the ``tlp:<level>`` MISP tag (2026-10, fresh-baseline PR).
+
+    MISPWriter stamps one ``tlp:<level>`` tag on every attribute (``_tlp_tag``);
+    this is the read half. Returns the lower-case level (``white``, ``green``,
+    ``amber``, …) or ``""`` when the attribute carries no TLP tag, so callers can
+    skip the property instead of writing an empty string.
+    """
+    for tag in tags:
+        name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
+        if isinstance(name, str) and name.lower().startswith("tlp:"):
+            level = name[len("tlp:") :].strip().lower()
+            if level:
+                return level
+    return ""
+
+
+def _extract_attack_domain_tag(tags: List[Dict[str, Any]]) -> str:
+    """Rehydrate the ``attack-domain:<domain>`` MISP tag (2026-10) — ``enterprise`` when absent."""
+    for tag in tags:
+        name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
+        if isinstance(name, str) and name.lower().startswith("attack-domain:"):
+            domain = name[len("attack-domain:") :].strip().lower()
+            if domain in ("enterprise", "ics", "mobile"):
+                return domain
+    return "enterprise"
+
+
 def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
     """Rehydrate ``alias:<name>`` MISP tags into an aliases list.
 
@@ -830,6 +877,7 @@ class MISPToNeo4jSync:
         "AlienVault-OTX": "alienvault_otx",
         "NVD": "nvd",
         "CISA-KEV": "cisa_kev",
+        "CISA-ICS": "cisa_ics",  # 2026-10: CISA ICS advisories collector (source-asserted sectors)
         "MITRE-ATT&CK": "mitre_attck",
         "VirusTotal": "virustotal",
         "AbuseIPDB": "abuseipdb",
@@ -2326,40 +2374,54 @@ class MISPToNeo4jSync:
                     cves.append(match.group(1).upper())
         return cves
 
+    # Report-scoped linking (2026-10 fresh-baseline PR). An OTX pulse is the
+    # only "report" unit the pipeline currently carries end to end, so these
+    # are the only relationship kinds derived from co-membership.
+    _REPORT_LINK_CONFIDENCE = 0.6
+    _REPORT_LINK_MATCH_TYPE = "otx_pulse"
+    _MAX_REPORT_INDICATORS = 2000
+    _MAX_REPORT_MALWARE = 50
+    _MAX_REPORT_ACTORS = 10
+
     def _build_cross_item_relationships(self, items: List[Dict]) -> List[Dict]:
         """
-        Build relationships between items from **exactly one** MISP event.
+        Build report-scoped relationships between items from **exactly one** MISP event.
 
         **Contract (do not violate):** ``items`` must be the parsed rows for a **single**
         ``full_event`` only — e.g. in ``run()``: ``_dedupe_parsed_items(event_items)``
         where ``event_items`` came from that event's attributes only.
 
-        **Do not** pass a list merged across the whole sync or multiple events. Doing so
-        creates **false** co-occurrence edges (entities that never shared an event) and
-        **O(n²)** relationship blowups. There is no global/cross-event mode here by design.
-
-        Pairwise logic (indicator × malware, actor × technique, etc.) is intentional **within**
-        one event's attribute set.
+        **2026-10 change (fresh-baseline PR, finding F1 of the ResilMesh conformance
+        check):** whole-event pairing was removed. EdgeGuard MISP events are
+        per-source, per-day buckets (``EdgeGuard-<source>-<date>``), so linking every
+        indicator to every malware and every malware to every actor in the same event
+        asserted relationships no source had made (e.g. one malware attributed to 152
+        actors, median 91). Items are now paired only when they come from the **same
+        source report** — today that is the OTX pulse (``item["pulse_id"]``), which the
+        OTX collector carries on indicators, malware and actors and the MISP writer
+        round-trips. Items without a report id are never paired.
 
         Relationship kinds produced:
-        - ThreatActor -> EMPLOYS_TECHNIQUE -> Technique
-        - Malware -> ATTRIBUTED_TO -> ThreatActor
-        - Indicator -> INDICATES -> Malware
-        - Indicator/Vulnerability -> TARGETS -> Sector
-        - Indicator -> EXPLOITS -> Vulnerability (CVE) (``rel_type`` ``EXPLOITS`` in definitions)
+        - Indicator -> INDICATES -> Malware          (same pulse; ``match_type`` ``otx_pulse``, 0.6)
+        - Malware -> ATTRIBUTED_TO -> ThreatActor    (same pulse that names an adversary; ``otx_pulse``, 0.6)
+        - Indicator -> TARGETS -> Sector, Vulnerability -> AFFECTS -> Sector
+          (from each item's own ``zone``; unchanged)
+
+        No longer produced here: ThreatActor -> EMPLOYS_TECHNIQUE (comes from the node's
+        ``uses_techniques`` / ``reported_techniques`` lists in ``build_relationships``),
+        Indicator -> EXPLOITS (only the indicator's own ``cve_id`` tag asserts that; see
+        ``build_relationships`` Q3).
 
         Args:
-            items: Parsed items for **one** event only (typically ``_dedupe_parsed_items`` on that event's list).
+            items: Parsed items for **one** event only.
 
         Returns:
-            List of relationship definitions to merge in Neo4j for that event's co-occurrence graph.
+            List of relationship definitions to merge in Neo4j.
         """
-        relationships = []
+        relationships: List[Dict] = []
 
         # All items in this list share the same MISP event (single-event contract above).
-        # Capture the event id once and stamp it on every constructed relationship so the
-        # edge carries provenance back to the originating MISP event. Empty/missing →
-        # the merger skips the array append.
+        # Stamp it on every constructed relationship for provenance.
         _evt_id = ""
         for _i in items:
             _eid = _i.get("misp_event_id")
@@ -2367,171 +2429,77 @@ class MISPToNeo4jSync:
                 _evt_id = str(_eid)
                 break
 
-        # Group items by type for cross-referencing
-        actors = [i for i in items if i.get("type") == "actor"]
-        techniques = [i for i in items if i.get("type") == "technique"]
-        malware_items = [i for i in items if i.get("type") == "malware"]
-        indicators = [i for i in items if i.get("indicator_type") or i.get("type") == "indicator"]
+        # Group by source report. Only OTX pulses carry a report id today. An item
+        # de-duplicated within the event keeps the other pulses it appeared in under
+        # ``report_ids`` (see ``_dedupe_parsed_items``), so it joins every one of them.
+        by_report: Dict[str, Dict[str, List[Dict]]] = {}
+        for item in items:
+            candidate_ids = [item.get("pulse_id")] + list(item.get("report_ids") or [])
+            for report_id in candidate_ids:
+                if not report_id or not isinstance(report_id, str):
+                    continue
+                report_id = report_id.strip()
+                if not report_id:
+                    continue
+                bucket = by_report.setdefault(report_id, {"indicators": [], "malware": [], "actors": []})
+                if item.get("indicator_type") or item.get("type") == "indicator":
+                    if item.get("value"):
+                        bucket["indicators"].append(item)
+                elif item.get("type") == "malware" and item.get("name"):
+                    bucket["malware"].append(item)
+                elif item.get("type") == "actor" and item.get("name"):
+                    bucket["actors"].append(item)
 
-        # Type-based sampling caps to prevent O(n²) blowup on large events.
-        # Each cross-product is capped independently; smaller entity types (actors,
-        # techniques, malware) keep all items, only indicators are sampled.
-        _MAX_ACTORS = 500
-        _MAX_TECHNIQUES = 500
-        _MAX_MALWARE = 500
-        _MAX_INDICATORS = 2000
-        _MAX_VULNS = 1000
-
-        sampled = False
-        if len(actors) > _MAX_ACTORS:
-            logger.info("Sampling actors: %s → %s", len(actors), _MAX_ACTORS)
-            actors = actors[:_MAX_ACTORS]
-            sampled = True
-        if len(techniques) > _MAX_TECHNIQUES:
-            logger.info("Sampling techniques: %s → %s", len(techniques), _MAX_TECHNIQUES)
-            techniques = techniques[:_MAX_TECHNIQUES]
-            sampled = True
-        if len(malware_items) > _MAX_MALWARE:
-            logger.info("Sampling malware: %s → %s", len(malware_items), _MAX_MALWARE)
-            malware_items = malware_items[:_MAX_MALWARE]
-            sampled = True
-        if len(indicators) > _MAX_INDICATORS:
-            logger.info("Sampling indicators: %s → %s", len(indicators), _MAX_INDICATORS)
-            indicators = indicators[:_MAX_INDICATORS]
-            sampled = True
-        if sampled:
-            logger.info("Type-based sampling applied to keep cross-products manageable")
-
-        # Collect vulnerabilities for cross-product estimation
-        vulnerabilities = [i for i in items if resolve_vulnerability_cve_id(i) is not None]
-        if len(vulnerabilities) > _MAX_VULNS:
-            logger.info("Sampling vulnerabilities: %s → %s", len(vulnerabilities), _MAX_VULNS)
-            vulnerabilities = vulnerabilities[:_MAX_VULNS]
-
-        # Dynamic sampling: estimate cross-product size and reduce caps if needed
-        _SAFE_REL_LIMIT = 50000
-        estimated_rels = (
-            len(actors) * len(techniques)
-            + len(malware_items) * len(actors)
-            + len(indicators) * len(malware_items)
-            + len(indicators) * len(vulnerabilities)
-        )
-        if estimated_rels > _SAFE_REL_LIMIT and estimated_rels > 0:
-            # Use sqrt(factor) because relationships are pairwise products:
-            # reducing both sides by sqrt(f) reduces each product by f.
-            import math
-
-            factor = math.sqrt(_SAFE_REL_LIMIT / estimated_rels)
-            _MAX_INDICATORS = max(100, int(len(indicators) * factor))
-            _MAX_MALWARE = max(50, int(len(malware_items) * factor))
-            _MAX_VULNS = max(50, int(len(vulnerabilities) * factor))
-            _MAX_ACTORS = max(50, int(len(actors) * factor))
-            _MAX_TECHNIQUES = max(50, int(len(techniques) * factor))
-            # Re-sample with reduced caps
-            indicators = indicators[:_MAX_INDICATORS]
-            malware_items = malware_items[:_MAX_MALWARE]
-            vulnerabilities = vulnerabilities[:_MAX_VULNS]
-            actors = actors[:_MAX_ACTORS]
-            techniques = techniques[:_MAX_TECHNIQUES]
-            new_estimated = (
-                len(actors) * len(techniques)
-                + len(malware_items) * len(actors)
-                + len(indicators) * len(malware_items)
-                + len(indicators) * len(vulnerabilities)
-            )
-            logger.warning(
-                "CROSS-ITEM: Estimated %s relationships exceeds %s limit — "
-                "dynamically reduced caps (indicators=%s, malware=%s, vulns=%s, actors=%s, techniques=%s) → ~%s rels",
-                estimated_rels,
-                _SAFE_REL_LIMIT,
-                len(indicators),
-                len(malware_items),
-                len(vulnerabilities),
-                len(actors),
-                len(techniques),
-                new_estimated,
-            )
-            try:
-                from metrics_server import PIPELINE_ERRORS
-
-                PIPELINE_ERRORS.labels(task="cross_item_rels", error_type="dynamic_sampling_triggered", source="").inc()
-            except Exception:
-                logger.debug("Metrics recording failed", exc_info=True)
-
-        # Build actor -> technique relationships (EMPLOYS_TECHNIQUE).
-        # Attribution semantics: "actor uses this TTP". Split from a
-        # previously-generic USES in 2026-04 to disambiguate from
-        # IMPLEMENTS_TECHNIQUE (Malware/Tool capability).
-        for actor in actors:
-            for technique in techniques:
-                relationships.append(
-                    {
-                        "rel_type": "EMPLOYS_TECHNIQUE",
-                        "from_type": "ThreatActor",
-                        "from_key": {"name": actor["name"]},
-                        "to_type": "Technique",
-                        "to_key": {"mitre_id": technique["mitre_id"]},
-                        "confidence": 0.5,
-                        "misp_event_id": _evt_id,
-                    }
+        for report_id, bucket in by_report.items():
+            indicators = bucket["indicators"]
+            malware_items = bucket["malware"]
+            actors = bucket["actors"]
+            if len(indicators) > self._MAX_REPORT_INDICATORS:
+                logger.info(
+                    "Report %s: capping indicators %s -> %s for report-scoped linking",
+                    report_id,
+                    len(indicators),
+                    self._MAX_REPORT_INDICATORS,
                 )
+                indicators = indicators[: self._MAX_REPORT_INDICATORS]
+            malware_items = malware_items[: self._MAX_REPORT_MALWARE]
+            actors = actors[: self._MAX_REPORT_ACTORS]
 
-        # Build malware -> actor relationships (ATTRIBUTED_TO)
-        # When an event has both malware and actors, attribute malware to actors
-        for malware in malware_items:
-            for actor in actors:
-                relationships.append(
-                    {
-                        "rel_type": "ATTRIBUTED_TO",
-                        "from_type": "Malware",
-                        "from_key": {"name": malware["name"]},
-                        "to_type": "ThreatActor",
-                        "to_key": {"name": actor["name"]},
-                        "confidence": 0.5,
-                        "misp_event_id": _evt_id,
-                    }
-                )
-
-        # Build indicator -> malware relationships (INDICATES)
-        # Indicators in the same MISP event as a malware entry indicate that malware.
-        for indicator in indicators:
-            for malware in malware_items:
-                indicator_type = indicator.get("indicator_type", "unknown")
-                indicator_value = indicator.get("value")
-                if indicator_value:
+            # Indicator -> Malware (INDICATES): the pulse lists these IOCs under these
+            # malware families.
+            for indicator in indicators:
+                for malware in malware_items:
                     relationships.append(
                         {
                             "rel_type": "INDICATES",
                             "from_type": "Indicator",
                             "from_key": {
-                                "value": indicator_value,
-                                "indicator_type": indicator_type,
+                                "value": indicator.get("value"),
+                                "indicator_type": indicator.get("indicator_type", "unknown"),
                             },
                             "to_type": "Malware",
                             "to_key": {"name": malware["name"]},
-                            "confidence": 0.5,
+                            "confidence": self._REPORT_LINK_CONFIDENCE,
+                            "match_type": self._REPORT_LINK_MATCH_TYPE,
+                            "report_id": report_id,
                             "misp_event_id": _evt_id,
                         }
                     )
 
-        # Build indicator -> vulnerability/CVE relationships (EXPLOITS)
-        # Indicators in the same MISP event as a CVE are likely exploiting it.
-        for indicator in indicators:
-            for vuln in vulnerabilities:
-                indicator_value = indicator.get("value")
-                cve_id = resolve_vulnerability_cve_id(vuln)
-                if indicator_value and cve_id:
+            # Malware -> ThreatActor (ATTRIBUTED_TO): the pulse names an adversary for
+            # these malware families.
+            for malware in malware_items:
+                for actor in actors:
                     relationships.append(
                         {
-                            "rel_type": "EXPLOITS",
-                            "from_type": "Indicator",
-                            "from_key": {
-                                "value": indicator_value,
-                                "indicator_type": indicator.get("indicator_type", "unknown"),
-                            },
-                            "to_type": "Vulnerability",
-                            "to_key": {"cve_id": cve_id},
-                            "confidence": 0.5,
+                            "rel_type": "ATTRIBUTED_TO",
+                            "from_type": "Malware",
+                            "from_key": {"name": malware["name"]},
+                            "to_type": "ThreatActor",
+                            "to_key": {"name": actor["name"]},
+                            "confidence": self._REPORT_LINK_CONFIDENCE,
+                            "match_type": self._REPORT_LINK_MATCH_TYPE,
+                            "report_id": report_id,
                             "misp_event_id": _evt_id,
                         }
                     )
@@ -2824,6 +2792,7 @@ class MISPToNeo4jSync:
                 "attack_vector": attack_vector,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
                 # ResilMesh-compatible fields — populated when NVD_META is present
                 "cwe": nvd_meta.get("cwe", []),
@@ -2855,9 +2824,28 @@ class MISPToNeo4jSync:
         elif attr_type == "threat-actor":
             actor_name = value
 
+            # 2026-10 defense in depth: the OTX collector now splits composite
+            # adversary strings and drops descriptive phrases before MISP, so a
+            # composite or generic name reaching this parser is legacy data (or a
+            # foreign MISP writer). A phrase must never become a ThreatActor node;
+            # a composite is skipped rather than silently reduced to its first name.
+            _cleaned_names = clean_actor_names(actor_name)
+            _same_name = len(_cleaned_names) == 1 and (
+                " ".join(_cleaned_names[0].split()).casefold() == " ".join(str(actor_name).split()).casefold()
+            )
+            if not _same_name:
+                logger.info(
+                    "Skipping threat-actor attribute %r: %s",
+                    actor_name[:80],
+                    "generic phrase, not a name" if not _cleaned_names else "composite name — split at collection",
+                )
+                return None, []
+
             # Parse uses_techniques from MITRE_USES_TECHNIQUES: comment prefix (same as malware/tool)
             raw_comment = attr.get("comment", "") or ""
             uses_techniques = []
+            reported_techniques: List[str] = []
+            actor_pulse_id = ""
             actor_description = raw_comment
             if "MITRE_USES_TECHNIQUES:" in raw_comment:
                 try:
@@ -2871,6 +2859,10 @@ class MISPToNeo4jSync:
                     parsed = json.loads(json_part)
                     if isinstance(parsed, dict):
                         uses_techniques = parsed.get("t", [])
+                        # 2026-10: pulse-level ids ("rt") and the pulse id ("pid")
+                        # written by MISPWriter._technique_meta.
+                        reported_techniques = [str(x) for x in (parsed.get("rt") or [])]
+                        actor_pulse_id = str(parsed.get("pid") or "").strip()
                     elif isinstance(parsed, list):
                         uses_techniques = parsed
                 except (ValueError, IndexError):
@@ -2913,6 +2905,8 @@ class MISPToNeo4jSync:
                 "aliases": actor_aliases,
                 "description": actor_description,
                 "uses_techniques": uses_techniques,
+                "reported_techniques": reported_techniques,
+                "pulse_id": actor_pulse_id,
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
@@ -2925,6 +2919,7 @@ class MISPToNeo4jSync:
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
             return item, relationships
@@ -2941,6 +2936,8 @@ class MISPToNeo4jSync:
 
             raw_comment = attr.get("comment", "") or ""
             uses_techniques: List[str] = []
+            reported_techniques: List[str] = []
+            malware_pulse_id = ""
             description = raw_comment
             if raw_comment.strip().startswith("MITRE_USES_TECHNIQUES:"):
                 try:
@@ -2950,6 +2947,9 @@ class MISPToNeo4jSync:
                     tail = (rest[nl + 1 :].strip() if nl >= 0 else "") or ""
                     meta = json.loads(json_part)
                     uses_techniques = [str(x) for x in (meta.get("t") or [])]
+                    # 2026-10: pulse-level ids ("rt") + pulse id ("pid"), see MISPWriter._technique_meta.
+                    reported_techniques = [str(x) for x in (meta.get("rt") or [])]
+                    malware_pulse_id = str(meta.get("pid") or "").strip()
                     description = tail or description
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
@@ -3001,7 +3001,10 @@ class MISPToNeo4jSync:
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "uses_techniques": uses_techniques,
+                "reported_techniques": reported_techniques,
+                "pulse_id": malware_pulse_id,
                 "relationships": relationships,
             }
             return item, relationships
@@ -3047,6 +3050,7 @@ class MISPToNeo4jSync:
             _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "technique",
+                "attack_domain": _extract_attack_domain_tag(tags),  # 2026-10: enterprise | ics
                 "mitre_id": mitre_id,
                 "name": name,
                 "description": technique_description,
@@ -3064,6 +3068,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.8,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
             return item, relationships
@@ -3086,6 +3091,7 @@ class MISPToNeo4jSync:
             _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
             item = {
                 "type": "tactic",
+                "attack_domain": _extract_attack_domain_tag(tags),  # 2026-10: enterprise | ics
                 "mitre_id": mitre_id,
                 "name": name,
                 "shortname": shortname,
@@ -3102,6 +3108,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.95,  # MITRE ATT&CK range
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
             }
             return item, relationships
 
@@ -3176,6 +3183,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.9,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
             }
             return item, relationships
 
@@ -3274,6 +3282,7 @@ class MISPToNeo4jSync:
                 "pulse_name": otx_meta.get("pulse_name") or tf_meta.get("malware_family") or raw_comment,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
+                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
 
@@ -3985,9 +3994,9 @@ class MISPToNeo4jSync:
             rels_created = self._create_relationships(event_embedded_rels, "misp")
             self.stats["relationships_created"] += rels_created
         if cross_rels:
-            # Cross-item (co-occurrence) rels use distinct source_id so calibration
-            # job can find and rescore them by MISP event size.
-            rels_created = self._create_relationships(cross_rels, "misp_cooccurrence")
+            # Report-scoped rels (same OTX pulse) carry their own source_id so
+            # they are distinguishable from attribute-embedded ("misp") edges.
+            rels_created = self._create_relationships(cross_rels, _REPORT_SCOPED_SOURCE_ID)
             self.stats["relationships_created"] += rels_created
 
         return len(event_items), len(cross_rels), ev_errors
@@ -4010,7 +4019,23 @@ class MISPToNeo4jSync:
         # Stores only the fields needed by _build_cross_item_relationships (~100 bytes/item
         # vs ~2KB/item for full parsed items).
         _rel_items: List[Dict] = []
-        _REL_KEYS = ("type", "name", "mitre_id", "tag", "indicator_type", "value", "malware_family", "zone", "cve_id")
+        # 2026-10: ``pulse_id`` / ``report_ids`` are what report-scoped linking groups
+        # on, and ``misp_event_id`` is the provenance stamp — without them the
+        # large (paged) OTX events, which hold most of the data, produced no links.
+        _REL_KEYS = (
+            "type",
+            "name",
+            "mitre_id",
+            "tag",
+            "indicator_type",
+            "value",
+            "malware_family",
+            "zone",
+            "cve_id",
+            "pulse_id",
+            "report_ids",
+            "misp_event_id",
+        )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size
 
@@ -4079,9 +4104,9 @@ class MISPToNeo4jSync:
             cross_rels = self._build_cross_item_relationships(_rel_items)
             if cross_rels:
                 logger.info(
-                    "Event %s: building %s cross-item relationships from all pages...", event_id, len(cross_rels)
+                    "Event %s: building %s report-scoped relationships from all pages...", event_id, len(cross_rels)
                 )
-                rels_created = self._create_relationships(cross_rels, "misp_cooccurrence")
+                rels_created = self._create_relationships(cross_rels, _REPORT_SCOPED_SOURCE_ID)
                 self.stats["relationships_created"] += rels_created
                 total_cross_rels += rels_created
             del _rel_items

@@ -82,19 +82,35 @@ class TestBuildRelationshipsAccumulatesSourceIds:
             "Q3b must accumulate cve_tag_match into r.source_ids (set-valued provenance)"
         )
 
-    def test_q4_cooccurrence_accumulates_misp_cooccurrence(self, source: str) -> None:
-        """Q4 (the PRE-OVERWRITE site) must accumulate
-        ``"misp_cooccurrence"`` into ``r.source_ids`` so Q9's later MERGE
-        on the same edge cannot erase the co-occurrence tag."""
-        assert "_q4_inner" in source
-        q4_idx = source.find("_q4_inner")
-        block = source[q4_idx : q4_idx + 2500]
-        assert 'r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["misp_cooccurrence"])' in block, (
-            "Q4 MUST accumulate misp_cooccurrence into r.source_ids — without "
-            "this, Q9's later MERGE on the same edge hides the co-occurrence "
-            "tag from the calibrator filter and ~30-50% of INDICATES edges "
-            "on a 730d baseline stay at inflated 0.8 confidence."
-        )
+    def test_q4_cooccurrence_query_removed(self, source: str) -> None:
+        """2026-10 (fresh-baseline PR): Q4 — the whole-event
+        ``misp_cooccurrence`` INDICATES query that this PR originally
+        hardened — was REMOVED (ResilMesh conformance finding F1). The
+        pre-overwrite site no longer exists, so nothing in this file may
+        MERGE an INDICATES edge stamped ``misp_cooccurrence``. Report-scoped
+        INDICATES edges now come from the MISP→Neo4j sync (``otx_pulse``);
+        the reported-technique queries 5b / 6b took Q4's place."""
+        assert "_q4_inner" not in source, "Q4 co-occurrence inner query must stay removed"
+        assert "_q4_outer" not in source, "Q4 co-occurrence outer query must stay removed"
+        # Scan the executable Cypher (string constants assigned to ``*_inner``
+        # variables), not the prose — the Q9 comment trail still quotes the
+        # old ``misp_cooccurrence`` stamp when explaining the overwrite bug.
+        import ast
+
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for tgt in node.targets:
+                if not (isinstance(tgt, ast.Name) and tgt.id.endswith("_inner")):
+                    continue
+                body = "".join(
+                    c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                )
+                assert "misp_cooccurrence" not in body, f"{tgt.id} must not stamp misp_cooccurrence"
+        assert "4. (removed 2026-10" in source, "the Q4 tombstone comment must document the removal"
+        assert '"employs_technique_reported"' in source, "5b (ThreatActor reported_techniques) must exist"
+        assert '"malware_implements_technique_reported"' in source, "6b (Malware reported_techniques) must exist"
 
     def test_q9_malware_family_accumulates_malware_family_match(self, source: str) -> None:
         """Q9 (the OVERWRITE site — the bug origin) must accumulate
@@ -109,16 +125,12 @@ class TestBuildRelationshipsAccumulatesSourceIds:
             "but the set-valued r.source_ids is what the calibrator now uses."
         )
 
-    def test_q4_and_q9_both_set_scalar_source_id_too(self, source: str) -> None:
-        """Backwards compat: scalar ``r.source_id`` writes MUST remain on
-        both Q4 and Q9 so legacy readers (and the calibrator's fallback
-        branch) still work for edges stamped before the array rollout."""
-        assert "_q4_inner" in source and "_q9_inner" in source
-        q4_idx = source.find("_q4_inner")
-        q4_block = source[q4_idx : q4_idx + 2500]
-        assert 'r.source_id = "misp_cooccurrence"' in q4_block, (
-            "Q4 MUST still set scalar r.source_id (legacy/fallback compat)"
-        )
+    def test_q9_sets_scalar_source_id_too(self, source: str) -> None:
+        """Backwards compat: the scalar ``r.source_id`` write MUST remain on
+        Q9 so legacy readers (and the calibrator's fallback branch) still
+        work for edges stamped before the array rollout. (Q4 used to be
+        pinned here too — it was removed in 2026-10, see the test above.)"""
+        assert "_q9_inner" in source
         q9_idx = source.find("_q9_inner")
         q9_block = source[q9_idx : q9_idx + 2500]
         assert 'r.source_id = "malware_family_match"' in q9_block, (

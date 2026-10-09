@@ -27,6 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 
+# Import MISP writer
+from actor_name_hygiene import clean_actor_names
+
 # Import baseline checkpoint (incremental cursor only — no page-based checkpointing)
 from baseline_checkpoint import (
     get_source_incremental,
@@ -44,8 +47,6 @@ from collectors.collector_utils import (
     retry_with_backoff,
     status_after_misp_push,
 )
-
-# Import MISP writer
 from collectors.misp_writer import MISPWriter
 from config import (
     OTX_API_KEY,
@@ -515,8 +516,11 @@ class OTXCollector:
                         "tag": self.tag,
                         "source": [self.tag],
                         "confidence_score": 0.5,
-                        # ATT&CK technique IDs from pulse → uses_techniques on Malware node
-                        "uses_techniques": pulse_attack_ids,
+                        # 2026-10: pulse-level ATT&CK ids are a report association,
+                        # not MITRE's explicit "uses" relationship — they travel as
+                        # ``reported_techniques`` (→ IMPLEMENTS_TECHNIQUE with
+                        # match_type ``otx_pulse``), never as ``uses_techniques``.
+                        "reported_techniques": pulse_attack_ids,
                         **pulse_meta,
                     }
                     if pulse_created:
@@ -556,16 +560,23 @@ class OTXCollector:
                 # PR-M2 §4-F5 (Bugbot round 3): symmetric honest-NULL
                 # propagation — see malware-family branch above for
                 # rationale. Same pulse-level timestamps apply.
-                if pulse_adversary:
+                # 2026-10: OTX's free-text ``adversary`` is a report field, not a
+                # name — pulses ship composites ("apt-c-13, sandworm, frozenbarents",
+                # "head mare and twelve") and descriptions ("multiple russian
+                # state-backed groups"). ``clean_actor_names`` splits the former into
+                # one actor item each and drops the latter, so no ThreatActor node is
+                # ever created from a phrase.
+                for adversary_name in clean_actor_names(pulse_adversary or ""):
                     actor_item: Dict[str, Any] = {
                         "type": "actor",
-                        "name": pulse_adversary,
+                        "name": adversary_name,
                         "description": pulse_description[:1000],
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
                         "confidence_score": 0.5,
-                        "uses_techniques": pulse_attack_ids,
+                        # 2026-10: see the malware branch — pulse ids are reported, not MITRE-explicit.
+                        "reported_techniques": pulse_attack_ids,
                         "aliases": [],
                         **pulse_meta,
                     }

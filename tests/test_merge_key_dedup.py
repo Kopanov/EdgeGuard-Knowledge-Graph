@@ -217,42 +217,47 @@ class TestBatchMergeKeys:
 
 
 class TestCrossItemRelKeys:
-    """Verify _build_cross_item_relationships builds correct from_key/to_key."""
+    """Verify _build_cross_item_relationships builds correct from_key/to_key.
+
+    2026-10 (fresh-baseline PR): pairing is scoped to the OTX pulse
+    (``item["pulse_id"]``) and only INDICATES / ATTRIBUTED_TO are derived
+    from co-membership; EMPLOYS_TECHNIQUE and EXPLOITS are no longer
+    emitted here. The key-shape invariant (no ``tag`` in from/to keys)
+    is unchanged for the edges that remain."""
 
     def _build_rels(self, items):
         syncer = MISPToNeo4jSync.__new__(MISPToNeo4jSync)
         return syncer._build_cross_item_relationships(items)
 
-    def test_actor_technique_employs_no_tag(self):
+    def test_actor_technique_employs_not_emitted(self):
+        """Actor × Technique in the same pulse no longer yields
+        EMPLOYS_TECHNIQUE — that edge comes from ``uses_techniques`` /
+        ``reported_techniques`` in build_relationships (Q5 / Q5b)."""
         items = [
-            {"type": "actor", "name": "APT28", "tag": "mitre_attck"},
-            {"type": "technique", "mitre_id": "T1059", "name": "CLI", "tag": "mitre_attck"},
+            {"type": "actor", "name": "APT28", "tag": "mitre_attck", "pulse_id": "p1"},
+            {"type": "technique", "mitre_id": "T1059", "name": "CLI", "tag": "mitre_attck", "pulse_id": "p1"},
         ]
         rels = self._build_rels(items)
-        # Actor→Technique is EMPLOYS_TECHNIQUE (attribution) since the
-        # 2026-04 split of the generic USES bucket.
-        employs = [r for r in rels if r["rel_type"] == "EMPLOYS_TECHNIQUE"]
-        assert len(employs) == 1
-        assert "tag" not in employs[0]["from_key"], f"from_key has tag: {employs[0]['from_key']}"
-        assert "tag" not in employs[0]["to_key"], f"to_key has tag: {employs[0]['to_key']}"
-        assert employs[0]["from_key"] == {"name": "APT28"}
-        assert employs[0]["to_key"] == {"mitre_id": "T1059"}
+        assert not [r for r in rels if r["rel_type"] == "EMPLOYS_TECHNIQUE"]
+        assert rels == []
 
     def test_malware_actor_attributed_to_no_tag(self):
         items = [
-            {"type": "malware", "name": "Emotet", "tag": "misp"},
-            {"type": "actor", "name": "TA542", "tag": "misp"},
+            {"type": "malware", "name": "Emotet", "tag": "misp", "pulse_id": "p1"},
+            {"type": "actor", "name": "TA542", "tag": "misp", "pulse_id": "p1"},
         ]
         rels = self._build_rels(items)
         attr = [r for r in rels if r["rel_type"] == "ATTRIBUTED_TO"]
         assert len(attr) == 1
         assert "tag" not in attr[0]["from_key"]
         assert "tag" not in attr[0]["to_key"]
+        assert attr[0]["from_key"] == {"name": "Emotet"}
+        assert attr[0]["to_key"] == {"name": "TA542"}
 
     def test_indicator_malware_indicates_no_tag(self):
         items = [
-            {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp"},
-            {"type": "malware", "name": "Emotet", "tag": "misp"},
+            {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp", "pulse_id": "p1"},
+            {"type": "malware", "name": "Emotet", "tag": "misp", "pulse_id": "p1"},
         ]
         rels = self._build_rels(items)
         ind = [r for r in rels if r["rel_type"] == "INDICATES"]
@@ -260,18 +265,25 @@ class TestCrossItemRelKeys:
         # Indicator from_key should NOT have tag (tag removed from all MERGE keys)
         assert "tag" not in ind[0]["from_key"], f"INDICATES from_key should not have tag: {ind[0]['from_key']}"
         assert "tag" not in ind[0]["to_key"], f"INDICATES to_key should not have tag: {ind[0]['to_key']}"
+        assert ind[0]["from_key"] == {"value": "1.2.3.4", "indicator_type": "ipv4"}
 
-    def test_indicator_vulnerability_exploits_no_tag(self):
+    def test_indicator_vulnerability_exploits_not_emitted(self):
+        """Indicator × CVE in the same pulse no longer yields EXPLOITS —
+        only the indicator's own ``cve_id`` tag asserts that
+        (build_relationships Q3 / parse_attribute embedded rels)."""
         items = [
-            {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp"},
-            {"type": "vulnerability", "cve_id": "CVE-2021-44228", "value": "CVE-2021-44228", "tag": "nvd"},
+            {"type": "indicator", "indicator_type": "ipv4", "value": "1.2.3.4", "tag": "misp", "pulse_id": "p1"},
+            {
+                "type": "vulnerability",
+                "cve_id": "CVE-2021-44228",
+                "value": "CVE-2021-44228",
+                "tag": "nvd",
+                "pulse_id": "p1",
+            },
         ]
         rels = self._build_rels(items)
-        expl = [r for r in rels if r["rel_type"] == "EXPLOITS"]
-        assert len(expl) == 1
-        assert "tag" not in expl[0]["from_key"], f"EXPLOITS from_key should not have tag: {expl[0]['from_key']}"
-        assert "tag" not in expl[0]["to_key"], f"EXPLOITS to_key should not have tag: {expl[0]['to_key']}"
-        assert expl[0]["to_key"] == {"cve_id": "CVE-2021-44228"}
+        assert not [r for r in rels if r["rel_type"] == "EXPLOITS"]
+        assert rels == []
 
     def test_vulnerability_sector_affects_no_tag(self):
         """PR #33 round 12: Vulnerability → Sector emits ``rel_type="AFFECTS"``
@@ -332,15 +344,16 @@ class TestDedupHypothesis:
 
 
 # ===========================================================================
-# 7. source_id routing: embedded=misp, cross-item=misp_cooccurrence
+# 7. source_id routing: embedded=misp, cross-item=otx_pulse
 # ===========================================================================
 
 
 class TestSourceIdRouting:
-    """Verify cross-item rels use misp_cooccurrence for calibration compatibility."""
+    """Verify report-scoped (cross-item) rels use ``otx_pulse`` so they are
+    distinguishable from attribute-embedded ``misp`` edges (2026-10)."""
 
     def test_process_event_attributes_source_id_split(self):
-        """Embedded rels → 'misp', cross-item rels → 'misp_cooccurrence'."""
+        """Embedded rels → 'misp', cross-item rels → 'otx_pulse'."""
         syncer = MISPToNeo4jSync.__new__(MISPToNeo4jSync)
         syncer.neo4j = MagicMock()
         syncer.neo4j.merge_indicators_batch.return_value = (2, 0)
@@ -387,11 +400,11 @@ class TestSourceIdRouting:
 
         # Should have 2 _create_relationships calls:
         # 1st: embedded rels with "misp"
-        # 2nd: cross-item rels with "misp_cooccurrence"
+        # 2nd: cross-item (report-scoped) rels with "otx_pulse"
         assert len(source_ids_used) == 2, f"Expected 2 _create_relationships calls, got {len(source_ids_used)}"
         assert source_ids_used[0][0] == "misp", f"Embedded rels should use 'misp', got '{source_ids_used[0][0]}'"
-        assert source_ids_used[1][0] == "misp_cooccurrence", (
-            f"Cross-item rels should use 'misp_cooccurrence', got '{source_ids_used[1][0]}'"
+        assert source_ids_used[1][0] == "otx_pulse", (
+            f"Cross-item rels should use 'otx_pulse', got '{source_ids_used[1][0]}'"
         )
 
 
@@ -401,30 +414,38 @@ class TestSourceIdRouting:
 
 
 class TestTypeSamplingCaps:
-    """Verify _build_cross_item_relationships samples large type groups."""
+    """Verify _build_cross_item_relationships caps large per-report groups
+    (``_MAX_REPORT_INDICATORS`` = 2000 per pulse, 2026-10)."""
 
     def _build_rels(self, items):
         syncer = MISPToNeo4jSync.__new__(MISPToNeo4jSync)
         return syncer._build_cross_item_relationships(items)
 
     def test_large_indicator_list_sampled(self):
-        """3000 indicators should be sampled to 2000."""
+        """3000 indicators in one pulse should be capped to 2000."""
         items = [
-            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.{i // 256}.{i % 256}", "tag": "misp"}
+            {
+                "type": "indicator",
+                "indicator_type": "ipv4",
+                "value": f"10.0.{i // 256}.{i % 256}",
+                "tag": "misp",
+                "pulse_id": "big-pulse",
+            }
             for i in range(3000)
         ]
-        items.append({"type": "malware", "name": "TestMalware", "tag": "misp"})
+        items.append({"type": "malware", "name": "TestMalware", "tag": "misp", "pulse_id": "big-pulse"})
         rels = self._build_rels(items)
         # With 2000 indicators x 1 malware = 2000 INDICATES rels (not 3000)
         indicates = [r for r in rels if r["rel_type"] == "INDICATES"]
-        assert len(indicates) == 2000, f"Expected 2000 sampled INDICATES, got {len(indicates)}"
+        assert len(indicates) == 2000, f"Expected 2000 capped INDICATES, got {len(indicates)}"
 
     def test_small_event_not_sampled(self):
-        """50 indicators + 5 malware should NOT be sampled."""
+        """50 indicators + 5 malware in one pulse should NOT be capped."""
         items = [
-            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.0.{i}", "tag": "misp"} for i in range(50)
+            {"type": "indicator", "indicator_type": "ipv4", "value": f"10.0.0.{i}", "tag": "misp", "pulse_id": "p1"}
+            for i in range(50)
         ]
-        items.extend([{"type": "malware", "name": f"Malware{i}", "tag": "misp"} for i in range(5)])
+        items.extend([{"type": "malware", "name": f"Malware{i}", "tag": "misp", "pulse_id": "p1"} for i in range(5)])
         rels = self._build_rels(items)
         indicates = [r for r in rels if r["rel_type"] == "INDICATES"]
         assert len(indicates) == 250, f"Expected 50*5=250 INDICATES, got {len(indicates)}"

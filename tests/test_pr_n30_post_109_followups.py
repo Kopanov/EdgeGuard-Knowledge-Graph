@@ -160,8 +160,8 @@ class TestPRN30CrossCheckerH2EventIdCap:
             "PR-N30 H-2: backfill script must define the sibling constant"
         )
 
-    def test_forward_write_cap_applied_to_all_six_sites(self):
-        """All 6 forward-write Cypher cap sites use the canonical
+    def test_forward_write_cap_applied_to_all_five_sites(self):
+        """All forward-write Cypher cap sites use the canonical
         ``CRITICAL_MAX_EVENT_IDS_PER_EDGE`` constant via f-string.
 
         PR-N30 Bugbot round 1 (MED) caught: pre-fix Q4 still had a
@@ -170,16 +170,21 @@ class TestPRN30CrossCheckerH2EventIdCap:
         of the constant from 200 → e.g. 500 would silently leave Q4
         at 200, re-introducing the exact "different content depending
         on write path" drift the constant was created to prevent.
-        Total expected occurrences: 6 (Q3a, Q3b, Q4, Q7a, Q7b, Q9)."""
+
+        2026-10 (fresh-baseline PR): Q4 — the whole-event co-occurrence
+        query — was removed, so the forward-write cap sites are now
+        exactly 5 (Q3a, Q3b, Q7a, Q7b, Q9). Pin the exact count so a
+        re-added event-id pairing query (or a dropped cap) is noticed."""
         text = self.BUILD_RELS.read_text()
         cap_pattern = "[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
         occurrences = text.count(cap_pattern)
-        assert occurrences >= 6, (
+        assert occurrences == 5, (
             f"PR-N30 H-2 + Bugbot round 1: f-string cap "
-            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 6 "
-            f"forward-write Cypher cap sites (Q3a, Q3b, Q4, Q7a, Q7b, Q9); "
+            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 5 "
+            f"forward-write Cypher cap sites (Q3a, Q3b, Q7a, Q7b, Q9 — Q4 was removed 2026-10); "
             f"found {occurrences}"
         )
+        assert "_q4_inner" not in text, "Q4 co-occurrence query must stay removed (2026-10)"
         # Negative pin: no hardcoded ``[0..200]`` should remain in actual
         # code (comments may legitimately reference the literal in
         # audit-history docs — strip those before scanning).

@@ -930,3 +930,68 @@ SOURCE_INTERVALS = {
     "mitre": 24,  # 24 hours — matches edgeguard_daily schedule
     "virustotal": 4,  # 4 hours — matches edgeguard_medium_freq schedule
 }
+
+# ---------------------------------------------------------------------------
+# MITRE ATT&CK for ICS (2026-10)
+# ---------------------------------------------------------------------------
+# Opt-in ingestion of the ATT&CK for ICS STIX bundle (mitre/cti ``ics-attack``)
+# alongside Enterprise in ``collectors/mitre_collector.py``. Default OFF: the
+# ICS bundle adds ~97 T08xx techniques, 12 TA01xx tactics and OT-focused
+# actors/malware whose tactic short names overlap Enterprise ones, so every
+# emitted item carries ``attack_domain`` ("enterprise" | "ics") for the
+# downstream writer/parser/Neo4j wiring. An ICS fetch failure never fails
+# the Enterprise ingest (isolated in the collector).
+ENABLE_MITRE_ICS = _env_bool("EDGEGUARD_ENABLE_MITRE_ICS", "false")
+
+# Override the ICS bundle URL (mirror / pinned release). Set-but-empty means
+# "use the default" (compose-style), matching the MITRE_MAX_RELATIONSHIPS
+# ``or`` chain in the collector.
+MITRE_ICS_ATTACK_URL = (os.getenv("MITRE_ICS_ATTACK_URL") or "").strip() or (
+    "https://raw.githubusercontent.com/mitre/cti/master/ics-attack/ics-attack.json"
+)
+
+# ---------------------------------------------------------------------------
+# TLP (2026-10, fresh-baseline PR)
+# ---------------------------------------------------------------------------
+# Default Traffic Light Protocol level stamped as a ``tlp:<level>`` tag on every
+# MISP attribute EdgeGuard writes and rehydrated as ``n.tlp`` in Neo4j. All
+# current sources are open feeds, so ``white`` is the honest default; a source
+# that states its own level (e.g. OTX ``pulse_tlp``) overrides it per item.
+EDGEGUARD_DEFAULT_TLP = os.getenv("EDGEGUARD_DEFAULT_TLP", "white").strip().lower() or "white"
+
+# ---------------------------------------------------------------------------
+# CISA ICS advisories collector (2026-10)
+# ---------------------------------------------------------------------------
+# ``src/collectors/cisa_ics_collector.py`` — CSAF 2.0 advisories from the
+# public ``cisagov/CSAF`` GitHub repo, carrying CISA's own
+# "Critical infrastructure sectors" assertion per advisory. Flag-guarded
+# and OFF by default: the daily DAG task returns a skipped status (success,
+# 0 items) until an operator sets ``EDGEGUARD_ENABLE_CISA_ICS=true``.
+ENABLE_CISA_ICS = _env_bool("EDGEGUARD_ENABLE_CISA_ICS", "false")
+# Raw base URL of the ``csaf_files/OT/white/`` folder (must end with "/";
+# ``index.txt`` and ``changes.csv`` live directly under it).
+CISA_ICS_BASE_URL = os.getenv(
+    "EDGEGUARD_CISA_ICS_BASE_URL",
+    "https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/",
+)
+# Hard cap on advisory files fetched per run (politeness toward GitHub raw;
+# a 24-month baseline is ~900 files).
+CISA_ICS_MAX_ADVISORIES_PER_RUN = _env_int("EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN", 1200)
+# Baseline-only sanity floor: when at least this many advisories were
+# attempted but fewer parsed successfully, the collector raises a transient
+# error (task skipped + alert) instead of pushing a thin dataset.
+CISA_ICS_MIN_EXPECTED_ADVISORIES = _env_int("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES", 50)
+
+# ---------------------------------------------------------------------------
+# ThreatActor alias-duplicate merge (2026-10, fresh-baseline PR)
+# ---------------------------------------------------------------------------
+# Post-sync enrichment job ``enrichment_jobs.merge_alias_duplicate_actors``
+# folds NON-MITRE ThreatActor nodes whose name is an alias of exactly one
+# MITRE-sourced actor into that canonical node (``apoc.refactor.mergeNodes``,
+# runs before ``build_campaign_nodes``). Default ON. ``false`` = dry run: the
+# job logs the candidate count and merges nothing. NOTE: the job itself reads
+# the env var at CALL time (so an operator can flip it between DAG runs
+# without a restart); this constant mirrors it for import-time consumers
+# (DAG wiring, doctor checks). String-level name hygiene for the same problem
+# at ingest lives in ``src/actor_name_hygiene.py`` (no flag — pure helpers).
+ENABLE_ACTOR_ALIAS_MERGE = _env_bool("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true")

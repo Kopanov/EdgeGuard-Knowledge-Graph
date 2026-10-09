@@ -408,9 +408,13 @@ def test_run_pipeline_edges_stamp_endpoint_uuids():
 
 def test_build_relationships_summary_denominator_matches_query_count():
     """Round 28 (bugbot LOW): the ``[BUILD_RELATIONSHIPS SUMMARY]`` log
-    line used to hardcode ``failures=%d/11`` but there are 12 independent
-    _safe_run_batched calls (queries 1, 2, 3a, 3b, 4, 5, 6, 7a, 7b, 8, 9,
-    10). "failures=12/11" is not a valid fraction.
+    line used to hardcode ``failures=%d/11`` but there were 12 independent
+    _safe_run_batched calls. "failures=12/11" is not a valid fraction.
+
+    2026-10 (fresh-baseline PR): the whole-event co-occurrence query 4 was
+    removed and the reported-technique queries 5b / 6b were added, so there
+    are now 13 batched link steps (1, 2, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 8, 9,
+    10). The SUMMARY / partial-success denominators must follow that count.
 
     Pin by counting _safe_run_batched calls in build_relationships() and
     asserting the SUMMARY log uses the right denominator."""
@@ -423,9 +427,9 @@ def test_build_relationships_summary_denominator_matches_query_count():
     src = inspect.getsource(br.build_relationships)
 
     call_count = src.count("_safe_run_batched(")
-    assert call_count == 12, (
-        f"expected 12 _safe_run_batched calls in build_relationships(); got {call_count}. "
-        "If you added/removed a link query, also update the denominators below."
+    assert call_count == 13, (
+        f"expected 13 _safe_run_batched calls in build_relationships() (1, 2, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 8, 9, 10); "
+        f"got {call_count}. If you added/removed a link query, also update the denominators below."
     )
     assert f"failures=%d/{call_count}" in src, (
         f"[BUILD_RELATIONSHIPS SUMMARY] format must use /{call_count} denominator (not a stale number)"

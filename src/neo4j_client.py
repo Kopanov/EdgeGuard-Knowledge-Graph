@@ -1250,6 +1250,65 @@ class Neo4jClient:
             logger.error(f"Error clearing Neo4j: {e}")
             return False
 
+    def clear_edgeguard_managed(self) -> bool:
+        """Delete only what EdgeGuard wrote (2026-10, fresh-baseline PR).
+
+        Scoped by the ownership marker ``n.edgeguard_managed = true`` that every
+        EdgeGuard node carries (threat-intel nodes, CVSS sub-nodes, Sector, Source,
+        Campaign). Nodes without the marker — ResilMesh's topology, identity and
+        mission layers on a shared database — are left untouched. ``DETACH DELETE``
+        also removes every relationship attached to a deleted node, including any
+        a partner drew to it; that is unavoidable when the node itself goes.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.driver:
+            logger.error("Cannot clear: no connection to Neo4j")
+            return False
+
+        try:
+            logger.warning("Clearing EdgeGuard-managed nodes (edgeguard_managed = true) from Neo4j...")
+            with self.driver.session() as session:
+                counts = session.run(
+                    "MATCH (n) WHERE n.edgeguard_managed = true RETURN count(n) AS count",
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+                node_count = counts.single()["count"]
+                others = session.run(
+                    "MATCH (n) WHERE coalesce(n.edgeguard_managed, false) <> true RETURN count(n) AS count",
+                    timeout=NEO4J_READ_TIMEOUT,
+                ).single()["count"]
+                logger.info("EdgeGuard-managed nodes: %s; nodes left untouched: %s", node_count, others)
+
+                batch_size = 10000
+                deleted = 0
+                while deleted < node_count:
+                    result = session.run(
+                        f"MATCH (n) WHERE n.edgeguard_managed = true WITH n LIMIT {batch_size} "
+                        "DETACH DELETE n RETURN count(n) AS deleted",
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    batch_deleted = result.single()["deleted"]
+                    if batch_deleted == 0:
+                        break
+                    deleted += batch_deleted
+                    logger.debug(f"Deleted batch of {batch_deleted} EdgeGuard-managed nodes")
+
+            logger.info(f"Cleared {deleted} EdgeGuard-managed nodes and their relationships")
+            return True
+
+        except (
+            neo4j_exceptions.ServiceUnavailable,
+            neo4j_exceptions.TransientError,
+            ConnectionError,
+            TimeoutError,
+        ):
+            raise
+        except Exception as e:
+            logger.error(f"Error clearing EdgeGuard-managed data from Neo4j: {e}")
+            return False
+
     @retry_with_backoff(max_retries=3)
     def create_constraints(self) -> Tuple[int, int]:
         """
@@ -1558,7 +1617,8 @@ class Neo4jClient:
                         s.type = $type,
                         s.reliability = $reliability,
                         s.updated_at = datetime(),
-                        s.uuid = coalesce(s.uuid, $source_uuid)
+                        s.uuid = coalesce(s.uuid, $source_uuid),
+                        s.edgeguard_managed = true
                     """
                     session.run(
                         query,
@@ -1819,6 +1879,10 @@ class Neo4jClient:
                     "malware_types",
                     "uses_techniques",
                     "tactic_phases",
+                    # 2026-10: pulse-level technique ids and source-report ids
+                    # accumulate across pulses like the other list props.
+                    "reported_techniques",
+                    "pulse_ids",
                 }
             )
             # PR-N14 Fix #3 (2026-04-21 pre-baseline audit): cardinality
@@ -1886,7 +1950,14 @@ class Neo4jClient:
                     out = out[:_MAX_ARRAY_ITEMS]
                 return out
 
-            extra_props = extra_props or {}
+            extra_props = dict(extra_props or {})
+            # 2026-10 (fresh-baseline PR): TLP travels as a ``tlp:<level>`` MISP tag,
+            # is rehydrated into ``item["tlp"]`` by the sync, and lands on every
+            # node that goes through this chokepoint (CVE, Malware, ThreatActor,
+            # Technique, Tactic, Tool). Indicators use the batch path, which
+            # promotes it explicitly.
+            if data.get("tlp") and "tlp" not in extra_props:
+                extra_props["tlp"] = str(data["tlp"])
             params_extra = {}
             for prop_name, prop_value in extra_props.items():
                 _validate_prop_name(prop_name)
@@ -2410,6 +2481,20 @@ class Neo4jClient:
             extra_props["published"] = data["published"]
         if data.get("last_modified"):
             extra_props["last_modified"] = data["last_modified"]
+        # 2026-10 (fresh-baseline PR, ResilMesh conformance finding F2): the four
+        # ResilMesh CVE properties ``cwe``, ``ref_tags``, ``cpe_type`` and
+        # ``result_impacts`` were rehydrated from NVD_META into the item but never
+        # promoted to the node by this path (only the batch Vulnerability path and
+        # ``merge_resilmesh_cve`` wrote them), so every CVE in the 2026-09 baseline
+        # had them only inside ``SOURCED_FROM.raw_data``. ``reference_urls`` and
+        # ``affected_products`` ride along for parity with the batch path (CPE
+        # strings are what a vendor/product sector rule needs).
+        for _list_prop in ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products"):
+            _val = data.get(_list_prop)
+            if isinstance(_val, list) and _val:
+                _clean = [str(x) for x in _val if x is not None and str(x) != ""]
+                if _clean:  # never overwrite an existing list with an empty one
+                    extra_props[_list_prop] = _clean
 
         ok = self.merge_node_with_source("CVE", key_props, data, source_id, extra_props=extra_props or None)
         if not ok:
@@ -2469,11 +2554,13 @@ class Neo4jClient:
             MERGE (cve)-[r1:{rel_type}]->(n)
                 ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
             SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
-                r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid)
+                r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid),
+                r1.edgeguard_managed = true
             MERGE (n)-[r2:{rel_type}]->(cve)
                 ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
             SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
-                r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid)
+                r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid),
+                r2.edgeguard_managed = true
             """
             # NB (PR #33 round 8, bugbot MED): spread filtered_cvss FIRST so the
             # explicit cve_uuid / cvss_uuid / cve_id / tag entries below always
@@ -2569,7 +2656,13 @@ class Neo4jClient:
             "malware_types": malware_types,
             "aliases": aliases,
             "uses_techniques": uses_techniques,
+            # 2026-10: pulse-level technique ids (OTX) are kept apart from MITRE's
+            # explicit list so build_relationships can label the edges honestly.
+            "reported_techniques": data.get("reported_techniques", []) or [],
         }
+        if data.get("pulse_id"):
+            # Source-report provenance: every OTX pulse that mentioned this malware.
+            extra_props["pulse_ids"] = [str(data["pulse_id"])]
         if data.get("description"):
             extra_props["description"] = data["description"]
         return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
@@ -2617,7 +2710,11 @@ class Neo4jClient:
             "aliases": aliases,
             "description": description,
             "uses_techniques": uses_techniques,
+            # 2026-10: see merge_malware — reported (pulse-level) ids stay separate.
+            "reported_techniques": data.get("reported_techniques", []) or [],
         }
+        if data.get("pulse_id"):
+            extra_props["pulse_ids"] = [str(data["pulse_id"])]
         if data.get("sophistication"):
             extra_props["sophistication"] = data["sophistication"]
         if data.get("primary_motivation"):
@@ -2682,7 +2779,11 @@ class Neo4jClient:
         if mitre_id is None:
             return False
         key_props = {"mitre_id": mitre_id}
-        extra_props: Dict[str, Any] = {"tactic_phases": data.get("tactic_phases", [])}
+        extra_props: Dict[str, Any] = {
+            "tactic_phases": data.get("tactic_phases", []),
+            # 2026-10: ATT&CK domain so ICS techniques link only to ICS tactics.
+            "attack_domain": str(data.get("attack_domain") or "enterprise"),
+        }
         extra_props["detection"] = data.get("detection", "")
         extra_props["is_subtechnique"] = data.get("is_subtechnique", False)
         if data.get("name"):
@@ -2699,7 +2800,10 @@ class Neo4jClient:
         if mitre_id is None:
             return False
         key_props = {"mitre_id": mitre_id}
-        extra_props: Dict[str, Any] = {"shortname": data.get("shortname", "")}
+        extra_props: Dict[str, Any] = {
+            "shortname": data.get("shortname", ""),
+            "attack_domain": str(data.get("attack_domain") or "enterprise"),  # 2026-10
+        }
         if data.get("name"):
             extra_props["name"] = data["name"]
         if data.get("description"):
@@ -3024,6 +3128,8 @@ class Neo4jClient:
                     # New enrichment fields (stored as-is if present, None-safe)
                     if item.get("indicator_role"):
                         batch_item["indicator_role"] = item["indicator_role"]
+                    if item.get("tlp"):
+                        batch_item["tlp"] = str(item["tlp"])  # 2026-10: TLP level from the tlp:<level> MISP tag
                     if item.get("url_status"):
                         batch_item["url_status"] = item["url_status"]
                     if item.get("last_online"):
@@ -3096,6 +3202,7 @@ class Neo4jClient:
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
+                    n.tlp = coalesce(item.tlp, n.tlp),
                     n.url_status = coalesce(item.url_status, n.url_status),
                     n.last_online = coalesce(item.last_online, n.last_online),
                     n.abuse_categories = {_dedup_concat_clause("n.abuse_categories", "coalesce(item.abuse_categories, [])")},
@@ -4073,6 +4180,9 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            # 2026-10: report-scoped edges say what asserted them.
+                            "match_type": rel.get("match_type"),
+                            "report_id": nonempty_graph_string(rel.get("report_id")),
                         }
                     )
                 else:
@@ -4088,6 +4198,9 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            # 2026-10: report-scoped edges say what asserted them.
+                            "match_type": rel.get("match_type"),
+                            "report_id": nonempty_graph_string(rel.get("report_id")),
                         }
                     )
                 else:
@@ -4203,10 +4316,20 @@ class Neo4jClient:
             # the next time the sync ran. Post-fix the CASE preserves
             # any value written after ``r.calibrated_at`` was stamped.
             confidence_expr = _confidence_respect_calibrator("row.confidence")
+            # 2026-10 (fresh-baseline PR): every EdgeGuard edge carries the
+            # ownership marker (shared-database contract with ResilMesh), the
+            # kind of evidence behind it (``match_type``, when the producer
+            # states one — a constant ``extra_set`` such as ``cve_tag`` still
+            # wins because it is applied after this line) and the source
+            # report ids that asserted it (``report_ids``, OTX pulse ids).
+            report_dedup = _dedup_concat_optional_clause("r.report_ids", "row.report_id", require_nonempty_string=True)
             return (
                 f"SET r.sources = {sources_dedup},\n"
                 f"            r.source_id = row.source_id,\n"
-                f"            r.confidence_score = {confidence_expr},{extra}\n"
+                f"            r.confidence_score = {confidence_expr},\n"
+                f"            r.edgeguard_managed = true,\n"
+                f"            r.match_type = coalesce(row.match_type, r.match_type),\n"
+                f"            r.report_ids = {report_dedup},{extra}\n"
                 f"            r.misp_event_ids = {misp_dedup},\n"
                 f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
                 f"            r.updated_at = datetime(),\n"
@@ -6029,6 +6152,7 @@ class Neo4jClient:
         ON CREATE SET r.src_uuid = v.uuid, r.trg_uuid = c.uuid
         SET r.created_at = datetime(),
             r.updated_at = datetime(),
+            r.edgeguard_managed = true,
             r.src_uuid = coalesce(r.src_uuid, v.uuid),
             r.trg_uuid = coalesce(r.trg_uuid, c.uuid)
         """
@@ -6079,6 +6203,7 @@ class Neo4jClient:
         ON CREATE SET r.src_uuid = c.uuid, r.trg_uuid = v.uuid
         SET r.created_at = datetime(),
             r.updated_at = datetime(),
+            r.edgeguard_managed = true,
             r.src_uuid = coalesce(r.src_uuid, c.uuid),
             r.trg_uuid = coalesce(r.trg_uuid, v.uuid)
         """
