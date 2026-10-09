@@ -292,7 +292,7 @@ class EdgeGuardPipeline:
 
     def _create_indicates_relationships(self) -> int:
         """
-        Create INDICATES relationships using MISP event co-occurrence.
+        CLI relationship pass: CVE-tag EXPLOITS only (2026-10: event co-occurrence INDICATES removed).
 
         The correct threat-intel logic: when an Indicator (IP, domain, hash) and
         a Malware node share the same MISP event ID, they were observed together
@@ -305,45 +305,14 @@ class EdgeGuardPipeline:
             Number of INDICATES relationships created
         """
         try:
-            # Co-occurrence query: Indicators and Malware that share a MISP event
-            # are linked with INDICATES.  Works cross-source because every MISP-
-            # derived node accumulates its event ids in misp_event_ids[].
-            # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators).
-            #
-            # PR #33 round 10: dropped legacy scalar misp_event_id from both
-            # filter and join. Outer filter only includes nodes with a non-
-            # empty misp_event_ids array; inner join matches by array IN
-            # membership.
-            # PR #34 round 28 (bugbot MED): stamp r.src_uuid / r.trg_uuid on
-            # both co-occurrence and EXPLOITS edges so the CLI path produces
-            # the same cross-environment-traceable edges as the primary
-            # build_relationships.py path. Without this, edges created via
-            # run_pipeline.py CLI had NULL endpoint uuids, silently breaking
-            # the delta-sync contract for any operator who preferred this
-            # code path.
-            cooccurrence_query = """
-            CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0 RETURN i',
-                'WITH $i AS i
-                 WITH i, [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ""][0..200] AS eids
-                 UNWIND eids AS eid WITH i, eid
-                 MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids
-                 MERGE (i)-[r:INDICATES]->(m)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5, r.src_uuid = i.uuid, r.trg_uuid = m.uuid
-                 SET r.updated_at = datetime(),
-                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
-                     r.trg_uuid = coalesce(r.trg_uuid, m.uuid)',
-                {batchSize: 5000, parallel: false}
-            )
-            YIELD total
-            RETURN total AS created
-            """
-            results = self.neo4j.run(cooccurrence_query)
-            record = results[0] if results else None
-            indicates_count = record.get("created", 0) if record else 0
-            logger.info(f"   INDICATES (co-occurrence, batched): {indicates_count} relationships")
-
-            time.sleep(3)  # Let Neo4j flush between relationship queries
+            # 2026-10 (fresh-baseline PR, conformance finding F1): the whole-event
+            # co-occurrence INDICATES query that lived here was removed. EdgeGuard MISP
+            # events are per-source, per-day buckets, so a shared event id never meant
+            # a source asserted the link. Report-scoped INDICATES (same OTX pulse,
+            # match_type "otx_pulse") is written by the MISP→Neo4j sync; the family
+            # match lives in build_relationships Q9. This CLI path keeps only the
+            # CVE-tag EXPLOITS pass below.
+            indicates_count = 0
 
             # Second pass: Indicators that explicitly mention a CVE are linked to
             # that CVE/Vulnerability via EXPLOITS (more specific than INDICATES).

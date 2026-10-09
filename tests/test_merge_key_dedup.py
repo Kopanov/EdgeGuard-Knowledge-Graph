@@ -378,7 +378,7 @@ class TestSourceIdRouting:
         syncer._create_relationships = _mock_create_rels
         syncer.sync_to_neo4j = MagicMock(return_value=(2, 0, []))
         syncer._build_cross_item_relationships = MagicMock(
-            return_value=[{"rel_type": "INDICATES", "from_type": "Indicator", "to_type": "Malware"}]
+            return_value=[{"rel_type": "INDICATES", "from_type": "Indicator", "to_type": "Malware", "report_id": "p1"}]
         )
 
         # Simulate parse_attribute returning items + embedded rels

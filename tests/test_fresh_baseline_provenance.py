@@ -364,7 +364,7 @@ class TestCrossItemBuilderReportScope:
         for r in rels["TARGETS"] + rels["AFFECTS"]:
             assert r["misp_event_id"] == "5"
             assert r["confidence"] == 0.5
-            assert "report_id" not in r and "match_type" not in r
+            assert "report_id" not in r and r["match_type"] == "zone_classification"
 
     def test_misp_event_id_taken_from_first_item_that_has_one(self, syncer):
         items = [_mal("M", misp_event_id=""), _act("A", misp_event_id="42")]
@@ -473,7 +473,9 @@ class TestCreateRelationshipsRouting:
             source_ids_used.append((source_id, len(rels))),
             len(rels),
         )[1]
-        syncer._build_cross_item_relationships = MagicMock(return_value=[{"rel_type": "INDICATES"}, {"rel_type": "X"}])
+        syncer._build_cross_item_relationships = MagicMock(
+            return_value=[{"rel_type": "INDICATES", "report_id": "p1"}, {"rel_type": "TARGETS"}]
+        )
         syncer.parse_attribute = lambda attr, event: (
             {"indicator_type": "ipv4", "value": attr["value"], "tag": "misp"},
             [{"rel_type": "TARGETS", "embedded": True}],
@@ -481,14 +483,15 @@ class TestCreateRelationshipsRouting:
         attributes = [{"type": "ip-src", "value": "1.1.1.1"}, {"type": "ip-src", "value": "2.2.2.2"}]
         parsed, cross, errors = syncer._process_event_attributes("1", {"Event": {"id": "1"}}, attributes)
         assert (parsed, cross, errors) == (2, 2, 0)
-        assert source_ids_used == [("misp", 2), (_REPORT_SCOPED_SOURCE_ID, 2)]
+        # report-scoped rows → otx_pulse; zone-derived TARGETS/AFFECTS rows → misp (review fix)
+        assert source_ids_used == [("misp", 2), (_REPORT_SCOPED_SOURCE_ID, 1), ("misp", 1)]
         assert source_ids_used[1][0] == "otx_pulse"
         assert syncer.stats["relationships_created"] == 4
 
     def test_no_call_site_uses_misp_cooccurrence_any_more(self):
         text = _RUN_MISP.read_text()
         assert '_create_relationships(cross_rels, "misp_cooccurrence")' not in text
-        assert text.count("_create_relationships(cross_rels, _REPORT_SCOPED_SOURCE_ID)") == 2, (
+        assert text.count("_write_cross_item_relationships(cross_rels)") == 2, (
             "both the in-memory and the paged call site must route report-scoped edges via the constant"
         )
         assert '_REPORT_SCOPED_SOURCE_ID = "otx_pulse"' in text
@@ -1295,7 +1298,7 @@ class TestTlpPromotion:
         client, session = _make_neo4j_mock()
         client.merge_actor({"name": "APT28", "tag": "mitre_attck", "zone": ["global"], "tlp": "amber"}, source_id="x")
         cypher, kwargs = session.run.call_args_list[1][0][0], session.run.call_args_list[1][1]
-        assert "n.tlp = $tlp" in cypher
+        assert "n.tlp = CASE WHEN" in cypher and "$tlp" in cypher, "tlp keeps the most restrictive level"
         assert kwargs["tlp"] == "amber"
 
     def test_merge_node_with_source_skips_tlp_when_absent(self):
@@ -1324,7 +1327,7 @@ class TestTlpPromotion:
         batch_calls = [c for c in session.run.call_args_list if "UNWIND $batch" in c[0][0]]
         assert batch_calls, "indicator batch MERGE not executed"
         cypher, kwargs = batch_calls[0][0][0], batch_calls[0][1]
-        assert "n.tlp = coalesce(item.tlp, n.tlp)" in cypher
+        assert "n.tlp = CASE WHEN" in cypher and "item.tlp" in cypher, "tlp keeps the most restrictive level"
         by_value = {item["value"]: item for item in kwargs["batch"]}
         assert by_value["1.2.3.4"]["tlp"] == "green"
         assert "tlp" not in by_value["5.6.7.8"], "absent TLP must stay NULL so coalesce keeps the old value"

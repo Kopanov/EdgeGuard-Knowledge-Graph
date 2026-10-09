@@ -810,7 +810,7 @@ def build_relationships():
             "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (i)-[r:TARGETS]->(sec) "
-            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
             "    r.edgeguard_managed = true, "
             # PR-N26 (cloud-Neo4j audit 2026-04-23): propagate the indicator's
@@ -855,7 +855,7 @@ def build_relationships():
             "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (v)-[r:AFFECTS]->(sec) "
-            "ON CREATE SET r.confidence_score = 1.0, r.created_at = datetime() "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
             "    r.edgeguard_managed = true, "
             # PR-N26 (cloud-Neo4j audit 2026-04-23): symmetric with Q7a — the

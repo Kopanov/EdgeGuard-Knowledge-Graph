@@ -442,7 +442,7 @@ class CISAICSCollector:
 
     @staticmethod
     def is_enabled() -> bool:
-        """Read the flag at call time (not import time) so Airflow workers and tests see env changes."""
+        """Return ``config.ENABLE_CISA_ICS`` (resolved when ``config`` is imported; tests patch the attribute)."""
         import config as _config
 
         return bool(getattr(_config, "ENABLE_CISA_ICS", False))
@@ -786,8 +786,16 @@ class CISAICSCollector:
             st["circuit_breaker_state"] = CISA_ICS_CIRCUIT_BREAKER.state.name
             st["stats"] = dict(stats)
             # Cursor advances only after a CLEAN push (mirrors the OTX / MITRE cursors).
-            if not baseline and failed == 0 and processed_max_ts:
+            # 2026-10 review fix: a failed fetch must not be skipped by the cursor moving past it —
+            # advance only when every selected advisory was fetched and pushed cleanly.
+            if not baseline and failed == 0 and stats.get("fetch_failed", 0) == 0 and processed_max_ts:
                 self._advance_cursor(processed_max_ts)
+            elif not baseline and processed_max_ts:
+                logger.warning(
+                    "CISA ICS: cursor NOT advanced (push failures=%s, fetch failures=%s) — will retry next run",
+                    failed,
+                    stats.get("fetch_failed", 0),
+                )
             return st
 
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, TransientServerError) as e:

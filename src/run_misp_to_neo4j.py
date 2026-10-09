@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -2462,8 +2463,14 @@ class MISPToNeo4jSync:
                     self._MAX_REPORT_INDICATORS,
                 )
                 indicators = indicators[: self._MAX_REPORT_INDICATORS]
-            malware_items = malware_items[: self._MAX_REPORT_MALWARE]
-            actors = actors[: self._MAX_REPORT_ACTORS]
+            if len(malware_items) > self._MAX_REPORT_MALWARE:
+                logger.info(
+                    "Report %s: capping malware %s -> %s", report_id, len(malware_items), self._MAX_REPORT_MALWARE
+                )
+                malware_items = malware_items[: self._MAX_REPORT_MALWARE]
+            if len(actors) > self._MAX_REPORT_ACTORS:
+                logger.info("Report %s: capping actors %s -> %s", report_id, len(actors), self._MAX_REPORT_ACTORS)
+                actors = actors[: self._MAX_REPORT_ACTORS]
 
             # Indicator -> Malware (INDICATES): the pulse lists these IOCs under these
             # malware families.
@@ -2530,6 +2537,7 @@ class MISPToNeo4jSync:
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
+                                    "match_type": "zone_classification",
                                     "misp_event_id": _evt_id,
                                 }
                             )
@@ -2549,6 +2557,7 @@ class MISPToNeo4jSync:
                                     "to_type": "Sector",
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
+                                    "match_type": "zone_classification",
                                     "misp_event_id": _evt_id,
                                 }
                             )
@@ -2831,7 +2840,8 @@ class MISPToNeo4jSync:
             # a composite is skipped rather than silently reduced to its first name.
             _cleaned_names = clean_actor_names(actor_name)
             _same_name = len(_cleaned_names) == 1 and (
-                " ".join(_cleaned_names[0].split()).casefold() == " ".join(str(actor_name).split()).casefold()
+                " ".join(unicodedata.normalize("NFC", _cleaned_names[0]).split()).casefold()
+                == " ".join(unicodedata.normalize("NFC", str(actor_name)).split()).casefold()
             )
             if not _same_name:
                 logger.info(
@@ -2877,6 +2887,7 @@ class MISPToNeo4jSync:
                         "rel_type": "EMPLOYS_TECHNIQUE",
                         "from_type": "ThreatActor",
                         "from_key": {"name": actor_name},
+                        "match_type": "misp_attribute_tag",
                         "to_type": "Technique",
                         "to_key": {"mitre_id": technique["mitre_id"]},
                         "confidence": confidence,
@@ -2964,6 +2975,7 @@ class MISPToNeo4jSync:
                         "rel_type": "ATTRIBUTED_TO",
                         "from_type": "Malware",
                         "from_key": {"name": malware_name},
+                        "match_type": "misp_attribute_tag",
                         "to_type": "ThreatActor",
                         "to_key": {"name": threat_actor},
                         "confidence": confidence,
@@ -3845,6 +3857,23 @@ class MISPToNeo4jSync:
             self.stats["errors"] += 1
             return False
 
+    def _write_cross_item_relationships(self, cross_rels: List[Dict]) -> int:
+        """Write the builder's output with honest provenance (2026-10 review fix).
+
+        Rows that carry a ``report_id`` are report-scoped (same OTX pulse) and get
+        ``source_id = "otx_pulse"``. The zone-derived TARGETS / AFFECTS rows come from
+        the item's own ``zone`` tag, whatever the source, so they are written as
+        ``"misp"`` — stamping them ``otx_pulse`` would claim a pulse that never existed.
+        """
+        report_rows = [r for r in cross_rels if r.get("report_id")]
+        zone_rows = [r for r in cross_rels if not r.get("report_id")]
+        created = 0
+        if report_rows:
+            created += self._create_relationships(report_rows, _REPORT_SCOPED_SOURCE_ID)
+        if zone_rows:
+            created += self._create_relationships(zone_rows, "misp")
+        return created
+
     def _create_relationships(self, relationships: List[Dict], source_id: str) -> int:
         """
         Create relationships in Neo4j using batched UNWIND (``Neo4jClient.create_misp_relationships_batch``).
@@ -3996,7 +4025,7 @@ class MISPToNeo4jSync:
         if cross_rels:
             # Report-scoped rels (same OTX pulse) carry their own source_id so
             # they are distinguishable from attribute-embedded ("misp") edges.
-            rels_created = self._create_relationships(cross_rels, _REPORT_SCOPED_SOURCE_ID)
+            rels_created = self._write_cross_item_relationships(cross_rels)
             self.stats["relationships_created"] += rels_created
 
         return len(event_items), len(cross_rels), ev_errors
@@ -4106,7 +4135,7 @@ class MISPToNeo4jSync:
                 logger.info(
                     "Event %s: building %s report-scoped relationships from all pages...", event_id, len(cross_rels)
                 )
-                rels_created = self._create_relationships(cross_rels, _REPORT_SCOPED_SOURCE_ID)
+                rels_created = self._write_cross_item_relationships(cross_rels)
                 self.stats["relationships_created"] += rels_created
                 total_cross_rels += rels_created
             del _rel_items

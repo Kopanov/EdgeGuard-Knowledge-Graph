@@ -647,6 +647,20 @@ def _dedup_concat_clause(prop_ref: str, addition_expr: str) -> str:
     return f"apoc.coll.toSet(coalesce({prop_ref}, []) + {addition_expr})"
 
 
+def _tlp_rank_case(expr: str) -> str:
+    """Cypher CASE ranking a TLP label (NULL / unknown → 0) so merges can keep the most restrictive."""
+    return (
+        f"CASE toLower(toString({expr})) WHEN 'red' THEN 5 WHEN 'amber+strict' THEN 4 WHEN 'amber' THEN 3 "
+        f"WHEN 'green' THEN 2 WHEN 'white' THEN 1 WHEN 'clear' THEN 1 ELSE 0 END"
+    )
+
+
+def _tlp_most_restrictive_clause(existing: str, incoming: str) -> str:
+    """2026-10 review fix: TLP is not last-writer-wins. If any source rated an entity
+    ``amber`` it stays ``amber`` when an open feed (default ``white``) touches it next."""
+    return f"CASE WHEN {_tlp_rank_case(incoming)} > {_tlp_rank_case(existing)} THEN {incoming} ELSE {existing} END"
+
+
 def _dedup_concat_optional_clause(
     prop_ref: str,
     value_expr: str,
@@ -2009,6 +2023,8 @@ class Neo4jClient:
                             # emitting the SET clause entirely.
                             continue
                         query += f", n.{prop_name} = {_dedup_concat_clause(f'n.{prop_name}', f'${prop_name}')}"
+                    elif prop_name == "tlp":
+                        query += f", n.tlp = {_tlp_most_restrictive_clause('n.tlp', '$tlp')}"
                     else:
                         query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
@@ -2661,8 +2677,9 @@ class Neo4jClient:
             "reported_techniques": data.get("reported_techniques", []) or [],
         }
         if data.get("pulse_id"):
-            # Source-report provenance: every OTX pulse that mentioned this malware.
-            extra_props["pulse_ids"] = [str(data["pulse_id"])]
+            # Source-report provenance: every OTX pulse that mentioned this malware
+            # (incl. the extra pulses de-duplication folded into ``report_ids``).
+            extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
         if data.get("description"):
             extra_props["description"] = data["description"]
         return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
@@ -2714,7 +2731,7 @@ class Neo4jClient:
             "reported_techniques": data.get("reported_techniques", []) or [],
         }
         if data.get("pulse_id"):
-            extra_props["pulse_ids"] = [str(data["pulse_id"])]
+            extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
         if data.get("sophistication"):
             extra_props["sophistication"] = data["sophistication"]
         if data.get("primary_motivation"):
@@ -3202,7 +3219,7 @@ class Neo4jClient:
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
                     n.indicator_role = coalesce(item.indicator_role, n.indicator_role),
-                    n.tlp = coalesce(item.tlp, n.tlp),
+                    n.tlp = {_tlp_most_restrictive_clause("n.tlp", "item.tlp")},
                     n.url_status = coalesce(item.url_status, n.url_status),
                     n.last_online = coalesce(item.last_online, n.last_online),
                     n.abuse_categories = {_dedup_concat_clause("n.abuse_categories", "coalesce(item.abuse_categories, [])")},
@@ -3885,6 +3902,7 @@ class Neo4jClient:
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = $sector_uuid
         SET s.updated_at = datetime(),
+            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
@@ -3953,6 +3971,7 @@ class Neo4jClient:
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = $sector_uuid
         SET s.updated_at = datetime(),
+            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
@@ -4407,6 +4426,7 @@ class Neo4jClient:
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = row.sector_uuid
         SET s.updated_at = datetime(),
+            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (i:Indicator {{value: row.value}})
@@ -4423,6 +4443,7 @@ class Neo4jClient:
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = row.sector_uuid
         SET s.updated_at = datetime(),
+            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:Vulnerability {{cve_id: row.cve_id}})
@@ -4435,6 +4456,7 @@ class Neo4jClient:
         ON CREATE SET s.created_at = datetime(),
                       s.uuid = row.sector_uuid
         SET s.updated_at = datetime(),
+            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:CVE {{cve_id: row.cve_id}})

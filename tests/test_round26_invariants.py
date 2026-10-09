@@ -395,8 +395,11 @@ def test_run_pipeline_edges_stamp_endpoint_uuids():
     with open(src_path) as fh:
         source = fh.read()
 
-    # Both inner queries must stamp src=i.uuid trg={m,c}.uuid.
-    for endpoint_var, edge_name in [("m", "INDICATES"), ("c", "EXPLOITS")]:
+    # 2026-10 (fresh-baseline PR): the whole-event co-occurrence INDICATES block was
+    # removed from this CLI path — only the EXPLOITS (cve tag) block remains and must
+    # still stamp the endpoint uuids. Pin the removal too.
+    assert 'r.source_id = "misp_cooccurrence"' not in source, "CLI co-occurrence INDICATES must stay removed"
+    for endpoint_var, edge_name in [("c", "EXPLOITS")]:
         assert f"r.src_uuid = i.uuid, r.trg_uuid = {endpoint_var}.uuid" in source, (
             f"{edge_name} edge in run_pipeline.py must stamp src=i.uuid trg={endpoint_var}.uuid "
             "on ON CREATE (round-28 fix)"

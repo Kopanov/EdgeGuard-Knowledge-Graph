@@ -788,7 +788,17 @@ class MITRECollector:
                 if extra:
                     existing["uses_techniques"] = list(have) + extra
 
-        merged["relationships"] = list(primary.get("relationships", [])) + list(secondary.get("relationships", []))
+        # 2026-10 review fix: a group/malware present in BOTH bundles carries the same
+        # STIX relationship objects twice; de-duplicate so the CLI relationship step
+        # (capped list) is not spent on repeats. Order preserved, first occurrence kept.
+        seen_rels: set = set()
+        merged["relationships"] = []
+        for rel in list(primary.get("relationships", [])) + list(secondary.get("relationships", [])):
+            key = json.dumps(rel, sort_keys=True, default=str) if isinstance(rel, dict) else repr(rel)
+            if key in seen_rels:
+                continue
+            seen_rels.add(key)
+            merged["relationships"].append(rel)
         return merged
 
     def _return_status(self, success: bool, count: int, error: str = None, failed: int = 0):

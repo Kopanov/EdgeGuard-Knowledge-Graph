@@ -61,7 +61,7 @@ _WORD_SEPARATOR_RE = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
 # a dangling conjunction (``"lockbit, cl0p, and fancy bear"`` →
 # ``"and fancy bear"``; ``"apt28 and, apt29"`` → ``"apt28 and"``). Strip it;
 # a fragment that IS just the conjunction becomes empty and is dropped.
-_LEADING_CONJUNCTION_RE = re.compile(r"^(?:and|&)(?:\s+|$)", re.IGNORECASE)
+_LEADING_CONJUNCTION_RE = re.compile(r"^(?:and|&|aka|a\.k\.a\.?|also known as)(?:\s+|$)", re.IGNORECASE)
 _TRAILING_CONJUNCTION_RE = re.compile(r"(?:^|\s+)(?:and|&)$", re.IGNORECASE)
 
 # Minimum length (characters, after trim) of EACH side of an ``and`` / ``&``
