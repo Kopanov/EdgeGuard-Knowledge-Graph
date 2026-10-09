@@ -18,6 +18,7 @@ This document details all data collectors in EdgeGuard, including their sources,
 10. [Healthcare Feed Collector](#9-healthcare-feed-collector)
 11. [Energy Feed Collector](#10-energy-feed-collector)
 12. [MISP Collector](#11-misp-collector)
+13. [CISA ICS Advisories Collector](#12-cisa-ics-advisories-collector)
 
 ---
 
@@ -81,7 +82,7 @@ All collectors return items with these common fields:
 ### What It Does
 Collects threat intelligence pulses from AlienVault OTX, including:
 - Indicators (IPs, domains, hashes, URLs) with per-indicator description
-- Malware families with ATT&CK technique IDs (`uses_techniques`)
+- Malware families with the pulse's ATT&CK technique IDs as `reported_techniques` (2026-10: pulse-level association, written to MISP as `MITRE_USES_TECHNIQUES:{"rt":[…],"pid":"<pulse id>"}` and linked downstream as `IMPLEMENTS_TECHNIQUE` with `match_type='otx_pulse'`, 0.6 — never as `uses_techniques` / `mitre_explicit`)
 - CVE references (all CVEs per pulse, no cap)
 - **Pulse metadata:** `attack_ids` (MITRE ATT&CK), `industries` (authoritative sector classification), `targeted_countries`, `tags`, `references`, `author_name`, `adversary`, `TLP`
 - Named adversaries are automatically extracted as ThreatActor items
@@ -144,7 +145,8 @@ def detect_sectors(self, text: str) -> List[str]:
     'tag': 'alienvault_otx',
     'sources': ['alienvault_otx'],
     'confidence_score': 0.5,
-    'uses_techniques': ['T1059', 'T1071'],  # ATT&CK from pulse attack_ids
+    'reported_techniques': ['T1059', 'T1071'],  # ATT&CK from pulse attack_ids (2026-10: reported, not MITRE-explicit)
+    'pulse_id': '6aa4409a4290cc035d81500c',   # source report id → report-scoped INDICATES / ATTRIBUTED_TO
     'pulse_id': '5f3a2b...',
     'pulse_name': 'Emotet Banking Trojan IOCs',
 }
@@ -165,7 +167,9 @@ def detect_sectors(self, text: str) -> List[str]:
     'attack_vector': 'NETWORK',
 }
 
-# Threat Actor (auto-extracted from pulse adversary field)
+# Threat Actor (auto-extracted from pulse adversary field — 2026-10: the free-text
+# adversary goes through actor_name_hygiene.clean_actor_names: "apt-c-13, sandworm"
+# → two actor items, "multiple russian state-backed groups" → none)
 {
     'type': 'actor',
     'name': 'TA542',
@@ -174,7 +178,7 @@ def detect_sectors(self, text: str) -> List[str]:
     'tag': 'alienvault_otx',
     'sources': ['alienvault_otx'],
     'confidence_score': 0.5,
-    'uses_techniques': ['T1059', 'T1071'],
+    'reported_techniques': ['T1059', 'T1071'],  # 2026-10
     'aliases': [],
 }
 ```
@@ -303,6 +307,7 @@ Collects threat intelligence from MITRE ATT&CK framework, including:
 
 ### Source
 - **URL:** `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json`
+- **ATT&CK for ICS (2026-10, `EDGEGUARD_ENABLE_MITRE_ICS=true`, default off):** `ics-attack/ics-attack.json` from the same repository (`MITRE_ICS_ATTACK_URL` to override) is fetched after the Enterprise bundle and parsed with the same code (`_parse_bundle`, kill-chain name `mitre-ics-attack`). 97 techniques (T08xx), 12 tactics (TA0100–TA0111, 9 short names identical to Enterprise), 14 groups, 23 malware. Every item carries `attack_domain` (`enterprise` | `ics`); groups/malware present in both bundles are emitted once with `uses_techniques` unioned. An ICS fetch/parse failure is logged, counted (`pipeline_errors_total{task=collect_mitre_ics}`) and never affects the Enterprise items; the MITRE circuit breaker is not tripped. No ETag for ICS: on an Enterprise HTTP 304 the ICS bundle is skipped (baseline runs ignore ETag). ICS items are **not** auto-zoned `energy` (`x_mitre_sectors` / assets unused — follow-up).
 - **API Key:** Not required
 - **Format:** STIX 2.1 bundle
 
@@ -744,6 +749,83 @@ SOURCE_TAG_MAPPING = {
 
 ---
 
+## 12. CISA ICS Advisories Collector
+
+**File:** `src/collectors/cisa_ics_collector.py` — **flag-guarded, OFF by default** (`EDGEGUARD_ENABLE_CISA_ICS=true` to enable). Added 2026-10.
+
+### What It Does
+Collects CISA ICS-CERT advisories (`ICSA-*`) and ICS medical advisories (`ICSMA-*`) published as **CSAF 2.0** JSON files in the public `cisagov/CSAF` GitHub repository and emits **one `vulnerability` item per (advisory, CVE)**. The point of this collector is the **source-asserted critical-infrastructure sector**: every advisory carries a `"Critical infrastructure sectors"` note written by CISA (e.g. `"Critical Manufacturing, Energy, Information Technology"`). The keyword sector detector (`detect_zones_from_text`) is **deliberately not applied** to these items.
+
+### Source
+- **Base URL:** `https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/` (`EDGEGUARD_CISA_ICS_BASE_URL`)
+- **Listing files:** `index.txt` (all advisories as `YYYY/<file>.json`, ~3,960 entries 2010–2026, newest first) and `changes.csv` (`"YYYY/<file>.json","<ISO timestamp>"`, no header, newest first)
+- **Per advisory:** `document.tracking.{id,initial_release_date,current_release_date}`, `document.title`, `document.notes[]`, `document.references[]` (`category: self` → cisa.gov URL), `product_tree.branches[]` (vendor → product_name), `vulnerabilities[]` (`cve`, `cwe`, `notes`, `scores[].cvss_v3`)
+- **API Key:** Not required · **Licence:** TLP:WHITE ("Disclosure is not limited")
+- **Mode selection:** baseline → `index.txt` filtered to the years inside `baseline_days` and pre-filtered on the day-of-year encoded in the file name (`icsa-26-281-01` → 2026-10-08, with a 45-day margin), fetched newest-first, then filtered by `initial_release_date >= cutoff`; incremental → `changes.csv` rows newer than the stored cursor (`checkpoints/baseline_checkpoint.json` → `cisa_ics.incremental.cisa_ics_last_change_ts`, minus a 24 h overlap; first run uses `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS`, default 30). The cursor advances **only after a clean MISP push** (`failed == 0`), like the OTX/MITRE cursors.
+
+### Zone Mapping (source-asserted, fixed table)
+
+| CISA sector (from the advisory note) | EdgeGuard zone |
+|---|---|
+| `Energy` | `energy` |
+| `Healthcare and Public Health` | `healthcare` |
+| `Financial Services` | `finance` |
+| any other sector (Critical Manufacturing, Water, Communications, …) | contributes nothing |
+| nothing mapped | `['global']` |
+
+The raw sector list is kept on the item as `ics_sectors`; every emitted zone is validated against `config.VALID_ZONES`.
+
+### Example Output
+
+```python
+{
+    'type': 'vulnerability',
+    'cve_id': 'CVE-2026-32645',
+    'description': 'ICSA-26-281-01: Red Lion Controls N-Tron 700 Series — Default factory credentials ...',
+    'zone': ['energy'],                      # from "Critical Manufacturing, Energy, Information Technology"
+    'ics_sectors': ['Commercial Facilities', 'Communications', 'Critical Manufacturing', 'Energy', 'Information Technology'],
+    'advisory_id': 'ICSA-26-281-01',
+    'tag': 'cisa_ics',
+    'source': ['cisa_ics'],
+    'confidence_score': 0.9,                  # authoritative government advisory
+    'published': '2026-10-08T06:00:00+00:00',     # initial_release_date
+    'last_modified': '2026-10-08T06:00:00+00:00', # current_release_date
+    'first_seen': '2026-10-08T06:00:00+00:00',    # source-truthful (same two dates)
+    'last_seen': '2026-10-08T06:00:00+00:00',
+    'severity': 'MEDIUM', 'cvss_score': 6.0, 'attack_vector': 'LOCAL',
+    'cvss_v31_data': {'vector_string': 'CVSS:3.1/AV:L/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:N', 'base_score': 6.0, ...},
+    'cvss_v30_data': None,
+    'cwe': ['CWE-798'],
+    'vendor': 'Red Lion Controls', 'product': '700 Series',
+    'affected_products': ['Red Lion Controls 700 Series'],
+    'reference_urls': ['https://www.cisa.gov/news-events/ics-advisories/icsa-26-281-01'],
+    'ref_tags': [], 'cpe_type': [], 'result_impacts': ['HIGH', 'HIGH', 'NONE'],
+}
+# No CVSS block in the advisory → KEV-consistent defaults: severity HIGH, cvss_score 7.0, attack_vector NETWORK.
+# Dates absent → the four timestamp keys are omitted (honest-NULL), never wall-clock.
+# MISP: tagged source:CISA-ICS + zone:<Zone>; NOT tagged CISA-KEV. Same CVE in two advisories → MISP dedups the
+# second attribute (type, value); the first advisory's metadata wins.
+```
+
+### Flags & knobs (`src/config.py`, section "CISA ICS advisories collector (2026-10)")
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `EDGEGUARD_ENABLE_CISA_ICS` | `false` | Master switch. Off → the daily task and `collect()` log "disabled by flag" and return a skipped status (success, 0 items) **without any HTTP request** |
+| `EDGEGUARD_CISA_ICS_BASE_URL` | GitHub raw `OT/white/` folder | Where `index.txt`, `changes.csv` and the advisory files live |
+| `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` | `1200` | Hard cap on advisory files fetched per run (a 24-month baseline is ~900) |
+| `EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES` | `50` | Baseline-only sanity floor (see below) |
+| `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS` | `30` | Lookback for the first incremental run (no cursor yet) |
+
+### Safety behaviour
+- **Isolated:** own circuit breaker (`cisa_ics`, 3 failures → open 30 min), own `RateLimiter` (≤ 4 req/s, sequential fetches), `retry_with_backoff` (3 retries) + `request_with_rate_limit_retries` (429/5xx backoff). Shares only the generic helpers with the KEV collector.
+- **Per-file failures never abort the run:** a file that is not a JSON object with `document` + `vulnerabilities`, a JSON decode error, or a per-file 404 is counted in the status `stats` (`malformed`, `fetch_failed`, `skipped_vulns`, …) and skipped. Ten **consecutive** fetch failures (or the breaker opening mid-run) abort as a transient error **before** anything is pushed.
+- **Baseline sanity floor:** when at least `CISA_ICS_MIN_EXPECTED_ADVISORIES` advisories were attempted but fewer parsed, or the index lists nothing in the window, the collector logs an error, increments `pipeline_errors_total{task="collect_cisa_ics"}` and raises `CISAICSBaselineFloorError` (a `TransientServerError` subclass) → `run_collector_with_metrics` marks the task **skipped + Slack alert** instead of writing a thin dataset. Not evaluated when fewer than the floor were attempted (small `collection_limit` smoke runs).
+- **Upstream outage** (timeout / connection error / 5xx on the index) propagates as transient → skip + alert. A 4xx on `index.txt`/`changes.csv` (layout change) returns `success=False` so the task goes red for an operator. Code defects re-raise (DAG catastrophic branch).
+- `health_check()` GETs `index.txt` and returns the same `{healthy, response_time_ms, ...}` shape as the other collectors.
+
+---
+
 ## Collector Summary Table
 
 | Collector | Sources | Status | Zone Detection |
@@ -759,6 +841,7 @@ SOURCE_TAG_MAPPING = {
 | Healthcare | HC3, FDA, H-ISAC | ⏳ Placeholder | - |
 | Energy | E-ISAC, ICS-CERT | ⏳ Placeholder | - |
 | MISP | Local MISP | ✅ Active | `detect_sectors()` → list |
+| CISA ICS | cisagov/CSAF (ICS-CERT advisories) | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) | Source-asserted sector → fixed table (`map_sectors_to_zones()`), no keyword detector |
 
 ---
 
@@ -781,7 +864,8 @@ upper bound for a single baseline run.
 | **VirusTotal** | `limit = 100` (baseline default, raised from 20 in PR-M1) | Free tier: **4 req/min**, **500 req/day** | At `limit=100` a baseline run consumes ~100-105 API calls (~26 min wall-clock at 4/min); comfortably inside the 500/day quota with headroom for incremental runs. **VT is enrichment-only on the free tier** — genuine bulk or historical depth requires the Premium API (no 4 req/min cap; per-step daily quotas). A Premium path is a future option, not planned |
 | **Finance (Feodo / SSLBL)** | Full feed | Public CSV/text feeds, no rate limit | No change planned |
 | **Global (URLhaus / CyberCure / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus/CyberCure full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
-| **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** ENTSO-E, EU-CERT, E-ISAC, national CERT integrations. Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1 |
+| **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** ENTSO-E, EU-CERT, E-ISAC, national CERT integrations. Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1. **Since 2026-10 the ICS-CERT part is a real collector:** [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
+| **CISA ICS Advisories** | `min(index entries in window, CISA_ICS_MAX_ADVISORIES_PER_RUN=1200)` advisory files (~900 on a 730-day run), one item per CVE | Public GitHub raw files, no auth; polite sequential fetch ≤ 4 req/s | Flag-guarded, default **off**. Baseline sanity floor `CISA_ICS_MIN_EXPECTED_ADVISORIES=50` → transient skip + alert instead of a thin dataset |
 | **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** HC3, FDA, H-ISAC, national healthcare CERT integrations. Same skip-dashboard behaviour as Energy |
 
 ### Planned improvements (future PRs)

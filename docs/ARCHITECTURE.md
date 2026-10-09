@@ -48,7 +48,7 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │                     Neo4j                                  │
 │  • Indicator, CVE, Malware, ThreatActor, Technique, …     │
 │  • ``zone`` and ``source`` as arrays on nodes               │
-│  • Cross-item relationships after per-event parse           │
+│  • Report-scoped relationships (same OTX pulse) per event  │
 └─────────────────────────┬───────────────────────────────────┘
                           │
                           ▼
@@ -58,9 +58,10 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │     Actor → Technique (EMPLOYS_TECHNIQUE, MITRE explicit),  │
 │     Malware/Tool → Technique (IMPLEMENTS_TECHNIQUE, MITRE), │
 │     Indicator → Technique (USES_TECHNIQUE, OTX attack_ids), │
-│     IOC↔malware/CVE,                                        │
+│     Actor/Malware → Technique from OTX pulse ids            │
+│     (EMPLOYS/IMPLEMENTS_TECHNIQUE, otx_pulse 0.6),          │
 │     malware_family name match → Malware (INDICATES, 0.8),   │
-│     co-occurrence INDICATES, sector edges                   │
+│     CVE-tag EXPLOITS, sector edges — no event co-occurrence │
 │  2. enrichment_jobs — campaigns (RUNS/PART_OF),            │
 │     confidence calibration, IOC decay (order inside module) │
 └─────────────────────────────────────────────────────────────┘
@@ -75,7 +76,7 @@ Collectors → MISP → [per MISP event] parse_attribute() → dedupe → cross-
               → sync_to_neo4j() (Python chunks) → create_misp_relationships_batch() (UNWIND batches) → Neo4j
 ```
 
-No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Cross-item** relationships (e.g. co-occurrence-style edges produced during sync) are built from **one event’s item list only** — do not pass a global multi-event list into `_build_cross_item_relationships` (see `run_misp_to_neo4j.py` docstring). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
+No STIX bundle is materialized on this path: each MISP attribute is parsed into EdgeGuard item dicts. **Report-scoped** relationships produced during sync (2026-10) are built from **one event’s item list only**, and inside it only between items that share the same OTX `pulse_id`: `Indicator → INDICATES → Malware` and `Malware → ATTRIBUTED_TO → ThreatActor`, `match_type='otx_pulse'`, confidence 0.6, `r.report_ids[]`. Items without a pulse id are never paired, and nothing is paired across the whole per-source, per-day event any more (see the `_build_cross_item_relationships` docstring in `run_misp_to_neo4j.py`). **Node** merges use Python-side chunks (`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`); **relationship** writes use **`EDGEGUARD_REL_BATCH_SIZE`** (default **500** definitions per UNWIND). Optional **`EDGEGUARD_DEBUG_GC`** enables `gc.collect()` after each node chunk (diagnostics; can hurt RAM on small workers).
 
 **CLI / `run_pipeline.py` (optional)** — with `use_stix_flow=True` (default for **`python src/run_pipeline.py`** step 3 when STIX is available):
 
@@ -139,7 +140,7 @@ All zone values are validated against `VALID_ZONES` in `config.py` before any wr
 
 > **History:** Prior to 2026-04 all three were a single generic `USES` edge. The split was made to distinguish **attribution** (actor employs a TTP) from **capability** (malware/tool implements a TTP), which matters for both Cypher query clarity and GraphRAG retrieval. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* The property name **`uses_techniques`** on nodes is a STIX-side serialization field and was intentionally left unchanged.
 
-The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
+The MITRE collector populates **`uses_techniques: [T1059, ...]`** on each **ThreatActor**, **Malware**, and **Tool** item; malware IDs round-trip through MISP via the **`MITRE_USES_TECHNIQUES:`** attribute comment (same idea as **`NVD_META:`** for CVEs). **2026-10:** the OTX collector puts a pulse's `attack_ids` on its malware/actor items as **`reported_techniques`** (JSON key `rt`, with the pulse id as `pid`) — never as `uses_techniques` — so pulse-level associations become `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` edges with `match_type='otx_pulse'` (0.6) instead of being mislabelled `mitre_explicit`. `build_relationships.py` matches `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label, writing the appropriate specialized edge type. Edge confidence **`0.95`**, **`match_type = 'mitre_explicit'`**.
 
 ---
 
@@ -204,6 +205,7 @@ When data is pushed to MISP, it gets tagged with:
 | Zone | `zone:Finance` | All detected zones (equal importance) |
 | Source | `source:AlienVault-OTX` | Original data source |
 | Confidence | `confidence:high` | Based on confidence_score |
+| TLP | `tlp:white` | 2026-10: on every attribute — the source's own level (OTX `pulse_tlp`) or `EDGEGUARD_DEFAULT_TLP` |
 | Severity | `severity:HIGH` | For vulnerabilities |
 | CVSS | `cvss:critical` | CVSS score category |
 | Malware Family | `malware-family:emotet` | For malware indicators |
@@ -240,12 +242,12 @@ When data is pushed to MISP, it gets tagged with:
 | Relationship | From → To | How it is created |
 |---|---|---|
 | `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
-| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
-| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` on malware/tool (MISP **`MITRE_USES_TECHNIQUES:`** round-trip for malware) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor (`match_type='mitre_explicit'`, 0.95); OTX pulse `attack_ids` → `reported_techniques` (`match_type='otx_pulse'`, 0.6, 2026-10) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` (`mitre_explicit`, 0.95); OTX pulse ids → `reported_techniques` (`otx_pulse`, 0.6, 2026-10). MISP round-trip via **`MITRE_USES_TECHNIQUES:`** (`t` / `rt` / `pid`) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
-| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` exact match on the malware's own `attributed_to` claim against the actor's `name` OR the actor's `aliases` (the "Cozy Bear → APT29" path). Actor/malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06). The inverse path (actor name ∈ malware aliases) was **removed** 2026-06 as an attribution-forgery vector — see `build_relationships.py` Q2. |
-| `INDICATES` | Indicator → Malware | MISP event co-occurrence (`misp_event_ids[]` array IN-membership match) |
-| `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` |
+| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` exact match on the malware's own `attributed_to` claim against the actor's `name` OR the actor's `aliases` (`match_type='exact'`, 1.0; the "Cozy Bear → APT29" path), plus — 2026-10 — same-OTX-pulse links from the sync (`match_type='otx_pulse'`, 0.6). Whole-event co-occurrence attribution removed 2026-10. Actor/malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06). |
+| `INDICATES` | Indicator → Malware | Same-OTX-pulse link from the sync (`match_type='otx_pulse'`, 0.6, 2026-10) and source-asserted `malware_family` match (`build_relationships.py` Q9, 0.8). The whole-event `misp_event_ids[]` co-occurrence query was removed in 2026-10. |
+| `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0). Not derived from event co-membership since 2026-10. |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
 | `TARGETS` | Indicator → Sector | Node `zone` list → `build_relationships.py` |
 | `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → `build_relationships.py` |
@@ -277,7 +279,7 @@ backwards-compatibility plan for pre-PR-M2 data.
 
 **MISP traceability on edges (PR-N26, 2026-04-23):** the four edge types
 MERGEd by `build_relationships.py` from the MISP path —
-`INDICATES` (Indicator → Malware, both co-occurrence + family-match
+`INDICATES` (Indicator → Malware, both report-scoped + family-match
 patterns), `EXPLOITS` (Indicator → CVE / Vulnerability), `TARGETS`
 (Indicator → Sector), and `AFFECTS` (Vulnerability → Sector) — accumulate
 `r.misp_event_ids[]` via `apoc.coll.toSet`, same shape as the node-level

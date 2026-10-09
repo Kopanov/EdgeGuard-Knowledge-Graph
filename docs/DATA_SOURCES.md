@@ -24,8 +24,9 @@
 | 11 | CyberCure | TBD | ✅ Auto-tagged | Automated threats | ✅ Active |
 | 12 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
 | 13 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
+| 14 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
 
-**Note:** Energy and Healthcare collectors are placeholders requiring ISAC membership (ENTSO-E, H-ISAC/EHFC).
+**Note:** Energy and Healthcare collectors are placeholders requiring ISAC membership (ENTSO-E, H-ISAC/EHFC). CISA ICS Advisories (row 14) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
 
 ---
 
@@ -119,12 +120,36 @@
 
 ---
 
+### 4b. CISA ICS Advisories (CSAF 2.0) — flag-guarded, added 2026-10
+**Items:** one `vulnerability` per (advisory, CVE); ~900 advisories on a 730-day baseline | **Zone:** source-asserted by CISA, not keyword-detected
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://raw.githubusercontent.com/cisagov/CSAF/develop/csaf_files/OT/white/` (`index.txt`, `changes.csv`, `<year>/<advisory>.json`) — per `src/collectors/cisa_ics_collector.py` |
+| Format | CSAF 2.0 JSON, one file per advisory (`ICSA-*`, `ICSMA-*`) |
+| Auth | None (public GitHub raw); TLP:WHITE |
+| Update | Daily (`edgeguard_daily` → `collect_cisa_ics`), only when `EDGEGUARD_ENABLE_CISA_ICS=true` |
+| Classification | ✅ Fixed table on the advisory's `"Critical infrastructure sectors"` note: `Energy → energy`, `Healthcare and Public Health → healthcare`, `Financial Services → finance`; anything else → `global` |
+
+**What we get:**
+- CVE IDs with CWE, CVSS v3.x score/vector (→ `CVSSv31`/`CVSSv30` sub-nodes), vulnerability summary
+- Advisory id, title, cisa.gov URL, vendor and affected products
+- `initial_release_date` / `current_release_date` as source-truthful `first_seen` / `last_seen`
+- Raw CISA sector list (`ics_sectors`) in addition to the mapped zone
+
+**How classified:**
+- Sector names come from CISA's own note in the advisory; the keyword detector is not used
+
+**Safety:** own circuit breaker + rate limiter, per-file failures counted and skipped, baseline sanity floor (`EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES`, default 50) raises a transient error → task skipped + alert rather than a thin dataset. See [COLLECTORS.md §12](COLLECTORS.md#12-cisa-ics-advisories-collector).
+
+---
+
 ### 5. MITRE ATT&CK
 **Items:** 500 | **Zone:** N/A (techniques/actors)
 
 | Attribute | Value |
 |-----------|-------|
-| URL | `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` (per `src/collectors/mitre_collector.py:58`) |
+| URL | `https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json` (per `src/collectors/mitre_collector.py`); with `EDGEGUARD_ENABLE_MITRE_ICS=true` (2026-10, default off) also `ics-attack/ics-attack.json` — ATT&CK for ICS (97 techniques T08xx, 12 tactics, 14 groups, 23 malware), items stamped `attack_domain: ics`, ICS fetch failure isolated from the Enterprise ingest |
 | Format | STIX 2.1 JSON |
 | Auth | None (public) |
 | Update | Periodic |

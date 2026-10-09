@@ -215,6 +215,25 @@ OOM. Either:
 
 ---
 
+### [7] 2026-10 fresh-baseline PR: MISP import rule + flags
+
+**What:** the 2026-10 PR only materializes on a fresh re-feed. Before clearing:
+
+1. **MISP Import Regexp.** In the MISP UI open *Input Filters → Import Regexp*
+   and remove (or fix) the rule that rewrites `: Windows ` to `%WINDIR%\`. On the
+   2026-09 baseline it mangled 12 ATT&CK entries (`T1047: Windows Management
+   Instrumentation` became `T104%WINDIR%\Management Instrumentation`), so T1047,
+   T1021.006, T1543.003, T1222.001, T1546.003 and tool S0005 never reached Neo4j.
+   The acceptance script checks for them after the run.
+2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS` and `EDGEGUARD_ENABLE_CISA_ICS`
+   (both default `false`). Recommended: run the baseline with both **off**, run
+   `scripts/verify_fresh_baseline.py`, then enable them one at a time and re-run
+   the checks. `EDGEGUARD_DEFAULT_TLP` (`white`) and
+   `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE` (`true`) keep their defaults.
+3. **Snapshot first.** Take a `neo4j-admin database dump` and a MISP export of the
+   old instance before `edgeguard clear` — it is the "before" record for the
+   quality numbers and the graph the v0.10 model was benchmarked on.
+
 ### [6] PR-N32 unicode-bypass audit
 
 **What:** check whether legacy `Malware`/`ThreatActor`/`Tool` nodes
@@ -287,6 +306,34 @@ replace the manual-pause step.
 
 Follow [`docs/RUNBOOK.md`](RUNBOOK.md) § "After the run" — postcheck
 queries, sector-stats reconciliation, alert mute window cleanup.
+
+### Fresh-baseline acceptance (2026-10 PR)
+
+The 2026-10 changes (report-scoped linking, evidence labels, CVE properties,
+TLP, ownership marker, optional ICS sources) only materialize on a fresh
+re-feed. After `build_relationships` and the enrichment jobs have run, execute
+the read-only acceptance script against the new graph and keep its JSON with
+the baseline record:
+
+```bash
+python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json
+```
+
+It exits non-zero when any of these fail:
+
+| Check | Expected |
+|---|---|
+| Edges with `source_id = 'misp_cooccurrence'` | 0 |
+| `match_type = 'mitre_explicit'` edges whose source node has no MITRE source | 0 |
+| `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware in single digits |
+| NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | roughly the share NVD_META carries them (sample: 97 / 50 / 50 / 91 %) |
+| `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, Tool `S0005` | present (requires the MISP Import Regexp fix before re-import) |
+| `ThreatActor` names containing `,` or ` and ` | 0 |
+| `tlp` property | on every EdgeGuard node |
+| `edgeguard_managed` | on every EdgeGuard node and every EdgeGuard edge |
+| ICS (when `EDGEGUARD_ENABLE_MITRE_ICS`) | techniques with `attack_domain = 'ics'` link only to ICS tactics |
+| CISA ICS (when `EDGEGUARD_ENABLE_CISA_ICS`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges |
+| ResilMesh conformance | relationship names and directions unchanged; `HAS_CVSS_*` bidirectional |
 
 ### GraphRAG readiness verification (post-#126)
 

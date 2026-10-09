@@ -100,7 +100,7 @@ flowchart LR
         NEO4J_MERGE --> REL[Build Relationships<br/>apoc.periodic.iterate<br/>batchSize 5000]
         REL --> BRIDGE[CVE Bridge]
         BRIDGE --> CAMP[Campaign Builder]
-        CAMP --> CALIB[Co-occurrence Calibration]
+        CAMP --> CALIB[Legacy co-occurrence calibration (no-op since 2026-10)]
         CALIB --> DECAY[IOC Decay]
     end
 

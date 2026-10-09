@@ -285,7 +285,9 @@ def merge_node(existing, new):
    **and** `EXPLOITS` edges from large bulk-feed MISP events are
    down-weighted by event size into the 0.30–0.50 band (≤10 → 0.50,
    ≤20 → 0.45, ≤100 → 0.40, ≤500 → 0.35, >500 → 0.30); only edges marked
-   `misp_cooccurrence` / `misp_correlation` are touched.
+   `misp_cooccurrence` / `misp_correlation` are touched. **2026-10:** no such
+   edges are written any more — links are report-scoped (same OTX pulse,
+   `match_type='otx_pulse'`, 0.6) — so this step is a no-op on a fresh baseline.
 3. **Time decay** (post-sync, `enrichment_jobs.py` `decay_ioc_confidence`):
    tiered by label — **Indicator** ×0.85 at 90–180 days, ×0.70 at
    180–365 days; **Vulnerability** ×0.90 at 90–180 days, ×0.80 at
@@ -311,14 +313,14 @@ folded into a single multiplier.
 | `ATTRIBUTED_TO` | OTX | Indicator associated with Malware (from pulse) |
 | `RESOLVES_TO` | DNS | Domain resolves to IP (needs DNS data) |
 | `EXPLOITS` | CVEs | Indicator exploits Vulnerability (exact CVE ID match) |
-| `INDICATES` | Malware | Indicator indicates Malware (MISP co-occurrence or malware_family match) |
+| `INDICATES` | Malware | Indicator indicates Malware (same OTX pulse `otx_pulse` 0.6, or malware_family match 0.8; whole-event co-occurrence removed 2026-10) |
 
 ### 5.2 Relationship Quality
 
 - **EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE**: High quality - direct from MITRE STIX `uses` relationships. The split into attribution (actor→technique) and capability (malware/tool→technique) was made in 2026-04 to disambiguate the two semantics for Cypher queries and LLM/GraphRAG retrieval; both collapse back to STIX `uses` on export.
-- **ATTRIBUTED_TO**: Medium quality - inferred from OTX pulse
+- **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse. Whole-event co-occurrence attribution (one malware → up to 152 actors) was removed 2026-10
 - **EXPLOITS**: High quality - deterministic CVE ID match (confidence 1.0)
-- **INDICATES**: Medium quality - MISP co-occurrence (0.5) or malware_family name match (0.8)
+- **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8). The 0.5 whole-event co-occurrence level no longer exists (2026-10)
 - **RESOLVES_TO**: Requires external DNS data (not yet implemented)
 
 ---

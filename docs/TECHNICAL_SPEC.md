@@ -446,10 +446,10 @@ Auth:    Configured via environment variables
 
 | Relationship | From | To | Properties |
 |--------------|------|-----|------------|
-| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` (~0.95), `match_type='mitre_explicit'`, … (`build_relationships.py`, `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — pre-release framework, no migration script shipped; a fresh baseline rerun writes the specialized edge type directly.* |
-| `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; same MITRE STIX **`uses`** source via `node.uses_techniques` (`build_relationships.py`). Split from a generic `USES` in 2026-04. |
-| `ATTRIBUTED_TO` | Malware | ThreatActor | `confidence_score`, `match_type`, `created_at` (`build_relationships.py`) |
-| `INDICATES` | Indicator | Malware | Initial `confidence_score` 0.5, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; **also** `malware_family` name match from ThreatFox/VT (`confidence_score` 0.8); calibrated by `enrichment_jobs.calibrate_cooccurrence_confidence` |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` + `match_type` per evidence: `mitre_explicit` (0.95, `uses_techniques`) or `otx_pulse` (0.6, `reported_techniques`, 2026-10); `created_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` (`build_relationships.py` Q5/Q5b). *Split from a generic `USES` in 2026-04.* |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10). |
+| `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path, with `report_ids[]`, `misp_event_ids[]`, `sources[]`); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
+| `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path, `report_ids[]`) **or** `match_type='malware_family'` (0.8, Q9); `misp_event_ids[]`, `source_ids[]`, `edgeguard_managed`. The `misp_cooccurrence` level (0.5) is no longer written (2026-10); `calibrate_cooccurrence_confidence` only touches legacy edges |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'`, `source_id='cve_tag_match'` |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |

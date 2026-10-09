@@ -67,7 +67,7 @@ External sources (11 active feeds + 2 sector placeholders)
   Enrichment Jobs (post-sync)                                                   │
   • IOC Confidence Decay (stale indicators retire automatically)               │
   • Campaign Node Builder (ThreatActor → Malware → IOC chains)                │
-  • Co-occurrence Calibration (confidence weighted by event tightness)         │
+  • Evidence labels on every edge (match_type + confidence per source)        │
        │                                                                        │
        ▼                                                                        │
   FastAPI REST API (port 8000) ────────────────────────────────────────────────┘
@@ -285,7 +285,7 @@ python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pi
 | `edgeguard checkpoint clear` | Clear baseline state (preserves incremental by default) |
 | `edgeguard baseline --days N` | Additive baseline trigger — triggers the `edgeguard_baseline` DAG, no wipe |
 | `edgeguard fresh-baseline --days N` | **Destructive** wipe + rebuild — typed confirmation, blast-radius display, backup-timestamp gate |
-| `edgeguard clear neo4j` | Delete all graph data from Neo4j (keeps constraints) |
+| `edgeguard clear neo4j` | Delete all graph data from Neo4j (keeps constraints). `--edgeguard-only` deletes only nodes with `edgeguard_managed = true` — use on a database shared with ResilMesh |
 | `edgeguard clear misp` | Delete all EdgeGuard events from MISP |
 | `edgeguard clear all` | Full reset: Neo4j + MISP + checkpoints (`--force` skips confirmation) |
 | `edgeguard doctor` | Diagnose connectivity (MISP, Neo4j, Airflow, NATS, schema) |
@@ -588,7 +588,7 @@ After every MISP → Neo4j sync, **four** enrichment jobs run automatically (`en
 |-----|-------------|
 | **IOC Confidence Decay** | Tiered decay on stale indicators/vulnerabilities; retires when last update is **> 365 days** (`decay_ioc_confidence`) |
 | **Campaign Node Builder** | Creates `Campaign` nodes from ThreatActor → Malware → Indicator chains (`build_campaign_nodes`) |
-| **Co-occurrence Calibration** | Adjusts `INDICATES`/`EXPLOITS` edges with `source_id` in `misp_cooccurrence` / `misp_correlation` by MISP event size (`calibrate_cooccurrence_confidence`) |
+| **Co-occurrence Calibration** | Legacy: rescored `INDICATES`/`EXPLOITS` edges with `source_id` in `misp_cooccurrence` / `misp_correlation` by MISP event size (`calibrate_cooccurrence_confidence`). Since 2026-10 no such edges are written (links are report-scoped: same OTX pulse, `match_type='otx_pulse'`), so the job is a no-op on a fresh baseline |
 | **Vulnerability↔CVE bridge** | Idempotent `REFERS_TO` between `Vulnerability` and `CVE` (`bridge_vulnerability_cve`) |
 
 ### 4. ResilMesh Interoperability
@@ -626,6 +626,7 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 |--------|------|------------------|
 | **AlienVault OTX** | Threat Intelligence | Real-time indicator pulses, malware hashes, IPs, domains |
 | **CISA KEV** | Vulnerabilities | Known exploited vulnerabilities catalog (US government) |
+| **CISA ICS Advisories** | Vulnerabilities | ICS-CERT / ICS-medical advisories (CSAF 2.0, `cisagov/CSAF`) with CISA-asserted critical-infrastructure sectors → `energy` / `healthcare` / `finance` zones; flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off), isolated daily + baseline tasks |
 | **MITRE ATT&CK** | Tactics & Techniques | Enterprise attack matrices, threat actor profiles |
 | **NVD** | Vulnerabilities | CVE database, severity scores (CVSS) |
 | **MISP** | Threat Sharing | Hub — all collectors land here first (your deployment) |
@@ -693,7 +694,7 @@ EdgeGuard/
 │   ├── neo4j_client.py         # Graph MERGE logic, CVSS sub-nodes, relationship methods
 │   ├── run_misp_to_neo4j.py    # MISP → Neo4j (attribute parse; Airflow path). Optional STIX for CLI/export
 │   ├── run_pipeline.py         # CLI: run collectors → MISP; optional direct Neo4j path
-│   ├── build_relationships.py  # Graph edges: EMPLOYS_TECHNIQUE (actor→tech), IMPLEMENTS_TECHNIQUE (malware/tool→tech), co-occurrence INDICATES, …
+│   ├── build_relationships.py  # Graph edges: EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE (mitre_explicit + otx_pulse), exact ATTRIBUTED_TO, cve_tag EXPLOITS, family-match INDICATES, sector edges — no event co-occurrence
 │   ├── enrichment_jobs.py      # IOC decay, Campaign nodes, Vulnerability-CVE bridge
 │   ├── query_api.py            # FastAPI REST API — sector-filtered queries (port 8000)
 │   ├── graphql_api.py          # GraphQL API — ISIM-compatible endpoint (port 4001)
@@ -894,6 +895,10 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_MITRE_CONDITIONAL_GET` | MITRE STIX bundle: send **`If-None-Match`** on scheduled runs; **HTTP 304** skips re-parse/re-push. Baseline always full download. | `true` |
 | `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` | **MISP→Neo4j sync** (`run_misp_to_neo4j`): max **parsed graph items** merged **per Python chunk** (limits Airflow worker **RAM** during Neo4j writes). **Not** the MISP **event index** page size (**500** per page in code) or the paginated **`restSearch`** fallback (500/page) — see [COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md). Default **`500`**. Lower (e.g. `250`) if **OOM** / **SIGKILL** after parse. **`0`** or **`all`** = **single pass** (high OOM risk). | `500` |
 | `EDGEGUARD_REL_BATCH_SIZE` | Max **relationship definitions** per **`create_misp_relationships_batch`** UNWIND round-trip (embedded + cross-item edges). Lower if Neo4j **transaction timeouts** on huge events. | `500` |
+| `EDGEGUARD_DEFAULT_TLP` | TLP level stamped as `tlp:<level>` on every MISP attribute and rehydrated as `n.tlp` (2026-10). A source that states its own level (OTX `pulse_tlp`) overrides it per item. | `white` |
+| `EDGEGUARD_ENABLE_MITRE_ICS` | Also ingest **MITRE ATT&CK for ICS** (97 techniques, 12 tactics, groups, malware) in the MITRE collector; items carry `attack_domain` so ICS techniques link only to ICS tactics. Failure of the ICS fetch never affects the Enterprise ingest. | `false` |
+| `EDGEGUARD_ENABLE_CISA_ICS` | Enable the **CISA ICS advisories** collector (`cisa_ics`, daily DAG task): CVEs with the advisory's critical-infrastructure sectors (Energy → `energy`, Healthcare and Public Health → `healthcare`, Financial Services → `finance`). Flag-guarded, isolated, sanity floor + alerts. | `false` |
+| `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE` | Post-sync job that merges non-MITRE `ThreatActor` nodes whose name is an alias of exactly one MITRE-sourced actor (e.g. `reddelta` → `mustang panda`). `false` = report candidates only. | `true` |
 | `EDGEGUARD_DEBUG_GC` | If set to a **truthy** value, run **`gc.collect()`** after each Neo4j **node** merge chunk (diagnostics only; can **increase** peak RSS on tight workers — leave unset in production unless profiling). | *(unset)* |
 | `EDGEGUARD_INCREMENTAL_LIMIT` | Max items **per source** for regular cron runs. `0` = unlimited. | `200` |
 | `EDGEGUARD_MAX_ENTRIES` | Hard global override — overrides `INCREMENTAL_LIMIT` when non-zero. Leave at `0` to use per-mode defaults. | `0` |
@@ -1201,7 +1206,7 @@ EdgeGuard v2026.6.11 is **production-test ready**. Full pipeline validated on Do
 - **STIX 2.1 Pipeline**: Primary conversion path with direct MISP fallback
 - **Baseline + Incremental Modes**: One-time deep historical load and scheduled 2-3 day incremental updates; checkpoint file locking for concurrent Airflow workers
 - **6 primary Airflow DAGs** in `edgeguard_pipeline.py` (+ optional metrics DAGs); UI on port **8082** (intentional vs Temporal); sync conflict guard between baseline and incremental
-- **Post-Sync Enrichment**: IOC confidence decay, Campaign node materialisation (with cleanup for retired indicators), Vulnerability↔CVE bridge, co-occurrence confidence calibration
+- **Post-Sync Enrichment**: IOC confidence decay, Campaign node materialisation (with cleanup for retired indicators), Vulnerability↔CVE bridge, actor alias de-duplication (2026-10), legacy co-occurrence calibration
 - **Multi-Zone Sector Filtering**: Healthcare, Energy, Finance, Global — ~150 weighted keywords with negative exclusions, zone validation whitelist in Sector node creation
 - **GraphQL API** (port 4001): Strawberry/FastAPI with CORS; all node types queryable including Tool; 14 enrichment fields resolved; GraphiQL opt-in via `EDGEGUARD_GRAPHQL_PLAYGROUND=true`
 - **FastAPI REST API** (port 8000): Sector-filtered, rate-limited, authenticated endpoints; `/graph/explore` with 4 views (Malware, Actors, Indicators, CVEs)
