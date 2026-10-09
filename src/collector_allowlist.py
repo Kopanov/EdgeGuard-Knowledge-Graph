@@ -30,6 +30,8 @@ COLLECT_SOURCES_CANONICAL: FrozenSet[str] = frozenset(
         "cybercure",
         "feodo",
         "sslbl",
+        # CISA ICS advisories (2026-10) — flag-guarded by EDGEGUARD_ENABLE_CISA_ICS
+        "cisa_ics",
     }
 )
 

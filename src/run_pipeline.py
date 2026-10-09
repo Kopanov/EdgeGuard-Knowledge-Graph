@@ -24,6 +24,7 @@ from collector_allowlist import collect_sources_allowlist_from_env, is_collector
 from collector_failure_alerts import report_collector_failure
 from collectors.abuseipdb_collector import AbuseIPDBCollector
 from collectors.cisa_collector import CISACollector
+from collectors.cisa_ics_collector import CISAICSCollector
 from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
 from collectors.global_feed_collector import CyberCureCollector, ThreatFoxCollector, URLhausCollector
 from collectors.misp_collector import MISPCollector
@@ -84,6 +85,7 @@ SOURCE_ID_MAP = {
     "nvd": "nvd",
     "cisa_kev": "cisa",
     "cisa": "cisa",
+    "cisa_ics": "cisa_ics",
     "mitre_attck": "mitre_attck",
     "mitre": "mitre_attck",
     "virustotal": "virustotal",
@@ -144,6 +146,8 @@ class EdgeGuardPipeline:
             "otx": OTXCollector(misp_writer=self.misp_writer),
             "nvd": NVDCollector(misp_writer=self.misp_writer),
             "cisa": CISACollector(misp_writer=self.misp_writer),
+            # 2026-10: CISA ICS advisories (flag-guarded; collect() skips unless EDGEGUARD_ENABLE_CISA_ICS)
+            "cisa_ics": CISAICSCollector(misp_writer=self.misp_writer),
             "mitre": MITRECollector(misp_writer=self.misp_writer),
             "virustotal": VTCollector(misp_writer=self.misp_writer),
             # Legacy/enrichment VT collector (separate from vt_collector.VTCollector; same allowlist name as Airflow)

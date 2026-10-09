@@ -97,6 +97,7 @@ def test_collector_emitted_tags_match_allowlist():
     collector_emitted_tags = {
         "nvd",  # nvd_collector
         "cisa_kev",  # cisa_collector (via SOURCE_TAGS["cisa"])
+        "cisa_ics",  # cisa_ics_collector (SOURCE_ID) — flag-guarded, 2026-10
         "mitre_attck",  # mitre_collector (via SOURCE_TAGS["mitre"])
         "virustotal",  # virustotal_collector + vt_collector
         "abuseipdb",  # abuseipdb_collector

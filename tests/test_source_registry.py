@@ -282,9 +282,13 @@ def test_reliable_first_seen_alias_coverage_extension_is_documented():
     """
     from source_truthful_timestamps import _RELIABLE_FIRST_SEEN_SOURCES
 
+    # 2026-10: the CISA ICS advisories collector (canonical ``cisa_ics`` +
+    # aliases) is a reliable first-seen source — CISA's own
+    # initial_release_date / current_release_date.
+    expected_new_keys = {"sslbl", "cisa_ics", "cisa-ics", "ics_advisories"}
     new_keys = _RELIABLE_FIRST_SEEN_SOURCES - _LEGACY_RELIABLE_FIRST_SEEN_SOURCES
-    assert new_keys == {"sslbl"}, (
-        f"Refactor alias-coverage extension drift: expected exactly {{'sslbl'}}, got {new_keys}. "
+    assert new_keys == expected_new_keys, (
+        f"Refactor alias-coverage extension drift: expected exactly {expected_new_keys}, got {new_keys}. "
         "If you added a new reliable_first_seen=True source to the registry, update this test."
     )
 
@@ -742,6 +746,9 @@ def test_audit2_to_cli_sources_dict_preserves_legacy_iteration_order():
         "sslbl",
         "threatfox",
         "misp",
+        # Sources added after the legacy listing are appended in registry
+        # order (see ``_LEGACY_CLI_LISTING_ORDER``): CISA ICS advisories (2026-10).
+        "cisa_ics",
     )
     assert tuple(DEFAULT_SOURCES.keys()) == expected_order, (
         f"DEFAULT_SOURCES iteration order drift: expected {expected_order}, got {tuple(DEFAULT_SOURCES.keys())}"
