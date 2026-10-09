@@ -233,6 +233,12 @@ OOM. Either:
 3. **Snapshot first.** Take a `neo4j-admin database dump` and a MISP export of the
    old instance before `edgeguard clear` — it is the "before" record for the
    quality numbers and the graph the v0.10 model was benchmarked on.
+4. **One command for the re-feed.** `edgeguard fresh-baseline --days 730` wipes
+   Neo4j + MISP (typed confirmation, blast-radius display, backup-timestamp gate)
+   and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
+   chain then runs `build_relationships` and the enrichment jobs itself. When it
+   finishes, run `python scripts/verify_fresh_baseline.py` — every mandatory
+   check must pass before the instance is handed to the partners or the demo.
 
 ### [6] PR-N32 unicode-bypass audit
 
