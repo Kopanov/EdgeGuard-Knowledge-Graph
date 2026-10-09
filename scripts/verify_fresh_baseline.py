@@ -167,11 +167,11 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
     )
     median = r.get("median_actors")
     rep.add("attributed_to_fanout_plausible", (median is None) or (median <= 10), r)
-    r = _post(
+    breakdown = _post(
         "MATCH ()-[r:ATTRIBUTED_TO|INDICATES|EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|EXPLOITS]->() "
         "RETURN type(r) AS rel, r.match_type AS match_type, count(*) AS c ORDER BY rel, c DESC"
     )
-    rep.add("evidence_labels_breakdown", None, r)
+    rep.add("evidence_labels_breakdown", None, breakdown)
 
     # 4. ResilMesh CVE list properties on the node (NVD-sourced CVEs only).
     r = _one(
