@@ -455,12 +455,14 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
             # 2026-10: the same entity listed in several OTX pulses of one event keeps
             # every report id, so report-scoped linking links it to all of them
             # (``_build_cross_item_relationships`` reads ``pulse_id`` + ``report_ids``).
-            dup_pid = item.get("pulse_id")
             kept = _kept_by_key.get(key)
-            if dup_pid and kept is not None and dup_pid != kept.get("pulse_id"):
-                extra = kept.setdefault("report_ids", [])
-                if dup_pid not in extra:
-                    extra.append(dup_pid)
+            if kept is not None:
+                # the duplicate's own pulse id plus any report ids it already carried
+                for rid in [item.get("pulse_id")] + list(item.get("report_ids") or []):
+                    if rid and rid != kept.get("pulse_id"):
+                        extra = kept.setdefault("report_ids", [])
+                        if rid not in extra:
+                            extra.append(rid)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -2856,6 +2858,7 @@ class MISPToNeo4jSync:
             uses_techniques = []
             reported_techniques: List[str] = []
             actor_pulse_id = ""
+            actor_report_ids: List[str] = []
             actor_description = raw_comment
             if "MITRE_USES_TECHNIQUES:" in raw_comment:
                 try:
@@ -2873,6 +2876,7 @@ class MISPToNeo4jSync:
                         # written by MISPWriter._technique_meta.
                         reported_techniques = [str(x) for x in (parsed.get("rt") or [])]
                         actor_pulse_id = str(parsed.get("pid") or "").strip()
+                        actor_report_ids = [str(x).strip() for x in (parsed.get("rids") or []) if str(x).strip()]
                     elif isinstance(parsed, list):
                         uses_techniques = parsed
                 except (ValueError, IndexError):
@@ -2918,6 +2922,7 @@ class MISPToNeo4jSync:
                 "uses_techniques": uses_techniques,
                 "reported_techniques": reported_techniques,
                 "pulse_id": actor_pulse_id,
+                "report_ids": actor_report_ids,
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
@@ -2949,6 +2954,7 @@ class MISPToNeo4jSync:
             uses_techniques: List[str] = []
             reported_techniques: List[str] = []
             malware_pulse_id = ""
+            malware_report_ids: List[str] = []
             description = raw_comment
             if raw_comment.strip().startswith("MITRE_USES_TECHNIQUES:"):
                 try:
@@ -2961,6 +2967,7 @@ class MISPToNeo4jSync:
                     # 2026-10: pulse-level ids ("rt") + pulse id ("pid"), see MISPWriter._technique_meta.
                     reported_techniques = [str(x) for x in (meta.get("rt") or [])]
                     malware_pulse_id = str(meta.get("pid") or "").strip()
+                    malware_report_ids = [str(x).strip() for x in (meta.get("rids") or []) if str(x).strip()]
                     description = tail or description
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
@@ -3017,6 +3024,7 @@ class MISPToNeo4jSync:
                 "uses_techniques": uses_techniques,
                 "reported_techniques": reported_techniques,
                 "pulse_id": malware_pulse_id,
+                "report_ids": malware_report_ids,
                 "relationships": relationships,
             }
             return item, relationships
@@ -3324,6 +3332,10 @@ class MISPToNeo4jSync:
                 # ``neo4j_client.merge_indicators_batch:~L2169`` which
                 # silently received None for every OTX-sourced row.
                 item["pulse_id"] = otx_meta.get("pulse_id", "")
+                # 2026-10: other pulses of the same run that listed the IOC (OTX_META.report_ids).
+                rids = [str(x).strip() for x in (otx_meta.get("report_ids") or []) if str(x).strip()]
+                if rids:
+                    item["report_ids"] = rids
                 item["indicator_role"] = otx_meta.get("indicator_role", "")
                 item["is_active"] = otx_meta.get("is_active", True)
 

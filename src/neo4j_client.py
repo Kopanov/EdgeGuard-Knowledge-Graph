@@ -4154,6 +4154,7 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "match_type": rel.get("match_type"),
                             }
                         )
                     else:
@@ -4168,6 +4169,7 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "match_type": rel.get("match_type"),
                             }
                         )
                     else:
@@ -4184,6 +4186,7 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "match_type": rel.get("match_type"),
                             }
                         )
                     else:
@@ -4205,6 +4208,7 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "match_type": rel.get("match_type"),
                             }
                         )
                     else:
@@ -4268,6 +4272,7 @@ class Neo4jClient:
                                 "source_id": source_id,
                                 "confidence": conf,
                                 "misp_event_id": mev,
+                                "match_type": rel.get("match_type"),
                                 "sector_uuid": sec_uuid,
                             }
                         )
@@ -4297,6 +4302,7 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            "match_type": rel.get("match_type"),
                             "sector_uuid": sec_uuid,
                         }
                     )
@@ -4316,6 +4322,7 @@ class Neo4jClient:
                             "source_id": source_id,
                             "confidence": conf,
                             "misp_event_id": mev,
+                            "match_type": rel.get("match_type"),
                         }
                     )
                 else:

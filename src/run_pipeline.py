@@ -135,6 +135,21 @@ def get_source_id(item, raise_on_unknown: bool = False):
     return "unknown"
 
 
+# Source id for STIX objects the in-process loader imports. ``x_edgeguard_source`` is
+# stamped per object by ``sync_misp_to_neo4j_via_stix`` (the MISP event's source id);
+# a bundle that arrives without it (external STIX) is attributed to ``stix_import`` —
+# never to a real feed and never to the string ``"unknown"``. (Bugbot on PR #134.)
+STIX_IMPORT_SOURCE_ID = "stix_import"
+# Evidence label for relationships that come from an explicit STIX relationship object
+# in an imported bundle (legacy in-process path only; see
+# docs/RESILMESH_INTEROPERABILITY.md § 3.2.2).
+STIX_RELATIONSHIP_MATCH_TYPE = "stix_relationship"
+
+
+def _stix_object_source(obj: dict) -> str:
+    return str(obj.get("x_edgeguard_source") or STIX_IMPORT_SOURCE_ID)
+
+
 class EdgeGuardPipeline:
     def __init__(self):
         self.neo4j = Neo4jClient()
@@ -440,7 +455,7 @@ class EdgeGuardPipeline:
                                 "value": indicator_data.get("value", ""),
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
-                                "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                                "source": [_stix_object_source(obj)],  # Source as array (like zone)
                                 # PR-N14 Fix #4 (2026-04-21 pre-baseline audit): pass
                                 # None through when STIX has no ``created`` / ``modified``
                                 # — do NOT substitute wall-clock NOW. The prior
@@ -453,7 +468,7 @@ class EdgeGuardPipeline:
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
-                            source_id=obj.get("x_edgeguard_source", "unknown"),
+                            source_id=_stix_object_source(obj),
                         )
                         if ok:
                             stats["indicators"] += 1
@@ -474,7 +489,7 @@ class EdgeGuardPipeline:
                                 "attack_vector": "UNKNOWN",
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
-                                "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                                "source": [_stix_object_source(obj)],  # Source as array (like zone)
                                 # PR-N14 Fix #4: honest-NULL on STIX re-import — see
                                 # Indicator block above for rationale.
                                 "first_seen": obj.get("created") or None,
@@ -482,7 +497,7 @@ class EdgeGuardPipeline:
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
-                            source_id=obj.get("x_edgeguard_source", "unknown"),
+                            source_id=_stix_object_source(obj),
                         )
                         if ok:
                             stats["vulnerabilities"] += 1
@@ -496,10 +511,10 @@ class EdgeGuardPipeline:
                             "description": obj.get("description", ""),
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.7,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     if ok:
                         stats["actors"] += 1
@@ -514,10 +529,10 @@ class EdgeGuardPipeline:
                             "description": obj.get("description", ""),
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.7,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     if ok:
                         stats["malware"] += 1
@@ -537,10 +552,10 @@ class EdgeGuardPipeline:
                             "tool_types": obj.get("labels", []),
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],
+                            "source": [_stix_object_source(obj)],
                             "confidence_score": 0.7,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     stats.setdefault("tools", 0)
                     stats["tools"] += 1
@@ -563,10 +578,10 @@ class EdgeGuardPipeline:
                             "platforms": [],
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.8,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     stats["techniques"] += 1
 
@@ -586,10 +601,10 @@ class EdgeGuardPipeline:
                             "description": obj.get("description", ""),
                             "zone": ["global"],
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],
+                            "source": [_stix_object_source(obj)],
                             "confidence_score": 1.0,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     stats.setdefault("tactics", 0)
                     stats["tactics"] += 1
@@ -606,7 +621,7 @@ class EdgeGuardPipeline:
                                 "value": value,
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
-                                "source": [obj.get("x_edgeguard_source", "unknown")],
+                                "source": [_stix_object_source(obj)],
                                 # PR-N14 Fix #4: STIX observables (IPv4 / domain /
                                 # URL / …) have no native ``created`` / ``modified``
                                 # properties. Pass None instead of wall-clock NOW —
@@ -619,7 +634,7 @@ class EdgeGuardPipeline:
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
-                            source_id=obj.get("x_edgeguard_source", "unknown"),
+                            source_id=_stix_object_source(obj),
                         )
                         stats["observables"] += 1
 
@@ -639,7 +654,7 @@ class EdgeGuardPipeline:
                     if rel_type == "indicates":
                         if src["type"] == "indicator" and tgt["type"] == "malware":
                             self.neo4j.create_indicator_malware_relationship(
-                                src["value"], tgt["name"], source_id=obj.get("x_edgeguard_source", "unknown")
+                                src["value"], tgt["name"], source_id=_stix_object_source(obj)
                             )
                             stats["relationships_indicates"] += 1
 
@@ -647,7 +662,10 @@ class EdgeGuardPipeline:
                     elif rel_type == "attributed-to":
                         if src["type"] == "malware" and tgt["type"] == "actor":
                             self.neo4j.create_malware_actor_relationship(
-                                src["name"], tgt["name"], source_id=obj.get("x_edgeguard_source", "unknown")
+                                src["name"],
+                                tgt["name"],
+                                source_id=_stix_object_source(obj),
+                                match_type=STIX_RELATIONSHIP_MATCH_TYPE,
                             )
                             stats["relationships_attributed_to"] += 1
 

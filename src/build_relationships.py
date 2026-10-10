@@ -812,6 +812,8 @@ def build_relationships():
             "MERGE (i)-[r:TARGETS]->(sec) "
             'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
+            # 2026-10 (Bugbot on PR #134): edges the sync created before this step get the label too
+            '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
             # PR-N26 (cloud-Neo4j audit 2026-04-23): propagate the indicator's
             # MISP event ids onto the TARGETS edge. The zone tag itself comes
@@ -857,6 +859,8 @@ def build_relationships():
             "MERGE (v)-[r:AFFECTS]->(sec) "
             'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
+            # 2026-10 (Bugbot on PR #134): edges the sync created before this step get the label too
+            '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
             # PR-N26 (cloud-Neo4j audit 2026-04-23): symmetric with Q7a — the
             # zone tag on Vulnerability/CVE comes from MISP attribute parsing,

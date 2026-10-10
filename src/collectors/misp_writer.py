@@ -229,6 +229,9 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
       ``pid`` — ``pulse_id`` (2026-10): the OTX pulse the entity came from, so the
                 MISP→Neo4j sync can link items of the same report and the node can
                 keep ``pulse_ids`` provenance.
+      ``rids`` — ``report_ids`` (2026-10): the other pulses of the same collector run
+                that named the entity (folded in by the collector's dedup), so the sync
+                pairs it with the IOCs of every one of them, not only the first.
     Lists are capped so the comment stays within MISP field limits.
     """
     meta: Dict[str, Any] = {}
@@ -241,6 +244,9 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     pulse_id = item.get("pulse_id")
     if pulse_id:
         meta["pid"] = str(pulse_id)[:64]
+    report_ids = [str(x)[:64] for x in (item.get("report_ids") or []) if x]
+    if report_ids:
+        meta["rids"] = report_ids[:32]
     return meta
 
 
@@ -1072,6 +1078,9 @@ class MISPWriter:
                 # ``otx_collector.py:462,479-488`` and silently dropped
                 # on the MISP round-trip.
                 "pulse_id": indicator.get("pulse_id", ""),
+                # 2026-10: other pulses of the same run that listed this IOC (collector
+                # dedup) — the sync pairs the IOC with the malware/actors of all of them.
+                "report_ids": [str(x)[:64] for x in (indicator.get("report_ids") or []) if x][:32],
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
             }
