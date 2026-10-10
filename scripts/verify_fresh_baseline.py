@@ -280,6 +280,15 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         mandatory=require_cisa_ics,
     )
 
+    # 10b. Sector coverage (informational; the "measure" input for demo day): how many nodes of
+    #      each EdgeGuard label are linked to each Sector. 2026-10 sector-focus build adds
+    #      ThreatActor / Malware → Sector TARGETS (Q7c / Q7d).
+    cov = _post(
+        "MATCH (n)-[r:TARGETS|AFFECTS]->(s:Sector) WHERE s.name <> 'global' "
+        "RETURN s.name AS sector, labels(n)[0] AS label, count(DISTINCT n) AS nodes ORDER BY sector, label"
+    )
+    rep.add("sector_coverage", None, cov)
+
     # 11. ResilMesh-facing schema unchanged.
     types = [x["t"] for x in _post("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN t")]
     unexpected = sorted(t for t in types if t not in EDGEGUARD_REL_TYPES)

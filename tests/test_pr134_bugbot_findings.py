@@ -296,7 +296,9 @@ class TestBatchRowsCarryMatchType:
             text,
             re.S,
         )
-        assert len(blocks) == 2, "Q7a (TARGETS) and Q7b (AFFECTS)"
+        assert len(blocks) == 4, (
+            "Q7a (TARGETS), Q7b (AFFECTS), Q7c / Q7d (actor / malware TARGETS, 2026-10 sector build)"
+        )
         for b in blocks:
             assert 'r.match_type = coalesce(r.match_type, "zone_classification")' in b, b
 

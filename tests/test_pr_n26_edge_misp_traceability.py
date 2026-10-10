@@ -58,6 +58,7 @@ specific SET-clause shape this PR introduces.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -69,6 +70,16 @@ MIGRATIONS = REPO_ROOT / "migrations"
 # ===========================================================================
 # Helper: locate a string-literal assignment and return its concatenated value
 # ===========================================================================
+
+
+def _link(src: str, step: str, after: int = 0) -> int:
+    """Position of the ``[LINK] <step>/<total>`` banner in ``src`` (``-1`` if absent).
+
+    The total is not pinned: adding or removing a step renumbers every banner, which used to
+    break ~30 assertions across these files for no behavioural reason (2026-10 checks audit #4).
+    """
+    m = re.search(rf"\[LINK\] {re.escape(step)}/\d+", src[after:])
+    return after + m.start() if m else -1
 
 
 def _string_literal_value(src_path: Path, var_name: str) -> str:
@@ -152,7 +163,7 @@ class TestBuildRelationshipsHasMispEventIdsSetClause:
         assert "_q4_outer" not in assigned, "Q4 outer query must stay removed"
         text = _BUILD_RELATIONSHIPS.read_text()
         assert "eid IN i.misp_event_ids" not in text, "no event-id co-occurrence join may remain"
-        assert "[LINK] 5b/13" in text and "[LINK] 6b/13" in text, "5b / 6b must have replaced Q4"
+        assert _link(text, "5b") >= 0 and _link(text, "6b") >= 0, "5b / 6b must have replaced Q4"
 
     def test_q7a_targets_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q7a_inner")
