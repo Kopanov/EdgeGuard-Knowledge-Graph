@@ -188,7 +188,10 @@ class TestEmptyGraphRecentTimestampPassesThrough:
         with (
             patch("baseline_clean.probe_baseline_state", return_value=empty),
             patch("edgeguard._trigger_baseline_dag", return_value=(0, "run-1")),
-            caplog.at_level(logging.INFO, logger="edgeguard"),
+            # Root-level capture on purpose: the negative assertion below is about a line
+            # logged by ``baseline_clean``, not ``edgeguard``. Scoped to "edgeguard" it could
+            # never see that line and was vacuous (found 2026-10-10).
+            caplog.at_level(logging.INFO),
         ):
             ret = edgeguard.cmd_fresh_baseline(_make_args())
 
