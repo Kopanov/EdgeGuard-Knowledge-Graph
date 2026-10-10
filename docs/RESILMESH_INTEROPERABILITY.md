@@ -104,6 +104,7 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | `TARGETS` | `Indicator` → `Sector`; **`ThreatActor` → `Sector`, `Malware` → `Sector` (2026-10)** | From `zone[]` on the node — indicators: written by the sync (0.5, `source_id='misp'`) and by `build_relationships.py` Q7a (1.0); actors and malware: Q7c / Q7d (1.0), `global` skipped so an actor never "targets global". `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
 | `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes — sync (0.5, `source_id='misp'`) and `build_relationships.py` Q7b (1.0); `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |
+| `SUBTECHNIQUE_OF` | `Technique` → `Technique` | **2026-10 (R6).** Sub-technique → parent technique, from MITRE's dotted id (`T1021.006` → `T1021`; the same claim as the STIX `subtechnique-of` relationship). `build_relationships.py` Q1b, `match_type='mitre_explicit'`, 1.0, same `attack_domain` on both ends. 493 edges on the September graph. |
 
 #### ResilMesh-compatible relationships
 
@@ -193,7 +194,7 @@ by evidence without renaming anything — the ResilMesh and STIX-derived relatio
 
 | `r.match_type` | Meaning | Confidence | Produced by |
 |---|---|---|---|
-| `mitre_explicit` | MITRE ATT&CK's own STIX `uses` relationship | 0.95 | `build_relationships.py` Q5/Q6/Q10 from `uses_techniques` (MITRE collector only) |
+| `mitre_explicit` | MITRE ATT&CK's own assertion: the STIX `uses` relationship, or the sub-technique hierarchy encoded in MITRE's dotted ids (`T1021.006` → `T1021`, equivalent to its STIX `subtechnique-of`) | 0.95 (`uses`) / 1.0 (`SUBTECHNIQUE_OF`) | `build_relationships.py` Q5/Q6/Q10 from `uses_techniques` (MITRE collector only); Q1b `SUBTECHNIQUE_OF` |
 | `otx_pulse` | The entity was named in the same AlienVault OTX pulse (one report) | 0.6 | MISP→Neo4j sync (`INDICATES`, `ATTRIBUTED_TO`) and `build_relationships.py` Q5b/Q6b from `reported_techniques` |
 | `exact` | The malware's own `attributed_to` claim equals an actor name/alias | 1.0 | `build_relationships.py` Q2 |
 | `malware_family` | The indicator's source-asserted family equals a malware name/alias | 0.8 | `build_relationships.py` Q9 |

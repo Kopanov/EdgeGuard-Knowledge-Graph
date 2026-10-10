@@ -654,7 +654,7 @@ All node types are available: `CVE`, `Vulnerability`, `Indicator`, `ThreatActor`
 
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Campaign`
-- Relationships: `INDICATES`, `EXPLOITS`, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
+- Relationships: `INDICATES`, `EXPLOITS`, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `SUBTECHNIQUE_OF` *(sub-technique → parent Technique, 2026-10)*, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
 - Edges carry `confidence_score` plus provenance fields — `sources[]`/`imported_at` on sync-created edges, `match_type` on relationship-builder edges
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 

@@ -432,8 +432,8 @@ def test_build_relationships_summary_denominator_matches_query_count():
     src = inspect.getsource(br.build_relationships)
 
     call_count = src.count("_safe_run_batched(")
-    assert call_count == 15, (
-        f"expected 15 _safe_run_batched calls in build_relationships() (1, 2, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10); "
+    assert call_count == 16, (
+        f"expected 16 _safe_run_batched calls in build_relationships() (1, 1b, 2, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10); "
         f"got {call_count}. If you added/removed a link query, also update the denominators below."
     )
     assert f"failures=%d/{call_count}" in src, (
