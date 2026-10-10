@@ -5,8 +5,8 @@ already-known family still get their edges.
 Why: the sync pairs an IOC with the malware/actor named in the same pulse only when both are
 in the same run. After the baseline a known family is a cross-event duplicate in MISP (PR-F7
 dedupe) and is never re-pushed, so a later pulse's IOCs had no family in their event and got no
-INDICATES / ATTRIBUTED_TO. Path: collector ``pulse_malware_families`` / ``pulse_adversaries`` →
-``OTX_META.mf`` / ``.adv`` → parser → ``Indicator.pulse_malware_families`` / ``.pulse_adversaries``
+INDICATES / ATTRIBUTED_TO. Path: collector ``pulse_malware_families`` / ``pulse_malware_actor_pairs`` →
+``OTX_META.mf`` / ``.pa`` → parser → ``Indicator.pulse_malware_families`` / ``.pulse_malware_actor_pairs``
 → build_relationships Q9b (INDICATES) and Q2d (ATTRIBUTED_TO), ``otx_pulse`` 0.6, ON CREATE only.
 """
 
@@ -101,7 +101,12 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
         assert ioc["pulse_malware_families"] == ["Emotet", "TrickBot"], (
             "placeholders and case-duplicates dropped, order kept"
         )
-        assert ioc["pulse_adversaries"] == ["apt28", "fancy bear"], "adversary goes through actor hygiene"
+        assert ioc["pulse_malware_actor_pairs"] == [
+            "Emotet::apt28",
+            "Emotet::fancy bear",
+            "TrickBot::apt28",
+            "TrickBot::fancy bear",
+        ], "same-pulse family × adversary pairs; the adversary goes through actor hygiene"
         malware = next(i for i in items if i.get("type") == "malware" and i["name"] == "Emotet")
         assert "pulse_malware_families" not in malware, "lists live on indicators only"
 
@@ -115,12 +120,22 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
         shared = [i for i in items if i.get("value") == "203.0.113.5"]
         assert len(shared) == 1, "one item per IOC per run"
         assert shared[0]["pulse_malware_families"] == ["Emotet", "Mirai"]
-        assert shared[0]["pulse_adversaries"] == ["apt28", "lazarus group"]
+        assert shared[0]["pulse_malware_actor_pairs"] == [
+            "Emotet::apt28",
+            "Mirai::lazarus group",
+            "Emotet::lazarus group",
+        ], "pairs stay per pulse: p1 named (Emotet, apt28); p2 named (Mirai, Emotet) with lazarus"
+        assert "Mirai::apt28" not in shared[0]["pulse_malware_actor_pairs"], "no cross-pulse pairing (Bugbot on #145)"
         assert shared[0]["report_ids"] == ["p2"]
         other = next(i for i in items if i.get("value") == "198.51.100.9")
         assert other["pulse_malware_families"] == ["Mirai", "Emotet"], (
             "the second pulse's own order, untouched by the fold"
         )
+
+    def test_pair_encoder_is_same_pulse_only_and_capped(self):
+        assert oc._pulse_actor_pairs(["Emotet", "Mirai"], ["apt28"]) == ["Emotet::apt28", "Mirai::apt28"]
+        assert oc._pulse_actor_pairs(["Emotet"], []) == [] and oc._pulse_actor_pairs([], ["apt28"]) == []
+        assert len(oc._pulse_actor_pairs([f"f{i}" for i in range(20)], [f"a{i}" for i in range(5)])) == 50
 
     def test_helper_caps_and_filters(self):
         assert oc._pulse_family_names([f"fam{i}" for i in range(40)]) == [f"fam{i}" for i in range(20)]
@@ -149,20 +164,21 @@ class TestMispRoundTrip:
 
     def test_writer_emits_mf_and_adv_only_when_present(self):
         attr = _writer().create_attribute(
-            self._indicator(pulse_malware_families=["Emotet", "TrickBot"], pulse_adversaries=["apt28"])
+            self._indicator(pulse_malware_families=["Emotet", "TrickBot"], pulse_malware_actor_pairs=["Emotet::apt28"])
         )
         meta = json.loads(attr["comment"][len("OTX_META:") :])
-        assert meta["mf"] == ["Emotet", "TrickBot"] and meta["adv"] == ["apt28"]
+        assert meta["mf"] == ["Emotet", "TrickBot"] and meta["pa"] == ["Emotet::apt28"]
         attr2 = _writer().create_attribute(self._indicator())
         meta2 = json.loads(attr2["comment"][len("OTX_META:") :])
-        assert "mf" not in meta2 and "adv" not in meta2, "empty lists are pruned to keep the comment small"
+        assert "mf" not in meta2 and "pa" not in meta2, "empty lists are pruned to keep the comment small"
         attr3 = _writer().create_attribute(
             self._indicator(
-                pulse_malware_families=[f"f{i}" for i in range(40)], pulse_adversaries=[f"a{i}" for i in range(9)]
+                pulse_malware_families=[f"f{i}" for i in range(40)],
+                pulse_malware_actor_pairs=[f"f{i}::a{i}" for i in range(80)],
             )
         )
         meta3 = json.loads(attr3["comment"][len("OTX_META:") :])
-        assert len(meta3["mf"]) == 20 and len(meta3["adv"]) == 5
+        assert len(meta3["mf"]) == 20 and len(meta3["pa"]) == 50
 
     def test_otx_meta_is_written_for_every_pulse_indicator_not_only_those_with_attack_ids(self):
         """Pre-existing gap found here: OTX_META was emitted only when the pulse had attack_ids or
@@ -174,7 +190,9 @@ class TestMispRoundTrip:
 
     def test_parser_rehydrates_the_lists_on_the_indicator(self):
         syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
-        comment = 'OTX_META:{"pulse_id":"p1","mf":["Emotet"," TrickBot ",""],"adv":["apt28"]}'
+        comment = (
+            'OTX_META:{"pulse_id":"p1","mf":["Emotet"," TrickBot ",""],"pa":["Emotet::apt28","broken-no-separator"]}'
+        )
         attr = {
             "type": "ip-src",
             "value": "203.0.113.5",
@@ -184,9 +202,9 @@ class TestMispRoundTrip:
         }
         item, _ = syncer.parse_attribute(attr, _EVENT)
         assert item["pulse_malware_families"] == ["Emotet", "TrickBot"]
-        assert item["pulse_adversaries"] == ["apt28"]
+        assert item["pulse_malware_actor_pairs"] == ["Emotet::apt28"], "entries without the separator are dropped"
         item2, _ = syncer.parse_attribute({**attr, "comment": 'OTX_META:{"pulse_id":"p1"}'}, _EVENT)
-        assert "pulse_malware_families" not in item2 and "pulse_adversaries" not in item2
+        assert "pulse_malware_families" not in item2 and "pulse_malware_actor_pairs" not in item2
 
 
 # --------------------------------------------------------------------------- node write
@@ -211,7 +229,7 @@ class TestIndicatorBatchAccumulatesTheLists:
                     "tag": "alienvault_otx",
                     "zone": ["global"],
                     "pulse_malware_families": ["Emotet"],
-                    "pulse_adversaries": ["apt28"],
+                    "pulse_malware_actor_pairs": ["Emotet::apt28"],
                 }
             ],
             source_id="misp",
@@ -224,10 +242,12 @@ class TestIndicatorBatchAccumulatesTheLists:
                 if isinstance(v, list) and v and isinstance(v[0], dict) and "pulse_malware_families" in v[0]:
                     batch_rows = v
         assert batch_rows is not None, [list(c.kwargs) for c in session.run.call_args_list]
-        assert batch_rows[0]["pulse_malware_families"] == ["Emotet"] and batch_rows[0]["pulse_adversaries"] == ["apt28"]
+        assert batch_rows[0]["pulse_malware_families"] == ["Emotet"] and batch_rows[0]["pulse_malware_actor_pairs"] == [
+            "Emotet::apt28"
+        ]
         merged = "\n".join(cyphers)
         assert "n.pulse_malware_families = " in merged and "coalesce(item.pulse_malware_families, [])" in merged
-        assert "n.pulse_adversaries = " in merged and "coalesce(item.pulse_adversaries, [])" in merged
+        assert "n.pulse_malware_actor_pairs = " in merged and "coalesce(item.pulse_malware_actor_pairs, [])" in merged
         assert "coalesce(n.pulse_malware_families, [])" in merged, "accumulates across pulses, never overwrites"
 
 
@@ -250,9 +270,12 @@ class TestPulseScopedSteps:
 
     def test_q2d_pairs_malware_and_actor_from_the_indicator_lists(self):
         outer = _assigned_string("_q2d_outer")
-        assert "RETURN DISTINCT i.pulse_malware_families AS fams, i.pulse_adversaries AS advs" in outer
+        assert "UNWIND i.pulse_malware_actor_pairs AS pair RETURN DISTINCT pair" in outer, "one same-pulse pair per row"
         body = _assigned_string("_q2d_inner")
-        assert body.startswith("WITH $fams AS fams, $advs AS advs UNWIND fams AS fam UNWIND advs AS adv")
+        assert body.startswith('WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) = 2')
+        assert "UNWIND fams" not in body and "UNWIND advs" not in body, (
+            "no family × adversary cross product (Bugbot on #145)"
+        )
         assert "MATCH (m:Malware {name: fname}) MATCH (a:ThreatActor {name: aname})" in body
         assert "MERGE (m)-[r:ATTRIBUTED_TO]->(a)" in body
         assert 'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse"' in body

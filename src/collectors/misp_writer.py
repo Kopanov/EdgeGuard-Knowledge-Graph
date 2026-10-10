@@ -231,7 +231,7 @@ _META_COMMENT_BUDGET = 4000
 _META_SHRINK_LISTS = (
     "report_ids",
     "mf",
-    "adv",
+    "pa",
     "attack_ids",
     "targeted_countries",
     "otx_industries",
@@ -1116,7 +1116,7 @@ class MISPWriter:
                 "pulse_id",
                 "report_ids",
                 "pulse_malware_families",
-                "pulse_adversaries",
+                "pulse_malware_actor_pairs",
             )
         )
         has_tf_meta = indicator.get("malware_malpedia") or indicator.get("reference") or indicator.get("tags")
@@ -1166,11 +1166,12 @@ class MISPWriter:
                 # later pulse naming a known family still links its IOCs (the family attribute itself
                 # is a cross-event duplicate and is never re-pushed). Pruned below when empty.
                 "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
-                "adv": [str(x)[:128] for x in (indicator.get("pulse_adversaries") or []) if x][:5],
+                # ``pa``: "family::adversary" pairs of the SAME pulse (Bugbot on PR #145 — flat lists cross-linked).
+                "pa": [str(x)[:260] for x in (indicator.get("pulse_malware_actor_pairs") or []) if x][:50],
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
             }
-            for _k in ("mf", "adv"):
+            for _k in ("mf", "pa"):
                 if not otx_meta.get(_k):
                     otx_meta.pop(_k, None)
             comment = _fit_meta_comment("OTX_META:", otx_meta)

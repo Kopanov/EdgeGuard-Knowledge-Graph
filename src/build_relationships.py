@@ -644,19 +644,21 @@ def build_relationships():
             failures += 1
         query_pause()
 
-        # 2d. Malware → ThreatActor (ATTRIBUTED_TO) — pairs named by the same OTX pulse, carried
-        # on the pulse's indicators (see 9b for why). Report-scoped evidence: ``otx_pulse`` 0.6,
-        # ON CREATE only — an ``exact`` (Q2) or ``mitre_explicit`` attribution is never downgraded.
-        # Actor and malware names are canonical lower-case merge keys, so the lookups are indexed.
+        # 2d. Malware → ThreatActor (ATTRIBUTED_TO) — pairs named by the SAME OTX pulse, carried on the
+        # pulse's indicators as "family::adversary" strings (see 9b for why the indicator carries them).
+        # Bugbot on PR #145: two flat lists unioned across pulses on a shared IOC would cross-link a
+        # family from pulse A with an actor from pulse B — the exact cross-report attribution this work
+        # replaces; the pair encoding keeps the same-pulse guarantee. Report-scoped evidence:
+        # ``otx_pulse`` 0.6, ON CREATE only — an ``exact`` (Q2) or ``mitre_explicit`` attribution is never
+        # downgraded. Actor and malware names are canonical lower-case merge keys (indexed lookups).
         logger.info("[LINK] 2d/20 Malware → ThreatActor (named in the same OTX pulse)...")
         _q2d_outer = (
-            "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 "
-            "AND size(coalesce(i.pulse_adversaries, [])) > 0 "
-            "RETURN DISTINCT i.pulse_malware_families AS fams, i.pulse_adversaries AS advs"
+            "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_actor_pairs, [])) > 0 "
+            "UNWIND i.pulse_malware_actor_pairs AS pair RETURN DISTINCT pair"
         )
         _q2d_inner = (
-            "WITH $fams AS fams, $advs AS advs UNWIND fams AS fam UNWIND advs AS adv "
-            "WITH toLower(trim(fam)) AS fname, toLower(trim(adv)) AS aname "
+            'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) = 2 '
+            "WITH toLower(trim(parts[0])) AS fname, toLower(trim(parts[1])) AS aname "
             f'WHERE fname <> "" AND aname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             f"AND NOT aname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "MATCH (m:Malware {name: fname}) MATCH (a:ThreatActor {name: aname}) "

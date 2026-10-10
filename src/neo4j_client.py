@@ -3216,7 +3216,7 @@ class Neo4jClient:
                             batch_item[_enrich_field] = item[_enrich_field]
                     # 2026-10 (regular-update linking): families / adversaries of the pulse(s) that
                     # listed the IOC accumulate on the node (build_relationships Q9b / Q2d).
-                    for _list_field in ("pulse_malware_families", "pulse_adversaries"):
+                    for _list_field in ("pulse_malware_families", "pulse_malware_actor_pairs"):
                         _vals = [str(x) for x in (item.get(_list_field) or []) if x]
                         if _vals:
                             batch_item[_list_field] = _vals
@@ -3271,7 +3271,7 @@ class Neo4jClient:
                     n.domain = coalesce(item.domain, n.domain),
                     n.hostnames = coalesce(item.hostnames, n.hostnames),
                     n.pulse_malware_families = {_dedup_concat_clause("n.pulse_malware_families", "coalesce(item.pulse_malware_families, [])")},
-                    n.pulse_adversaries = {_dedup_concat_clause("n.pulse_adversaries", "coalesce(item.pulse_adversaries, [])")}
+                    n.pulse_malware_actor_pairs = {_dedup_concat_clause("n.pulse_malware_actor_pairs", "coalesce(item.pulse_malware_actor_pairs, [])")}
                 WITH n, item
                 MATCH (s:Source {{source_id: item.source_id}})
                 MERGE (n)-[r:SOURCED_FROM]->(s)

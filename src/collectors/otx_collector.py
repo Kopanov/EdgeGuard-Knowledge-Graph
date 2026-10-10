@@ -100,13 +100,28 @@ def _pulse_item_key(item: Dict[str, Any]) -> str:
 
 # 2026-10 (regular-update linking, audit follow-up): the families and adversaries a pulse
 # names travel on EVERY indicator of the pulse (``OTX_META.mf`` / ``.adv`` →
-# ``Indicator.pulse_malware_families`` / ``.pulse_adversaries``), so build_relationships
+# ``Indicator.pulse_malware_families`` / ``.pulse_malware_actor_pairs``), so build_relationships
 # Q9b / Q2d can link from the indicator side. The same-run pairing in the sync covers
 # the baseline only: after it, a known family is a cross-event duplicate in MISP and is
 # never re-pushed, so a later pulse's IOCs had no family in their event and got no edge.
 _MAX_PULSE_FAMILIES = 20
 _MAX_PULSE_ADVERSARIES = 5
+_MAX_PULSE_PAIRS = 50  # families × adversaries of ONE pulse, encoded "family::adversary"
 _PULSE_NAME_PLACEHOLDERS = frozenset({"", "unknown", "n/a", "none", "null", "-"})
+
+
+def _pulse_actor_pairs(families: List[str], adversaries: List[str]) -> List[str]:
+    """``"family::adversary"`` for every family × adversary named by ONE pulse. Encoding the pair
+    (Bugbot on PR #145) keeps the same-pulse guarantee when the lists of several pulses are unioned on a
+    shared IOC — two flat lists would cross-link a family from pulse A with an actor from pulse B."""
+    out: List[str] = []
+    for fam in families:
+        for adv in adversaries:
+            if fam and adv and "::" not in fam and "::" not in adv:
+                out.append(f"{fam}::{adv}")
+            if len(out) >= _MAX_PULSE_PAIRS:
+                return out
+    return out
 
 
 def _pulse_family_names(families: Any) -> List[str]:
@@ -155,7 +170,7 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     if extra_tids:
         kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids
     # Families / adversaries of every pulse that listed the IOC (copy-on-write as above).
-    for _list_key in ("pulse_malware_families", "pulse_adversaries"):
+    for _list_key in ("pulse_malware_families", "pulse_malware_actor_pairs"):
         _extra = [x for x in (dup.get(_list_key) or []) if x not in (kept.get(_list_key) or [])]
         if _extra:
             kept[_list_key] = list(kept.get(_list_key) or []) + _extra
@@ -555,6 +570,7 @@ class OTXCollector:
                 # 2026-10 (regular-update linking): computed once per pulse, stamped on each IOC below.
                 pulse_family_names = _pulse_family_names(pulse.get("malware_families", []))
                 pulse_actor_names = clean_actor_names(pulse_adversary or "")[:_MAX_PULSE_ADVERSARIES]
+                pulse_actor_pairs = _pulse_actor_pairs(pulse_family_names, pulse_actor_names)
                 pulse_meta = {
                     "pulse_id": pulse.get("id"),
                     "pulse_name": pulse.get("name", "")[:100],
@@ -585,7 +601,7 @@ class OTXCollector:
                         "is_active": ind.get("is_active", True),
                         # 2026-10 (regular-update linking): see _pulse_family_names.
                         "pulse_malware_families": list(pulse_family_names),
-                        "pulse_adversaries": list(pulse_actor_names),
+                        "pulse_malware_actor_pairs": list(pulse_actor_pairs),
                         **pulse_meta,
                     }
                     if indicator_first_seen:
