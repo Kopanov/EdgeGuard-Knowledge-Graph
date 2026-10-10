@@ -455,6 +455,6 @@ class TestSrcFilePathsReferencedInDocsExist:
 # the ``TestContainerNamesInDocsMatchCompose`` test above already catches the
 # same drift via compose-membership check, and the standalone hyphen test
 # false-positived on legitimate Docker IMAGE NAMES (which CAN use hyphens —
-# see ``image: edgeguard-airflow:3.2.0-python3.12`` in docker-compose.yml).
+# see ``image: edgeguard-airflow:3.3.2-python3.12`` in docker-compose.yml).
 # Image names ≠ container names; only container-name contexts (``docker logs``
 # / ``exec`` / ``stats`` / ``inspect``) pin against compose.

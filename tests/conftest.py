@@ -8,13 +8,6 @@ import sys
 
 import pytest
 
-# Standalone scripts moved from src/ — not pytest-compatible (call APIs directly)
-collect_ignore = [
-    "test_otx_collector.py",
-    "test_enrichment.py",
-    "test_resilmesh_schema.py",
-]
-
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 # Set before any test module imports `collectors.*` (config.py requires these at import).
