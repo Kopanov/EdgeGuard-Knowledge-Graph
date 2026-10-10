@@ -242,8 +242,11 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    The acceptance script checks for them after the run.
 2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS` and `EDGEGUARD_ENABLE_CISA_ICS`
    (both default `false`). Recommended: run the baseline with both **off**, run
-   `scripts/verify_fresh_baseline.py`, then enable them one at a time and re-run
-   the checks. `EDGEGUARD_DEFAULT_TLP` (`white`) and
+   `scripts/verify_fresh_baseline.py`, then enable them one at a time (step 6).
+   On the Compose deployment the flags live in `.env` and reach the `airflow`
+   container only through the `x-common-env` block of `docker-compose.yml` (added
+   October 2026 — a checkout older than that silently ignores them); after changing
+   `.env` run `docker compose up -d airflow`. `EDGEGUARD_DEFAULT_TLP` (`white`) and
    `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE` (`true`) keep their defaults.
 3. **Snapshot first.** Take a `neo4j-admin database dump` and a MISP export of the
    old instance before `edgeguard clear` — it is the "before" record for the
@@ -268,6 +271,14 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    [RESILMESH_INTEROPERABILITY.md § 3.2](RESILMESH_INTEROPERABILITY.md)) — and
    `TARGETS` now also runs from actors and malware to sectors, so the Cypher model's
    training set needs examples for them.
+6. **Enable the ICS sources one at a time** (each followed by the acceptance script
+   with `--require-cisa-ics` / `--require-ics`):
+   - `EDGEGUARD_ENABLE_CISA_ICS=true`, `docker compose up -d airflow`, then one **additive**
+     `edgeguard baseline --days 730` (same DAG, no wipe). The daily task alone would load
+     only the last `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS` (30) days of advisories.
+   - `EDGEGUARD_ENABLE_MITRE_ICS=true`, `docker compose up -d airflow`, then either the same
+     additive baseline or `MITRE_FORCE_REFETCH=true` for one daily run — the daily MITRE
+     task skips both bundles while the Enterprise bundle's ETag is unchanged.
 
 ### [6] PR-N32 unicode-bypass audit
 
@@ -421,7 +432,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-10 — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._
