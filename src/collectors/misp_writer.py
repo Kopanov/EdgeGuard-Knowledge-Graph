@@ -232,6 +232,9 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
       ``rids`` — ``report_ids`` (2026-10): the other pulses of the same collector run
                 that named the entity (folded in by the collector's dedup), so the sync
                 pairs it with the IOCs of every one of them, not only the first.
+      ``m`` / ``s`` — ``uses_malware`` / ``uses_tools`` (2026-10, R6): malware names and tool
+                ATT&CK ids MITRE's explicit ``uses`` relationships attach to a group, so the
+                sync can write ``USES_MALWARE`` / ``USES_TOOL`` (actors only).
     Lists are capped so the comment stays within MISP field limits.
     """
     meta: Dict[str, Any] = {}
@@ -247,6 +250,13 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     report_ids = [str(x)[:64] for x in (item.get("report_ids") or []) if x]
     if report_ids:
         meta["rids"] = report_ids[:32]
+    # 2026-10 (R6): MITRE group → software ``uses`` (actors only)
+    uses_malware = [str(x)[:128] for x in (item.get("uses_malware") or []) if x]
+    if uses_malware:
+        meta["m"] = uses_malware[:200]
+    uses_tools = [str(x)[:64] for x in (item.get("uses_tools") or []) if x]
+    if uses_tools:
+        meta["s"] = uses_tools[:200]
     return meta
 
 

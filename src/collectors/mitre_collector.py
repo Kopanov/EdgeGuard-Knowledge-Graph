@@ -432,6 +432,20 @@ class MITRECollector:
                                     "target_name": tgt["name"],
                                 }
                             )
+                        elif src["type"] == "actor" and tgt["type"] in ("malware", "tool"):
+                            # 2026-10 (R6): group → software ``uses`` — carried as uses_malware /
+                            # uses_tools on the actor item → USES_MALWARE / USES_TOOL edges.
+                            relationships.append(
+                                {
+                                    "type": "uses_software",
+                                    "attack_domain": domain,
+                                    "source_type": "actor",
+                                    "source_name": src["name"],
+                                    "target_type": tgt["type"],
+                                    "target_mitre_id": tgt.get("mitre_id", ""),
+                                    "target_name": tgt["name"],
+                                }
+                            )
                     elif rel_type == "subtechnique-of":
                         if src["type"] == "technique" and tgt["type"] == "technique":
                             relationships.append(
@@ -483,6 +497,8 @@ class MITRECollector:
         _actor_uses: dict = {}
         _malware_uses: dict = {}
         _tool_uses: dict = {}
+        _actor_uses_malware: dict = {}  # actor name → [malware names]   (2026-10 R6)
+        _actor_uses_tools: dict = {}  # actor name → [tool mitre ids]   (2026-10 R6)
         for rel in relationships:
             if rel["type"] == "uses" and rel.get("target_mitre_id"):
                 if rel["source_type"] == "actor":
@@ -495,6 +511,12 @@ class MITRECollector:
                 if name not in bucket:
                     bucket[name] = []
                 bucket[name].append(rel["target_mitre_id"])
+            elif rel["type"] == "uses_software":
+                name = rel["source_name"]
+                if rel["target_type"] == "malware":
+                    _actor_uses_malware.setdefault(name, []).append(rel["target_name"])
+                else:
+                    _actor_uses_tools.setdefault(name, []).append(rel.get("target_mitre_id") or rel["target_name"])
 
         # Separate by type
         techniques = []
@@ -613,6 +635,8 @@ class MITRECollector:
                         # without co-occurrence guesswork. (Edge type renamed
                         # from generic ``USES`` in 2026-04 PR #41.)
                         "uses_techniques": _actor_uses.get(actor_name, []),
+                        "uses_malware": _actor_uses_malware.get(actor_name, []),
+                        "uses_tools": _actor_uses_tools.get(actor_name, []),
                     }
                 )
 
@@ -778,15 +802,16 @@ class MITRECollector:
                     by_name[it.get("name")] = it
                     merged[key].append(it)
                     continue
-                have = existing.get("uses_techniques") or []
-                seen_t = set(have)
-                extra = []
-                for t in it.get("uses_techniques") or []:
-                    if t not in seen_t:
-                        seen_t.add(t)
-                        extra.append(t)
-                if extra:
-                    existing["uses_techniques"] = list(have) + extra
+                for list_key in ("uses_techniques", "uses_malware", "uses_tools"):
+                    have = existing.get(list_key) or []
+                    seen_t = set(have)
+                    extra = []
+                    for t in it.get(list_key) or []:
+                        if t not in seen_t:
+                            seen_t.add(t)
+                            extra.append(t)
+                    if extra:
+                        existing[list_key] = list(have) + extra
 
         # 2026-10 review fix: a group/malware present in BOTH bundles carries the same
         # STIX relationship objects twice; de-duplicate so the CLI relationship step

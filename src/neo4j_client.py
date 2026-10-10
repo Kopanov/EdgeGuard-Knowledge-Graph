@@ -1898,6 +1898,8 @@ class Neo4jClient:
                     # accumulate across pulses like the other list props.
                     "reported_techniques",
                     "pulse_ids",
+                    "uses_malware",
+                    "uses_tools",
                 }
             )
             # PR-N14 Fix #3 (2026-04-21 pre-baseline audit): cardinality
@@ -2730,6 +2732,9 @@ class Neo4jClient:
             "uses_techniques": uses_techniques,
             # 2026-10: see merge_malware — reported (pulse-level) ids stay separate.
             "reported_techniques": data.get("reported_techniques", []) or [],
+            # 2026-10 (R6): MITRE group → software claims → USES_MALWARE / USES_TOOL (build_relationships 2b/2c)
+            "uses_malware": data.get("uses_malware", []) or [],
+            "uses_tools": data.get("uses_tools", []) or [],
         }
         if data.get("pulse_id"):
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]

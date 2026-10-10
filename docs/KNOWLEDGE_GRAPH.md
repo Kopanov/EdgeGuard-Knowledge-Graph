@@ -64,6 +64,8 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `AFFECTS` | Vulnerability/CVE → Sector | Zone list unwind (confidence 1.0) |
 | `IN_TACTIC` | Technique → Tactic | Kill-chain phase exact match (confidence 1.0) |
 | `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent from MITRE's dotted id (`T1021.006` → `T1021`); `mitre_explicit`, 1.0 (2026-10) |
+| `USES_MALWARE` | ThreatActor → Malware | MITRE's explicit group → malware `uses`; `mitre_explicit`, 0.95 (2026-10, R6) |
+| `USES_TOOL` | ThreatActor → Tool | MITRE's explicit group → tool `uses`; `mitre_explicit`, 0.95 (2026-10, R6) |
 | `HAS_CVSS_v2/v30/v31/v40` | CVE ↔ CVSS sub-nodes | Bidirectional (ResilMesh schema) |
 | `REFERS_TO` | CVE ↔ Vulnerability | Bidirectional bridge by cve_id (`enrichment_jobs.bridge_vulnerability_cve`) |
 | `SOURCED_FROM` | Node → Source | **Per-source provenance edge.** ONE edge per (entity, source) pair (multi-source IOCs preserve full provenance). See [SOURCED_FROM edge schema](#sourced_from-edge-schema) below for the full property contract. |
@@ -419,7 +421,7 @@ ORDER BY i.last_updated DESC
 ---
 
 _Last updated: 2026-10-10 — fresh-baseline PR: report-scoped linking replaces whole-event co-occurrence (`INDICATES` / `ATTRIBUTED_TO` only within one OTX pulse, `match_type='otx_pulse'`, 0.6); old Q4 removed; Q5b/Q6b from `reported_techniques`; `mitre_explicit` reserved for the MITRE collector; CVE list properties promoted; `tlp` and the ownership marker on every node and edge. Prior: 2026-06-11 — PR #126: documented the alias round-trip (ThreatActor/Malware `aliases` survive the MISP round-trip via `alias:` tags; ATT&CK malware aliases from `x_mitre_aliases`) on the ATTRIBUTED_TO matching note, and added the cve_cvss_score + cve_cisa_exploit_add range indexes. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification:_
-- _Verified all confidence values match `src/build_relationships.py` (step numbers as of 2026-04-28 — the pipeline has 16 steps since 2026-10: Q4 removed, 5b/6b added, 7c/7d ThreatActor/Malware → Sector added, 1b SUBTECHNIQUE_OF added):
+- _Verified all confidence values match `src/build_relationships.py` (step numbers as of 2026-04-28 — the pipeline has 18 steps since 2026-10: Q4 removed, 5b/6b added, 7c/7d ThreatActor/Malware → Sector added, 1b SUBTECHNIQUE_OF added, 2b/2c USES_MALWARE/USES_TOOL added):
   EMPLOYS_TECHNIQUE = 0.95 (line 5/12), IMPLEMENTS_TECHNIQUE = 0.95
   (lines 6/12 and 10/12), USES_TECHNIQUE = 0.85 (8/12 — OTX
   attack_ids), INDICATES co-occurrence = 0.5 (4/12), INDICATES

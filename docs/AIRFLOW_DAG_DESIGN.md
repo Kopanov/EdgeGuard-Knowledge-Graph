@@ -273,6 +273,8 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 | `(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN tool.uses_techniques` — **same STIX `uses` rows** (tool → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Technique)-[:IN_TACTIC]->(Tactic)` | MITRE ATT&CK taxonomy | **1.0** |
 | `(Technique)-[:SUBTECHNIQUE_OF]->(Technique)` | MITRE dotted id `T1021.006` → `T1021` (Q1b, 2026-10) | **1.0** (`match_type='mitre_explicit'`) |
+| `(ThreatActor)-[:USES_MALWARE]->(Malware)` | `m.name IN a.uses_malware` (MITRE STIX `uses` group → malware; Q2b, 2026-10) | **0.95** (`mitre_explicit`) |
+| `(ThreatActor)-[:USES_TOOL]->(Tool)` | `t.mitre_id IN a.uses_tools` (MITRE STIX `uses` group → tool; Q2c, 2026-10) | **0.95** (`mitre_explicit`) |
 
 **Note on Actor/Malware/Tool → Technique:** All three are sourced from **explicit** STIX **`relationship_type: uses`** objects in the MITRE ATT&CK bundle — **not** from fuzzy text matching and **not** from actor/technique MISP co-occurrence (which is always empty). The MITRE collector populates **`uses_techniques`** on actors directly from the bundle; for **malware** and **tool**, the same list is embedded in MISP as **`MITRE_USES_TECHNIQUES:{...}`** on the attribute comment so `run_misp_to_neo4j` can restore **`uses_techniques`** on **`Malware`** / **`Tool`** nodes. `build_relationships.py` uses `WHERE t.mitre_id IN coalesce(node.uses_techniques, [])` per label and emits the specialized edge type matching the source label.
 
