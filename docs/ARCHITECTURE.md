@@ -250,6 +250,8 @@ When data is pushed to MISP, it gets tagged with:
 | `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0). Not derived from event co-membership since 2026-10. |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
 | `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent technique (MITRE dotted id; 2026-10) |
+| `USES_MALWARE` | ThreatActor → Malware | MITRE explicit group → malware `uses` (2026-10, R6) |
+| `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses` (2026-10, R6) |
 | `TARGETS` | Indicator → Sector | Node `zone` list → `build_relationships.py` |
 | `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → `build_relationships.py` |
 | `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` |

@@ -340,6 +340,7 @@ It exits non-zero when any of these fail:
 | ICS (when `EDGEGUARD_ENABLE_MITRE_ICS`) | techniques with `attack_domain = 'ics'` link only to ICS tactics |
 | CISA ICS (when `EDGEGUARD_ENABLE_CISA_ICS`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges |
 | Sub-technique hierarchy (`subtechnique_of_complete`) | every dotted-id `Technique` whose parent exists has a `SUBTECHNIQUE_OF` edge to it (493 on the September graph; 0 missing) |
+| Group → software (`uses_malware_complete`, `uses_tool_complete`) | every MITRE `uses_malware` / `uses_tools` claim whose target node exists has its edge (informational until the MITRE collector of the R6 build has run) |
 | Sector coverage (`sector_coverage`, informational) | `ThreatActor` / `Malware` → `Sector` `TARGETS` present for finance, energy, healthcare (2026-10: ~200/100/100 actors and ~750/400/320 malware on the September graph); energy CVEs well above the 234 of the keyword-only vocabulary |
 | ResilMesh conformance | relationship names and directions unchanged; `HAS_CVSS_*` bidirectional |
 

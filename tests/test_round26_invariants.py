@@ -416,10 +416,11 @@ def test_build_relationships_summary_denominator_matches_query_count():
 
     2026-10 (fresh-baseline PR): the whole-event co-occurrence query 4 was
     removed and the reported-technique queries 5b / 6b were added; the
-    2026-10 sector-focus build added 7c / 7d (ThreatActor / Malware → Sector),
-    so there are now 15 batched link steps (1, 2, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b,
-    7c, 7d, 8, 9, 10). The SUMMARY / partial-success denominators must follow
-    that count.
+    2026-10 sector-focus build added 7c / 7d (ThreatActor / Malware → Sector)
+    and the R6 builds added 1b (SUBTECHNIQUE_OF) and 2b / 2c (USES_MALWARE /
+    USES_TOOL), so there are now 18 batched link steps (1, 1b, 2, 2b, 2c, 3a,
+    3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10). The SUMMARY / partial-success
+    denominators must follow that count.
 
     Pin by counting _safe_run_batched calls in build_relationships() and
     asserting the SUMMARY log uses the right denominator."""
@@ -432,8 +433,8 @@ def test_build_relationships_summary_denominator_matches_query_count():
     src = inspect.getsource(br.build_relationships)
 
     call_count = src.count("_safe_run_batched(")
-    assert call_count == 16, (
-        f"expected 16 _safe_run_batched calls in build_relationships() (1, 1b, 2, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10); "
+    assert call_count == 18, (
+        f"expected 18 _safe_run_batched calls in build_relationships() (1, 1b, 2, 2b, 2c, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10); "
         f"got {call_count}. If you added/removed a link query, also update the denominators below."
     )
     assert f"failures=%d/{call_count}" in src, (

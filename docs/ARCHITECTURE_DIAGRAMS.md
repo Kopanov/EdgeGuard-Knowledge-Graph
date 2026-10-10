@@ -130,6 +130,8 @@ graph TB
     CVE -->|HAS_CVSS_v*| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
     T -->|IN_TACTIC| TAC[Tactic]
     T -->|SUBTECHNIQUE_OF| T
+    A -->|USES_MALWARE| M
+    A -->|USES_TOOL| TL[Tool]
     TOOL[Tool] -->|IMPLEMENTS_TECHNIQUE| T
 
     %% Edge legend:

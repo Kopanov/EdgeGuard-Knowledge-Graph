@@ -82,7 +82,7 @@ All collectors return items with these common fields:
 ### What It Does
 Collects threat intelligence pulses from AlienVault OTX, including:
 - Indicators (IPs, domains, hashes, URLs) with per-indicator description
-- Malware families with the pulse's ATT&CK technique IDs as `reported_techniques` (2026-10: pulse-level association, written to MISP as `MITRE_USES_TECHNIQUES:{"rt":[…],"pid":"<pulse id>","rids":[…]}` — `rids` lists the other pulses of the same run that named the entity (the collector's dedup folds them in instead of dropping them; indicators carry the same list as `OTX_META.report_ids`) and linked downstream as `IMPLEMENTS_TECHNIQUE` with `match_type='otx_pulse'`, 0.6 — never as `uses_techniques` / `mitre_explicit`)
+- Malware families with the pulse's ATT&CK technique IDs as `reported_techniques` (2026-10: pulse-level association, written to MISP as `MITRE_USES_TECHNIQUES:{"rt":[…],"pid":"<pulse id>","rids":[…]}` — `rids` lists the other pulses of the same run that named the entity (the collector's dedup folds them in instead of dropping them; indicators carry the same list as `OTX_META.report_ids`); on MITRE actors the block also carries `m` (malware names) and `s` (tool S-ids) from the group → software `uses` relationships (R6: `USES_MALWARE` / `USES_TOOL`) and linked downstream as `IMPLEMENTS_TECHNIQUE` with `match_type='otx_pulse'`, 0.6 — never as `uses_techniques` / `mitre_explicit`)
 - CVE references (all CVEs per pulse, no cap)
 - **Pulse metadata:** `attack_ids` (MITRE ATT&CK), `industries` (authoritative sector classification), `targeted_countries`, `tags`, `references`, `author_name`, `adversary`, `TLP`
 - Named adversaries are automatically extracted as ThreatActor items

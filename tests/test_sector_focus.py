@@ -64,14 +64,14 @@ class TestActorAndMalwareTargetSector:
         text = _BUILD_REL.read_text()
         assert '"actor_targets_sector"' in text and '"malware_targets_sector"' in text
 
-    def test_step_count_is_sixteen_everywhere(self):
+    def test_step_count_is_eighteen_everywhere(self):
         text = _BUILD_REL.read_text()
         banners = re.findall(r"\[LINK\] (\w+)/(\d+) ", text)
         totals = {t for _, t in banners}
-        assert totals == {"16"}, totals
-        assert len(banners) == 16, [s for s, _ in banners]
+        assert totals == {"18"}, totals
+        assert len(banners) == 18, [s for s, _ in banners]
         assert {"7a", "7b", "7c", "7d"} <= {s for s, _ in banners}
-        assert "failures=%d/16" in text and "/13" not in text and "/15" not in text
+        assert "failures=%d/18" in text and "/13" not in text and "/15" not in text and "/16" not in text
 
     def test_new_steps_run_right_after_7b_and_before_8(self):
         text = _BUILD_REL.read_text()

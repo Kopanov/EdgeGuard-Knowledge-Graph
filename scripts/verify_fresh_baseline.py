@@ -87,6 +87,8 @@ EDGEGUARD_REL_TYPES = (
     "AFFECTS",
     "IN_TACTIC",
     "SUBTECHNIQUE_OF",
+    "USES_MALWARE",
+    "USES_TOOL",
     "RUNS",
     "PART_OF",
     "REFERS_TO",
@@ -291,6 +293,26 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         "sum(CASE WHEN p IS NOT NULL AND NOT EXISTS { (s)-[:SUBTECHNIQUE_OF]->(p) } THEN 1 ELSE 0 END) AS edge_missing"
     )
     rep.add("subtechnique_of_complete", (r.get("subs") or 0) > 0 and r.get("edge_missing") == 0, r)
+
+    # 10a2. Group → software (2026-10 R6): every MITRE ``uses_malware`` / ``uses_tools`` claim whose
+    #       target node exists has its USES_MALWARE / USES_TOOL edge. Informational until the
+    #       MITRE collector of this build has run (no claims on the node yet).
+    r = _one(
+        "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_malware, [])) > 0 UNWIND a.uses_malware AS mn "
+        "OPTIONAL MATCH (m:Malware {name: toLower(trim(mn))}) "
+        "WITH a, mn, collect(m) AS ms "
+        "RETURN count(*) AS claims, sum(CASE WHEN size(ms) = 0 THEN 1 ELSE 0 END) AS target_missing, "
+        "sum(CASE WHEN size(ms) > 0 AND none(m IN ms WHERE EXISTS { (a)-[:USES_MALWARE]->(m) }) THEN 1 ELSE 0 END) AS edge_missing"
+    )
+    rep.add("uses_malware_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+    r = _one(
+        "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_tools, [])) > 0 UNWIND a.uses_tools AS tid "
+        "OPTIONAL MATCH (t:Tool {mitre_id: tid}) "
+        "WITH a, tid, collect(t) AS ts "
+        "RETURN count(*) AS claims, sum(CASE WHEN size(ts) = 0 THEN 1 ELSE 0 END) AS target_missing, "
+        "sum(CASE WHEN size(ts) > 0 AND none(t IN ts WHERE EXISTS { (a)-[:USES_TOOL]->(t) }) THEN 1 ELSE 0 END) AS edge_missing"
+    )
+    rep.add("uses_tool_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
 
     # 10b. Sector coverage (informational; the "measure" input for demo day): how many nodes of
     #      each EdgeGuard label are linked to each Sector. 2026-10 sector-focus build adds

@@ -2859,6 +2859,8 @@ class MISPToNeo4jSync:
             reported_techniques: List[str] = []
             actor_pulse_id = ""
             actor_report_ids: List[str] = []
+            actor_uses_malware: List[str] = []
+            actor_uses_tools: List[str] = []
             actor_description = raw_comment
             if "MITRE_USES_TECHNIQUES:" in raw_comment:
                 try:
@@ -2877,6 +2879,8 @@ class MISPToNeo4jSync:
                         reported_techniques = [str(x) for x in (parsed.get("rt") or [])]
                         actor_pulse_id = str(parsed.get("pid") or "").strip()
                         actor_report_ids = [str(x).strip() for x in (parsed.get("rids") or []) if str(x).strip()]
+                        actor_uses_malware = [str(x).strip() for x in (parsed.get("m") or []) if str(x).strip()]
+                        actor_uses_tools = [str(x).strip() for x in (parsed.get("s") or []) if str(x).strip()]
                     elif isinstance(parsed, list):
                         uses_techniques = parsed
                 except (ValueError, IndexError):
@@ -2923,6 +2927,8 @@ class MISPToNeo4jSync:
                 "reported_techniques": reported_techniques,
                 "pulse_id": actor_pulse_id,
                 "report_ids": actor_report_ids,
+                "uses_malware": actor_uses_malware,
+                "uses_tools": actor_uses_tools,
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
