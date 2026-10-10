@@ -142,6 +142,8 @@ class TestParentheticalActorNames:
             ("team (2024)", ["team (2024)"]),  # digits only inside → not an alias
             ("x (y)", ["x (y)"]),  # head too short to be a name
             ("apt28 and apt29", ["apt28", "apt29"]),
+            ("apt28 (fancy bear) and apt29 (cozy bear)", ["apt28", "apt29"]),  # Bugbot on #144: sides too
+            ("sidecopy & transparent tribe (apt36)", ["sidecopy", "transparent tribe"]),
             ("lazarus group / hidden cobra", ["lazarus group", "hidden cobra"]),
         ],
     )
@@ -149,6 +151,66 @@ class TestParentheticalActorNames:
         from actor_name_hygiene import clean_actor_names
 
         assert clean_actor_names(raw) == expected
+
+
+# --------------------------------------------------------------------------- Bugbot on #144: meta comments stay valid JSON
+class TestMetaCommentsNeverBreakTheJson:
+    """The 500-id report list can overflow the 4000-char comment budget; a string slice cut the JSON
+    mid-token and the parser dropped the whole block. Lists are halved instead, JSON stays valid."""
+
+    def _writer(self):
+        from collectors.misp_writer import MISPWriter
+
+        return MISPWriter(url="http://127.0.0.1:9", api_key="dummy", verify_ssl=False)
+
+    def test_many_report_ids_shrink_but_the_comment_stays_parseable(self):
+        import json
+
+        ind = {
+            "indicator_type": "ipv4",
+            "value": "203.0.113.5",
+            "zone": ["global"],
+            "tag": "alienvault_otx",
+            "source": ["alienvault_otx"],
+            "confidence_score": 0.5,
+            "pulse_id": "p0",
+            "attack_ids": ["T1059"],
+            "description": "d" * 600,
+            "report_ids": [f"0123456789abcdef0123456789abcdef{i:04d}" for i in range(500)],
+        }
+        attr = self._writer().create_attribute(ind)
+        comment = attr["comment"]
+        assert comment.startswith("OTX_META:") and len(comment) <= 4000
+        meta = json.loads(comment[len("OTX_META:") :])
+        assert meta["pulse_id"] == "p0" and meta["attack_ids"] == ["T1059"], "the small fields survive"
+        assert 1 <= len(meta["report_ids"]) < 500 and meta["report_ids"][0].endswith("0000"), "oldest-first prefix kept"
+
+    def test_small_comment_is_untouched(self):
+        import json
+
+        ind = {
+            "indicator_type": "ipv4",
+            "value": "203.0.113.5",
+            "zone": ["global"],
+            "tag": "alienvault_otx",
+            "source": ["alienvault_otx"],
+            "confidence_score": 0.5,
+            "pulse_id": "p0",
+            "attack_ids": ["T1059"],
+            "report_ids": ["p1", "p2"],
+        }
+        meta = json.loads(self._writer().create_attribute(ind)["comment"][len("OTX_META:") :])
+        assert meta["report_ids"] == ["p1", "p2"]
+
+    def test_fit_helper_drops_optional_keys_as_last_resort(self):
+        import json
+
+        from collectors.misp_writer import _fit_meta_comment
+
+        out = _fit_meta_comment(
+            "X:", {"pulse_id": "p", "description": "x" * 5000, "report_ids": ["a"] * 300}, budget=300
+        )
+        assert len(out) <= 300 and json.loads(out[2:])["pulse_id"] == "p"
 
 
 # --------------------------------------------------------------------------- A6 / D9: evidence labels, alert TLP

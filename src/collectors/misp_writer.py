@@ -222,6 +222,56 @@ def _attack_domain(item: Dict[str, Any]) -> str:
 _MAX_REPORT_IDS = 500
 
 
+# Bugbot on PR #144 (High): the OTX_META / TF_META comments were hard-sliced at 4000 characters, so a
+# few dozen pulse ids (or a long description) cut the JSON mid-token and the sync's json.loads
+# dropped the WHOLE block — pulse_id, report_ids, families, attack_ids. Shrink list fields instead
+# (longest-first, halving), then long strings, then drop optional keys; the result is always valid
+# JSON. The budget stays 4000 (MISP renders comments inline); the TEXT column itself holds 64 KB.
+_META_COMMENT_BUDGET = 4000
+_META_SHRINK_LISTS = (
+    "report_ids",
+    "mf",
+    "adv",
+    "attack_ids",
+    "targeted_countries",
+    "otx_industries",
+    "pulse_tags",
+    "pulse_references",
+    "tags",
+)
+_META_SHRINK_STRINGS = ("description", "pulse_name", "reference")
+
+
+def _fit_meta_comment(prefix: str, meta: Dict[str, Any], budget: int = _META_COMMENT_BUDGET) -> str:
+    """``prefix + json.dumps(meta)``, shrunk until it fits *budget* without ever breaking the JSON."""
+    comment = prefix + json.dumps(meta, default=str)
+    if len(comment) <= budget:
+        return comment
+    original_len = len(comment)
+    meta = dict(meta)
+    for key in _META_SHRINK_LISTS:
+        while len(comment) > budget and isinstance(meta.get(key), list) and len(meta[key]) > 1:
+            meta[key] = meta[key][: max(1, len(meta[key]) // 2)]
+            comment = prefix + json.dumps(meta, default=str)
+    for key in _META_SHRINK_STRINGS:
+        while len(comment) > budget and isinstance(meta.get(key), str) and len(meta[key]) > 32:
+            meta[key] = meta[key][: max(32, len(meta[key]) // 2)]
+            comment = prefix + json.dumps(meta, default=str)
+    for key in _META_SHRINK_LISTS + _META_SHRINK_STRINGS:
+        if len(comment) <= budget:
+            break
+        if key in meta:
+            meta.pop(key)
+            comment = prefix + json.dumps(meta, default=str)
+    logger.warning(
+        "%s comment shrunk to fit MISP: %d -> %d chars (lists halved / optional keys dropped, JSON intact)",
+        prefix.rstrip(":"),
+        original_len,
+        len(comment),
+    )
+    return comment
+
+
 def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     """Build the ``MITRE_USES_TECHNIQUES:`` JSON block for malware / actor / tool items.
 
@@ -1100,11 +1150,7 @@ class MISPWriter:
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
             }
-            comment = "OTX_META:" + json.dumps(otx_meta, default=str)
-            if len(comment) > 4000:
-                original_len = len(comment)
-                comment = comment[:4000]
-                logger.warning(f"Truncated OTX_META comment for {value}: {original_len} -> 4000 chars")
+            comment = _fit_meta_comment("OTX_META:", otx_meta)
         elif has_tf_meta:
             tf_meta = {
                 "malware_malpedia": indicator.get("malware_malpedia", ""),
@@ -1132,11 +1178,7 @@ class MISPWriter:
                 "ioc_id": indicator.get("ioc_id", ""),
                 "malware_alias": indicator.get("malware_alias", ""),
             }
-            comment = "TF_META:" + json.dumps(tf_meta, default=str)
-            if len(comment) > 4000:
-                original_len = len(comment)
-                comment = comment[:4000]
-                logger.warning(f"Truncated TF_META comment for {value}: {original_len} -> 4000 chars")
+            comment = _fit_meta_comment("TF_META:", tf_meta)
         else:
             comment = sanitize_value(indicator.get("pulse_name") or indicator.get("description", ""), max_length=255)
 

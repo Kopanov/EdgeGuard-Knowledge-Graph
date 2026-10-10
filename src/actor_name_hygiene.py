@@ -340,8 +340,11 @@ def split_composite_actor_name(name: str) -> List[str]:
         frag = _TRAILING_CONJUNCTION_RE.sub("", frag).strip()
         if not frag:
             continue
+        # Strip BEFORE the and-split (so "mois (ministry of intelligence and security)" is never
+        # split inside the parenthesis) and AGAIN on every side after it (Bugbot on PR #144:
+        # "apt28 (fancy bear) and apt29 (cozy bear)" kept both parentheticals).
         frag = _strip_trailing_parenthetical(frag)
-        fragments.extend(_try_and_split(frag))
+        fragments.extend(_strip_trailing_parenthetical(side) for side in _try_and_split(frag))
 
     fragments = [f for f in (f.strip() for f in fragments) if len(f) > 1]
 
