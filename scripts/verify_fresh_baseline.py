@@ -43,7 +43,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-BASE = os.getenv("NEO4J_HTTP_URL", "https://neo4j.edgeguard.org").rstrip("/")
+# NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
+BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
 DB = os.getenv("NEO4J_DATABASE", "neo4j")
 USER = os.getenv("NEO4J_USER", "neo4j")
 PWD = os.getenv("NEO4J_PASSWORD", "")
@@ -304,7 +305,19 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         "RETURN count(*) AS claims, sum(CASE WHEN size(ms) = 0 THEN 1 ELSE 0 END) AS target_missing, "
         "sum(CASE WHEN size(ms) > 0 AND none(m IN ms WHERE EXISTS { (a)-[:USES_MALWARE]->(m) }) THEN 1 ELSE 0 END) AS edge_missing"
     )
-    rep.add("uses_malware_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+    # 2026-10 audit: once a MITRE actor exists the claims MUST exist too — zero claims then means the
+    # `m` / `s` lists were lost between collector and node, exactly what this check is for.
+    mitre_actors = (
+        _one("MATCH (a:ThreatActor) WHERE 'mitre_attck' IN coalesce(a.source, []) RETURN count(a) AS c").get("c") or 0
+    )
+
+    def _uses_ok(row: Dict[str, Any]) -> Optional[bool]:
+        if mitre_actors == 0:
+            return None
+        return (row.get("claims") or 0) > 0 and row.get("edge_missing") == 0
+
+    r["mitre_actors"] = mitre_actors
+    rep.add("uses_malware_complete", _uses_ok(r), r)
     r = _one(
         "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_tools, [])) > 0 UNWIND a.uses_tools AS tid "
         "OPTIONAL MATCH (t:Tool {mitre_id: tid}) "
@@ -312,7 +325,13 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         "RETURN count(*) AS claims, sum(CASE WHEN size(ts) = 0 THEN 1 ELSE 0 END) AS target_missing, "
         "sum(CASE WHEN size(ts) > 0 AND none(t IN ts WHERE EXISTS { (a)-[:USES_TOOL]->(t) }) THEN 1 ELSE 0 END) AS edge_missing"
     )
-    rep.add("uses_tool_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+    r["mitre_actors"] = mitre_actors
+    rep.add("uses_tool_complete", _uses_ok(r), r)
+
+    # 10a3. `global` is the "no sector" marker: no TARGETS / AFFECTS edge may point at it (2026-10 audit:
+    #       the old graph carried ~270k such edges at confidence 1.0).
+    r = _one("MATCH ()-[r:TARGETS|AFFECTS]->(g:Sector {name: 'global'}) RETURN count(r) AS c")
+    rep.add("no_global_sector_edges", r.get("c") == 0, r)
 
     # 10b. Sector coverage (informational; the "measure" input for demo day): how many nodes of
     #      each EdgeGuard label are linked to each Sector. 2026-10 sector-focus build adds

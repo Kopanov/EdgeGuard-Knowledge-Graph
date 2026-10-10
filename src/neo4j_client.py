@@ -981,6 +981,17 @@ def retry_with_backoff(max_retries: int = MAX_RETRIES, base_delay: float = RETRY
     return decorator
 
 
+def _alert_default_tlp() -> str:
+    """TLP stamped on alert-created indicators: ``config.EDGEGUARD_DEFAULT_TLP`` (``white`` when
+    config is unavailable, e.g. in a bare unit test)."""
+    try:
+        from config import EDGEGUARD_DEFAULT_TLP
+
+        return str(EDGEGUARD_DEFAULT_TLP or "white")
+    except Exception:  # noqa: BLE001 - never let a config import problem break an alert write
+        return "white"
+
+
 class Neo4jClient:
     """Production-ready Neo4j client with retry logic and batch processing."""
 
@@ -1888,6 +1899,18 @@ class Neo4jClient:
             # Validate every property name before interpolating into Cypher.
             # Array properties that should ACCUMULATE (deduplicated) across sources,
             # not overwrite. Scalar properties are set with last-write-wins.
+            # 2026-10 audit: the 50 cap was sized for aliases (p99 ≈ 30) but was applied to every
+            # accumulating list — MITRE groups carry up to 130 `uses_techniques` (27/172 exceed 50) and
+            # the writer sends up to 400 (`_technique_meta`), so the node kept the first 50 and ~670
+            # `mitre_explicit` edges could never exist. Technique / software / report lists get their
+            # own ceilings (≥ the writer's caps); `aliases` and the rest keep 50.
+            _ARRAY_ITEM_CAPS = {
+                "uses_techniques": 512,
+                "reported_techniques": 512,
+                "pulse_ids": 512,
+                "uses_malware": 256,
+                "uses_tools": 256,
+            }
             _ARRAY_ACCUMULATE_PROPS = frozenset(
                 {
                     "aliases",
@@ -1953,7 +1976,8 @@ class Neo4jClient:
                         label,
                         prop,
                     )
-                if len(out) > _MAX_ARRAY_ITEMS:
+                cap = _ARRAY_ITEM_CAPS.get(prop, _MAX_ARRAY_ITEMS)
+                if len(out) > cap:
                     logger.warning(
                         "PR-N14: %s[%s] incoming size %d exceeds cap %d — truncating to "
                         "first %d entries (stable order). A compromised feed may be "
@@ -1961,10 +1985,10 @@ class Neo4jClient:
                         label,
                         prop,
                         len(out),
-                        _MAX_ARRAY_ITEMS,
-                        _MAX_ARRAY_ITEMS,
+                        cap,
+                        cap,
                     )
-                    out = out[:_MAX_ARRAY_ITEMS]
+                    out = out[:cap]
                 return out
 
             extra_props = dict(extra_props or {})
@@ -6466,6 +6490,9 @@ class Neo4jClient:
             "value": normalized_value,
             "tag": f"{zone_array[0]}_{normalized_type}",
             "zone": zone_array,
+            # 2026-10 audit: every EdgeGuard node carries `tlp` (acceptance check `tlp_on_every_node`);
+            # an alert states no TLP, so the deployment default applies.
+            "tlp": _alert_default_tlp(),
             # PR (S5) (bugbot 6543da4 LOW): dropped the stale
             # ``"first_seen": now`` key — the Cypher no longer references
             # ``$first_seen`` (the legacy node field write was removed
@@ -6506,6 +6533,7 @@ class Neo4jClient:
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
             i.edgeguard_managed = true,
+            i.tlp = coalesce(i.tlp, $tlp),
             i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
         """
 
@@ -6530,7 +6558,9 @@ class Neo4jClient:
                     WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                     THEN $confidence_score
                     ELSE i.confidence_score END,
-                {_zone_clause_i}
+                {_zone_clause_i},
+                i.edgeguard_managed = true,
+                i.tlp = coalesce(i.tlp, $tlp)
             """
             try:
                 with self.driver.session() as session:

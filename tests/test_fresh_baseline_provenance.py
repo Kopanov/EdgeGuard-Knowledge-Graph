@@ -1410,11 +1410,20 @@ class TestClearEdgeguardManaged:
             "clear_edgeguard_managed must be wrapped by @retry_with_backoff like clear_all"
         )
         client, _ = self._client(managed=1, deleted_batches=[1])
-        client.driver.session.return_value.__enter__.return_value.run = MagicMock(
-            side_effect=neo4j_client_mod.neo4j_exceptions.ServiceUnavailable("down")
-        )
-        with pytest.raises(neo4j_client_mod.neo4j_exceptions.ServiceUnavailable):
-            client.clear_edgeguard_managed()
+        run = MagicMock(side_effect=neo4j_client_mod.neo4j_exceptions.ServiceUnavailable("down"))
+        client.driver.session.return_value.__enter__.return_value.run = run
+        # 2026-10 audit: the decorator sleeps 2/4/8 s for real — patch it out and pin the retry count
+        # (max_retries=3 → 4 attempts); the old test slept 14 s and passed with a non-retrying decorator.
+        sleeps: list = []
+        monkeypatch_sleep = neo4j_client_mod.time.sleep
+        neo4j_client_mod.time.sleep = lambda s: sleeps.append(s)
+        try:
+            with pytest.raises(neo4j_client_mod.neo4j_exceptions.ServiceUnavailable):
+                client.clear_edgeguard_managed()
+        finally:
+            neo4j_client_mod.time.sleep = monkeypatch_sleep
+        assert run.call_count == 4, f"expected 4 attempts (1 + 3 retries), got {run.call_count}"
+        assert len(sleeps) == 3 and all(sl > 0 for sl in sleeps)
 
 
 class TestOwnershipMarkerOnOtherWriters:

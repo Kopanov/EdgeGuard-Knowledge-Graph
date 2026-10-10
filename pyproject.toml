@@ -7,7 +7,7 @@ authors = [
     {name = "EdgeGuard Team"}
 ]
 readme = "README.md"
-# EdgeGuard CI and Docker images use 3.12. Apache Airflow 2.11 supports 3.11+ upstream; this repo
+# EdgeGuard CI and Docker images use 3.12. Apache Airflow 3.3 supports 3.10–3.14 upstream; this repo
 # standardizes on 3.12+ for one supported interpreter line.
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -74,7 +74,7 @@ monitoring = [
     "prometheus-client~=0.21",
 ]
 api = [
-    "fastapi~=0.115",
+    "fastapi>=0.115,!=0.136.3,<1.0",  # MAL-2026-4750 — same exclusion as requirements*.txt
     "uvicorn~=0.34",
     "slowapi~=0.1",      # rate limiting
     "nats-py~=2.9",

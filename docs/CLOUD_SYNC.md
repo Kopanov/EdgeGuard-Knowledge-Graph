@@ -146,7 +146,7 @@ Used by every MISP-derived edge MERGE in the codebase, including:
 
 - All 11 query templates in `Neo4jClient.create_misp_relationships_batch`
 - All 6 standalone `Neo4jClient.create_*_relationship` helpers
-- All 12 link queries in `src/build_relationships.py`
+- All 18 link steps in `src/build_relationships.py`
 - The REFERS_TO bridge in `src/enrichment_jobs.py`
 - The HAS_CVSS_v* edges in `Neo4jClient._merge_cvss_node`
 - The RUNS / PART_OF edges in `enrichment_jobs.build_campaign_nodes`

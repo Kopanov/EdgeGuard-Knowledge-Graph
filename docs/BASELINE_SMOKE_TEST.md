@@ -27,9 +27,7 @@ These are passed into the **Airflow** container via `docker-compose.yml` (`x-com
 ### 2. Restart Airflow so it picks up `.env`
 
 ```bash
-docker compose up -d airflow
-# or
-docker compose restart airflow
+docker compose up -d airflow   # not `restart`: a restart keeps the old .env values
 ```
 
 ### 3. Trigger the DAG

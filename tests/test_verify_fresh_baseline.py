@@ -68,6 +68,10 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"present": False, "edges": 0}]
     if "db.relationshipTypes" in s:
         return [{"t": t} for t in ("SOURCED_FROM", "INDICATES", "INVOLVES", "ON")]
+    if "'mitre_attck' IN coalesce(a.source, [])" in s:
+        return [{"c": 150}]
+    if "(g:Sector {name: 'global'})" in s:
+        return [{"c": 0}]
     if "USES_MALWARE" in s or "USES_TOOL" in s:
         return [{"claims": 120, "target_missing": 3, "edge_missing": 0}]
     if "SUBTECHNIQUE_OF" in s:
@@ -171,6 +175,37 @@ class TestNoFalsePositives:
             assert never_tlp not in vfb._TLP_LABELS
 
 
+class TestUsesClaimsAreMandatoryOnceMitreActorsExist:
+    """2026-10 audit: `claims == 0` used to be informational, but after the re-feed the MITRE collector
+    always runs, so zero claims means the `m` / `s` lists were lost in transit — the exact defect
+    the check exists for. The gate must fail, not print INFO."""
+
+    def test_zero_claims_fail_when_mitre_actors_exist(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [{"claims": 0, "target_missing": 0, "edge_missing": 0}]
+                if ("USES_MALWARE" in st or "USES_TOOL" in st)
+                else rows
+            ),
+        )
+        assert {c["check"] for c in rep.failed} == {"uses_malware_complete", "uses_tool_complete"}
+        assert _check(rep, "uses_malware_complete")["detail"]["mitre_actors"] == 150
+
+    def test_informational_only_while_no_mitre_actor_exists(self, vfb, monkeypatch):
+        def override(st, rows):
+            if "'mitre_attck' IN coalesce(a.source, [])" in st:
+                return [{"c": 0}]
+            if "USES_MALWARE" in st or "USES_TOOL" in st:
+                return [{"claims": 0, "target_missing": 0, "edge_missing": 0}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override)
+        assert _check(rep, "uses_malware_complete")["ok"] is None and _check(rep, "uses_tool_complete")["ok"] is None
+        assert rep.failed == []
+
+
 class TestRealBreakageStillFails:
     @pytest.mark.parametrize(
         "fragment, bad_rows, check",
@@ -181,6 +216,22 @@ class TestRealBreakageStillFails:
             ("a.name CONTAINS ','", [{"c": 2, "examples": ["APT28, Fancy Bear"]}], "no_composite_actor_names"),
             ("n.tlp IS NULL", [{"total": 500, "missing": 9}], "tlp_on_every_node"),
             ("coalesce(t.attack_domain, 'enterprise') <>", [{"c": 3}], "in_tactic_same_domain"),
+            # 2026-10 audit: negative rows for the R6 / sector checks (they only had happy-path coverage)
+            ("SUBTECHNIQUE_OF", [{"subs": 493, "parent_missing": 0, "edge_missing": 7}], "subtechnique_of_complete"),
+            ("USES_MALWARE", [{"claims": 120, "target_missing": 3, "edge_missing": 2}], "uses_malware_complete"),
+            ("USES_TOOL", [{"claims": 40, "target_missing": 0, "edge_missing": 1}], "uses_tool_complete"),
+            ("(g:Sector {name: 'global'})", [{"c": 137948}], "no_global_sector_edges"),
+            ("bidirectional", [{"label": "CVSSv31", "total": 7, "bidirectional": 6}], "cvss_bidirectional"),
+            (
+                "percentileCont",
+                [{"malware_with_attribution": 50, "median_actors": 40.0, "max_actors": 90}],
+                "attributed_to_fanout_plausible",
+            ),
+            (
+                "n.edgeguard_managed IS NULL UNWIND labels(n)",
+                [{"label": "Malware", "c": 3}],
+                "ownership_marker_on_nodes",
+            ),
         ],
     )
     def test_each_invariant_breaking_row_fails_its_check(self, vfb, monkeypatch, fragment, bad_rows, check):

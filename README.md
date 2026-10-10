@@ -258,7 +258,7 @@ cd EdgeGuard-Knowledge-Graph
 ./install.sh          # detects Docker, copies .env, builds image, starts stack
 ```
 
-`install.sh` handles everything: checks Docker, copies `.env.example → .env`, builds the image, and runs `docker compose up -d`. After it finishes, edit `.env` with your API keys and restart.
+`install.sh` handles everything: checks Docker, copies `.env.example → .env`, builds the image, and runs `docker compose up -d`. After it finishes, edit `.env` with your API keys and run `docker compose up -d` again (a plain `restart` does not re-read `.env`).
 
 **Post-install validation (run this after any install method):**
 ```bash
