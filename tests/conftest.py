@@ -16,6 +16,17 @@ if not os.getenv("NEO4J_PASSWORD"):
 if not os.getenv("MISP_API_KEY"):
     os.environ["MISP_API_KEY"] = "pytest-dummy-misp-key"
 
+# ``graphql_api`` and ``query_api`` raise at import time when ``EDGEGUARD_ENV`` is unset
+# (secure default: unset/unknown = prod) and no ``EDGEGUARD_API_KEY`` is configured. The
+# suite only passed because ``tests/test_graphql_api.py`` and
+# ``tests/test_ioc_normalize_and_actor_summary.py`` run the same ``setdefault`` at module
+# level and pytest imports every module during collection before the first test runs —
+# so five files (``test_auth_and_api_hardening``, ``test_pr33_bugbot_fixes``,
+# ``test_pr_n3_api_key_timing_attack``, ``test_query_api``, ``test_round26_invariants``)
+# failed whenever run on their own (found 2026-10-10). Make the suite's implicit default
+# explicit here; tests that exercise prod semantics set and restore the variable themselves.
+os.environ.setdefault("EDGEGUARD_ENV", "dev")
+
 
 @pytest.fixture(autouse=True)
 def _edgeguard_required_env(monkeypatch):
