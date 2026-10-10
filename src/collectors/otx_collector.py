@@ -111,15 +111,20 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     ``OTX_META.report_ids`` on the MISP attribute; the sync groups on
     ``[pulse_id] + report_ids``) and its ATT&CK ids to ``reported_techniques``.
     """
+    # Copy-on-write (Bugbot on PR #134, round 2): ``reported_techniques`` is the pulse's
+    # ``pulse_attack_ids`` list object, shared by reference with ``attack_ids`` in
+    # ``pulse_meta`` and with every sibling item of the same pulse. Appending in place
+    # would leak the later pulse's ATT&CK ids onto indicators and entities that never
+    # appeared in it. Always rebind a fresh list on the kept item before extending it.
     dup_pid = dup.get("pulse_id")
     if dup_pid and dup_pid != kept.get("pulse_id"):
-        rids = kept.setdefault("report_ids", [])
+        rids = list(kept.get("report_ids") or [])
         if dup_pid not in rids:
             rids.append(dup_pid)
-    for tid in dup.get("reported_techniques") or []:
-        kept_rts = kept.setdefault("reported_techniques", [])
-        if tid not in kept_rts:
-            kept_rts.append(tid)
+        kept["report_ids"] = rids
+    extra_tids = [t for t in (dup.get("reported_techniques") or []) if t not in (kept.get("reported_techniques") or [])]
+    if extra_tids:
+        kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids
 
 
 def _dedupe_pulse_items(processed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

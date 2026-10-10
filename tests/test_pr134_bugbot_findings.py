@@ -85,6 +85,23 @@ class TestCollectorDedupFoldsLaterPulses:
         assert [i["name"] for i in out] == ["A", "B"]
         assert "report_ids" not in out[0] and "report_ids" not in out[1]
 
+    def test_fold_never_mutates_lists_shared_with_sibling_items(self):
+        """Bugbot round 2: ``reported_techniques`` is the pulse's ``pulse_attack_ids`` object, shared
+        with ``attack_ids`` in ``pulse_meta`` and with every sibling of that pulse. Folding a later
+        pulse must not write its ATT&CK ids onto them."""
+        shared = ["T1566"]  # one list object, as the collector builds it per pulse
+        pulse_meta = {"pulse_id": "p1", "attack_ids": shared}
+        emotet = {"type": "malware", "name": "Emotet", "reported_techniques": shared, **pulse_meta}
+        trickbot = {"type": "malware", "name": "TrickBot", "reported_techniques": shared, **pulse_meta}
+        ioc = {"indicator_type": "ipv4", "value": "1.2.3.4", **pulse_meta}
+        later = {"type": "malware", "name": "Emotet", "pulse_id": "p2", "reported_techniques": ["T1059"]}
+        out = otx._dedupe_pulse_items([emotet, trickbot, ioc, later])
+        kept = next(i for i in out if i.get("name") == "Emotet")
+        assert kept["reported_techniques"] == ["T1566", "T1059"] and kept["report_ids"] == ["p2"]
+        assert shared == ["T1566"], "the shared pulse list must be untouched"
+        assert trickbot["reported_techniques"] == ["T1566"] and ioc["attack_ids"] == ["T1566"]
+        assert kept["reported_techniques"] is not shared, "copy-on-write: the kept item owns a new list"
+
     def test_items_without_an_identity_are_dropped_as_before(self):
         assert (
             otx._dedupe_pulse_items([{"type": "malware", "name": ""}, {"indicator_type": "ipv4", "value": None}]) == []
