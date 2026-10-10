@@ -172,17 +172,18 @@ class TestPRN30CrossCheckerH2EventIdCap:
         on write path" drift the constant was created to prevent.
 
         2026-10 (fresh-baseline PR): Q4 — the whole-event co-occurrence
-        query — was removed, so the forward-write cap sites are now
-        exactly 5 (Q3a, Q3b, Q7a, Q7b, Q9). Pin the exact count so a
+        query — was removed and the 2026-10 sector-focus build added Q7c / Q7d
+        (ThreatActor / Malware → Sector), so the forward-write cap sites are
+        now exactly 7 (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9). Pin the exact count so a
         re-added event-id pairing query (or a dropped cap) is noticed."""
         text = self.BUILD_RELS.read_text()
         cap_pattern = "[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
         occurrences = text.count(cap_pattern)
-        assert occurrences == 5, (
+        assert occurrences == 7, (
             f"PR-N30 H-2 + Bugbot round 1: f-string cap "
-            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 5 "
-            f"forward-write Cypher cap sites (Q3a, Q3b, Q7a, Q7b, Q9 — Q4 was removed 2026-10); "
-            f"found {occurrences}"
+            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 7 "
+            f"forward-write Cypher cap sites (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9 — Q4 was removed 2026-10, "
+            f"7c/7d added by the 2026-10 sector-focus build); found {occurrences}"
         )
         assert "_q4_inner" not in text, "Q4 co-occurrence query must stay removed (2026-10)"
         # Negative pin: no hardcoded ``[0..200]`` should remain in actual
