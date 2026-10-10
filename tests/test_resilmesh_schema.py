@@ -1,4 +1,11 @@
-"""EdgeGuard — ResilMesh schema alignment tests (no live Neo4j required)."""
+"""EdgeGuard — ResilMesh schema alignment tests (no live Neo4j required).
+
+2026-10 hygiene: this file sat in ``conftest.collect_ignore`` since March under a stale
+"not pytest-compatible" comment and was never collected; its one failing pin named a
+method (``ensure_constraints``) that never existed (``create_constraints`` /
+``create_indexes`` do). Un-ignored and repaired — the other pins are the ResilMesh
+interoperability contract and belong in CI.
+"""
 
 import os
 import sys
@@ -79,7 +86,8 @@ def test_neo4j_client_has_edgeguard_core_methods():
         "merge_vulnerabilities_batch",
         "get_stats",
         "health_check",
-        "ensure_constraints",
+        "create_constraints",
+        "create_indexes",
         "apply_sector_labels",
     ]
 

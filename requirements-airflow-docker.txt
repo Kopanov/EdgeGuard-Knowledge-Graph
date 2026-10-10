@@ -47,7 +47,7 @@ slowapi~=0.1
 strawberry-graphql~=0.283
 
 # PR-B audit fix (Dependency MED-2): align with root requirements.txt
-# (which pins ~=1.41 / ~=0.62b0 for Airflow 3.2 compatibility — see the
+# (which pins ~=1.41 / ~=0.62b0 for Airflow 3.x compatibility, 3.3 today — see the
 # comment block at requirements.txt:97-101 for the full rationale on why
 # 1.41 is required). Previous values (~=1.29 / ~=0.50b0) drifted; the
 # Airflow worker may have shipped working only because the airflow base

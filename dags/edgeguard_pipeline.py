@@ -101,7 +101,11 @@ from typing import Any, Optional
 
 import pendulum
 from airflow import DAG
-from airflow.exceptions import AirflowException, AirflowSkipException
+
+try:  # Airflow 3.3+: exceptions moved to the Task SDK; the old path still works but warns on every parse
+    from airflow.sdk.exceptions import AirflowException, AirflowSkipException
+except ImportError:  # pragma: no cover - Airflow 2.x / 3.2 fallback
+    from airflow.exceptions import AirflowException, AirflowSkipException
 
 # Airflow 3.x: BashOperator / PythonOperator / ShortCircuitOperator moved
 # from airflow-core into the ``apache-airflow-providers-standard`` package.
@@ -133,7 +137,10 @@ try:
 except ImportError:  # pragma: no cover - 2.x fallback
     from airflow.models import Variable  # Airflow 2.x
 
-from airflow.utils.trigger_rule import TriggerRule
+try:  # Airflow 3.3+: moved; the old path still works but emits DeprecatedImportWarning
+    from airflow.task.trigger_rule import TriggerRule
+except ImportError:  # pragma: no cover - Airflow 2.x / 3.2 fallback
+    from airflow.utils.trigger_rule import TriggerRule
 
 # Fixed start date — must not be dynamic (pendulum.now()) because Airflow
 # recomputes it on every scheduler heartbeat which breaks run deduplication
