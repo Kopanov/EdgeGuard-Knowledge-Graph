@@ -172,6 +172,14 @@ We tested a hybrid approach (keyword + token overlap fallback) vs. keyword-only:
 
 **Result:** When feeds provide malware family names (e.g., "QakBot C&C server"), classification now works automatically.
 
+### 3.6b CPE Vendor and Product Vocabulary (2026-10)
+
+**Problem:** the NVD collector already scores CPE vendor / product tokens (`configurations_to_zone_text` → the `comment` field of the item), but `SECTOR_KEYWORDS['energy']` contained no vendor names. Measured on the hosted graph (25k-CVE NVD sample, 2026-10-10): Siemens 238 CVEs with 4 tagged energy, Rockwell Automation 49 / 0, Fuji Electric 29 / 0, Growatt 30 / 0, ABB 28 / 0, Advantech 26 / 0, Delta Electronics 25 / 0, Phoenix Contact 14 / 0, Schneider Electric 10 / 0, Hitachi Energy 7 / 0.
+
+**Implementation:** ICS / energy vendors and product families as they appear in CPE strings (`siemens`, `simatic`, `wincc`, `rockwellautomation`, `factorytalk`, `modicon`, `ecostruxure`, `experion`, `deltav`, `codesys`, `iec 61850`, `dnp3`, solar inverter vendors, EV charging / OCPP, smart meters …) were added to `SECTOR_KEYWORDS['energy']`, and payment / ATM / banking-software vendors (`diebold nixdorf`, `vynamic`, `ingenico`, `verifone`, `temenos`, `finastra`, `flexcube`, `iso 8583`, `iso 20022`, `metatrader`, crypto wallets …) to `SECTOR_KEYWORDS['finance']`. Generic or shared names (`ge`, `sel`, `oracle`, `sap`, `cisco`, `huawei`, Honeywell's consumer lines) stay out. A vendor can own non-OT product lines, so `healthineers` / `siemens healthineers` are **negative** energy keywords: a Siemens Healthineers CVE stays healthcare only.
+
+**Result (same 25k sample, recomputed with the new vocabulary):** energy-tagged CVEs 26 → 513, finance +24. On the full NVD set that is roughly +2,800 energy CVEs against the 234 the keyword-only vocabulary produced. Tags are assigned at collection, so the gain appears with the next baseline / daily runs.
+
 ### 3.7 Future: LLM-Based Classification (Roadmap)
 
 For sources without sector tags or malware family names, we can use LLM classification:

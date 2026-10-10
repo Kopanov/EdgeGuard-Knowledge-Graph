@@ -56,6 +56,7 @@ read-back path.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -72,6 +73,16 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n10")
 # ===========================================================================
 # Fix #1 — placeholder-name reject
 # ===========================================================================
+
+
+def _link(src: str, step: str, after: int = 0) -> int:
+    """Position of the ``[LINK] <step>/<total>`` banner in ``src`` (``-1`` if absent).
+
+    The total is not pinned: adding or removing a step renumbers every banner, which used to
+    break ~30 assertions across these files for no behavioural reason (2026-10 checks audit #4).
+    """
+    m = re.search(rf"\[LINK\] {re.escape(step)}/\d+", src[after:])
+    return after + m.start() if m else -1
 
 
 class TestFix1PlaceholderNameReject:
@@ -155,8 +166,8 @@ class TestFix1PlaceholderNameReject:
         still pass. See _outer docstring for the NULL-propagation
         rationale."""
         src = (SRC / "build_relationships.py").read_text()
-        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/13", step2_idx)
+        step2_idx = _link(src, "2")
+        step3_idx = _link(src, "3a", step2_idx)
         block = src[step2_idx:step3_idx]
         # Must filter placeholder attributed_to in outer (no coalesce —
         # the branch has already asserted IS NOT NULL so coalesce would
@@ -167,15 +178,15 @@ class TestFix1PlaceholderNameReject:
 
     def test_q2_inner_filters_placeholder_actor_names(self):
         src = (SRC / "build_relationships.py").read_text()
-        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/13", step2_idx)
+        step2_idx = _link(src, "2")
+        step3_idx = _link(src, "3a", step2_idx)
         block = src[step2_idx:step3_idx]
         assert "NOT toLower(trim(a.name)) IN" in block, "Q2 inner must filter placeholder ThreatActor names"
 
     def test_q9_outer_filters_placeholder_malware_family(self):
         src = (SRC / "build_relationships.py").read_text()
-        q9_start = src.find("[LINK] 9/13")
-        q10_start = src.find("[LINK] 10/13")
+        q9_start = _link(src, "9")
+        q10_start = _link(src, "10")
         block = src[q9_start:q10_start]
         # The outer must include the NOT IN filter
         q9_outer_idx = block.find("_q9_outer")
@@ -185,8 +196,8 @@ class TestFix1PlaceholderNameReject:
 
     def test_q9_inner_filters_placeholder_malware_names(self):
         src = (SRC / "build_relationships.py").read_text()
-        q9_start = src.find("[LINK] 9/13")
-        q10_start = src.find("[LINK] 10/13")
+        q9_start = _link(src, "9")
+        q10_start = _link(src, "10")
         block = src[q9_start:q10_start]
         q9_inner_idx = block.find("_q9_inner")
         q9_skip_idx = block.find("_q9_skip", q9_inner_idx)
@@ -195,8 +206,8 @@ class TestFix1PlaceholderNameReject:
 
     def test_q9_skip_mirrors_inner_filter(self):
         src = (SRC / "build_relationships.py").read_text()
-        q9_start = src.find("[LINK] 9/13")
-        q10_start = src.find("[LINK] 10/13")
+        q9_start = _link(src, "9")
+        q10_start = _link(src, "10")
         block = src[q9_start:q10_start]
         q9_skip_idx = block.find("_q9_skip")
         next_assignment_idx = block.find("if not _safe_run_batched", q9_skip_idx)
@@ -442,7 +453,7 @@ class TestBugbotFollowupQ2InnerAttributedToFilter:
         src = (SRC / "build_relationships.py").read_text()
         tree = ast.parse(src)
         # Find `_inner` assignment under the function scope that contains
-        # the "[LINK] 2/13 Malware → ThreatActor" log line.
+        # the "[LINK] 2/<total> Malware → ThreatActor" log line.
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):
                 continue

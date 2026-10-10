@@ -34,6 +34,7 @@ with cross-agent corroboration:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -50,6 +51,16 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n8")
 # ===========================================================================
 # Fix #1 — Q9 calibrator-respect guard (BLOCK-MERGE)
 # ===========================================================================
+
+
+def _link(src: str, step: str, after: int = 0) -> int:
+    """Position of the ``[LINK] <step>/<total>`` banner in ``src`` (``-1`` if absent).
+
+    The total is not pinned: adding or removing a step renumbers every banner, which used to
+    break ~30 assertions across these files for no behavioural reason (2026-10 checks audit #4).
+    """
+    m = re.search(rf"\[LINK\] {re.escape(step)}/\d+", src[after:])
+    return after + m.start() if m else -1
 
 
 class TestFix1Q9CalibratorRespect:
@@ -295,9 +306,9 @@ class TestFix4CanonicalizationParity:
         form is now the correct shape (NULL propagates as falsy)."""
         src = self._src()
         # Find the step 2 block
-        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
+        step2_idx = _link(src, "2")
         assert step2_idx != -1
-        step3_idx = src.find("[LINK] 3a/13", step2_idx)
+        step3_idx = _link(src, "3a", step2_idx)
         block = src[step2_idx:step3_idx]
         # Post-R1 form: no coalesce wrapper around the field
         assert "toLower(trim(m.attributed_to))" in block, "Q2 m.attributed_to side must use trim()+toLower()"
@@ -353,16 +364,16 @@ class TestFix4CanonicalizationParity:
         removal prevents."""
         src = self._src()
         # Q2 outer
-        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/13", step2_idx)
+        step2_idx = _link(src, "2")
+        step3_idx = _link(src, "3a", step2_idx)
         q2_block = src[step2_idx:step3_idx]
         assert "size(trim(m.attributed_to)) > 0" in q2_block, (
             "Q2 outer must filter with size(trim(m.attributed_to)) > 0"
         )
 
         # Q9 outer + skip
-        q9_start = src.find("[LINK] 9/13")
-        q10_start = src.find("[LINK] 10/13")
+        q9_start = _link(src, "9")
+        q10_start = _link(src, "10")
         q9_block = src[q9_start:q10_start]
         # Q9 outer and skip both need the hardened form
         assert q9_block.count("size(trim(i.malware_family)) > 0") >= 2, (
@@ -374,10 +385,10 @@ class TestFix4CanonicalizationParity:
         trim()) must NOT appear in the Q2 or Q9 inner/skip blocks."""
         src = self._src()
         # Restrict search to the Q2/Q9 blocks
-        step2_idx = src.find("[LINK] 2/13")
-        step3_idx = src.find("[LINK] 3a/13")
-        step9_start = src.find("[LINK] 9/13")
-        step10_idx = src.find("[LINK] 10/13")
+        step2_idx = _link(src, "2")
+        step3_idx = _link(src, "3a")
+        step9_start = _link(src, "9")
+        step10_idx = _link(src, "10")
 
         q2_block = src[step2_idx:step3_idx]
         q9_block = src[step9_start:step10_idx]

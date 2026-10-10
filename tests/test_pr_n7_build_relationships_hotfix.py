@@ -58,6 +58,7 @@ investigation found THREE distinct bugs at three layers:
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -73,6 +74,16 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n7")
 # ===========================================================================
 # Fix #1 — quote-escape bug eliminated at all 4 outer query sites
 # ===========================================================================
+
+
+def _link(src: str, step: str, after: int = 0) -> int:
+    """Position of the ``[LINK] <step>/<total>`` banner in ``src`` (``-1`` if absent).
+
+    The total is not pinned: adding or removing a step renumbers every banner, which used to
+    break ~30 assertions across these files for no behavioural reason (2026-10 checks audit #4).
+    """
+    m = re.search(rf"\[LINK\] {re.escape(step)}/\d+", src[after:])
+    return after + m.start() if m else -1
 
 
 class TestFix1QuoteEscapeBugEliminated:
@@ -95,8 +106,8 @@ class TestFix1QuoteEscapeBugEliminated:
 
         src = self._src()
         # Scan a window around step 2 to find the _outer assignment.
-        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/13", step2_idx)
+        step2_idx = _link(src, "2")
+        step3_idx = _link(src, "3a", step2_idx)
         assert step2_idx != -1 and step3_idx != -1
         # Parse the full module so AST walker covers all assignments.
         tree = ast.parse(src)
@@ -295,7 +306,7 @@ class TestFix2Step4Removed:
         import ast
 
         src = self._src()
-        assert "[LINK] 4/13 Indicator → Malware (co-occurrence" not in src, "step-4 banner must stay removed"
+        assert _link(src, "4") < 0, "step-4 banner must stay removed"
         tree = ast.parse(src)
         assert self._extract_string_constant(tree, "_q4_outer") is None, "_q4_outer must stay removed"
         assert self._extract_string_constant(tree, "_q4_inner") is None, "_q4_inner must stay removed"
@@ -322,7 +333,7 @@ class TestFix2Step4Removed:
         (Malware.reported_techniques → IMPLEMENTS_TECHNIQUE) exist with the
         ``otx_pulse`` evidence label at confidence 0.6."""
         src = self._src()
-        assert "[LINK] 5b/13" in src and "[LINK] 6b/13" in src
+        assert _link(src, "5b") >= 0 and _link(src, "6b") >= 0
         assert '"employs_technique_reported"' in src
         assert '"malware_implements_technique_reported"' in src
         for list_prop in ("a.reported_techniques", "m.reported_techniques"):

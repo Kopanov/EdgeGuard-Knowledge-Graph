@@ -48,6 +48,7 @@ signal.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -66,6 +67,16 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n9")
 # ===========================================================================
 
 
+def _link(src: str, step: str, after: int = 0) -> int:
+    """Position of the ``[LINK] <step>/<total>`` banner in ``src`` (``-1`` if absent).
+
+    The total is not pinned: adding or removing a step renumbers every banner, which used to
+    break ~30 assertions across these files for no behavioural reason (2026-10 checks audit #4).
+    """
+    m = re.search(rf"\[LINK\] {re.escape(step)}/\d+", src[after:])
+    return after + m.start() if m else -1
+
+
 class TestFixANullEmptyAliasFilter:
     """List comprehensions over ``m.aliases`` / ``a.aliases`` must
     filter out NULL and whitespace-only entries before the IN
@@ -82,8 +93,8 @@ class TestFixANullEmptyAliasFilter:
         ``WHERE x IS NOT NULL AND size(trim(x)) > 0`` filter."""
         src = self._src()
         # Find Q2 block
-        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/13", step2_idx)
+        step2_idx = _link(src, "2")
+        step3_idx = _link(src, "3a", step2_idx)
         block = src[step2_idx:step3_idx]
 
         a_alias_filter = "x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"

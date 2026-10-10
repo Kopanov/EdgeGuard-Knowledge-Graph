@@ -68,6 +68,11 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"present": False, "edges": 0}]
     if "db.relationshipTypes" in s:
         return [{"t": t} for t in ("SOURCED_FROM", "INDICATES", "INVOLVES", "ON")]
+    if "[r:TARGETS|AFFECTS]->(s:Sector)" in s:
+        return [
+            {"sector": "energy", "label": "CVE", "nodes": 5},
+            {"sector": "energy", "label": "ThreatActor", "nodes": 2},
+        ]
     if "bidirectional" in s:
         return [{"label": lbl, "total": 7, "bidirectional": 7} for lbl in ("CVSSv30", "CVSSv31", "CVSSv40")]
     raise AssertionError(f"unexpected statement in test dispatcher: {statement[:120]}")
