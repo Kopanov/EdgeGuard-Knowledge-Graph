@@ -1005,7 +1005,9 @@ class TestOtxCollectorReportedTechniquesAndActorHygiene:
 
     def test_source_never_writes_pulse_attack_ids_into_uses_techniques(self):
         text = _OTX.read_text()
-        assert '"uses_techniques": pulse_attack_ids' not in text, "pulse ids must never masquerade as MITRE explicit uses"
+        assert '"uses_techniques": pulse_attack_ids' not in text, (
+            "pulse ids must never masquerade as MITRE explicit uses"
+        )
 
 
 # ===========================================================================
@@ -1574,4 +1576,6 @@ class TestTlpMostRestrictiveClause:
         clause = neo4j_client_mod._tlp_most_restrictive_clause("n.tlp", "$tlp")
         assert clause.startswith("CASE WHEN ") and clause.endswith("THEN $tlp ELSE n.tlp END")
         inc, exist = clause.split(" > ", 1)
-        assert "$tlp" in inc and "n.tlp" in exist.split(" THEN ")[0], "comparison direction: incoming rank > existing rank → take incoming"
+        assert "$tlp" in inc and "n.tlp" in exist.split(" THEN ")[0], (
+            "comparison direction: incoming rank > existing rank → take incoming"
+        )

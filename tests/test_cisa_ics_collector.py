@@ -48,6 +48,8 @@ class _FrozenDatetime(_dt.datetime):
 @pytest.fixture(autouse=True)
 def _freeze_collector_clock(monkeypatch):
     monkeypatch.setattr(mod, "datetime", _FrozenDatetime)
+
+
 from collectors.collector_utils import TransientServerError  # noqa: E402
 from resilience import CircuitBreaker  # noqa: E402
 
