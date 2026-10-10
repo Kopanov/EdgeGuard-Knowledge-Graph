@@ -418,7 +418,7 @@ ORDER BY i.last_updated DESC
 ---
 
 _Last updated: 2026-10-10 — fresh-baseline PR: report-scoped linking replaces whole-event co-occurrence (`INDICATES` / `ATTRIBUTED_TO` only within one OTX pulse, `match_type='otx_pulse'`, 0.6); old Q4 removed; Q5b/Q6b from `reported_techniques`; `mitre_explicit` reserved for the MITRE collector; CVE list properties promoted; `tlp` and the ownership marker on every node and edge. Prior: 2026-06-11 — PR #126: documented the alias round-trip (ThreatActor/Malware `aliases` survive the MISP round-trip via `alias:` tags; ATT&CK malware aliases from `x_mitre_aliases`) on the ATTRIBUTED_TO matching note, and added the cve_cvss_score + cve_cisa_exploit_add range indexes. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification:_
-- _Verified all confidence values match `src/build_relationships.py`:
+- _Verified all confidence values match `src/build_relationships.py` (step numbers as of 2026-04-28 — the pipeline has 13 steps since 2026-10, Q4 removed, 5b/6b added):
   EMPLOYS_TECHNIQUE = 0.95 (line 5/12), IMPLEMENTS_TECHNIQUE = 0.95
   (lines 6/12 and 10/12), USES_TECHNIQUE = 0.85 (8/12 — OTX
   attack_ids), INDICATES co-occurrence = 0.5 (4/12), INDICATES

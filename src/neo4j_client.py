@@ -1264,6 +1264,7 @@ class Neo4jClient:
             logger.error(f"Error clearing Neo4j: {e}")
             return False
 
+    @retry_with_backoff(max_retries=3)
     def clear_edgeguard_managed(self) -> bool:
         """Delete only what EdgeGuard wrote (2026-10, fresh-baseline PR).
 
@@ -3482,6 +3483,8 @@ class Neo4jClient:
                         batch_item["reference_urls"] = item["reference_urls"]
                     if item.get("affected_products"):
                         batch_item["affected_products"] = item["affected_products"]
+                    if item.get("tlp"):
+                        batch_item["tlp"] = str(item["tlp"])  # 2026-10: TLP level from the tlp:<level> MISP tag
 
                     batch_data.append(batch_item)
 
@@ -3515,6 +3518,7 @@ class Neo4jClient:
                     n.last_imported_from = item.source_id,
                     n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
                     n.edgeguard_managed = true,
+                    n.tlp = {_tlp_most_restrictive_clause("n.tlp", "item.tlp")},
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
@@ -3621,7 +3625,7 @@ class Neo4jClient:
         WHERE {key_conditions}
         MATCH (s:Source {{source_id: $source_id}})
         MERGE (n)-[r:SOURCED_FROM]->(s)
-        SET r.imported_at = datetime(), r.updated_at = datetime()
+        SET r.imported_at = datetime(), r.updated_at = datetime(), r.edgeguard_managed = true
         """
 
         try:
@@ -3687,9 +3691,23 @@ class Neo4jClient:
             return False
 
     def create_malware_actor_relationship(
-        self, malware_name: str, actor_name: str, source_id: str = "mitre_attck"
+        self,
+        malware_name: str,
+        actor_name: str,
+        source_id: str = "mitre_attck",
+        match_type: Optional[str] = None,
     ) -> bool:
         """Create ATTRIBUTED_TO relationship: Malware -> ThreatActor.
+
+        Legacy direct-write path (``run_pipeline.py``; the Airflow DAGs go through
+        MISP → ``run_misp_to_neo4j``). 2026-10 (fresh-baseline PR): the edge now
+        carries the ownership marker and an evidence label so
+        ``scripts/verify_fresh_baseline.py`` holds on this path too. When
+        ``match_type`` is not given it is derived from ``source_id``:
+        ``mitre_attck`` → ``mitre_explicit`` (MITRE's own STIX ``attributed-to``),
+        ``mitre_derived`` → ``mitre_derived`` (inferred from a MITRE ``uses`` malware
+        row); any other source leaves the label unset rather than inventing one.
+
 
         Matches by name or alias, cross-source (no tag filter).
         Each OR group is wrapped in parentheses to avoid the Cypher operator
@@ -3705,6 +3723,8 @@ class Neo4jClient:
             logger.debug("Skipping malware↔actor link: missing malware or actor name")
             return False
 
+        if match_type is None:
+            match_type = {"mitre_attck": "mitre_explicit", "mitre_derived": "mitre_derived"}.get(source_id)
         logger.debug(f"Creating malware-actor relationship: {mn} -> {an}")
 
         query = f"""
@@ -3715,6 +3735,8 @@ class Neo4jClient:
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
             r.source_id = $source_id,
+            r.match_type = coalesce(r.match_type, $match_type),
+            r.edgeguard_managed = true,
             r.confidence_score = {_confidence_respect_calibrator(0.7)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -3728,6 +3750,7 @@ class Neo4jClient:
                     malware_name=mn,
                     actor_name=an,
                     source_id=source_id,
+                    match_type=match_type,
                     timeout=NEO4J_READ_TIMEOUT,
                 )
                 logger.debug(f"Malware-actor relationship created: {mn} -> {an}")

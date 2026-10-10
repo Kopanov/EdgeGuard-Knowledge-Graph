@@ -296,7 +296,6 @@ class TestFix2Step4Removed:
 
         src = self._src()
         assert "[LINK] 4/13 Indicator → Malware (co-occurrence" not in src, "step-4 banner must stay removed"
-        assert "4. (removed 2026-10" in src, "the step-4 tombstone comment must document the removal"
         tree = ast.parse(src)
         assert self._extract_string_constant(tree, "_q4_outer") is None, "_q4_outer must stay removed"
         assert self._extract_string_constant(tree, "_q4_inner") is None, "_q4_inner must stay removed"

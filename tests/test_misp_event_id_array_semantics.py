@@ -212,7 +212,6 @@ def test_build_relationships_indicates_cooccurrence_is_gone_and_no_scalar_leg_re
         source = fh.read()
 
     assert "4. Indicator → Malware (INDICATES)" not in source, "the INDICATES co-occurrence block must stay removed"
-    assert "4. (removed 2026-10" in source, "the #4 tombstone comment must document the removal"
     assert "eid IN i.misp_event_ids" not in source, "no event-id co-occurrence join may remain"
     assert "eid IN m.misp_event_ids" not in source, "no event-id co-occurrence join may remain"
 

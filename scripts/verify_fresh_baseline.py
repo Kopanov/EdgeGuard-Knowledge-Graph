@@ -9,7 +9,8 @@ Bolt-over-WebSocket. Nothing is written.
 What it verifies (see docs/BASELINE_LAUNCH_CHECKLIST.md § "Fresh-baseline
 acceptance"): the whole-event co-occurrence edges are gone, every technique edge
 labelled ``mitre_explicit`` really comes from a MITRE-sourced node, the ResilMesh
-CVE list properties are on the ``CVE`` node, the ATT&CK entries that the MISP
+CVE list properties are on the ``CVE`` node (judged on CVEs NVD has had time to
+analyse — see check 4), the ATT&CK entries that the MISP
 import rule used to mangle are present, OTX actor names are clean, ``tlp`` and the
 ``edgeguard_managed`` marker are on every EdgeGuard node and edge, ICS techniques
 link only to ICS tactics, and the ResilMesh-facing schema is unchanged.
@@ -92,13 +93,24 @@ EDGEGUARD_REL_TYPES = (
     "HAS_CVSS_v30",
     "HAS_CVSS_v31",
     "HAS_CVSS_v40",
-    "INVOLVES",
+    # NOT listed: INVOLVES (Alert → Indicator). It is written by the ResilMesh alert
+    # processor together with the Alert nodes, neither of which carries the ownership
+    # marker, so it is not part of the baseline contract this script polices.
 )
-# Nodes that are not parsed from a MISP attribute never carry ``tlp``.
-_NO_TLP_LABELS = ("Source", "Sector", "Campaign", "CVSSv2", "CVSSv30", "CVSSv31", "CVSSv40")
+# Labels parsed from MISP attributes — the only nodes that carry ``tlp`` (the tag travels
+# with the attribute). Source/Sector/Campaign/CVSS* and the ResilMesh-model nodes written
+# on alert ingestion (Host, IP, Alert, …) are marker-stamped but never have a TLP, so the
+# check is an allowlist, not a skip-list.
+_TLP_LABELS = ("Indicator", "CVE", "Vulnerability", "Malware", "ThreatActor", "Technique", "Tactic", "Tool")
 # ATT&CK entries whose names contain ": Windows " — the MISP Import Regexp rule
 # rewrote them to ``%WINDIR%\`` before the 2026-10 fix, so they vanished.
 _MANGLED_TECHNIQUES = ("T1047", "T1021.006", "T1543.003", "T1222.001", "T1546.003")
+_MANGLED_TOOLS_HINT = (
+    "requires the MISP Import Regexp fix (docs/BASELINE_LAUNCH_CHECKLIST.md § [7], step 1) before the re-feed"
+)
+# NVD analysis lag: reference tags + CPE configurations appear weeks after publication.
+_NVD_ANALYSIS_LAG_DAYS = 45
+_MIN_ANALYSED_CVES = 100
 _MANGLED_TOOLS = ("S0005",)
 
 
@@ -174,22 +186,36 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
     rep.add("evidence_labels_breakdown", None, breakdown)
 
     # 4. ResilMesh CVE list properties on the node (NVD-sourced CVEs only).
+    #
+    # Scope: CVEs published at least _NVD_ANALYSIS_LAG_DAYS ago. NVD analysts assign the
+    # reference tags (``ref_tags``) and the CPE configurations (``cpe_type``) during
+    # analysis, which lags publication by weeks; day-old CVEs carry neither. Measured on
+    # the hosted graph on 2026-10-10: the 730-day baseline event had ref_tags/cpe_type on
+    # 57 % of its NVD CVEs, every daily event of the last two weeks had them on 0 %. Without
+    # the scope a short smoke baseline (7–30 days) fails this check with nothing wrong.
+    # Below _MIN_ANALYSED_CVES analysed CVEs the check is informational.
     r = _one(
-        "MATCH (c:CVE) WHERE 'nvd' IN coalesce(c.source, []) RETURN count(c) AS n, "
+        "MATCH (c:CVE) WHERE 'nvd' IN coalesce(c.source, []) AND c.published IS NOT NULL "
+        "AND datetime(c.published) < datetime() - duration({days: $lag}) RETURN count(c) AS n, "
         "sum(CASE WHEN c.cwe IS NOT NULL THEN 1 ELSE 0 END) AS cwe, "
         "sum(CASE WHEN c.ref_tags IS NOT NULL THEN 1 ELSE 0 END) AS ref_tags, "
         "sum(CASE WHEN c.cpe_type IS NOT NULL THEN 1 ELSE 0 END) AS cpe_type, "
-        "sum(CASE WHEN c.result_impacts IS NOT NULL THEN 1 ELSE 0 END) AS result_impacts"
+        "sum(CASE WHEN c.result_impacts IS NOT NULL THEN 1 ELSE 0 END) AS result_impacts",
+        {"lag": _NVD_ANALYSIS_LAG_DAYS},
     )
     n = r.get("n") or 0
-    ok = (
-        n > 0
-        and (r["cwe"] / n) >= 0.5
-        and (r["result_impacts"] / n) >= 0.5
-        and (r["ref_tags"] / n) >= 0.2
-        and (r["cpe_type"] / n) >= 0.2
-    )
-    rep.add("cve_resilmesh_properties_present", ok, r)
+    r["scope"] = f"NVD CVEs published > {_NVD_ANALYSIS_LAG_DAYS} days ago"
+    if n < _MIN_ANALYSED_CVES:
+        r["note"] = f"only {n} analysed CVEs (< {_MIN_ANALYSED_CVES}) — informational; rerun on a longer baseline"
+        rep.add("cve_resilmesh_properties_present", None, r)
+    else:
+        ok = (
+            (r["cwe"] / n) >= 0.5
+            and (r["result_impacts"] / n) >= 0.5
+            and (r["ref_tags"] / n) >= 0.2
+            and (r["cpe_type"] / n) >= 0.2
+        )
+        rep.add("cve_resilmesh_properties_present", ok, r)
 
     # 5. Previously mangled ATT&CK entries are present.
     rows = _post(
@@ -200,7 +226,12 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         "UNWIND $ids AS id OPTIONAL MATCH (t:Tool {mitre_id: id}) RETURN id, t IS NOT NULL AS present",
         {"ids": list(_MANGLED_TOOLS)},
     )
-    rep.add("mangled_attack_entries_present", all(x["present"] for x in rows + tools), rows + tools)
+    present = all(x["present"] for x in rows + tools)
+    rep.add(
+        "mangled_attack_entries_present",
+        present,
+        {"entries": rows + tools, **({} if present else {"hint": _MANGLED_TOOLS_HINT})},
+    )
 
     # 6. Actor names are clean.
     r = _one(
@@ -211,9 +242,9 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
 
     # 7. TLP on every node parsed from a MISP attribute.
     r = _one(
-        "MATCH (n) WHERE n.edgeguard_managed = true AND none(l IN labels(n) WHERE l IN $skip) "
+        "MATCH (n) WHERE n.edgeguard_managed = true AND any(l IN labels(n) WHERE l IN $labels) "
         "RETURN count(n) AS total, sum(CASE WHEN n.tlp IS NULL THEN 1 ELSE 0 END) AS missing",
-        {"skip": list(_NO_TLP_LABELS)},
+        {"labels": list(_TLP_LABELS)},
     )
     rep.add("tlp_on_every_node", (r.get("total") or 0) > 0 and r.get("missing") == 0, r)
 

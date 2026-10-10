@@ -1634,7 +1634,6 @@ def test_indicates_cooccurrence_query_sets_updated_at():
     assert "4. Indicator → Malware (INDICATES)" not in src, (
         "the whole-event INDICATES co-occurrence query must stay removed"
     )
-    assert "4. (removed 2026-10" in src, "the #4 tombstone comment must document the removal"
 
     for banner, next_banner in (
         ("5b. ThreatActor → Technique", "6. Malware → Technique"),

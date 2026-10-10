@@ -44,7 +44,7 @@ As part of the EdgeGuard framework for Graph-Augmented xAI on edge infrastructur
 ### The Workflow
 
 ```
-External sources (11 active feeds + 2 sector placeholders)
+External sources (11 active feeds + CISA ICS advisories, opt-in + 2 sector placeholders)
        │
        ▼
   Collectors ──────────────────────────────────────────────────────────────────┐
@@ -582,7 +582,7 @@ All collectors write exclusively to MISP first. Neo4j is populated only from MIS
 
 ### 3. Post-Sync Enrichment Pipeline
 
-After every MISP → Neo4j sync, **four** enrichment jobs run automatically (`enrichment_jobs.run_all_enrichment_jobs`):
+After every MISP → Neo4j sync, **five** enrichment jobs run automatically (`enrichment_jobs.run_all_enrichment_jobs`):
 
 | Job | What it does |
 |-----|-------------|
@@ -590,6 +590,7 @@ After every MISP → Neo4j sync, **four** enrichment jobs run automatically (`en
 | **Campaign Node Builder** | Creates `Campaign` nodes from ThreatActor → Malware → Indicator chains (`build_campaign_nodes`) |
 | **Co-occurrence Calibration** | Legacy: rescored `INDICATES`/`EXPLOITS` edges with `source_id` in `misp_cooccurrence` / `misp_correlation` by MISP event size (`calibrate_cooccurrence_confidence`). Since 2026-10 no such edges are written (links are report-scoped: same OTX pulse, `match_type='otx_pulse'`), so the job is a no-op on a fresh baseline |
 | **Vulnerability↔CVE bridge** | Idempotent `REFERS_TO` between `Vulnerability` and `CVE` (`bridge_vulnerability_cve`) |
+| **Actor alias merge** (2026-10) | Folds a non-MITRE `ThreatActor` whose name is an alias of exactly one MITRE actor into that node (APOC `mergeNodes`, edges re-pointed); `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE=false` = dry run that only logs candidates (`merge_alias_duplicate_actors`, runs before the Campaign builder) |
 
 ### 4. ResilMesh Interoperability
 

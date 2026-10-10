@@ -108,7 +108,6 @@ class TestBuildRelationshipsAccumulatesSourceIds:
                     c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
                 )
                 assert "misp_cooccurrence" not in body, f"{tgt.id} must not stamp misp_cooccurrence"
-        assert "4. (removed 2026-10" in source, "the Q4 tombstone comment must document the removal"
         assert '"employs_technique_reported"' in source, "5b (ThreatActor reported_techniques) must exist"
         assert '"malware_implements_technique_reported"' in source, "6b (Malware reported_techniques) must exist"
 

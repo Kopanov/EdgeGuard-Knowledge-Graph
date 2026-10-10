@@ -201,6 +201,7 @@ by evidence without renaming anything — the ResilMesh and STIX-derived relatio
 | `otx_attack_ids` | Pulse-level ATT&CK ids inherited by every indicator in the pulse | 0.85 | `build_relationships.py` Q8 (`USES_TECHNIQUE`; unchanged, documented as pulse-level) |
 | `kill_chain_phase` | ATT&CK tactic phase on the technique | 1.0 | `build_relationships.py` Q1 (`IN_TACTIC`) |
 | `zone_classification` | EdgeGuard's own sector classification of the node (keyword / OTX industry / CISA sector) | 0.5 (sync) / 1.0 (Q7a, Q7b) | `TARGETS` (Indicator → Sector), `AFFECTS` (CVE → Sector); sync rows are written with `source_id='misp'` |
+| `mitre_derived` | Malware attributed to an actor because MITRE's STIX says the actor **uses** that malware (inference, not an explicit `attributed-to`) | 0.7 | Legacy in-process path only (`run_pipeline.py` → `Neo4jClient.create_malware_actor_relationship`); the DAG path does not write it |
 | `misp_attribute_tag` | A tag on the MISP attribute itself (`mitre-attack:technique=`, `threat_actor=`, `exploits:`) | per attribute confidence (≥ 0.7) | MISP→Neo4j sync: attribute-embedded `EMPLOYS_TECHNIQUE`, `ATTRIBUTED_TO`; embedded `EXPLOITS` keeps `cve_tag` |
 
 Report-scoped edges also carry `r.report_ids[]` (the OTX pulse ids) next to `r.misp_event_ids[]`, so a

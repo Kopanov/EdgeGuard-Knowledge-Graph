@@ -17,6 +17,7 @@ routed by URL suffix. Covers:
 from __future__ import annotations
 
 import copy
+import datetime as _dt
 import json
 import os
 import sys
@@ -30,6 +31,23 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
 import collectors.cisa_ics_collector as mod  # noqa: E402
+
+# Freeze the collector's clock. SAMPLE_ADVISORY is dated 2026-10-08 and the baseline window is
+# 730 days: with a real clock these fixtures start failing in October 2028, and the name-date
+# prefilter test flips on 1–20 January (``cutoff - 20d`` falls in the previous year). Every
+# ``datetime.now()`` inside the collector module now returns the same instant.
+_FROZEN_NOW = _dt.datetime(2026, 10, 10, 12, 0, tzinfo=_dt.timezone.utc)
+
+
+class _FrozenDatetime(_dt.datetime):
+    @classmethod
+    def now(cls, tz=None):  # noqa: D401 — datetime API
+        return _FROZEN_NOW.astimezone(tz) if tz else _FROZEN_NOW.replace(tzinfo=None)
+
+
+@pytest.fixture(autouse=True)
+def _freeze_collector_clock(monkeypatch):
+    monkeypatch.setattr(mod, "datetime", _FrozenDatetime)
 from collectors.collector_utils import TransientServerError  # noqa: E402
 from resilience import CircuitBreaker  # noqa: E402
 
@@ -805,7 +823,7 @@ def test_timestamps_normalised_to_tz_aware_iso():
 def test_baseline_prefilter_skips_files_whose_name_date_is_far_before_cutoff(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
-    now = datetime.now(timezone.utc)
+    now = mod.datetime.now(timezone.utc)  # the frozen clock the collector sees
     cutoff = now - timedelta(days=730)
 
     def _name(dt: datetime, n: int = 1) -> str:

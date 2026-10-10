@@ -332,7 +332,7 @@ It exits non-zero when any of these fail:
 | Edges with `source_id = 'misp_cooccurrence'` | 0 |
 | `match_type = 'mitre_explicit'` edges whose source node has no MITRE source | 0 |
 | `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware in single digits |
-| NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | roughly the share NVD_META carries them (sample: 97 / 50 / 50 / 91 %) |
+| NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | judged only on CVEs published > 45 days ago (NVD assigns reference tags and CPE configurations during analysis, weeks after publication — day-old CVEs have neither); thresholds 50 / 20 / 20 / 50 %; measured 2026-10-10 on the 730-day event: 93 / 57 / 58 / 91 %. Informational when fewer than 100 analysed CVEs are present (short smoke baselines) |
 | `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, Tool `S0005` | present (requires the MISP Import Regexp fix before re-import) |
 | `ThreatActor` names containing `,` or ` and ` | 0 |
 | `tlp` property | on every EdgeGuard node |

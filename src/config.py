@@ -989,9 +989,10 @@ CISA_ICS_MIN_EXPECTED_ADVISORIES = _env_int("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADV
 # folds NON-MITRE ThreatActor nodes whose name is an alias of exactly one
 # MITRE-sourced actor into that canonical node (``apoc.refactor.mergeNodes``,
 # runs before ``build_campaign_nodes``). Default ON. ``false`` = dry run: the
-# job logs the candidate count and merges nothing. NOTE: the job itself reads
-# the env var at CALL time (so an operator can flip it between DAG runs
-# without a restart); this constant mirrors it for import-time consumers
-# (DAG wiring, doctor checks). String-level name hygiene for the same problem
-# at ingest lives in ``src/actor_name_hygiene.py`` (no flag — pure helpers).
-ENABLE_ACTOR_ALIAS_MERGE = _env_bool("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true")
+# job logs the candidate count and merges nothing. There is deliberately NO
+# import-time constant for it: ``enrichment_jobs._actor_alias_merge_enabled``
+# reads ``EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`` at CALL time so an operator can
+# flip it between DAG runs without a restart (a constant here would be read by
+# nothing and would silently disagree with the job). String-level name hygiene
+# for the same problem at ingest lives in ``src/actor_name_hygiene.py`` (no
+# flag — pure helpers).

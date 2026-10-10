@@ -288,7 +288,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 ### 2. run_enrichment_jobs
 
-Runs `src/enrichment_jobs.py` — **four** jobs in sequence (`run_all_enrichment_jobs`):
+Runs `src/enrichment_jobs.py` — **five** jobs in sequence (`run_all_enrichment_jobs`):
 
 1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
 1b. **Actor alias merge** (`merge_alias_duplicate_actors`, 2026-10 — folds non-MITRE actors named by an alias of exactly one MITRE actor into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`)

@@ -305,7 +305,12 @@ class TestEnvFlag:
     def test_flag_name_matches_config(self):
         assert FLAG == "EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE"
         src = (SRC / "config.py").read_text()
-        assert 'ENABLE_ACTOR_ALIAS_MERGE = _env_bool("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true")' in src
+        env_example = (SRC.parent / ".env.example").read_text()
+        assert FLAG in env_example, ".env.example must document the operator flag the job reads at call time"
+        assert "ENABLE_ACTOR_ALIAS_MERGE =" not in src, (
+            "config.py must not grow an import-time mirror: the job reads the env var at call time "
+            "(see enrichment_jobs._actor_alias_merge_enabled) and a constant here would be read by nothing"
+        )
 
 
 # ---------------------------------------------------------------------------
