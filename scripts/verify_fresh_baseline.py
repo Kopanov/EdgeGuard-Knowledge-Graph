@@ -86,6 +86,7 @@ EDGEGUARD_REL_TYPES = (
     "TARGETS",
     "AFFECTS",
     "IN_TACTIC",
+    "SUBTECHNIQUE_OF",
     "RUNS",
     "PART_OF",
     "REFERS_TO",
@@ -279,6 +280,17 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         r,
         mandatory=require_cisa_ics,
     )
+
+    # 10a. Sub-technique hierarchy complete (2026-10 R6): every dotted-id technique whose parent
+    #      exists links to it with SUBTECHNIQUE_OF.
+    r = _one(
+        "MATCH (s:Technique) WHERE s.mitre_id CONTAINS '.' "
+        "WITH s, split(s.mitre_id, '.')[0] AS pid "
+        "OPTIONAL MATCH (p:Technique {mitre_id: pid}) "
+        "RETURN count(s) AS subs, sum(CASE WHEN p IS NULL THEN 1 ELSE 0 END) AS parent_missing, "
+        "sum(CASE WHEN p IS NOT NULL AND NOT EXISTS { (s)-[:SUBTECHNIQUE_OF]->(p) } THEN 1 ELSE 0 END) AS edge_missing"
+    )
+    rep.add("subtechnique_of_complete", (r.get("subs") or 0) > 0 and r.get("edge_missing") == 0, r)
 
     # 10b. Sector coverage (informational; the "measure" input for demo day): how many nodes of
     #      each EdgeGuard label are linked to each Sector. 2026-10 sector-focus build adds

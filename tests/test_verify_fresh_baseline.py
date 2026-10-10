@@ -68,6 +68,8 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"present": False, "edges": 0}]
     if "db.relationshipTypes" in s:
         return [{"t": t} for t in ("SOURCED_FROM", "INDICATES", "INVOLVES", "ON")]
+    if "SUBTECHNIQUE_OF" in s:
+        return [{"subs": 493, "parent_missing": 0, "edge_missing": 0}]
     if "[r:TARGETS|AFFECTS]->(s:Sector)" in s:
         return [
             {"sector": "energy", "label": "CVE", "nodes": 5},

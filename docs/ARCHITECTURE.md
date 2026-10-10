@@ -249,6 +249,7 @@ When data is pushed to MISP, it gets tagged with:
 | `INDICATES` | Indicator → Malware | Same-OTX-pulse link from the sync (`match_type='otx_pulse'`, 0.6, 2026-10) and source-asserted `malware_family` match (`build_relationships.py` Q9, 0.8). The whole-event `misp_event_ids[]` co-occurrence query was removed in 2026-10. |
 | `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0). Not derived from event co-membership since 2026-10. |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
+| `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent technique (MITRE dotted id; 2026-10) |
 | `TARGETS` | Indicator → Sector | Node `zone` list → `build_relationships.py` |
 | `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → `build_relationships.py` |
 | `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` |
