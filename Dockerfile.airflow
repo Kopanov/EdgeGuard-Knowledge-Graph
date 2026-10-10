@@ -76,6 +76,9 @@ USER airflow
 
 COPY requirements-airflow-docker.txt /tmp/requirements-airflow-docker.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-airflow-docker.txt
+# 2026-10: the apache/airflow base ships GitPython 3.1.46 (CVE-2026-78676, CRITICAL in Trivy);
+# lift it to the fixed release without touching Airflow's own pins.
+RUN pip install --no-cache-dir "GitPython>=3.1.59"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["airflow", "standalone"]

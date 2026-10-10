@@ -295,9 +295,9 @@ class TestFix4CanonicalizationParity:
         form is now the correct shape (NULL propagates as falsy)."""
         src = self._src()
         # Find the step 2 block
-        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
+        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
         assert step2_idx != -1
-        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        step3_idx = src.find("[LINK] 3a/13", step2_idx)
         block = src[step2_idx:step3_idx]
         # Post-R1 form: no coalesce wrapper around the field
         assert "toLower(trim(m.attributed_to))" in block, "Q2 m.attributed_to side must use trim()+toLower()"
@@ -353,16 +353,16 @@ class TestFix4CanonicalizationParity:
         removal prevents."""
         src = self._src()
         # Q2 outer
-        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
+        step3_idx = src.find("[LINK] 3a/13", step2_idx)
         q2_block = src[step2_idx:step3_idx]
         assert "size(trim(m.attributed_to)) > 0" in q2_block, (
             "Q2 outer must filter with size(trim(m.attributed_to)) > 0"
         )
 
         # Q9 outer + skip
-        q9_start = src.find("[LINK] 9/12")
-        q10_start = src.find("[LINK] 10/12")
+        q9_start = src.find("[LINK] 9/13")
+        q10_start = src.find("[LINK] 10/13")
         q9_block = src[q9_start:q10_start]
         # Q9 outer and skip both need the hardened form
         assert q9_block.count("size(trim(i.malware_family)) > 0") >= 2, (
@@ -374,10 +374,10 @@ class TestFix4CanonicalizationParity:
         trim()) must NOT appear in the Q2 or Q9 inner/skip blocks."""
         src = self._src()
         # Restrict search to the Q2/Q9 blocks
-        step2_idx = src.find("[LINK] 2/12")
-        step3_idx = src.find("[LINK] 3a/12")
-        step9_start = src.find("[LINK] 9/12")
-        step10_idx = src.find("[LINK] 10/12")
+        step2_idx = src.find("[LINK] 2/13")
+        step3_idx = src.find("[LINK] 3a/13")
+        step9_start = src.find("[LINK] 9/13")
+        step10_idx = src.find("[LINK] 10/13")
 
         q2_block = src[step2_idx:step3_idx]
         q9_block = src[step9_start:step10_idx]

@@ -50,12 +50,12 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 
 | Relationship | From → To | Source / Confidence |
 |---|---|---|
-| `EMPLOYS_TECHNIQUE` | ThreatActor → Technique | **Attribution.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
-| `IMPLEMENTS_TECHNIQUE` | Malware → Technique | **Capability.** MITRE STIX explicit `uses` relationship via `uses_techniques` (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
+| `EMPLOYS_TECHNIQUE` | ThreatActor → Technique | **Attribution.** `match_type='mitre_explicit'` (0.95) from MITRE STIX `uses` → `uses_techniques`; `match_type='otx_pulse'` (0.6, 2026-10) from OTX pulse `attack_ids` → `reported_techniques`. Q5 runs before Q5b so a pair MITRE asserts keeps the explicit stamp. *(Split from a generic `USES` in 2026-04.)* |
+| `IMPLEMENTS_TECHNIQUE` | Malware → Technique | **Capability.** `match_type='mitre_explicit'` (0.95) via `uses_techniques`; `match_type='otx_pulse'` (0.6, 2026-10) via `reported_techniques`. *(Split from a generic `USES` in 2026-04.)* |
 | `IMPLEMENTS_TECHNIQUE` | Tool → Technique | **Capability.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
-| `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` name matching — the malware's own `m.attributed_to` claim, matched exactly against the actor's `a.name` OR the actor's `a.aliases` (the "Cozy Bear → APT29" path). Actor/Malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06 fix; ATT&CK malware aliases from `x_mitre_aliases`). The inverse path (actor name ∈ malware `aliases`) was **removed** 2026-06 as an attribution-forgery vector — see `build_relationships.py` Q2. |
-| `INDICATES` | Indicator → Malware | MISP event co-occurrence (confidence 0.5) **and** malware_family name match from ThreatFox/VT (confidence 0.8) |
-| `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag exact match (confidence 1.0) |
+| `ATTRIBUTED_TO` | Malware → ThreatActor | `match_type='exact'` (1.0): the malware's own `m.attributed_to` claim matched exactly against `a.name` OR `a.aliases` (the "Cozy Bear → APT29" path; `build_relationships.py` Q2). `match_type='otx_pulse'` (0.6, 2026-10): malware and actor named in the same OTX pulse, written by the MISP→Neo4j sync with `r.report_ids[]`. Whole-event co-occurrence attribution was removed in 2026-10 (fresh-baseline PR). |
+| `INDICATES` | Indicator → Malware | `match_type='malware_family'` (0.8): source-asserted family name match (ThreatFox/VT/OTX, Q9) **and** `match_type='otx_pulse'` (0.6, 2026-10): indicator and malware listed in the same OTX pulse (sync path). The whole-event co-occurrence query (old Q4, 0.5) was removed in 2026-10. |
+| `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag on the indicator, exact match (`match_type='cve_tag'`, 1.0). Not produced from event co-membership since 2026-10. |
 | `REFERS_TO` | Vulnerability ↔ CVE | `bridge_vulnerability_cve()` |
 | `RUNS` | ThreatActor → Campaign | `build_campaign_nodes()` |
 | `PART_OF` | Malware, Indicator → Campaign | `build_campaign_nodes()` |
@@ -91,6 +91,15 @@ Every threat-intel node (Indicator, Vulnerability, Malware, ThreatActor, Techniq
 **MIN/MAX merge semantics handle every realistic ordering scenario** — see `src/source_truthful_timestamps.py` module docstring or `migrations/2026_04_first_seen_at_source.md` for the full scenario walkthrough (baseline + incremental + out-of-order + stale-import + multi-source).
 
 **Timestamp invariants.** Every value flowing into `r.source_reported_first_at` / `r.source_reported_last_at` is **either NULL or tz-aware ISO-8601 UTC** (PR-M2 §4-F1). Mixing naive and aware values would corrupt the MIN/MAX comparison since Neo4j parses naive ISO strings as **server-local** time. The canonicalization chokepoint is `coerce_iso()` in `src/source_truthful_timestamps.py`. Producers MUST emit honest NULL when the source field is absent — never wall-clock NOW (PR-M2 §4-F4 / F5). The complete semantic model is documented in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md).
+
+### Evidence labels, report provenance, TLP (2026-10)
+
+- `r.match_type` states the evidence behind every edge (`mitre_explicit`, `otx_pulse`, `exact`, `malware_family`, `cve_tag`, `otx_attack_ids`, `kill_chain_phase`) — see `docs/RESILMESH_INTEROPERABILITY.md` §3.2.2 for the table with confidences.
+- `r.report_ids[]` (OTX pulse ids) on report-scoped edges; `n.pulse_ids[]` on `Malware` / `ThreatActor` nodes (every pulse that named them); `n.reported_techniques[]` next to `n.uses_techniques[]` (pulse-level vs MITRE-explicit ATT&CK ids).
+- `n.tlp` on every EdgeGuard node (from the `tlp:<level>` MISP tag; default `white`).
+- `n.attack_domain` (`enterprise` | `ics`) on `Technique` and `Tactic` (from the `attack-domain:<domain>` MISP tag); `IN_TACTIC` is created only within the same domain. ATT&CK for ICS is ingested when `EDGEGUARD_ENABLE_MITRE_ICS=true` (97 techniques T08xx, 12 tactics TA0100–TA0111, shared groups/malware keep one node with unioned technique lists).
+- `r.edgeguard_managed = true` on every EdgeGuard edge, and on `Campaign` / `Source` nodes — the ownership marker is complete, so `edgeguard clear neo4j --edgeguard-only` can remove exactly EdgeGuard's data from a shared database.
+- `CVE` nodes carry `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]`, `reference_urls[]`, `affected_products[]` from NVD (ResilMesh CVE properties).
 
 ### Technique edges: attribution vs capability vs observation
 
@@ -244,7 +253,7 @@ CREATE INDEX campaign_zone IF NOT EXISTS FOR (c:Campaign) ON (c.zone);
 
 ### Sync throughput (Airflow worker memory)
 
-MISP→Neo4j ingestion (`run_misp_to_neo4j.py`) processes **one MISP event at a time**: parse attributes → dedupe within the event → build **cross-item** edges **for that event only** (no cross-event co-occurrence on this path) → merge nodes in **Python-side chunks** (**`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, default **`500`**) → flush relationships in **UNWIND batches** (**`EDGEGUARD_REL_BATCH_SIZE`**, default **`500`**). **`0`** or **`all`** on chunk size disables Python node chunking (**OOM risk** on huge attribute counts). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
+MISP→Neo4j ingestion (`run_misp_to_neo4j.py`) processes **one MISP event at a time**: parse attributes → dedupe within the event → build **report-scoped** edges (2026-10: only items that share the same OTX `pulse_id` are paired — `INDICATES` and `ATTRIBUTED_TO` with `match_type='otx_pulse'`; whole-event pairing is gone) → merge nodes in **Python-side chunks** (**`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`**, default **`500`**) → flush relationships in **UNWIND batches** (**`EDGEGUARD_REL_BATCH_SIZE`**, default **`500`**). **`0`** or **`all`** on chunk size disables Python node chunking (**OOM risk** on huge attribute counts). See [README.md](../README.md), [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), and [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md).
 
 ### Querying Full History
 
@@ -408,8 +417,8 @@ ORDER BY i.last_updated DESC
 
 ---
 
-_Last updated: 2026-06-11 — PR #126: documented the alias round-trip (ThreatActor/Malware `aliases` survive the MISP round-trip via `alias:` tags; ATT&CK malware aliases from `x_mitre_aliases`) on the ATTRIBUTED_TO matching note, and added the cve_cvss_score + cve_cisa_exploit_add range indexes. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification:_
-- _Verified all confidence values match `src/build_relationships.py`:
+_Last updated: 2026-10-10 — fresh-baseline PR: report-scoped linking replaces whole-event co-occurrence (`INDICATES` / `ATTRIBUTED_TO` only within one OTX pulse, `match_type='otx_pulse'`, 0.6); old Q4 removed; Q5b/Q6b from `reported_techniques`; `mitre_explicit` reserved for the MITRE collector; CVE list properties promoted; `tlp` and the ownership marker on every node and edge. Prior: 2026-06-11 — PR #126: documented the alias round-trip (ThreatActor/Malware `aliases` survive the MISP round-trip via `alias:` tags; ATT&CK malware aliases from `x_mitre_aliases`) on the ATTRIBUTED_TO matching note, and added the cve_cvss_score + cve_cisa_exploit_add range indexes. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification:_
+- _Verified all confidence values match `src/build_relationships.py` (step numbers as of 2026-04-28 — the pipeline has 13 steps since 2026-10, Q4 removed, 5b/6b added):
   EMPLOYS_TECHNIQUE = 0.95 (line 5/12), IMPLEMENTS_TECHNIQUE = 0.95
   (lines 6/12 and 10/12), USES_TECHNIQUE = 0.85 (8/12 — OTX
   attack_ids), INDICATES co-occurrence = 0.5 (4/12), INDICATES

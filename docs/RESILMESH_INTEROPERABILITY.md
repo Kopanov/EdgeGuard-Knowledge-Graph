@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-06-12** — Wazuh integration phase 1: documented `GET /export/wazuh/cdb` (sector IOC/CVE intelligence as Wazuh CDB lists — export-lists-first per the 2026-06 team decision). Prior: 2026-06-11 — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
+**Last updated: 2026-10-10** — fresh-baseline PR (ResilMesh conformance check of 2026-10-09): relationships are no longer derived from whole-MISP-event co-occurrence — only items from the same source report (OTX pulse) are linked, under the same relationship names, with an explicit evidence label (`match_type`) and confidence (§3.2.2); OTX pulse-level ATT&CK ids are `reported_techniques` (`match_type = "otx_pulse"`), never `mitre_explicit`; the four ResilMesh CVE list properties are on the `CVE` node (§5); every EdgeGuard edge and the Campaign/Source nodes carry `edgeguard_managed` (§3.4); `tlp:<level>` on every MISP attribute → `n.tlp` (§3.3). Prior: 2026-06-12 — Wazuh integration phase 1: documented `GET /export/wazuh/cdb` (sector IOC/CVE intelligence as Wazuh CDB lists — export-lists-first per the 2026-06 team decision). Prior: 2026-06-11 — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -67,15 +67,15 @@ All EdgeGuard nodes are **ResilMesh-schema compatible** where they overlap.
 
 | Node Label | Key Properties | Source |
 |------------|---------------|--------|
-| `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_seen`, `last_updated`, `misp_event_ids[]`, `misp_attribute_ids[]`, **`uuid`** (deterministic, equal to the UUID portion of the STIX SDO id), … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
+| `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_imported_at` (DB-local; the source's own claim lives on `SOURCED_FROM.source_reported_first_at`), `last_updated`, `misp_event_ids[]`, `misp_attribute_ids[]`, `pulse_id` (OTX report), `attack_ids[]` (pulse-level), `tlp` (2026-10), **`uuid`** (deterministic, equal to the UUID portion of the STIX SDO id), … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
 | `Vulnerability` | `cve_id`, `severity`, `cvss_score`, `attack_vector`, `zone[]`, `published`, `last_modified` | NVD, CISA KEV, OTX |
 | `CVE` | `cve_id`, `description`, `published`, `last_modified`, `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]` | NVD |
 | `CVSSv31` | `vector_string`, `base_score`, `base_severity`, `attack_vector`, `attack_complexity`, `privileges_required`, `user_interaction`, `scope`, `confidentiality_impact`, `integrity_impact`, `availability_impact`, `impact_score`, `exploitability_score` | NVD (via CVE node) |
 | `CVSSv2` | `vector_string`, `base_score`, `base_severity`, `access_vector`, `access_complexity`, `authentication`, `confidentiality_impact`, `integrity_impact`, `availability_impact`, `impact_score`, `exploitability_score`, `obtain_all_privilege`, `obtain_user_privilege`, `ac_insuf_info` | NVD (via CVE node) |
-| `ThreatActor` | `name`, `aliases[]`, `description`, `zone[]` | MITRE ATT&CK, OTX |
-| `Malware` | `name`, `malware_types[]`, `aliases[]`, `zone[]`, `uses_techniques[]` (MITRE explicit **`uses`**, optional) | MITRE ATT&CK, OTX, ThreatFox |
-| `Technique` | `mitre_id`, `name`, `description`, `tactic_phases[]`, `zone[]` | MITRE ATT&CK |
-| `Tactic` | `mitre_id`, `name`, `shortname` | MITRE ATT&CK |
+| `ThreatActor` | `name` (cleaned: no composites, no descriptive phrases — 2026-10), `aliases[]`, `description`, `zone[]`, `uses_techniques[]` (MITRE explicit **`uses`**), `reported_techniques[]` (OTX pulse-level, 2026-10), `pulse_ids[]` (2026-10), `tlp` | MITRE ATT&CK, OTX (duplicates under an alias of a MITRE actor are merged into the MITRE node post-sync) |
+| `Malware` | `name`, `malware_types[]`, `aliases[]`, `zone[]`, `uses_techniques[]` (MITRE explicit **`uses`**, optional), `reported_techniques[]` (OTX pulse-level, 2026-10), `pulse_ids[]` (2026-10), `tlp` | MITRE ATT&CK, OTX, ThreatFox |
+| `Technique` | `mitre_id`, `name`, `description`, `tactic_phases[]`, `attack_domain` (`enterprise` \| `ics`, 2026-10), `zone[]`, `tlp` | MITRE ATT&CK Enterprise; ATT&CK for ICS when `EDGEGUARD_ENABLE_MITRE_ICS` is on |
+| `Tactic` | `mitre_id`, `name`, `shortname`, `attack_domain` (2026-10) | MITRE ATT&CK (Enterprise; ICS when enabled — 9 of 12 ICS short names equal Enterprise ones, so `IN_TACTIC` is matched within the domain) |
 | `Source` | `source_id`, `name` | Internal registry |
 
 #### ResilMesh Topology Layer (schema-compatible stubs)
@@ -95,14 +95,14 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | Relationship | From → To | Description |
 |---|---|---|
 | `SOURCED_FROM` | Any node → `Source` | **Per-source provenance** — one edge per (entity, source) pair. Carries `raw_data`, `imported_at` (immutable), `updated_at`, `confidence`, plus per-source claim properties **`source_reported_first_at`** (MIN-guarded) and **`source_reported_last_at`** (MAX-guarded) — what the source itself says about when it first/last recorded the entity. STIX export aggregates `MIN(r.source_reported_first_at)` across all edges to populate `Indicator.valid_from`. See [`docs/KNOWLEDGE_GRAPH.md#sourced_from-edge-schema`](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema) for the full property contract. |
-| `EMPLOYS_TECHNIQUE` | `ThreatActor` / `Campaign` → `Technique` | **Attribution.** Actor employs a MITRE technique (explicit STIX **`uses`** → `uses_techniques` on actor). *Split from a generic `USES` in 2026-04 — see below.* |
-| `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability.** Malware or tool implements a MITRE technique (same STIX **`uses`** → `uses_techniques` on the source node; MISP **`MITRE_USES_TECHNIQUES:`** round-trip for Malware). *Split from a generic `USES` in 2026-04 — see below.* |
+| `EMPLOYS_TECHNIQUE` | `ThreatActor` / `Campaign` → `Technique` | **Attribution.** Actor employs a MITRE technique. Two evidence levels, told apart by `r.match_type` (§3.2.2): `mitre_explicit` (0.95, from MITRE's STIX **`uses`** → `uses_techniques`) and `otx_pulse` (0.6, from an OTX pulse's `attack_ids` → `reported_techniques`, 2026-10). *Split from a generic `USES` in 2026-04 — see below.* |
+| `IMPLEMENTS_TECHNIQUE` | `Malware` / `Tool` → `Technique` | **Capability.** Malware or tool implements a MITRE technique. Same two evidence levels as `EMPLOYS_TECHNIQUE`: `mitre_explicit` (0.95) and, for malware named in an OTX pulse, `otx_pulse` (0.6, 2026-10). MISP round-trip via the **`MITRE_USES_TECHNIQUES:`** comment (`t` = explicit, `rt` = reported, `pid` = pulse id). *Split from a generic `USES` in 2026-04 — see below.* |
 | `USES_TECHNIQUE` | `Indicator` → `Technique` | **Observation.** OTX `attack_ids` on indicator → `Technique.mitre_id` (`build_relationships.py`, conf 0.85). Unchanged by the 2026-04 refactor. |
-| `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor (`build_relationships.py`) |
-| `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Same `cve_id` on indicator and vuln/CVE node (`build_relationships.py`). **PR-N26:** edge carries `r.misp_event_ids[]`. |
-| `INDICATES` | `Indicator` → `Malware` | MISP co-occurrence — array-only on both ends (`eid IN n.misp_event_ids` for both Indicator and Malware; legacy scalar dropped PR #33 round 10) or `malware_family` name match (ThreatFox/VT, conf 0.8) — **`build_relationships.py`**. **PR-N26:** edge carries `r.misp_event_ids[]` for direct edge-level provenance. |
-| `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators (`build_relationships.py`). **PR-N26:** edge carries `r.misp_event_ids[]`. |
-| `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes (`build_relationships.py`). **PR-N26:** edge carries `r.misp_event_ids[]`. |
+| `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor. Either the malware's own `attributed_to` claim matched exactly to the actor's name or alias (`match_type = "exact"`, 1.0, `build_relationships.py` Q2), or — 2026-10 — malware and actor named in the **same OTX pulse** (`match_type = "otx_pulse"`, 0.6, `r.report_ids[]` = pulse ids, written by the MISP→Neo4j sync). Whole-event co-occurrence attribution was removed (it had attributed one malware to up to 152 actors). |
+| `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Only from the indicator's own `cve_id` tag (`match_type = "cve_tag"`; 1.0 from `build_relationships.py` Q3, or the attribute's own confidence (≥ 0.7) when the sync created the edge first from the `exploits:` tag). 2026-10: no longer produced from event co-membership (an IP or hash listed next to a CVE does not exploit it). Edge carries `r.misp_event_ids[]`. |
+| `INDICATES` | `Indicator` → `Malware` | Two evidence levels (§3.2.2): a source-asserted `malware_family` on the indicator matched to the malware name/alias (`match_type = "malware_family"`, 0.8, ThreatFox/VT/OTX), or — 2026-10 — indicator and malware listed in the **same OTX pulse** (`match_type = "otx_pulse"`, 0.6, `r.report_ids[]`). Whole-event co-occurrence (`misp_cooccurrence`, 0.5, 96% of all INDICATES on the 2026-09 baseline) was removed. Edge carries `r.misp_event_ids[]`. |
+| `TARGETS` | `Indicator` → `Sector` | From `zone[]` on indicators — written by the sync (0.5, `source_id='misp'`) and by `build_relationships.py` Q7a (1.0); `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
+| `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes — sync (0.5, `source_id='misp'`) and `build_relationships.py` Q7b (1.0); `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |
 
 #### ResilMesh-compatible relationships
@@ -184,6 +184,32 @@ MATCH (n)-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_TECHNIQUE]->(t:Techniqu
 RETURN n, type(r) AS rel, t
 ```
 
+### 3.2.2 Evidence labels on relationships (2026-10)
+
+Every relationship that encodes a claim between threat-intelligence entities states what kind of evidence
+produced it, in `r.match_type`, with a confidence that follows from the evidence. (Structural edges —
+`SOURCED_FROM`, `HAS_CVSS_*`, `REFERS_TO`, `RUNS`, `PART_OF` — carry none; their meaning is fixed.) Consumers (and the text-to-Cypher model) can therefore filter
+by evidence without renaming anything — the ResilMesh and STIX-derived relationship names are unchanged.
+
+| `r.match_type` | Meaning | Confidence | Produced by |
+|---|---|---|---|
+| `mitre_explicit` | MITRE ATT&CK's own STIX `uses` relationship | 0.95 | `build_relationships.py` Q5/Q6/Q10 from `uses_techniques` (MITRE collector only) |
+| `otx_pulse` | The entity was named in the same AlienVault OTX pulse (one report) | 0.6 | MISP→Neo4j sync (`INDICATES`, `ATTRIBUTED_TO`) and `build_relationships.py` Q5b/Q6b from `reported_techniques` |
+| `exact` | The malware's own `attributed_to` claim equals an actor name/alias | 1.0 | `build_relationships.py` Q2 |
+| `malware_family` | The indicator's source-asserted family equals a malware name/alias | 0.8 | `build_relationships.py` Q9 |
+| `cve_tag` | The indicator's own CVE tag | 1.0 | `build_relationships.py` Q3a/Q3b |
+| `otx_attack_ids` | Pulse-level ATT&CK ids inherited by every indicator in the pulse | 0.85 | `build_relationships.py` Q8 (`USES_TECHNIQUE`; unchanged, documented as pulse-level) |
+| `kill_chain_phase` | ATT&CK tactic phase on the technique | 1.0 | `build_relationships.py` Q1 (`IN_TACTIC`) |
+| `zone_classification` | EdgeGuard's own sector classification of the node (keyword / OTX industry / CISA sector) | 0.5 (sync) / 1.0 (Q7a, Q7b) | `TARGETS` (Indicator → Sector), `AFFECTS` (CVE → Sector); sync rows are written with `source_id='misp'` |
+| `mitre_derived` | Malware attributed to an actor because MITRE's STIX says the actor **uses** that malware (inference, not an explicit `attributed-to`) | 0.7 | Legacy in-process path only (`run_pipeline.py` → `Neo4jClient.create_malware_actor_relationship`); the DAG path does not write it |
+| `stix_relationship` | An explicit STIX relationship object (`attributed-to`) in a bundle imported by the in-process loader | 0.7 | Legacy in-process path only (`run_pipeline.load_stix21_to_neo4j` → `Neo4jClient.create_malware_actor_relationship`); the DAG path does not write it |
+| `misp_attribute_tag` | A tag on the MISP attribute itself (`mitre-attack:technique=`, `threat_actor=`, `exploits:`) | per attribute confidence (≥ 0.7) | MISP→Neo4j sync: attribute-embedded `EMPLOYS_TECHNIQUE`, `ATTRIBUTED_TO`; embedded `EXPLOITS` keeps `cve_tag` |
+
+Report-scoped edges also carry `r.report_ids[]` (the OTX pulse ids) next to `r.misp_event_ids[]`, so a
+consumer can go from the edge to the report that asserted it. Items without a report id are never paired.
+`misp_cooccurrence` no longer appears on any edge written by this version; `calibrate_cooccurrence_confidence`
+is kept for graphs that still hold such edges and is a no-op on a fresh baseline.
+
 ### 3.2.x STIX 2.1 timestamp semantics (PR-M2)
 
 The full timestamp model is documented in [`docs/TIMESTAMPS.md`](TIMESTAMPS.md). For consumers, the upshot is:
@@ -220,7 +246,7 @@ A consumer reading this gets a clear picture: the underlying CVE was published i
 ### 3.3 Sector/zone and TLP
 
 - **`zone`** — `LIST[STRING]` on merged threat-intel nodes (`global`, `healthcare`, `energy`, `finance`, …), populated from classification + MISP→Neo4j resolution (attribute-level `zone:` tags prioritized over event name / legacy event tags). Enables sector-scoped queries.
-- **TLP** — **Current `MISPWriter`:** new events are tagged only with **`EdgeGuard`**; TLP is **not** added at event level by default. **Neo4j nodes are not guaranteed to have a `tlp` property** on every label after sync; do not rely on `n.tlp` in Cypher unless you add a separate projection step. Older MISP events may still carry historical TLP/sector event tags.
+- **TLP** (2026-10) — `MISPWriter` stamps one **`tlp:<level>`** tag on **every attribute** (`_tlp_tag`): the source's own level when it states one (OTX `pulse_tlp`), otherwise `EDGEGUARD_DEFAULT_TLP` (`white` — every current source is an open feed). The MISP→Neo4j sync rehydrates it as **`n.tlp`** on every EdgeGuard node label, keeping the **most restrictive** level a source ever stated for the node (`red` > `amber+strict` > `amber` > `green` > `white`/`clear`), so `WHERE n.tlp IN ['white','clear','green']` is a valid filter. Events are still tagged only with `EdgeGuard` at event level.
 
 **Historical collection windows (hard limits):**
 
@@ -238,6 +264,8 @@ Every node written by EdgeGuard carries a constant property:
 ```
 edgeguard_managed = true
 ```
+
+**2026-10:** the marker is now on **every relationship EdgeGuard writes** as well (`SOURCED_FROM`, every `build_relationships.py` edge, the batched MISP edges, `HAS_CVSS_*`, `REFERS_TO`, `RUNS`, `PART_OF`) and on the `Campaign` and `Source` nodes that previously lacked it. `edgeguard clear neo4j --edgeguard-only` deletes exactly this set and nothing else — the mode to use on a database shared with ResilMesh. Relationship *names* EdgeGuard shares with ResilMesh (`PART_OF`, `REFERS_TO`, `HAS_CVSS_*`) must never be selected by type alone on a shared database; scope by the marker and by EdgeGuard labels.
 
 This follows the same principle as Kubernetes' `app.kubernetes.io/managed-by: helm` label — when multiple systems share the same database, each system marks what it owns. Without this, a consumer querying the shared Neo4j has no reliable way to distinguish EdgeGuard-written nodes from ResilMesh-written nodes of the same label (e.g., both may write `CVE` or `Vulnerability` nodes).
 
@@ -356,6 +384,8 @@ This answers: *"Log4Shell affects which of our hosts, and what missions depend o
 | `ref_tags` | LIST OF STRING | ✅ `ref_tags` (e.g. `["Vendor Advisory"]`) | Aligned |
 | `cpe_type` | LIST OF STRING | ✅ `cpe_type` (e.g. `["a", "o"]`) | Aligned |
 | `result_impacts` | LIST OF STRING | ✅ `result_impacts` (CIA values) | Aligned |
+
+> **2026-10:** `cwe`, `ref_tags`, `cpe_type` and `result_impacts` (plus `reference_urls`, `affected_products`) are written on the `CVE` node by `merge_cve` whenever NVD provides them. On the 2026-09 baseline they existed only inside `SOURCED_FROM.raw_data` (0 of 139,410 CVE nodes carried `c.cwe`), so a ResilMesh consumer reading `c.cwe` got nothing; the conformance check of 2026-10-09 caught it.
 
 ### CVSSv31 Node
 

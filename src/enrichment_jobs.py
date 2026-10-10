@@ -2,7 +2,7 @@
 """
 EdgeGuard — Post-Sync Enrichment Jobs
 ======================================
-Four graph-quality jobs that run AFTER every MISP→Neo4j sync.
+Five graph-quality jobs that run AFTER every MISP→Neo4j sync.
 They are designed to be idempotent — safe to re-run at any time.
 
 Jobs
@@ -11,6 +11,7 @@ Jobs
 2. build_campaign_nodes   — Group ThreatActor / Malware / Indicator into Campaigns
 3. calibrate_cooccurrence — Adjust INDICATES/EXPLOITS confidence for large MISP feed dumps
 4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
+5. merge_alias_duplicate_actors — Fold alias-duplicate ThreatActors into their MITRE canonical
 """
 
 import logging
@@ -18,12 +19,12 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause  # noqa: E402
-from node_identity import compute_node_uuid  # noqa: E402
+from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
 
 try:
@@ -360,7 +361,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                                        AND (c.last_seen IS NULL OR last_seen > c.last_seen)
                                        THEN last_seen ELSE c.last_seen END,
                 c.zone             = all_zones,
-                c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
+                c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name]),
+                // 2026-10: Campaign nodes are EdgeGuard-owned like every other
+                // node this pipeline writes (shared-database contract).
+                c.edgeguard_managed = true
             MERGE (a)-[r_runs:RUNS]->(c)
             // PR-N8 HIGH (audit Cross-Checker, 2026-04-21): stamp
             // created_at / updated_at so this edge is visible to cloud
@@ -373,7 +377,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                           r_runs.created_at = datetime()
             SET r_runs.src_uuid = coalesce(r_runs.src_uuid, a.uuid),
                 r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid),
-                r_runs.updated_at = datetime()
+                r_runs.updated_at = datetime(),
+                r_runs.edgeguard_managed = true
             RETURN count(DISTINCT c) AS campaigns
             """
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
@@ -413,7 +418,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                           r.created_at = datetime()
             SET r.src_uuid = coalesce(r.src_uuid, m.uuid),
                 r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
-                r.updated_at = datetime()
+                r.updated_at = datetime(),
+                r.edgeguard_managed = true
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -479,7 +485,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                              r.trg_uuid = c.uuid
                SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
                    r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
-                   r.updated_at = datetime()",
+                   r.updated_at = datetime(),
+                   r.edgeguard_managed = true",
               {batchSize: 25, parallel: false, retries: 2}
             )
             YIELD batches, total, errorMessages, committedOperations
@@ -885,7 +892,7 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     query = """
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
-        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) ON CREATE SET r1.created_at = datetime() SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid), r1.updated_at = datetime() MERGE (c)-[r2:REFERS_TO]->(v) ON CREATE SET r2.created_at = datetime() SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid), r2.updated_at = datetime()',
+        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) ON CREATE SET r1.created_at = datetime() SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid), r1.updated_at = datetime(), r1.edgeguard_managed = true MERGE (c)-[r2:REFERS_TO]->(v) ON CREATE SET r2.created_at = datetime() SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid), r2.updated_at = datetime(), r2.edgeguard_managed = true',
         {batchSize: 5000, parallel: false}
     )
     YIELD total
@@ -939,13 +946,374 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# JOB 5: ThreatActor alias-duplicate merge
+# ---------------------------------------------------------------------------
+# OTX pulses and MISP galaxy tags name the same actor under several labels
+# (``reddelta`` / ``twill typhoon`` / ``unc6384`` next to the MITRE node
+# ``mustang panda`` whose ``aliases[]`` already lists all three). Each label
+# became its own ThreatActor node, splitting the actor's Malware
+# ATTRIBUTED_TO edges, Campaigns and technique links across N nodes.
+# This job folds every NON-MITRE node whose name is an alias of exactly ONE
+# MITRE-sourced actor into that canonical node with
+# ``apoc.refactor.mergeNodes``. It runs BEFORE ``build_campaign_nodes`` so
+# campaigns are materialised on the merged actor.
+#
+# String-level hygiene for the SAME problem at ingest (composite / generic
+# names) lives in ``src/actor_name_hygiene.py``.
+# ---------------------------------------------------------------------------
+
+_ACTOR_ALIAS_MERGE_ENV_FLAG = "EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE"
+_ACTOR_ALIAS_MERGE_BATCH_SIZE = 200  # (canonical, duplicate) pairs per transaction
+_ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN = 2000  # hard cap; the rest waits for the next run
+_ACTOR_ALIAS_MERGE_MITRE_SOURCE = "mitre_attck"  # SOURCE_TAGS["mitre"] — canonical actors
+
+# ``apoc.refactor.mergeNodes`` property strategy. First node in the list is
+# the canonical; ``"discard"`` keeps the canonical's value, ``"combine"``
+# unions both values into a list. Every SCALAR the rest of the codebase
+# reads as a scalar is listed explicitly as ``"discard"`` so it can never be
+# silently turned into a list; every list-typed accumulator is
+# ``"combine"``. ``".*"`` is APOC's catch-all — ``"discard"`` so an
+# unforeseen scalar also stays scalar (the ``".*": "combine"`` wildcard is
+# deliberately NOT used). The same map governs relationship properties when
+# ``mergeRels: true`` collapses two parallel edges, hence the edge-side
+# list props (``sources``, ``source_ids``) are included.
+_ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
+    # identity — canonical wins; the UNIQUE(name) constraint stays satisfied
+    "name": "discard",
+    "uuid": "discard",
+    "mitre_id": "discard",
+    # node scalars (merge_node_with_source / merge_actor / decay job)
+    "description": "discard",
+    "confidence_score": "discard",
+    "tag": "discard",
+    "active": "discard",
+    "first_imported_at": "discard",
+    "last_updated": "discard",
+    "last_imported_from": "discard",
+    "edgeguard_managed": "discard",
+    "retired_at": "discard",
+    "last_decayed_tier": "discard",
+    "last_decayed_at": "discard",
+    "sophistication": "discard",
+    "primary_motivation": "discard",
+    "resource_level": "discard",
+    "tlp": "discard",
+    # node lists (accumulators)
+    "aliases": "combine",
+    "source": "combine",
+    "zone": "combine",
+    "tags": "combine",
+    "uses_techniques": "combine",
+    "reported_techniques": "combine",
+    "misp_event_ids": "combine",
+    "misp_attribute_ids": "combine",
+    "pulse_ids": "combine",
+    # edge lists (only relevant when mergeRels collapses parallel edges)
+    "sources": "combine",
+    "source_ids": "combine",
+    # everything else: keep the canonical's value, never listify
+    ".*": "discard",
+}
+
+# Candidate pairs. ``d`` must NOT be MITRE-sourced, ``c`` MUST be, and
+# ``toLower(trim(d.name))`` must equal ``toLower(trim(x))`` for some
+# ``x IN c.aliases``. Placeholder names (``"unknown"``, ``"apt"`` …) are
+# excluded on both sides — same ``_REJECTED_PLACEHOLDER_NAMES`` gate that
+# ``build_relationships`` Q2 applies to alias matching. Grouped per
+# duplicate so the caller can apply the ambiguity guard
+# (``size(canonical_names) > 1`` → skip).
+_ACTOR_ALIAS_MERGE_CANDIDATES_CYPHER = """
+MATCH (d:ThreatActor)
+WHERE d.name IS NOT NULL
+  AND size(trim(d.name)) > 0
+  AND NOT toLower(trim(d.name)) IN $placeholders
+  AND NOT $mitre_source IN coalesce(d.source, [])
+WITH d, toLower(trim(d.name)) AS dup_key
+MATCH (c:ThreatActor)
+WHERE c <> d
+  AND $mitre_source IN coalesce(c.source, [])
+  AND c.aliases IS NOT NULL
+  AND dup_key IN [x IN c.aliases
+                  WHERE x IS NOT NULL
+                    AND size(trim(toString(x))) > 0
+                    AND NOT toLower(trim(toString(x))) IN $placeholders
+                  | toLower(trim(toString(x)))]
+WITH d, collect(DISTINCT c.name) AS canonical_names
+RETURN d.name AS duplicate_name, canonical_names
+ORDER BY duplicate_name
+"""
+
+# One ``mergeNodes`` call per canonical with ALL of its duplicates in the
+# batch, so rows of the UNWIND never touch each other's nodes (a duplicate
+# maps to exactly one canonical thanks to the ambiguity guard). The
+# MITRE-side guards are re-checked here so a stale candidate list can never
+# merge two canonical actors. ``c.aliases`` gains the duplicate names BEFORE
+# the merge, as required; ``apoc.coll.toSet`` afterwards de-duplicates what
+# ``"combine"`` produced.
+_ACTOR_ALIAS_MERGE_APPLY_CYPHER = """
+UNWIND $groups AS g
+MATCH (c:ThreatActor {name: g.canonical})
+WHERE $mitre_source IN coalesce(c.source, [])
+MATCH (d:ThreatActor)
+WHERE d.name IN g.duplicates
+  AND d <> c
+  AND NOT $mitre_source IN coalesce(d.source, [])
+WITH c, collect(DISTINCT d) AS dups
+WHERE size(dups) > 0
+SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name])
+WITH c, size(dups) AS n_dups, dups
+CALL apoc.refactor.mergeNodes([c] + dups, {
+    properties: $strategy,
+    mergeRels: true,
+    produceSelfRel: false
+})
+YIELD node
+SET node.aliases = apoc.coll.toSet(coalesce(node.aliases, [])),
+    node.source = apoc.coll.toSet(coalesce(node.source, [])),
+    node.last_updated = datetime()
+RETURN sum(n_dups) AS merged, count(node) AS canonicals
+"""
+
+# Edges moved over from a duplicate still carry the DUPLICATE's uuid in
+# ``r.src_uuid`` / ``r.trg_uuid`` (cross-environment traceability contract,
+# see node_identity.py). Re-stamp them with the canonical's uuid.
+_ACTOR_ALIAS_MERGE_RESTAMP_OUT_CYPHER = """
+UNWIND $canonicals AS cname
+MATCH (c:ThreatActor {name: cname})-[r]->()
+WHERE r.src_uuid IS NOT NULL AND r.src_uuid <> c.uuid
+SET r.src_uuid = c.uuid
+RETURN count(r) AS restamped
+"""
+_ACTOR_ALIAS_MERGE_RESTAMP_IN_CYPHER = """
+UNWIND $canonicals AS cname
+MATCH (c:ThreatActor {name: cname})<-[r]-()
+WHERE r.trg_uuid IS NOT NULL AND r.trg_uuid <> c.uuid
+SET r.trg_uuid = c.uuid
+RETURN count(r) AS restamped
+"""
+
+
+def _actor_alias_merge_enabled() -> bool:
+    """``EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`` (default ``"true"``). Read at
+    call time — not import time — so an operator can flip it between DAG
+    runs without a restart (same truthy set as ``config._env_bool``)."""
+    raw = os.getenv(_ACTOR_ALIAS_MERGE_ENV_FLAG, "true")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _is_apoc_missing_error(exc: BaseException) -> bool:
+    """True when ``exc`` is Neo4j telling us an ``apoc.*`` procedure /
+    function does not exist (APOC plugin not installed)."""
+    code = str(getattr(exc, "code", "") or "")
+    msg = str(exc)
+    lowered = msg.lower()
+    if code == "Neo.ClientError.Procedure.ProcedureNotFound":
+        return True
+    if "procedurenotfound" in lowered:
+        return True
+    if "apoc." in lowered and ("there is no procedure with the name" in lowered or "unknown function" in lowered):
+        return True
+    return False
+
+
+def merge_alias_duplicate_actors(neo4j_client) -> Dict:
+    """Fold alias-duplicate ThreatActor nodes into their canonical MITRE node.
+
+    Candidate pair = (canonical ``c``, duplicate ``d``) where
+      * ``"mitre_attck" IN c.source`` and NOT ``"mitre_attck" IN d.source``
+        (a MITRE-sourced node is never a duplicate — two canonical actors
+        are never merged);
+      * ``toLower(trim(d.name)) = toLower(trim(x))`` for some ``x IN c.aliases``;
+      * neither name is a placeholder (``_REJECTED_PLACEHOLDER_NAMES``).
+
+    Ambiguity guard: a duplicate whose name is an alias of MORE THAN ONE
+    canonical actor is skipped and counted (``skipped_ambiguous``).
+
+    Merge = ``SET c.aliases += d.name`` then
+    ``apoc.refactor.mergeNodes([c, d], {properties: <explicit map>,
+    mergeRels: true, produceSelfRel: false})`` — see
+    ``_ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY`` for the per-property rules
+    (scalars ``"discard"`` = canonical wins, lists ``"combine"``). The
+    canonical keeps its ``name`` / ``uuid``; the duplicate node disappears,
+    so the UNIQUE constraint on ``ThreatActor.name`` holds throughout. All
+    of the duplicate's relationships move to the canonical; their
+    ``src_uuid`` / ``trg_uuid`` are re-stamped with the canonical's uuid.
+
+    Campaigns: a stale ``"<duplicate> Campaign"`` node (if any) is NOT
+    touched here. ``build_campaign_nodes`` runs right after this job: its
+    Step 3b prunes the stale PART_OF edges and Step 4 marks the campaign
+    ``active = false`` (the repo's retire-don't-delete rule), while the
+    canonical's own campaign is (re)built with the merged aliases.
+
+    Batching: ``_ACTOR_ALIAS_MERGE_BATCH_SIZE`` pairs per transaction,
+    ``_ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN`` cap per run (idempotent —
+    leftovers merge on the next run).
+
+    Dry run: ``EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE=false`` logs the candidate
+    count and merges nothing.
+
+    APOC missing: logs a WARNING and returns (``apoc_missing = 1``) instead
+    of failing the enrichment run. Any other per-batch failure is logged,
+    counted in ``errors`` and the next batch proceeds (same best-effort
+    shape as the per-tier handler in ``calibrate_cooccurrence_confidence``);
+    whole-session failures re-raise per PR-N21.
+
+    Returns ``{candidates, merged, skipped_ambiguous, errors,
+    restamped_edges, apoc_missing}``.
+    """
+    if not neo4j_client.driver:
+        logger.error("merge_alias_duplicate_actors: no Neo4j connection")
+        return {}
+
+    results: Dict = {
+        "candidates": 0,
+        "merged": 0,
+        "skipped_ambiguous": 0,
+        "errors": 0,
+        "restamped_edges": 0,
+        "apoc_missing": 0,
+    }
+    placeholders = sorted(_REJECTED_PLACEHOLDER_NAMES)
+
+    try:
+        with neo4j_client.driver.session() as session:
+            rows = session.run(
+                _ACTOR_ALIAS_MERGE_CANDIDATES_CYPHER,
+                placeholders=placeholders,
+                mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                timeout=NEO4J_READ_TIMEOUT,
+            )
+            pairs: List[Tuple[str, str]] = []  # (canonical_name, duplicate_name)
+            for row in rows:
+                dup_name = row["duplicate_name"]
+                canonical_names = [n for n in (row["canonical_names"] or []) if n]
+                if not dup_name or not canonical_names:
+                    continue
+                if len(canonical_names) > 1:
+                    results["skipped_ambiguous"] += 1
+                    logger.warning(
+                        "[ACTOR-ALIAS-MERGE] skipping %r — alias of %d canonical actors %s (ambiguous)",
+                        dup_name,
+                        len(canonical_names),
+                        sorted(canonical_names),
+                    )
+                    continue
+                pairs.append((canonical_names[0], dup_name))
+            results["candidates"] = len(pairs) + results["skipped_ambiguous"]
+
+            if not pairs:
+                logger.info(
+                    "[ACTOR-ALIAS-MERGE] no alias-duplicate ThreatActor pairs (ambiguous skipped: %d)",
+                    results["skipped_ambiguous"],
+                )
+                return results
+
+            if not _actor_alias_merge_enabled():
+                logger.info(
+                    "[ACTOR-ALIAS-MERGE] DRY RUN (%s=false): %d mergeable pair(s), %d ambiguous skipped — "
+                    "merging nothing. Sample: %s",
+                    _ACTOR_ALIAS_MERGE_ENV_FLAG,
+                    len(pairs),
+                    results["skipped_ambiguous"],
+                    pairs[:10],
+                )
+                return results
+
+            if len(pairs) > _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN:
+                logger.warning(
+                    "[ACTOR-ALIAS-MERGE] %d mergeable pairs exceed the per-run cap %d — "
+                    "merging the first %d, the rest on the next run",
+                    len(pairs),
+                    _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN,
+                    _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN,
+                )
+                pairs = pairs[:_ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN]
+
+            batches = [
+                pairs[i : i + _ACTOR_ALIAS_MERGE_BATCH_SIZE]
+                for i in range(0, len(pairs), _ACTOR_ALIAS_MERGE_BATCH_SIZE)
+            ]
+            for batch_no, batch in enumerate(batches, start=1):
+                grouped: Dict[str, List[str]] = {}
+                for canonical, dup in batch:
+                    grouped.setdefault(canonical, []).append(dup)
+                groups = [{"canonical": c, "duplicates": sorted(set(d))} for c, d in sorted(grouped.items())]
+                try:
+                    rec = session.run(
+                        _ACTOR_ALIAS_MERGE_APPLY_CYPHER,
+                        groups=groups,
+                        strategy=_ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY,
+                        mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    ).single()
+                    merged = int((rec["merged"] if rec else 0) or 0)
+                    results["merged"] += merged
+                    canonical_names = [g["canonical"] for g in groups]
+                    for restamp_cypher in (
+                        _ACTOR_ALIAS_MERGE_RESTAMP_OUT_CYPHER,
+                        _ACTOR_ALIAS_MERGE_RESTAMP_IN_CYPHER,
+                    ):
+                        rs = session.run(
+                            restamp_cypher, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT
+                        ).single()
+                        results["restamped_edges"] += int((rs["restamped"] if rs else 0) or 0)
+                    logger.info(
+                        "[ACTOR-ALIAS-MERGE] batch %d/%d: merged %d duplicate(s) into %d canonical actor(s)",
+                        batch_no,
+                        len(batches),
+                        merged,
+                        len(groups),
+                    )
+                except Exception as batch_err:
+                    if _is_apoc_missing_error(batch_err):
+                        logger.warning(
+                            "[ACTOR-ALIAS-MERGE] APOC unavailable (%s) — skipping alias merge; "
+                            "install the APOC plugin to enable it. %d pair(s) left untouched.",
+                            batch_err,
+                            len(pairs),
+                        )
+                        results["apoc_missing"] = 1
+                        return results
+                    results["errors"] += 1
+                    logger.error(
+                        "[ACTOR-ALIAS-MERGE] batch %d/%d FAILED (%d pairs rolled back): %s",
+                        batch_no,
+                        len(batches),
+                        len(batch),
+                        batch_err,
+                        exc_info=True,
+                    )
+                if batch_no < len(batches):
+                    query_pause()
+    except Exception as e:
+        # PR-N21: whole-session failures (driver dead, candidate query
+        # broken) must fail loudly — only per-batch and APOC-missing
+        # conditions are handled above.
+        logger.error(f"[ACTOR-ALIAS-MERGE] merge_alias_duplicate_actors FAILED: {e}", exc_info=True)
+        raise
+
+    logger.info(
+        "[ACTOR-ALIAS-MERGE] complete — candidates=%d merged=%d skipped_ambiguous=%d errors=%d restamped_edges=%d",
+        results["candidates"],
+        results["merged"],
+        results["skipped_ambiguous"],
+        results["errors"],
+        results["restamped_edges"],
+    )
+    return results
+
+
+# ---------------------------------------------------------------------------
 # CONVENIENCE RUNNER
 # ---------------------------------------------------------------------------
 
 
 def run_all_enrichment_jobs(neo4j_client) -> Dict:
     """
-    Run all four post-sync enrichment jobs in sequence.
+    Run all five post-sync enrichment jobs in sequence.
+
+    Order matters: ``merge_alias_duplicate_actors`` runs BEFORE
+    ``build_campaign_nodes`` so campaigns are built on merged actors.
 
     Returns a summary dict for logging/metrics.
     """
@@ -965,28 +1333,33 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
                 logger.debug("Metrics recording failed", exc_info=True)
         return result
 
-    logger.info("\n[1/4] Vulnerability↔CVE REFERS_TO Bridge...")
+    logger.info("\n[1/5] Vulnerability↔CVE REFERS_TO Bridge...")
     summary["bridge"] = _timed("bridge", bridge_vulnerability_cve, neo4j_client)
 
-    logger.info("\n[2/4] Campaign Node Builder...")
+    # Must precede build_campaign_nodes: campaigns are keyed on actor name.
+    logger.info("\n[2/5] ThreatActor Alias-Duplicate Merge...")
+    summary["actor_alias_merge"] = _timed("actor_alias_merge", merge_alias_duplicate_actors, neo4j_client)
+
+    logger.info("\n[3/5] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
 
-    logger.info("\n[3/4] Co-occurrence Confidence Calibration...")
+    logger.info("\n[4/5] Co-occurrence Confidence Calibration...")
     summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
 
-    logger.info("\n[4/4] IOC Confidence Decay...")
+    logger.info("\n[5/5] IOC Confidence Decay...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
     # PR #33 round 13: explicit aggregated summary so an operator scanning logs
-    # sees totals from all 4 jobs without grepping each function's output.
+    # sees totals from all 5 jobs without grepping each function's output.
     def _sum(d):
         if isinstance(d, dict):
             return sum(v for v in d.values() if isinstance(v, (int, float)))
         return d if isinstance(d, (int, float)) else 0
 
     logger.info(
-        "[ENRICHMENT SUMMARY] bridge=%s campaigns=%s calibration=%s decay=%s",
+        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s campaigns=%s calibration=%s decay=%s",
         _sum(summary.get("bridge")),
+        _sum(summary.get("actor_alias_merge")),
         _sum(summary.get("campaigns")),
         _sum(summary.get("calibration")),
         _sum(summary.get("decay")),

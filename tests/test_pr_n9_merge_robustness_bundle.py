@@ -82,8 +82,8 @@ class TestFixANullEmptyAliasFilter:
         ``WHERE x IS NOT NULL AND size(trim(x)) > 0`` filter."""
         src = self._src()
         # Find Q2 block
-        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
+        step3_idx = src.find("[LINK] 3a/13", step2_idx)
         block = src[step2_idx:step3_idx]
 
         a_alias_filter = "x IN coalesce(a.aliases, []) WHERE x IS NOT NULL AND size(trim(x)) > 0"

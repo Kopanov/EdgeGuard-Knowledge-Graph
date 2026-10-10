@@ -113,12 +113,11 @@ _BUILD_RELATIONSHIPS = SRC / "build_relationships.py"
 
 
 class TestBuildRelationshipsHasMispEventIdsSetClause:
-    """Each of the 6 fixed inner-query constants must contain the
+    """Each of the remaining fixed inner-query constants must contain the
     ``r.misp_event_ids = apoc.coll.toSet(coalesce(r.misp_event_ids, []) + …)``
-    SET clause. The right-hand side may differ (``[eid]`` for Q4 — the
-    co-occurrence path which has the eid in scope — vs ``coalesce(<src>.
-    misp_event_ids, [])`` for the others), so the pin checks each pattern
-    individually."""
+    SET clause (``coalesce(<src>.misp_event_ids, [])``), so the pin checks
+    each pattern individually. Q4 — the co-occurrence path that appended
+    ``[eid]`` — was removed in 2026-10; its test now pins the absence."""
 
     def test_q3a_exploits_vuln_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q3a_inner")
@@ -134,19 +133,26 @@ class TestBuildRelationshipsHasMispEventIdsSetClause:
         assert "coalesce(i.misp_event_ids, [])" in body
         assert "apoc.coll.toSet" in body
 
-    def test_q4_indicates_cooccurrence_uses_eid_in_scope(self):
-        """Q4's co-occurrence query iterates ``eid IN m.misp_event_ids`` —
-        the eid IS the originating event id, so the SET appends ``[eid]``
-        (cleaner than propagating the full source array)."""
-        body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q4_inner")
-        assert "r.misp_event_ids" in body, "Q4 must SET r.misp_event_ids (PR-N26)"
-        # Specifically [eid] (not coalesce-from-i) — Q4 has the exact
-        # event id available, no superset needed.
-        assert "+ [eid]" in body or "+[eid]" in body, (
-            "Q4 must SET r.misp_event_ids = apoc.coll.toSet(coalesce(r.misp_event_ids, []) + [eid]) "
-            "— the eid is already in scope, no need to propagate the full array"
-        )
-        assert "apoc.coll.toSet" in body
+    def test_q4_indicates_cooccurrence_query_is_gone(self):
+        """2026-10 (fresh-baseline PR): Q4 — the whole-event co-occurrence
+        INDICATES query whose ``[eid]`` wire-up PR-N26 pinned — was removed
+        (ResilMesh conformance finding F1). There is no ``_q4_inner`` to
+        wire any more, and no inner query may iterate ``eid IN
+        m.misp_event_ids`` to MERGE INDICATES. The reported-technique
+        queries 5b / 6b took its slot."""
+        tree = ast.parse(_BUILD_RELATIONSHIPS.read_text())
+        assigned = {
+            tgt.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            for tgt in node.targets
+            if isinstance(tgt, ast.Name)
+        }
+        assert "_q4_inner" not in assigned, "Q4 inner query must stay removed"
+        assert "_q4_outer" not in assigned, "Q4 outer query must stay removed"
+        text = _BUILD_RELATIONSHIPS.read_text()
+        assert "eid IN i.misp_event_ids" not in text, "no event-id co-occurrence join may remain"
+        assert "[LINK] 5b/13" in text and "[LINK] 6b/13" in text, "5b / 6b must have replaced Q4"
 
     def test_q7a_targets_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q7a_inner")

@@ -266,9 +266,9 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 | Relationship | Method | Confidence / properties |
 |-------------|--------|-------------------------|
-| `(Indicator)-[:INDICATES]->(Malware)` | Shared MISP event id from `misp_event_ids[]` (co-occurrence) in `build_relationships.py` | Initial **0.5**, `match_type='misp_cooccurrence'`, `source_id='misp_cooccurrence'`; then **0.30–0.50** via `calibrate_cooccurrence_confidence()` from event size (co-occurrence ceiling: 0.50) |
+| `(Indicator)-[:INDICATES]->(Malware)` | 2026-10: same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, `r.report_ids[]`), or `malware_family` name match in `build_relationships.py` Q9. The whole-event `misp_event_ids[]` co-occurrence query was removed | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
 | `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'`, `source_id='cve_tag_match'` (not bulk-calibrated like co-occurrence) |
-| `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** | **0.95** (`match_type='mitre_explicit'`) |
+| `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** (Q5); 2026-10: also `a.reported_techniques` from OTX pulse `attack_ids` (Q5b) | **0.95** (`match_type='mitre_explicit'`) / **0.6** (`match_type='otx_pulse'`) |
 | `(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN m.uses_techniques` — **same STIX `uses` rows** (malware → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN tool.uses_techniques` — **same STIX `uses` rows** (tool → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Technique)-[:IN_TACTIC]->(Tactic)` | MITRE ATT&CK taxonomy | **1.0** |
@@ -277,6 +277,8 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 > **2026-04 refactor note:** Prior to April 2026 all three edges were a single generic `USES`. They were split into `EMPLOYS_TECHNIQUE` (attribution — actor/campaign) and `IMPLEMENTS_TECHNIQUE` (capability — malware/tool) to improve Cypher clarity and LLM/GraphRAG retrieval. Both edges collapse back to STIX 2.1 `relationship_type: "uses"` on export. *Pre-release framework — no migration script is shipped; a fresh baseline rerun writes the specialized edge types directly.* See [`docs/KNOWLEDGE_GRAPH.md`](KNOWLEDGE_GRAPH.md#technique-edges-attribution-vs-capability-vs-observation) for the semantic rationale.
 
+> **2026-10 (fresh-baseline PR):** the Indicator → Malware co-occurrence query described in the next note was **removed**; `INDICATES` is now written only by the sync for items of the same OTX pulse and by the family match. The note is kept for history.
+>
 > **PR #33 round 10 — array-only INDICATES co-occurrence:** the legacy
 > first-seen scalar `misp_event_id` was dropped pre-release. The Indicator
 > → Malware co-occurrence query is now array-only on both ends — outer
@@ -286,11 +288,12 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 ### 2. run_enrichment_jobs
 
-Runs `src/enrichment_jobs.py` — **four** jobs in sequence (`run_all_enrichment_jobs`):
+Runs `src/enrichment_jobs.py` — **five** jobs in sequence (`run_all_enrichment_jobs`):
 
 1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
+1b. **Actor alias merge** (`merge_alias_duplicate_actors`, 2026-10 — folds non-MITRE actors named by an alias of exactly one MITRE actor into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`)
 2. **Campaign nodes** (`build_campaign_nodes`)
-3. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`)
+3. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; legacy — no-op since 2026-10, no `misp_cooccurrence` edges are written)
 4. **IOC confidence decay** (`decay_ioc_confidence` — idempotent last step)
 
 #### IOC Confidence Decay
@@ -331,7 +334,7 @@ Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.source_id IN 
 | 101–500 (large feed) | 0.35 |
 | > 500 (bulk dump, e.g. Feodo) | 0.30 |
 
-Only edges with `source_id IN ['misp_cooccurrence', 'misp_correlation']` are modified. Manually curated edges are untouched.
+Only edges with `source_id IN ['misp_cooccurrence', 'misp_correlation']` are modified. Manually curated edges are untouched. **2026-10:** this version writes no such edges (report-scoped linking, `source_id='otx_pulse'`), so the job finds nothing on a fresh baseline; it is kept for graphs built before the change.
 
 > **Multi-event event sizing (array-only):** the event-size pre-compute
 > UNWINDs `misp_event_ids[]` and counts distinct Indicators per event id,

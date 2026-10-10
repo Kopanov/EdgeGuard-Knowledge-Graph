@@ -1039,6 +1039,42 @@ def run_mitre_collection(**context):
     return run_collector_with_metrics("mitre", MITRECollector, MISPWriter(), limit=limit)
 
 
+def run_cisa_ics_collection(**context):
+    """Run the CISA ICS advisories collector with metrics (flag-guarded, default OFF).
+
+    ``EDGEGUARD_ENABLE_CISA_ICS`` unset/false → log "disabled by flag" and
+    return a skipped status (success, 0 items) WITHOUT instantiating the
+    collector or touching MISP — the task can never fail while the flag is
+    off. When enabled it goes through ``run_collector_with_metrics`` exactly
+    like the other collectors (transient upstream failure → skip + alert;
+    code defects fail loudly).
+    """
+    try:
+        from config import ENABLE_CISA_ICS as _cisa_ics_enabled
+    except Exception:  # noqa: BLE001 - a config import problem must not fail a flag-off task
+        logger.warning("CISA_ICS: could not read EDGEGUARD_ENABLE_CISA_ICS from config — treating as disabled")
+        _cisa_ics_enabled = False
+
+    if not _cisa_ics_enabled:
+        from collectors.collector_utils import make_skipped_optional_source
+
+        logger.info(
+            "CISA_ICS skipped — disabled by flag (set EDGEGUARD_ENABLE_CISA_ICS=true to enable); "
+            "task success with 0 items"
+        )
+        return make_skipped_optional_source(
+            "cisa_ics",
+            skip_reason="disabled by flag EDGEGUARD_ENABLE_CISA_ICS",
+            skip_reason_class="cisa_ics_disabled_by_flag",
+        )
+
+    from collectors.cisa_ics_collector import CISAICSCollector
+    from collectors.misp_writer import MISPWriter
+
+    limit = get_effective_limit("cisa_ics")
+    return run_collector_with_metrics("cisa_ics", CISAICSCollector, MISPWriter(), limit=limit)
+
+
 def run_vt_collection(**context):
     """Run NEW VirusTotal collector (vt_collector.py) with metrics."""
     from collectors.misp_writer import MISPWriter
@@ -1557,7 +1593,7 @@ daily_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (7 collectors parallel + retries) + buffer
+    dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (8 collectors parallel + retries) + buffer
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1571,6 +1607,15 @@ misp_health_daily = PythonOperator(
 collect_mitre_daily = PythonOperator(
     task_id="collect_mitre",
     python_callable=run_mitre_collection,
+    execution_timeout=timedelta(hours=2),
+    dag=daily_dag,
+)
+
+# CISA ICS advisories (2026-10): flag-guarded by EDGEGUARD_ENABLE_CISA_ICS
+# (default OFF → task logs "disabled by flag" and succeeds with 0 items).
+collect_cisa_ics_daily = PythonOperator(
+    task_id="collect_cisa_ics",
+    python_callable=run_cisa_ics_collection,
     execution_timeout=timedelta(hours=2),
     dag=daily_dag,
 )
@@ -1622,6 +1667,7 @@ log_daily_summary = BashOperator(
     bash_command="""
         echo "Daily Collectors Complete - $(date)"
         echo "  - MITRE ATT&CK"
+        echo "  - CISA ICS Advisories (flag-guarded: EDGEGUARD_ENABLE_CISA_ICS)"
         echo "  - AbuseIPDB"
         echo "  - ThreatFox"
         echo "  - URLhaus"
@@ -1638,6 +1684,7 @@ log_daily_summary = BashOperator(
     misp_health_daily
     >> [
         collect_mitre_daily,
+        collect_cisa_ics_daily,
         collect_abuseipdb_daily,
         collect_threatfox_daily,
         collect_urlhaus_daily,
@@ -2328,6 +2375,31 @@ def run_baseline_cisa(**context):
     from collectors.cisa_collector import CISACollector
 
     return run_baseline_collector("cisa", CISACollector, context=context)
+
+
+def run_baseline_cisa_ics(**context):
+    """Baseline load of CISA ICS advisories (2026-10; flag-guarded like the daily task).
+
+    Without this task the 24-month advisory history would only ever arrive through
+    the daily ``changes.csv`` increments — i.e. never on a fresh re-feed.
+    """
+    try:
+        from config import ENABLE_CISA_ICS as _cisa_ics_enabled
+    except Exception:  # noqa: BLE001 - a config import problem must not fail a flag-off task
+        logger.warning("CISA_ICS baseline: could not read EDGEGUARD_ENABLE_CISA_ICS — treating as disabled")
+        _cisa_ics_enabled = False
+    if not _cisa_ics_enabled:
+        from collectors.collector_utils import make_skipped_optional_source
+
+        logger.info("CISA_ICS baseline skipped — disabled by flag (EDGEGUARD_ENABLE_CISA_ICS)")
+        return make_skipped_optional_source(
+            "cisa_ics",
+            skip_reason="disabled by flag EDGEGUARD_ENABLE_CISA_ICS",
+            skip_reason_class="cisa_ics_disabled_by_flag",
+        )
+    from collectors.cisa_ics_collector import CISAICSCollector
+
+    return run_baseline_collector("cisa_ics", CISAICSCollector, context=context)
 
 
 def run_baseline_mitre(**context):
@@ -3096,6 +3168,14 @@ with TaskGroup(
     bl_sslblacklist = PythonOperator(
         task_id="collect_sslblacklist",
         python_callable=run_baseline_sslblacklist,
+        execution_timeout=timedelta(hours=2),
+        dag=baseline_dag,
+    )
+    # 2026-10: CISA ICS advisories — flag-guarded (EDGEGUARD_ENABLE_CISA_ICS); the
+    # wrapper returns a skipped status when the flag is off, so the task is inert.
+    bl_cisa_ics = PythonOperator(
+        task_id="collect_cisa_ics",
+        python_callable=run_baseline_cisa_ics,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )

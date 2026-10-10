@@ -159,33 +159,33 @@ def test_parse_attribute_indicator_exploits_carries_event_id(syncer: MISPToNeo4j
 
 
 def test_cross_item_rels_inherit_event_id(syncer: MISPToNeo4jSync):
-    """Cross-item edges (single-event contract) should be stamped with the
-    common event id pulled from the items themselves."""
+    """Report-scoped edges (single-event contract, 2026-10: paired by
+    ``pulse_id``) should be stamped with the common event id pulled from
+    the items themselves."""
     items = [
         {
             "type": "actor",
             "name": "APT-Test",
             "misp_event_id": "777",
-        },
-        {
-            "type": "technique",
-            "mitre_id": "T1059",
-            "misp_event_id": "777",
+            "pulse_id": "pulse-1",
         },
         {
             "type": "malware",
             "name": "Emotet",
             "misp_event_id": "777",
+            "pulse_id": "pulse-1",
         },
         {
             "indicator_type": "ipv4",
             "value": "203.0.113.5",
             "type": "indicator",
             "misp_event_id": "777",
+            "pulse_id": "pulse-1",
         },
     ]
     rels = syncer._build_cross_item_relationships(items)
-    assert rels, "expected cross-item relationships"
+    assert rels, "expected report-scoped relationships"
+    assert {r["rel_type"] for r in rels} == {"INDICATES", "ATTRIBUTED_TO"}
     for r in rels:
         assert r.get("misp_event_id") == "777", f"rel_type={r.get('rel_type')} missing event id stamp"
 
@@ -195,10 +195,10 @@ def test_cross_item_rels_handle_missing_event_id(syncer: MISPToNeo4jSync):
     just with an empty stamp — the merger's CASE expression will skip the
     array append."""
     items = [
-        {"type": "actor", "name": "APT-X"},
-        {"type": "technique", "mitre_id": "T1078"},
+        {"type": "malware", "name": "Mal-X", "pulse_id": "pulse-2"},
+        {"type": "actor", "name": "APT-X", "pulse_id": "pulse-2"},
     ]
     rels = syncer._build_cross_item_relationships(items)
-    assert rels, "expected at least an EMPLOYS_TECHNIQUE rel"
+    assert rels, "expected at least an ATTRIBUTED_TO rel"
     for r in rels:
         assert r.get("misp_event_id") == ""

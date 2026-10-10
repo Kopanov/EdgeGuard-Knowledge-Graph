@@ -190,45 +190,53 @@ def test_calibrate_large_event_query_is_parameterized_array_only():
 # ---------------------------------------------------------------------------
 
 
-def test_build_relationships_indicates_cooccurrence_is_array_only():
-    """PR #33 round 10 + PR-N7: the INDICATES co-occurrence query is
-    array-only on both the outer and inner sides (no scalar event-id
-    leg in either direction).
+def test_build_relationships_indicates_cooccurrence_is_gone_and_no_scalar_leg_remains():
+    """PR #33 round 10 + PR-N7 pinned the INDICATES co-occurrence query
+    (#4) as array-only on both sides. 2026-10 (fresh-baseline PR, ResilMesh
+    conformance finding F1) removed that query outright — a shared
+    per-source, per-day MISP event id never meant the source asserted a
+    link. The invariant this test now pins is twofold:
 
-    PR-N7 (2026-04-21 on-call): join direction REVERSED for scale —
-    outer is now Malware (~3.4K), inner scans Indicator per event_id.
-    The array-only invariant this test pins still holds, just with
-    the roles swapped."""
+    * the co-occurrence block (and any event-id join between Indicator and
+      Malware) is absent, and
+    * no inner query anywhere in build_relationships.py reintroduces a
+      scalar ``misp_event_id`` leg — the array-only contract from PR #33
+      still holds for the queries that remain (Q3a/Q3b/Q7a/Q7b/Q9 all
+      propagate ``misp_event_ids[]``)."""
+    import ast
+
     import build_relationships
 
     src_path = build_relationships.__file__
     with open(src_path) as fh:
         source = fh.read()
 
-    block_start = source.find("4. Indicator → Malware (INDICATES)")
-    block_end = source.find("5. ThreatActor → Technique", block_start)
-    assert block_start > 0 and block_end > block_start, "could not locate the INDICATES co-occurrence block"
-    block = source[block_start:block_end]
+    assert "4. Indicator → Malware (INDICATES)" not in source, "the INDICATES co-occurrence block must stay removed"
+    assert "eid IN i.misp_event_ids" not in source, "no event-id co-occurrence join may remain"
+    assert "eid IN m.misp_event_ids" not in source, "no event-id co-occurrence join may remain"
 
-    # Outer (PR-N7 reversal): array filter on Malware side, small-side driver.
-    assert "m.misp_event_ids IS NOT NULL AND size(m.misp_event_ids) > 0" in block, (
-        "outer query must filter Malware by misp_event_ids[] (PR-N7 reversal)"
-    )
-    # No leftover scalar leg anywhere.
-    assert "i.misp_event_id IS NOT NULL" not in block, "inner Indicator scalar leg must be removed"
-    assert "i.misp_event_id <> " not in block, "inner Indicator scalar empty-check must be removed"
-    assert "m.misp_event_id IS NOT NULL" not in block, "outer Malware scalar leg must be removed"
-    assert "m.misp_event_id <> " not in block, "outer Malware scalar empty-check must be removed"
-
-    # Inner Indicator match (post-PR-N7): array IN-membership only.
-    assert "eid IN i.misp_event_ids" in block, "inner Indicator match must use array IN membership (PR-N7 reversal)"
-    assert "i.misp_event_id = eid" not in block, "scalar Indicator match must be removed"
-    assert "MATCH (i:Indicator {misp_event_id: eid})" not in block, (
-        "legacy scalar Indicator property match must be removed"
-    )
-
-    # MERGE direction must remain Indicator→Malware (the reversal is
-    # only about which side drives the apoc outer loop, NOT edge semantics).
-    assert "MERGE (i)-[r:INDICATES]->(m)" in block, (
-        "edge direction must remain i→m INDICATES; PR-N7 reversal is about outer driver only"
-    )
+    # Array-only contract on every remaining inner query: no scalar leg, and
+    # no query may stamp misp_cooccurrence any more (report-scoped edges
+    # use otx_pulse and are written by the MISP→Neo4j sync).
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not (isinstance(target, ast.Name) and target.id.endswith("_inner")):
+                continue
+            value = "".join(
+                sub.value
+                for sub in ast.walk(node.value)
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+            )
+            assert "misp_cooccurrence" not in value, f"{target.id} re-introduces the misp_cooccurrence stamp"
+            for scalar_leg in (
+                "i.misp_event_id IS NOT NULL",
+                "i.misp_event_id <> ",
+                "m.misp_event_id IS NOT NULL",
+                "m.misp_event_id <> ",
+                "i.misp_event_id = eid",
+                "MATCH (i:Indicator {misp_event_id: eid})",
+            ):
+                assert scalar_leg not in value, f"{target.id} re-introduces a scalar misp_event_id leg: {scalar_leg}"

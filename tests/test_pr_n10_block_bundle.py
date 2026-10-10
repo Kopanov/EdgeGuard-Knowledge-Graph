@@ -155,8 +155,8 @@ class TestFix1PlaceholderNameReject:
         still pass. See _outer docstring for the NULL-propagation
         rationale."""
         src = (SRC / "build_relationships.py").read_text()
-        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
+        step3_idx = src.find("[LINK] 3a/13", step2_idx)
         block = src[step2_idx:step3_idx]
         # Must filter placeholder attributed_to in outer (no coalesce —
         # the branch has already asserted IS NOT NULL so coalesce would
@@ -167,15 +167,15 @@ class TestFix1PlaceholderNameReject:
 
     def test_q2_inner_filters_placeholder_actor_names(self):
         src = (SRC / "build_relationships.py").read_text()
-        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
+        step3_idx = src.find("[LINK] 3a/13", step2_idx)
         block = src[step2_idx:step3_idx]
         assert "NOT toLower(trim(a.name)) IN" in block, "Q2 inner must filter placeholder ThreatActor names"
 
     def test_q9_outer_filters_placeholder_malware_family(self):
         src = (SRC / "build_relationships.py").read_text()
-        q9_start = src.find("[LINK] 9/12")
-        q10_start = src.find("[LINK] 10/12")
+        q9_start = src.find("[LINK] 9/13")
+        q10_start = src.find("[LINK] 10/13")
         block = src[q9_start:q10_start]
         # The outer must include the NOT IN filter
         q9_outer_idx = block.find("_q9_outer")
@@ -185,8 +185,8 @@ class TestFix1PlaceholderNameReject:
 
     def test_q9_inner_filters_placeholder_malware_names(self):
         src = (SRC / "build_relationships.py").read_text()
-        q9_start = src.find("[LINK] 9/12")
-        q10_start = src.find("[LINK] 10/12")
+        q9_start = src.find("[LINK] 9/13")
+        q10_start = src.find("[LINK] 10/13")
         block = src[q9_start:q10_start]
         q9_inner_idx = block.find("_q9_inner")
         q9_skip_idx = block.find("_q9_skip", q9_inner_idx)
@@ -195,8 +195,8 @@ class TestFix1PlaceholderNameReject:
 
     def test_q9_skip_mirrors_inner_filter(self):
         src = (SRC / "build_relationships.py").read_text()
-        q9_start = src.find("[LINK] 9/12")
-        q10_start = src.find("[LINK] 10/12")
+        q9_start = src.find("[LINK] 9/13")
+        q10_start = src.find("[LINK] 10/13")
         block = src[q9_start:q10_start]
         q9_skip_idx = block.find("_q9_skip")
         next_assignment_idx = block.find("if not _safe_run_batched", q9_skip_idx)
@@ -442,7 +442,7 @@ class TestBugbotFollowupQ2InnerAttributedToFilter:
         src = (SRC / "build_relationships.py").read_text()
         tree = ast.parse(src)
         # Find `_inner` assignment under the function scope that contains
-        # the "[LINK] 2/12 Malware → ThreatActor" log line.
+        # the "[LINK] 2/13 Malware → ThreatActor" log line.
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):
                 continue

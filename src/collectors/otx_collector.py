@@ -27,6 +27,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 
+# Import MISP writer
+from actor_name_hygiene import clean_actor_names
+
 # Import baseline checkpoint (incremental cursor only — no page-based checkpointing)
 from baseline_checkpoint import (
     get_source_incremental,
@@ -44,8 +47,6 @@ from collectors.collector_utils import (
     retry_with_backoff,
     status_after_misp_push,
 )
-
-# Import MISP writer
 from collectors.misp_writer import MISPWriter
 from config import (
     OTX_API_KEY,
@@ -82,6 +83,65 @@ RETRY_DELAY_BASE = 2  # seconds
 
 # Circuit breaker for OTX (shared registry — see resilience.py)
 OTX_CIRCUIT_BREAKER = get_circuit_breaker("otx", failure_threshold=3, recovery_timeout=3600)
+
+
+def _pulse_item_key(item: Dict[str, Any]) -> str:
+    """Same-run identity of an OTX item (what two pulses naming the same thing share)."""
+    if "indicator_type" in item and "value" in item:
+        return f"{item.get('indicator_type')}:{item.get('value')}"
+    if item.get("type") == "malware":
+        return f"malware:{item.get('name')}"
+    if item.get("type") == "vulnerability":
+        return f"cve:{item.get('cve_id')}"
+    if item.get("type") == "actor":
+        return f"actor:{item.get('name')}"
+    return str(item)
+
+
+def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> None:
+    """Fold a same-run duplicate into the kept item.
+
+    2026-10 (fresh-baseline PR, Bugbot finding): the kept item used to be the
+    first pulse's copy and the later pulses were dropped, so a malware family
+    or actor named in five pulses of one run reached MISP with the first
+    pulse's ``pulse_id`` only — report-scoped ``INDICATES`` / ``ATTRIBUTED_TO``
+    then paired it with IOCs of that one pulse and left the IOCs of the other
+    four unlinked although they shared a pulse with it. Every later pulse now
+    contributes its id to ``report_ids`` (``MITRE_USES_TECHNIQUES.rids`` /
+    ``OTX_META.report_ids`` on the MISP attribute; the sync groups on
+    ``[pulse_id] + report_ids``) and its ATT&CK ids to ``reported_techniques``.
+    """
+    # Copy-on-write (Bugbot on PR #134, round 2): ``reported_techniques`` is the pulse's
+    # ``pulse_attack_ids`` list object, shared by reference with ``attack_ids`` in
+    # ``pulse_meta`` and with every sibling item of the same pulse. Appending in place
+    # would leak the later pulse's ATT&CK ids onto indicators and entities that never
+    # appeared in it. Always rebind a fresh list on the kept item before extending it.
+    dup_pid = dup.get("pulse_id")
+    if dup_pid and dup_pid != kept.get("pulse_id"):
+        rids = list(kept.get("report_ids") or [])
+        if dup_pid not in rids:
+            rids.append(dup_pid)
+        kept["report_ids"] = rids
+    extra_tids = [t for t in (dup.get("reported_techniques") or []) if t not in (kept.get("reported_techniques") or [])]
+    if extra_tids:
+        kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids
+
+
+def _dedupe_pulse_items(processed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One item per identity, keeping the first copy and folding the rest into it."""
+    kept_by_key: Dict[str, Dict[str, Any]] = {}
+    unique: List[Dict[str, Any]] = []
+    for item in processed:
+        if not (item.get("value") or item.get("name") or item.get("cve_id")):
+            continue
+        key = _pulse_item_key(item)
+        kept = kept_by_key.get(key)
+        if kept is None:
+            kept_by_key[key] = item
+            unique.append(item)
+        else:
+            _fold_duplicate_pulse_item(kept, item)
+    return unique
 
 
 class OTXCollector:
@@ -515,8 +575,11 @@ class OTXCollector:
                         "tag": self.tag,
                         "source": [self.tag],
                         "confidence_score": 0.5,
-                        # ATT&CK technique IDs from pulse → uses_techniques on Malware node
-                        "uses_techniques": pulse_attack_ids,
+                        # 2026-10: pulse-level ATT&CK ids are a report association,
+                        # not MITRE's explicit "uses" relationship — they travel as
+                        # ``reported_techniques`` (→ IMPLEMENTS_TECHNIQUE with
+                        # match_type ``otx_pulse``), never as ``uses_techniques``.
+                        "reported_techniques": pulse_attack_ids,
                         **pulse_meta,
                     }
                     if pulse_created:
@@ -556,16 +619,23 @@ class OTXCollector:
                 # PR-M2 §4-F5 (Bugbot round 3): symmetric honest-NULL
                 # propagation — see malware-family branch above for
                 # rationale. Same pulse-level timestamps apply.
-                if pulse_adversary:
+                # 2026-10: OTX's free-text ``adversary`` is a report field, not a
+                # name — pulses ship composites ("apt-c-13, sandworm, frozenbarents",
+                # "head mare and twelve") and descriptions ("multiple russian
+                # state-backed groups"). ``clean_actor_names`` splits the former into
+                # one actor item each and drops the latter, so no ThreatActor node is
+                # ever created from a phrase.
+                for adversary_name in clean_actor_names(pulse_adversary or ""):
                     actor_item: Dict[str, Any] = {
                         "type": "actor",
-                        "name": pulse_adversary,
+                        "name": adversary_name,
                         "description": pulse_description[:1000],
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
                         "confidence_score": 0.5,
-                        "uses_techniques": pulse_attack_ids,
+                        # 2026-10: see the malware branch — pulse ids are reported, not MITRE-explicit.
+                        "reported_techniques": pulse_attack_ids,
                         "aliases": [],
                         **pulse_meta,
                     }
@@ -575,24 +645,9 @@ class OTXCollector:
                         actor_item["last_seen"] = pulse_modified
                     processed.append(actor_item)
 
-            # Deduplicate
-            seen = set()
-            unique = []
-            for item in processed:
-                if "indicator_type" in item and "value" in item:
-                    key = f"{item.get('indicator_type')}:{item.get('value')}"
-                elif item.get("type") == "malware":
-                    key = f"malware:{item.get('name')}"
-                elif item.get("type") == "vulnerability":
-                    key = f"cve:{item.get('cve_id')}"
-                elif item.get("type") == "actor":
-                    key = f"actor:{item.get('name')}"
-                else:
-                    key = str(item)
-
-                if key not in seen and (item.get("value") or item.get("name") or item.get("cve_id")):
-                    seen.add(key)
-                    unique.append(item)
+            # Deduplicate — later pulses fold their pulse id / reported techniques into
+            # the kept item (see _dedupe_pulse_items; Bugbot finding on PR #134).
+            unique = _dedupe_pulse_items(processed)
 
             logger.info(f"[OK] OTX: Processed {len(unique)} unique items")
             if skipped_old > 0:

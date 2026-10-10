@@ -1617,7 +1617,12 @@ def test_indicates_cooccurrence_query_sets_updated_at():
     omitted ``r.updated_at = datetime()``. Every other relationship query
     in this file sets r.updated_at; the delta-sync recipe in CLOUD_SYNC.md
     filters edges by ``r.updated_at >= ...`` — without it, INDICATES
-    co-occurrence edges were silently excluded from cloud-sync."""
+    co-occurrence edges were silently excluded from cloud-sync.
+
+    2026-10 (fresh-baseline PR): query #4 was removed outright (ResilMesh
+    conformance finding F1), so the pin now covers (a) the removal and
+    (b) the two reported-technique queries (5b / 6b) that took its slot —
+    they must carry the same ``r.updated_at`` stamp for the delta-sync."""
     import importlib
     import inspect
 
@@ -1626,14 +1631,21 @@ def test_indicates_cooccurrence_query_sets_updated_at():
     build_relationships = importlib.import_module("build_relationships")
 
     src = inspect.getsource(build_relationships.build_relationships)
-    block_start = src.find("4. Indicator → Malware (INDICATES)")
-    block_end = src.find("5. ThreatActor → Technique", block_start)
-    assert block_start > 0 and block_end > block_start, "INDICATES block not found"
-    block = src[block_start:block_end]
-    assert "r.updated_at = datetime()" in block, (
-        "INDICATES co-occurrence inner query must SET r.updated_at — "
-        "without it, delta-sync cloud filter excludes these edges"
+    assert "4. Indicator → Malware (INDICATES)" not in src, (
+        "the whole-event INDICATES co-occurrence query must stay removed"
     )
+
+    for banner, next_banner in (
+        ("5b. ThreatActor → Technique", "6. Malware → Technique"),
+        ("6b. Malware → Technique", "7a. Indicator → Sector"),
+    ):
+        block_start = src.find(banner)
+        block_end = src.find(next_banner, block_start)
+        assert block_start > 0 and block_end > block_start, f"{banner} block not found"
+        block = src[block_start:block_end]
+        assert "r.updated_at = datetime()" in block, (
+            f"{banner} inner query must SET r.updated_at — without it, delta-sync cloud filter excludes these edges"
+        )
 
 
 def test_alert_processor_zone_type_guard_present():

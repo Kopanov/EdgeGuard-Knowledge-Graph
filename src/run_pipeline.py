@@ -24,6 +24,7 @@ from collector_allowlist import collect_sources_allowlist_from_env, is_collector
 from collector_failure_alerts import report_collector_failure
 from collectors.abuseipdb_collector import AbuseIPDBCollector
 from collectors.cisa_collector import CISACollector
+from collectors.cisa_ics_collector import CISAICSCollector
 from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
 from collectors.global_feed_collector import CyberCureCollector, ThreatFoxCollector, URLhausCollector
 from collectors.misp_collector import MISPCollector
@@ -84,6 +85,7 @@ SOURCE_ID_MAP = {
     "nvd": "nvd",
     "cisa_kev": "cisa",
     "cisa": "cisa",
+    "cisa_ics": "cisa_ics",
     "mitre_attck": "mitre_attck",
     "mitre": "mitre_attck",
     "virustotal": "virustotal",
@@ -133,6 +135,21 @@ def get_source_id(item, raise_on_unknown: bool = False):
     return "unknown"
 
 
+# Source id for STIX objects the in-process loader imports. ``x_edgeguard_source`` is
+# stamped per object by ``sync_misp_to_neo4j_via_stix`` (the MISP event's source id);
+# a bundle that arrives without it (external STIX) is attributed to ``stix_import`` —
+# never to a real feed and never to the string ``"unknown"``. (Bugbot on PR #134.)
+STIX_IMPORT_SOURCE_ID = "stix_import"
+# Evidence label for relationships that come from an explicit STIX relationship object
+# in an imported bundle (legacy in-process path only; see
+# docs/RESILMESH_INTEROPERABILITY.md § 3.2.2).
+STIX_RELATIONSHIP_MATCH_TYPE = "stix_relationship"
+
+
+def _stix_object_source(obj: dict) -> str:
+    return str(obj.get("x_edgeguard_source") or STIX_IMPORT_SOURCE_ID)
+
+
 class EdgeGuardPipeline:
     def __init__(self):
         self.neo4j = Neo4jClient()
@@ -144,6 +161,8 @@ class EdgeGuardPipeline:
             "otx": OTXCollector(misp_writer=self.misp_writer),
             "nvd": NVDCollector(misp_writer=self.misp_writer),
             "cisa": CISACollector(misp_writer=self.misp_writer),
+            # 2026-10: CISA ICS advisories (flag-guarded; collect() skips unless EDGEGUARD_ENABLE_CISA_ICS)
+            "cisa_ics": CISAICSCollector(misp_writer=self.misp_writer),
             "mitre": MITRECollector(misp_writer=self.misp_writer),
             "virustotal": VTCollector(misp_writer=self.misp_writer),
             # Legacy/enrichment VT collector (separate from vt_collector.VTCollector; same allowlist name as Airflow)
@@ -288,7 +307,7 @@ class EdgeGuardPipeline:
 
     def _create_indicates_relationships(self) -> int:
         """
-        Create INDICATES relationships using MISP event co-occurrence.
+        CLI relationship pass: CVE-tag EXPLOITS only (2026-10: event co-occurrence INDICATES removed).
 
         The correct threat-intel logic: when an Indicator (IP, domain, hash) and
         a Malware node share the same MISP event ID, they were observed together
@@ -301,45 +320,14 @@ class EdgeGuardPipeline:
             Number of INDICATES relationships created
         """
         try:
-            # Co-occurrence query: Indicators and Malware that share a MISP event
-            # are linked with INDICATES.  Works cross-source because every MISP-
-            # derived node accumulates its event ids in misp_event_ids[].
-            # Co-occurrence: batched via apoc.periodic.iterate (prevents OOM on 170K+ indicators).
-            #
-            # PR #33 round 10: dropped legacy scalar misp_event_id from both
-            # filter and join. Outer filter only includes nodes with a non-
-            # empty misp_event_ids array; inner join matches by array IN
-            # membership.
-            # PR #34 round 28 (bugbot MED): stamp r.src_uuid / r.trg_uuid on
-            # both co-occurrence and EXPLOITS edges so the CLI path produces
-            # the same cross-environment-traceable edges as the primary
-            # build_relationships.py path. Without this, edges created via
-            # run_pipeline.py CLI had NULL endpoint uuids, silently breaking
-            # the delta-sync contract for any operator who preferred this
-            # code path.
-            cooccurrence_query = """
-            CALL apoc.periodic.iterate(
-                'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND size(i.misp_event_ids) > 0 RETURN i',
-                'WITH $i AS i
-                 WITH i, [eid IN i.misp_event_ids WHERE eid IS NOT NULL AND eid <> ""][0..200] AS eids
-                 UNWIND eids AS eid WITH i, eid
-                 MATCH (m:Malware) WHERE m.misp_event_ids IS NOT NULL AND eid IN m.misp_event_ids
-                 MERGE (i)-[r:INDICATES]->(m)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "misp_cooccurrence", r.confidence_score = 0.5, r.src_uuid = i.uuid, r.trg_uuid = m.uuid
-                 SET r.updated_at = datetime(),
-                     r.src_uuid = coalesce(r.src_uuid, i.uuid),
-                     r.trg_uuid = coalesce(r.trg_uuid, m.uuid)',
-                {batchSize: 5000, parallel: false}
-            )
-            YIELD total
-            RETURN total AS created
-            """
-            results = self.neo4j.run(cooccurrence_query)
-            record = results[0] if results else None
-            indicates_count = record.get("created", 0) if record else 0
-            logger.info(f"   INDICATES (co-occurrence, batched): {indicates_count} relationships")
-
-            time.sleep(3)  # Let Neo4j flush between relationship queries
+            # 2026-10 (fresh-baseline PR, conformance finding F1): the whole-event
+            # co-occurrence INDICATES query that lived here was removed. EdgeGuard MISP
+            # events are per-source, per-day buckets, so a shared event id never meant
+            # a source asserted the link. Report-scoped INDICATES (same OTX pulse,
+            # match_type "otx_pulse") is written by the MISP→Neo4j sync; the family
+            # match lives in build_relationships Q9. This CLI path keeps only the
+            # CVE-tag EXPLOITS pass below.
+            indicates_count = 0
 
             # Second pass: Indicators that explicitly mention a CVE are linked to
             # that CVE/Vulnerability via EXPLOITS (more specific than INDICATES).
@@ -467,7 +455,7 @@ class EdgeGuardPipeline:
                                 "value": indicator_data.get("value", ""),
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
-                                "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                                "source": [_stix_object_source(obj)],  # Source as array (like zone)
                                 # PR-N14 Fix #4 (2026-04-21 pre-baseline audit): pass
                                 # None through when STIX has no ``created`` / ``modified``
                                 # — do NOT substitute wall-clock NOW. The prior
@@ -480,7 +468,7 @@ class EdgeGuardPipeline:
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
-                            source_id=obj.get("x_edgeguard_source", "unknown"),
+                            source_id=_stix_object_source(obj),
                         )
                         if ok:
                             stats["indicators"] += 1
@@ -501,7 +489,7 @@ class EdgeGuardPipeline:
                                 "attack_vector": "UNKNOWN",
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
-                                "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                                "source": [_stix_object_source(obj)],  # Source as array (like zone)
                                 # PR-N14 Fix #4: honest-NULL on STIX re-import — see
                                 # Indicator block above for rationale.
                                 "first_seen": obj.get("created") or None,
@@ -509,7 +497,7 @@ class EdgeGuardPipeline:
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
-                            source_id=obj.get("x_edgeguard_source", "unknown"),
+                            source_id=_stix_object_source(obj),
                         )
                         if ok:
                             stats["vulnerabilities"] += 1
@@ -523,10 +511,10 @@ class EdgeGuardPipeline:
                             "description": obj.get("description", ""),
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.7,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     if ok:
                         stats["actors"] += 1
@@ -541,10 +529,10 @@ class EdgeGuardPipeline:
                             "description": obj.get("description", ""),
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.7,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     if ok:
                         stats["malware"] += 1
@@ -564,10 +552,10 @@ class EdgeGuardPipeline:
                             "tool_types": obj.get("labels", []),
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],
+                            "source": [_stix_object_source(obj)],
                             "confidence_score": 0.7,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     stats.setdefault("tools", 0)
                     stats["tools"] += 1
@@ -590,10 +578,10 @@ class EdgeGuardPipeline:
                             "platforms": [],
                             "zone": self._extract_zones_from_stix_labels(obj),
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],  # Source as array (like zone)
+                            "source": [_stix_object_source(obj)],  # Source as array (like zone)
                             "confidence_score": 0.8,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     stats["techniques"] += 1
 
@@ -613,10 +601,10 @@ class EdgeGuardPipeline:
                             "description": obj.get("description", ""),
                             "zone": ["global"],
                             "tag": "stix_import",
-                            "source": [obj.get("x_edgeguard_source", "unknown")],
+                            "source": [_stix_object_source(obj)],
                             "confidence_score": 1.0,
                         },
-                        source_id=obj.get("x_edgeguard_source", "unknown"),
+                        source_id=_stix_object_source(obj),
                     )
                     stats.setdefault("tactics", 0)
                     stats["tactics"] += 1
@@ -633,7 +621,7 @@ class EdgeGuardPipeline:
                                 "value": value,
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
-                                "source": [obj.get("x_edgeguard_source", "unknown")],
+                                "source": [_stix_object_source(obj)],
                                 # PR-N14 Fix #4: STIX observables (IPv4 / domain /
                                 # URL / …) have no native ``created`` / ``modified``
                                 # properties. Pass None instead of wall-clock NOW —
@@ -646,7 +634,7 @@ class EdgeGuardPipeline:
                                 "confidence_score": 0.7,
                                 "misp_event_id": None,
                             },
-                            source_id=obj.get("x_edgeguard_source", "unknown"),
+                            source_id=_stix_object_source(obj),
                         )
                         stats["observables"] += 1
 
@@ -666,14 +654,19 @@ class EdgeGuardPipeline:
                     if rel_type == "indicates":
                         if src["type"] == "indicator" and tgt["type"] == "malware":
                             self.neo4j.create_indicator_malware_relationship(
-                                src["value"], tgt["name"], source_id=obj.get("x_edgeguard_source", "unknown")
+                                src["value"], tgt["name"], source_id=_stix_object_source(obj)
                             )
                             stats["relationships_indicates"] += 1
 
                     # Handle ATTRIBUTED_TO (Malware -> ThreatActor)
                     elif rel_type == "attributed-to":
                         if src["type"] == "malware" and tgt["type"] == "actor":
-                            self.neo4j.create_malware_actor_relationship(src["name"], tgt["name"])
+                            self.neo4j.create_malware_actor_relationship(
+                                src["name"],
+                                tgt["name"],
+                                source_id=_stix_object_source(obj),
+                                match_type=STIX_RELATIONSHIP_MATCH_TYPE,
+                            )
                             stats["relationships_attributed_to"] += 1
 
                     # Handle STIX "uses" predicate → EMPLOYS_TECHNIQUE (Actor)

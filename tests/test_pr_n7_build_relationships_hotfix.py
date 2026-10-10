@@ -95,8 +95,8 @@ class TestFix1QuoteEscapeBugEliminated:
 
         src = self._src()
         # Scan a window around step 2 to find the _outer assignment.
-        step2_idx = src.find("[LINK] 2/12 Malware → ThreatActor")
-        step3_idx = src.find("[LINK] 3a/12", step2_idx)
+        step2_idx = src.find("[LINK] 2/13 Malware → ThreatActor")
+        step3_idx = src.find("[LINK] 3a/13", step2_idx)
         assert step2_idx != -1 and step3_idx != -1
         # Parse the full module so AST walker covers all assignments.
         tree = ast.parse(src)
@@ -277,60 +277,60 @@ _q_inner = "WITH $i AS i RETURN i"
 # ===========================================================================
 
 
-class TestFix2Step4JoinReversal:
-    """Step 4 now iterates from the small side (Malware, ~3.4K)
-    instead of the large side (Indicator, ~144K). 43× fewer apoc
-    outer iterations."""
+class TestFix2Step4Removed:
+    """Fix #2 reversed the join of step 4 (Indicator → Malware
+    co-occurrence) for scale. In 2026-10 (fresh-baseline PR, ResilMesh
+    conformance finding F1) step 4 was REMOVED outright: EdgeGuard MISP
+    events are per-source, per-day buckets, so a shared event id never
+    meant the source asserted a link. These tests pin the removal so the
+    O(n²) query — and its 5-hour stall — cannot come back, and that the
+    reported-technique queries 5b / 6b took its slot."""
 
     def _src(self) -> str:
         return (SRC / "build_relationships.py").read_text()
 
-    def test_step4_outer_is_malware_not_indicator(self):
-        """Outer MATCH must select Malware, not Indicator. Find the
-        step-4 outer assignment by the label banner."""
-        src = self._src()
-        step4_idx = src.find("[LINK] 4/12 Indicator → Malware (co-occurrence")
-        assert step4_idx != -1
-        # Following _q4_outer assignment
-        outer_idx = src.find("_q4_outer =", step4_idx)
-        assert outer_idx != -1
-        line = src[outer_idx : src.find("\n", outer_idx)]
-        # Must match Malware, not Indicator
-        assert "MATCH (m:Malware)" in line, f"Step 4 outer must be Malware; got: {line}"
-        assert "MATCH (i:Indicator)" not in line, f"Step 4 outer must NOT be Indicator (pre-fix form); got: {line}"
+    def test_step4_banner_and_queries_are_gone(self):
+        """Neither the step-4 log banner nor its ``_q4_outer`` /
+        ``_q4_inner`` assignments may exist any more."""
+        import ast
 
-    def test_step4_inner_matches_indicator(self):
-        """Inner MATCH must select Indicator (the other side of the
-        join). Use AST walking to extract the actual string value of
-        ``_q4_inner`` — source-text regex misses because the tuple
-        contains parentheses inside comments."""
+        src = self._src()
+        assert "[LINK] 4/13 Indicator → Malware (co-occurrence" not in src, "step-4 banner must stay removed"
+        tree = ast.parse(src)
+        assert self._extract_string_constant(tree, "_q4_outer") is None, "_q4_outer must stay removed"
+        assert self._extract_string_constant(tree, "_q4_inner") is None, "_q4_inner must stay removed"
+
+    def test_no_inner_query_joins_on_event_id_cooccurrence(self):
+        """No ``*_inner`` string may pair Indicator and Malware by shared
+        ``misp_event_ids`` (``eid IN i.misp_event_ids``) or stamp
+        ``misp_cooccurrence`` — that is the exact query that was removed."""
         import ast
 
         src = self._src()
         tree = ast.parse(src)
-        q4_inner_value = self._extract_string_constant(tree, "_q4_inner")
-        assert q4_inner_value is not None, "could not locate _q4_inner assignment"
-        assert "MATCH (i:Indicator)" in q4_inner_value, (
-            f"Step 4 inner must scan Indicator; got: {q4_inner_value[:200]!r}"
-        )
-        assert "eid IN i.misp_event_ids" in q4_inner_value, (
-            "Step 4 inner must filter by event-id membership on Indicator side"
-        )
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and "inner" in target.id.lower():
+                    value = self._extract_string_constant(tree, target.id) or ""
+                    assert "eid IN i.misp_event_ids" not in value, f"{target.id} re-introduces the co-occurrence join"
+                    assert "misp_cooccurrence" not in value, f"{target.id} re-introduces misp_cooccurrence"
 
-    def test_step4_merge_edge_direction_unchanged(self):
-        """MERGE direction must still be (i)-[:INDICATES]->(m) — the
-        reversal is only in which side is the apoc outer driver, NOT
-        in the edge semantics."""
-        import ast
-
+    def test_reported_technique_queries_took_step4_slot(self):
+        """5b (ThreatActor.reported_techniques → EMPLOYS_TECHNIQUE) and 6b
+        (Malware.reported_techniques → IMPLEMENTS_TECHNIQUE) exist with the
+        ``otx_pulse`` evidence label at confidence 0.6."""
         src = self._src()
-        tree = ast.parse(src)
-        q4_inner_value = self._extract_string_constant(tree, "_q4_inner")
-        assert q4_inner_value is not None
-        assert "MERGE (i)-[r:INDICATES]->(m)" in q4_inner_value, (
-            "edge direction must remain i→m (INDICATES); join reversal is "
-            "about outer driver only, not semantic direction"
-        )
+        assert "[LINK] 5b/13" in src and "[LINK] 6b/13" in src
+        assert '"employs_technique_reported"' in src
+        assert '"malware_implements_technique_reported"' in src
+        for list_prop in ("a.reported_techniques", "m.reported_techniques"):
+            idx = src.find(f"UNWIND {list_prop} AS tid")
+            assert idx != -1, f"missing reported-technique UNWIND on {list_prop}"
+            inner = src[idx : src.find("\n", idx)]
+            assert 'r.match_type = "otx_pulse"' in inner, f"{list_prop} query must stamp otx_pulse"
+            assert "r.confidence_score = 0.6" in inner, f"{list_prop} query must use confidence 0.6"
 
     @staticmethod
     def _extract_string_constant(tree, var_name: str):

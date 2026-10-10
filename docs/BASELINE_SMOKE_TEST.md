@@ -69,6 +69,9 @@ python src/run_pipeline.py --baseline --baseline-days 7
 python src/run_pipeline.py --baseline --fresh-baseline --baseline-days 7
 ```
 
+> **Preferred since 2026-10:** `edgeguard fresh-baseline --days 7` — it triggers the `edgeguard_baseline` DAG (the path the hosted pipeline runs), enforces the backup-timestamp gate, and is what `scripts/verify_fresh_baseline.py` is written for. The in-process `run_pipeline.py` commands above remain for development; they write some edges through a legacy direct path (see `Neo4jClient.create_malware_actor_relationship`).
+ On a 7-day window the acceptance script reports the CVE-properties check as *informational*: NVD assigns reference tags and CPE configurations weeks after publication, so day-old CVEs legitimately lack them.
+
 Requires MISP/Neo4j (and API keys) as for a normal run.
 
 ---

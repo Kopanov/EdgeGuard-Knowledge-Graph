@@ -178,7 +178,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | Every 30 min | High-frequency updates | AlienVault OTX |
 | `edgeguard_medium_freq` | Every 4 hours | Medium-frequency sources | CISA KEV, VirusTotal |
 | `edgeguard_low_freq` | Every 8 hours | Low-frequency sources | NVD |
-| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, ThreatFox, AbuseIPDB, URLhaus, CyberCure, Feodo, SSLBlacklist |
+| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`), ThreatFox, AbuseIPDB, URLhaus, CyberCure, Feodo, SSLBlacklist |
 | `edgeguard_neo4j_sync` | `0 3 */3 * *` (every 3 days at 03:00) | MISP → Neo4j sync + `build_relationships` + `run_enrichment_jobs` | All sources |
 
 **Concurrency and timeout guards (all 6 DAGs):**
@@ -188,7 +188,8 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | 1 | 5h 30m | Covers OTX with full retry chain |
 | `edgeguard_medium_freq` | 1 | 5h | CISA + VT parallel with retries |
 | `edgeguard_low_freq` | 1 | 8h 30m | NVD with full retry chain |
-| `edgeguard_daily` | 1 | 8h 30m | 7 parallel collectors with retries |
+| `edgeguard_daily` | 1 | 8h 30m | 8 parallel collectors with retries (`collect_cisa_ics` is a no-op skip while its flag is off) |
+| `edgeguard_baseline` | — | — | 2026-10: `tier2_feeds` also runs `collect_cisa_ics` (baseline load of the 24-month advisory history; no-op skip while `EDGEGUARD_ENABLE_CISA_ICS` is off) |
 | `edgeguard_neo4j_sync` | 1 | 22h | Full sync + relationships + enrichment |
 | `edgeguard_baseline` | 1 | 32h | Full historical collection + sync |
 
@@ -275,6 +276,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | Source | DAG | Rate Limit | Items/Run |
 |--------|-----|------------|-----------|
 | MITRE ATT&CK | `edgeguard_daily` | No limit | 500 items |
+| CISA ICS Advisories (`collect_cisa_ics`, 2026-10) | `edgeguard_daily` | Polite: ≤ 4 req/s, ≤ `EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN` (1200) files | Advisories changed since the cursor (`changes.csv`); **task is skipped with success unless `EDGEGUARD_ENABLE_CISA_ICS=true`** |
 | ThreatFox | `edgeguard_daily` | No limit | 100 IOCs |
 | AbuseIPDB | `edgeguard_daily` | 1000/day | 100 IPs |
 | URLhaus | `edgeguard_daily` | No limit | 100 URLs |
@@ -301,6 +303,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | CyberCure | `CyberCureCollector` | `global_feed_collector.py` | Keyword-based |
 | Feodo | `FeodoCollector` | `finance_feed_collector.py` | Hardcoded Finance |
 | SSL Blacklist | `SSLBlacklistCollector` | `finance_feed_collector.py` | Malware family |
+| CISA ICS Advisories | `CISAICSCollector` | `cisa_ics_collector.py` | Source-asserted CISA sector → fixed table (Energy / Healthcare and Public Health / Financial Services); **flag-guarded**: `run_cisa_ics_collection` logs "disabled by flag" and returns a skipped status (success, 0 items) unless `EDGEGUARD_ENABLE_CISA_ICS=true` |
 
 ### Placeholder Collectors (Not Yet Active)
 
@@ -540,6 +543,11 @@ export EDGEGUARD_BASE_DIR="/path/to/EdgeGuard-Knowledge-Graph"
 # Monitoring
 export EDGEGUARD_ENABLE_METRICS=true     # Enable Prometheus metrics
 export EDGEGUARD_METRICS_PORT=8001       # Must not conflict with FastAPI (8000)
+
+# Optional collectors (default off)
+export EDGEGUARD_ENABLE_CISA_ICS=true    # CISA ICS advisories (edgeguard_daily → collect_cisa_ics); off → task skipped with success
+# export EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN=1200   # per-run file cap (politeness toward GitHub raw)
+# export EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES=50    # baseline sanity floor → transient skip + alert
 ```
 
 ---
@@ -698,7 +706,7 @@ Add keys when you want those feeds. Values that are **empty**, **whitespace-only
 6. **Event view shape:** `get_event` / `/events/view` may return a **PyMISP object** or **`{'Event': ...}`**; the sync normalizes to a flat dict before reading **`Attribute`**. REST is always tried if PyMISP returns an unparsed type.
 7. **MISP Objects vs flat attributes:** Ingestion uses the event’s top-level **`Attribute`** list. Events that store IOCs only inside **`Object`** (object templates) may log a warning and sync **zero** attributes until object expansion is implemented.
 8. **OOM / worker killed during Neo4j insert:** The sync merges in **Python-side chunks** (default **500** items, 3s pause). Events with **>5000 attributes** are streamed in pages of 5000. Default **`AIRFLOW_MEMORY_LIMIT`** is **12g** (100K+ attr events need 8-12GB). Lower **`EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE`** if still OOM.
-9. **Cross-item relationships are per MISP event:** The sync builds co-occurrence edges (actor↔technique, indicator↔malware, etc.) **within each event** only, then writes nodes and edges for that event before moving on. This avoids false links and runaway **O(n²)** work across the whole run.
+9. **Cross-item relationships are per MISP event and per source report (2026-10):** the sync pairs items **only when they share the same OTX pulse** (`pulse_id`) inside one event — `INDICATES` and `ATTRIBUTED_TO` with `match_type='otx_pulse'` — then writes nodes and edges for that event before moving on. Whole-event pairing (actor↔technique, every indicator↔every malware) was removed because EdgeGuard events are per-source, per-day buckets, not reports.
 10. **Relationship batching:** **`EDGEGUARD_REL_BATCH_SIZE`** (default **500**) controls how many relationship definitions are sent per **`create_misp_relationships_batch`** UNWIND round-trip.
 11. **Task success vs Airflow “failed” / SIGKILL:** If the graph is updated but the task is red, read **[HEARTBEAT.md](HEARTBEAT.md)** — **`local_task_job_heartbeat_sec`**, **`scheduler_zombie_task_threshold`**, **`zombie_detection_interval`**, and **OOM (-9)** are common causes separate from application exceptions. Compose defaults are documented there.
 

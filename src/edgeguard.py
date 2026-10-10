@@ -1801,11 +1801,18 @@ def cmd_clear(args) -> int:
 
 
 def cmd_clear_neo4j(args) -> int:
-    """Clear all EdgeGuard data from Neo4j (keeps constraints/indexes)."""
+    """Clear EdgeGuard data from Neo4j (keeps constraints/indexes).
+
+    Default: full wipe (every node). ``--edgeguard-only`` (2026-10): delete only
+    nodes carrying ``edgeguard_managed = true`` — the mode to use on a database
+    shared with ResilMesh, whose nodes never carry the marker.
+    """
     section("Clear Neo4j")
 
+    edgeguard_only = getattr(args, "edgeguard_only", False)
+    scope = "EdgeGuard-managed graph data (edgeguard_managed = true)" if edgeguard_only else "ALL graph data"
     if not getattr(args, "force", False):
-        confirm = input("This will DELETE all graph data from Neo4j. Type DELETE to confirm: ")
+        confirm = input(f"This will DELETE {scope} from Neo4j. Type DELETE to confirm: ")
         if confirm != "DELETE":
             info("Aborted.")
             return 0
@@ -1818,8 +1825,11 @@ def cmd_clear_neo4j(args) -> int:
             err("Cannot connect to Neo4j")
             return 1
         try:
-            client.clear_all()
-            ok("Neo4j graph data cleared (constraints and indexes preserved)")
+            cleared = client.clear_edgeguard_managed() if edgeguard_only else client.clear_all()
+            if not cleared:
+                err("Neo4j clear reported a failure — check the log")
+                return 1
+            ok(f"Neo4j {scope} cleared (constraints and indexes preserved)")
         finally:
             client.close()
     except Exception as e:
@@ -2955,6 +2965,14 @@ Examples:
 
     clear_neo4j_parser = clear_subparsers.add_parser("neo4j", help="Delete all graph data from Neo4j")
     clear_neo4j_parser.add_argument("--force", action="store_true", help="Skip DELETE confirmation")
+    clear_neo4j_parser.add_argument(
+        "--edgeguard-only",
+        action="store_true",
+        help=(
+            "Delete only nodes EdgeGuard wrote (edgeguard_managed = true) and their relationships; "
+            "leaves ResilMesh-owned data untouched. Use this on a shared database."
+        ),
+    )
 
     clear_misp_parser = clear_subparsers.add_parser("misp", help="Delete all EdgeGuard events from MISP")
     clear_misp_parser.add_argument("--force", action="store_true", help="Skip DELETE confirmation")

@@ -11,6 +11,7 @@ Available Collectors:
 - URLhausCollector: Malware URLs from URLhaus
 - CyberCureCollector: General IOC feeds from CyberCure
 - CISACollector: Known Exploited Vulnerabilities from CISA
+- CISAICSCollector: CISA ICS advisories (CSAF 2.0) with source-asserted sectors (flag-guarded)
 - MITRECollector: MITRE ATT&CK framework data
 - NVDCollector: National Vulnerability Database
 - OTXCollector: AlienVault Open Threat Exchange
@@ -42,6 +43,7 @@ from collectors.abuseipdb_collector import AbuseIPDBCollector
 
 # Vulnerability and framework collectors
 from collectors.cisa_collector import CISACollector
+from collectors.cisa_ics_collector import CISAICSCollector
 
 # Sector-specific collectors
 from collectors.energy_feed_collector import EnergyCollector, EnergyPlaceholderCollector
@@ -74,6 +76,7 @@ __all__ = [
     "collect_all_global_feeds",
     # Vulnerability/framework
     "CISACollector",
+    "CISAICSCollector",
     "MITRECollector",
     "NVDCollector",
     # Enrichment
