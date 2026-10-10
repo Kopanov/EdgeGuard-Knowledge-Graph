@@ -231,8 +231,9 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    metadata DB and rebuild the image — `docker compose build airflow && docker
    compose up -d --force-recreate airflow` — following
    [AIRFLOW_DAGS.md § 3.2 → 3.3.2](AIRFLOW_DAGS.md#32--332-october-2026).
-   `edgeguard doctor` must then report Airflow `3.3.x` with no drift warning, and
-   the DAG list must load with zero parse errors.
+   `edgeguard version` must print `2026.10.10` (or later) and `edgeguard doctor` must
+   report Airflow `3.3.x` with no drift warning; the DAG list must load with zero parse
+   errors.
 1. **MISP Import Regexp.** In the MISP UI open *Input Filters → Import Regexp*
    and remove (or fix) the rule that rewrites `: Windows ` to `%WINDIR%\`. On the
    2026-09 baseline it mangled 12 ATT&CK entries (`T1047: Windows Management
