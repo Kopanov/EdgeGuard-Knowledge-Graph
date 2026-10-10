@@ -128,8 +128,7 @@ After **any** change to **`.env`**, restart services that read it (at least **Ai
 
 ```bash
 docker compose up -d --force-recreate api graphql airflow
-# or simply:
-docker compose restart airflow api graphql
+# (`docker compose restart` is NOT enough after a .env change — it keeps the old values)
 ```
 
 ### 3.5 URLs to open (default ports)

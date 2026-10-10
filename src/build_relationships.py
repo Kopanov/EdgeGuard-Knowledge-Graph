@@ -885,7 +885,9 @@ def build_relationships():
         # in run_pipeline.py's working co-occurrence query.
         _q7a_inner = (
             "WITH $i AS i UNWIND i.zone AS zone_name WITH i, zone_name "
-            'WHERE zone_name IS NOT NULL AND zone_name <> "" '
+            # 2026-10 audit: `global` is the "no sector" marker, not a sector — never an edge target
+            # (Q7c/Q7d and the sync already skip it; the old graph carried 270k such edges).
+            'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
             # PR #37 (Devil's Advocate Tier S): stamp ``edgeguard_managed=true``
@@ -903,8 +905,11 @@ def build_relationships():
             "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (i)-[r:TARGETS]->(sec) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
-            "SET r.updated_at = datetime(), "
+            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
+            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
+            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
+            # every run so edges created by either writer converge.
+            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
             # 2026-10 (Bugbot on PR #134): edges the sync created before this step get the label too
             '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
@@ -940,7 +945,7 @@ def build_relationships():
         # See 7a above: double quotes for inner string literals.
         _q7b_inner = (
             "WITH $v AS v UNWIND v.zone AS zone_name WITH v, zone_name "
-            'WHERE zone_name IS NOT NULL AND zone_name <> "" '
+            'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
             # PR #37: same edgeguard_managed stamp as 7a — keeps STIX export
@@ -950,8 +955,11 @@ def build_relationships():
             "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (v)-[r:AFFECTS]->(sec) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
-            "SET r.updated_at = datetime(), "
+            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
+            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
+            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
+            # every run so edges created by either writer converge.
+            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
             # 2026-10 (Bugbot on PR #134): edges the sync created before this step get the label too
             '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
@@ -993,8 +1001,11 @@ def build_relationships():
             "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (a)-[r:TARGETS]->(sec) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
-            "SET r.updated_at = datetime(), "
+            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
+            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
+            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
+            # every run so edges created by either writer converge.
+            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
             '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
             "    r.misp_event_ids = apoc.coll.toSet("
@@ -1021,8 +1032,11 @@ def build_relationships():
             "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (m)-[r:TARGETS]->(sec) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "zone_classification", r.created_at = datetime() '
-            "SET r.updated_at = datetime(), "
+            'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
+            # 2026-10 audit (Martin's rule): a sector derived from keywords / CPE vendors / OTX industries is
+            # an inference, not an explicit statement — 0.5 like the sync writes, never 1.0. Re-applied on
+            # every run so edges created by either writer converge.
+            "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
             '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
             "    r.misp_event_ids = apoc.coll.toSet("

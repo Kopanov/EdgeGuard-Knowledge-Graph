@@ -2760,6 +2760,7 @@ class MISPToNeo4jSync:
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
+                        "match_type": "zone_classification",  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )
@@ -3184,6 +3185,7 @@ class MISPToNeo4jSync:
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
+                        "match_type": "zone_classification",  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )
@@ -3227,6 +3229,7 @@ class MISPToNeo4jSync:
                         "to_type": "Malware",
                         "to_key": {"name": malware_name},
                         "confidence": confidence,
+                        "match_type": "misp_attribute_tag",  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )
@@ -3241,6 +3244,7 @@ class MISPToNeo4jSync:
                         "to_type": "Sector",
                         "to_key": {"name": target_sector},
                         "confidence": confidence,
+                        "match_type": "zone_classification",  # 2026-10 audit: every edge carries an evidence label
                         "misp_event_id": _evt_id,
                     }
                 )
@@ -3264,6 +3268,7 @@ class MISPToNeo4jSync:
                             confidence, 0.7
                         ),  # explicit CVE tag match floors at 0.7, respects tag confidence
                         "misp_event_id": _evt_id,
+                        "match_type": "cve_tag",  # 2026-10 audit: every edge carries an evidence label
                     }
                 )
 

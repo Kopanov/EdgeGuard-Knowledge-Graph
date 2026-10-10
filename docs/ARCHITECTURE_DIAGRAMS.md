@@ -33,8 +33,8 @@ graph TB
         MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
-        BREL["build_relationships<br/>12 link queries → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ PR-N26 r.misp_event_ids array on edges"]
-        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns /<br/>Calibration / Decay]
+        BREL["build_relationships<br/>18 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ PR-N26 r.misp_event_ids array on edges"]
+        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge]
     end
 
     subgraph APIs
@@ -201,8 +201,8 @@ gantt
 flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_preflight<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 4h timeout]
-    C --> D[build_relationships<br/>12 link queries → many edge types incl. INDICATES, EXPLOITS, TARGETS, AFFECTS]
-    D --> E[run_enrichment_jobs<br/>4 post-sync jobs]
+    C --> D[build_relationships<br/>18 link steps → many edge types incl. INDICATES, EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL]
+    D --> E[run_enrichment_jobs<br/>5 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
     A -->|skip: last sync < 72h| SKIP[All downstream<br/>SKIPPED]

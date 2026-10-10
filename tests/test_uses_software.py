@@ -265,4 +265,6 @@ class TestAcceptanceScript:
         script = _ACCEPT.read_text()
         assert '    "USES_MALWARE",\n    "USES_TOOL",\n' in script
         assert 'rep.add("uses_malware_complete"' in script and 'rep.add("uses_tool_complete"' in script
-        assert 'None if (r.get("claims") or 0) == 0 else' in script, "informational until the R6 collector has run"
+        # 2026-10 audit: informational only while no MITRE actor exists; once one does, zero claims FAIL
+        assert "def _uses_ok(" in script and "if mitre_actors == 0:" in script and "return None" in script
+        assert '(row.get("claims") or 0) > 0 and row.get("edge_missing") == 0' in script

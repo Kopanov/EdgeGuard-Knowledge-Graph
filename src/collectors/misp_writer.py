@@ -216,6 +216,12 @@ def _attack_domain(item: Dict[str, Any]) -> str:
     return domain if domain in ("enterprise", "ics", "mobile") else "enterprise"
 
 
+# 2026-10 audit: the 730-day baseline is ONE collector run, so a family named in N pulses carries
+# all N ids in `rids`; the earlier 32 cut every link beyond the 33rd pulse (Mirai, Cobalt Strike,
+# AgentTesla appear in hundreds). MISP `comment` is TEXT (64 KB); 500 × ~27 chars ≈ 13 KB.
+_MAX_REPORT_IDS = 500
+
+
 def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
     """Build the ``MITRE_USES_TECHNIQUES:`` JSON block for malware / actor / tool items.
 
@@ -249,7 +255,7 @@ def _technique_meta(item: Dict[str, Any]) -> Dict[str, Any]:
         meta["pid"] = str(pulse_id)[:64]
     report_ids = [str(x)[:64] for x in (item.get("report_ids") or []) if x]
     if report_ids:
-        meta["rids"] = report_ids[:32]
+        meta["rids"] = report_ids[:_MAX_REPORT_IDS]
     # 2026-10 (R6): MITRE group → software ``uses`` (actors only)
     uses_malware = [str(x)[:128] for x in (item.get("uses_malware") or []) if x]
     if uses_malware:
@@ -1090,7 +1096,7 @@ class MISPWriter:
                 "pulse_id": indicator.get("pulse_id", ""),
                 # 2026-10: other pulses of the same run that listed this IOC (collector
                 # dedup) — the sync pairs the IOC with the malware/actors of all of them.
-                "report_ids": [str(x)[:64] for x in (indicator.get("report_ids") or []) if x][:32],
+                "report_ids": [str(x)[:64] for x in (indicator.get("report_ids") or []) if x][:_MAX_REPORT_IDS],
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
             }

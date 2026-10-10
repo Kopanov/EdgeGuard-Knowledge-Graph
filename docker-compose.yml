@@ -47,6 +47,10 @@ x-common-env: &common-env
   EDGEGUARD_API_KEY: ${EDGEGUARD_API_KEY:-}
   # Optional: comma-separated allowlist of collectors (see .env.example / docs/AIRFLOW_DAGS.md)
   EDGEGUARD_COLLECT_SOURCES: ${EDGEGUARD_COLLECT_SOURCES:-}
+  # Trust allowlist for foreign MISP events (src/source_trust.py): .env.example says "configure at
+  # least one in production" — without forwarding it was silently bypassed inside the containers.
+  EDGEGUARD_TRUSTED_MISP_ORG_UUIDS: ${EDGEGUARD_TRUSTED_MISP_ORG_UUIDS:-}
+  EDGEGUARD_TRUSTED_MISP_ORG_NAMES: ${EDGEGUARD_TRUSTED_MISP_ORG_NAMES:-}
   # Collector API keys — leave blank to skip that source
   OTX_API_KEY: ${OTX_API_KEY:-}
   NVD_API_KEY: ${NVD_API_KEY:-}
@@ -294,6 +298,13 @@ services:
       # (UI/API triggers; the CLI wrapper checks these on the host instead).
       EDGEGUARD_LAST_BACKUP_AT: ${EDGEGUARD_LAST_BACKUP_AT:-}
       EDGEGUARD_BACKUP_MAX_AGE_HOURS: ${EDGEGUARD_BACKUP_MAX_AGE_HOURS:-}
+      # Orphan-process safeguard (src/parent_dag_liveness.py) calls the Airflow API from inside the
+      # task; without the credentials the probe gets 401 and fails OPEN. Kept on the airflow service
+      # only (not x-common-env) so api/graphql never see the Airflow password.
+      AIRFLOW_API_USER: ${AIRFLOW_API_USER:-airflow}
+      AIRFLOW_API_PASSWORD: ${AIRFLOW_API_PASSWORD:-}
+      EDGEGUARD_PARENT_DAG_LIVENESS_CHECK: ${EDGEGUARD_PARENT_DAG_LIVENESS_CHECK:-true}
+      EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC: ${EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC:-}
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro

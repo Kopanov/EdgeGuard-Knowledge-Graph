@@ -252,11 +252,24 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    `baseline_clean` task refuse to run without a backup inside
    `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (default 240 h).
 4. **One command for the re-feed.** `edgeguard fresh-baseline --days 730` wipes
-   Neo4j + MISP (typed confirmation, blast-radius display, backup-timestamp gate)
+   **the whole Neo4j database** (every node, not only `edgeguard_managed` ones) and the
+   EdgeGuard MISP events (typed confirmation, blast-radius display, backup-timestamp gate).
+   That is the right mode for the October 2026 re-feed: the hosted database holds no
+   partner-written nodes (verified 2026-10-10 — the ResilMesh labels exist only as
+   constraint tokens). On a database ResilMesh has started writing to, use the
+   edgeguard-only sequence instead: `edgeguard clear neo4j --edgeguard-only`,
+   `edgeguard clear misp`, `edgeguard checkpoint clear --include-incremental`, then the
+   additive `edgeguard baseline --days 730` — and first delete unmarked leftovers from
+   before the marker existed (`MATCH (c:Campaign) WHERE c.edgeguard_managed IS NULL DETACH DELETE c`)
+   or `ownership_marker_on_nodes` fails. The gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
-   finishes, run `python scripts/verify_fresh_baseline.py` — every mandatory
-   check must pass before the instance is handed to the partners or the demo.
+   finishes, run `python scripts/verify_fresh_baseline.py` (needs `NEO4J_HTTP_URL` or
+   `NEO4J_HTTP`, `NEO4J_USER`, `NEO4J_PASSWORD` of the instance under test in the
+   environment) — every mandatory check must pass before the instance is handed to the
+   partners or the demo. `uses_malware_complete` / `uses_tool_complete` are mandatory as soon
+   as a MITRE actor exists (2026-10 audit): zero claims then means the `m` / `s` lists were
+   lost in transit, not "collector not run yet".
    Pause the scheduled DAGs before triggering, as for any baseline
    ([RUNBOOK § Baseline day protocol](RUNBOOK.md#baseline-day-protocol)).
 5. **Hand back.** Return the acceptance JSON

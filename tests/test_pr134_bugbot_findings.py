@@ -117,7 +117,11 @@ class TestReportIdsRoundTripThroughMisp:
         assert _technique_meta({"pulse_id": "p1", "report_ids": ["p2", "p3"]}) == {"pid": "p1", "rids": ["p2", "p3"]}
         assert _technique_meta({"pulse_id": "p1", "report_ids": []}) == {"pid": "p1"}, "no key when empty"
         meta = _technique_meta({"pulse_id": "p1", "report_ids": [f"p{i}" for i in range(50)]})
-        assert len(meta["rids"]) == 32, "capped so the MISP comment stays within field limits"
+        assert len(meta["rids"]) == 50, (
+            "50 ids fit — the cap is 500 (2026-10 audit: 32 cut every link beyond the 33rd pulse)"
+        )
+        meta = _technique_meta({"pulse_id": "p1", "report_ids": [f"p{i}" for i in range(700)]})
+        assert len(meta["rids"]) == 500, "capped at 500 so the MISP comment (TEXT, 64 KB) stays small"
 
     @pytest.fixture
     def syncer(self) -> MISPToNeo4jSync:
@@ -292,7 +296,7 @@ class TestBatchRowsCarryMatchType:
     def test_q7a_q7b_stamp_zone_classification_on_pre_existing_edges(self):
         text = (Path(_SRC) / "build_relationships.py").read_text()
         blocks = re.findall(
-            r'ON CREATE SET r\.confidence_score = 1\.0, r\.match_type = "zone_classification".*?r\.edgeguard_managed = true',
+            r'ON CREATE SET r\.confidence_score = 0\.5, r\.match_type = "zone_classification".*?r\.edgeguard_managed = true',
             text,
             re.S,
         )

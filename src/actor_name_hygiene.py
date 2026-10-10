@@ -256,6 +256,21 @@ def _normalise(name: str) -> str:
     return _WHITESPACE_RE.sub(" ", unicodedata.normalize("NFC", name)).strip()
 
 
+# 2026-10 audit: "Name (Alias)" is the dominant composite form on the hosted graph (27 of 815
+# non-MITRE actors: "apt28 (fancy bear)", "kimsuky (apt43)", "apt-c-00 (ocean lotus)"). Keep the
+# head; the parenthetical is an alias the MITRE alias merge resolves when it is one.
+# Whitespace before "(" and a letter inside are required: "NoName057(16)" is one group's real name.
+_TRAILING_PAREN_RE = re.compile(r"^(?P<head>.+?)\s+\((?P<inner>[^()]*[A-Za-z][^()]*)\)$")
+
+
+def _strip_trailing_parenthetical(fragment: str) -> str:
+    m = _TRAILING_PAREN_RE.match(fragment)
+    if not m:
+        return fragment
+    head = m.group("head").strip()
+    return head if len(head) > 1 else fragment
+
+
 def _try_and_split(fragment: str) -> List[str]:
     """Split ``fragment`` on ``" and "`` / ``" & "`` if every guard passes,
     else return ``[fragment]`` unchanged.
@@ -273,6 +288,10 @@ def _try_and_split(fragment: str) -> List[str]:
         return [fragment]
     for side in sides:
         if len(side) < AND_SPLIT_MIN_SIDE_LEN or side.lower() in AND_SPLIT_PROTECTED_SIDES:
+            return [fragment]
+        # 2026-10 audit: never split inside a parenthetical —
+        # "mois (ministry of intelligence and security)" produced a ThreatActor "security)".
+        if side.count("(") != side.count(")"):
             return [fragment]
     return sides
 
@@ -321,6 +340,7 @@ def split_composite_actor_name(name: str) -> List[str]:
         frag = _TRAILING_CONJUNCTION_RE.sub("", frag).strip()
         if not frag:
             continue
+        frag = _strip_trailing_parenthetical(frag)
         fragments.extend(_try_and_split(frag))
 
     fragments = [f for f in (f.strip() for f in fragments) if len(f) > 1]

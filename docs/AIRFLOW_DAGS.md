@@ -83,7 +83,7 @@ A patch bump to 3.2.2 would have left `CVE-2026-33264` open, so the base moved t
 3. `edgeguard doctor` should report Airflow `3.3.x` with no drift warning; `edgeguard validate` as usual.
 4. Note from the 3.3.1 release: pandas 3 changes how DataFrame XComs are stored. EdgeGuard pins `pandas~=2.2` in the image and stores no DataFrame XComs, so nothing to do — only relevant if you add a task that returns a DataFrame.
 
-**Known deprecation (non-breaking):** on 3.3.x the DAG file's `from airflow.utils.trigger_rule import TriggerRule` emits `DeprecatedImportWarning: use airflow.task.trigger_rule.TriggerRule`. The old path still works for the whole 3.x line; switch to the new path with an `ImportError` fallback (the pattern already used for `Variable` / `TaskGroup`) in a DAG-touching PR.
+**Deprecation, resolved in PR #139:** on 3.3.x `from airflow.utils.trigger_rule import TriggerRule` emits `DeprecatedImportWarning: use airflow.task.trigger_rule.TriggerRule`; the DAG now imports the new path with an `ImportError` fallback (zero warnings on 3.3.2). Historical note: The old path still works for the whole 3.x line; switch to the new path with an `ImportError` fallback (the pattern already used for `Variable` / `TaskGroup`) in a DAG-touching PR.
 
 Verified on this bump: `pip-audit -r requirements.txt` is clean with no ignore list (the `PYSEC-2026-161` Starlette exception is gone because airflow-core 3.3 requires `starlette>=1.0.1`), and the DAG/version/contract test files pass against a real Airflow 3.3.2 install.
 
