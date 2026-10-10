@@ -219,7 +219,7 @@ OOM. Either:
 
 **What:** the 2026-10 PRs (#136–#140: evidence labels, report-scoped linking, CVE
 properties, TLP, ownership marker, sector targeting, `SUBTECHNIQUE_OF`,
-`USES_MALWARE` / `USES_TOOL`, 18 `build_relationships` steps) only materialize on a
+`USES_MALWARE` / `USES_TOOL`, pulse-scoped INDICATES / ATTRIBUTED_TO on regular updates, 20 `build_relationships` steps) only materialize on a
 fresh re-feed — **and only if the hosted pipeline runs that code**. Before clearing:
 
 0. **Deploy `main` first.** The wipe rebuilds the graph with whatever is checked out,

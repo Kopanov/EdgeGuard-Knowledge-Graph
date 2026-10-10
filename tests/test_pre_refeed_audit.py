@@ -294,16 +294,25 @@ class TestBuildRelationshipsWiring:
             ok = br.build_relationships()
         return ok, calls
 
-    def test_eighteen_distinct_steps_in_order_with_skip_queries_where_designed(self):
+    def test_twenty_distinct_steps_in_order_with_skip_queries_where_designed(self):
         ok, calls = self._run()
         assert ok is not False
         keys = [k for _, k, _ in calls]
-        assert len(calls) == 18 and len(set(keys)) == 18, keys
-        assert keys[:5] == ["in_tactic", "subtechnique_of", "attributed_to", "uses_malware", "uses_tool"], keys[:5]
+        assert len(calls) == 20 and len(set(keys)) == 20, keys
+        assert keys[:6] == [
+            "in_tactic",
+            "subtechnique_of",
+            "attributed_to",
+            "uses_malware",
+            "uses_tool",
+            "attributed_to_pulse",
+        ], keys[:6]
+        assert keys.index("indicates_family") + 1 == keys.index("indicates_pulse"), "9b runs right after 9"
         skip = {k: s for _, k, s in calls}
         assert skip["uses_malware"] and skip["uses_tool"], "R6 steps skip when no claim is pending"
         assert not skip["in_tactic"] and not skip["subtechnique_of"], "cheap full passes have no skip query"
-        assert {"uses_malware", "uses_tool", "subtechnique_of"} <= set(keys)
+        assert {"uses_malware", "uses_tool", "subtechnique_of", "indicates_pulse", "attributed_to_pulse"} <= set(keys)
+        assert skip["indicates_pulse"] and not skip["attributed_to_pulse"]
 
 
 # --------------------------------------------------------------------------- B6: dependency pin parity

@@ -1549,7 +1549,7 @@ class EdgeGuardPipeline:
         # invoking both here, gated to ``baseline=True`` to avoid
         # surprising incremental-mode CLI users with extra latency.
         if baseline:
-            # Step 5b: build_relationships (18 cross-entity link steps).
+            # Step 5b: build_relationships (20 cross-entity link steps).
             # Subprocess-isolated to match the DAG's invocation shape.
             #
             # PR-K3 §1-4: use the streaming helper so the child's 5-hour
@@ -1597,7 +1597,7 @@ class EdgeGuardPipeline:
                     # abort that loses Step 5c enrichment too.
                     #
                     # Operator hint: the graph edges from
-                    # build_relationships (18 link steps:
+                    # build_relationships (20 link steps:
                     # IMPLEMENTS_TECHNIQUE, TARGETS, AFFECTS, ...) will
                     # be MISSING. Re-run ``python src/build_relationships.py``
                     # standalone to complete the graph.

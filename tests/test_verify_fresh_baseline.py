@@ -72,6 +72,8 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"c": 150}]
     if "(g:Sector {name: 'global'})" in s:
         return [{"c": 0}]
+    if "pulse_malware_families" in s:
+        return [{"claims": 300, "target_missing": 20, "edge_missing": 0}]
     if "USES_MALWARE" in s or "USES_TOOL" in s:
         return [{"claims": 120, "target_missing": 3, "edge_missing": 0}]
     if "SUBTECHNIQUE_OF" in s:
@@ -221,6 +223,11 @@ class TestRealBreakageStillFails:
             ("USES_MALWARE", [{"claims": 120, "target_missing": 3, "edge_missing": 2}], "uses_malware_complete"),
             ("USES_TOOL", [{"claims": 40, "target_missing": 0, "edge_missing": 1}], "uses_tool_complete"),
             ("(g:Sector {name: 'global'})", [{"c": 137948}], "no_global_sector_edges"),
+            (
+                "pulse_malware_families",
+                [{"claims": 300, "target_missing": 20, "edge_missing": 4}],
+                "pulse_indicates_complete",
+            ),
             ("bidirectional", [{"label": "CVSSv31", "total": 7, "bidirectional": 6}], "cvss_bidirectional"),
             (
                 "percentileCont",

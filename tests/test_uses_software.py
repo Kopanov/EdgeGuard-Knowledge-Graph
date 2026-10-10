@@ -253,11 +253,11 @@ class TestBuildRelationshipsSteps:
         assert '"uses_malware"' in text and '"uses_tool"' in text
         assert "_q2b_skip" in text and "_q2c_skip" in text
 
-    def test_step_count_is_eighteen(self):
+    def test_step_count_is_twenty(self):
         text = _BUILD_REL.read_text()
         banners = re.findall(r"\[LINK\] (\w+)/(\d+) ", text)
-        assert {t for _, t in banners} == {"18"} and len(banners) == 18
-        assert "failures=%d/18" in text
+        assert {t for _, t in banners} == {"20"} and len(banners) == 20
+        assert "failures=%d/20" in text
 
 
 class TestAcceptanceScript:

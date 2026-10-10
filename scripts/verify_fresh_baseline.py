@@ -328,6 +328,18 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
     r["mitre_actors"] = mitre_actors
     rep.add("uses_tool_complete", _uses_ok(r), r)
 
+    # 10a4. Pulse-scoped INDICATES (2026-10, regular-update linking): every family a pulse named on an
+    #       indicator, whose Malware node exists, has its INDICATES edge (Q9b). Informational only
+    #       while no indicator carries pulse families (pre-change data).
+    r = _one(
+        "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 "
+        "UNWIND i.pulse_malware_families AS fam WITH i, toLower(trim(fam)) AS f "
+        "OPTIONAL MATCH (m:Malware {name: f}) WITH i, f, collect(m) AS ms "
+        "RETURN count(*) AS claims, sum(CASE WHEN size(ms) = 0 THEN 1 ELSE 0 END) AS target_missing, "
+        "sum(CASE WHEN size(ms) > 0 AND none(m IN ms WHERE EXISTS { (i)-[:INDICATES]->(m) }) THEN 1 ELSE 0 END) AS edge_missing"
+    )
+    rep.add("pulse_indicates_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+
     # 10a3. `global` is the "no sector" marker: no TARGETS / AFFECTS edge may point at it (2026-10 audit:
     #       the old graph carried ~270k such edges at confidence 1.0).
     r = _one("MATCH ()-[r:TARGETS|AFFECTS]->(g:Sector {name: 'global'}) RETURN count(r) AS c")

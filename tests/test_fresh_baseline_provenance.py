@@ -1028,7 +1028,9 @@ class TestBuildRelationshipsSource:
 
     def test_only_q9_merges_indicates(self):
         indicates = [name for name, _, body in _inner_queries() if "[r:INDICATES]" in body]
-        assert indicates == ["_q9_inner"], "report-scoped INDICATES edges are written by the sync, not here"
+        # 2026-10 (regular-update linking): Q9b links an IOC to the families named by its pulse(s) from
+        # the indicator side (otx_pulse 0.6, ON CREATE only); the sync still pairs same-run items.
+        assert indicates == ["_q9_inner", "_q9b_inner"], "IOC-level family match (Q9) + pulse-scoped (Q9b) only"
 
     def test_5b_actor_reported_techniques(self):
         bodies = [body for _, _, body in _inner_queries() if "UNWIND a.reported_techniques AS tid" in body]
