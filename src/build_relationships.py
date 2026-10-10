@@ -680,9 +680,15 @@ def build_relationships():
         # pairs — pairs whose Technique node does NOT exist. Each orphan
         # pair is an edge that the inner action silently fails to create.
         # Direct skip count, no comparison with APOC total needed.
+        # 2026-10 (Bugbot on PR #136): MITRE's explicit ``uses`` is the strongest evidence for a
+        # technique edge, so Q5 / Q6 / Q10 stamp ``mitre_explicit`` / 0.95 in the unconditional SET,
+        # not only ON CREATE — a pair first written as ``otx_pulse`` 0.6 (Q5b / Q6b, or the sync's
+        # ``misp_attribute_tag`` rows) is upgraded when ``uses_techniques`` later asserts it (common
+        # after the alias merge folds an OTX actor into its MITRE node). Q5b / Q6b stay ON CREATE
+        # only, so they can never downgrade a MITRE-asserted edge.
         logger.info("[LINK] 5/13 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
-        _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q5_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 "
             "UNWIND a.uses_techniques AS tid "
@@ -735,7 +741,7 @@ def build_relationships():
         # pairs whose Technique node does NOT exist — direct skip count.
         logger.info("[LINK] 6/13 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q6_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 "
             "UNWIND m.uses_techniques AS tid "
@@ -1088,7 +1094,7 @@ def build_relationships():
         # (tool, technique-id) pairs whose Technique node does NOT exist.
         logger.info("[LINK] 10/13 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
-        _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
         _q10_skip = (
             "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 "
             "UNWIND tool.uses_techniques AS tid "

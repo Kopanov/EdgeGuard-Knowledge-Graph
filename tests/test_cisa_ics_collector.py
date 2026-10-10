@@ -647,6 +647,38 @@ def test_incremental_uses_changes_csv_and_advances_cursor_only_after_clean_push(
     mod.update_source_incremental.assert_not_called()
 
 
+def test_incremental_empty_run_does_not_advance_cursor_past_a_failed_fetch(monkeypatch):
+    """Bugbot on #136: the empty-result path advanced the cursor whenever any advisory was fetched,
+    ignoring ``fetch_failed`` — a later file's timestamp moved the cursor past an earlier failed
+    advisory, which was then never retried until it changed again."""
+    from datetime import timedelta, timezone
+
+    now = mod.datetime.now(timezone.utc)
+    older = (now - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    newer = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    no_cves = copy.deepcopy(SAMPLE_ADVISORY)
+    no_cves["vulnerabilities"] = []  # parses fine, yields no items → the empty-result path
+    http = _FakeHTTP(
+        {
+            "changes.csv": _changes(("2026/failing.json", older), ("2026/empty.json", newer)),
+            # 2026/failing.json is deliberately absent → 404 → fetch_failed
+            "2026/empty.json": no_cves,
+        }
+    )
+    c = _collector(http, monkeypatch, push_ok=0)
+    st = c.collect(push_to_misp=True, baseline=False)
+    assert st["count"] == 0 and st["stats"]["fetch_failed"] == 1
+    mod.update_source_incremental.assert_not_called()
+
+    # Control: the same empty run with no fetch failure advances to the newest processed timestamp.
+    mod.update_source_incremental.reset_mock()
+    http = _FakeHTTP({"changes.csv": _changes(("2026/empty.json", newer)), "2026/empty.json": no_cves})
+    c = _collector(http, monkeypatch, push_ok=0)
+    st = c.collect(push_to_misp=True, baseline=False)
+    assert st["count"] == 0 and st["stats"]["fetch_failed"] == 0
+    mod.update_source_incremental.assert_called_once_with("cisa_ics", cisa_ics_last_change_ts=newer)
+
+
 def test_incremental_cursor_filters_with_overlap(monkeypatch):
     monkeypatch.setattr(
         mod, "get_source_incremental", lambda _s: {"cisa_ics_last_change_ts": "2026-10-08T06:00:00.000000Z"}

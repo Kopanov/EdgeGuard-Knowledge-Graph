@@ -772,8 +772,16 @@ class CISAICSCollector:
             if not processed:
                 st = self._return_status(True, 0, failed=0)
                 st["stats"] = dict(stats)
-                if not baseline and processed_max_ts:
+                # Same gate as the push path below (Bugbot on PR #136): an advisory that failed to
+                # fetch must stay in front of the cursor, or a later file's timestamp moves the
+                # cursor past it and it is never retried until it changes again.
+                if not baseline and processed_max_ts and stats.get("fetch_failed", 0) == 0:
                     self._advance_cursor(processed_max_ts)
+                elif not baseline and processed_max_ts:
+                    logger.warning(
+                        "CISA ICS: cursor NOT advanced on empty run (fetch failures=%s) — will retry next run",
+                        stats.get("fetch_failed", 0),
+                    )
                 return st
 
             success, failed = self.misp_writer.push_items(processed)

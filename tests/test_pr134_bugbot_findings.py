@@ -368,3 +368,47 @@ class TestStixLoaderProvenance:
         assert session.run.call_args[1]["match_type"] == "mitre_derived"
         client.create_malware_actor_relationship("Emotet", "TA542", source_id="alienvault_otx")
         assert session.run.call_args[1]["match_type"] is None, "no invented label for an unknown evidence class"
+
+
+def _split_on_create(cypher: str) -> tuple[str, str]:
+    """``(ON CREATE SET clause, unconditional SET clause)`` of a MERGE inner query."""
+    _, _, rest = cypher.partition("ON CREATE SET ")
+    on_create, _, after = rest.partition(" SET ")
+    return on_create, after
+
+
+# --------------------------------------------------------------------------- #136 round: label upgrade
+class TestMitreExplicitUpgradesExistingEdges:
+    """Bugbot on #136: Q5 / Q6 / Q10 stamped ``mitre_explicit`` / 0.95 only ON CREATE, so a pair first
+    written as ``otx_pulse`` 0.6 (Q5b / Q6b or the sync's ``misp_attribute_tag`` rows) was never upgraded
+    when MITRE's explicit ``uses`` asserted it."""
+
+    @staticmethod
+    def _inner_strings() -> list[str]:
+        import ast
+
+        text = (Path(_SRC) / "build_relationships.py").read_text()
+        out = []
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Assign) and any(isinstance(x, ast.Name) and x.id == "_inner" for x in node.targets):
+                parts = [
+                    c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                ]
+                out.append("".join(parts))
+        return out
+
+    def test_every_mitre_explicit_step_upgrades_in_the_unconditional_set(self):
+        explicit = [q for q in self._inner_strings() if "uses_techniques AS tid" in q]
+        assert len(explicit) == 3, "Q5 actor, Q6 malware, Q10 tool"
+        for q in explicit:
+            on_create, after = _split_on_create(q)
+            assert "match_type" not in on_create, "label must not be ON CREATE-only"
+            assert 'r.match_type = "mitre_explicit"' in after and "r.confidence_score = 0.95" in after
+
+    def test_reported_steps_never_downgrade_a_mitre_edge(self):
+        reported = [q for q in self._inner_strings() if "reported_techniques AS tid" in q]
+        assert len(reported) == 2, "Q5b actor, Q6b malware"
+        for q in reported:
+            on_create, after = _split_on_create(q)
+            assert 'r.match_type = "otx_pulse"' in on_create and "0.6" in on_create
+            assert "match_type" not in after and "confidence_score" not in after
