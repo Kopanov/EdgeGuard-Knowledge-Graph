@@ -203,7 +203,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.airflow
-    image: edgeguard-airflow:3.2.0-python3.12
+    image: edgeguard-airflow:3.3.2-python3.12
     container_name: edgeguard_airflow
     restart: unless-stopped
     # Dockerfile.airflow CMD is `airflow standalone` (tini as PID 1). Do not set `command: standalone`

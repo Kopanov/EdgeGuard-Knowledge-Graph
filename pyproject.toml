@@ -41,7 +41,8 @@ dev = [
     "ruff~=0.9",         # linter / formatter
     "mypy~=1.14",        # static type checker
 ]
-# Apache Airflow 3.2.x (April 2026 release). Upgraded from 2.11 to clear a
+# Apache Airflow 3.3.x (October 2026 security bump; 3.2.x since April 2026 —
+# see Dockerfile.airflow for the CVE list). Upgraded from 2.11 to clear a
 # stack of unpatched CVEs in the 2.x line (flask CVE-2026-27205,
 # flask-appbuilder CVE-2025-58065/32962, airflow CVE-2025-66236) that have
 # fix versions only in Airflow 3.x. The ``apache-airflow-providers-standard``
@@ -60,11 +61,11 @@ dev = [
 #   - Scheduler + API server are now separate processes; see docker-compose
 #     for the updated service topology.
 #
-# [postgres] still pulls psycopg + the postgres provider. Keep ~=3.2 for
-# patch upgrades within the stable 3.2 line; a bump to 3.3 or 4.x is a
+# [postgres] still pulls psycopg + the postgres provider. Keep ~=3.3 for
+# patch upgrades within the stable 3.3 line; a bump to 3.4 or 4.x is a
 # separate review.
 airflow = [
-    "apache-airflow[postgres]~=3.2",
+    "apache-airflow[postgres]~=3.3",
     # Ships BashOperator, PythonOperator, ShortCircuitOperator etc. that
     # this repo imports from dags/. Required on Airflow 3.x.
     "apache-airflow-providers-standard~=1.5",
