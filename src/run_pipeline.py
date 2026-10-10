@@ -646,9 +646,7 @@ class EdgeGuardPipeline:
                     # Handle ATTRIBUTED_TO (Malware -> ThreatActor)
                     elif rel_type == "attributed-to":
                         if src["type"] == "malware" and tgt["type"] == "actor":
-                            self.neo4j.create_malware_actor_relationship(
-                                src["name"], tgt["name"], source_id=obj.get("x_edgeguard_source", "unknown")
-                            )
+                            self.neo4j.create_malware_actor_relationship(src["name"], tgt["name"])
                             stats["relationships_attributed_to"] += 1
 
                     # Handle STIX "uses" predicate → EMPLOYS_TECHNIQUE (Actor)
