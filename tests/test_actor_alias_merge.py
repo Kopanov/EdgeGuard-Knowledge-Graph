@@ -419,6 +419,7 @@ class TestPropertyStrategy:
             "edgeguard_managed",
             "tlp",
             "retired_at",
+            "retired_by",
             "last_decayed_tier",
             "last_decayed_at",
             "sophistication",

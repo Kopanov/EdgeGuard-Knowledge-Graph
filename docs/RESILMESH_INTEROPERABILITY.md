@@ -208,6 +208,8 @@ by evidence without renaming anything — the ResilMesh and STIX-derived relatio
 | `stix_relationship` | An explicit STIX relationship object (`attributed-to`) in a bundle imported by the in-process loader | 0.7 | Legacy in-process path only (`run_pipeline.load_stix21_to_neo4j` → `Neo4jClient.create_malware_actor_relationship`); the DAG path does not write it |
 | `misp_attribute_tag` | A tag on the MISP attribute itself (`mitre-attack:technique=`, `threat_actor=`, `exploits:`) | per attribute confidence (≥ 0.7) | MISP→Neo4j sync: attribute-embedded `EMPLOYS_TECHNIQUE`, `ATTRIBUTED_TO`; embedded `EXPLOITS` keeps `cve_tag` |
 
+**Precedence (2026-10):** an edge's label and confidence only ever move towards stronger evidence. The MISP→Neo4j sync keeps the higher `confidence_score` and the label that came with it (a later `otx_pulse` 0.6 row never overwrites an `exact` 1.0 or `mitre_explicit` 0.95 edge); `build_relationships` re-asserts explicit labels on every run and writes report-scoped labels on creation only.
+
 Report-scoped edges also carry `r.report_ids[]` (the OTX pulse ids) next to `r.misp_event_ids[]`, so a
 consumer can go from the edge to the report that asserted it. Items without a report id are never paired.
 `misp_cooccurrence` no longer appears on any edge written by this version; `calibrate_cooccurrence_confidence`

@@ -291,7 +291,7 @@ class TestBatchRowsCarryMatchType:
         client, captured = _capturing_client()
         client.create_misp_relationships_batch(self._RELS, source_id="misp")
         for query, _ in captured:
-            assert "r.match_type = coalesce(row.match_type, r.match_type)" in query, query[:200]
+            assert "THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END" in query, query[:200]
 
     def test_q7a_q7b_stamp_zone_classification_on_pre_existing_edges(self):
         text = (Path(_SRC) / "build_relationships.py").read_text()
