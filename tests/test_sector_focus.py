@@ -145,13 +145,30 @@ class TestCpeVendorVocabulary:
         for too_generic in ("ge", "sel", "oracle", "sap", "cisco", "huawei", "honeywell"):
             assert too_generic not in SECTOR_KEYWORDS["energy"] and too_generic not in SECTOR_KEYWORDS["finance"]
 
-    def test_siemens_healthineers_is_not_energy(self):
-        # the healthcare vendor shares the word "siemens" only in prose, not in its CPE vendor token
-        zones = _zones_for_cpe(
+    @pytest.mark.parametrize(
+        "cpe",
+        [
             "cpe:2.3:a:siemens_healthineers:syngo:*:*:*:*:*:*:*:*",
+            # Bugbot on #137: the common NVD form — vendor token "siemens", Healthineers only in prose
+            "cpe:2.3:a:siemens:syngo:*:*:*:*:*:*:*:*",
+        ],
+    )
+    def test_siemens_healthineers_is_not_energy(self, cpe):
+        zones = _zones_for_cpe(
+            cpe,
             description="Siemens Healthineers syngo medical imaging software allows an attacker to access patient data.",
         )
-        assert "healthcare" in zones and "energy" not in zones, zones
+        assert zones == ["healthcare"], zones
+
+    def test_negative_keywords_are_module_level_and_cross_field(self):
+        from config import SECTOR_NEGATIVE_KEYWORDS, _excluded_sectors
+
+        assert "healthineers" in SECTOR_NEGATIVE_KEYWORDS["energy"]
+        assert _excluded_sectors("siemens healthineers syngo") == {"energy"}
+        zones = detect_zones_from_item(
+            {"description": "Healthineers patient data exposure", "comment": "siemens syngo"}
+        )
+        assert "energy" not in zones
 
 
 # --------------------------------------------------------------------------- acceptance script

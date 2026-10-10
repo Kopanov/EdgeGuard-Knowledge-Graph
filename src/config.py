@@ -192,6 +192,55 @@ ZONE_DETECT_THRESHOLD = _bounded_env_float("EDGEGUARD_ZONE_DETECT_THRESHOLD", 1.
 ZONE_ITEM_COMBINED_THRESHOLD = _bounded_env_float("EDGEGUARD_ZONE_ITEM_THRESHOLD", 1.5, lo=0.1, hi=100.0)
 
 
+# NEGATIVE KEYWORDS — explicit exclusions, stronger than positive matches. Applied per field by
+# ``detect_zones_from_text`` and once more by ``detect_zones_from_item`` over the concatenated
+# text of every scanned field (Bugbot on PR #137: a per-field exclusion cannot cancel a vendor
+# hit that sits in another field, e.g. CPE vendor ``siemens`` in ``comment`` with
+# "Healthineers" only in the description).
+SECTOR_NEGATIVE_KEYWORDS: dict = {
+    "healthcare": [
+        "not healthcare",
+        "no healthcare",
+        "except hospital",
+        "excluding medical",
+        "non-medical",
+        "non-hospital",
+        "unrelated to healthcare",
+    ],
+    "energy": [
+        "not energy",
+        "no energy",
+        "except power",
+        "excluding grid",
+        "non-energy",
+        "non-grid",
+        "unrelated to energy",
+        # 2026-10 sector-focus build: the energy vocabulary now carries ICS vendor names, and
+        # a vendor can have non-OT product lines — "Siemens Healthineers" is a healthcare
+        # vendor whose prose (and CPE vendor token) contains "siemens".
+        "healthineers",
+        "siemens healthineers",
+    ],
+    "finance": [
+        "not finance",
+        "no finance",
+        "except bank",
+        "excluding payment",
+        "non-financial",
+        "non-banking",
+        "unrelated to finance",
+    ],
+}
+_SECTOR_NEGATIVE_PATTERNS: dict = {
+    zone: [re.compile(r"\b" + re.escape(kw) + r"\b") for kw in kws] for zone, kws in SECTOR_NEGATIVE_KEYWORDS.items()
+}
+
+
+def _excluded_sectors(text_lower: str) -> set:
+    """Sectors explicitly excluded by a negative keyword anywhere in ``text_lower``."""
+    return {zone for zone, pats in _SECTOR_NEGATIVE_PATTERNS.items() if any(p.search(text_lower) for p in pats)}
+
+
 def detect_zones_from_text(text: str, default_zone: str = "global", context: str = "body") -> list:
     """Detect sectors from text using CONSERVATIVE weighted scoring.
 
@@ -224,48 +273,7 @@ def detect_zones_from_text(text: str, default_zone: str = "global", context: str
     text_lower = text.lower()
     sector_scores = {zone: 0.0 for zone in SECTOR_KEYWORDS}
 
-    # NEGATIVE KEYWORDS - explicit exclusions (stronger than positive matches)
-    negative_keywords = {
-        "healthcare": [
-            "not healthcare",
-            "no healthcare",
-            "except hospital",
-            "excluding medical",
-            "non-medical",
-            "non-hospital",
-            "unrelated to healthcare",
-        ],
-        "energy": [
-            "not energy",
-            "no energy",
-            "except power",
-            "excluding grid",
-            "non-energy",
-            "non-grid",
-            "unrelated to energy",
-            # 2026-10 sector-focus build: the energy vocabulary now carries ICS vendor names, and
-            # a vendor can have non-OT product lines — "Siemens Healthineers" is a healthcare
-            # vendor whose prose (and CPE vendor token) contains "siemens".
-            "healthineers",
-            "siemens healthineers",
-        ],
-        "finance": [
-            "not finance",
-            "no finance",
-            "except bank",
-            "excluding payment",
-            "non-financial",
-            "non-banking",
-            "unrelated to finance",
-        ],
-    }
-
-    # Check negative keywords first - if found, exclude that sector entirely
-    excluded_sectors = set()
-    for zone, neg_kws in negative_keywords.items():
-        for neg_kw in neg_kws:
-            if re.search(r"\b" + re.escape(neg_kw) + r"\b", text_lower):
-                excluded_sectors.add(zone)
+    excluded_sectors = _excluded_sectors(text_lower)
 
     # Positive keyword matching with weights (pre-compiled patterns)
     for zone, patterns in _SECTOR_PATTERNS.items():
@@ -336,6 +344,29 @@ def detect_zones_from_item(item: dict) -> list:
         if zones != ["global"]:
             for z in zones:
                 combined_scores[z] += 0.5
+
+    # Item-level exclusion: a negative keyword found in ANY scanned field cancels that sector,
+    # even when the positive hit sits in another field (CPE vendor token vs. description).
+    all_text = " ".join(
+        str(item[f])
+        for f in (
+            "name",
+            "alias",
+            "aliases",
+            "family",
+            "title",
+            "info",
+            "event_name",
+            "description",
+            "comment",
+            "detail",
+        )
+        if item.get(f)
+    )
+    if item.get("tags"):
+        all_text += " " + " ".join(str(t) for t in item["tags"])
+    for zone in _excluded_sectors(all_text.lower()):
+        combined_scores[zone] = 0.0
 
     threshold = ZONE_ITEM_COMBINED_THRESHOLD
     max_score = max(combined_scores.values()) if combined_scores else 0
