@@ -70,6 +70,22 @@ x-common-env: &common-env
   # Issue #62: min fraction of ATTEMPTED MISP pushes that must succeed or the
   # collector task fails RED (default 0.95 in code; 0 disables the gate).
   EDGEGUARD_MISP_MIN_SUCCESS_RATE: ${EDGEGUARD_MISP_MIN_SUCCESS_RATE:-}
+  # 2026-10 fresh-baseline train — optional sources and levers (set in .env; defaults mirror src/config.py).
+  # Without these lines a value in .env never reached the airflow container, so the two ICS sources
+  # could not be enabled on the Compose deployment. Ints that the code parses with int() get an
+  # explicit default here: set-but-empty would raise at import.
+  EDGEGUARD_ENABLE_MITRE_ICS: ${EDGEGUARD_ENABLE_MITRE_ICS:-false}
+  MITRE_ICS_ATTACK_URL: ${MITRE_ICS_ATTACK_URL:-}
+  MITRE_FORCE_REFETCH: ${MITRE_FORCE_REFETCH:-}
+  EDGEGUARD_MITRE_CONDITIONAL_GET: ${EDGEGUARD_MITRE_CONDITIONAL_GET:-true}
+  EDGEGUARD_ENABLE_CISA_ICS: ${EDGEGUARD_ENABLE_CISA_ICS:-false}
+  EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS:-30}
+  EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN: ${EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN:-}
+  EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES: ${EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES:-}
+  EDGEGUARD_CISA_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_INCREMENTAL_DAYS:-30}
+  EDGEGUARD_NVD_INCREMENTAL_DAYS: ${EDGEGUARD_NVD_INCREMENTAL_DAYS:-14}
+  EDGEGUARD_DEFAULT_TLP: ${EDGEGUARD_DEFAULT_TLP:-white}
+  EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE: ${EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE:-true}
 
 services:
   # ─────────────────────────────────────────────────────────────────────────────

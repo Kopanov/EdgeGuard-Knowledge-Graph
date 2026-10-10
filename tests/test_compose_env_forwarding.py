@@ -1,0 +1,74 @@
+"""Pin: every operator-facing variable of the 2026-10 train reaches the containers.
+
+``docker-compose.yml`` forwards an explicit list of variables through ``x-common-env``;
+anything not on the list is silently invisible inside the ``airflow`` container even when
+it is set in ``.env``. Found 2026-10-10: the two ICS source flags (and the TLP / alias-merge
+levers) were documented in README and ``.env.example`` but never forwarded, so the sources
+could not be enabled on the Compose deployment at all.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+COMPOSE = REPO_ROOT / "docker-compose.yml"
+
+# (variable, default that compose must give when .env leaves it unset; None = empty allowed)
+FORWARDED = [
+    ("EDGEGUARD_ENABLE_MITRE_ICS", "false"),
+    ("MITRE_ICS_ATTACK_URL", None),
+    ("MITRE_FORCE_REFETCH", None),
+    ("EDGEGUARD_MITRE_CONDITIONAL_GET", "true"),
+    ("EDGEGUARD_ENABLE_CISA_ICS", "false"),
+    ("EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...)) — empty would raise
+    ("EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN", None),  # _env_int tolerates empty
+    ("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES", None),
+    ("EDGEGUARD_CISA_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...))
+    ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # int(os.environ.get(...))
+    ("EDGEGUARD_DEFAULT_TLP", "white"),
+    ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
+]
+
+
+def _common_env() -> dict:
+    data = yaml.safe_load(COMPOSE.read_text())
+    return data["x-common-env"]
+
+
+@pytest.mark.parametrize("name, default", FORWARDED, ids=[n for n, _ in FORWARDED])
+def test_variable_is_forwarded_with_the_code_default(name, default):
+    env = _common_env()
+    assert name in env, f"{name} is read by src/ but docker-compose.yml never forwards it into the containers"
+    value = str(env[name])
+    m = re.fullmatch(r"\$\{" + re.escape(name) + r":-(.*)\}", value)
+    assert m, f"{name} must be forwarded as ${{{name}:-<default>}} so .env can override it; got {value!r}"
+    if default is None:
+        assert m.group(1) == "", f"{name}: compose default must stay empty (code applies its own default)"
+    else:
+        assert m.group(1) == default, (
+            f"{name}: compose default {m.group(1)!r} drifted from the code default {default!r}"
+        )
+
+
+def test_common_env_is_inherited_by_the_airflow_service():
+    data = yaml.safe_load(COMPOSE.read_text())
+    airflow_env = data["services"]["airflow"]["environment"]
+    # YAML merge (<<: *common-env) is resolved by the loader: the flags must be present on the service.
+    for name, _ in FORWARDED:
+        assert name in airflow_env, f"{name} not visible on the airflow service environment"
+
+
+def test_int_parsed_variables_never_default_to_empty():
+    """Guard for the trap the comment in compose describes: set-but-empty + int() = ImportError."""
+    env = _common_env()
+    for name in (
+        "EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS",
+        "EDGEGUARD_CISA_INCREMENTAL_DAYS",
+        "EDGEGUARD_NVD_INCREMENTAL_DAYS",
+    ):
+        assert not str(env[name]).endswith(":-}"), f"{name} would be empty inside the container when unset in .env"
