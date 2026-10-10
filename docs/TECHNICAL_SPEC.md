@@ -731,7 +731,7 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 {
   "alert_id": "wazuh-001",
   "enriched": true,
-  "edgeguard_version": "2026.6.11",
+  "edgeguard_version": "2026.10.10",
   "latency_ms": 120,
   "enrichment": {
     "indicator": {
@@ -861,4 +861,4 @@ together so they cannot drift.
 
 ---
 
-_Last updated: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._

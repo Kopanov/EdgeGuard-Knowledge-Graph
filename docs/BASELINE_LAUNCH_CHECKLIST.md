@@ -217,8 +217,23 @@ OOM. Either:
 
 ### [7] 2026-10 fresh-baseline PR: MISP import rule + flags
 
-**What:** the 2026-10 PR only materializes on a fresh re-feed. Before clearing:
+**What:** the 2026-10 PRs (#136–#140: evidence labels, report-scoped linking, CVE
+properties, TLP, ownership marker, sector targeting, `SUBTECHNIQUE_OF`,
+`USES_MALWARE` / `USES_TOOL`, 18 `build_relationships` steps) only materialize on a
+fresh re-feed — **and only if the hosted pipeline runs that code**. Before clearing:
 
+0. **Deploy `main` first.** The wipe rebuilds the graph with whatever is checked out,
+   so a re-feed on the old checkout produces a graph identical to the one being
+   replaced. On the hosted pipeline: `git status` clean and `git diff origin/main`
+   empty (commit or drop any local change first), then `git pull` to the PR #140
+   merge (`ca9cdae`) or later. The Airflow base moved to
+   `apache/airflow:3.3.2-python3.12` in the same train, so back up the Airflow
+   metadata DB and rebuild the image — `docker compose build airflow && docker
+   compose up -d --force-recreate airflow` — following
+   [AIRFLOW_DAGS.md § 3.2 → 3.3.2](AIRFLOW_DAGS.md#32--332-october-2026).
+   `edgeguard version` must print `2026.10.10` (or later) and `edgeguard doctor` must
+   report Airflow `3.3.x` with no drift warning; the DAG list must load with zero parse
+   errors.
 1. **MISP Import Regexp.** In the MISP UI open *Input Filters → Import Regexp*
    and remove (or fix) the rule that rewrites `: Windows ` to `%WINDIR%\`. On the
    2026-09 baseline it mangled 12 ATT&CK entries (`T1047: Windows Management
@@ -233,12 +248,26 @@ OOM. Either:
 3. **Snapshot first.** Take a `neo4j-admin database dump` and a MISP export of the
    old instance before `edgeguard clear` — it is the "before" record for the
    quality numbers and the graph the v0.10 model was benchmarked on.
+   Record the backup time in `EDGEGUARD_LAST_BACKUP_AT` — `fresh-baseline` and the
+   `baseline_clean` task refuse to run without a backup inside
+   `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (default 240 h).
 4. **One command for the re-feed.** `edgeguard fresh-baseline --days 730` wipes
    Neo4j + MISP (typed confirmation, blast-radius display, backup-timestamp gate)
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
    finishes, run `python scripts/verify_fresh_baseline.py` — every mandatory
    check must pass before the instance is handed to the partners or the demo.
+   Pause the scheduled DAGs before triggering, as for any baseline
+   ([RUNBOOK § Baseline day protocol](RUNBOOK.md#baseline-day-protocol)).
+5. **Hand back.** Return the acceptance JSON
+   (`python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json`),
+   the two snapshot paths and the `edgeguard_baseline` DAG run id. The informational
+   checks `uses_malware_complete` / `uses_tool_complete` become real once the MITRE
+   collector of this build has run. Three relationship types exist for the first time
+   after this re-feed — `SUBTECHNIQUE_OF`, `USES_MALWARE`, `USES_TOOL` (definitions in
+   [RESILMESH_INTEROPERABILITY.md § 3.2](RESILMESH_INTEROPERABILITY.md)) — and
+   `TARGETS` now also runs from actors and malware to sectors, so the Cypher model's
+   training set needs examples for them.
 
 ### [6] PR-N32 unicode-bypass audit
 
@@ -392,7 +421,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-10 — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._
