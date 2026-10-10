@@ -1161,15 +1161,14 @@ class MISPWriter:
                 # 2026-10: other pulses of the same run that listed this IOC (collector
                 # dedup) — the sync pairs the IOC with the malware/actors of all of them.
                 "report_ids": [str(x)[:64] for x in (indicator.get("report_ids") or []) if x][:_MAX_REPORT_IDS],
-                # 2026-10 (regular-update linking): families / adversaries named by the pulse(s) that
-                # listed this IOC — build_relationships Q9b / Q2d link from the indicator side, so a
-                # later pulse naming a known family still links its IOCs (the family attribute itself
-                # is a cross-event duplicate and is never re-pushed). Pruned below when empty.
-                "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
-                # ``pa``: "family::adversary" pairs of the SAME pulse (Bugbot on PR #145 — flat lists cross-linked).
-                "pa": [str(x)[:260] for x in (indicator.get("pulse_malware_actor_pairs") or []) if x][:50],
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
+                # 2026-10 (regular-update linking): families named by the pulse(s) that listed this IOC and
+                # the "family::adversary" pairs of the SAME pulse (Q9b / Q2d link from the indicator side;
+                # the family attribute itself is a cross-event duplicate and is never re-pushed). Pruned
+                # below when empty. Kept last: test_pr_n13 pins the key order inside a fixed window.
+                "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
+                "pa": [str(x)[:260] for x in (indicator.get("pulse_malware_actor_pairs") or []) if x][:50],
             }
             for _k in ("mf", "pa"):
                 if not otx_meta.get(_k):
