@@ -1136,7 +1136,9 @@ class TestBatchRelationshipSetClause:
     def test_set_clause_writes_ownership_match_type_and_report_ids(self):
         for query, _rows in self._run([_indicates_rel(), _attributed_rel()]):
             assert "r.edgeguard_managed = true" in query
-            assert "r.match_type = coalesce(row.match_type, r.match_type)" in query
+            assert "THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END" in query, (
+                "label follows the stronger evidence"
+            )
             assert "r.report_ids = " in query and "row.report_id" in query
             assert "r.source_id = row.source_id" in query
 
@@ -1180,7 +1182,7 @@ class TestBatchRelationshipSetClause:
         queries = [q for q, _ in self._run([rel], source_id="misp") if "[r:EXPLOITS]" in q]
         assert queries
         for q in queries:
-            coalesce_idx = q.find("r.match_type = coalesce(row.match_type, r.match_type)")
+            coalesce_idx = q.find("THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END")
             constant_idx = q.find("r.match_type = 'cve_tag'")
             assert 0 <= coalesce_idx < constant_idx, "the constant cve_tag SET must be applied after the coalesce"
 

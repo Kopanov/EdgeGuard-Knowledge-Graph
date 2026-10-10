@@ -992,6 +992,27 @@ def _alert_default_tlp() -> str:
         return "white"
 
 
+def _reactivation_clauses(var: str, indent: str = "") -> str:
+    """The SET fragments every node write applies for the active / retired lifecycle.
+
+    2026-10 (aging logic check): ``decay_ioc_confidence`` retires a node after a year without a
+    sighting (``active = false``, ``retired_at``, ``retired_by = 'decay'``). Before this, every merge
+    kept ``active`` untouched whenever ``retired_at`` was set — meant for a manual decommission, but
+    the decay job set the same field, so an IOC that reappeared in a fresh pulse stayed inactive
+    forever and its decay tier never reset. A re-observation now reactivates a decay-retired node;
+    a manual decommission (``retired_at`` without the ``'decay'`` tag) still wins. Order matters:
+    ``active`` and ``retired_at`` read ``retired_by`` before it is cleared. The same text is spliced
+    into every node-write query (tests pin the equality).
+    """
+    v = var
+    return (
+        f"{v}.active = CASE WHEN {v}.retired_at IS NOT NULL AND coalesce({v}.retired_by, 'manual') <> 'decay' THEN {v}.active ELSE true END,\n"
+        f"{indent}{v}.retired_at = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_at END,\n"
+        f"{indent}{v}.last_decayed_tier = null,\n"
+        f"{indent}{v}.retired_by = CASE WHEN coalesce({v}.retired_by, '') = 'decay' THEN null ELSE {v}.retired_by END"
+    )
+
+
 class Neo4jClient:
     """Production-ready Neo4j client with retry logic and batch processing."""
 
@@ -1852,7 +1873,10 @@ class Neo4jClient:
                 n.tag = coalesce(n.tag, $tag_value),
                 n.last_updated = datetime(),
                 n.last_imported_from = $source_id,
-                n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
+                n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
+                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
+                n.last_decayed_tier = null,
+                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                 n.edgeguard_managed = true,
                 // n.uuid is deterministic — coalesce so we never overwrite it.
                 // (Defensive only; same input always produces same uuid, but if a
@@ -2925,7 +2949,10 @@ class Neo4jClient:
             MATCH (n:Indicator)
             WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
             WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
+            SET n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
+                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
+                n.last_decayed_tier = null,
+                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END
             """
 
             query_indicators_inactive = """
@@ -2944,7 +2971,10 @@ class Neo4jClient:
             MATCH (n:Vulnerability)
             WITH n, [eid IN coalesce(n.misp_event_ids, []) WHERE eid IS NOT NULL AND eid <> ''] AS event_ids
             WHERE size(event_ids) > 0 AND any(eid IN event_ids WHERE eid IN $active_ids)
-            SET n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END
+            SET n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
+                n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
+                n.last_decayed_tier = null,
+                n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END
             """
 
             # Mark inactive Vulnerabilities — same any-of / none-of semantics.
@@ -3249,7 +3279,10 @@ class Neo4jClient:
                     n.tags = {_dedup_concat_clause("n.tags", "[item.tag]")},
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
+                    n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
+                    n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
+                    n.last_decayed_tier = null,
+                    n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                     n.edgeguard_managed = true,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
@@ -3553,7 +3586,10 @@ class Neo4jClient:
                     n.tag = coalesce(n.tag, item.tag),
                     n.last_updated = datetime(),
                     n.last_imported_from = item.source_id,
-                    n.active = CASE WHEN n.retired_at IS NOT NULL THEN n.active ELSE true END,
+                    n.active = CASE WHEN n.retired_at IS NOT NULL AND coalesce(n.retired_by, 'manual') <> 'decay' THEN n.active ELSE true END,
+                    n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
+                    n.last_decayed_tier = null,
+                    n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
                     n.edgeguard_managed = true,
                     n.tlp = {_tlp_most_restrictive_clause("n.tlp", "item.tlp")},
                     n.uuid = coalesce(n.uuid, item.node_uuid),
@@ -4412,9 +4448,14 @@ class Neo4jClient:
             return (
                 f"SET r.sources = {sources_dedup},\n"
                 f"            r.source_id = row.source_id,\n"
-                f"            r.confidence_score = {confidence_expr},\n"
+                # 2026-10 (aging logic check): a weaker later row never lowers an edge — the label follows
+                # the stronger evidence and the confidence keeps the maximum (same rule as the TLP ladder
+                # on nodes). ``match_type`` is evaluated first so it still sees the previous confidence.
+                f"            r.match_type = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} >= r.confidence_score "
+                f"THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END,\n"
+                f"            r.confidence_score = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} > r.confidence_score "
+                f"THEN {confidence_expr} ELSE r.confidence_score END,\n"
                 f"            r.edgeguard_managed = true,\n"
-                f"            r.match_type = coalesce(row.match_type, r.match_type),\n"
                 f"            r.report_ids = {report_dedup},{extra}\n"
                 f"            r.misp_event_ids = {misp_dedup},\n"
                 f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
@@ -6542,7 +6583,10 @@ class Neo4jClient:
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
             i.edgeguard_managed = true,
             i.tlp = coalesce(i.tlp, $tlp),
-            i.active = CASE WHEN i.retired_at IS NOT NULL THEN i.active ELSE true END
+            i.active = CASE WHEN i.retired_at IS NOT NULL AND coalesce(i.retired_by, 'manual') <> 'decay' THEN i.active ELSE true END,
+            i.retired_at = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_at END,
+            i.last_decayed_tier = null,
+            i.retired_by = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_by END
         """
 
         try:

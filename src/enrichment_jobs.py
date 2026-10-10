@@ -58,6 +58,10 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
     All changes are non-destructive:
     - Minimum confidence floor is 0.10 (node stays queryable)
     - Retired nodes (active=false) are kept for historical queries
+    - 2026-10: retirement by this job is tagged ``retired_by = 'decay'`` so a node that
+      is observed again in a later sync is reactivated (``active = true``, ``retired_at``
+      cleared, decay tier reset) — only a manual decommission (``retired_at`` set without
+      that tag) survives a re-observation
     - first_imported_at and source are never touched
     """
     if not neo4j_client.driver:
@@ -86,7 +90,8 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
                       AND n.active = true
                       AND duration.between(n.last_updated, datetime()).days > $min_days
                     SET n.active = false,
-                        n.retired_at = datetime()
+                        n.retired_at = datetime(),
+                        n.retired_by = 'decay'
                     RETURN count(n) AS affected
                     """
                     desc = f"{label} retired (>{min_days}d)"
@@ -992,6 +997,7 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "last_imported_from": "discard",
     "edgeguard_managed": "discard",
     "retired_at": "discard",
+    "retired_by": "discard",
     "last_decayed_tier": "discard",
     "last_decayed_at": "discard",
     "sophistication": "discard",

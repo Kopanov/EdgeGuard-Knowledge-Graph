@@ -411,6 +411,8 @@ ORDER BY i.confidence_score DESC
 
 ### Find active vs retired IOCs for a threat actor
 
+_Lifecycle (2026-10): `decay_ioc_confidence` lowers `confidence_score` after 90 and 180 days without a sighting and sets `active = false`, `retired_at`, `retired_by = 'decay'` after 365; any later write of the same node (incremental sync, alert) reactivates it and resets the decay tier. Only a manual decommission — `retired_at` without the `decay` tag — survives a re-observation. Edge confidence written by the sync never decreases: the label follows the stronger evidence._
+
 ```cypher
 MATCH (a:ThreatActor {name: 'Lazarus Group'})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
 RETURN i.value, i.indicator_type, i.confidence_score,

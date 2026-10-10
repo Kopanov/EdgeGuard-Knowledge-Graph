@@ -586,7 +586,7 @@ After every MISP → Neo4j sync, **five** enrichment jobs run automatically (`en
 
 | Job | What it does |
 |-----|-------------|
-| **IOC Confidence Decay** | Tiered decay on stale indicators/vulnerabilities; retires when last update is **> 365 days** (`decay_ioc_confidence`) |
+| **IOC Confidence Decay** | Tiered decay on stale indicators/vulnerabilities; retires when last update is **> 365 days** (`decay_ioc_confidence`, tagged `retired_by = 'decay'`). A retired node that is observed again is reactivated by the next sync (2026-10); a manual decommission (`retired_at` without that tag) stays retired |
 | **Campaign Node Builder** | Creates `Campaign` nodes from ThreatActor → Malware → Indicator chains (`build_campaign_nodes`) |
 | **Co-occurrence Calibration** | Legacy: rescored `INDICATES`/`EXPLOITS` edges with `source_id` in `misp_cooccurrence` / `misp_correlation` by MISP event size (`calibrate_cooccurrence_confidence`). Since 2026-10 no such edges are written (links are report-scoped: same OTX pulse, `match_type='otx_pulse'`), so the job is a no-op on a fresh baseline |
 | **Vulnerability↔CVE bridge** | Idempotent `REFERS_TO` between `Vulnerability` and `CVE` (`bridge_vulnerability_cve`) |
