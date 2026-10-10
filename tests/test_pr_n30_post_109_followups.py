@@ -173,16 +173,17 @@ class TestPRN30CrossCheckerH2EventIdCap:
 
         2026-10 (fresh-baseline PR): Q4 — the whole-event co-occurrence
         query — was removed and the 2026-10 sector-focus build added Q7c / Q7d
-        (ThreatActor / Malware → Sector), so the forward-write cap sites are
-        now exactly 7 (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9). Pin the exact count so a
-        re-added event-id pairing query (or a dropped cap) is noticed."""
+        (ThreatActor / Malware → Sector), and the 2026-10 pulse-scoped linking added
+        Q9b (Indicator → Malware named in the same pulse), so the forward-write cap
+        sites are now exactly 8 (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9, Q9b). Pin the exact
+        count so a re-added event-id pairing query (or a dropped cap) is noticed."""
         text = self.BUILD_RELS.read_text()
         cap_pattern = "[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
         occurrences = text.count(cap_pattern)
-        assert occurrences == 7, (
+        assert occurrences == 8, (
             f"PR-N30 H-2 + Bugbot round 1: f-string cap "
-            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 7 "
-            f"forward-write Cypher cap sites (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9 — Q4 was removed 2026-10, "
+            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 8 "
+            f"forward-write Cypher cap sites (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9, Q9b — Q4 was removed 2026-10, "
             f"7c/7d added by the 2026-10 sector-focus build); found {occurrences}"
         )
         assert "_q4_inner" not in text, "Q4 co-occurrence query must stay removed (2026-10)"

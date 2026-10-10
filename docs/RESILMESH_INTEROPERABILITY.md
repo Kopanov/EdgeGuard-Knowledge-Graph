@@ -197,7 +197,7 @@ by evidence without renaming anything — the ResilMesh and STIX-derived relatio
 | `r.match_type` | Meaning | Confidence | Produced by |
 |---|---|---|---|
 | `mitre_explicit` | MITRE ATT&CK's own assertion: the STIX `uses` relationship, or the sub-technique hierarchy encoded in MITRE's dotted ids (`T1021.006` → `T1021`, equivalent to its STIX `subtechnique-of`) | 0.95 (`uses`) / 1.0 (`SUBTECHNIQUE_OF`) | `build_relationships.py` Q5/Q6/Q10 from `uses_techniques` (MITRE collector only); Q1b `SUBTECHNIQUE_OF`; Q2b/Q2c `USES_MALWARE` / `USES_TOOL` from `uses_malware` / `uses_tools` |
-| `otx_pulse` | The entity was named in the same AlienVault OTX pulse (one report) | 0.6 | MISP→Neo4j sync (`INDICATES`, `ATTRIBUTED_TO`) and `build_relationships.py` Q5b/Q6b from `reported_techniques` |
+| `otx_pulse` | The entity was named in the same AlienVault OTX pulse (one report) | 0.6 | MISP→Neo4j sync (`INDICATES`, `ATTRIBUTED_TO`, same-run pairs); `build_relationships.py` Q5b/Q6b from `reported_techniques`; **Q9b/Q2d (2026-10, regular updates)** from the families / adversaries each pulse stamps on its indicators (`Indicator.pulse_malware_families` / `.pulse_adversaries`) — so IOCs of a later pulse naming an already-known family still link, although the family attribute itself is a MISP cross-event duplicate. ON CREATE only: never downgrades `malware_family` (0.8), `exact` (1.0) or `mitre_explicit` |
 | `exact` | The malware's own `attributed_to` claim equals an actor name/alias | 1.0 | `build_relationships.py` Q2 |
 | `malware_family` | The indicator's source-asserted family equals a malware name/alias | 0.8 | `build_relationships.py` Q9 |
 | `cve_tag` | The indicator's own CVE tag | 1.0 | `build_relationships.py` Q3a/Q3b |

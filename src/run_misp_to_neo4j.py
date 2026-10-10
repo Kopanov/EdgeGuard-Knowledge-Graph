@@ -3347,6 +3347,13 @@ class MISPToNeo4jSync:
                 rids = [str(x).strip() for x in (otx_meta.get("report_ids") or []) if str(x).strip()]
                 if rids:
                     item["report_ids"] = rids
+                # 2026-10 (regular-update linking): OTX_META.mf / .adv → lists on the indicator.
+                _fams = [str(x).strip() for x in (otx_meta.get("mf") or []) if str(x).strip()]
+                if _fams:
+                    item["pulse_malware_families"] = _fams
+                _advs = [str(x).strip() for x in (otx_meta.get("adv") or []) if str(x).strip()]
+                if _advs:
+                    item["pulse_adversaries"] = _advs
                 item["indicator_role"] = otx_meta.get("indicator_role", "")
                 item["is_active"] = otx_meta.get("is_active", True)
 

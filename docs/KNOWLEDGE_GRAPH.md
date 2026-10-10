@@ -54,7 +54,7 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `IMPLEMENTS_TECHNIQUE` | Malware → Technique | **Capability.** `match_type='mitre_explicit'` (0.95) via `uses_techniques`; `match_type='otx_pulse'` (0.6, 2026-10) via `reported_techniques`. *(Split from a generic `USES` in 2026-04.)* |
 | `IMPLEMENTS_TECHNIQUE` | Tool → Technique | **Capability.** MITRE STIX explicit `uses` relationship (confidence 0.95) *(split from a generic `USES` in 2026-04)* |
 | `ATTRIBUTED_TO` | Malware → ThreatActor | `match_type='exact'` (1.0): the malware's own `m.attributed_to` claim matched exactly against `a.name` OR `a.aliases` (the "Cozy Bear → APT29" path; `build_relationships.py` Q2). `match_type='otx_pulse'` (0.6, 2026-10): malware and actor named in the same OTX pulse, written by the MISP→Neo4j sync with `r.report_ids[]`. Whole-event co-occurrence attribution was removed in 2026-10 (fresh-baseline PR). |
-| `INDICATES` | Indicator → Malware | `match_type='malware_family'` (0.8): source-asserted family name match (ThreatFox/VT/OTX, Q9) **and** `match_type='otx_pulse'` (0.6, 2026-10): indicator and malware listed in the same OTX pulse (sync path). The whole-event co-occurrence query (old Q4, 0.5) was removed in 2026-10. |
+| `INDICATES` | Indicator → Malware | `match_type='malware_family'` (0.8): source-asserted family name match (ThreatFox/VT/OTX, Q9) **and** `match_type='otx_pulse'` (0.6, 2026-10): same-run pairing by the sync, and — for regular updates — Q9b from the families the pulse stamps on each indicator (`pulse_malware_families`); indicator and malware listed in the same OTX pulse (sync path). The whole-event co-occurrence query (old Q4, 0.5) was removed in 2026-10. |
 | `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag on the indicator, exact match (`match_type='cve_tag'`, 1.0). Not produced from event co-membership since 2026-10. |
 | `REFERS_TO` | Vulnerability ↔ CVE | `bridge_vulnerability_cve()` |
 | `RUNS` | ThreatActor → Campaign | `build_campaign_nodes()` |
@@ -422,10 +422,11 @@ ORDER BY i.last_updated DESC
 ---
 
 _Last updated: 2026-10-10 — fresh-baseline PR: report-scoped linking replaces whole-event co-occurrence (`INDICATES` / `ATTRIBUTED_TO` only within one OTX pulse, `match_type='otx_pulse'`, 0.6); old Q4 removed; Q5b/Q6b from `reported_techniques`; `mitre_explicit` reserved for the MITRE collector; CVE list properties promoted; `tlp` and the ownership marker on every node and edge. Prior: 2026-06-11 — PR #126: documented the alias round-trip (ThreatActor/Malware `aliases` survive the MISP round-trip via `alias:` tags; ATT&CK malware aliases from `x_mitre_aliases`) on the ATTRIBUTED_TO matching note, and added the cve_cvss_score + cve_cisa_exploit_add range indexes. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification:_
-- _Verified all confidence values match `src/build_relationships.py` (step numbers as of 2026-04-28 — the pipeline has 18 steps since 2026-10: Q4 removed, 5b/6b added, 7c/7d ThreatActor/Malware → Sector added, 1b SUBTECHNIQUE_OF added, 2b/2c USES_MALWARE/USES_TOOL added):
-  EMPLOYS_TECHNIQUE = 0.95 (step 5/18), IMPLEMENTS_TECHNIQUE = 0.95
-  (steps 6/18 and 10/18), USES_TECHNIQUE = 0.85 (8/18 — OTX
-  attack_ids), INDICATES family-match = 0.8 (9/18); the co-occurrence
+- _Verified all confidence values match `src/build_relationships.py` (step numbers as of 2026-04-28 — the pipeline has 20 steps since 2026-10: Q4 removed, 5b/6b added, 7c/7d ThreatActor/Malware → Sector added, 1b SUBTECHNIQUE_OF added, 2b/2c USES_MALWARE/USES_TOOL added):
+  EMPLOYS_TECHNIQUE = 0.95 (step 5/20), IMPLEMENTS_TECHNIQUE = 0.95
+  (steps 6/20 and 10/20), USES_TECHNIQUE = 0.85 (8/20 — OTX
+  attack_ids), INDICATES family-match = 0.8 (9/20), INDICATES same-pulse = 0.6 (9b/20),
+  ATTRIBUTED_TO same-pulse = 0.6 (2d/20); the co-occurrence
   INDICATES step was removed in 2026-10 (report-scoped linking replaces it)._
 - _Verified relationships exist in code: `RUNS` and `PART_OF` in
   `src/enrichment_jobs.py:184-186` (build_campaign_nodes); `INVOLVES`

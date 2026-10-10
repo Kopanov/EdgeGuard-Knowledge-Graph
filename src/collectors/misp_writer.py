@@ -1104,7 +1104,21 @@ class MISPWriter:
 
         # Encode rich metadata as JSON comment for sources with structured data
         # (same pattern as NVD_META for vulnerabilities).
-        has_otx_meta = indicator.get("attack_ids") or indicator.get("targeted_countries")
+        # 2026-10 (regular-update linking, found while testing): OTX_META used to be written only when the
+        # pulse carried ATT&CK ids or targeted countries — an OTX IOC from any other pulse lost its
+        # pulse_id / report_ids (so the sync could not group it) and now its families / adversaries.
+        # Any pulse-level field marks an OTX indicator.
+        has_otx_meta = any(
+            indicator.get(k)
+            for k in (
+                "attack_ids",
+                "targeted_countries",
+                "pulse_id",
+                "report_ids",
+                "pulse_malware_families",
+                "pulse_adversaries",
+            )
+        )
         has_tf_meta = indicator.get("malware_malpedia") or indicator.get("reference") or indicator.get("tags")
 
         if has_otx_meta:
@@ -1147,9 +1161,18 @@ class MISPWriter:
                 # 2026-10: other pulses of the same run that listed this IOC (collector
                 # dedup) — the sync pairs the IOC with the malware/actors of all of them.
                 "report_ids": [str(x)[:64] for x in (indicator.get("report_ids") or []) if x][:_MAX_REPORT_IDS],
+                # 2026-10 (regular-update linking): families / adversaries named by the pulse(s) that
+                # listed this IOC — build_relationships Q9b / Q2d link from the indicator side, so a
+                # later pulse naming a known family still links its IOCs (the family attribute itself
+                # is a cross-event duplicate and is never re-pushed). Pruned below when empty.
+                "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
+                "adv": [str(x)[:128] for x in (indicator.get("pulse_adversaries") or []) if x][:5],
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
             }
+            for _k in ("mf", "adv"):
+                if not otx_meta.get(_k):
+                    otx_meta.pop(_k, None)
             comment = _fit_meta_comment("OTX_META:", otx_meta)
         elif has_tf_meta:
             tf_meta = {
