@@ -146,7 +146,12 @@ class TestBackupTimestampGate:
         monkeypatch.setenv("EDGEGUARD_LAST_BACKUP_AT", recent)
         monkeypatch.delenv("EDGEGUARD_BACKUP_MAX_AGE_HOURS", raising=False)
 
-        with caplog.at_level(logging.INFO, logger="edgeguard"):
+        # The gate helper lives in ``baseline_clean`` (``edgeguard._check_recent_backup_timestamp``
+        # only delegates), so capture THAT logger. Scoping caplog to "edgeguard" left the
+        # ``baseline_clean`` logger at the root level (WARNING) and the INFO line was dropped
+        # whenever no earlier test had lowered the root level — the test passed only by
+        # suite ordering (found 2026-10-10).
+        with caplog.at_level(logging.INFO, logger="baseline_clean"):
             result = _check_recent_backup_timestamp()
         assert result is None
         # The freshness-info log MUST be present
