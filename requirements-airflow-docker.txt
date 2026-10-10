@@ -12,12 +12,16 @@
 # apache-airflow-providers-standard is listed below because in Airflow 3.x
 # the formerly-bundled operators (BashOperator, PythonOperator,
 # ShortCircuitOperator, ...) live in that provider package. The base
-# apache/airflow:3.2.x image should already include it, but listing it here
+# apache/airflow:3.3.x image should already include it, but listing it here
 # makes the dependency explicit and matches requirements.txt.
 apache-airflow-providers-standard~=1.5
 
 neo4j~=5.27
 requests~=2.32
+# The apache/airflow:3.3.2 base ships pandas 3.0.5; this pin deliberately
+# brings the image back to the 2.x line that requirements.txt and the test
+# suite use (the DAGs store no DataFrame XComs, so the 3.3.1 pandas-3 XCom
+# format note does not apply).
 pandas~=2.2
 pyyaml~=6.0
 python-dateutil~=2.9
@@ -32,7 +36,12 @@ prometheus-client~=0.21
 
 nats-py~=2.9
 
-fastapi~=0.115
+# Aligned with requirements.txt (SECURITY MAL-2026-4750): the apache/airflow
+# 3.3.2 base ships fastapi 0.136.3, the flagged supply-chain release that the
+# root manifest already excludes — without the same exclusion here the image
+# would keep it. pip steps the bundled copy down to 0.136.1 (airflow-core 3.3
+# allows fastapi>=0.129,<0.137).
+fastapi>=0.115,!=0.136.3,<1.0
 uvicorn~=0.34
 slowapi~=0.1
 strawberry-graphql~=0.283
@@ -58,7 +67,8 @@ opentelemetry-exporter-otlp~=1.41
 # be removed.
 # TODO(issue #52): remove this override once the upstream Trivy watch
 # (see .github/workflows/ci.yml:131) confirms apache/airflow ships a
-# base image with litellm>=1.83.0.
+# base image with litellm>=1.83.0. (The 3.3.2 base ships 1.85.7, so this is
+# a no-op there; kept so a rollback to the 3.2.x base stays protected.)
 litellm>=1.83.0
 
 # Same pattern (Trivy CRITICAL on PR #125, 2026-06-11): redshift-connector

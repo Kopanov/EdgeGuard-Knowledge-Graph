@@ -248,7 +248,7 @@ The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands B
 ### Prerequisites
 
 - Docker + Docker Compose (recommended — Neo4j, **`airflow_postgres`**, Airflow, REST API, GraphQL)
-- **or** **Python 3.12+** (required for pip/venv installs; `pyproject.toml` / CI match this) + Neo4j + MISP. For **pip-installed Airflow** with PostgreSQL metadata, use **`pip install ".[airflow]"`** or **`apache-airflow[postgres]~=3.2`** + **`apache-airflow-providers-standard~=1.5`** (see `requirements.txt`). *Note: Airflow 3.2 supports Python 3.10–3.14 upstream; EdgeGuard standardizes on 3.12+. Upgraded from 2.11 in April 2026 — see [`docs/AIRFLOW_DAGS.md`](docs/AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for migration notes if you are updating from an existing 2.11 deployment.*
+- **or** **Python 3.12+** (required for pip/venv installs; `pyproject.toml` / CI match this) + Neo4j + MISP. For **pip-installed Airflow** with PostgreSQL metadata, use **`pip install ".[airflow]"`** or **`apache-airflow[postgres]~=3.3`** + **`apache-airflow-providers-standard~=1.5`** (see `requirements.txt`). *Note: Airflow 3.3 supports Python 3.10–3.14 upstream; EdgeGuard standardizes on 3.12+. Upgraded from 2.11 in April 2026 and from 3.2.0 to 3.3.2 in October 2026 (base-image CVEs) — see [`docs/AIRFLOW_DAGS.md`](docs/AIRFLOW_DAGS.md#airflow-2-to-3-upgrade) for migration notes if you are updating from an existing 2.11 deployment.*
 
 ### Option A — One-line install (Docker, recommended)
 

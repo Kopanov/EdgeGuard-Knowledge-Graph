@@ -1,6 +1,6 @@
 # Custom Airflow image: official image + EdgeGuard worker dependencies (neo4j, pymisp, collectors, etc.).
-# Use an explicit **-python3.12** tag: unpinned `apache/airflow:3.2.x` defaults may be 3.10–3.13; EdgeGuard
-# requires Python 3.12+ (`pyproject.toml` requires-python). Airflow 3.2 supports Python 3.10–3.14.
+# Use an explicit **-python3.12** tag: unpinned `apache/airflow:3.3.x` defaults may be 3.10–3.13; EdgeGuard
+# requires Python 3.12+ (`pyproject.toml` requires-python). Airflow 3.3 supports Python 3.10–3.14.
 # Without this Dockerfile layer, `pip install` inside a running container is lost on recreate.
 # Rebuild after dependency changes: `docker compose build airflow`
 #
@@ -13,14 +13,31 @@
 # Metadata DB migration required on first boot — see docs/AIRFLOW_DAGS.md
 # "Airflow 3 upgrade" section.
 #
+# Bumped 3.2.0 → 3.3.2 (October 2026) to clear six Trivy CRITICALs the 3.2.0
+# base carried and that cannot all be patched from this layer:
+#   - apache-airflow CVE-2026-33264 (code execution via unsafe serialized-DAG
+#     deserialization) — fixed only in 3.3.0; CVE-2026-42252 — fixed in 3.2.2
+#   - PyJWT 2.12.1 CVE-2026-102268 (fix 2.14.0), anyio 4.13.0 CVE-2026-63374
+#     (fix 4.14.2), apache-airflow-providers-sftp 5.7.1 CVE-2026-50203 (fix
+#     5.8.1), snowflake-connector-python 4.4.0 CVE-2026-15925 (fix 4.7.1)
+# The 3.3.2 constraints ship all of those at or above the fixed versions
+# (PyJWT 2.14.0, anyio 4.15.1, sftp 6.0.1, snowflake-connector 4.7.3), plus
+# providers-fab 3.9.0 → Flask 3.1.3, which also retires the operationally
+# accepted Flask CVE-2026-27205. 3.3.x "Significant Changes" list no removed
+# or renamed DAG-author APIs (airflow.sdk, TaskGroup, Variable,
+# providers.standard are unchanged); the base is still Debian 12 (bookworm),
+# so the apt package names below remain valid. Rebuild + `airflow standalone`
+# applies the 3.3 metadata migrations on first boot — back up airflow_postgres
+# first (docs/AIRFLOW_DAGS.md § "3.2 → 3.3.2").
+#
 # tini as PID 1: improves signal forwarding and zombie reaping (helpful on Docker Desktop / constrained VMs).
 # docker-compose.yml must NOT use `command: standalone` alone — that would run `tini -- standalone` (invalid).
 # Either omit `command` (use CMD below) or set `command: ["airflow", "standalone"]`.
 #
-FROM apache/airflow:3.2.0-python3.12
+FROM apache/airflow:3.3.2-python3.12
 
 USER root
-# PR-B audit fix (Dependency MED-4 + Trivy run): the apache/airflow:3.2.0-python3.12
+# PR-B audit fix (Dependency MED-4 + Trivy run): the apache/airflow:3.3.2-python3.12
 # base is Debian 12 (bookworm), NOT 13 (trixie) like python:3.12-slim. The
 # openssl packages have different names across Debian releases (no
 # ``libssl3t64`` / ``openssl-provider-legacy`` in bookworm). Use the generic
@@ -50,6 +67,9 @@ USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tini \
  && apt-get install -y --no-install-recommends --only-upgrade openssl libssl3 libgnutls30 \
+ # 2026-10: Trivy CRITICAL CVE-2026-13221 in perl 5.36.0-7+deb12u3 (image) — fixed in deb12u4,
+ # already in the bookworm archive. Same upgrade-in-place pattern as openssl above.
+ && apt-get install -y --no-install-recommends --only-upgrade perl-base perl perl-modules-5.36 libperl5.36 \
  && rm -rf /var/lib/apt/lists/*
 
 USER airflow

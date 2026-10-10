@@ -97,9 +97,9 @@ RECOMMENDED_VERSIONS: Dict[str, str] = {
     # Neo4j Python driver: still on the 5.x line. Bumping to 6.x is a
     # major version change — separate PR with explicit testing.
     "neo4j_driver": "5.27",
-    # Apache Airflow: 3.2.x baked into the custom image (Dockerfile.airflow
-    # ``FROM apache/airflow:3.2.0-python3.12``).
-    "airflow": "3.2",
+    # Apache Airflow: 3.3.x baked into the custom image (Dockerfile.airflow
+    # ``FROM apache/airflow:3.3.2-python3.12``; 3.2.0 until October 2026).
+    "airflow": "3.3",
     # PyMISP — talks to MISP 2.4.x.
     "pymisp": "2.4",
     # MISP server. We don't bump aggressively; 2.4.x is the long-running

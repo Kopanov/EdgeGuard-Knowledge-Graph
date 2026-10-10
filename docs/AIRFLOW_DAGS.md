@@ -3,7 +3,7 @@
 **Last Updated:** 2026-06-11 (PR #125 — sync-cadence fix + backup-gate conf keys; see footer)
 **Purpose:** Automated ETL pipeline for threat intelligence collection and synchronization.  
 **DAG Python files:** repository `dags/` directory.
-**Airflow version:** Apache Airflow 3.2.x (upgraded from 2.11 in April 2026 — see [§ Airflow 2 to 3 upgrade](#airflow-2-to-3-upgrade) if you are migrating an existing deployment).
+**Airflow version:** Apache Airflow 3.3.x — base image `apache/airflow:3.3.2-python3.12` since October 2026 (see [§ 3.2 → 3.3.2](#32--332-october-2026)); upgraded from 2.11 in April 2026 — see [§ Airflow 2 to 3 upgrade](#airflow-2-to-3-upgrade) if you are migrating an existing deployment.
 
 **Where you are in the docs:** Step **2** of the operator path — read after **[SETUP_GUIDE.md](SETUP_GUIDE.md)**. **Next →** **[BASELINE_SMOKE_TEST.md](BASELINE_SMOKE_TEST.md)** for a safe first **`edgeguard_baseline`**. Full order: [DOCUMENTATION_AUDIT.md](DOCUMENTATION_AUDIT.md) § *Recommended reading order*.
 
@@ -45,17 +45,47 @@ All handled on the `chore/airflow-3-upgrade` branch (merged):
 
 `airflow.exceptions.AirflowException`, `from airflow import DAG`, `airflow.utils.trigger_rule.TriggerRule`, and `pendulum` usage are unchanged — they work identically on 3.x.
 
-### Flask on Airflow 3.2 — reality check
+### Flask on Airflow 3.x — reality check
 
-The `apache/airflow:3.2.0-python3.12` base image still bundles **Flask 2.2.5** via the `apache-airflow-providers-fab` provider (the default web-UI auth manager), which hard-pins `flask<2.3`. Flask 3.x is not achievable in this configuration without **replacing** the FAB provider with a Flask-3.x-compatible alternative — there is no intermediate path.
+**Resolved by the 3.3.2 base image (October 2026):** `apache/airflow:3.3.2-python3.12` ships `apache-airflow-providers-fab` 3.9.0, which allows Flask 3 — the image runs **Flask 3.1.3**, so CVE-2026-27205 is cleared in the Docker path too. The paragraphs below describe the situation on the 3.2.0 base and are kept for the record; the loopback-only API binding stays in place regardless.
 
-Practical consequences:
+On the `apache/airflow:3.2.0-python3.12` base image the FAB provider (the default web-UI auth manager) hard-pinned `flask<2.3`, so the image bundled **Flask 2.2.5**. Flask 3.x was not achievable in that configuration without **replacing** the FAB provider with a Flask-3.x-compatible alternative — there was no intermediate path.
+
+Practical consequences at the time:
 
 - `pip install -r requirements.txt` on its own does NOT pull Flask, because `requirements.txt` only lists `apache-airflow[postgres]` and `apache-airflow-providers-standard` — neither pulls FAB. A pip-audit against `requirements.txt` reports zero vulnerabilities because Flask is not in the tree it sees.
 - The **Docker image** path bundles FAB (and therefore Flask 2.2.5) because the upstream `apache/airflow` image ships the FAB auth manager for backward compatibility with 2.x deployments.
 - **Flask 2.2.5 is still vulnerable to CVE-2026-27205**, confirmed with `pip-audit`. The fix is only in Flask 3.1.3+.
 
-**Mitigation in EdgeGuard's deployment:** the Airflow API server is bound to `127.0.0.1:8082` in `docker-compose.yml`, so the Flask attack surface is loopback-only — not reachable from the network on a production host. The CVE is accepted operationally with this constraint. A future effort would replace FAB with a Flask-3-compatible auth manager (tracked in backlog — no ETA).
+**Mitigation in EdgeGuard's deployment:** the Airflow API server is bound to `127.0.0.1:8082` in `docker-compose.yml`, so the Flask attack surface is loopback-only — not reachable from the network on a production host. The CVE was accepted operationally with this constraint until the 3.3.2 base retired it.
+
+### 3.2 → 3.3.2 (October 2026)
+
+**Why:** the CI image scan (`trivy image --severity CRITICAL`) failed on six findings in the `apache/airflow:3.2.0-python3.12` base that cannot all be patched from `Dockerfile.airflow`:
+
+| Package | CVE | Installed | Fixed in |
+|---|---|---|---|
+| `apache-airflow` | `CVE-2026-33264` (code execution via unsafe serialized-DAG deserialization) | 3.2.0 | **3.3.0** |
+| `apache-airflow` | `CVE-2026-42252` | 3.2.0 | 3.2.2 |
+| `PyJWT` | `CVE-2026-102268` | 2.12.1 | 2.14.0 |
+| `anyio` | `CVE-2026-63374` (TLS certificate spoofing) | 4.13.0 | 4.14.2 |
+| `apache-airflow-providers-sftp` | `CVE-2026-50203` (path traversal) | 5.7.1 | 5.8.1 |
+| `snowflake-connector-python` | `CVE-2026-15925` | 4.4.0 | 4.7.1 |
+
+A patch bump to 3.2.2 would have left `CVE-2026-33264` open, so the base moved to the 3.3 line. The 3.3.2 constraints ship PyJWT 2.14.0, anyio 4.15.1, sftp provider 6.0.1 and snowflake-connector 4.7.3, plus FAB 3.9.0 → Flask 3.1.3 (see above).
+
+**What changed in the repo:** `Dockerfile.airflow` `FROM apache/airflow:3.3.2-python3.12`; `docker-compose.yml` image tag `edgeguard-airflow:3.3.2-python3.12`; `apache-airflow[postgres]~=3.3` in `requirements.txt` / `pyproject.toml`; `RECOMMENDED_VERSIONS["airflow"] = "3.3"` (so `edgeguard doctor` does not warn); `requirements-airflow-docker.txt` gained the same `fastapi!=0.136.3` exclusion as the root manifest (the 3.3.2 base bundles that flagged release). No DAG code changed — Airflow 3.3.x's "Significant Changes" remove or rename nothing the DAGs use (`airflow.sdk.Variable` / `TaskGroup`, `airflow.providers.standard.*` operators, `TriggerRule`).
+
+**Operator rollout:**
+
+1. Back up the metadata DB (same command as step 1 below) — 3.3 ships schema migrations, applied by `airflow standalone` on first boot.
+2. `docker compose build airflow && docker compose up -d airflow`; `docker compose logs -f airflow` until the API server reports healthy.
+3. `edgeguard doctor` should report Airflow `3.3.x` with no drift warning; `edgeguard validate` as usual.
+4. Note from the 3.3.1 release: pandas 3 changes how DataFrame XComs are stored. EdgeGuard pins `pandas~=2.2` in the image and stores no DataFrame XComs, so nothing to do — only relevant if you add a task that returns a DataFrame.
+
+**Known deprecation (non-breaking):** on 3.3.x the DAG file's `from airflow.utils.trigger_rule import TriggerRule` emits `DeprecatedImportWarning: use airflow.task.trigger_rule.TriggerRule`. The old path still works for the whole 3.x line; switch to the new path with an `ImportError` fallback (the pattern already used for `Variable` / `TaskGroup`) in a DAG-touching PR.
+
+Verified on this bump: `pip-audit -r requirements.txt` is clean with no ignore list (the `PYSEC-2026-161` Starlette exception is gone because airflow-core 3.3 requires `starlette>=1.0.1`), and the DAG/version/contract test files pass against a real Airflow 3.3.2 install.
 
 ### Operator rollout — things YOU still have to do
 
