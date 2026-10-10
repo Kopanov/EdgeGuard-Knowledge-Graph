@@ -116,10 +116,16 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
         rids = kept.setdefault("report_ids", [])
         if dup_pid not in rids:
             rids.append(dup_pid)
-    for tid in dup.get("reported_techniques") or []:
-        kept_rts = kept.setdefault("reported_techniques", [])
-        if tid not in kept_rts:
-            kept_rts.append(tid)
+    dup_rts = dup.get("reported_techniques") or []
+    if dup_rts:
+        # Copy-on-write: per-pulse technique lists are shared across items from
+        # the first pulse, so mutating in place would leak later pulse ATT&CK
+        # ids onto siblings that never appeared in those pulses.
+        kept_rts = list(kept.get("reported_techniques") or [])
+        for tid in dup_rts:
+            if tid not in kept_rts:
+                kept_rts.append(tid)
+        kept["reported_techniques"] = kept_rts
 
 
 def _dedupe_pulse_items(processed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
