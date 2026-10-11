@@ -135,9 +135,10 @@ def test_neo4j_connection():
     """Test Neo4j connection."""
     try:
         from neo4j import GraphDatabase
+        from neo4j_client import session_kwargs
 
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-        with driver.session() as session:
+        with driver.session(**session_kwargs()) as session:
             result = session.run("RETURN 1 as test")
             result.single()
         driver.close()
@@ -1382,11 +1383,12 @@ def get_neo4j_status():
     """Get Neo4j status and stats."""
     try:
         from neo4j import GraphDatabase
+        from neo4j_client import session_kwargs
 
         driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
         stats = {}
-        with driver.session() as session:
+        with driver.session(**session_kwargs()) as session:
             # Get node counts
             for label in ["Indicator", "Vulnerability", "Malware", "ThreatActor", "Technique"]:
                 result = session.run(f"MATCH (n:{label}) RETURN count(n) as count")

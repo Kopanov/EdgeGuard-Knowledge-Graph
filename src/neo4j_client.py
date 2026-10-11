@@ -1153,6 +1153,14 @@ def _configured_database() -> Optional[str]:
     return (os.getenv("NEO4J_DATABASE") or "").strip() or None
 
 
+def session_kwargs() -> Dict[str, Any]:
+    """Keyword arguments for a raw ``driver.session(...)`` call outside this client (CLI checks,
+    version probe): ``{"database": <name>}`` when ``NEO4J_DATABASE`` is set, else empty, so every
+    session of the deployment targets the same database."""
+    database = _configured_database()
+    return {"database": database} if database else {}
+
+
 class _TimeoutDriver:
     """Driver proxy whose sessions translate ``timeout=`` into transaction timeouts (see above)
     and target the configured database when ``NEO4J_DATABASE`` is set."""

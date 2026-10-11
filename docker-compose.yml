@@ -243,11 +243,23 @@ services:
       - |
         set -e
         mkdir -p /opt/airflow/state /opt/airflow/checkpoints
+        # One-time migration for deployments created before the bind mounts: the airflow_db volume
+        # (mounted read-only at /legacy) may still hold the sync state file and the collector
+        # checkpoints at these paths. Copy them into the host directories without overwriting
+        # anything already there, so the recorded sync watermark and the resume points are not
+        # hidden by the new mounts (a hidden state file would trigger a full sync and a
+        # re-collection from scratch).
+        for d in state checkpoints; do
+          if [ -d "/legacy/$d" ]; then
+            cp -an "/legacy/$d/." "/opt/airflow/$d/" || true
+          fi
+        done
         chown -R 50000:0 /opt/airflow/state /opt/airflow/checkpoints
         chmod -R u+rwX,g+rwX /opt/airflow/state /opt/airflow/checkpoints
     volumes:
       - ./state:/opt/airflow/state
       - ./checkpoints:/opt/airflow/checkpoints
+      - airflow_db:/legacy:ro
     networks:
       - edgeguard_net
 

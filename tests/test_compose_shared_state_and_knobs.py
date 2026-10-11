@@ -48,6 +48,14 @@ class TestSharedStateDirectories:
             "condition": "service_completed_successfully"
         }
 
+    def test_init_service_migrates_existing_state_from_the_volume_without_overwriting(self):
+        """Deployments created before the bind mounts keep their sync watermark and resume points."""
+        init = _compose()["services"]["airflow-init"]
+        assert "airflow_db:/legacy:ro" in init["volumes"]
+        script = "\n".join(init["command"])
+        assert 'cp -an "/legacy/$d/." "/opt/airflow/$d/"' in script
+        assert script.index("cp -an") < script.index("chown -R 50000:0"), "copy before the ownership fix"
+
     def test_container_paths_match_the_code_defaults(self):
         """The DAG derives BASE_DIR from its own location and the lock module from src/..; with src
         and dags mounted under /opt/airflow both resolve to the mounted directories."""
@@ -199,6 +207,19 @@ class TestDatabaseNameReachesSessions:
 
     def test_connect_wires_the_configured_database(self):
         assert "database=_configured_database()" in inspect.getsource(inspect.unwrap(nc.Neo4jClient.connect))
+
+    def test_session_kwargs_follow_the_variable(self, monkeypatch):
+        monkeypatch.setenv("NEO4J_DATABASE", "edgeguard")
+        assert nc.session_kwargs() == {"database": "edgeguard"}
+        monkeypatch.delenv("NEO4J_DATABASE")
+        assert nc.session_kwargs() == {}
+
+    def test_cli_and_version_probe_sessions_use_the_helper(self):
+        cli = (_ROOT / "src" / "edgeguard.py").read_text()
+        assert cli.count("driver.session(**session_kwargs())") == 2, "both raw CLI sessions must pass the database"
+        assert "driver.session()" not in cli
+        probe = (_ROOT / "src" / "version_compatibility.py").read_text()
+        assert 'driver.session(default_access_mode="READ", **_session_kwargs())' in probe
 
 
 class _Ctx:

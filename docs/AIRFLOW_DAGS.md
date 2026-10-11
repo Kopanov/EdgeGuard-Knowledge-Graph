@@ -356,7 +356,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 
 ### Shared state directories (2026-10)
 
-`./state` (sync state file) and `./checkpoints` (collector checkpoints, baseline lock sentinel) are bind-mounted into the Airflow container at `/opt/airflow/state` and `/opt/airflow/checkpoints`. The `airflow-init` service creates them owned by the container user (uid 50000) before Airflow starts. The host CLI (`edgeguard doctor`, `monitor`, `stats`, `checkpoint status`) therefore reads what the DAGs wrote; host-side writes or deletes (`edgeguard checkpoint clear`) go through `docker compose exec airflow …` unless the host user owns the directories.
+`./state` (sync state file) and `./checkpoints` (collector checkpoints, baseline lock sentinel) are bind-mounted into the Airflow container at `/opt/airflow/state` and `/opt/airflow/checkpoints`. The `airflow-init` service creates them owned by the container user (uid 50000) before Airflow starts. On a deployment created before these mounts, `airflow-init` first copies the state file and the checkpoints still stored in the `airflow_db` volume into the host directories (without overwriting), so the sync watermark and the collector resume points survive the switch. The host CLI (`edgeguard doctor`, `monitor`, `stats`, `checkpoint status`) therefore reads what the DAGs wrote; host-side writes or deletes (`edgeguard checkpoint clear`) go through `docker compose exec airflow …` unless the host user owns the directories.
 
 ### Airflow task: `run_neo4j_sync` (`edgeguard_neo4j_sync` DAG)
 
