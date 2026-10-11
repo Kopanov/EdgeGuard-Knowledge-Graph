@@ -47,6 +47,9 @@ EdgeGuard serves as the **Threat Intelligence Enrichment Layer** for ResilMesh. 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+> **Status (2026-10):** everything up to the response builder is implemented and tested; the
+> "Back to ResilMesh via NATS" step is the target design — no code path publishes the response yet.
+
 ---
 
 ## Node Type Mappings
@@ -291,14 +294,14 @@ raise `AttributeError`.
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ 8. ENRICHED ALERT PUBLICATION                                   │
-│    EdgeGuard publishes to NATS:                                 │
+│    EdgeGuard publishes to NATS (PLANNED — not wired yet):       │
 │    resilmesh.enriched.alerts                                    │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ 9. CONSUMPTION                                                  │
-│    ResilMesh consumes enriched alert for:                       │
+│    ResilMesh consumes enriched alert for (PLANNED):             │
 │    - SOC dashboard display                                      │
 │    - Incident response workflows                                │
 │    - Automated blocking decisions                               │
@@ -340,7 +343,9 @@ response = {
     "enrichment": enrichment
 }
 
-# Step 5: Publish to NATS
+# Step 5: Publish to NATS — target design, not implemented (2026-10). The current handler
+# (`alert_processor.handle_resilmesh_alert`) returns the response to its caller; no code
+# path publishes it. Subject and response schema are pending agreement with ResilMesh.
 await nats_client.publish("resilmesh.enriched.alerts", json.dumps(response))
 ```
 
@@ -693,14 +698,13 @@ except Exception as e:
 
 ## Summary
 
-EdgeGuard provides **complete ResilMesh integration** with:
+EdgeGuard's ResilMesh integration today (2026-10):
 
-- ✅ **20 node types** from ResilMesh schema
-- ✅ **35 relationship types** (78% coverage)
-- ✅ **Full bridge layer** between threat intel and topology
-- ✅ **Complete alert pipeline** from ingestion to enrichment
-- ✅ **Production-ready** constraints and indexes
-- ✅ **Comprehensive testing** capabilities
+- ✅ **Shared Neo4j database** — EdgeGuard writes the threat-intelligence layer (`Indicator`, `Malware`, `ThreatActor`, `Campaign`, `Technique`, `Tactic`, `Tool`, `Sector`, `Source`, `CVE` + `CVSSv*`) with `edgeguard_managed` on every node it creates and `edgeguard_enriched` on partner nodes it writes to; 21 relationship types, every edge stamped and evidence-labelled (`match_type`).
+- ✅ **Schema-compatible helpers** for the ResilMesh topology / identity / mission labels and their relationships (the tables above) — available to an alert or import path; the scheduled pipeline does not write them.
+- ✅ **Vulnerability ↔ CVE bridge job** (`REFERS_TO`, both directions) for any `Vulnerability` node carrying `cve_id`.
+- ✅ **Inbound alert enrichment** — `resilmesh.alerts.zone.*` → `Alert` node, `Indicator`, `INVOLVES`, enrichment chain.
+- ⚠️ **Not implemented:** publishing the enriched response back over NATS, a deployable NATS consumer service, inbound payload validation, the `SoftwareVersion` bridge (`IN` / `ON`), `INDICATOR_RESOLVES_TO`, `Malware → Host`. See [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 4.4 and § 8.6 for what each needs.
 
 The integration enables **context-aware threat detection** that combines:
 - External threat intelligence (CVE, MITRE, IOCs)
@@ -716,4 +720,6 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
+
+_Prior: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._
