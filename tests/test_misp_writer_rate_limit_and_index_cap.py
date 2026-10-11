@@ -55,11 +55,13 @@ ATTRS = [{"type": "ip-dst", "value": "203.0.113.10", "category": "Network activi
 
 
 class TestEventLookup:
-    def test_rate_limited_lookup_honours_retry_after_and_is_retried(self, monkeypatch):
-        writer, posted, sleeps = _writer(monkeypatch, [_Resp(429, headers={"Retry-After": "7"})])
+    def test_rate_limited_lookup_is_transient_and_does_not_sleep_under_the_lock(self, monkeypatch):
+        """The confirming lookup runs inside the event-creation lock: the wait belongs to the
+        retry decorator outside it, not to the lookup."""
+        writer, _posted, sleeps = _writer(monkeypatch, [_Resp(429, headers={"Retry-After": "7"})])
         with pytest.raises(mw.MispTransientError):
             writer._restsearch_events_for_name("EdgeGuard-otx-2026-10-12")
-        assert 7.0 in sleeps
+        assert sleeps == []
 
     def test_server_error_on_lookup_is_transient(self, monkeypatch):
         writer, _posted, sleeps = _writer(monkeypatch, [_Resp(503, text="maintenance")])
@@ -88,12 +90,38 @@ class TestEventLookup:
         assert all(not url.endswith("/events") for url, _ in posted), "POST /events must not happen"
         assert any("no event is created" in r.getMessage() for r in caplog.records)
 
+    def test_transient_lookup_failure_after_retries_counts_the_group_and_continues(self, monkeypatch, caplog):
+        """A MispTransientError escaping _get_or_create_event must not abort the whole push."""
+        writer, _posted, _sleeps = _writer(monkeypatch, [_Resp(200, {})])
+        calls: list = []
+
+        def fake_get_or_create(source, date=None, **_k):
+            calls.append(source)
+            if source == "otx":
+                raise mw.MispTransientError("MISP 503 on event lookup")
+            return "9"
+
+        monkeypatch.setattr(writer, "_get_or_create_event", fake_get_or_create)
+        monkeypatch.setattr(writer, "_get_existing_attribute_keys", lambda *a, **k: set(), raising=False)
+        monkeypatch.setattr(writer, "_get_existing_source_attribute_keys", lambda *a, **k: set(), raising=False)
+        monkeypatch.setattr(writer, "_push_batch", lambda event_id, attrs: (len(attrs), 0))
+        # push_items groups by the item's ``tag`` (the MISP source tag), one event per tag and day.
+        items = [
+            {"tag": "otx", "indicator_type": "ipv4", "value": "203.0.113.10", "zone": "energy"},
+            {"tag": "nvd", "indicator_type": "ipv4", "value": "203.0.113.11", "zone": "energy"},
+        ]
+        with caplog.at_level(logging.ERROR, logger="collectors.misp_writer"):
+            success, failed = writer.push_items(items)
+        assert "otx" in calls and "nvd" in calls, "the remaining source groups are still pushed"
+        assert failed >= 1 and success >= 1
+        assert any("failed after retries" in r.getMessage() for r in caplog.records)
+
     def test_missing_event_id_counts_the_batch_as_failed(self, monkeypatch):
         writer, _posted, _sleeps = _writer(monkeypatch, [_Resp(403, text="forbidden")])
         monkeypatch.setattr(writer, "_get_or_create_event", lambda *a, **k: None)
         monkeypatch.setattr(writer, "_get_existing_attribute_keys", lambda *a, **k: set(), raising=False)
         monkeypatch.setattr(writer, "_get_existing_source_attribute_keys", lambda *a, **k: set(), raising=False)
-        items = [{"source": "otx", "indicator_type": "ipv4", "value": "203.0.113.10", "zone": "energy"}]
+        items = [{"tag": "otx", "indicator_type": "ipv4", "value": "203.0.113.10", "zone": "energy"}]
         success, failed = writer.push_items(items)
         assert success == 0 and failed >= 1
 

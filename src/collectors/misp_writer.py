@@ -720,17 +720,15 @@ class MISPWriter:
         if response.status_code != 200:
             detail = (response.text or "")[:500]
             if response.status_code == 429 or response.status_code >= 500:
-                # Rate limit or server error: let @retry_with_backoff on the caller retry. A
-                # Retry-After header (bounded by collector_utils) is honoured before the backoff.
-                wait = retry_after_sleep_seconds(response, fallback=0.0) if response.status_code == 429 else 0.0
+                # Rate limit or server error: let @retry_with_backoff on the caller retry with its
+                # exponential backoff. No sleep here: the confirming lookup runs inside the
+                # cross-process event-creation lock, and a Retry-After wait taken there would hold
+                # the lock against every parallel collector.
                 logger.warning(
-                    "MISP restSearch for event lookup answered HTTP %s%s — retrying: %s",
+                    "MISP restSearch for event lookup answered HTTP %s — the caller retries with backoff: %s",
                     response.status_code,
-                    f" (Retry-After: {wait:.0f}s)" if wait else "",
                     detail,
                 )
-                if wait:
-                    time.sleep(wait)
                 raise MispTransientError(
                     f"MISP {response.status_code} on event lookup for {event_name!r}", response=response
                 )
@@ -1974,8 +1972,21 @@ class MISPWriter:
                     seen.add(key)
                     unique_attrs.append(attr)
 
-            # Get or create event
-            event_id = self._get_or_create_event(source, date)
+            # Get or create event. A transient failure that survives the retry decorator is
+            # recorded as a failed batch for this source group; the remaining groups are pushed.
+            try:
+                event_id = self._get_or_create_event(source, date)
+            except _TRANSIENT_HTTP_ERRORS as e:
+                logger.error(
+                    "Event lookup/creation for source %r failed after retries (%s: %s) — %d attribute(s) counted as failed",
+                    source,
+                    type(e).__name__,
+                    e,
+                    len(unique_attrs),
+                )
+                self.stats["errors"] += 1
+                total_failed += len(unique_attrs)
+                continue
             if not event_id:
                 total_failed += len(unique_attrs)
                 continue
