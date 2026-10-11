@@ -1054,7 +1054,10 @@ def _normalise_zone_list(value: Any) -> List[str]:
         elif name not in cleaned:
             cleaned.append(name)
     if unknown:
-        logger.warning("Alert zone(s) outside EdgeGuard's vocabulary dropped: %s", sorted(set(unknown)))
+        # Partner-supplied strings: strip line breaks before logging (log injection) and log at
+        # DEBUG, as the project rule for zone parameters requires.
+        shown = ", ".join(sorted(set(unknown)))[:200].replace("\n", " ").replace("\r", " ")
+        logger.debug("Alert zone(s) outside EdgeGuard's vocabulary dropped: %s", shown)
     return cleaned or ["global"]
 
 

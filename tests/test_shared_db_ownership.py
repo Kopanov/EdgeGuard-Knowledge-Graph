@@ -149,10 +149,13 @@ class TestMarkerOnCreatePathOnly:
         session2 = client2.driver.session.return_value.__enter__.return_value
         assert next(c.kwargs for c in session2.run.call_args_list if "zone" in c.kwargs)["zone"] == ["global"]
 
-    def test_unknown_zones_are_logged_and_dropped(self, caplog):
-        with caplog.at_level("WARNING", logger="neo4j_client"):
-            assert nc._normalise_zone_list(["us-gov", "energy"]) == ["energy"]
-        assert any("outside EdgeGuard's vocabulary" in r.message and "us-gov" in r.message for r in caplog.records)
+    def test_unknown_zones_are_logged_at_debug_without_line_breaks(self, caplog):
+        """Project rule: zone parameters are logged at DEBUG only, after stripping CR/LF (Bugbot on #149)."""
+        with caplog.at_level("DEBUG", logger="neo4j_client"):
+            assert nc._normalise_zone_list(["us-gov\nINJECTED LINE", "energy"]) == ["energy"]
+        records = [r for r in caplog.records if "outside EdgeGuard's vocabulary" in r.message]
+        assert records and all(r.levelname == "DEBUG" for r in records)
+        assert "\n" not in records[0].message and "us-gov INJECTED LINE" in records[0].message
 
     def test_clear_edgeguard_managed_deletes_created_nodes_only(self):
         src = inspect.getsource(nc.Neo4jClient.clear_edgeguard_managed)
