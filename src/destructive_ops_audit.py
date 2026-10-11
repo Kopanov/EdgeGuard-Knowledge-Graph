@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 AUDIT_PATH_ENV = "EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH"
 DEFAULT_AUDIT_PATH = os.path.join("logs", "destructive_ops.jsonl")
 
+_DESTRUCTIVE_OPS: Optional[Any] = None
 try:  # optional, like every other metrics import in this code base
     from metrics_server import DESTRUCTIVE_OPS as _DESTRUCTIVE_OPS
 except Exception:  # pragma: no cover — prometheus_client absent, an older metrics_server, or a duplicate

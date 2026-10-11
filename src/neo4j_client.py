@@ -1029,14 +1029,32 @@ SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT = frozenset(
 
 
 def _normalise_zone_list(value: Any) -> List[str]:
-    """``Alert.zone`` is a list like every other ``zone`` property; accept the scalar NATS form."""
+    """``Alert.zone`` is a list of EdgeGuard zone names, like every other ``zone`` property.
+
+    Accepts the scalar NATS form, lower-cases and strips each entry, keeps only names in
+    ``config.VALID_ZONES`` (a partner's unknown or mis-cased sector strings are logged and
+    dropped, never stored) and falls back to ``["global"]`` so an alert never lacks a zone.
+    """
+    from config import VALID_ZONES  # local import: config needs the runtime environment
+
     if isinstance(value, str):
         items = [value]
     elif isinstance(value, (list, tuple, set)):
         items = list(value)
     else:
         items = []
-    cleaned = [z.strip() for z in items if isinstance(z, str) and z.strip()]
+    cleaned: List[str] = []
+    unknown: List[str] = []
+    for raw in items:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        name = raw.strip().lower()
+        if name not in VALID_ZONES:
+            unknown.append(name)
+        elif name not in cleaned:
+            cleaned.append(name)
+    if unknown:
+        logger.warning("Alert zone(s) outside EdgeGuard's vocabulary dropped: %s", sorted(set(unknown)))
     return cleaned or ["global"]
 
 

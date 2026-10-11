@@ -550,6 +550,7 @@ async def search_indicator(request: Request, s: IndicatorSearch):
             related_query = """
                 MATCH (n:Indicator {value: $value})--(related)
                 WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+                  AND (related.edgeguard_managed = true OR related.edgeguard_enriched = true)
                 RETURN related LIMIT 10
             """
             related_result = session.run(related_query, value=normalized_value, timeout=_NEO4J_QUERY_TIMEOUT)

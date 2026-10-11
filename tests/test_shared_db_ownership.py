@@ -123,10 +123,20 @@ class TestMarkerOnCreatePathOnly:
             ("  ", ["global"]),
             ([], ["global"]),
             (42, ["global"]),
+            ("Healthcare", ["healthcare"]),
+            (["Energy", "energy", "ENERGY"], ["energy"]),
+            ("us-gov", ["global"]),
+            (["finance", "us-gov", "lab"], ["finance"]),
         ],
     )
     def test_zone_normaliser(self, raw, expected):
+        """Scalar or list in; lower-cased, de-duplicated, vocabulary-checked list out (Bugbot on #147)."""
         assert nc._normalise_zone_list(raw) == expected
+
+    def test_unknown_zones_are_logged_and_dropped(self, caplog):
+        with caplog.at_level("WARNING", logger="neo4j_client"):
+            assert nc._normalise_zone_list(["us-gov", "energy"]) == ["energy"]
+        assert any("outside EdgeGuard's vocabulary" in r.message and "us-gov" in r.message for r in caplog.records)
 
     def test_clear_edgeguard_managed_deletes_created_nodes_only(self):
         src = inspect.getsource(nc.Neo4jClient.clear_edgeguard_managed)
@@ -190,6 +200,14 @@ class TestReadersExposeCreatedOrEnriched:
                     assert f"({var}.edgeguard_managed = true OR {var}.edgeguard_enriched = true)" in line, (
                         f"{name}:{lineno} filters on the create marker alone: {line.strip()}"
                     )
+
+    def test_related_entities_lookup_is_scoped_too(self):
+        """Bugbot on #147: the seed's neighbours must pass the same ownership filter, or
+        ``/search/indicator`` would serialise partner topology EdgeGuard never touched."""
+        src = (_SRC / "query_api.py").read_text()
+        start = src.index("MATCH (n:Indicator {value: $value})--(related)")
+        block = src[start : src.index("RETURN related", start)]
+        assert "(related.edgeguard_managed = true OR related.edgeguard_enriched = true)" in block
 
     def test_writers_do_not_use_the_widened_form_for_ownership(self):
         """The wipe and the status counts are about nodes EdgeGuard created — never widened."""
