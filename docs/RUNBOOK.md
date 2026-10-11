@@ -433,36 +433,36 @@ the re-trigger is dedup-safe.
 ### ⚠️ Baseline launch path — PICK ONE (CLI or DAG+pause)
 
 The 730-day baseline runs for ~32h (matches the baseline DAG's
-`dagrun_timeout`). Over that window, the 4 scheduled
-incremental DAGs will try to write to MISP + Neo4j in parallel with the
-baseline unless you stop them. This is Issue #57 (documented in
-`docs/flow_audits/01_baseline_sequence.md` Finding 1) and was the
-underlying cause of the 2026-04-19 MISP-PHP-FPM exhaustion + 14.7%
-NVD loss. Three regression xfails pin this contract in
-`tests/test_tier1_sequential_robustness.py` — they stay failing until
-Issue #57 ships a DB-backed mutex.
+`dagrun_timeout`). Over that window the 5 scheduled DAGs check the
+`checkpoints/baseline_in_progress.lock` sentinel at task start and skip
+while the `edgeguard_baseline` DAG holds it (`baseline_acquire_lock`,
+taken before the destructive `baseline_clean` step; released by
+`baseline_release_lock` with `ALL_DONE`). This is Issue #57 (root cause
+in `docs/flow_audits/01_baseline_sequence.md` Finding 1, the 2026-04-19
+MISP-PHP-FPM exhaustion + 14.7% NVD loss), closed in 2026-10. The
+holder's liveness is the DAG-run state read through the Airflow REST
+API, with the sentinel age as fallback (`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`,
+default 48 h). `tests/test_tier1_sequential_robustness.py` pins the
+DAG-side acquisition. A scheduled task that is already running when the
+lock is taken completes its current write, so pausing the scheduled DAGs
+before a destructive `fresh-baseline` remains recommended.
 
-**Until Issue #57 lands, pick one of the two safe launch paths below.**
+**Pick one of the two launch paths below.**
 
-> **Docs correction (2026-06, supersedes the PR-N35 note):** two claims in
-> the earlier PR-N35 callout were wrong at the time they were written:
-> (1) the `edgeguard baseline` / `edgeguard fresh-baseline` subcommands
-> DO exist (shipped in PR-C, 2026-04-19) — but they are thin wrappers
-> that trigger this same `edgeguard_baseline` DAG and do NOT pause
-> anything for you; (2) the `baseline_in_progress.lock` sentinel at
-> `checkpoints/baseline_in_progress.lock` (per `src/baseline_lock.py`)
-> is **NOT written by the baseline DAG** — the DAG-side lock tasks were
-> de-scoped in PR-F2 (Issue #57); only the legacy in-process
-> `python src/run_pipeline.py --baseline` path writes it. Net effect:
-> for every practical launch flow, the manual pause below is the ONLY
-> mutex against the scheduled DAGs.
+> **2026-10:** the `baseline_in_progress.lock` sentinel is written by the
+> baseline DAG itself (`baseline_acquire_lock`) and by the legacy
+> in-process `python src/run_pipeline.py --baseline` path. The
+> `edgeguard baseline` / `edgeguard fresh-baseline` wrappers trigger the
+> DAG and add safety UX; they do not pause anything.
 
-#### Option A — DAG + pre-pause the 5 scheduled DAGs (recommended)
+#### Option A — DAG trigger, optionally pre-pausing the 5 scheduled DAGs (recommended)
 
 Whether you trigger via the Airflow UI, the API, or the CLI wrappers,
-pause the 5 scheduled DAGs first so they cannot fire during the ~32h
-window (this includes `edgeguard_neo4j_sync` — a full MISP→Neo4j sync
-firing mid-baseline is the same concurrent-writer hazard):
+the baseline DAG holds the lock and the scheduled DAGs skip at task
+start. Pausing them first guarantees that none is mid-write when the
+lock is taken (recommended before a destructive fresh-baseline; this
+includes `edgeguard_neo4j_sync` — a full MISP→Neo4j sync firing
+mid-baseline is the same concurrent-writer hazard):
 
 ```bash
 docker compose exec airflow airflow dags pause edgeguard_daily
@@ -496,11 +496,10 @@ Exit non-zero = do NOT launch. Exit zero + green summary = safe to trigger.
 
 `edgeguard baseline --days N` (additive) and `edgeguard fresh-baseline`
 (destructive — typed confirmation + backup-timestamp gate) trigger the
-same `edgeguard_baseline` DAG; they add safety UX, not a mutex. The
-only path that holds the `baseline_in_progress.lock` sentinel is the
-legacy in-process `python src/run_pipeline.py --baseline` run. Pausing
-the 5 scheduled DAGs BEFORE triggering is the operator's job until
-Issue #57 ships a DB-backed mutex.
+same `edgeguard_baseline` DAG; they add safety UX, not a mutex of their
+own. The `baseline_in_progress.lock` sentinel is held by the DAG
+(`baseline_acquire_lock`) and by the legacy in-process
+`python src/run_pipeline.py --baseline` run (Issue #57).
 
 ---
 

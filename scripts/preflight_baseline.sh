@@ -219,7 +219,7 @@ else
     # this fixes the executable).
     # All 5 scheduled DAGs — including edgeguard_neo4j_sync (every 3 days):
     # a full MISP→Neo4j sync firing mid-baseline is the same concurrent-writer
-    # hazard as the collector DAGs (its baseline mutex only sees CLI-held locks).
+    # hazard as the collector DAGs (the baseline lock is held by the DAG as well since 2026-10).
     for dag in edgeguard_daily edgeguard_medium_freq edgeguard_pipeline edgeguard_low_freq edgeguard_neo4j_sync; do
       STATE=$(docker compose exec -T airflow airflow dags details "$dag" 2>/dev/null | grep -iE '^is_paused' | awk '{print $NF}' || echo "")
       if [[ "$STATE" == "True" ]]; then
@@ -227,7 +227,7 @@ else
       elif [[ -z "$STATE" ]]; then
         warn "DAG $dag state not queryable (airflow service unresponsive?)"
       else
-        fail "DAG $dag is NOT paused — pause it before baseline (docs/RUNBOOK.md Option B). Issue #57."
+        warn "DAG $dag is not paused — the baseline DAG holds the baseline lock and scheduled tasks skip at start; pause it to guarantee none is mid-write (docs/RUNBOOK.md Option A). Issue #57."
       fi
     done
   fi

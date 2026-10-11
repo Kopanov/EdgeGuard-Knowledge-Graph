@@ -236,9 +236,9 @@ Driven by the 2026-04-20 comprehensive multi-agent audit. Four merged PRs (F9 #6
 
 #### 🏗️ Separate architectural tracks
 
-- **Airflow-aware baseline lock** — [Issue #57](../../issues/57). The legacy PID-based baseline lock fails in Airflow's multi-process model (the lock-task subprocess dies immediately; later incrementals treat the sentinel as stale). Needs a design spike, not a patch. Four candidate designs documented in the issue; interim operator discipline is "don't trigger fresh-baseline while incremental DAGs are running."
+- ~~**Airflow-aware baseline lock**~~ ✅ shipped 2026-10 — the `edgeguard_baseline` DAG acquires `checkpoints/baseline_in_progress.lock` with the DAG run as holder (`baseline_acquire_lock`, before `baseline_clean`) and releases it with `baseline_release_lock` (`ALL_DONE`); the scheduled DAGs check the holder's liveness through the Airflow REST API (run state) and fall back to the sentinel age (`EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`, default 48 h). Closes [Issue #57](../../issues/57).
 
-The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — proper redesign tracked in [Issue #57](../../issues/57)). The 2026-04-20 multi-agent audit triggered **PR-F9 / G1 / I** (merged) addressing the highest-severity findings; **PR-G2 / H / J / Tier-3** are the queued follow-ups above. Next we work through the remaining In-Progress items + queued follow-ups, then the README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once local-operational hardening lands.
+The phased plan: **PR-F1** landed the easy + fast audit fixes; **PR-F2** lands BACKUP.md + the backup-timestamp gate (the Airflow-side baseline lock was de-scoped after Bugbot caught two architectural flaws — redesigned and shipped in 2026-10, see [Issue #57](../../issues/57)). The 2026-04-20 multi-agent audit triggered **PR-F9 / G1 / I** (merged) addressing the highest-severity findings; **PR-G2 / H / J / Tier-3** are the queued follow-ups above. Next we work through the remaining In-Progress items + queued follow-ups, then the README will gain "📋 Planned" sections for **Cloud deployment** (Aura Neo4j + cloud MISP + K8s) and **Regular monitoring & incremental SLOs** once local-operational hardening lands.
 
 ---
 
@@ -427,11 +427,11 @@ docker compose up -d
 #      See docs/BASELINE_SMOKE_TEST.md
 #
 #    ⚠️  IMPORTANT — before you trigger the 730-day baseline, read the
-#        "Running the 730-day baseline" section below. ALL launch flows
-#        (Airflow UI, API, or the `edgeguard baseline` / `fresh-baseline`
-#        CLI wrappers — which trigger this same DAG) require pausing the
-#        5 scheduled DAGs first (Issue #57): the baseline DAG holds no
-#        lock, so nothing else stops them from writing concurrently.
+#        "Running the 730-day baseline" section below. The baseline DAG
+#        holds the baseline lock for the whole run (Issue #57, shipped
+#        2026-10) and the 5 scheduled DAGs skip while it is held; pausing
+#        them first remains the recommended extra step before a
+#        destructive fresh-baseline.
 
 # 3. Incremental cron DAGs start automatically after baseline:
 #    edgeguard_pipeline    → every 30 min  (OTX)
@@ -485,9 +485,9 @@ The 730-day baseline ingests ~2 years of threat intelligence (~99K CVEs, ~115K i
 
 ### Why the launch path matters
 
-The Airflow `edgeguard_baseline` DAG does **not** acquire the `baseline_lock` sentinel ([Issue #57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57) — the lock-task pair was de-scoped after Bugbot caught two architectural flaws; only the legacy in-process `python src/run_pipeline.py --baseline` path writes it). Over the ~26h window, the **5 scheduled DAGs** (`edgeguard_daily`, `edgeguard_medium_freq`, `edgeguard_pipeline`, `edgeguard_low_freq`, and the every-3-days `edgeguard_neo4j_sync`) will fire and write to MISP + Neo4j in parallel with the baseline. That concurrent-writer pattern caused the 2026-04-19 MISP-PHP-FPM exhaustion and lost 14.7% of NVD data mid-run. Three regression xfails in `tests/test_tier1_sequential_robustness.py` pin this contract until the DB-backed mutex ships.
+Since 2026-10 the Airflow `edgeguard_baseline` DAG acquires the `baseline_lock` sentinel itself ([Issue #57](https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/issues/57)): the `baseline_acquire_lock` task writes `checkpoints/baseline_in_progress.lock` with the DAG run as holder before the destructive `baseline_clean` step, and `baseline_release_lock` (`ALL_DONE`) removes it after the postcheck. Over the ~26h window the **5 scheduled DAGs** (`edgeguard_daily`, `edgeguard_medium_freq`, `edgeguard_pipeline`, `edgeguard_low_freq`, `edgeguard_neo4j_sync`) check the sentinel at task start and skip (status `skipped`, reason `baseline_in_progress`) while it is held. The holder's liveness is the DAG-run state read through the Airflow REST API, with the sentinel age as fallback (48 h default, above the 32 h `dagrun_timeout`). The 2026-04-19 NVD-14.7% incident happened without this mutex.
 
-**Until Issue #57 lands, manually pausing the 5 scheduled DAGs before any baseline launch is mandatory** — this applies equally to Airflow UI/API triggers and to the `edgeguard baseline` / `edgeguard fresh-baseline` CLI wrappers (which trigger the same DAG; they do **not** pause anything for you). The full procedure is in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#baseline-day-protocol).
+Pausing the 5 scheduled DAGs before a baseline launch is no longer mandatory. It remains the recommended extra step before a destructive `fresh-baseline`: a scheduled task that is already running when the lock is acquired completes its current write. The full procedure is in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#baseline-day-protocol).
 
 ### Step 1 — Preflight check
 
@@ -504,18 +504,15 @@ Run the preflight script first. It runs 12 readiness check sections in ~5 second
 
 Exit 0 = safe to launch. Exit 1 = read the ✗ items and fix them first. The script verifies: required env vars, Neo4j + APOC reachability, MISP API auth, Airflow DAG pause state (if `--launch-path=dag`), worker RAM ≥ 4 GB, Prometheus alerts parse + alertmanager pager wiring not placeholder, no stale `baseline_lock` sentinel, kill-switch defaults, pytest collection, and the PR-N29 invariants (retries=0 on the critical chain, fallback sentinel class, 48h lock max-age).
 
-### Step 2 — Launch (DAG + pre-pause the 5 scheduled DAGs)
+### Step 2 — Launch (DAG; optionally pre-pause the 5 scheduled DAGs)
 
-> **Docs correction (2026-06):** an earlier PR-J1 note here claimed the
-> `edgeguard baseline` subcommand does not exist and that the baseline
-> DAG writes the lock sentinel itself. Both claims were wrong at the
-> time of writing: `edgeguard baseline` and `edgeguard fresh-baseline`
-> shipped in PR-C (2026-04-19) as thin wrappers that trigger this DAG,
-> and the DAG-side lock tasks were de-scoped in PR-F2 (Issue #57) — the
-> sentinel is written only by the legacy in-process CLI path. Net
-> effect: **no launch flow pauses the scheduled DAGs for you.**
+> **2026-10:** the `edgeguard_baseline` DAG acquires and releases the
+> `baseline_in_progress.lock` sentinel itself (Issue #57), so the scheduled
+> DAGs skip while a baseline runs. The `edgeguard baseline` and
+> `edgeguard fresh-baseline` wrappers trigger this DAG and add safety UX;
+> they do not pause anything.
 
-Pause the 5 scheduled DAGs first so they can't fire during the ~32h baseline window (see [`docs/RUNBOOK.md`](docs/RUNBOOK.md) § Baseline launch path for the full procedure):
+Optionally pause the 5 scheduled DAGs first so that none of them is mid-write when the lock is acquired (they skip at task start while the baseline holds the lock) (see [`docs/RUNBOOK.md`](docs/RUNBOOK.md) § Baseline launch path for the full procedure):
 
 ```bash
 # 1. Pause all 5 scheduled DAGs BEFORE triggering the baseline
@@ -968,7 +965,7 @@ These were previously documented only in the "Recommended Memory Settings" table
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `EDGEGUARD_BASELINE_LOCK_PATH` | Cross-process baseline mutex lock file (written only by the in-process CLI baseline path) | `<repo_root>/checkpoints/baseline_in_progress.lock` (derived from the module location — independent of `EDGEGUARD_BASE_DIR`) |
+| `EDGEGUARD_BASELINE_LOCK_PATH` | Cross-process baseline mutex lock file (written by the `edgeguard_baseline` DAG's `baseline_acquire_lock` task and by the in-process CLI baseline path) | `<repo_root>/checkpoints/baseline_in_progress.lock` (derived from the module location — independent of `EDGEGUARD_BASE_DIR`) |
 | `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | Stale-lock auto-clear timeout. After this, a leftover lock from a crashed baseline is treated as releasable (same-host PID-liveness check bypasses the age cap). | `172800` (48h — bumped from 24h in PR-N29; the 32h baseline window outlives 24h) |
 | `EDGEGUARD_CHECKPOINT_DIR` | Override default checkpoint directory (path-traversal guarded — must stay inside project root) | `<project_root>/checkpoints/` |
 | `EDGEGUARD_STATE_DIR` | Override default state directory | `<project_root>/state/` |

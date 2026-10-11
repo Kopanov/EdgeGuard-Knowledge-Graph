@@ -215,24 +215,10 @@ class TestBaselineLockSentinelCoverage:
             "baseline_skip_reason must remain defined in src/baseline_lock.py"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "Issue #57: DAG-triggered baseline does NOT acquire baseline_lock "
-            "sentinel (the Airflow-side lock-task pair was de-scoped in PR-F2 "
-            "after Bugbot caught two architectural flaws in the PID-based "
-            "primitive). Known gap — during a DAG-triggered 730-day baseline, "
-            "incremental DAGs do NOT skip. Interim mitigation: use CLI "
-            "`python src/run_pipeline.py --baseline` OR pre-pause the "
-            "scheduled incremental DAGs in Airflow. See "
-            "dags/edgeguard_pipeline.py:2656-2679 for the de-scope note."
-        ),
-        strict=True,
-    )
     def test_baseline_dag_acquires_sentinel(self, dag_source: str) -> None:
-        """When Issue #57 lands, the ``edgeguard_baseline`` DAG will
-        have a task that calls ``acquire_baseline_lock()``. Until
-        then this is a known gap; test xfails. When it flips to
-        xpass, remove the marker.
+        """Issue #57 (closed 2026-10): the ``edgeguard_baseline`` DAG has a
+        task that calls ``acquire_baseline_lock(holder=...)`` so the scheduled
+        DAGs skip during a DAG-triggered baseline.
 
         Comment-stripping is critical: the DAG currently has a
         comment block that literally includes the string
@@ -247,12 +233,13 @@ class TestBaselineLockSentinelCoverage:
         # Strip comment lines so the de-scope note doesn't satisfy the
         # check. The code must have an ACTIVE call to acquire_baseline_lock().
         code_only = "\n".join(line for line in tail.splitlines() if not line.lstrip().startswith("#"))
-        assert "acquire_baseline_lock()" in code_only, (
-            "Issue #57 fix: the baseline DAG should have a task calling "
-            "acquire_baseline_lock() so incremental DAGs skip correctly "
+        assert "acquire_baseline_lock(holder=" in code_only, (
+            "Issue #57 fix: the baseline DAG must have a task calling "
+            "acquire_baseline_lock(holder=...) so incremental DAGs skip correctly "
             "during a DAG-triggered 730-day baseline. Comment-only "
             "mentions don't count — need an actual call."
         )
+        assert "release_baseline_lock(holder=" in code_only, "the DAG must also release the lock (ALL_DONE task)"
 
 
 # ---------------------------------------------------------------------------

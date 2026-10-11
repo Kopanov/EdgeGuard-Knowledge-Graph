@@ -31,6 +31,24 @@ so stale entries (process died without cleanup) can be pruned safely by
 checking whether the PID is still alive on the same host. Cross-host
 stale detection uses a configurable max-age (default 24h).
 
+Holders (2026-10, Issue #57)
+----------------------------
+
+The sentinel records who holds it:
+
+* ``process`` (default, legacy) — the in-process CLI baseline
+  (``python src/run_pipeline.py --baseline``). Liveness is the PID on the
+  same host, then the age cap on other hosts.
+* ``airflow_dag_run`` — the ``edgeguard_baseline`` DAG (task
+  ``baseline_acquire_lock``). The task process that writes the sentinel
+  exits seconds later while the DAG run continues for hours, so PID
+  liveness is meaningless here; the run state from the Airflow REST API
+  (``airflow_client.get_dag_run``) is authoritative when available, and the
+  sentinel is otherwise trusted until it is older than
+  ``EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`` (default 48 h, above the DAG's
+  32 h ``dagrun_timeout``). ``baseline_release_lock`` (``ALL_DONE``)
+  removes it at the end of the run.
+
 Why not Airflow pools / ExternalTaskSensor
 ------------------------------------------
 
@@ -67,6 +85,12 @@ logger = logging.getLogger(__name__)
 # preflight script) are unaffected — PID liveness check bypasses this
 # age cap. 48h gives 16h buffer above the dagrun_timeout ceiling.
 _BASELINE_LOCK_MAX_AGE_SEC_DEFAULT = 48 * 3600
+
+# Sentinel holder kinds (``holder`` key; absent means ``process``).
+HOLDER_PROCESS = "process"
+HOLDER_AIRFLOW_DAG_RUN = "airflow_dag_run"
+# DAG-run states in which the holder is alive.
+_ACTIVE_RUN_STATES = frozenset({"queued", "running"})
 
 
 def _repo_root() -> str:
@@ -106,6 +130,81 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _sentinel_age_sec(data: Dict[str, Any]) -> float:
+    """Seconds since ``started_at``; infinity when the timestamp is unusable."""
+    try:
+        started_dt = datetime.fromisoformat(str(data.get("started_at", "")))
+        return (datetime.now(timezone.utc) - started_dt).total_seconds()
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def sentinel_holder(data: Dict[str, Any]) -> str:
+    """``process`` or ``airflow_dag_run``."""
+    return str(data.get("holder") or HOLDER_PROCESS)
+
+
+def describe_holder(data: Dict[str, Any]) -> str:
+    """Operator-facing description of who holds the sentinel."""
+    if sentinel_holder(data) == HOLDER_AIRFLOW_DAG_RUN:
+        return f"Airflow DAG run {data.get('dag_id')}/{data.get('run_id')} (started_at={data.get('started_at')})"
+    return f"pid={data.get('pid')} host={data.get('host')} started_at={data.get('started_at')}"
+
+
+def _airflow_run_state(dag_id: str, run_id: str) -> Optional[str]:
+    """State of a DAG run through the Airflow REST client, or None when it cannot be determined."""
+    if not dag_id or not run_id:
+        return None
+    try:
+        import airflow_client
+    except Exception:
+        return None
+    try:
+        result = airflow_client.get_dag_run(dag_id, run_id)
+    except Exception:
+        return None
+    if not isinstance(result, dict) or "error" in result:
+        return None
+    state = result.get("state")
+    return str(state) if state else None
+
+
+def _airflow_sentinel_if_live(path: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Liveness of a sentinel written by the ``edgeguard_baseline`` DAG.
+
+    The run state from the Airflow REST API is authoritative when available. Without it the
+    sentinel is trusted until it is older than ``EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC``.
+    """
+    dag_id = str(data.get("dag_id") or "")
+    run_id = str(data.get("run_id") or "")
+    state = _airflow_run_state(dag_id, run_id)
+    if state is not None:
+        if state in _ACTIVE_RUN_STATES:
+            return data
+        logger.warning(
+            "Stale baseline lock (DAG run %s/%s is %s) — removing %s",
+            dag_id,
+            run_id,
+            state,
+            path,
+        )
+        _safe_remove(path)
+        return None
+    age_sec = _sentinel_age_sec(data)
+    if age_sec > _max_age_sec():
+        logger.warning(
+            "Stale baseline lock (DAG run %s/%s, age %.0fs > max %.0fs, run state not available) — removing %s",
+            dag_id,
+            run_id,
+            age_sec,
+            _max_age_sec(),
+            path,
+        )
+        _safe_remove(path)
+        return None
+    return data
+
+
 def _max_age_sec() -> float:
     raw = os.environ.get("EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC")
     if not raw:
@@ -129,10 +228,12 @@ def is_baseline_running() -> Optional[Dict[str, Any]]:
     if data is None:
         return None
 
+    if sentinel_holder(data) == HOLDER_AIRFLOW_DAG_RUN:
+        return _airflow_sentinel_if_live(path, data)
+
     # Validate fields — tolerate missing/garbled state by treating as stale.
     pid = data.get("pid")
     host = data.get("host", "")
-    started_at = data.get("started_at", "")
     try:
         pid_int = int(pid) if pid is not None else 0
     except (TypeError, ValueError):
@@ -160,11 +261,7 @@ def is_baseline_running() -> Optional[Dict[str, Any]]:
     # Age check — ONLY for cross-host sentinels, where we can't verify the
     # PID from here. If a baseline ran on another host and crashed without
     # cleaning up, this reaps the sentinel after the configured max age.
-    try:
-        started_dt = datetime.fromisoformat(started_at)
-        age_sec = (datetime.now(timezone.utc) - started_dt).total_seconds()
-    except (TypeError, ValueError):
-        age_sec = float("inf")
+    age_sec = _sentinel_age_sec(data)
 
     if age_sec > _max_age_sec():
         logger.warning(
@@ -262,10 +359,14 @@ def _is_corrupt_sentinel(path: str) -> bool:
     return not isinstance(parsed, dict)
 
 
-def acquire_baseline_lock() -> bool:
+def acquire_baseline_lock(holder: Optional[Dict[str, Any]] = None) -> bool:
     """
     Write the sentinel file. Returns True on success, False if another
     live baseline already holds the lock (caller should not proceed).
+
+    ``holder`` is None for the in-process CLI baseline (PID-based liveness) or
+    ``{"dag_id": ..., "run_id": ...}`` for the ``edgeguard_baseline`` DAG, whose
+    liveness is the DAG-run state (see the module docstring).
 
     The caller is responsible for calling `release_baseline_lock()` on
     exit — both success and failure paths. `_run_pipeline_inner` wraps
@@ -299,22 +400,25 @@ def acquire_baseline_lock() -> bool:
     existing = is_baseline_running()
     if existing is not None:
         logger.error(
-            "Refusing to start baseline: another baseline is already running "
-            "(pid=%s host=%s started_at=%s). "
-            "If this is stale, delete %s and retry.",
-            existing.get("pid"),
-            existing.get("host"),
-            existing.get("started_at"),
+            "Refusing to start baseline: another baseline is already running (%s). If this is stale, delete %s and retry.",
+            describe_holder(existing),
             path,
         )
         return False
 
-    payload = {
+    payload: Dict[str, Any] = {
         "pid": os.getpid(),
         "host": socket.gethostname(),
         "started_at": datetime.now(timezone.utc).isoformat(),
         "monotonic_started": time.monotonic(),
     }
+    if holder is not None:
+        dag_id = str(holder.get("dag_id") or "")
+        run_id = str(holder.get("run_id") or "")
+        if not dag_id or not run_id:
+            logger.error("Refusing to acquire the baseline lock for a DAG run without dag_id/run_id: %r", holder)
+            return False
+        payload.update({"holder": HOLDER_AIRFLOW_DAG_RUN, "dag_id": dag_id, "run_id": run_id})
     serialized = json.dumps(payload).encode("utf-8")
 
     # Atomic create-or-fail. If FileExistsError fires, a competitor slipped
@@ -405,22 +509,41 @@ def acquire_baseline_lock() -> bool:
             pass
         return False
 
-    logger.info(
-        "Acquired baseline lock at %s (pid=%s host=%s)",
-        path,
-        payload["pid"],
-        payload["host"],
-    )
+    logger.info("Acquired baseline lock at %s (%s)", path, describe_holder(payload))
     return True
 
 
-def release_baseline_lock() -> None:
-    """Remove the sentinel. Safe to call even if never acquired (idempotent)."""
+def release_baseline_lock(holder: Optional[Dict[str, Any]] = None) -> None:
+    """Remove the sentinel. Safe to call even if never acquired (idempotent).
+
+    A sentinel held by a DAG run is removed only when ``holder`` names the same ``run_id``;
+    a process sentinel only by the process that wrote it.
+    """
     path = baseline_lock_path()
     # Only remove if the sentinel belongs to this process — prevents a
     # crash-and-restart race where we'd delete someone else's lock.
     data = _read_sentinel(path)
     if data is None:
+        return
+    if sentinel_holder(data) == HOLDER_AIRFLOW_DAG_RUN:
+        requested = str((holder or {}).get("run_id") or "")
+        if not requested or requested != str(data.get("run_id") or ""):
+            logger.warning(
+                "Not removing baseline lock: held by %s, release requested by %s",
+                describe_holder(data),
+                f"DAG run {holder.get('dag_id')}/{requested}" if holder else f"pid={os.getpid()}",
+            )
+            return
+        _safe_remove(path)
+        logger.info("Released baseline lock at %s (%s)", path, describe_holder(data))
+        return
+    if holder is not None:
+        logger.warning(
+            "Not removing baseline lock: held by %s, release requested by DAG run %s/%s",
+            describe_holder(data),
+            holder.get("dag_id"),
+            holder.get("run_id"),
+        )
         return
     try:
         pid_val = int(data.get("pid", 0))
@@ -446,7 +569,6 @@ def baseline_skip_reason() -> Optional[str]:
     if data is None:
         return None
     return (
-        f"EdgeGuard baseline is running (pid={data.get('pid')}, "
-        f"host={data.get('host')}, started_at={data.get('started_at')}) — "
+        f"EdgeGuard baseline is running ({describe_holder(data)}) — "
         "skipping scheduled collector run to avoid racing MISP/Neo4j writes"
     )
