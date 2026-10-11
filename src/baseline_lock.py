@@ -46,8 +46,11 @@ The sentinel records who holds it:
   (``airflow_client.get_dag_run``) is authoritative when available, and the
   sentinel is otherwise trusted until it is older than
   ``EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC`` (default 48 h, above the DAG's
-  32 h ``dagrun_timeout``). ``baseline_release_lock`` (``ALL_DONE``)
-  removes it at the end of the run.
+  32 h ``dagrun_timeout``). ``baseline_release_lock`` removes it after a
+  successful run. A ``failed`` run keeps the sentinel (clearing the failed
+  task resumes the same run, which must stay under the mutex) until the age
+  cap; a ``success`` state prunes it. Acquiring again for the same run id is
+  idempotent (task retries, manual re-runs).
 
 Why not Airflow pools / ExternalTaskSensor
 ------------------------------------------
@@ -91,6 +94,10 @@ HOLDER_PROCESS = "process"
 HOLDER_AIRFLOW_DAG_RUN = "airflow_dag_run"
 # DAG-run states in which the holder is alive.
 _ACTIVE_RUN_STATES = frozenset({"queued", "running"})
+# DAG-run state after which the sentinel is pruned. ``failed`` is deliberately absent: a failed
+# baseline run is resumed by clearing the failed task (the checkpoint design of the DAG), and the
+# resumed run must still hold the lock; its sentinel is kept until the age cap instead.
+_FINISHED_RUN_STATES = frozenset({"success"})
 
 
 def _repo_root() -> str:
@@ -178,9 +185,9 @@ def _airflow_sentinel_if_live(path: str, data: Dict[str, Any]) -> Optional[Dict[
     dag_id = str(data.get("dag_id") or "")
     run_id = str(data.get("run_id") or "")
     state = _airflow_run_state(dag_id, run_id)
-    if state is not None:
-        if state in _ACTIVE_RUN_STATES:
-            return data
+    if state in _ACTIVE_RUN_STATES:
+        return data
+    if state in _FINISHED_RUN_STATES:
         logger.warning(
             "Stale baseline lock (DAG run %s/%s is %s) — removing %s",
             dag_id,
@@ -190,12 +197,15 @@ def _airflow_sentinel_if_live(path: str, data: Dict[str, Any]) -> Optional[Dict[
         )
         _safe_remove(path)
         return None
+    # ``failed`` (resumable by clearing the failed task) or the run state is not available:
+    # trust the sentinel until the age cap.
     age_sec = _sentinel_age_sec(data)
     if age_sec > _max_age_sec():
         logger.warning(
-            "Stale baseline lock (DAG run %s/%s, age %.0fs > max %.0fs, run state not available) — removing %s",
+            "Stale baseline lock (DAG run %s/%s, state %s, age %.0fs > max %.0fs) — removing %s",
             dag_id,
             run_id,
+            state or "not available",
             age_sec,
             _max_age_sec(),
             path,
@@ -399,6 +409,14 @@ def acquire_baseline_lock(holder: Optional[Dict[str, Any]] = None) -> bool:
     # there's a live baseline.
     existing = is_baseline_running()
     if existing is not None:
+        if (
+            holder is not None
+            and sentinel_holder(existing) == HOLDER_AIRFLOW_DAG_RUN
+            and str(existing.get("run_id") or "") == str(holder.get("run_id") or "")
+        ):
+            # Idempotent for the owning run: a retry or manual re-run of the acquiring task.
+            logger.info("Baseline lock at %s is already held by this DAG run (%s)", path, describe_holder(existing))
+            return True
         logger.error(
             "Refusing to start baseline: another baseline is already running (%s). If this is stale, delete %s and retry.",
             describe_holder(existing),

@@ -2747,7 +2747,8 @@ def _baseline_acquire_lock(**context) -> None:
     Runs before the destructive ``baseline_clean`` step. The scheduled DAGs check the
     sentinel at task start (``baseline_skip_reason``) and skip while it is held; the
     holder's liveness is the DAG-run state through the Airflow REST API, with the sentinel
-    age as fallback (see ``src/baseline_lock.py``). A task of a scheduled DAG that is
+    age as fallback (see ``src/baseline_lock.py``). Idempotent for the same run id, so a
+    retry or a manual re-run of this task succeeds. A task of a scheduled DAG that is
     already running when the lock is taken completes its current write.
     """
     from baseline_lock import acquire_baseline_lock, baseline_lock_path, is_baseline_running
@@ -2791,7 +2792,9 @@ baseline_release_lock_task = PythonOperator(
     task_id="baseline_release_lock",
     python_callable=_baseline_release_lock,
     execution_timeout=timedelta(minutes=2),
-    trigger_rule=TriggerRule.ALL_DONE,
+    # Only after a successful chain: a failed run keeps the lock so that clearing the failed task
+    # resumes the same run under the mutex (see src/baseline_lock.py for how the sentinel is reaped).
+    trigger_rule=TriggerRule.ALL_SUCCESS,
     dag=baseline_dag,
 )
 
@@ -3457,7 +3460,9 @@ baseline_complete = BashOperator(
 # ─────────────────────────────────────────────────────────────────────────────
 # Baseline lock (Issue #57, closed 2026-10): ``baseline_acquire_lock`` writes the
 # ``baseline_in_progress.lock`` sentinel with this DAG run as holder before the destructive
-# ``baseline_clean`` step; ``baseline_release_lock`` (ALL_DONE) removes it after the postcheck.
+# ``baseline_clean`` step; ``baseline_release_lock`` removes it after a successful run. A failed run
+# keeps the lock so that clearing the failed task resumes under the mutex (the liveness check keeps a
+# failed run's sentinel until the age cap and prunes it once the run state is success).
 # The scheduled DAGs skip while the sentinel is held. The earlier PID-based attempt failed
 # because the task process that writes the sentinel exits while the DAG run continues; the
 # holder's liveness is now the DAG-run state (Airflow REST API) with the sentinel age as
@@ -3483,6 +3488,7 @@ baseline_complete = BashOperator(
     >> baseline_postcheck_task  # PR-N21: invariant check, fails DAG on Campaign=0 etc.
     >> baseline_complete
 )
-# Release the lock whatever the outcome of the chain (ALL_DONE). After a DAG-run timeout no task
-# runs any more; the liveness check in baseline_lock then reaps the sentinel (run state, then age).
-baseline_postcheck_task >> baseline_release_lock_task
+# Released only after a successful run. A failed or timed-out run keeps the sentinel: clearing the
+# failed task resumes the run under the mutex; an abandoned run's sentinel is reaped by the liveness
+# check at the age cap (48 h default) or removed by the operator.
+baseline_complete >> baseline_release_lock_task

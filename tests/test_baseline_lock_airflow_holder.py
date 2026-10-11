@@ -73,14 +73,36 @@ class TestAirflowRunHolder:
         assert baseline_lock.is_baseline_running() is not None
         assert run_state["calls"][-1] == (HOLDER["dag_id"], HOLDER["run_id"])
 
-    def test_terminal_run_state_prunes_the_sentinel(self, lock_path, run_state, caplog):
+    def test_successful_run_state_prunes_the_sentinel(self, lock_path, run_state, caplog):
         run_state["state"] = "running"
         assert baseline_lock.acquire_baseline_lock(holder=HOLDER)
-        run_state["state"] = "failed"
+        run_state["state"] = "success"
         with caplog.at_level(logging.WARNING, logger="baseline_lock"):
             assert baseline_lock.is_baseline_running() is None
         assert not lock_path.exists()
-        assert any("is failed" in r.message for r in caplog.records)
+        assert any("is success" in r.message for r in caplog.records)
+
+    def test_failed_run_keeps_the_lock_until_the_age_cap(self, lock_path, run_state):
+        """A failed baseline is resumed by clearing the failed task; the resumed run must stay under the mutex."""
+        run_state["state"] = "running"
+        assert baseline_lock.acquire_baseline_lock(holder=HOLDER)
+        run_state["state"] = "failed"
+        assert baseline_lock.is_baseline_running() is not None
+        assert lock_path.exists()
+        _rewrite(lock_path, started_at=(datetime.now(timezone.utc) - timedelta(hours=49)).isoformat())
+        assert baseline_lock.is_baseline_running() is None
+        assert not lock_path.exists()
+
+    def test_acquire_is_idempotent_for_the_same_run(self, lock_path, run_state, caplog):
+        run_state["state"] = "running"
+        assert baseline_lock.acquire_baseline_lock(holder=HOLDER) is True
+        with caplog.at_level(logging.INFO, logger="baseline_lock"):
+            assert baseline_lock.acquire_baseline_lock(holder=HOLDER) is True
+        assert any("already held by this DAG run" in r.message for r in caplog.records)
+        assert (
+            baseline_lock.acquire_baseline_lock(holder={"dag_id": HOLDER["dag_id"], "run_id": "manual__other"}) is False
+        )
+        assert json.loads(lock_path.read_text())["run_id"] == HOLDER["run_id"]
 
     def test_api_unavailable_trusts_a_fresh_sentinel_and_reaps_an_old_one(self, lock_path, run_state):
         run_state["state"] = None
@@ -162,18 +184,21 @@ class TestDagWiring:
             < chain.index(">> baseline_clean_task")
             < chain.index(">> baseline_start")
         )
-        assert "baseline_postcheck_task >> baseline_release_lock_task" in dag_src
+        assert "baseline_complete >> baseline_release_lock_task" in dag_src
 
-    def test_release_task_runs_whatever_the_outcome(self, dag_src):
+    def test_release_task_runs_only_after_a_successful_chain(self, dag_src):
+        """A failed run keeps the lock so that clearing the failed task resumes under the mutex."""
         block = dag_src[dag_src.index("baseline_release_lock_task = PythonOperator(") :]
         block = block[: block.index("\n)\n")]
-        assert "trigger_rule=TriggerRule.ALL_DONE" in block
+        assert "trigger_rule=TriggerRule.ALL_SUCCESS" in block
+        assert "ALL_DONE" not in block
 
     def test_acquire_callable_takes_the_lock_and_refuses_a_second_run(self, lock_path, run_state):
         ns = _dag_lock_callables()
         run_state["state"] = "running"
         ns["_baseline_acquire_lock"](dag_run=_Run("manual__first"))
         assert json.loads(lock_path.read_text())["run_id"] == "manual__first"
+        ns["_baseline_acquire_lock"](dag_run=_Run("manual__first"))  # retry of the task: idempotent
         with pytest.raises(_AirflowException, match="Another baseline holds"):
             ns["_baseline_acquire_lock"](dag_run=_Run("manual__second"))
         ns["_baseline_release_lock"](dag_run=_Run("manual__second"))

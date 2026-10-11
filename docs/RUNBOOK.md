@@ -437,7 +437,11 @@ The 730-day baseline runs for ~32h (matches the baseline DAG's
 `checkpoints/baseline_in_progress.lock` sentinel at task start and skip
 while the `edgeguard_baseline` DAG holds it (`baseline_acquire_lock`,
 taken before the destructive `baseline_clean` step; released by
-`baseline_release_lock` with `ALL_DONE`). This is Issue #57 (root cause
+`baseline_release_lock` after a successful run). A failed run keeps the
+lock so that clearing the failed task resumes under the mutex; an
+abandoned run's sentinel is reaped at the age cap, or remove it by hand:
+`docker compose exec airflow rm /opt/airflow/checkpoints/baseline_in_progress.lock`.
+This is Issue #57 (root cause
 in `docs/flow_audits/01_baseline_sequence.md` Finding 1, the 2026-04-19
 MISP-PHP-FPM exhaustion + 14.7% NVD loss), closed in 2026-10. The
 holder's liveness is the DAG-run state read through the Airflow REST
