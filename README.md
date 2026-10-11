@@ -672,10 +672,10 @@ Set the flags in `.env`; `docker-compose.yml` forwards them into the `airflow` c
 - Edges carry `confidence_score` plus provenance fields — `sources[]`/`imported_at` on sync-created edges, `match_type` on relationship-builder edges
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 
-### 8. Real-Time Alerts
-- NATS integration for instant notifications
-- Zone-based topic routing — exact subject `resilmesh.threats.zone.<zone>` (e.g. `resilmesh.threats.zone.healthcare`); wildcard consumers subscribe to `resilmesh.threats.zone.*`
-- Multi-zone threat detection
+### 8. Real-Time Alerts (inbound, library code)
+- NATS alert loop: an alert received on `resilmesh.alerts.zone.<zone>` becomes an `Alert` node with its enrichment (`src/alert_processor.py`); payloads failing validation are rejected with a reason
+- Zone-based subjects — exact subject `resilmesh.threats.zone.<zone>` (e.g. `resilmesh.threats.zone.healthcare`) for the planned threat publication; wildcard consumers subscribe to `resilmesh.threats.zone.*`
+- Not yet deployed: a consumer service, publishing the enriched response back, and the subjects, schema and hosting agreed with ResilMesh (see *In Progress / Planned*)
 
 ### 9. Production-Ready CLI
 - `doctor` — Diagnose connectivity and config issues
@@ -1206,7 +1206,9 @@ recent = metrics.get_recent_runs(5)
 
 ### Metrics Storage
 
-Metrics are persisted to `data/metrics.json` for durability across restarts.
+Metrics are exposed to Prometheus (multi-process directory served by the `metrics` compose service,
+see [docs/PROMETHEUS_SETUP.md](docs/PROMETHEUS_SETUP.md)) and summarised in the task logs. There is no
+JSON persistence of run metrics: the `data/metrics.json` writer in `src/metrics.py` has no caller.
 
 ---
 
@@ -1227,7 +1229,7 @@ EdgeGuard v2026.10.10 is **production-test ready** and is the code for the Octob
 - **Post-Sync Enrichment**: IOC confidence decay, Campaign node materialisation (with cleanup for retired indicators), Vulnerability↔CVE bridge, actor alias de-duplication (2026-10), legacy co-occurrence calibration (no co-occurrence edges remain since whole-event co-occurrence linking was removed in 2026-10)
 - **Multi-Zone Sector Filtering**: Healthcare, Energy, Finance, Global — ~300 weighted keywords (2026-10: ICS/energy and payment/banking vendors and product families as they appear in NVD CPE strings) with negative exclusions, zone validation whitelist in Sector node creation
 - **GraphQL API** (port 4001): Strawberry/FastAPI with CORS; all node types queryable including Tool; 14 enrichment fields resolved; GraphiQL opt-in via `EDGEGUARD_GRAPHQL_PLAYGROUND=true`
-- **FastAPI REST API** (port 8000): Sector-filtered, rate-limited, authenticated endpoints; `/graph/explore` with 4 views (Malware, Actors, Indicators, CVEs)
+- **FastAPI REST API** (port 8000): Sector-filtered data endpoints, rate-limited and authenticated (`/health` is public); `/graph/explore` with 4 views (Malware, Actors, Indicators, CVEs)
 - **Interactive Graph Explorer**: Browser-based Cytoscape.js visualization with live Neo4j data, CISA KEV highlighting, search, zone filtering ([docs/GRAPH_EXPLORER.md](docs/GRAPH_EXPLORER.md))
 - **Full-stack Docker Compose**: Neo4j + Airflow + REST API + GraphQL in one `docker compose up -d`; also supports conda/venv/bare-metal with external MISP+Neo4j
 - **CI/CD**: Lint (ruff), type-check (mypy), full pytest suite (2,900+ tests, 30% coverage gate), Docker build, pip-audit, BugBot

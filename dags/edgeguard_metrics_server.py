@@ -202,16 +202,17 @@ metrics_server_task = PythonOperator(
 )
 
 # ================================================================================
-# ALTERNATIVE DAG: Metrics Server with Auto-Restart
+# ALTERNATIVE DAG: scheduled metrics server (bare-metal installs only)
 # ================================================================================
 
-# This DAG runs the metrics server with a schedule, allowing Airflow to
-# restart it periodically if it fails.
+# Same server task under a schedule, so a failed run is retried by Airflow's retry policy; it
+# does not restart a task that is still running. In the Compose deployment both DAGs exit at once
+# because PROMETHEUS_MULTIPROC_DIR is set and the `metrics` service serves the endpoint.
 
 dag_with_restart = DAG(
     "edgeguard_metrics_server_scheduled",
     default_args=default_args,
-    description="EdgeGuard Metrics Server (Auto-Restart)",
+    description="EdgeGuard Metrics Server (scheduled variant for bare-metal installs)",
     schedule="@once",  # Run once, restart on failure
     start_date=pendulum.datetime(2025, 1, 1, tz="UTC"),
     catchup=False,

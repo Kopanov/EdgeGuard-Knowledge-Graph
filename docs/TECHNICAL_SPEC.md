@@ -610,10 +610,13 @@ CREATE INDEX organizationunit_name FOR (ou:OrganizationUnit) ON (ou.name);
 
 ### FastAPI Query Engine
 
-All endpoints except `GET /health` require the `X-API-Key` header
-(`_verify_api_key`, constant-time compare) and are rate-limited (shared
-read limit; `POST /admin/query` has its own stricter admin limit and
-additionally requires `X-Admin-Token`). Routes verified against
+All data endpoints require the `X-API-Key` header (`_verify_api_key`,
+constant-time compare) and are rate-limited (shared read limit;
+`POST /admin/query` has its own stricter admin limit and additionally
+requires `X-Admin-Token`). `GET /health` is public. The interactive
+documentation routes (`/docs`, `/redoc`, `/openapi.json`) are served
+without a key only when `EDGEGUARD_ENV` names a non-production
+environment; in production they require the key (2026-10). Routes verified against
 `src/query_api.py` at HEAD — alert *enrichment* is **not** a REST
 endpoint; it is NATS-based via `src/alert_processor.py` (see *NATS
 Topics* below).
@@ -621,7 +624,7 @@ Topics* below).
 | Method | Path | Description | Parameters |
 |--------|------|-------------|------------|
 | GET | `/health` | Health check — **HTTP 200** always; JSON includes `status` (`ok`/`degraded`), `neo4j_connected` (from `Neo4jClient.health_check()`: ping + APOC). | - |
-| POST | `/query` | Natural-language threat query | `query`, `zone`, `limit` (body) |
+| POST | `/query` | Natural-language threat query | `query`, `zone`, `limit`, `return_cypher` (body) |
 | POST | `/search/indicator` | Search a single indicator. Input is canonicalized via `ioc_normalize.canonicalize_lookup` (refang, NFC, case-fold, type resolution) before querying — see *Type Mapping* below. | `value`, `indicator_type`, `zone` (body) |
 | GET | `/zone/{zone}` | Threats for a zone/sector | `zone` (path), `limit`, `severity` |
 | GET | `/indicators` | List indicators with filters | `indicator_type`, `zone`, `source`, `limit`, `offset` |
@@ -727,53 +730,55 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 
 ### Output (EdgeGuard → ResilMesh)
 
+The response is the `EnrichedAlert` dataclass of `src/alert_processor.py` serialised with
+`to_dict()`. Publishing it back to NATS is not implemented yet (the processor returns it to its
+caller); the schema is:
+
 ```json
 {
   "alert_id": "wazuh-001",
   "enriched": true,
-  "edgeguard_version": "2026.10.10",
+  "edgeguard_version": "<CalVer from pyproject.toml>",
   "latency_ms": 120,
+  "query_metadata": {
+    "indicator_found": true,
+    "malware_found": true,
+    "actor_found": true,
+    "techniques_found": 3
+  },
   "enrichment": {
-    "indicator": {
-      "value": "192.168.1.100",
-      "type": "ipv4",
-      "confidence_score": 0.8
-    },
-    "malware": [{
-      "name": "TrickBot",
-      "family": "TrickBot",
-      "types": ["trojan", "banking_trojan"]
-    }],
-    "threat_actors": [{
-      "name": "Wizard Spider",
-      "aliases": ["IRON LIBERTY", "TEMP.MixMaster"]
-    }],
-    "techniques": [{
-      "mitre_id": "T1021.002",
-      "name": "Remote Services: SMB/Windows Admin Shares",
-      "tactic": "Lateral Movement"
-    }],
-    "cves": [{
-      "cve_id": "CVE-2021-43297",
-      "cvss_score": 9.8,
-      "severity": "Critical",
-      "description": "Apache Log4j2 JNDI features..."
-    }],
-    "network_context": {
-      "resolved_ip": "192.168.1.100",
-      "targeted_hosts": ["hospital-server-01"]
-    },
-    "affected_zones": ["healthcare", "finance"],
-    "confidence": 0.85
-  }
+    "indicator": "192.168.1.100",
+    "indicator_type": "ip",
+    "known_malware": ["TrickBot", "Emotet"],
+    "threat_actors": ["Wizard Spider"],
+    "techniques": [
+      {"mitre_id": "T1071", "name": "Application Layer Protocol", "tactic": "Command and Control"}
+    ],
+    "cves": ["CVE-2021-43297"],
+    "confidence": 0.85,
+    "first_seen": "2025-01-15",
+    "last_updated": "2026-03-07",
+    "sectors_affected": ["healthcare", "finance"],
+    "cross_zone_detected": true,
+    "recommendations": [
+      "Block indicator 192.168.1.100 at perimeter",
+      "Check hospital-server-01 for compromise indicators"
+    ]
+  },
+  "original_alert": { "...": "copy of the incoming alert" }
 }
 ```
 
 ---
 
-## Performance SLAs
+## Performance targets
 
-| Metric | Target | Measurement |
+The values below are design targets. None of them is measured in production today: the API
+exposes no latency histogram, the alert enrichment path has no deployed consumer, and no load
+test has been run against the edge deployment (production-readiness check, 2026-10-11). They
+are kept as the acceptance thresholds for a future measurement, not as guarantees.
+
+| Metric | Target | Measurement (planned) |
 |--------|--------|-------------|
 | Graph query latency (median) | <100-150ms | Neo4j query log |
 | End-to-end p95 response | ≤2.0 seconds | API response time |
@@ -825,9 +830,7 @@ together so they cannot drift.
 | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j connection URI |
 | `NEO4J_USER` | `neo4j` | Neo4j username |
 | `NEO4J_PASSWORD` | - | Neo4j password |
-| `NATS_SERVERS` | `nats://localhost:4222` | NATS server URLs |
-| `NATS_TLS_CERT` | - | TLS certificate path |
-| `NATS_TLS_KEY` | - | TLS key path |
+| `NATS_SERVERS` | - | Documented NATS server URLs. No code path reads this variable today: `NATSClient` receives its server list from its caller and no consumer service is deployed (see *NATS Topics*). |
 | `MISP_URL` | - | MISP instance URL |
 | `MISP_API_KEY` | - | MISP API key |
 | `EDGEGUARD_MISP_HTTP_HOST` | (unset) | Optional HTTP `Host` when URL hostname ≠ Apache `ServerName` (e.g. Docker DNS `misp_misp_1` vs vhost `misp-edgeguard`). See [MISP_SOURCES.md](MISP_SOURCES.md). |
@@ -843,6 +846,14 @@ together so they cannot drift.
 | `EDGEGUARD_MISP_PAGE_SIZE` | `500` | MISP `/events/index` page size used by the **primary** index path in `run_misp_to_neo4j._fetch_edgeguard_events_via_requests_index`. |
 | `EDGEGUARD_MISP_MAX_PAGES` | `100` | MISP `/events/index` page cap on the primary index path. |
 | `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | `172800` (48h) | Cross-host stale-lock TTL for the `baseline_lock` sentinel (PR-N29 M3, bumped from 24h → 48h to give a 16h buffer above the 32h `dagrun_timeout`). See `src/baseline_lock.py`. |
+| `EDGEGUARD_API_KEY` | - | Shared secret for the REST and GraphQL data endpoints (`X-API-Key`); required when `EDGEGUARD_ENV` is production (unset or empty counts as production). |
+| `EDGEGUARD_ENV` | - (production) | Environment name; `dev`, `development`, `local`, `staging`, `test` are non-production. Forwarded to every container by `docker-compose.yml`. |
+| `EDGEGUARD_API_HOST` / `EDGEGUARD_API_PORT` / `EDGEGUARD_API_WORKERS` | `127.0.0.1` / `8000` / `1` | REST bind address, port and worker count (compose: `0.0.0.0`, 8000 published on loopback, 2 workers). |
+| `EDGEGUARD_GRAPHQL_HOST` / `EDGEGUARD_GRAPHQL_PORT` / `EDGEGUARD_GRAPHQL_WORKERS` / `EDGEGUARD_GRAPHQL_PLAYGROUND` / `EDGEGUARD_GRAPHQL_MAX_DEPTH` | `127.0.0.1` / `4001` / `1` / `false` / code default | GraphQL bind, port, workers, interactive explorer, query depth cap. |
+| `EDGEGUARD_CORS_ORIGINS` | `http://localhost,http://localhost:3000` | CORS allowlist of both APIs (comma-separated). |
+| `EDGEGUARD_MAX_BODY_BYTES` | `1048576` | Request body cap of both APIs. |
+| `EDGEGUARD_ALLOW_UNAUTH` | - | Last-resort opt-in to start an API without a key on a non-loopback bind (documented in `.env.example`). |
+| `EDGEGUARD_ENABLE_ADMIN_QUERY` / `EDGEGUARD_ADMIN_TOKEN` | `false` / - | Raw Cypher route `POST /admin/query` and its token. |
 | `LOG_LEVEL` | `INFO` | Logging level |
 
 **Internal constants (no env override today; tune by editing `src/run_misp_to_neo4j.py`):**
