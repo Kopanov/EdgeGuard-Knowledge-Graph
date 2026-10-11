@@ -1144,15 +1144,36 @@ class _TimeoutSession:
         return getattr(self._inner, name)
 
 
+def _configured_database() -> Optional[str]:
+    """``NEO4J_DATABASE`` when set and non-empty, else None (the server's default database).
+
+    ``config.NEO4J_DATABASE`` was read but never passed to a session, so the variable had no
+    effect; only an explicit value is forwarded, which keeps single-database servers unchanged.
+    """
+    return (os.getenv("NEO4J_DATABASE") or "").strip() or None
+
+
+def session_kwargs() -> Dict[str, Any]:
+    """Keyword arguments for a raw ``driver.session(...)`` call outside this client (CLI checks,
+    version probe): ``{"database": <name>}`` when ``NEO4J_DATABASE`` is set, else empty, so every
+    session of the deployment targets the same database."""
+    database = _configured_database()
+    return {"database": database} if database else {}
+
+
 class _TimeoutDriver:
-    """Driver proxy whose sessions translate ``timeout=`` into transaction timeouts (see above)."""
+    """Driver proxy whose sessions translate ``timeout=`` into transaction timeouts (see above)
+    and target the configured database when ``NEO4J_DATABASE`` is set."""
 
-    __slots__ = ("_raw",)
+    __slots__ = ("_raw", "_database")
 
-    def __init__(self, driver: Any) -> None:
+    def __init__(self, driver: Any, database: Optional[str] = None) -> None:
         self._raw = driver
+        self._database = database
 
     def session(self, **kwargs: Any) -> _TimeoutSession:
+        if self._database and "database" not in kwargs:
+            kwargs["database"] = self._database
         return _TimeoutSession(self._raw.session(**kwargs))
 
     def __getattr__(self, name: str) -> Any:
@@ -1191,7 +1212,8 @@ class Neo4jClient:
                     max_connection_lifetime=3600,
                     max_connection_pool_size=50,
                     connection_acquisition_timeout=120,
-                )
+                ),
+                database=_configured_database(),
             )
 
             # Verify connection with health check

@@ -8,7 +8,7 @@ MISP-as-Source-of-Truth Architecture:
 - MISP preflight (**PythonOperator**) before collector operations
 
 Config:
-- MISP_REFRESH_INTERVAL: How often to fetch sources and push to MISP (hours)
+- MISP_REFRESH_INTERVAL: informational only (logged at parse time); the collector DAGs run on fixed cron schedules
 - NEO4J_SYNC_INTERVAL: How often to sync MISP to Neo4j (hours)
 - EDGEGUARD_COLLECT_SOURCES: Optional comma-separated allowlist of collector names
   (e.g. ``otx,nvd,cisa``). Unset = all collectors run. ``none`` or ``-`` = disable all.

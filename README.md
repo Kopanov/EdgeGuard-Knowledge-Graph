@@ -893,7 +893,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `NEO4J_URI` | Neo4j connection URI (Compose **`x-common-env`** defaults to **`bolt://neo4j:7687`**; host scripts often use **`bolt://localhost:7687`**) | see **`.env.example`** |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j password | *(required, no default)* |
-| `NEO4J_DATABASE` | Neo4j database name | `neo4j` |
+| `NEO4J_DATABASE` | Database for every Neo4j session (multi-database servers only; unset = the server's default). Forwarded by Compose. | *(unset)* |
 | `EDGEGUARD_SSL_VERIFY` | Verify TLS certificates for **HTTPS** (MISP API, collectors, MISP→Neo4j sync `requests` / PyMISP). Unset or missing defaults to **`true`**. If unset or empty, **`SSL_VERIFY`** is read as the same flag (`true`/`false`). **`SSL_CERT_VERIFY`** is **not** used — set **`EDGEGUARD_SSL_VERIFY`** instead. | `true` |
 | `OTX_API_KEY` | AlienVault OTX API key | *(optional)* |
 | `NVD_API_KEY` | NVD API key | *(optional)* |
@@ -967,8 +967,8 @@ These were previously documented only in the "Recommended Memory Settings" table
 |----------|-------------|---------|
 | `EDGEGUARD_BASELINE_LOCK_PATH` | Cross-process baseline mutex lock file (written by the `edgeguard_baseline` DAG's `baseline_acquire_lock` task and by the in-process CLI baseline path) | `<repo_root>/checkpoints/baseline_in_progress.lock` (derived from the module location — independent of `EDGEGUARD_BASE_DIR`) |
 | `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` | Stale-lock auto-clear timeout. After this, a leftover lock from a crashed baseline is treated as releasable (same-host PID-liveness check bypasses the age cap). | `172800` (48h — bumped from 24h in PR-N29; the 32h baseline window outlives 24h) |
-| `EDGEGUARD_CHECKPOINT_DIR` | Override default checkpoint directory (path-traversal guarded — must stay inside project root) | `<project_root>/checkpoints/` |
-| `EDGEGUARD_STATE_DIR` | Override default state directory | `<project_root>/state/` |
+| `EDGEGUARD_CHECKPOINT_DIR` | Override default checkpoint directory (path-traversal guarded — must stay inside project root; host-side CLI, the Airflow container uses `/opt/airflow/checkpoints`, bind-mounted from `./checkpoints`) | `<project_root>/checkpoints/` |
+| `EDGEGUARD_STATE_DIR` | Override default state directory (host-side CLI; the Airflow container uses `/opt/airflow/state`, bind-mounted from `./state`) | `<project_root>/state/` |
 | `EDGEGUARD_BASE_DIR` | Override project root directory (used by DAGs for path resolution) | `<directory containing dags/>` |
 | `EDGEGUARD_VERSION` | Sets only the `version` label on the Prometheus `APP_INFO` metric. Everywhere else (APIs, logs) the version comes from `package_meta.package_version()` (pyproject CalVer) and ignores this var. | `1.0.0` (metrics label fallback) |
 | `EDGEGUARD_ENABLE_SLACK_ALERTS` | Enable Slack notifications on collector failure | *(unset)* |
