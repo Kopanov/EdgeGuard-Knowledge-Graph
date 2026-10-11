@@ -63,7 +63,7 @@ x-common-env: &common-env
   # edgeguard_baseline DAG: optional smoke-test overrides (see docs/BASELINE_SMOKE_TEST.md)
   EDGEGUARD_BASELINE_DAYS: ${EDGEGUARD_BASELINE_DAYS:-}
   EDGEGUARD_BASELINE_COLLECTION_LIMIT: ${EDGEGUARD_BASELINE_COLLECTION_LIMIT:-}
-  # MISP→Neo4j: items per Python sync chunk (default 1000); lower to reduce OOM. "0" or "all" = single pass (risky).
+  # MISP→Neo4j: items per Python sync chunk (default 500 in code); lower to reduce OOM. "0" or "all" = single pass (risky).
   EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE: ${EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE:-}
   # Relationship UNWIND batch for create_misp_relationships_batch (default 2000 in code if unset/empty).
   EDGEGUARD_REL_BATCH_SIZE: ${EDGEGUARD_REL_BATCH_SIZE:-}
@@ -90,6 +90,18 @@ x-common-env: &common-env
   EDGEGUARD_NVD_INCREMENTAL_DAYS: ${EDGEGUARD_NVD_INCREMENTAL_DAYS:-14}
   EDGEGUARD_DEFAULT_TLP: ${EDGEGUARD_DEFAULT_TLP:-white}
   EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE: ${EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE:-true}
+  # 2026-10 configuration forwarding (production-readiness check): variables read by the code
+  # that never reached the containers. Set-but-empty keeps the code default in every case below.
+  # Environment name — config.is_production_env() is fail-closed: unset or empty is treated as
+  # production (API key required, documentation routes key-gated); set dev / staging in .env for
+  # non-production stacks. Previously the value in .env never reached the containers.
+  EDGEGUARD_ENV: ${EDGEGUARD_ENV:-}
+  # Neo4j database for every session (multi-database servers only; empty = the server default).
+  NEO4J_DATABASE: ${NEO4J_DATABASE:-}
+  # REST and GraphQL CORS allowlist (same default as the code).
+  EDGEGUARD_CORS_ORIGINS: ${EDGEGUARD_CORS_ORIGINS:-http://localhost,http://localhost:3000}
+  # REST and GraphQL request body cap in bytes (code default 1048576; the parsers tolerate empty).
+  EDGEGUARD_MAX_BODY_BYTES: ${EDGEGUARD_MAX_BODY_BYTES:-}
 
 services:
   # ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +231,26 @@ services:
   # requirements-airflow-docker.txt and baked by Dockerfile.airflow. Do not pip install inside the container;
   # recreate would drop them. After pulling code or changing that file: docker compose build airflow && docker compose up -d airflow
   # ─────────────────────────────────────────────────────────────────────────────
+  # One-shot permission fix for the bind-mounted state directories (same pattern as the official
+  # Airflow Compose file): Docker creates missing host directories as root, and the Airflow
+  # container runs as uid 50000, which could then not write its checkpoints and sync state.
+  airflow-init:
+    image: edgeguard-airflow:3.3.2-python3.12
+    container_name: edgeguard_airflow_init
+    user: "0:0"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /opt/airflow/state /opt/airflow/checkpoints
+        chown -R 50000:0 /opt/airflow/state /opt/airflow/checkpoints
+        chmod -R u+rwX,g+rwX /opt/airflow/state /opt/airflow/checkpoints
+    volumes:
+      - ./state:/opt/airflow/state
+      - ./checkpoints:/opt/airflow/checkpoints
+    networks:
+      - edgeguard_net
+
   airflow:
     build:
       context: .
@@ -326,13 +358,42 @@ services:
       AIRFLOW_API_PASSWORD: ${AIRFLOW_API_PASSWORD:-}
       EDGEGUARD_PARENT_DAG_LIVENESS_CHECK: ${EDGEGUARD_PARENT_DAG_LIVENESS_CHECK:-true}
       EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC: ${EDGEGUARD_LIVENESS_CHECK_INTERVAL_SEC:-}
+      AIRFLOW_WEBSERVER_URL: ${AIRFLOW_WEBSERVER_URL:-http://localhost:8082}
+      # MISP push / sync tuning knobs documented in .env.example (2026-10 configuration forwarding).
+      # Variables the code parses with int()/float() carry the code default here, because a
+      # set-but-empty value would raise at import; the others tolerate empty.
+      EDGEGUARD_MISP_PUSH_BATCH_SIZE: ${EDGEGUARD_MISP_PUSH_BATCH_SIZE:-}
+      EDGEGUARD_MISP_BATCH_THROTTLE_SEC: ${EDGEGUARD_MISP_BATCH_THROTTLE_SEC:-}
+      EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC: ${EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC:-}
+      EDGEGUARD_MISP_EVENT_LOCK_PATH: ${EDGEGUARD_MISP_EVENT_LOCK_PATH:-/tmp/edgeguard_misp_get_or_create_event.lock}
+      EDGEGUARD_MAX_EVENT_ATTRIBUTES: ${EDGEGUARD_MAX_EVENT_ATTRIBUTES:-50000}
+      EDGEGUARD_MISP_PAGE_SIZE: ${EDGEGUARD_MISP_PAGE_SIZE:-500}
+      EDGEGUARD_MISP_MAX_PAGES: ${EDGEGUARD_MISP_MAX_PAGES:-100}
+      EDGEGUARD_MISP_RETRY_COOLDOWN_SEC: ${EDGEGUARD_MISP_RETRY_COOLDOWN_SEC:-15.0}
+      EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES: ${EDGEGUARD_MISP_MAX_ATTR_VALUE_BYTES:-4096}
+      EDGEGUARD_SYNC_INTERVAL_DAYS: ${EDGEGUARD_SYNC_INTERVAL_DAYS:-3}
+      EDGEGUARD_EARLIEST_IOC_DATE: ${EDGEGUARD_EARLIEST_IOC_DATE:-}
+      EDGEGUARD_MITRE_MAX_RELATIONSHIPS: ${EDGEGUARD_MITRE_MAX_RELATIONSHIPS:-}
+      EDGEGUARD_SUBPROCESS_TAIL_LINES: ${EDGEGUARD_SUBPROCESS_TAIL_LINES:-}
+      EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC: ${EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC:-}
+      # Operations-only escape hatches (truthy values disable a safeguard; leave unset in production).
+      EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION: ${EDGEGUARD_DISABLE_MERGE_COUNTER_INSPECTION:-}
+      EDGEGUARD_RESPECT_CALIBRATOR: ${EDGEGUARD_RESPECT_CALIBRATOR:-}
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro
       - airflow_logs:/opt/airflow/logs
       - airflow_db:/opt/airflow
       - metrics_multiproc:/opt/airflow/metrics_multiproc
+      # Shared with the host (2026-10): the sync state file, the collector checkpoints and the
+      # baseline lock sentinel live here. Before this, they lived only in the airflow_db volume and
+      # the host CLI (doctor, monitor, stats, checkpoint status) read empty host directories.
+      # airflow-init below creates the directories owned by the container user (uid 50000).
+      - ./state:/opt/airflow/state
+      - ./checkpoints:/opt/airflow/checkpoints
     depends_on:
+      airflow-init:
+        condition: service_completed_successfully
       neo4j:
         condition: service_healthy
       airflow_postgres:
@@ -490,6 +551,8 @@ services:
       EDGEGUARD_GRAPHQL_WORKERS: "2"
       # Set to "false" in production to disable the interactive GraphiQL explorer
       EDGEGUARD_GRAPHQL_PLAYGROUND: ${EDGEGUARD_GRAPHQL_PLAYGROUND:-false}
+      # Query depth cap of the GraphQL validation rules (code default when empty).
+      EDGEGUARD_GRAPHQL_MAX_DEPTH: ${EDGEGUARD_GRAPHQL_MAX_DEPTH:-}
       # PR-A audit fix (Bugbot MED on commit b2c0479): symmetric with the
       # api service above — forward EDGEGUARD_ALLOW_UNAUTH so the .env.example
       # escape hatch documentation actually works for graphql too.

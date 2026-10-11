@@ -428,6 +428,10 @@ the re-trigger is dedup-safe.
 
 ---
 
+## Shared state directories
+
+`./state` and `./checkpoints` are bind-mounted into the Airflow container (`/opt/airflow/state`, `/opt/airflow/checkpoints`), so `edgeguard doctor`, `monitor`, `stats` and `checkpoint status` on the host read the files the DAGs wrote (sync state, collector checkpoints, `baseline_in_progress.lock`). The `airflow-init` service creates the directories owned by uid 50000 before Airflow starts. Host-side deletes (`edgeguard checkpoint clear`, removing a stale sentinel) go through `docker compose exec airflow …` unless the host user owns the directories.
+
 ## Baseline-day protocol
 
 ### ⚠️ Baseline launch path — PICK ONE (CLI or DAG+pause)
