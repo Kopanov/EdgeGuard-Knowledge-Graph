@@ -197,6 +197,17 @@ class TestGraphQLLimits:
         errors = resp.json().get("errors") or []
         assert any("Query rejected" in (e.get("message") or "") for e in errors), resp.json()
 
+    def test_nesting_depth_is_checked_regardless_of_spread_order(self, monkeypatch):
+        """Bugbot on #151 round 3: memoising by name only let a chain spread as F0, F1, …, Fn (each at
+        root) escape the nesting check because every fragment was first seen on a short path."""
+        monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
+        parts = ["fragment F0 on Query { a: tactics { __typename } }"]
+        parts += [f"fragment F{i} on Query {{ ...F{i - 1} }}" for i in range(1, 41)]
+        query = " ".join(parts) + " query { " + " ".join(f"...F{i}" for i in range(41)) + " }"
+        resp = TestClient(graphql_api.app, raise_server_exceptions=False).post("/graphql", json={"query": query})
+        errors = resp.json().get("errors") or []
+        assert any("nesting deeper" in (e.get("message") or "") for e in errors), resp.json()
+
     def test_fragment_cycle_is_rejected_before_validation(self, monkeypatch):
         monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
         query = "fragment A on Query { ...B } fragment B on Query { ...A } query { ...A }"

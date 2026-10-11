@@ -828,16 +828,43 @@ def _expanded_selection_count(document: Any, cap: int, max_depth: int) -> tuple[
     (linear in document size). Returns ``(count, problem)``; ``problem`` names a fragment cycle or
     nesting deeper than ``max_depth``. Counting stops once ``cap`` is exceeded."""
     fragments = {d.name.value: d for d in document.definitions if isinstance(d, FragmentDefinitionNode)}
-    memo: Dict[str, int] = {}
+    size_memo: Dict[str, int] = {}
+    nest_memo: Dict[str, int] = {}
     problem: Optional[str] = None
+
+    def nesting(name: str, stack: frozenset) -> int:
+        """Spread levels below fragment ``name`` (memoised by name; independent of where it is used —
+        Bugbot on #151: a depth check that only ran on the first visit was bypassed by spreading F0..Fn
+        in that order)."""
+        nonlocal problem
+        if name in nest_memo:
+            return nest_memo[name]
+        fragment = fragments.get(name)
+        if fragment is None:
+            return 0
+        if name in stack:
+            problem = f"fragment cycle through {name}"
+            return max_depth + 1
+        below = 0
+
+        def walk(selection_set: Any) -> None:
+            nonlocal below
+            if selection_set is None:
+                return
+            for sel in selection_set.selections:
+                if isinstance(sel, (FieldNode, InlineFragmentNode)):
+                    walk(sel.selection_set)
+                elif isinstance(sel, FragmentSpreadNode):
+                    below = max(below, 1 + nesting(sel.name.value, stack | {name}))
+
+        walk(fragment.selection_set)
+        nest_memo[name] = below
+        return below
 
     def size(selection_set: Any, stack: frozenset, depth: int) -> int:
         nonlocal problem
         if selection_set is None or problem is not None:
             return 0
-        if depth > max_depth:
-            problem = f"fragment nesting deeper than {max_depth}"
-            return cap + 1
         total = 0
         for sel in selection_set.selections:
             if isinstance(sel, FieldNode):
@@ -849,11 +876,14 @@ def _expanded_selection_count(document: Any, cap: int, max_depth: int) -> tuple[
                 if name in stack:
                     problem = f"fragment cycle through {name}"
                     return cap + 1
-                if name not in memo:
+                if depth + 1 + nesting(name, stack) > max_depth:
+                    problem = problem or f"fragment nesting deeper than {max_depth}"
+                    return cap + 1
+                if name not in size_memo:
                     fragment = fragments.get(name)
-                    memo[name] = size(fragment.selection_set, stack | {name}, depth + 1) if fragment else 0
-                total += memo[name]
-            if total > cap:
+                    size_memo[name] = size(fragment.selection_set, stack | {name}, depth + 1) if fragment else 0
+                total += size_memo[name]
+            if total > cap or problem is not None:
                 return total
         return total
 
