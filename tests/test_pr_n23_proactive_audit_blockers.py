@@ -182,39 +182,67 @@ class TestFix2MergeVulnerabilitiesBatchPromotesEnrichment:
 
 
 class TestFix3VulnerabilitySdoExportsEnrichment:
-    """STIX Vulnerability SDO must carry the Neo4j enrichment via
-    ``x_edgeguard_*`` custom properties (per STIX 2.1 allow_custom)."""
+    """STIX Vulnerability SDO must carry the Neo4j enrichment as
+    ``x_edgeguard_*`` top-level extension properties.
+
+    The field list lives in ``stix_exporter._VULNERABILITY_PROMOTED_FIELDS``
+    (shared with the extension definition), so these checks drive the real
+    ``_vulnerability_sdo`` builder and inspect its output rather than the
+    function source."""
+
+    _ENRICHED_PROPS = {
+        "cve_id": "CVE-2021-44228",
+        "description": "Log4Shell",
+        "cvss_score": 10.0,
+        "severity": "CRITICAL",
+        "attack_vector": "NETWORK",
+        "published": "2021-12-10T10:15:09+00:00",
+        "last_modified": "2024-01-05T00:00:00+00:00",
+        "cisa_exploit_add": "2021-12-10",
+        "cisa_action_due": "2021-12-24",
+        "cisa_required_action": "Apply updates per vendor instructions.",
+        "cisa_vulnerability_name": "Apache Log4j2 Remote Code Execution Vulnerability",
+        "cwe": ["CWE-917"],
+        "cisa_cwes": ["CWE-917"],
+        "ref_tags": ["Exploit", "Vendor Advisory"],
+        "reference_urls": ["https://logging.apache.org/log4j/2.x/security.html"],
+        "affected_products": ["cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"],
+    }
 
     def _body(self) -> str:
         return _function_body(SRC / "stix_exporter.py", "_vulnerability_sdo", class_name="StixExporter")
 
+    def _sdo(self) -> dict:
+        from stix_exporter import StixExporter
+
+        exporter = StixExporter.__new__(StixExporter)
+        return exporter._vulnerability_sdo(dict(self._ENRICHED_PROPS))
+
     def test_cvss_score_promoted(self):
-        body = self._body()
-        assert '"x_edgeguard_cvss_score"' in body or "'x_edgeguard_cvss_score'" in body
+        assert self._sdo()["x_edgeguard_cvss_score"] == 10.0
 
     def test_severity_promoted(self):
-        body = self._body()
-        assert '"x_edgeguard_severity"' in body or "'x_edgeguard_severity'" in body
+        assert self._sdo()["x_edgeguard_severity"] == "CRITICAL"
 
     def test_dates_promoted(self):
-        body = self._body()
-        assert "x_edgeguard_published" in body, "STIX SDO must carry published date"
-        assert "x_edgeguard_last_modified" in body
+        sdo = self._sdo()
+        assert sdo["x_edgeguard_published"] == self._ENRICHED_PROPS["published"], "STIX SDO must carry published date"
+        assert sdo["x_edgeguard_last_modified"] == self._ENRICHED_PROPS["last_modified"]
 
     def test_cisa_kev_fields_promoted(self):
-        body = self._body()
+        sdo = self._sdo()
         for field in (
             "x_edgeguard_cisa_exploit_add",
             "x_edgeguard_cisa_action_due",
             "x_edgeguard_cisa_required_action",
             "x_edgeguard_cisa_vulnerability_name",
         ):
-            assert field in body, f"STIX SDO must carry {field}"
+            assert field in sdo, f"STIX SDO must carry {field}"
 
     def test_cwe_and_references_promoted(self):
-        body = self._body()
+        sdo = self._sdo()
         for field in ("x_edgeguard_cwe", "x_edgeguard_ref_tags", "x_edgeguard_reference_urls"):
-            assert field in body, f"STIX SDO must carry {field}"
+            assert field in sdo, f"STIX SDO must carry {field}"
 
     def test_skips_empty_values(self):
         """An empty / None / [] value must NOT be emitted (would bloat bundle

@@ -88,29 +88,39 @@ def test_stix_bundle_objects_are_sorted_by_id():
     assert ids == sorted(ids), "bundle.objects must be sorted by id"
 
 
+def _producer_identity(bundle: dict) -> dict:
+    """The EdgeGuard producer ``identity`` object that carries the bundle provenance."""
+    from stix_exporter import EDGEGUARD_IDENTITY_ID
+
+    return next(o for o in bundle["objects"] if o["id"] == EDGEGUARD_IDENTITY_ID)
+
+
 def test_stix_bundle_omits_wall_clock_when_deterministic_env_set(monkeypatch):
-    """When EDGEGUARD_DETERMINISTIC_BUNDLE=1, ``generated_at`` must be
-    omitted entirely so two bundles with the same content are byte-stable
-    (used by ResilMesh diff polls and CI snapshot tests)."""
+    """When EDGEGUARD_DETERMINISTIC_BUNDLE=1, ``x_edgeguard_generated_at``
+    must be omitted entirely so two bundles with the same content are
+    byte-stable (used by ResilMesh diff polls and CI snapshot tests)."""
     from stix_exporter import StixExporter
 
     monkeypatch.setenv("EDGEGUARD_DETERMINISTIC_BUNDLE", "1")
     exporter = StixExporter(neo4j_client=None)
     bundle = exporter._bundle([{"id": "indicator--x", "type": "indicator"}])
-    assert "generated_at" not in bundle["x_edgeguard_source"], (
+    assert "x_edgeguard_generated_at" not in _producer_identity(bundle), (
         "EDGEGUARD_DETERMINISTIC_BUNDLE=1 must drop the wall-clock timestamp"
     )
 
 
 def test_stix_bundle_keeps_wall_clock_by_default(monkeypatch):
-    """Default ON: ``generated_at`` is present so operators can answer
-    'when did this bundle leave EdgeGuard' from the bundle alone."""
+    """Default ON: ``x_edgeguard_generated_at`` is present on the producer
+    identity so operators can answer 'when did this bundle leave EdgeGuard'
+    from the bundle alone."""
     from stix_exporter import StixExporter
 
     monkeypatch.delenv("EDGEGUARD_DETERMINISTIC_BUNDLE", raising=False)
     exporter = StixExporter(neo4j_client=None)
     bundle = exporter._bundle([])
-    assert "generated_at" in bundle["x_edgeguard_source"], "default behavior must keep generated_at for forensics"
+    assert "x_edgeguard_generated_at" in _producer_identity(bundle), (
+        "default behavior must keep generated_at for forensics"
+    )
 
 
 # ---------------------------------------------------------------------------

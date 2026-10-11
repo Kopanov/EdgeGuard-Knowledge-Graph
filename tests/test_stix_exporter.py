@@ -7,10 +7,29 @@ ID behaviour, not to exercise real Cypher.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import os
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock
 
-from stix_exporter import StixExporter, _deterministic_id
+import pytest
+import stix2
+
+# ``query_api`` reads these at import time; the route tests below import it
+# lazily, so the defaults are set here (same values as tests/test_query_api.py).
+os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
+os.environ.setdefault("NEO4J_USER", "neo4j")
+os.environ.setdefault("NEO4J_PASSWORD", "test-password")
+os.environ.setdefault("EDGEGUARD_ENV", "dev")
+
+import stix_exporter
+from stix_exporter import (
+    EDGEGUARD_EXTENSION_ID,
+    EDGEGUARD_IDENTITY_ID,
+    StixExporter,
+    _build_pattern,
+    _deterministic_id,
+)
 
 # ---------------------------------------------------------------------------
 # Fake Neo4j driver
@@ -25,28 +44,44 @@ class _FakeResult:
         return iter(self._rows)
 
 
+_AGGREGATE_LABEL_RE = re.compile(r"MATCH \(n:(\w+)\)")
+
+
 class _FakeSession:
-    def __init__(self, rows: List[Dict[str, Any]]):
+    def __init__(
+        self,
+        rows: List[Dict[str, Any]],
+        aggregate_rows_by_label: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ):
         self._rows = rows
+        # Rows returned for the batched ``SOURCED_FROM`` aggregate query of
+        # a given label (``_prefetch_source_aggregates``). Labels without an
+        # entry return no rows. When ``None`` every query returns ``rows``.
+        self._aggregate_rows_by_label = aggregate_rows_by_label
         self.last_cypher: str = ""
         self.last_params: Dict[str, Any] = {}
-        # PR (S5) (architecture redesign): the StixExporter now
-        # also runs short per-node aggregate queries against the
-        # SOURCED_FROM edges (``_enrich_props_with_source_aggregates``)
-        # AFTER the main export query. Without history tracking,
-        # ``last_cypher`` would only ever hold the secondary aggregate
-        # query — assertions on the export Cypher would always fail.
-        # ``cypher_history`` keeps the full ordered list; ``main_cypher``
-        # is the FIRST cypher (the export query). Tests that previously
-        # asserted on ``last_cypher`` have been updated to use
-        # ``main_cypher`` so they keep passing under the new architecture.
+        # The exporter runs the export query first and then one batched
+        # source-aggregate query per node label. ``cypher_history`` keeps
+        # the ordered list of statements and ``call_history`` the
+        # (statement, parameters) pairs; ``main_cypher`` is the FIRST
+        # statement (the export query).
         self.cypher_history: List[str] = []
+        self.call_history: List[Tuple[str, Dict[str, Any]]] = []
 
     @property
     def main_cypher(self) -> str:
         """The first Cypher executed in this session — the export
         query (NOT a follow-up source-truthful aggregate)."""
         return self.cypher_history[0] if self.cypher_history else ""
+
+    @property
+    def main_params(self) -> Dict[str, Any]:
+        return self.call_history[0][1] if self.call_history else {}
+
+    @property
+    def aggregate_calls(self) -> List[Tuple[str, Dict[str, Any]]]:
+        """The batched ``SOURCED_FROM`` aggregate statements, in order."""
+        return [(c, p) for c, p in self.call_history if "SOURCED_FROM" in c]
 
     def __enter__(self):
         return self
@@ -58,12 +93,21 @@ class _FakeSession:
         self.last_cypher = cypher
         self.last_params = params
         self.cypher_history.append(cypher)
+        self.call_history.append((cypher, params))
+        if self._aggregate_rows_by_label is not None and "SOURCED_FROM" in cypher:
+            match = _AGGREGATE_LABEL_RE.search(cypher)
+            label = match.group(1) if match else ""
+            return _FakeResult(self._aggregate_rows_by_label.get(label, []))
         return _FakeResult(self._rows)
 
 
 class _FakeDriver:
-    def __init__(self, rows: List[Dict[str, Any]]):
-        self._session = _FakeSession(rows)
+    def __init__(
+        self,
+        rows: List[Dict[str, Any]],
+        aggregate_rows_by_label: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ):
+        self._session = _FakeSession(rows, aggregate_rows_by_label)
         self.last_session_kwargs: Dict[str, Any] = {}
 
     def session(self, **kwargs: Any):
@@ -74,9 +118,12 @@ class _FakeDriver:
         return self._session
 
 
-def _mk_client(rows: List[Dict[str, Any]]) -> Any:
+def _mk_client(
+    rows: List[Dict[str, Any]],
+    aggregate_rows_by_label: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Any:
     client = MagicMock()
-    client.driver = _FakeDriver(rows)
+    client.driver = _FakeDriver(rows, aggregate_rows_by_label)
     client.is_connected.return_value = True
     return client
 
@@ -85,9 +132,26 @@ def _mk_client(rows: List[Dict[str, Any]]) -> Any:
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Object types every bundle carries regardless of the seed: the producer
+# identity, the extension definition and the referenced TLP markings.
+_PROVENANCE_TYPES = {"extension-definition", "marking-definition"}
+
 
 def _by_type(bundle: Dict[str, Any], stix_type: str) -> List[Dict[str, Any]]:
     return [o for o in bundle["objects"] if o["type"] == stix_type]
+
+
+def _exported(bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Objects built from graph nodes/edges — without the provenance objects."""
+    return [o for o in bundle["objects"] if o["type"] not in _PROVENANCE_TYPES and o["id"] != EDGEGUARD_IDENTITY_ID]
+
+
+def _sector_identities(bundle: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [o for o in _by_type(bundle, "identity") if o["id"] != EDGEGUARD_IDENTITY_ID]
+
+
+def _producer_identity(bundle: Dict[str, Any]) -> Dict[str, Any]:
+    return next(o for o in bundle["objects"] if o["id"] == EDGEGUARD_IDENTITY_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +319,11 @@ def test_stix_exporter_passes_query_timeout():
     assert last_params["timeout"] > 0
 
 
-def test_actor_with_attributed_malware_emits_attributed_to_sro():
+def test_actor_with_attributed_malware_emits_intrusion_set_uses_malware_sro():
+    """The graph edge is (Malware)-[:ATTRIBUTED_TO]->(ThreatActor). STIX 2.1
+    defines ``attributed-to`` only for campaign / intrusion-set sources; the
+    pair is modelled as ``intrusion-set uses malware`` (the MITRE ATT&CK
+    form these edges derive from), so the SRO is reversed on export."""
     rows = [
         {
             "seed": {"name": "APT28"},
@@ -271,10 +339,11 @@ def test_actor_with_attributed_malware_emits_attributed_to_sro():
     malware = _by_type(bundle, "malware")
     rels = _by_type(bundle, "relationship")
     assert len(malware) == 1 and malware[0]["name"] == "X-Agent"
-    attributed = [r for r in rels if r["relationship_type"] == "attributed-to"]
-    assert len(attributed) == 1
-    assert attributed[0]["source_ref"] == malware[0]["id"]
-    assert attributed[0]["target_ref"].startswith("intrusion-set--")
+    assert not any(r["relationship_type"] == "attributed-to" for r in rels)
+    uses = [r for r in rels if r["relationship_type"] == "uses"]
+    assert len(uses) == 1
+    assert uses[0]["source_ref"].startswith("intrusion-set--")
+    assert uses[0]["target_ref"] == malware[0]["id"]
 
 
 def test_indicator_indicates_malware_bundle():
@@ -469,7 +538,10 @@ def test_cve_export_uses_affects_not_targets_for_sectors():
     assert "[:TARGETS]->(s:Sector)" not in q
 
 
-def test_cve_export_bundle_contains_vulnerability_and_indicator_indicates_rel():
+def test_cve_export_bundle_contains_vulnerability_and_indicator_related_to_rel():
+    """STIX 2.1 defines no indicator → vulnerability relationship (``indicates``
+    targets attack-pattern, campaign, infrastructure, intrusion-set, malware,
+    threat-actor and tool only), so EXPLOITS is exported as ``related-to``."""
     rows = [
         {
             "seed": {"cve_id": "CVE-2021-44228", "name": "Log4Shell"},
@@ -486,14 +558,19 @@ def test_cve_export_bundle_contains_vulnerability_and_indicator_indicates_rel():
     assert vulns[0]["external_references"][0]["source_name"] == "cve"
     assert vulns[0]["external_references"][0]["external_id"] == "CVE-2021-44228"
     rels = _by_type(bundle, "relationship")
-    assert any(r["relationship_type"] == "indicates" and r["target_ref"] == vulns[0]["id"] for r in rels)
+    to_vuln = [r for r in rels if r["target_ref"] == vulns[0]["id"]]
+    assert len(to_vuln) == 1
+    assert to_vuln[0]["relationship_type"] == "related-to"
+    assert to_vuln[0]["source_ref"].startswith("indicator--")
 
 
 def test_empty_bundle_when_seed_not_found():
     exporter = StixExporter(_mk_client([]))
     bundle = exporter.export_indicator("nothing-here")
     assert bundle["type"] == "bundle"
-    assert bundle["objects"] == []
+    # No graph-derived objects; only the provenance objects remain.
+    assert _exported(bundle) == []
+    assert {o["type"] for o in bundle["objects"]} == {"identity", "extension-definition", "marking-definition"}
 
 
 # ---------------------------------------------------------------------------
@@ -545,9 +622,12 @@ def test_sdo_has_no_zone_property_when_node_has_no_zones():
     assert "x_edgeguard_zones" not in ind
 
 
-def test_bundle_carries_x_edgeguard_source_provenance():
-    """Every bundle — including empty ones — must carry bundle-level
-    provenance so ResilMesh can tell which EdgeGuard build produced it."""
+def test_bundle_carries_producer_identity_provenance(monkeypatch):
+    """Every bundle — including empty ones — must carry provenance so
+    ResilMesh can tell which EdgeGuard build produced it. STIX 2.1 permits
+    no custom properties on the Bundle itself, so the provenance lives on
+    the EdgeGuard producer ``identity`` as top-level extension properties."""
+    monkeypatch.setattr(stix_exporter, "_GIT_SHA", "d5dc41f")
     rows = [
         {
             "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
@@ -558,21 +638,28 @@ def test_bundle_carries_x_edgeguard_source_provenance():
         }
     ]
     bundle = StixExporter(_mk_client(rows)).export_indicator("1.2.3.4")
-    assert "x_edgeguard_source" in bundle
-    src = bundle["x_edgeguard_source"]
-    assert src["producer"] == "EdgeGuard Knowledge Graph"
-    assert src["exporter"] == "stix_exporter"
-    assert src["spec_version"] == "2.1"
-    assert "generated_at" in src
+    assert set(bundle) == {"type", "id", "objects"}, "a STIX 2.1 Bundle carries only type, id and objects"
+    ident = _producer_identity(bundle)
+    assert ident["type"] == "identity"
+    assert ident["name"] == "EdgeGuard Knowledge Graph"
+    assert ident["identity_class"] == "system"
+    assert ident["x_edgeguard_exporter"] == "stix_exporter"
+    assert ident["x_edgeguard_git_sha"] == "d5dc41f"
     # generated_at is ISO 8601 Z-suffixed UTC
-    assert src["generated_at"].endswith("Z")
-    assert "T" in src["generated_at"]
+    assert ident["x_edgeguard_generated_at"].endswith("Z")
+    assert "T" in ident["x_edgeguard_generated_at"]
+    assert ident["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
+    # Every exported object names the identity as its creator.
+    for o in _exported(bundle):
+        assert o["created_by_ref"] == EDGEGUARD_IDENTITY_ID, o["id"]
 
 
 def test_empty_bundle_also_carries_provenance():
     bundle = StixExporter(_mk_client([])).export_indicator("nothing-here")
-    assert bundle["objects"] == []
-    assert "x_edgeguard_source" in bundle
+    assert _exported(bundle) == []
+    ident = _producer_identity(bundle)
+    assert ident["x_edgeguard_exporter"] == "stix_exporter"
+    assert any(o["type"] == "extension-definition" for o in bundle["objects"])
 
 
 def test_depth_1_indicator_skips_non_primary_relations():
@@ -592,16 +679,17 @@ def test_depth_1_indicator_skips_non_primary_relations():
     bundle_1 = exporter.export_indicator("1.2.3.4", depth=1)
     bundle_2 = exporter.export_indicator("1.2.3.4", depth=2)
     # Minimal bundle: seed + malware + the INDICATES SRO. Nothing else.
-    types_1 = {o["type"] for o in bundle_1["objects"]}
+    types_1 = {o["type"] for o in _exported(bundle_1)}
     assert "indicator" in types_1
     assert "malware" in types_1
     assert "vulnerability" not in types_1
     assert "attack-pattern" not in types_1
-    assert "identity" not in types_1  # sectors map to identity SDOs
+    assert _sector_identities(bundle_1) == []  # sectors map to identity SDOs
     # Full bundle has all of them (regression guard — default behavior
     # is unchanged by the depth knob).
-    types_2 = {o["type"] for o in bundle_2["objects"]}
-    assert {"indicator", "malware", "vulnerability", "attack-pattern", "identity"} <= types_2
+    types_2 = {o["type"] for o in _exported(bundle_2)}
+    assert {"indicator", "malware", "vulnerability", "attack-pattern"} <= types_2
+    assert len(_sector_identities(bundle_2)) == 1
 
 
 def test_depth_1_actor_skips_techniques_and_campaigns():
@@ -650,13 +738,13 @@ def test_depth_1_cve_skips_sectors():
         }
     ]
     bundle = StixExporter(_mk_client(rows)).export_cve("CVE-2021-44228", depth=1)
-    types = {o["type"] for o in bundle["objects"]}
+    types = {o["type"] for o in _exported(bundle)}
     assert "vulnerability" in types
     assert "indicator" in types  # primary
-    assert "identity" not in types  # sector identity omitted
+    assert _sector_identities(bundle) == []  # sector identity omitted
     rels = _by_type(bundle, "relationship")
-    # No targets SRO (sector-related) in a depth=1 CVE bundle.
-    assert not any(r["relationship_type"] == "targets" for r in rels)
+    # No sector-related SRO in a depth=1 CVE bundle.
+    assert not any(r["target_ref"].startswith("identity--") for r in rels)
 
 
 def test_depth_default_preserves_legacy_behavior():
@@ -679,3 +767,588 @@ def test_depth_default_preserves_legacy_behavior():
     ids_default = sorted(o["id"] for o in default["objects"])
     ids_explicit = sorted(o["id"] for o in explicit["objects"])
     assert ids_default == ids_explicit
+
+
+# ---------------------------------------------------------------------------
+# Export hardening (2026-10): bounded exports, batched aggregates
+# ---------------------------------------------------------------------------
+
+_INDICATOR_ROW = {
+    "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+    "malware": [],
+    "vulns": [],
+    "techniques": [],
+    "sectors": [],
+}
+_ACTOR_ROW = {"seed": {"name": "apt28"}, "malware": [], "actor_tech": [], "mal_tech": [], "campaigns": []}
+_TECHNIQUE_ROW = {
+    "seed": {"mitre_id": "T1059", "name": "CLI"},
+    "actors": [],
+    "malware": [],
+    "tools": [],
+    "indicators": [],
+}
+_CVE_ROW = {"seed": {"cve_id": "CVE-2021-44228"}, "indicators": [], "sectors": []}
+
+_EXPORTS = [
+    ("export_indicator", "1.2.3.4", _INDICATOR_ROW, 4),
+    ("export_threat_actor", "APT28", _ACTOR_ROW, 4),
+    ("export_technique", "T1059", _TECHNIQUE_ROW, 4),
+    ("export_cve", "CVE-2021-44228", _CVE_ROW, 2),
+]
+
+
+@pytest.mark.parametrize("method, identifier, row, collections", _EXPORTS)
+def test_every_collection_is_ordered_and_limited_by_parameter(method, identifier, row, collections):
+    """Each related-node collection must be bounded by a parameterised
+    ``LIMIT $limit`` that is preceded by an ``ORDER BY`` on the same stage
+    (deterministic truncation). The parameter value is the clamped
+    ``limit`` argument."""
+    client = _mk_client([row])
+    getattr(StixExporter(client), method)(identifier, limit=7)
+    q = client.driver._session.main_cypher
+    params = client.driver._session.main_params
+    assert params["limit"] == 7
+    assert "LIMIT $limit" in q
+    limited_stages = [line for line in q.splitlines() if "LIMIT $limit" in line]
+    assert len(limited_stages) == collections, limited_stages
+    for line in limited_stages:
+        assert "ORDER BY" in line, f"LIMIT without ORDER BY is non-deterministic: {line.strip()}"
+    # No unbounded collect() of related nodes remains: every collect() is
+    # preceded by a limited stage, so the counts agree.
+    assert q.count("collect(DISTINCT") == collections
+
+
+@pytest.mark.parametrize("method, identifier, row, _collections", _EXPORTS)
+def test_limit_default_and_clamping(method, identifier, row, _collections):
+    """Omitted ``limit`` → ``_DEFAULT_LIMIT``; values above ``_MAX_LIMIT`` are
+    clamped; zero / negative values become 1; non-integers fall back to the
+    default."""
+    for given, expected in (
+        (None, stix_exporter._DEFAULT_LIMIT),
+        (10_000, stix_exporter._MAX_LIMIT),
+        (0, 1),
+        (-5, 1),
+        ("abc", stix_exporter._DEFAULT_LIMIT),
+    ):
+        client = _mk_client([row])
+        exporter = StixExporter(client)
+        if given is None:
+            getattr(exporter, method)(identifier)
+        else:
+            getattr(exporter, method)(identifier, limit=given)
+        assert client.driver._session.main_params["limit"] == expected, (given, expected)
+
+
+def test_seed_match_is_reduced_to_one_deterministic_row():
+    """The per-collection limits are only well defined for a single seed
+    row, so the seed stage carries its own ``ORDER BY ... LIMIT 1`` where
+    the key is not unique (indicator value across types, CVE twin nodes,
+    actor alias hits). Technique.mitre_id is unique and needs none."""
+    cases = {
+        "export_indicator": ("1.2.3.4", _INDICATOR_ROW, "WITH i ORDER BY i.indicator_type LIMIT 1"),
+        "export_threat_actor": ("APT28", _ACTOR_ROW, "ORDER BY _match_rank, a.name\n            LIMIT 1"),
+        "export_cve": ("CVE-2021-44228", _CVE_ROW, "WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END) LIMIT 1"),
+    }
+    for method, (identifier, row, fragment) in cases.items():
+        client = _mk_client([row])
+        getattr(StixExporter(client), method)(identifier)
+        assert fragment in client.driver._session.main_cypher, method
+
+
+def test_source_aggregates_use_exactly_one_batched_query_per_label():
+    """The per-source MIN/MAX timestamps are fetched with ONE ``UNWIND``
+    query per node label and bundle — never one query per node. Sector
+    nodes carry no per-source claims and are skipped."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [
+                {"name": "emotet", "malware_types": ["trojan"]},
+                {"name": "qakbot", "malware_types": ["trojan"]},
+                {"name": "trickbot", "malware_types": ["trojan"]},
+            ],
+            "vulns": [{"cve_id": "CVE-2021-44228"}],
+            "techniques": [{"mitre_id": "T1059", "name": "CLI"}, {"mitre_id": "T1055", "name": "Injection"}],
+            "sectors": [{"name": "energy"}],
+        }
+    ]
+    client = _mk_client(rows)
+    StixExporter(client).export_indicator("1.2.3.4")
+    session = client.driver._session
+    aggregate_calls = session.aggregate_calls
+    labels = [_AGGREGATE_LABEL_RE.search(c).group(1) for c, _ in aggregate_calls]  # type: ignore[union-attr]
+    assert sorted(labels) == ["Indicator", "Malware", "Technique", "Vulnerability"], labels
+    assert len(labels) == len(set(labels)), "one aggregate query per label"
+    # 1 export query + 4 aggregate queries — eight nodes, not eight queries.
+    assert len(session.call_history) == 1 + 4
+    for cypher, params in aggregate_calls:
+        assert "UNWIND $rows AS row" in cypher
+        assert "SOURCED_FROM" in cypher
+        assert isinstance(params["rows"], list) and params["rows"]
+    malware_rows = next(p["rows"] for c, p in aggregate_calls if "(n:Malware)" in c)
+    assert sorted(r["name"] for r in malware_rows) == ["emotet", "qakbot", "trickbot"]
+    technique_rows = next(p["rows"] for c, p in aggregate_calls if "(n:Technique)" in c)
+    assert sorted(r["mitre_id"] for r in technique_rows) == ["T1055", "T1059"]
+
+
+def test_batched_aggregates_are_mapped_back_to_the_right_node():
+    """Rows of the batched aggregate query are keyed by the natural-key
+    columns; each node must receive its own MIN/MAX, not a neighbour's."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [
+                {"name": "emotet", "malware_types": ["trojan"]},
+                {"name": "qakbot", "malware_types": ["trojan"]},
+            ],
+            "vulns": [],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    aggregates = {
+        "Malware": [
+            {
+                "name": "qakbot",
+                "first_seen_at_source": "2019-03-01T00:00:00+00:00",
+                "last_seen_at_source": "2024-05-01T00:00:00+00:00",
+            },
+            {
+                "name": "emotet",
+                "first_seen_at_source": "2014-06-01T00:00:00+00:00",
+                "last_seen_at_source": "2024-01-01T00:00:00+00:00",
+            },
+        ],
+        "Indicator": [
+            {
+                "indicator_type": "ipv4",
+                "value": "1.2.3.4",
+                "first_seen_at_source": "2023-01-01T00:00:00+00:00",
+                "last_seen_at_source": "2023-02-01T00:00:00+00:00",
+            }
+        ],
+    }
+    client = _mk_client(rows, aggregate_rows_by_label=aggregates)
+    bundle = StixExporter(client).export_indicator("1.2.3.4")
+    by_name = {m["name"]: m for m in _by_type(bundle, "malware")}
+    assert by_name["emotet"]["x_edgeguard_first_seen_at_source"].startswith("2014-06-01")
+    assert by_name["qakbot"]["x_edgeguard_first_seen_at_source"].startswith("2019-03-01")
+    assert by_name["qakbot"]["x_edgeguard_last_seen_at_source"].startswith("2024-05-01")
+    indicator = _by_type(bundle, "indicator")[0]
+    assert indicator["valid_from"].startswith("2023-01-01")
+    assert "x_edgeguard_first_seen_inferred" not in indicator
+    # Still one aggregate query per label.
+    assert sorted(_AGGREGATE_LABEL_RE.search(c).group(1) for c, _ in client.driver._session.aggregate_calls) == [  # type: ignore[union-attr]
+        "Indicator",
+        "Malware",
+    ]
+
+
+def test_actor_lookup_is_case_insensitive_and_alias_aware():
+    """Actor names are stored lower-case; the lookup must fold the input
+    and each alias with ``toLower(trim(...))`` exactly like
+    ``GET /actors/{name}/summary`` — a case-sensitive ``a.name = $name``
+    never matches ``APT28`` against the stored ``apt28``."""
+    client = _mk_client([_ACTOR_ROW])
+    StixExporter(client).export_threat_actor("APT28")
+    q = client.driver._session.main_cypher
+    assert "a.name = toLower(trim($name))" in q
+    assert "any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim($name)))" in q
+    assert "a.name = $name" not in q
+    assert "$name IN coalesce(a.aliases, [])" not in q
+    # The raw input is bound as a parameter; folding happens in Cypher.
+    assert client.driver._session.main_params["name"] == "APT28"
+
+
+# ---------------------------------------------------------------------------
+# Export hardening (2026-10): TLP markings, strict parsing, patterns, SROs
+# ---------------------------------------------------------------------------
+
+_TLP_SPEC_IDS = {
+    "white": "marking-definition--613f2e26-407d-48c7-9eca-b8e91df99dc9",
+    "green": "marking-definition--34098fce-860f-48ae-8e50-ebd3cc5e41da",
+    "amber": "marking-definition--f88d31f6-486f-44da-b317-01333bde0b82",
+    "red": "marking-definition--5e57c739-391a-4eb3-b6be-7d15ca92d5ed",
+}
+
+
+def test_tlp_marking_objects_present_and_referenced():
+    """Every SDO carries ``object_marking_refs`` from the node's ``tlp``;
+    the referenced TLP ``marking-definition`` objects (the fixed STIX 2.1
+    identifiers) are included in the bundle; SROs inherit the most
+    restrictive marking of their endpoints."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4", "tlp": "amber"},
+            "malware": [{"name": "emotet", "malware_types": ["trojan"], "tlp": "green"}],
+            "vulns": [{"cve_id": "CVE-2021-44228", "tlp": "red"}],
+            "techniques": [{"mitre_id": "T1059", "name": "CLI"}],  # no TLP → deployment default (white)
+            "sectors": [],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_indicator("1.2.3.4")
+    assert _by_type(bundle, "indicator")[0]["object_marking_refs"] == [_TLP_SPEC_IDS["amber"]]
+    assert _by_type(bundle, "malware")[0]["object_marking_refs"] == [_TLP_SPEC_IDS["green"]]
+    assert _by_type(bundle, "vulnerability")[0]["object_marking_refs"] == [_TLP_SPEC_IDS["red"]]
+    assert _by_type(bundle, "attack-pattern")[0]["object_marking_refs"] == [_TLP_SPEC_IDS["white"]]
+    markings = {m["id"]: m for m in _by_type(bundle, "marking-definition")}
+    referenced = {ref for o in bundle["objects"] for ref in o.get("object_marking_refs", [])}
+    assert set(markings) == referenced == set(_TLP_SPEC_IDS.values())
+    for m in markings.values():
+        assert m["definition_type"] == "tlp"
+        assert m["created"] == "2017-01-20T00:00:00.000Z"
+    # SRO marking = most restrictive endpoint.
+    rels = {r["target_ref"].split("--")[0]: r for r in _by_type(bundle, "relationship")}
+    assert rels["malware"]["object_marking_refs"] == [_TLP_SPEC_IDS["amber"]]  # amber indicator → green malware
+    assert rels["vulnerability"]["object_marking_refs"] == [_TLP_SPEC_IDS["red"]]  # amber indicator → red CVE
+    assert rels["attack-pattern"]["object_marking_refs"] == [_TLP_SPEC_IDS["amber"]]
+
+
+def test_tlp_level_mapping_edge_cases(monkeypatch, caplog):
+    """``clear`` is TLP 2.0's name for WHITE; ``amber+strict`` has no STIX
+    2.1 built-in and must not be loosened (→ RED); an unrecognised level is
+    exported restricted (AMBER) with a warning; a missing level follows the
+    deployment default ``config.EDGEGUARD_DEFAULT_TLP``."""
+    import config
+
+    ref = stix_exporter._marking_ref_for
+    assert ref({"tlp": "clear"}) == _TLP_SPEC_IDS["white"]
+    assert ref({"tlp": "WHITE"}) == _TLP_SPEC_IDS["white"]
+    assert ref({"tlp": "amber+strict"}) == _TLP_SPEC_IDS["red"]
+    with caplog.at_level("WARNING", logger="stix_exporter"):
+        assert ref({"tlp": "purple"}) == _TLP_SPEC_IDS["amber"]
+    assert any("Unrecognised TLP level" in r.message for r in caplog.records)
+    monkeypatch.setattr(config, "EDGEGUARD_DEFAULT_TLP", "green")
+    assert ref({}) == _TLP_SPEC_IDS["green"]
+    assert ref({"tlp": None}) == _TLP_SPEC_IDS["green"]
+    monkeypatch.setattr(config, "EDGEGUARD_DEFAULT_TLP", "white")
+    assert ref({}) == _TLP_SPEC_IDS["white"]
+
+
+def _rich_indicator_rows() -> List[Dict[str, Any]]:
+    """A seed with every property class the exporter can emit."""
+    return [
+        {
+            "seed": {
+                "value": "203.0.113.5",
+                "indicator_type": "ipv4",
+                "tlp": "amber",
+                "zone": ["energy", "global"],
+                "misp_event_ids": ["1001", "1002"],
+                "misp_attribute_ids": ["uuid-a"],
+                "first_imported_at": "2026-04-21T08:00:00+00:00",
+                "last_updated": "2026-04-22T08:00:00+00:00",
+            },
+            "malware": [{"name": "emotet", "malware_types": ["trojan"], "tlp": "green", "zone": ["finance"]}],
+            "vulns": [
+                {
+                    "cve_id": "CVE-2021-44228",
+                    "description": "Log4Shell",
+                    "cvss_score": 10.0,
+                    "severity": "CRITICAL",
+                    "attack_vector": "NETWORK",
+                    "published": "2021-12-10T10:15:09+00:00",
+                    "last_modified": "2024-01-05T00:00:00+00:00",
+                    "cisa_exploit_add": "2021-12-10",
+                    "cisa_action_due": "2021-12-24",
+                    "cisa_required_action": "Apply updates per vendor instructions.",
+                    "cisa_vulnerability_name": "Apache Log4j2 Remote Code Execution Vulnerability",
+                    "cwe": ["CWE-917"],
+                    "cisa_cwes": ["CWE-917"],
+                    "ref_tags": ["Exploit"],
+                    "reference_urls": ["https://logging.apache.org/log4j/2.x/security.html"],
+                    "affected_products": ["cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*"],
+                    "tlp": "white",
+                }
+            ],
+            "techniques": [
+                {"mitre_id": "T1059", "name": "Command and Scripting Interpreter", "tactic_phases": ["execution"]}
+            ],
+            "sectors": [{"name": "energy"}],
+        }
+    ]
+
+
+def _rich_aggregates() -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "Indicator": [
+            {
+                "indicator_type": "ipv4",
+                "value": "203.0.113.5",
+                "first_seen_at_source": "2023-01-01T00:00:00+00:00",
+                "last_seen_at_source": "2023-02-01T00:00:00+00:00",
+            }
+        ]
+    }
+
+
+def test_rich_bundle_passes_strict_stix2_parse(monkeypatch):
+    """The bundle must parse with ``stix2.parse`` under the default
+    ``allow_custom=False`` while keeping the provenance and every
+    ``x_edgeguard_*`` property. Negative control: removing the extension
+    declaration from one object makes the same bundle fail, which proves
+    the parser is strict and the extension is what makes it acceptable."""
+    monkeypatch.setattr(stix_exporter, "_GIT_SHA", "d5dc41f")
+    bundle = StixExporter(_mk_client(_rich_indicator_rows(), _rich_aggregates())).export_indicator("203.0.113.5")
+
+    parsed = stix2.parse(bundle)  # allow_custom defaults to False
+    assert parsed.type == "bundle"
+    assert len(parsed.objects) == len(bundle["objects"])
+
+    # Provenance and extension properties survived at the top level.
+    indicator = _by_type(bundle, "indicator")[0]
+    assert indicator["x_edgeguard_zones"] == ["energy", "global"]
+    assert indicator["x_edgeguard_misp_event_ids"] == ["1001", "1002"]
+    assert indicator["x_edgeguard_first_seen_at_source"].startswith("2023-01-01")
+    assert indicator["x_edgeguard_first_imported_at"].startswith("2026-04-21")
+    assert _by_type(bundle, "vulnerability")[0]["x_edgeguard_cvss_score"] == 10.0
+    assert _producer_identity(bundle)["x_edgeguard_git_sha"] == "d5dc41f"
+    assert indicator["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
+
+    # Negative control: the bare x_ properties are rejected without the extension.
+    import copy
+
+    broken = copy.deepcopy(bundle)
+    next(o for o in broken["objects"] if o["type"] == "indicator").pop("extensions")
+    with pytest.raises(Exception) as excinfo:
+        stix2.parse(broken)
+    assert "x_edgeguard_" in str(excinfo.value)
+
+
+def test_every_emitted_extension_property_is_declared():
+    """``extension_properties`` of the extension definition must list every
+    ``x_edgeguard_*`` property the exporter emits — a strict consumer that
+    validates against the declaration would otherwise reject the object."""
+    bundle = StixExporter(_mk_client(_rich_indicator_rows(), _rich_aggregates())).export_indicator("203.0.113.5")
+    ext_def = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
+    assert ext_def["id"] == EDGEGUARD_EXTENSION_ID
+    assert ext_def["created_by_ref"] == EDGEGUARD_IDENTITY_ID
+    assert ext_def["extension_types"] == ["toplevel-property-extension"]
+    declared = set(ext_def["extension_properties"])
+    emitted = {k for o in bundle["objects"] for k in o if k.startswith("x_edgeguard_")}
+    # Non-vacuous: the fixture exercises timestamps, zones, MISP ids, NVD
+    # and CISA enrichment and the identity provenance.
+    assert len(emitted) >= 15, sorted(emitted)
+    assert emitted <= declared, sorted(emitted - declared)
+    # Objects with extension properties declare the extension; objects
+    # without them do not grow an ``extensions`` map.
+    for o in bundle["objects"]:
+        has_ext_props = any(k.startswith("x_edgeguard_") for k in o)
+        assert has_ext_props == (EDGEGUARD_EXTENSION_ID in o.get("extensions", {})), o["id"]
+
+
+def test_x_mitre_tactic_is_the_only_remaining_custom_type():
+    """Document the known exception: ``_tactic_sdo`` keeps MITRE's
+    ``x-mitre-tactic`` custom type (not strictly parseable) and no
+    ``export_*`` path reaches it."""
+    exporter = StixExporter(_mk_client([]))
+    sdo = exporter._tactic_sdo({"mitre_id": "TA0002", "name": "Execution"})
+    assert sdo["type"] == "x-mitre-tactic"
+    assert sdo["created_by_ref"] == EDGEGUARD_IDENTITY_ID
+    assert sdo["object_marking_refs"] == [_TLP_SPEC_IDS["white"]]
+    src = open(stix_exporter.__file__, encoding="utf-8").read()
+    export_bodies = src.split("    def export_")[1:]
+    assert export_bodies and not any('"Tactic"' in body.split("    def _")[0] for body in export_bodies)
+
+
+_MD5 = "d41d8cd98f00b204e9800998ecf8427e"
+_SHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+_SHA512 = _SHA256 + _SHA256
+
+
+@pytest.mark.parametrize(
+    "indicator_type, value, expected",
+    [
+        ("email", "alice@example.com", "[email-addr:value = 'alice@example.com']"),
+        ("email-src", "bob@example.com", "[email-addr:value = 'bob@example.com']"),
+        ("hash", _MD5, f"[file:hashes.'MD5' = '{_MD5}']"),
+        ("hash", _SHA1, f"[file:hashes.'SHA-1' = '{_SHA1}']"),
+        ("hash", _SHA256, f"[file:hashes.'SHA-256' = '{_SHA256}']"),
+        ("hash", _SHA512, f"[file:hashes.'SHA-512' = '{_SHA512}']"),
+        ("hash", _SHA256.upper(), f"[file:hashes.'SHA-256' = '{_SHA256.upper()}']"),
+        ("md5", _MD5, f"[file:hashes.'MD5' = '{_MD5}']"),
+        ("sha256", _SHA256, f"[file:hashes.'SHA-256' = '{_SHA256}']"),
+        # Declared type contradicted by the digest format: the format decides.
+        ("md5", _SHA256, f"[file:hashes.'SHA-256' = '{_SHA256}']"),
+        (
+            "hash",
+            "3:AXGBicFlgVNhBGcL6wCrFQEv:AXGHsNhxLsr2C",
+            "[file:hashes.'SSDEEP' = '3:AXGBicFlgVNhBGcL6wCrFQEv:AXGHsNhxLsr2C']",
+        ),
+        # No algorithm fits: an honest custom key rather than a wrong label.
+        ("hash", "abc123", "[file:hashes.'UNKNOWN' = 'abc123']"),
+        ("url", "http://evil.example/a'b\\c", "[url:value = 'http://evil.example/a\\'b\\\\c']"),
+        ("domain", "evil.example", "[domain-name:value = 'evil.example']"),
+        ("hostname", "host.evil.example", "[domain-name:value = 'host.evil.example']"),
+        ("ipv4", "203.0.113.5", "[ipv4-addr:value = '203.0.113.5']"),
+        ("ipv4", "203.0.113.0/24", "[ipv4-addr:value = '203.0.113.0/24']"),
+        ("ipv6", "2001:db8::1", "[ipv6-addr:value = '2001:db8::1']"),
+        ("filename", "payload.exe", "[file:name = 'payload.exe']"),
+        # Blank type: inferred from the value's shape.
+        ("", "203.0.113.9", "[ipv4-addr:value = '203.0.113.9']"),
+        ("", _SHA1, f"[file:hashes.'SHA-1' = '{_SHA1}']"),
+        # Nothing fits: a custom observable type, never a non-base64 payload_bin.
+        ("unknown", "just a phrase", "[x-edgeguard-observable:value = 'just a phrase']"),
+    ],
+)
+def test_build_pattern_grammar(indicator_type, value, expected):
+    pattern = _build_pattern(indicator_type, value)
+    assert pattern == expected
+    assert "payload_bin" not in pattern
+    # The stix2 pattern validator accepts it (it rejects digests whose
+    # format does not match the declared algorithm).
+    stix2.Indicator(pattern=pattern, pattern_type="stix", valid_from="2026-01-01T00:00:00Z")
+
+
+def test_indicator_sdo_patterns_are_valid_for_email_and_hash_nodes():
+    """End-to-end through ``_indicator_sdo``: e-mail and hash indicators no
+    longer fall through to ``artifact:payload_bin``."""
+    exporter = StixExporter(_mk_client([]))
+    email = exporter._indicator_sdo({"value": "alice@example.com", "indicator_type": "email"})
+    assert email["pattern"] == "[email-addr:value = 'alice@example.com']"
+    digest = exporter._indicator_sdo({"value": _SHA256, "indicator_type": "hash"})
+    assert digest["pattern"] == f"[file:hashes.'SHA-256' = '{_SHA256}']"
+
+
+def test_edge_to_sro_follows_the_stix21_relationship_table():
+    """Each graph edge maps to the relationship_type the STIX 2.1 summary
+    table permits for the (source, target) pair; the table-defined pairs
+    that run the other way are reversed; unknown pairs → related-to."""
+    exporter = StixExporter(_mk_client([]))
+    ind = _deterministic_id("indicator", "ipv4|1.2.3.4")
+    mal = _deterministic_id("malware", "emotet")
+    vuln = _deterministic_id("vulnerability", "CVE-2021-44228")
+    ident = _deterministic_id("identity", "energy")
+    iset = _deterministic_id("intrusion-set", "apt28")
+    camp = _deterministic_id("campaign", "pawn storm")
+    ap = _deterministic_id("attack-pattern", "T1059")
+    tool = _deterministic_id("tool", "mimikatz")
+
+    def sro(edge, s, t):
+        r = exporter._edge_to_sro(edge, s, t)
+        return r["relationship_type"], r["source_ref"], r["target_ref"]
+
+    assert sro("INDICATES", ind, mal) == ("indicates", ind, mal)
+    assert sro("USES_TECHNIQUE", ind, ap) == ("indicates", ind, ap)
+    assert sro("EXPLOITS", ind, vuln) == ("related-to", ind, vuln)
+    assert sro("TARGETS", ind, ident) == ("related-to", ind, ident)
+    assert sro("ATTRIBUTED_TO", mal, iset) == ("uses", iset, mal)
+    assert sro("EMPLOYS_TECHNIQUE", iset, ap) == ("uses", iset, ap)
+    assert sro("IMPLEMENTS_TECHNIQUE", mal, ap) == ("uses", mal, ap)
+    assert sro("IMPLEMENTS_TECHNIQUE", tool, ap) == ("uses", tool, ap)
+    assert sro("RUNS", iset, camp) == ("attributed-to", camp, iset)
+    assert sro("AFFECTS", vuln, ident) == ("related-to", vuln, ident)
+    # Unknown pair: graph direction kept, related-to.
+    assert sro("SOMETHING_NEW", tool, ident) == ("related-to", tool, ident)
+    r = exporter._edge_to_sro("INDICATES", ind, mal)
+    assert r["created_by_ref"] == EDGEGUARD_IDENTITY_ID
+    assert r["object_marking_refs"]
+
+
+def test_actor_bundle_relationship_types_are_valid_for_their_pairs():
+    """End to end: a full actor bundle emits only table-permitted
+    relationship types per source type (campaign attributed-to
+    intrusion-set, intrusion-set / malware uses ...)."""
+    rows = [
+        {
+            "seed": {"name": "apt28"},
+            "malware": [{"name": "x-agent", "malware_types": ["trojan"]}],
+            "actor_tech": [{"mitre_id": "T1055", "name": "Process Injection"}],
+            "mal_tech": [{"m": {"name": "x-agent"}, "t": {"mitre_id": "T1059", "name": "CLI"}}],
+            "campaigns": [{"name": "pawn storm"}],
+        }
+    ]
+    bundle = StixExporter(_mk_client(rows)).export_threat_actor("APT28")
+    rels = _by_type(bundle, "relationship")
+    assert len(rels) == 4
+    pairs = {(r["source_ref"].split("--")[0], r["relationship_type"], r["target_ref"].split("--")[0]) for r in rels}
+    assert pairs == {
+        ("intrusion-set", "uses", "malware"),
+        ("intrusion-set", "uses", "attack-pattern"),
+        ("malware", "uses", "attack-pattern"),
+        ("campaign", "attributed-to", "intrusion-set"),
+    }
+
+
+def test_sector_identity_uses_industry_sector_ov():
+    """``sectors`` must hold ``industry-sector-ov`` values; the EdgeGuard
+    zone stays the identity ``name``. ``global`` (the no-sector marker)
+    and unknown zones carry no ``sectors``."""
+    exporter = StixExporter.__new__(StixExporter)
+    assert exporter._sector_sdo({"name": "finance"})["sectors"] == ["financial-services"]
+    assert exporter._sector_sdo({"name": "energy"})["sectors"] == ["energy"]
+    assert exporter._sector_sdo({"name": "Healthcare"})["sectors"] == ["healthcare"]
+    assert exporter._sector_sdo({"name": "finance"})["name"] == "finance"
+    assert "sectors" not in exporter._sector_sdo({"name": "global"})
+    assert "sectors" not in exporter._sector_sdo({"name": "space-tourism"})
+    assert exporter._sector_sdo({"name": "finance"})["created_by_ref"] == EDGEGUARD_IDENTITY_ID
+
+
+# ---------------------------------------------------------------------------
+# REST route: ``?limit=`` validation
+# ---------------------------------------------------------------------------
+
+
+def _api_client(monkeypatch):
+    """``query_api`` module + test client with API-key enforcement disabled.
+
+    Other test modules set ``query_api._API_KEY`` for the process; the
+    established pattern (tests/test_api_hardening_partner_surface.py) is to
+    neutralise it per test so the routes are exercised unauthenticated.
+    """
+    from fastapi.testclient import TestClient
+
+    import query_api
+
+    monkeypatch.setattr(query_api, "_API_KEY", None)
+    return query_api, TestClient(query_api.app)
+
+
+def test_route_limit_constants_match_exporter(monkeypatch):
+    query_api, _client = _api_client(monkeypatch)
+    assert query_api._STIX_DEFAULT_LIMIT == stix_exporter._DEFAULT_LIMIT == 100
+    assert query_api._STIX_MAX_LIMIT == stix_exporter._MAX_LIMIT == 500
+
+
+def test_route_limit_default_and_explicit_value_reach_the_query(monkeypatch):
+    query_api, http = _api_client(monkeypatch)
+    neo4j_client = _mk_client([_TECHNIQUE_ROW])
+    monkeypatch.setattr(query_api, "neo4j_client", neo4j_client)
+
+    resp = http.get("/stix/export/technique/T1059")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/stix+json")
+    assert neo4j_client.driver._session.main_params["limit"] == 100
+
+    neo4j_client = _mk_client([_TECHNIQUE_ROW])
+    monkeypatch.setattr(query_api, "neo4j_client", neo4j_client)
+    resp = http.get("/stix/export/technique/T1059?limit=500")
+    assert resp.status_code == 200, resp.text
+    assert neo4j_client.driver._session.main_params["limit"] == 500
+
+    neo4j_client = _mk_client([_TECHNIQUE_ROW])
+    monkeypatch.setattr(query_api, "neo4j_client", neo4j_client)
+    resp = http.get("/stix/export/technique/T1059?limit=7")
+    assert resp.status_code == 200, resp.text
+    assert neo4j_client.driver._session.main_params["limit"] == 7
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "501", "abc", "1.5"])
+def test_route_limit_out_of_range_is_rejected_with_422(monkeypatch, bad):
+    query_api, http = _api_client(monkeypatch)
+    neo4j_client = _mk_client([_TECHNIQUE_ROW])
+    monkeypatch.setattr(query_api, "neo4j_client", neo4j_client)
+    resp = http.get(f"/stix/export/technique/T1059?limit={bad}")
+    assert resp.status_code == 422, resp.text
+    assert neo4j_client.driver._session.call_history == [], "no query must run for an invalid limit"
+
+
+def test_stix_types_advertises_limit_bounds(monkeypatch):
+    _query_api, http = _api_client(monkeypatch)
+    resp = http.get("/stix/types")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["default_limit"] == 100
+    assert data["max_limit"] == 500

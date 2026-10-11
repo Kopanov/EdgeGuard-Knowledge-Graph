@@ -30,6 +30,59 @@ Key design decisions (see proposal doc for justification):
 - ATT&CK tactics are emitted as ``kill_chain_phases`` on the
   ``attack-pattern`` SDO, not as standalone objects (per STIX 2.1 ATT&CK
   convention).
+
+Export hardening (2026-10):
+
+- **Bounded exports.** Every ``export_*`` method takes a ``limit``
+  argument (default ``_DEFAULT_LIMIT``, hard maximum ``_MAX_LIMIT``) that
+  is applied per related-node collection inside the Cypher
+  (``ORDER BY <natural key> LIMIT $limit`` before each ``collect``), so a
+  highly connected seed such as T1059 cannot produce an unbounded bundle.
+  The seed match is itself reduced to one deterministic row so the
+  per-collection limits are well defined. The REST layer exposes the same
+  bound as a validated ``?limit=`` query parameter.
+- **Batched source aggregates.** The per-source MIN/MAX timestamps on the
+  ``SOURCED_FROM`` edges are fetched with one ``UNWIND`` query per node
+  label and bundle (``_prefetch_source_aggregates``) instead of one query
+  per node.
+- **Provenance and custom properties (strict-parser compliance).** STIX
+  2.1 permits only ``type``, ``id`` and ``objects`` on a Bundle, and
+  ``stix2.parse`` with the default ``allow_custom=False`` rejects both
+  bundle-level custom properties and undeclared ``x_`` properties on
+  objects (``ExtraPropertiesError``). Verified against stix2 3.0.2: an
+  object whose ``extensions`` map declares an
+  ``extension-definition--*`` entry with
+  ``extension_type: "toplevel-property-extension"`` is accepted with its
+  top-level extension properties intact, and ``extension-definition``
+  objects parse natively. The exporter therefore emits (a) an EdgeGuard
+  producer ``identity`` object, referenced by ``created_by_ref`` from
+  every SDO/SRO, that carries the former bundle-level provenance
+  (exporter, git SHA, generation time) as top-level extension
+  properties, and (b) a single ``extension-definition`` object
+  (``EDGEGUARD_EXTENSION_ID``) declaring every ``x_edgeguard_*``
+  property name (``EDGEGUARD_EXTENSION_PROPERTIES``). Each object that
+  carries at least one ``x_edgeguard_*`` property declares the extension
+  in its ``extensions`` map. The property-extension (nested) form was
+  also accepted by stix2 but was rejected here because it would move the
+  properties that ResilMesh already reads at the top level. ``Tactic``
+  nodes are not reachable from any ``export_*`` path; the
+  ``x-mitre-tactic`` custom type they map to is not strictly parseable
+  and is retained only for MITRE convention.
+- **TLP markings.** The four STIX 2.1 TLP ``marking-definition`` objects
+  (the fixed identifiers from the specification, as shipped in
+  ``stix2.TLP_*``) are included when referenced, and every SDO carries
+  ``object_marking_refs`` derived from the node's ``tlp`` property; SROs
+  inherit the most restrictive marking of their two endpoints.
+- **Patterns.** Indicator patterns are built in this module from the
+  STIX 2.1 patterning grammar: ``email-addr``, ``file:hashes`` keyed by
+  the detected algorithm, ``file:name``, ``url``, ``domain-name``,
+  ``ipv4-addr`` / ``ipv6-addr``; values are escaped.
+- **Relationships and vocabularies.** ``_edge_to_sro`` maps each graph
+  edge type to the ``relationship_type`` permitted by the STIX 2.1
+  relationship summary table for the (source, target) SDO pair, reversing
+  direction where the specification models the pair the other way round;
+  unknown pairs fall back to ``related-to``. Sector identities use the
+  ``industry-sector-ov`` vocabulary.
 """
 
 from __future__ import annotations
@@ -39,13 +92,31 @@ import hashlib
 import json
 import logging
 import os
+import re
 import unicodedata
 import uuid
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import stix2
 
 logger = logging.getLogger(__name__)
+
+# Per-collection bound on related nodes in an export (see the module
+# docstring). The default and maximum follow the REST read clamps in
+# ``query_api.py`` (``Query(..., ge=1, le=500)``); the route declares the
+# same two values on its ``?limit=`` parameter.
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 500
+
+
+def _clamp_limit(limit: Any) -> int:
+    """Coerce ``limit`` into ``[1, _MAX_LIMIT]``; non-integers fall back to the default."""
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return _DEFAULT_LIMIT
+    return max(1, min(value, _MAX_LIMIT))
+
 
 # Per-query timeout (seconds). Matches ``_NEO4J_QUERY_TIMEOUT`` in
 # ``query_api.py`` so a pathological export can't tie up the request
@@ -223,45 +294,311 @@ def _deterministic_id(obj_type: str, natural_key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Pattern helper — reuse the escape + type mapping from MISPToNeo4jSync
-# instead of re-implementing it. We instantiate the class lazily with
-# ``__new__`` to avoid triggering its heavy ``__init__`` (which would try
-# to connect to MISP).
+# Producer identity, extension definition, TLP markings
 # ---------------------------------------------------------------------------
 
-_pattern_helper: Any = None
+# Deterministic identifiers of the two provenance objects every bundle
+# carries. Both derive from ``EDGEGUARD_STIX_NAMESPACE`` so they are stable
+# across processes and releases; consumers may cache them.
+EDGEGUARD_IDENTITY_NAME = "EdgeGuard Knowledge Graph"
+EDGEGUARD_IDENTITY_ID = _deterministic_id("identity", EDGEGUARD_IDENTITY_NAME)
+EDGEGUARD_EXTENSION_ID = _deterministic_id("extension-definition", "edgeguard-provenance")
+
+# Version stamps of the identity and the extension definition. These are
+# fixed (not wall-clock) so the two objects are byte-stable across exports;
+# ``modified`` and ``version`` are bumped when the definition changes.
+_PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
+_EXTENSION_VERSION = "1.0.0"
+_EXTENSION_SCHEMA_URL = (
+    "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
+    "#edgeguard-extension-definition"
+)
+
+# Vulnerability enrichment fields promoted to top-level extension
+# properties by ``_vulnerability_sdo`` (Neo4j property, STIX property).
+_VULNERABILITY_PROMOTED_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("cvss_score", "x_edgeguard_cvss_score"),
+    ("severity", "x_edgeguard_severity"),
+    ("attack_vector", "x_edgeguard_attack_vector"),
+    ("published", "x_edgeguard_published"),
+    ("last_modified", "x_edgeguard_last_modified"),
+    ("cisa_exploit_add", "x_edgeguard_cisa_exploit_add"),
+    ("cisa_action_due", "x_edgeguard_cisa_action_due"),
+    ("cisa_required_action", "x_edgeguard_cisa_required_action"),
+    ("cisa_vulnerability_name", "x_edgeguard_cisa_vulnerability_name"),
+    ("cwe", "x_edgeguard_cwe"),
+    ("cisa_cwes", "x_edgeguard_cisa_cwes"),
+    ("ref_tags", "x_edgeguard_ref_tags"),
+    ("reference_urls", "x_edgeguard_reference_urls"),
+    ("affected_products", "x_edgeguard_affected_products"),
+)
+
+# Every top-level ``x_edgeguard_*`` property the exporter can emit. The
+# extension definition declares this list as ``extension_properties``
+# (required for ``toplevel-property-extension``); a test asserts that no
+# emitted property is missing from it.
+EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
+    # Producer identity
+    "x_edgeguard_exporter",
+    "x_edgeguard_git_sha",
+    "x_edgeguard_generated_at",
+    # Source-truthful and import-wall-clock timestamps (all SDO types)
+    "x_edgeguard_first_seen_at_source",
+    "x_edgeguard_last_seen_at_source",
+    "x_edgeguard_first_imported_at",
+    "x_edgeguard_last_updated",
+    "x_edgeguard_first_seen_inferred",
+    # Zones and MISP traceability
+    "x_edgeguard_zones",
+    "x_edgeguard_misp_event_ids",
+    "x_edgeguard_misp_attribute_ids",
+) + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
+
+_EXTENSION_PREFIX = "x_edgeguard_"
+
+# STIX 2.1 TLP marking definitions. The identifiers are fixed by the
+# specification (section 7.2.1.4) and ``stix2`` rejects any TLP
+# marking-definition that deviates from them, so the SDK constants are
+# the single source. Node ``tlp`` values follow the write-side ladder in
+# ``neo4j_client._tlp_rank_case`` (red > amber+strict > amber > green >
+# white = clear). Levels without a STIX 2.1 built-in map to the nearest
+# built-in that is at least as restrictive: ``clear`` is the TLP 2.0 name
+# of WHITE; ``amber+strict`` has no 2.1 equivalent and is exported as RED
+# rather than loosened to AMBER.
+_TLP_MARKING_BY_LEVEL: Dict[str, Any] = {
+    "white": stix2.TLP_WHITE,
+    "clear": stix2.TLP_WHITE,
+    "green": stix2.TLP_GREEN,
+    "amber": stix2.TLP_AMBER,
+    "amber+strict": stix2.TLP_RED,
+    "red": stix2.TLP_RED,
+}
+_TLP_MARKINGS_BY_ID: Dict[str, Any] = {
+    m.id: m for m in (stix2.TLP_WHITE, stix2.TLP_GREEN, stix2.TLP_AMBER, stix2.TLP_RED)
+}
+_TLP_RANK_BY_ID: Dict[str, int] = {
+    stix2.TLP_WHITE.id: 1,
+    stix2.TLP_GREEN.id: 2,
+    stix2.TLP_AMBER.id: 3,
+    stix2.TLP_RED.id: 4,
+}
 
 
-def _get_pattern_helper() -> Any:
-    """Return a bare instance of MISPToNeo4jSync for pattern helpers.
+def _default_tlp_marking_id() -> str:
+    """Marking applied when a node carries no ``tlp`` property.
 
-    We only need ``_value_to_stix_pattern``/``_escape_stix_value``; both
-    are pure and do not touch ``self``'s network state, so skipping
-    ``__init__`` is safe.
+    This is the deployment default ``config.EDGEGUARD_DEFAULT_TLP``
+    (``white`` unless configured) — the same value the write side stamps
+    on nodes that arrive without a TLP, so export and storage agree.
     """
-    global _pattern_helper
-    if _pattern_helper is None:
-        from run_misp_to_neo4j import MISPToNeo4jSync
+    try:
+        import config
 
-        _pattern_helper = MISPToNeo4jSync.__new__(MISPToNeo4jSync)
-    return _pattern_helper
+        level = str(getattr(config, "EDGEGUARD_DEFAULT_TLP", "white") or "white").strip().lower()
+    except Exception:  # pragma: no cover - config import failure is a deployment error
+        level = "white"
+    return _TLP_MARKING_BY_LEVEL.get(level, stix2.TLP_WHITE).id
+
+
+def _marking_ref_for(props: Dict[str, Any]) -> str:
+    """Return the TLP ``marking-definition`` id for a node's ``tlp`` property.
+
+    A node with no TLP receives the deployment default (see
+    ``_default_tlp_marking_id``). A non-empty value outside the known
+    ladder is exported as TLP:AMBER — restricted rather than public — and
+    logged, because the level was asserted by a source but cannot be
+    interpreted.
+    """
+    raw = props.get("tlp")
+    level = str(raw).strip().lower() if raw is not None else ""
+    if not level:
+        # Node carries no TLP: apply the deployment default.
+        return _default_tlp_marking_id()
+    marking = _TLP_MARKING_BY_LEVEL.get(level)
+    if marking is None:
+        logger.warning(
+            "[stix-export] Unrecognised TLP level %r on exported node; marking the SDO TLP:AMBER",
+            raw,
+        )
+        return stix2.TLP_AMBER.id
+    return marking.id
+
+
+def _most_restrictive_marking(*marking_ids: Optional[str]) -> str:
+    """Return the highest-ranked TLP marking id among ``marking_ids``."""
+    known = [m for m in marking_ids if m in _TLP_RANK_BY_ID]
+    if not known:
+        return _default_tlp_marking_id()
+    return max(known, key=lambda m: _TLP_RANK_BY_ID[m])
+
+
+# STIX 2.1 ``industry-sector-ov`` values for EdgeGuard zones. ``global``
+# is the "no sector" marker and has no vocabulary value; sectors outside
+# this map are exported as a named identity without ``sectors``.
+_INDUSTRY_SECTOR_OV: Dict[str, str] = {
+    "healthcare": "healthcare",
+    "energy": "energy",
+    "finance": "financial-services",
+}
+
+
+def _industry_sectors(name: str) -> Optional[List[str]]:
+    """Map an EdgeGuard sector name to ``industry-sector-ov`` (``None`` when unmapped)."""
+    key = (name or "").strip().lower()
+    vocab = _INDUSTRY_SECTOR_OV.get(key)
+    return [vocab] if vocab else None
+
+
+# Graph edge → STIX 2.1 relationship, keyed by (edge type, source SDO type,
+# target SDO type) in GRAPH direction; the value is (relationship_type,
+# reverse). ``reverse=True`` swaps source and target because the STIX 2.1
+# relationship summary table defines the pair in the opposite direction.
+# Pairs the table does not define at all are emitted as ``related-to``.
+#
+# - indicator → malware / attack-pattern: ``indicates`` (table: indicator
+#   indicates attack-pattern, campaign, infrastructure, intrusion-set,
+#   malware, threat-actor, tool).
+# - indicator → vulnerability (EXPLOITS): the table defines no
+#   indicator → vulnerability pair, so ``related-to``.
+# - indicator → identity (TARGETS): ``indicator`` has no ``targets``
+#   relationship in the table, so ``related-to``.
+# - malware → intrusion-set (ATTRIBUTED_TO): ``attributed-to`` is defined
+#   only for campaign / intrusion-set sources. MITRE ATT&CK — the origin
+#   of these edges — models the pair as ``intrusion-set uses malware``,
+#   which the table defines; the SRO is therefore reversed.
+# - intrusion-set / malware / tool → attack-pattern: ``uses``.
+# - intrusion-set → campaign (RUNS): the table defines ``campaign
+#   attributed-to intrusion-set``; reversed.
+# - vulnerability → identity (AFFECTS): ``vulnerability`` has no outgoing
+#   relationships in the table, so ``related-to``.
+_SRO_BY_EDGE: Dict[Tuple[str, str, str], Tuple[str, bool]] = {
+    ("INDICATES", "indicator", "malware"): ("indicates", False),
+    ("USES_TECHNIQUE", "indicator", "attack-pattern"): ("indicates", False),
+    ("EXPLOITS", "indicator", "vulnerability"): ("related-to", False),
+    ("TARGETS", "indicator", "identity"): ("related-to", False),
+    ("ATTRIBUTED_TO", "malware", "intrusion-set"): ("uses", True),
+    ("EMPLOYS_TECHNIQUE", "intrusion-set", "attack-pattern"): ("uses", False),
+    ("IMPLEMENTS_TECHNIQUE", "malware", "attack-pattern"): ("uses", False),
+    ("IMPLEMENTS_TECHNIQUE", "tool", "attack-pattern"): ("uses", False),
+    ("RUNS", "intrusion-set", "campaign"): ("attributed-to", True),
+    ("AFFECTS", "vulnerability", "identity"): ("related-to", False),
+}
+
+
+# ---------------------------------------------------------------------------
+# Pattern builder — STIX 2.1 patterning grammar (section 9)
+# ---------------------------------------------------------------------------
+
+_HEX_RE = re.compile(r"^[A-Fa-f0-9]+$")
+_SSDEEP_RE = re.compile(r"^\d+:[A-Za-z0-9/+]*:[A-Za-z0-9/+]*$")
+_TLSH_RE = re.compile(r"^(T1)?[A-Fa-f0-9]{70}$")
+# hash-algorithm-ov key by hexadecimal digest length.
+_HASH_ALGORITHM_BY_HEX_LENGTH: Dict[int, str] = {32: "MD5", 40: "SHA-1", 64: "SHA-256", 128: "SHA-512"}
+_HEX_LENGTH_BY_HASH_ALGORITHM: Dict[str, int] = {a: n for n, a in _HASH_ALGORITHM_BY_HEX_LENGTH.items()}
+# Declared EdgeGuard / MISP hash types and their vocabulary key.
+_HASH_ALGORITHM_BY_TYPE: Dict[str, str] = {
+    "md5": "MD5",
+    "sha1": "SHA-1",
+    "sha-1": "SHA-1",
+    "sha256": "SHA-256",
+    "sha-256": "SHA-256",
+    "sha512": "SHA-512",
+    "sha-512": "SHA-512",
+    "ssdeep": "SSDEEP",
+    "tlsh": "TLSH",
+}
+_HASH_INDICATOR_TYPES = frozenset(_HASH_ALGORITHM_BY_TYPE) | {"hash"}
+_IPV4_TYPES = frozenset({"ipv4", "ip", "ip-src", "ip-dst", "ip-src|port", "ip-dst|port"})
+_IPV6_TYPES = frozenset({"ipv6"})
+_DOMAIN_TYPES = frozenset({"domain", "hostname"})
+_URL_TYPES = frozenset({"url", "uri"})
+_EMAIL_TYPES = frozenset({"email", "email-src", "email-dst", "email-addr"})
+_FILENAME_TYPES = frozenset({"filename", "file-name"})
+# Custom hash key used when the algorithm cannot be determined. Permitted
+# by the ``hashes`` type rules (3-250 ASCII characters from
+# ``[A-Za-z0-9_-]``) and preferable to mislabelling the digest.
+_UNKNOWN_HASH_KEY = "UNKNOWN"
+
+
+def _escape_stix_value(value: str) -> str:
+    """Escape a value for a single-quoted STIX pattern string literal (backslash, then quote)."""
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _hash_algorithm(indicator_type: str, value: str) -> str:
+    """Pick the ``file:hashes`` key for a digest.
+
+    The declared type wins when the value matches its format; otherwise
+    the format decides (32/40/64/128 hexadecimal characters, SSDEEP and
+    TLSH shapes). A digest that matches none of these is keyed
+    ``UNKNOWN`` so the pattern stays valid without asserting an
+    algorithm — the pattern validator rejects a digest whose format does
+    not match the declared algorithm.
+    """
+    digest = value.strip()
+    is_hex = bool(_HEX_RE.match(digest))
+    declared = _HASH_ALGORITHM_BY_TYPE.get(indicator_type)
+    if declared is not None:
+        expected_len = _HEX_LENGTH_BY_HASH_ALGORITHM.get(declared)
+        if expected_len is not None and is_hex and len(digest) == expected_len:
+            return declared
+        if declared == "SSDEEP" and _SSDEEP_RE.match(digest):
+            return declared
+        if declared == "TLSH" and _TLSH_RE.match(digest):
+            return declared
+    if is_hex and len(digest) in _HASH_ALGORITHM_BY_HEX_LENGTH:
+        return _HASH_ALGORITHM_BY_HEX_LENGTH[len(digest)]
+    if _SSDEEP_RE.match(digest):
+        return "SSDEEP"
+    if _TLSH_RE.match(digest):
+        return "TLSH"
+    return _UNKNOWN_HASH_KEY
 
 
 def _build_pattern(indicator_type: Optional[str], value: str) -> str:
     """Build a STIX 2.1 pattern literal for an indicator row.
 
-    Falls back to a generic ``artifact`` match if the MISP type is not
-    recognised — that way we never drop an indicator just because its
-    type is exotic; the proposal lists pattern coverage as a follow-up.
+    Observable mapping (STIX 2.1 section 6): IPv4/IPv6 → ``ipv4-addr`` /
+    ``ipv6-addr``, domain/hostname → ``domain-name``, URL → ``url``,
+    e-mail address → ``email-addr``, digests → ``file:hashes.'<ALGO>'``
+    (algorithm from the declared type or the digest format, see
+    ``_hash_algorithm``), file names → ``file:name``. A blank or
+    unrecognised type is inferred from the value's shape with the shared
+    ``ioc_normalize.infer_indicator_type`` helper; when that fails the
+    pattern uses the custom observable type ``x-edgeguard-observable``,
+    which is valid under the patterning grammar and states that no
+    standard object type applies instead of mislabelling the value.
+    STIX requires a pattern on every Indicator, so this never returns
+    ``None``.
     """
-    helper = _get_pattern_helper()
-    pattern = helper._value_to_stix_pattern(indicator_type or "", value)
-    if pattern:
-        return pattern
-    # Fallback: emit a valid but coarse pattern. STIX requires a pattern
-    # on indicator SDOs so we must not return None here.
-    safe = helper._escape_stix_value(value)
-    return f"[artifact:payload_bin = '{safe}']"
+    itype = (indicator_type or "").strip().lower()
+    raw = value if isinstance(value, str) else str(value)
+    recognised = (
+        _HASH_INDICATOR_TYPES | _IPV4_TYPES | _IPV6_TYPES | _DOMAIN_TYPES | _URL_TYPES | _EMAIL_TYPES | _FILENAME_TYPES
+    )
+    if itype not in recognised:
+        from ioc_normalize import infer_indicator_type
+
+        itype = infer_indicator_type(raw) or itype
+    safe = _escape_stix_value(raw.strip())
+    if itype in _IPV4_TYPES:
+        # ``ip-src|port`` style values carry a port suffix; the address part is the observable.
+        address = safe.split("|", 1)[0]
+        return f"[ipv4-addr:value = '{address}']"
+    if itype in _IPV6_TYPES:
+        return f"[ipv6-addr:value = '{safe}']"
+    if itype in _DOMAIN_TYPES:
+        return f"[domain-name:value = '{safe}']"
+    if itype in _URL_TYPES:
+        return f"[url:value = '{safe}']"
+    if itype in _EMAIL_TYPES:
+        return f"[email-addr:value = '{safe}']"
+    if itype in _HASH_INDICATOR_TYPES:
+        algorithm = _hash_algorithm(itype, raw)
+        return f"[file:hashes.'{algorithm}' = '{safe}']"
+    if itype in _FILENAME_TYPES:
+        return f"[file:name = '{safe}']"
+    return f"[x-edgeguard-observable:value = '{safe}']"
 
 
 # ---------------------------------------------------------------------------
@@ -294,12 +631,16 @@ class StixExporter:
         # entity within one bundle don't re-query.
         # Cleared at the start of every public ``export_*`` method.
         self._aggregate_cache: Dict[Any, Dict[str, Any]] = {}
+        # TLP marking id per emitted SDO id, so SROs can inherit the most
+        # restrictive marking of their endpoints. Bundle-scoped like the
+        # aggregate cache.
+        self._marking_by_id: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def export_indicator(self, value: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
+    def export_indicator(self, value: str, depth: int = _DEFAULT_DEPTH, limit: int = _DEFAULT_LIMIT) -> Dict[str, Any]:
         """Bundle one indicator + its 1-hop neighbourhood.
 
         Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability,
@@ -312,11 +653,17 @@ class StixExporter:
         ``depth`` is a Python-side filter that saves bundle size, not
         query time. A future optimisation would push the filter into
         the query itself.
+
+        ``limit`` bounds every related-node collection (malware, CVEs,
+        techniques, sectors) inside the query; it is clamped to
+        ``[1, _MAX_LIMIT]``. Each collection is ordered by its natural
+        key before the limit is applied so truncation is deterministic.
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
+        limit = _clamp_limit(limit)
         # Each OPTIONAL MATCH is aggregated into a collect() before the next
         # one starts. Without the WITH ... collect() fence pattern the four
         # OPTIONAL MATCH clauses form a Cartesian product — every row from
@@ -325,29 +672,38 @@ class StixExporter:
         # techniques × 5 sectors = 15 000 intermediate rows) blows up long
         # before the outer DISTINCT collapses them. Same pattern as the
         # round-2/round-4 fixes to export_threat_actor and export_technique.
+        # The seed is reduced to one row (the unique key is
+        # (indicator_type, value), so one value may exist under several
+        # types) and every stage is ordered and limited before it is
+        # collected.
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
             WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
+            WITH i ORDER BY i.indicator_type LIMIT 1
             OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
+            WITH i, m ORDER BY m.name LIMIT $limit
             WITH i, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
               WHERE (v:CVE OR v:Vulnerability)
                 AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
+            WITH i, malware, v ORDER BY v.cve_id LIMIT $limit
             WITH i, malware, collect(DISTINCT v) AS vulns
             OPTIONAL MATCH (i)-[:USES_TECHNIQUE]->(t:Technique)
               WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
+            WITH i, malware, vulns, t ORDER BY t.mitre_id LIMIT $limit
             WITH i, malware, vulns, collect(DISTINCT t) AS techniques
             OPTIONAL MATCH (i)-[:TARGETS]->(s:Sector)
               WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
+            WITH i, malware, vulns, techniques, s ORDER BY s.name LIMIT $limit
             RETURN i AS seed,
                    malware,
                    vulns,
                    techniques,
                    collect(DISTINCT s) AS sectors
             """,
-            {"value": value},
+            {"value": value, "limit": limit},
         )
         if not rows:
             return self._empty_bundle()
@@ -356,57 +712,63 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
+        malware_nodes = [dict(m) for m in _nonnull(row["malware"])]
+        vuln_nodes = [dict(v) for v in _nonnull(row["vulns"])] if depth >= 2 else []
+        technique_nodes = [dict(t) for t in _nonnull(row["techniques"])] if depth >= 2 else []
+        sector_nodes = [dict(s) for s in _nonnull(row["sectors"])] if depth >= 2 else []
+        self._prefetch_source_aggregates(
+            [("Indicator", dict(seed))]
+            + [("Malware", m) for m in malware_nodes]
+            + [("Vulnerability", v) for v in vuln_nodes]
+            + [("Technique", t) for t in technique_nodes]
+            + [("Sector", s) for s in sector_nodes]
+        )
+
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("Indicator", dict(seed))
         self._add(objects, seed_sdo)
 
-        for m in _nonnull(row["malware"]):
-            m_sdo = self._node_to_sdo("Malware", dict(m))
+        for md in malware_nodes:
+            m_sdo = self._node_to_sdo("Malware", md)
             self._add(objects, m_sdo)
-            self._add(
-                objects,
-                self._edge_to_sro("indicates", seed_sdo["id"], m_sdo["id"]),
-            )
+            self._add(objects, self._edge_to_sro("INDICATES", seed_sdo["id"], m_sdo["id"]))
         # depth=1 short-circuit: bundle contains only the primary
         # relation type (INDICATES→Malware). See the docstring above.
         if depth < 2:
             return self._bundle(objects.values())
-        for v in _nonnull(row["vulns"]):
-            v_sdo = self._node_to_sdo("Vulnerability", dict(v))
+        for vd in vuln_nodes:
+            v_sdo = self._node_to_sdo("Vulnerability", vd)
             self._add(objects, v_sdo)
-            # STIX has no "exploits" vocab term; "indicates" is the closest
-            # defined value and matches the Indicator→Vulnerability semantics.
-            self._add(
-                objects,
-                self._edge_to_sro("indicates", seed_sdo["id"], v_sdo["id"]),
-            )
-        for t in _nonnull(row["techniques"]):
-            t_sdo = self._node_to_sdo("Technique", dict(t))
+            self._add(objects, self._edge_to_sro("EXPLOITS", seed_sdo["id"], v_sdo["id"]))
+        for td in technique_nodes:
+            t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
-            # Indicator→Technique: STIX 2.1 vocabulary for indicator
-            # source_ref allows "indicates". We use "indicates" here
-            # (not "uses") — see proposal doc §5.
-            self._add(
-                objects,
-                self._edge_to_sro("indicates", seed_sdo["id"], t_sdo["id"]),
-            )
-        for s in _nonnull(row["sectors"]):
-            s_sdo = self._node_to_sdo("Sector", dict(s))
+            self._add(objects, self._edge_to_sro("USES_TECHNIQUE", seed_sdo["id"], t_sdo["id"]))
+        for sd in sector_nodes:
+            s_sdo = self._node_to_sdo("Sector", sd)
             self._add(objects, s_sdo)
-            self._add(
-                objects,
-                self._edge_to_sro("targets", seed_sdo["id"], s_sdo["id"]),
-            )
+            self._add(objects, self._edge_to_sro("TARGETS", seed_sdo["id"], s_sdo["id"]))
 
         return self._bundle(objects.values())
 
-    def export_threat_actor(self, name: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
+    def export_threat_actor(
+        self, name: str, depth: int = _DEFAULT_DEPTH, limit: int = _DEFAULT_LIMIT
+    ) -> Dict[str, Any]:
         """Bundle centred on a ThreatActor + attributed malware + TTPs + campaigns.
 
         ``depth=1`` returns only actor + attributed malware (primary
         relation). ``depth=2`` (default) adds actor techniques, the
         malware→technique chain, and campaigns. See ``export_indicator``
-        for the general semantics.
+        for the general semantics; ``limit`` bounds each collection
+        (malware, actor techniques, malware→technique pairs, campaigns).
+
+        Actor resolution is case-insensitive and alias-aware, identical to
+        ``GET /actors/{name}/summary``: actor names are stored lower-case
+        at write time (``node_identity.canonicalize_merge_key``) while
+        aliases keep display case, hence ``toLower(trim(...))`` on both
+        the input and each alias. When several actors match, a canonical
+        name hit wins over an alias-only hit, then the lowest name, so
+        the seed is deterministic.
 
         The query uses a ``WITH ... collect(DISTINCT ...)`` step between
         every ``OPTIONAL MATCH`` to avoid the Cartesian product that
@@ -423,34 +785,43 @@ class StixExporter:
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
+        limit = _clamp_limit(limit)
         rows = self._run(
             """
             MATCH (a:ThreatActor)
-            WHERE (a.name = $name OR $name IN coalesce(a.aliases, []))
-              AND (a.edgeguard_managed = true OR a.edgeguard_enriched = true)
+            WHERE (a.edgeguard_managed = true OR a.edgeguard_enriched = true)
+              AND (a.name = toLower(trim($name))
+                   OR any(x IN coalesce(a.aliases, []) WHERE toLower(trim(x)) = toLower(trim($name))))
+            WITH a, (CASE WHEN a.name = toLower(trim($name)) THEN 0 ELSE 1 END) AS _match_rank
+            ORDER BY _match_rank, a.name
+            LIMIT 1
             WITH a
             OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
+            WITH a, m ORDER BY m.name LIMIT $limit
             WITH a, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
               WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
+            WITH a, malware, t ORDER BY t.mitre_id LIMIT $limit
             WITH a, malware, collect(DISTINCT t) AS actor_tech
             UNWIND (CASE WHEN size(malware) = 0 THEN [null] ELSE malware END) AS m_each
             OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
               WHERE m_each IS NOT NULL AND (mt.edgeguard_managed = true OR mt.edgeguard_enriched = true)
+            WITH a, malware, actor_tech, m_each, mt ORDER BY m_each.name, mt.mitre_id LIMIT $limit
             WITH a, malware, actor_tech,
                  collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
             WITH a, malware, actor_tech,
                  [pair IN mal_tech_raw WHERE pair IS NOT NULL] AS mal_tech
             OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
               WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
+            WITH a, malware, actor_tech, mal_tech, c ORDER BY c.name LIMIT $limit
             RETURN a AS seed,
                    malware,
                    actor_tech,
                    mal_tech,
                    collect(DISTINCT c) AS campaigns
             """,
-            {"name": name},
+            {"name": name, "limit": limit},
         )
         if not rows:
             return self._empty_bundle()
@@ -459,39 +830,48 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
+        malware_nodes = [dict(m) for m in _nonnull(row["malware"])]
+        actor_tech_nodes = [dict(t) for t in _nonnull(row["actor_tech"])] if depth >= 2 else []
+        mal_tech_pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        if depth >= 2:
+            for pair in row["mal_tech"] or []:
+                m = pair.get("m") if isinstance(pair, dict) else None
+                t = pair.get("t") if isinstance(pair, dict) else None
+                if m and t:
+                    mal_tech_pairs.append((dict(m), dict(t)))
+        campaign_nodes = [dict(c) for c in _nonnull(row["campaigns"])] if depth >= 2 else []
+        self._prefetch_source_aggregates(
+            [("ThreatActor", dict(seed))]
+            + [("Malware", m) for m in malware_nodes]
+            + [("Technique", t) for t in actor_tech_nodes]
+            + [("Malware", m) for m, _ in mal_tech_pairs]
+            + [("Technique", t) for _, t in mal_tech_pairs]
+            + [("Campaign", c) for c in campaign_nodes]
+        )
+
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("ThreatActor", dict(seed))
         self._add(objects, seed_sdo)
 
         mal_ids: Dict[str, str] = {}
-        for m in _nonnull(row["malware"]):
-            md = dict(m)
+        for md in malware_nodes:
             m_sdo = self._node_to_sdo("Malware", md)
             self._add(objects, m_sdo)
             mal_ids[md.get("name", "")] = m_sdo["id"]
-            self._add(
-                objects,
-                self._edge_to_sro("attributed-to", m_sdo["id"], seed_sdo["id"]),
-            )
+            # Graph direction: (Malware)-[:ATTRIBUTED_TO]->(ThreatActor).
+            # ``_edge_to_sro`` emits the STIX 2.1 form of this pair,
+            # ``intrusion-set uses malware`` (MITRE ATT&CK convention).
+            self._add(objects, self._edge_to_sro("ATTRIBUTED_TO", m_sdo["id"], seed_sdo["id"]))
 
         # depth=1: primary relation only (actor + attributed malware).
         if depth < 2:
             return self._bundle(objects.values())
 
-        for t in _nonnull(row["actor_tech"]):
-            t_sdo = self._node_to_sdo("Technique", dict(t))
+        for td in actor_tech_nodes:
+            t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
-            self._add(
-                objects,
-                self._edge_to_sro("uses", seed_sdo["id"], t_sdo["id"]),
-            )
-        for pair in row["mal_tech"] or []:
-            m = pair.get("m") if isinstance(pair, dict) else None
-            t = pair.get("t") if isinstance(pair, dict) else None
-            if not m or not t:
-                continue
-            md = dict(m)
-            td = dict(t)
+            self._add(objects, self._edge_to_sro("EMPLOYS_TECHNIQUE", seed_sdo["id"], t_sdo["id"]))
+        for md, td in mal_tech_pairs:
             m_sdo_id = mal_ids.get(md.get("name", "")) or self._add(objects, self._node_to_sdo("Malware", md))
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
@@ -502,32 +882,30 @@ class StixExporter:
             # invariant ever drifts.
             if m_sdo_id is None:
                 continue
-            self._add(
-                objects,
-                self._edge_to_sro("uses", m_sdo_id, t_sdo["id"]),
-            )
-        for c in _nonnull(row["campaigns"]):
-            c_sdo = self._node_to_sdo("Campaign", dict(c))
+            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", m_sdo_id, t_sdo["id"]))
+        for cd in campaign_nodes:
+            c_sdo = self._node_to_sdo("Campaign", cd)
             self._add(objects, c_sdo)
             # The graph edge is (ThreatActor)-[:RUNS]->(Campaign) — the
             # actor owns/operates the campaign. STIX 2.1 expresses this
             # as `relationship_type: attributed-to` with source_ref on
-            # the campaign and target_ref on the intrusion-set. See
+            # the campaign and target_ref on the intrusion-set; the
+            # reversal is performed by ``_edge_to_sro``. See
             # https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html#_i4tjv75ce50h
-            self._add(
-                objects,
-                self._edge_to_sro("attributed-to", c_sdo["id"], seed_sdo["id"]),
-            )
+            self._add(objects, self._edge_to_sro("RUNS", seed_sdo["id"], c_sdo["id"]))
 
         return self._bundle(objects.values())
 
-    def export_technique(self, mitre_id: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
+    def export_technique(
+        self, mitre_id: str, depth: int = _DEFAULT_DEPTH, limit: int = _DEFAULT_LIMIT
+    ) -> Dict[str, Any]:
         """Bundle centred on a Technique + everything that uses it.
 
         ``depth=1`` returns the technique plus only the ThreatActors
         that employ it (primary relation). ``depth=2`` (default) also
         includes Malware, Tools, and Indicators. See ``export_indicator``
-        for the general semantics.
+        for the general semantics; ``limit`` bounds each of the four
+        collections (T1059 is the documented hotspot).
 
         Uses ``WITH ... collect(DISTINCT ...) AS ...`` between every
         ``OPTIONAL MATCH`` for the same reason as ``export_threat_actor``:
@@ -544,6 +922,9 @@ class StixExporter:
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
+        limit = _clamp_limit(limit)
+        # ``Technique.mitre_id`` is unique, so the seed is a single row
+        # without an explicit LIMIT 1.
         rows = self._run(
             """
             MATCH (t:Technique {mitre_id: $mid})
@@ -551,22 +932,26 @@ class StixExporter:
             WITH t
             OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t)
               WHERE (a.edgeguard_managed = true OR a.edgeguard_enriched = true)
+            WITH t, a ORDER BY a.name LIMIT $limit
             WITH t, collect(DISTINCT a) AS actors
             OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
+            WITH t, actors, m ORDER BY m.name LIMIT $limit
             WITH t, actors, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE (tool.edgeguard_managed = true OR tool.edgeguard_enriched = true)
+            WITH t, actors, malware, tool ORDER BY tool.mitre_id, tool.name LIMIT $limit
             WITH t, actors, malware, collect(DISTINCT tool) AS tools
             OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE]->(t)
               WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
+            WITH t, actors, malware, tools, i ORDER BY i.value, i.indicator_type LIMIT $limit
             RETURN t AS seed,
                    actors,
                    malware,
                    tools,
                    collect(DISTINCT i) AS indicators
             """,
-            {"mid": mitre_id},
+            {"mid": mitre_id, "limit": limit},
         )
         if not rows:
             return self._empty_bundle()
@@ -575,59 +960,81 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
+        actor_nodes = [dict(a) for a in _nonnull(row["actors"])]
+        malware_nodes = [dict(m) for m in _nonnull(row["malware"])] if depth >= 2 else []
+        tool_nodes = [dict(tool) for tool in _nonnull(row["tools"])] if depth >= 2 else []
+        indicator_nodes = [dict(i) for i in _nonnull(row["indicators"])] if depth >= 2 else []
+        self._prefetch_source_aggregates(
+            [("Technique", dict(seed))]
+            + [("ThreatActor", a) for a in actor_nodes]
+            + [("Malware", m) for m in malware_nodes]
+            + [("Tool", tool) for tool in tool_nodes]
+            + [("Indicator", i) for i in indicator_nodes]
+        )
+
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("Technique", dict(seed))
         self._add(objects, seed_sdo)
 
-        for a in _nonnull(row["actors"]):
-            a_sdo = self._node_to_sdo("ThreatActor", dict(a))
+        for ad in actor_nodes:
+            a_sdo = self._node_to_sdo("ThreatActor", ad)
             self._add(objects, a_sdo)
-            self._add(objects, self._edge_to_sro("uses", a_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("EMPLOYS_TECHNIQUE", a_sdo["id"], seed_sdo["id"]))
         # depth=1: primary relation only (technique + attributed actors).
         if depth < 2:
             return self._bundle(objects.values())
-        for m in _nonnull(row["malware"]):
-            m_sdo = self._node_to_sdo("Malware", dict(m))
+        for md in malware_nodes:
+            m_sdo = self._node_to_sdo("Malware", md)
             self._add(objects, m_sdo)
-            self._add(objects, self._edge_to_sro("uses", m_sdo["id"], seed_sdo["id"]))
-        for tool in _nonnull(row["tools"]):
-            tool_sdo = self._node_to_sdo("Tool", dict(tool))
+            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", m_sdo["id"], seed_sdo["id"]))
+        for tool_d in tool_nodes:
+            tool_sdo = self._node_to_sdo("Tool", tool_d)
             self._add(objects, tool_sdo)
-            self._add(objects, self._edge_to_sro("uses", tool_sdo["id"], seed_sdo["id"]))
-        for i in _nonnull(row["indicators"]):
-            i_sdo = self._node_to_sdo("Indicator", dict(i))
+            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", tool_sdo["id"], seed_sdo["id"]))
+        for idn in indicator_nodes:
+            i_sdo = self._node_to_sdo("Indicator", idn)
             self._add(objects, i_sdo)
-            self._add(objects, self._edge_to_sro("indicates", i_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("USES_TECHNIQUE", i_sdo["id"], seed_sdo["id"]))
 
         return self._bundle(objects.values())
 
-    def export_cve(self, cve_id: str, depth: int = _DEFAULT_DEPTH) -> Dict[str, Any]:
+    def export_cve(self, cve_id: str, depth: int = _DEFAULT_DEPTH, limit: int = _DEFAULT_LIMIT) -> Dict[str, Any]:
         """Bundle centred on a CVE/Vulnerability + exploiting indicators + affected sectors.
 
         ``depth=1`` returns the CVE plus only the exploiting Indicators
         (primary relation). ``depth=2`` (default) also includes affected
-        sectors. See ``export_indicator`` for the general semantics.
+        sectors. See ``export_indicator`` for the general semantics;
+        ``limit`` bounds the indicator and sector collections.
+
+        A CVE may exist as two twin nodes (``CVE`` — NVD canonical — and
+        ``Vulnerability`` — MISP derived) that share one STIX id. The
+        seed is reduced to one row, preferring the ``CVE`` node because
+        it carries the NVD enrichment promoted by ``_vulnerability_sdo``.
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
+        limit = _clamp_limit(limit)
         rows = self._run(
             """
             MATCH (v)
             WHERE (v:CVE OR v:Vulnerability)
               AND v.cve_id = $cve_id
               AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
+            WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END) LIMIT 1
             OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(v)
               WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
+            WITH v, i ORDER BY i.value, i.indicator_type LIMIT $limit
             WITH v, collect(DISTINCT i) AS indicators
             OPTIONAL MATCH (v)-[:AFFECTS]->(s:Sector)
               WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
+            WITH v, indicators, s ORDER BY s.name LIMIT $limit
             RETURN v AS seed,
                    indicators,
                    collect(DISTINCT s) AS sectors
             """,
-            {"cve_id": cve_id},
+            {"cve_id": cve_id, "limit": limit},
         )
         if not rows:
             return self._empty_bundle()
@@ -636,21 +1043,29 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
+        indicator_nodes = [dict(i) for i in _nonnull(row["indicators"])]
+        sector_nodes = [dict(s) for s in _nonnull(row["sectors"])] if depth >= 2 else []
+        self._prefetch_source_aggregates(
+            [("Vulnerability", dict(seed))]
+            + [("Indicator", i) for i in indicator_nodes]
+            + [("Sector", s) for s in sector_nodes]
+        )
+
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("Vulnerability", dict(seed))
         self._add(objects, seed_sdo)
 
-        for i in _nonnull(row["indicators"]):
-            i_sdo = self._node_to_sdo("Indicator", dict(i))
+        for idn in indicator_nodes:
+            i_sdo = self._node_to_sdo("Indicator", idn)
             self._add(objects, i_sdo)
-            self._add(objects, self._edge_to_sro("indicates", i_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("EXPLOITS", i_sdo["id"], seed_sdo["id"]))
         # depth=1: primary relation only (CVE + exploiting indicators).
         if depth < 2:
             return self._bundle(objects.values())
-        for s in _nonnull(row["sectors"]):
-            s_sdo = self._node_to_sdo("Sector", dict(s))
+        for sd in sector_nodes:
+            s_sdo = self._node_to_sdo("Sector", sd)
             self._add(objects, s_sdo)
-            self._add(objects, self._edge_to_sro("targets", seed_sdo["id"], s_sdo["id"]))
+            self._add(objects, self._edge_to_sro("AFFECTS", seed_sdo["id"], s_sdo["id"]))
 
         return self._bundle(objects.values())
 
@@ -682,8 +1097,11 @@ class StixExporter:
         ``x_edgeguard_*`` extensions, just sourced from a different
         place than other entity types.
 
-        PR (S5) (Red Team H1 + Prod #1 + Perf F1 HIGH ×3):
-        cached per-export-call to eliminate the N+1 query problem.
+        The aggregates are read from the bundle-scoped cache populated by
+        ``_prefetch_source_aggregates`` (one query per label and bundle).
+        A node missing from the cache — a direct caller that did not
+        prefetch — is fetched on its own through the same batched path,
+        so the export methods never issue per-node queries.
 
         PR (S5) (Bug Hunter v2 #4 + Logic Tracker v2 F8 MED):
         previously the silent-bail paths returned props with NO log
@@ -694,17 +1112,6 @@ class StixExporter:
         labels without a SOURCED_FROM edge — props is returned
         unchanged when no edges exist.
         """
-        # PR (S5) (bugbot c136baf LOW): validate ``label``
-        # before f-string interpolation per project rule. Today's
-        # callers all pass hardcoded labels via _node_to_sdo, but
-        # the import boundary is the right place to defend against
-        # any future caller that might pass an attacker-controlled
-        # value (e.g. via a label query parameter).
-        from neo4j_client import _validate_label
-        from node_identity import natural_key_props
-
-        _validate_label(label)
-
         # ----- Special case: Campaign reads its own pre-aggregated props
         if label == "Campaign":
             out = dict(props)
@@ -714,63 +1121,12 @@ class StixExporter:
                 out["last_seen_at_source"] = props["last_seen"]
             return out
 
-        try:
-            keys = natural_key_props(label)
-        except KeyError:
+        cache_key = self._aggregate_cache_key(label, props)
+        if cache_key is None:
             return props
-        # Skip Source / Sector — they don't carry per-source claims
-        # (Source IS the source; Sector is a category).
-        if label in ("Source", "Sector"):
-            return props
-
-        # Build cache key from (label, sorted natural-key tuple).
-        # Sort so order-independent for multi-key labels like NetworkService.
-        cache_key = (label, tuple(sorted((k, props.get(k)) for k in keys)))
-
-        # If any natural-key value is None we can't safely look up — bail
-        # (with WARNING so operator can see the missing extension).
-        if any(v is None for _, v in cache_key[1]):
-            logger.warning(
-                "STIX source-aggregate skipped for %s — missing natural-key value(s) %s; "
-                "x_edgeguard_first_seen_at_source extension will be absent from this SDO",
-                label,
-                {k: v for k, v in cache_key[1]},
-            )
-            return props
-
-        # Per-export-call cache hit?
-        if cache_key in self._aggregate_cache:
-            agg = self._aggregate_cache[cache_key]
-        else:
-            where = " AND ".join(f"n.`{k}` = $key_{k}" for k in keys)
-            params = {f"key_{k}": props.get(k) for k in keys}
-            try:
-                rows = self._run(
-                    f"""
-                    MATCH (n:{label}) WHERE {where}
-                    OPTIONAL MATCH (n)-[r:SOURCED_FROM]->(:Source)
-                    RETURN min(r.source_reported_first_at) AS first_seen_at_source,
-                           max(r.source_reported_last_at) AS last_seen_at_source
-                    """,
-                    params,
-                )
-            except Exception as e:
-                # If the lookup fails (driver issue, transient), we still
-                # return a valid SDO — just without the source-truthful
-                # extension. The caller's ``valid_from`` chain falls
-                # through to ``first_imported_at``. Log so operators see
-                # the silent degradation.
-                logger.warning(
-                    "STIX source-aggregate query FAILED for %s key=%s: %s: %s — "
-                    "SDO emitted without x_edgeguard_* extensions",
-                    label,
-                    params,
-                    type(e).__name__,
-                    e,
-                )
-                return props
-            agg = rows[0] if rows else {}
-            self._aggregate_cache[cache_key] = agg
+        if cache_key not in self._aggregate_cache:
+            self._prefetch_source_aggregates([(label, props)])
+        agg = self._aggregate_cache.get(cache_key) or {}
 
         out = dict(props)
         if agg.get("first_seen_at_source") is not None:
@@ -779,8 +1135,104 @@ class StixExporter:
             out["last_seen_at_source"] = agg["last_seen_at_source"]
         return out
 
+    @staticmethod
+    def _aggregate_cache_key(label: str, props: Dict[str, Any]) -> Optional[Tuple[str, Tuple[Tuple[str, Any], ...]]]:
+        """Return ``(label, sorted natural-key items)`` or ``None`` when the
+        label carries no per-source claims or a natural-key value is missing.
+
+        ``Source`` is the source itself and ``Sector`` is a category; both
+        are skipped. A missing natural-key value is logged (the SDO is
+        emitted without the ``x_edgeguard_*_at_source`` properties).
+        """
+        from node_identity import natural_key_props
+
+        if label in ("Source", "Sector", "Campaign"):
+            return None
+        try:
+            keys = natural_key_props(label)
+        except KeyError:
+            return None
+        # Sort so the key is order-independent for multi-key labels.
+        key_items = tuple(sorted((k, props.get(k)) for k in keys))
+        if any(v is None for _, v in key_items):
+            logger.warning(
+                "STIX source-aggregate skipped for %s — missing natural-key value(s) %s; "
+                "x_edgeguard_first_seen_at_source extension will be absent from this SDO",
+                label,
+                dict(key_items),
+            )
+            return None
+        return (label, key_items)
+
+    def _prefetch_source_aggregates(self, nodes: Iterable[Tuple[str, Dict[str, Any]]]) -> None:
+        """Populate the aggregate cache for ``nodes`` with ONE query per label.
+
+        The natural keys of the not-yet-cached nodes are grouped by label
+        and sent as a single ``UNWIND $rows`` statement that returns one
+        row per matched node (grouped by the natural-key columns) with
+        ``min(r.source_reported_first_at)`` / ``max(r.source_reported_last_at)``
+        over its ``SOURCED_FROM`` edges. Every requested key is written to
+        the cache (an empty dict when the node returned no row) so a
+        later lookup never falls back to a per-node query. A failed query
+        is logged and leaves the affected keys empty — the SDOs are still
+        emitted, without the source-truthful properties.
+        """
+        from neo4j_client import _validate_label
+        from node_identity import natural_key_props
+
+        pending: Dict[str, Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], Dict[str, Any]]] = {}
+        for label, props in nodes:
+            cache_key = self._aggregate_cache_key(label, props)
+            if cache_key is None or cache_key in self._aggregate_cache:
+                continue
+            pending.setdefault(label, {})[cache_key] = dict(cache_key[1])
+
+        for label, keyed_rows in pending.items():
+            # Validate the label before f-string interpolation (Cypher
+            # injection guard, project rule). The callers pass fixed
+            # labels, but this is the boundary where a future caller
+            # could pass an attacker-controlled value.
+            _validate_label(label)
+            keys = natural_key_props(label)
+            where = " AND ".join(f"n.`{k}` = row.`{k}`" for k in keys)
+            key_columns = ", ".join(f"n.`{k}` AS `{k}`" for k in keys)
+            cypher = f"""
+                UNWIND $rows AS row
+                MATCH (n:{label}) WHERE {where}
+                OPTIONAL MATCH (n)-[r:SOURCED_FROM]->(:Source)
+                RETURN {key_columns},
+                       min(r.source_reported_first_at) AS first_seen_at_source,
+                       max(r.source_reported_last_at) AS last_seen_at_source
+            """
+            # Mark every requested key as resolved up front; rows that
+            # come back overwrite the placeholder.
+            for cache_key in keyed_rows:
+                self._aggregate_cache[cache_key] = {}
+            try:
+                rows = self._run(cypher, {"rows": list(keyed_rows.values())})
+            except Exception as e:
+                logger.warning(
+                    "STIX source-aggregate query FAILED for %s (%d node(s)): %s: %s — "
+                    "SDOs emitted without x_edgeguard_*_at_source properties",
+                    label,
+                    len(keyed_rows),
+                    type(e).__name__,
+                    e,
+                )
+                continue
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                returned_key = (label, tuple(sorted((k, r.get(k)) for k in keys)))
+                if returned_key not in keyed_rows:
+                    continue
+                self._aggregate_cache[returned_key] = {
+                    "first_seen_at_source": r.get("first_seen_at_source"),
+                    "last_seen_at_source": r.get("last_seen_at_source"),
+                }
+
     def _reset_export_cache(self) -> None:
-        """Clear the per-export-call source-aggregate cache.
+        """Clear the bundle-scoped caches (source aggregates, SDO markings).
 
         PR (S5): called at the start of every public ``export_*``
         method so subsequent exports don't see stale aggregates from
@@ -788,6 +1240,7 @@ class StixExporter:
         within one bundle without leaking state across bundles.
         """
         self._aggregate_cache.clear()
+        self._marking_by_id.clear()
 
     def _node_to_sdo(self, label: str, props: Dict[str, Any]) -> Dict[str, Any]:
         """Turn a Neo4j node dict into a STIX 2.1 SDO dict.
@@ -851,6 +1304,11 @@ class StixExporter:
             }
         _attach_zones(sdo, props)
         _attach_misp_provenance(sdo, props)
+        # Remember the SDO's marking so SROs can inherit the most
+        # restrictive marking of their endpoints (``_edge_to_sro``).
+        refs = sdo.get("object_marking_refs") or []
+        if refs:
+            self._marking_by_id[sdo["id"]] = refs[0]
         return sdo
 
     # ---- per-type constructors ----------------------------------------
@@ -980,6 +1438,8 @@ class StixExporter:
             valid_from=valid_from,
             name=props.get("name") or f"{ind_type}:{value}",
             indicator_types=_listify(props.get("indicator_classification") or ["malicious-activity"]),
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
             **_producer_created_modified(props),
         )
@@ -1012,6 +1472,8 @@ class StixExporter:
             malware_types=malware_types,
             aliases=_listify(props.get("aliases")),
             description=props.get("description"),
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
             **_producer_created_modified(props),
         )
@@ -1028,6 +1490,8 @@ class StixExporter:
             name=name,
             aliases=_listify(props.get("aliases")),
             description=props.get("description"),
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
             **_producer_created_modified(props),
         )
@@ -1064,6 +1528,8 @@ class StixExporter:
             "id": stix_id,
             "name": name,
             "description": props.get("description"),
+            "created_by_ref": EDGEGUARD_IDENTITY_ID,
+            "object_marking_refs": [_marking_ref_for(props)],
             "allow_custom": True,
         }
         if kcp:
@@ -1083,6 +1549,8 @@ class StixExporter:
             tool_types=_listify(props.get("tool_types") or ["unknown"]),
             description=props.get("description"),
             aliases=_listify(props.get("aliases")),
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
             **_producer_created_modified(props),
         )
@@ -1140,6 +1608,8 @@ class StixExporter:
             "id": stix_id,
             "created": created,
             "modified": modified,
+            "created_by_ref": EDGEGUARD_IDENTITY_ID,
+            "object_marking_refs": [_marking_ref_for(props)],
             "name": name,
             "description": props.get("description"),
         }
@@ -1158,6 +1628,8 @@ class StixExporter:
             name=name,
             description=props.get("description"),
             aliases=_listify(props.get("aliases")),
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
             **_producer_created_modified(props),
         )
@@ -1195,31 +1667,24 @@ class StixExporter:
             "id": stix_id,
             "name": cve_id,
             "description": props.get("description"),
+            "created_by_ref": EDGEGUARD_IDENTITY_ID,
+            "object_marking_refs": [_marking_ref_for(props)],
             "allow_custom": True,
         }
         if ext_refs:
             kwargs["external_references"] = ext_refs
 
         # Promote CVSS + severity + CISA KEV + NVD dates + CWE /
-        # references to STIX custom properties so the SDO actually
-        # carries the Neo4j enrichment through to ResilMesh.
-        _promoted_fields = (
-            ("cvss_score", "x_edgeguard_cvss_score"),
-            ("severity", "x_edgeguard_severity"),
-            ("attack_vector", "x_edgeguard_attack_vector"),
-            ("published", "x_edgeguard_published"),
-            ("last_modified", "x_edgeguard_last_modified"),
-            ("cisa_exploit_add", "x_edgeguard_cisa_exploit_add"),
-            ("cisa_action_due", "x_edgeguard_cisa_action_due"),
-            ("cisa_required_action", "x_edgeguard_cisa_required_action"),
-            ("cisa_vulnerability_name", "x_edgeguard_cisa_vulnerability_name"),
-            ("cwe", "x_edgeguard_cwe"),
-            ("cisa_cwes", "x_edgeguard_cisa_cwes"),
-            ("ref_tags", "x_edgeguard_ref_tags"),
-            ("reference_urls", "x_edgeguard_reference_urls"),
-            ("affected_products", "x_edgeguard_affected_products"),
-        )
-        for neo4j_key, stix_key in _promoted_fields:
+        # references to STIX top-level extension properties so the SDO
+        # actually carries the Neo4j enrichment through to ResilMesh
+        # (``x_edgeguard_cvss_score``, ``x_edgeguard_severity``,
+        # ``x_edgeguard_published``, ``x_edgeguard_last_modified``, the
+        # ``x_edgeguard_cisa_*`` fields, ``x_edgeguard_cwe``,
+        # ``x_edgeguard_ref_tags``, ``x_edgeguard_reference_urls``, ...).
+        # The field list is the module-level
+        # ``_VULNERABILITY_PROMOTED_FIELDS`` so the extension definition
+        # declares exactly the same names.
+        for neo4j_key, stix_key in _VULNERABILITY_PROMOTED_FIELDS:
             val = props.get(neo4j_key)
             # Skip None / empty strings / empty collections so we don't
             # bloat the STIX bundle with "x_edgeguard_cvss_score: null".
@@ -1245,11 +1710,17 @@ class StixExporter:
         # restore parity. Pinned by test_sector_stix_parity_end_to_end.
         name = props.get("name") or props.get("sector") or ""
         stix_id = _deterministic_id("identity", name)
+        # ``sectors`` values come from the STIX 2.1 ``industry-sector-ov``
+        # vocabulary (``_INDUSTRY_SECTOR_OV``); the EdgeGuard zone name is
+        # kept as the identity ``name``. Unmapped zones (``global`` is the
+        # "no sector" marker) are exported without ``sectors``.
         obj = stix2.Identity(
             id=stix_id,
             name=name,
             identity_class="class",
-            sectors=[name] if name else None,
+            sectors=_industry_sectors(name),
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[_marking_ref_for(props)],
             allow_custom=True,
         )
         return _to_dict(obj)
@@ -1258,14 +1729,43 @@ class StixExporter:
     # Edge → SRO
     # ------------------------------------------------------------------
 
-    def _edge_to_sro(self, relationship_type: str, source_ref: str, target_ref: str) -> Dict[str, Any]:
-        """Build a deterministic Relationship SRO between two SDOs."""
+    def _edge_to_sro(self, edge_type: str, source_ref: str, target_ref: str) -> Dict[str, Any]:
+        """Build a deterministic Relationship SRO for a graph edge.
+
+        ``edge_type`` is the EdgeGuard relationship type in graph
+        direction (``source_ref`` → ``target_ref``). The STIX
+        ``relationship_type`` — and, where the specification models the
+        pair the other way round, the direction — comes from
+        ``_SRO_BY_EDGE`` (see the table for the rationale per pair);
+        pairs absent from the table are emitted as ``related-to`` in graph
+        direction. The SRO carries ``created_by_ref`` and the most
+        restrictive ``object_marking_refs`` of its two endpoints.
+        """
+        source_type = source_ref.split("--", 1)[0]
+        target_type = target_ref.split("--", 1)[0]
+        mapping = _SRO_BY_EDGE.get((edge_type, source_type, target_type))
+        if mapping is None:
+            logger.warning(
+                "[stix-export] No STIX 2.1 relationship mapping for %s (%s -> %s); emitting related-to",
+                edge_type,
+                source_type,
+                target_type,
+            )
+            relationship_type, reverse = "related-to", False
+        else:
+            relationship_type, reverse = mapping
+        if reverse:
+            source_ref, target_ref = target_ref, source_ref
+        marking_by_id = getattr(self, "_marking_by_id", {})
+        marking = _most_restrictive_marking(marking_by_id.get(source_ref), marking_by_id.get(target_ref))
         stix_id = _deterministic_id("relationship", f"{source_ref}|{relationship_type}|{target_ref}")
         obj = stix2.Relationship(
             id=stix_id,
             relationship_type=relationship_type,
             source_ref=source_ref,
             target_ref=target_ref,
+            created_by_ref=EDGEGUARD_IDENTITY_ID,
+            object_marking_refs=[marking],
             allow_custom=True,
         )
         return _to_dict(obj)
@@ -1305,10 +1805,24 @@ class StixExporter:
         #      the wall-clock timestamp for forensics — so an operator
         #      can still answer "when was this bundle generated" from
         #      the bundle alone.
-        objects_list = sorted(
-            list(objects),
-            key=lambda o: o.get("id", ""),
+        #
+        # Strict-parser compliance (see the module docstring): a STIX 2.1
+        # Bundle carries only ``type``, ``id`` and ``objects``. The
+        # former bundle-level ``x_edgeguard_source`` provenance now lives
+        # on the EdgeGuard producer ``identity`` (referenced by every
+        # object's ``created_by_ref``); the ``extension-definition`` that
+        # declares the ``x_edgeguard_*`` top-level properties and the TLP
+        # ``marking-definition`` objects referenced by the bundle are
+        # appended as well, so the bundle is self-contained.
+        exported = [o for o in objects if o]
+        for o in exported:
+            _declare_extension(o)
+        all_objects: List[Dict[str, Any]] = exported + [_producer_identity(), _extension_definition()]
+        marking_ids = {ref for o in all_objects for ref in (o.get("object_marking_refs") or [])}
+        all_objects.extend(
+            _to_dict(_TLP_MARKINGS_BY_ID[mid]) for mid in sorted(marking_ids) if mid in _TLP_MARKINGS_BY_ID
         )
+        objects_list = sorted(all_objects, key=lambda o: o.get("id", ""))
         # Hash over the sorted ids only (NOT full payloads — payload
         # field churn within an SDO would change the id otherwise; the
         # bundle "identity" is "which objects are in it", not "what's
@@ -1320,7 +1834,6 @@ class StixExporter:
             "type": "bundle",
             "id": bundle_id,
             "objects": objects_list,
-            "x_edgeguard_source": _bundle_provenance(),
         }
 
     def _empty_bundle(self) -> Dict[str, Any]:
@@ -1417,7 +1930,7 @@ def _extract_zones(props: Dict[str, Any]) -> List[str]:
 
 
 def _bundle_provenance() -> Dict[str, Any]:
-    """Build the bundle-level ``x_edgeguard_source`` dict.
+    """Build the provenance dict carried by the producer identity.
 
     Kept in a module-level helper so tests can freeze the timestamp by
     monkeypatching ``_utcnow``. ``git_sha`` is read from the module
@@ -1431,14 +1944,92 @@ def _bundle_provenance() -> Dict[str, Any]:
     working without code change.
     """
     provenance: Dict[str, Any] = {
-        "producer": "EdgeGuard Knowledge Graph",
+        "producer": EDGEGUARD_IDENTITY_NAME,
         "exporter": "stix_exporter",
         "git_sha": _GIT_SHA or None,
-        "spec_version": "2.1",
     }
     if not _is_truthy_env("EDGEGUARD_DETERMINISTIC_BUNDLE"):
         provenance["generated_at"] = _utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     return provenance
+
+
+def _producer_identity() -> Dict[str, Any]:
+    """Build the EdgeGuard producer ``identity`` SDO.
+
+    Every exported object references it through ``created_by_ref``. It
+    carries the provenance that used to sit on the bundle as top-level
+    extension properties (``x_edgeguard_exporter``,
+    ``x_edgeguard_git_sha`` when known, ``x_edgeguard_generated_at``
+    unless ``EDGEGUARD_DETERMINISTIC_BUNDLE`` is set). ``created`` and
+    ``modified`` are fixed so the object is byte-stable; the identity is
+    marked TLP:WHITE because it describes the producer, not the data.
+    """
+    provenance = _bundle_provenance()
+    custom: Dict[str, Any] = {"x_edgeguard_exporter": provenance["exporter"]}
+    if provenance.get("git_sha"):
+        custom["x_edgeguard_git_sha"] = provenance["git_sha"]
+    if provenance.get("generated_at"):
+        custom["x_edgeguard_generated_at"] = provenance["generated_at"]
+    obj = stix2.Identity(
+        id=EDGEGUARD_IDENTITY_ID,
+        created=_PROVENANCE_OBJECTS_CREATED,
+        modified=_PROVENANCE_OBJECTS_CREATED,
+        name=provenance["producer"],
+        identity_class="system",
+        description="Producer of this STIX 2.1 bundle: the EdgeGuard threat-intelligence knowledge graph exporter.",
+        object_marking_refs=[stix2.TLP_WHITE.id],
+        extensions={EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}},
+        allow_custom=True,
+        **custom,
+    )
+    return _to_dict(obj)
+
+
+def _extension_definition() -> Dict[str, Any]:
+    """Build the ``extension-definition`` that declares the ``x_edgeguard_*`` properties.
+
+    ``extension_types`` is ``toplevel-property-extension`` so the
+    properties stay at the top level of each object (where ResilMesh
+    reads them) while remaining acceptable to strict STIX 2.1 parsers;
+    ``extension_properties`` lists every property name the exporter can
+    emit (``EDGEGUARD_EXTENSION_PROPERTIES``).
+    """
+    obj = stix2.ExtensionDefinition(
+        id=EDGEGUARD_EXTENSION_ID,
+        created=_PROVENANCE_OBJECTS_CREATED,
+        modified=_PROVENANCE_OBJECTS_CREATED,
+        created_by_ref=EDGEGUARD_IDENTITY_ID,
+        name="EdgeGuard provenance and enrichment properties",
+        description=(
+            "Top-level properties prefixed x_edgeguard_ carrying EdgeGuard provenance "
+            "(source-truthful and import timestamps, zones, MISP traceability, NVD and CISA KEV "
+            "enrichment, exporter build information)."
+        ),
+        schema=_EXTENSION_SCHEMA_URL,
+        version=_EXTENSION_VERSION,
+        extension_types=["toplevel-property-extension"],
+        extension_properties=list(EDGEGUARD_EXTENSION_PROPERTIES),
+    )
+    return _to_dict(obj)
+
+
+def _declare_extension(sdo: Dict[str, Any]) -> None:
+    """Declare the EdgeGuard extension on ``sdo`` when it carries ``x_edgeguard_*`` properties.
+
+    In-place mutation. Objects without such properties are left
+    untouched so lean objects (for example sector identities) do not
+    grow an ``extensions`` map. An existing ``extensions`` map is
+    extended, not replaced.
+    """
+    if not isinstance(sdo, dict):
+        return
+    if not any(isinstance(k, str) and k.startswith(_EXTENSION_PREFIX) for k in sdo):
+        return
+    extensions = sdo.get("extensions")
+    if not isinstance(extensions, dict):
+        extensions = {}
+        sdo["extensions"] = extensions
+    extensions.setdefault(EDGEGUARD_EXTENSION_ID, {"extension_type": "toplevel-property-extension"})
 
 
 def _is_truthy_env(name: str) -> bool:
