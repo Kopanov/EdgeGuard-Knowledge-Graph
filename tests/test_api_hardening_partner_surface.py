@@ -171,6 +171,48 @@ class TestGraphQLLimits:
         assert not any("root fields" in (e.get("message") or "") for e in (small.json().get("errors") or []))
         assert "MaxRootFieldsLimiter" in {type(e).__name__ for e in graphql_api._extensions}
 
+    @pytest.mark.parametrize("shape", ["doubling", "linear"])
+    def test_pathological_fragment_chains_are_rejected_quickly(self, monkeypatch, shape):
+        """Bugbot on #151 round 2: doubling fragments were exponential and a long linear chain hit
+        RecursionError before the cap applied. Both must now be rejected in well under a second."""
+        import time
+
+        monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
+        for attr in ("neo4j_client", "client"):
+            if hasattr(graphql_api, attr):
+                monkeypatch.setattr(graphql_api, attr, _fake_client(MagicMock()))
+        if shape == "doubling":
+            parts = ["fragment F0 on Query { a: tactics { __typename } }"]
+            parts += [f"fragment F{i} on Query {{ ...F{i - 1} ...F{i - 1} }}" for i in range(1, 40)]
+            query = " ".join(parts) + " query { ...F39 }"
+        else:
+            parts = ["fragment F0 on Query { a: tactics { __typename } }"]
+            parts += [f"fragment F{i} on Query {{ ...F{i - 1} }}" for i in range(1, 400)]
+            query = " ".join(parts) + " query { ...F399 }"
+        t0 = time.perf_counter()
+        resp = TestClient(graphql_api.app, raise_server_exceptions=False).post("/graphql", json={"query": query})
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 2.0, f"validation took {elapsed:.2f}s"
+        assert resp.status_code in (200, 400)
+        errors = resp.json().get("errors") or []
+        assert any("Query rejected" in (e.get("message") or "") for e in errors), resp.json()
+
+    def test_fragment_cycle_is_rejected_before_validation(self, monkeypatch):
+        monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
+        query = "fragment A on Query { ...B } fragment B on Query { ...A } query { ...A }"
+        resp = TestClient(graphql_api.app, raise_server_exceptions=False).post("/graphql", json={"query": query})
+        errors = resp.json().get("errors") or []
+        assert any("fragment cycle" in (e.get("message") or "") for e in errors), resp.json()
+
+    def test_expanded_count_is_linear_and_exact(self):
+        from graphql import parse
+
+        doc = parse(
+            "fragment F on Query { a: tactics { __typename } b: tactics { __typename } } query { ...F ...F c: tactics { __typename } }"
+        )
+        count, problem = graphql_api._expanded_selection_count(doc, 10_000, 16)
+        assert problem is None and count == 10  # fragment = 4 selections, spread twice, plus c + __typename
+
     def test_openapi_routes_are_rate_limited(self):
         for name in ("query_api", "graphql_api"):
             src = (_SRC / f"{name}.py").read_text()

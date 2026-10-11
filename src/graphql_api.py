@@ -21,7 +21,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import strawberry
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -714,9 +714,17 @@ GRAPHQL_PLAYGROUND = os.getenv("EDGEGUARD_GRAPHQL_PLAYGROUND", "false").lower() 
 # Both are extensions, not middleware — they run inside Strawberry's
 # request lifecycle so the limit applies BEFORE the resolver fans out
 # (vs. middleware which would run after parse).
-from graphql import FieldNode, FragmentSpreadNode, GraphQLError, InlineFragmentNode, ValidationRule  # noqa: E402
+from graphql import (  # noqa: E402
+    FieldNode,
+    FragmentDefinitionNode,
+    FragmentSpreadNode,
+    GraphQLError,
+    InlineFragmentNode,
+    OperationDefinitionNode,
+    ValidationRule,
+)
 from graphql.validation import NoSchemaIntrospectionCustomRule  # noqa: E402
-from strawberry.extensions import MaxAliasesLimiter, QueryDepthLimiter  # noqa: E402
+from strawberry.extensions import MaxAliasesLimiter, QueryDepthLimiter, SchemaExtension  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
 
 
@@ -751,6 +759,11 @@ def _env_positive_int(name: str, default: int) -> int:
 # 2026-10 readiness check: 300 aliased root fields ran 300 Cypher statements in one request.
 _GRAPHQL_MAX_ALIASES = _env_positive_int("EDGEGUARD_GRAPHQL_MAX_ALIASES", 15)
 _MAX_GRAPHQL_OFFSET = 100_000  # same ceiling as the REST API
+# Expanded selection budget checked BEFORE validation (Bugbot on #151, round 2): Strawberry's
+# QueryDepthLimiter re-walks every fragment spread without memoisation, so a chain of doubling
+# fragments costs exponential validation time regardless of the alias / root-field caps.
+_GRAPHQL_MAX_SELECTIONS = _env_positive_int("EDGEGUARD_GRAPHQL_MAX_SELECTIONS", 2000)
+_GRAPHQL_MAX_FRAGMENT_DEPTH = 16
 _MAX_BODY_BYTES = _env_positive_int("EDGEGUARD_MAX_BODY_BYTES", 1 * 1024 * 1024)
 # Note: ``_IS_PROD`` is defined at the top of this module (line ~70)
 # alongside the API-key auth check. The single source of truth is
@@ -768,35 +781,110 @@ def _make_root_field_limit_rule(max_fields: int) -> type:  # noqa: C901 — one 
     """
 
     class MaxRootFieldsRule(ValidationRule):
+        # Bugbot on #151: a chain of doubling fragments made the expansion exponential and a long
+        # linear chain hit RecursionError before the cap was checked. The walk now stops as soon as
+        # the running total exceeds the cap (bounded work: at most max_fields + 1 fields are ever
+        # counted) and refuses nesting deeper than _MAX_SPREAD_DEPTH.
+        _MAX_SPREAD_DEPTH = 16
+
         def enter_operation_definition(self, node, *_args):  # noqa: ANN001
-            total = self._count(node.selection_set, frozenset())
+            total = self._count(node.selection_set, frozenset(), 0, 0)
             if total > max_fields:
                 self.report_error(
                     GraphQLError(
-                        f"{total} root fields requested (aliases and fragments expanded); allowed: {max_fields}",
+                        f"more than {max_fields} root fields requested (aliases and fragments expanded); "
+                        f"allowed: {max_fields}",
                         node,
                     )
                 )
 
-        def _count(self, selection_set, seen):  # noqa: ANN001
+        def _count(self, selection_set, seen, total, depth):  # noqa: ANN001
+            """Running count of root fields; returns early once ``total`` exceeds the cap."""
             if selection_set is None:
-                return 0
-            total = 0
+                return total
+            if depth > self._MAX_SPREAD_DEPTH:
+                return max_fields + 1  # too deeply nested to be legitimate: treat as over the cap
             for sel in selection_set.selections:
+                if total > max_fields:
+                    return total
                 if isinstance(sel, FieldNode):
                     total += 1
                 elif isinstance(sel, InlineFragmentNode):
-                    total += self._count(sel.selection_set, seen)
+                    total = self._count(sel.selection_set, seen, total, depth + 1)
                 elif isinstance(sel, FragmentSpreadNode):
                     name = sel.name.value
                     if name in seen:
                         continue  # cycles are rejected by NoFragmentCyclesRule; never recurse into one
                     fragment = self.context.get_fragment(name)
                     if fragment is not None:
-                        total += self._count(fragment.selection_set, seen | {name})
+                        total = self._count(fragment.selection_set, seen | {name}, total, depth + 1)
             return total
 
     return MaxRootFieldsRule
+
+
+def _expanded_selection_count(document: Any, cap: int, max_depth: int) -> tuple[int, Optional[str]]:
+    """Selections an operation would execute after expanding fragments, computed with memoisation
+    (linear in document size). Returns ``(count, problem)``; ``problem`` names a fragment cycle or
+    nesting deeper than ``max_depth``. Counting stops once ``cap`` is exceeded."""
+    fragments = {d.name.value: d for d in document.definitions if isinstance(d, FragmentDefinitionNode)}
+    memo: Dict[str, int] = {}
+    problem: Optional[str] = None
+
+    def size(selection_set: Any, stack: frozenset, depth: int) -> int:
+        nonlocal problem
+        if selection_set is None or problem is not None:
+            return 0
+        if depth > max_depth:
+            problem = f"fragment nesting deeper than {max_depth}"
+            return cap + 1
+        total = 0
+        for sel in selection_set.selections:
+            if isinstance(sel, FieldNode):
+                total += 1 + size(sel.selection_set, stack, depth)
+            elif isinstance(sel, InlineFragmentNode):
+                total += size(sel.selection_set, stack, depth + 1)
+            elif isinstance(sel, FragmentSpreadNode):
+                name = sel.name.value
+                if name in stack:
+                    problem = f"fragment cycle through {name}"
+                    return cap + 1
+                if name not in memo:
+                    fragment = fragments.get(name)
+                    memo[name] = size(fragment.selection_set, stack | {name}, depth + 1) if fragment else 0
+                total += memo[name]
+            if total > cap:
+                return total
+        return total
+
+    total = 0
+    for definition in document.definitions:
+        if isinstance(definition, OperationDefinitionNode):
+            total += size(definition.selection_set, frozenset(), 0)
+            if total > cap or problem:
+                break
+    return total, problem
+
+
+class FragmentBudget(SchemaExtension):
+    """Rejects a document whose expanded size, fragment nesting or fragment cycles would make
+    validation itself expensive — before any validation rule runs. Setting
+    ``pre_execution_errors`` makes Strawberry skip ``validate_document`` and answer with the error."""
+
+    def on_validate(self):  # noqa: ANN201 — Strawberry hook (generator)
+        ctx = self.execution_context
+        document = getattr(ctx, "graphql_document", None)
+        if document is not None and ctx.pre_execution_errors is None:
+            count, problem = _expanded_selection_count(document, _GRAPHQL_MAX_SELECTIONS, _GRAPHQL_MAX_FRAGMENT_DEPTH)
+            if problem is not None:
+                ctx.pre_execution_errors = [GraphQLError(f"Query rejected: {problem}")]
+            elif count > _GRAPHQL_MAX_SELECTIONS:
+                ctx.pre_execution_errors = [
+                    GraphQLError(
+                        f"Query rejected: more than {_GRAPHQL_MAX_SELECTIONS} selections after fragment expansion"
+                    )
+                ]
+        yield
 
 
 class MaxRootFieldsLimiter(AddValidationRules):
@@ -808,6 +896,7 @@ class MaxRootFieldsLimiter(AddValidationRules):
 
 
 _extensions: list = [
+    FragmentBudget(),
     QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH),
     MaxAliasesLimiter(max_alias_count=_GRAPHQL_MAX_ALIASES),
     MaxRootFieldsLimiter(_GRAPHQL_MAX_ALIASES),
