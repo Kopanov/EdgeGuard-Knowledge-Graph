@@ -649,6 +649,15 @@ SOURCE_TRUTHFUL_FUTURE_CLAMP = Counter(
     [],
 )
 
+# 2026-10 (shared-database contract): every destructive graph operation EdgeGuard runs — the
+# full wipe, the edgeguard-only wipe, CVSS de-duplication — increments this and appends one line
+# to the JSONL trail written by ``destructive_ops_audit``.
+DESTRUCTIVE_OPS = Counter(
+    "edgeguard_destructive_ops_total",
+    "Destructive operations EdgeGuard executed against a shared store (node deletes, wipes)",
+    ["operation", "target"],
+)
+
 # Set application info
 APP_INFO.info(
     {"version": os.getenv("EDGEGUARD_VERSION", "1.0.0"), "environment": os.getenv("EDGEGUARD_ENV", "development")}

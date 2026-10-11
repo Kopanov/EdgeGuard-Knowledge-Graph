@@ -305,7 +305,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
 
 
 def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> List[Vulnerability]:
-    conditions = ["n.edgeguard_managed = true"]
+    conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
     params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset, "min_cvss": f.min_cvss}
 
     if f.zone is not strawberry.UNSET and f.zone:
@@ -322,7 +322,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
     MATCH (n:Vulnerability)
     {where}
     RETURN n
-    ORDER BY n.cvss_score DESC
+    ORDER BY coalesce(n.cvss_score, -1) DESC
     SKIP $offset LIMIT $limit
     """
     results = []
@@ -362,7 +362,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
 
 
 def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicator]:
-    conditions = ["n.edgeguard_managed = true"]
+    conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
     params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset}
 
     if f.zone is not strawberry.UNSET and f.zone:
@@ -382,7 +382,7 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
     MATCH (n:Indicator)
     {where}
     RETURN n
-    ORDER BY n.confidence_score DESC
+    ORDER BY coalesce(n.confidence_score, -1) DESC
     SKIP $offset LIMIT $limit
     """
     results = []
@@ -438,7 +438,7 @@ def _resolve_list(client: Neo4jClient, label: str, f: NodeFilter, cls, mapper):
     params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset}
 
     if f.edgeguard_managed_only:
-        conditions.append("n.edgeguard_managed = true")
+        conditions.append("(n.edgeguard_managed = true OR n.edgeguard_enriched = true)")
     if f.zone is not strawberry.UNSET and f.zone:
         conditions.append("$zone IN n.zone")
         params["zone"] = f.zone
@@ -448,7 +448,7 @@ def _resolve_list(client: Neo4jClient, label: str, f: NodeFilter, cls, mapper):
     MATCH (n:{label})
     {where}
     RETURN n
-    ORDER BY n.confidence_score DESC
+    ORDER BY coalesce(n.confidence_score, -1) DESC
     SKIP $offset LIMIT $limit
     """
     results = []
@@ -631,7 +631,7 @@ class Query:
         limit: int = 100,
     ) -> List[Tool]:
         client = _get_client()
-        conditions = ["n.edgeguard_managed = true"]
+        conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
         # PR-F9 Red Team audit (HIGH): ``limit`` was bound directly into
         # Cypher without the ``_MAX_GRAPHQL_LIMIT=500`` cap that EVERY
         # other resolver applies (vulnerabilities / malwares / actors
@@ -654,7 +654,7 @@ class Query:
         MATCH (n:Tool)
         {where}
         RETURN n
-        ORDER BY n.confidence_score DESC
+        ORDER BY coalesce(n.confidence_score, -1) DESC
         LIMIT $limit
         """
         results = []
@@ -708,7 +708,21 @@ from graphql.validation import NoSchemaIntrospectionCustomRule  # noqa: E402
 from strawberry.extensions import QueryDepthLimiter  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
 
-_GRAPHQL_MAX_DEPTH = int(os.getenv("EDGEGUARD_GRAPHQL_MAX_DEPTH", "8"))
+
+def _env_graphql_max_depth(default: int = 8) -> int:
+    """Query-depth limit from the environment; unset, empty, non-numeric or non-positive → *default*
+    (2026-10: an empty forwarded variable used to raise ValueError at import and stop the API)."""
+    raw = (os.getenv("EDGEGUARD_GRAPHQL_MAX_DEPTH") or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+_GRAPHQL_MAX_DEPTH = _env_graphql_max_depth()
 # Note: ``_IS_PROD`` is defined at the top of this module (line ~70)
 # alongside the API-key auth check. The single source of truth is
 # ``_is_prod_env()`` so the introspection-enable check below and the

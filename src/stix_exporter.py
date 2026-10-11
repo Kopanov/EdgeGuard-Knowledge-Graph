@@ -15,7 +15,7 @@ Key design decisions (see proposal doc for justification):
 - STIX IDs are **deterministic** (UUIDv5 over the node's natural key) so
   re-exports of the same graph state produce the same bundle — ResilMesh
   can diff bundles safely.
-- All Cypher queries filter on ``x.edgeguard_managed = true`` (strict
+- All Cypher queries filter on ``x.edgeguard_managed = true OR x.edgeguard_enriched = true`` — nodes EdgeGuard created or enriched — (strict
   equality — null fails) so we never leak ResilMesh-owned
   asset/vulnerability nodes into an outbound bundle. Originally written
   as ``coalesce(x.edgeguard_managed, true) = true``, which defaulted
@@ -328,19 +328,19 @@ class StixExporter:
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
-            WHERE i.edgeguard_managed = true
+            WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
             OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
-              WHERE m.edgeguard_managed = true
+              WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
             WITH i, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
               WHERE (v:CVE OR v:Vulnerability)
-                AND v.edgeguard_managed = true
+                AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
             WITH i, malware, collect(DISTINCT v) AS vulns
             OPTIONAL MATCH (i)-[:USES_TECHNIQUE]->(t:Technique)
-              WHERE t.edgeguard_managed = true
+              WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
             WITH i, malware, vulns, collect(DISTINCT t) AS techniques
             OPTIONAL MATCH (i)-[:TARGETS]->(s:Sector)
-              WHERE s.edgeguard_managed = true
+              WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
             RETURN i AS seed,
                    malware,
                    vulns,
@@ -427,23 +427,23 @@ class StixExporter:
             """
             MATCH (a:ThreatActor)
             WHERE (a.name = $name OR $name IN coalesce(a.aliases, []))
-              AND a.edgeguard_managed = true
+              AND (a.edgeguard_managed = true OR a.edgeguard_enriched = true)
             WITH a
             OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
-              WHERE m.edgeguard_managed = true
+              WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
             WITH a, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
-              WHERE t.edgeguard_managed = true
+              WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
             WITH a, malware, collect(DISTINCT t) AS actor_tech
             UNWIND (CASE WHEN size(malware) = 0 THEN [null] ELSE malware END) AS m_each
             OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
-              WHERE m_each IS NOT NULL AND mt.edgeguard_managed = true
+              WHERE m_each IS NOT NULL AND (mt.edgeguard_managed = true OR mt.edgeguard_enriched = true)
             WITH a, malware, actor_tech,
                  collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
             WITH a, malware, actor_tech,
                  [pair IN mal_tech_raw WHERE pair IS NOT NULL] AS mal_tech
             OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
-              WHERE c.edgeguard_managed = true
+              WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
             RETURN a AS seed,
                    malware,
                    actor_tech,
@@ -547,19 +547,19 @@ class StixExporter:
         rows = self._run(
             """
             MATCH (t:Technique {mitre_id: $mid})
-            WHERE t.edgeguard_managed = true
+            WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
             WITH t
             OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t)
-              WHERE a.edgeguard_managed = true
+              WHERE (a.edgeguard_managed = true OR a.edgeguard_enriched = true)
             WITH t, collect(DISTINCT a) AS actors
             OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t)
-              WHERE m.edgeguard_managed = true
+              WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
             WITH t, actors, collect(DISTINCT m) AS malware
             OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE]->(t)
-              WHERE tool.edgeguard_managed = true
+              WHERE (tool.edgeguard_managed = true OR tool.edgeguard_enriched = true)
             WITH t, actors, malware, collect(DISTINCT tool) AS tools
             OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE]->(t)
-              WHERE i.edgeguard_managed = true
+              WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
             RETURN t AS seed,
                    actors,
                    malware,
@@ -617,12 +617,12 @@ class StixExporter:
             MATCH (v)
             WHERE (v:CVE OR v:Vulnerability)
               AND v.cve_id = $cve_id
-              AND v.edgeguard_managed = true
+              AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
             OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(v)
-              WHERE i.edgeguard_managed = true
+              WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
             WITH v, collect(DISTINCT i) AS indicators
             OPTIONAL MATCH (v)-[:AFFECTS]->(s:Sector)
-              WHERE s.edgeguard_managed = true
+              WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
             RETURN v AS seed,
                    indicators,
                    collect(DISTINCT s) AS sectors

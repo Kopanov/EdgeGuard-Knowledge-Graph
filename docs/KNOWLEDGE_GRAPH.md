@@ -102,7 +102,7 @@ Every threat-intel node (Indicator, Vulnerability, Malware, ThreatActor, Techniq
 - `r.report_ids[]` (OTX pulse ids) on report-scoped edges; `n.pulse_ids[]` on `Malware` / `ThreatActor` nodes (every pulse that named them); `n.reported_techniques[]` next to `n.uses_techniques[]` (pulse-level vs MITRE-explicit ATT&CK ids).
 - `n.tlp` on every EdgeGuard node (from the `tlp:<level>` MISP tag; default `white`).
 - `n.attack_domain` (`enterprise` | `ics`) on `Technique` and `Tactic` (from the `attack-domain:<domain>` MISP tag); `IN_TACTIC` is created only within the same domain. ATT&CK for ICS is ingested when `EDGEGUARD_ENABLE_MITRE_ICS=true` (97 techniques T08xx, 12 tactics TA0100–TA0111, shared groups/malware keep one node with unioned technique lists).
-- `r.edgeguard_managed = true` on every EdgeGuard edge, and on `Campaign` / `Source` nodes — the ownership marker is complete, so `edgeguard clear neo4j --edgeguard-only` can remove exactly EdgeGuard's data from a shared database.
+- `edgeguard_managed = true` on every EdgeGuard edge and on every node EdgeGuard **creates** (stamped on the MERGE create path only since 2026-10; a node a partner created first that EdgeGuard writes to gets `edgeguard_enriched = true` instead) — so `edgeguard clear neo4j --edgeguard-only` removes exactly the nodes EdgeGuard created from a shared database, and the APIs / STIX export expose nodes it created or enriched.
 - `CVE` nodes carry `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]`, `reference_urls[]`, `affected_products[]` from NVD (ResilMesh CVE properties).
 
 ### Technique edges: attribution vs capability vs observation

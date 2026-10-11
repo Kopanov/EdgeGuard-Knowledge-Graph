@@ -531,16 +531,15 @@ CREATE CONSTRAINT cvssv30_key FOR (n:CVSSv30) REQUIRE (n.cve_id) IS UNIQUE;
 CREATE CONSTRAINT cvssv31_key FOR (n:CVSSv31) REQUIRE (n.cve_id) IS UNIQUE;
 CREATE CONSTRAINT cvssv40_key FOR (n:CVSSv40) REQUIRE (n.cve_id) IS UNIQUE;
 
-// ResilMesh topology constraints — single-key (no tag); shared across feeds
+// ResilMesh topology — only the keys that are unique in CRUSOE's own model as well (2026-10).
+// Device, NetworkService, SoftwareVersion, Application, Role and User are deliberately NOT
+// constrained: their keys recur legitimately in the partner's data (the same software version
+// per product, the same port/protocol per host), so DDL on those labels belongs to ResilMesh.
+// create_constraints() drops any such constraint an older EdgeGuard build created.
 CREATE CONSTRAINT ip_key FOR (n:IP) REQUIRE (n.address) IS UNIQUE;
 CREATE CONSTRAINT host_key FOR (n:Host) REQUIRE (n.hostname) IS UNIQUE;
-CREATE CONSTRAINT device_key FOR (n:Device) REQUIRE (n.device_id) IS UNIQUE;
 CREATE CONSTRAINT subnet_key FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE;
-CREATE CONSTRAINT networkservice_key FOR (n:NetworkService) REQUIRE (n.port, n.protocol) IS UNIQUE;
-CREATE CONSTRAINT softwareversion_key FOR (n:SoftwareVersion) REQUIRE (n.version) IS UNIQUE;
-CREATE CONSTRAINT application_key FOR (n:Application) REQUIRE (n.name) IS UNIQUE;
-CREATE CONSTRAINT role_key FOR (n:Role) REQUIRE (n.permission) IS UNIQUE;
-CREATE CONSTRAINT user_key FOR (n:User) REQUIRE (n.username, n.domain) IS UNIQUE;
+// Alert: alert_id is the idempotency key of the alerts EdgeGuard's own processor writes
 CREATE CONSTRAINT alert_key FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE;
 ```
 

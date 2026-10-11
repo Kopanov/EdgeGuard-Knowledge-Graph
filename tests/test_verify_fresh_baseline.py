@@ -56,10 +56,10 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"c": 0, "examples": []}]
     if "n.tlp IS NULL" in s:
         return [{"total": 500, "missing": 0}]
-    if "n.edgeguard_managed IS NULL UNWIND labels(n)" in s:
-        return [{"label": "Alert", "c": 3}, {"label": "Host", "c": 2}]
+    if "n.edgeguard_managed IS NULL AND n.edgeguard_enriched IS NULL" in s:
+        return [{"label": "Host", "c": 2}, {"label": "Device", "c": 1}]
     if "r.edgeguard_managed IS NULL RETURN type(r)" in s:
-        return [{"type": "INVOLVES", "c": 3}]
+        return [{"type": "ON", "c": 3}]
     if "coalesce(t.attack_domain, 'enterprise') <> coalesce(tc.attack_domain, 'enterprise')" in s:
         return [{"c": 0}]
     if "Technique {attack_domain: 'ics'}" in s:
@@ -115,13 +115,29 @@ class TestHealthyBaselinePasses:
 
 
 class TestNoFalsePositives:
-    def test_alert_subgraph_without_marker_does_not_fail_ownership_checks(self, vfb, monkeypatch):
-        """Alert / Host nodes and INVOLVES edges are written by the alert processor without the
-        marker; they are not part of the baseline contract and must only be reported."""
+    def test_partner_nodes_and_foreign_edges_without_marker_do_not_fail_ownership_checks(self, vfb, monkeypatch):
+        """Host / Device nodes and ResilMesh edge types are not EdgeGuard's; unmarked ones are only
+        reported. Alert nodes and INVOLVES edges ARE EdgeGuard's since 2026-10 and are policed."""
         rep = _run(vfb, monkeypatch)
         assert _check(rep, "ownership_marker_on_nodes")["ok"] is True
         assert _check(rep, "ownership_marker_on_edges")["ok"] is True
-        assert "INVOLVES" not in vfb.EDGEGUARD_REL_TYPES
+        assert "Alert" in vfb.EDGEGUARD_LABELS and "INVOLVES" in vfb.EDGEGUARD_REL_TYPES
+        assert "Host" not in vfb.EDGEGUARD_LABELS
+
+    def test_unmarked_alert_or_involves_fails_ownership_checks(self, vfb, monkeypatch):
+        """A node under an EdgeGuard label with neither marker means a writer omitted it (or a
+        partner wrote under EdgeGuard's label) — the check must fail, not stay silent."""
+
+        def broken(statement, rows):
+            if "n.edgeguard_managed IS NULL AND n.edgeguard_enriched IS NULL" in statement:
+                return [{"label": "Alert", "c": 3}]
+            if "r.edgeguard_managed IS NULL RETURN type(r)" in statement:
+                return [{"type": "INVOLVES", "c": 3}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=broken)
+        assert _check(rep, "ownership_marker_on_nodes")["ok"] is False
+        assert _check(rep, "ownership_marker_on_edges")["ok"] is False
 
     def test_cve_properties_check_is_informational_on_a_short_smoke_baseline(self, vfb, monkeypatch):
         """7-day window: every NVD CVE is younger than the analysis lag → n below the floor →
@@ -235,7 +251,7 @@ class TestRealBreakageStillFails:
                 "attributed_to_fanout_plausible",
             ),
             (
-                "n.edgeguard_managed IS NULL UNWIND labels(n)",
+                "n.edgeguard_managed IS NULL AND n.edgeguard_enriched IS NULL",
                 [{"label": "Malware", "c": 3}],
                 "ownership_marker_on_nodes",
             ),

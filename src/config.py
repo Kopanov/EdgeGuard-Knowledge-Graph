@@ -560,6 +560,9 @@ MISP_CROSS_EVENT_DEDUP = _env_bool("EDGEGUARD_MISP_CROSS_EVENT_DEDUP", "true")
 OTX_INCREMENTAL_LOOKBACK_DAYS = _env_int("EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS", 3)
 OTX_INCREMENTAL_OVERLAP_SEC = _env_int("EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC", 300)
 OTX_INCREMENTAL_MAX_PAGES = _env_int("EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES", 25)
+# Baseline page ceiling (2026-10): each page is ``limit`` pulses; the loop also stops after three
+# consecutive empty pages, so this only caps a very large modified-since window.
+OTX_BASELINE_MAX_PAGES = _env_int("EDGEGUARD_OTX_BASELINE_MAX_PAGES", 200)
 
 # MITRE: use If-None-Match on the STIX bundle URL when not in baseline mode (304 → skip re-push).
 MITRE_USE_CONDITIONAL_GET = _env_bool("EDGEGUARD_MITRE_CONDITIONAL_GET", "true")

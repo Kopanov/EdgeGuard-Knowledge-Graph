@@ -50,6 +50,7 @@ from collectors.collector_utils import (
 from collectors.misp_writer import MISPWriter
 from config import (
     OTX_API_KEY,
+    OTX_BASELINE_MAX_PAGES,
     OTX_INCREMENTAL_LOOKBACK_DAYS,
     OTX_INCREMENTAL_MAX_PAGES,
     OTX_INCREMENTAL_OVERLAP_SEC,
@@ -398,7 +399,7 @@ class OTXCollector:
                 all_pulses = []
                 modified_since = (datetime.now(timezone.utc) - timedelta(days=baseline_days)).isoformat()
                 page = 1
-                max_pages = 200
+                max_pages = OTX_BASELINE_MAX_PAGES
                 consecutive_empty = 0
 
                 while page <= max_pages and consecutive_empty < 3:
