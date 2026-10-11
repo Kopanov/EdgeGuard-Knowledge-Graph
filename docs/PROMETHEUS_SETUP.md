@@ -420,7 +420,7 @@ list (including disk / inode / Bravo-ops alerts), grep
 | Alert | Condition | Severity |
 |-------|-----------|----------|
 | `EdgeGuardCollectionHighFailureRate` | >20% failure rate | warning |
-| `EdgeGuardCollectionStale` | No success in >1 hour | critical |
+| `EdgeGuardCollectionStale` | No success for longer than twice the collector's cadence (OTX 2 h; CISA, VirusTotal 9 h; NVD 17 h; daily sources 26 h — recording rule `edgeguard:collector_max_stale_seconds`) | critical |
 | `EdgeGuardCircuitBreakerOpen` | Circuit open | critical |
 | `EdgeGuardServiceDown` | Health check fail | critical |
 | `EdgeGuardDAGRunFailures` | >3 failures/hour | warning |

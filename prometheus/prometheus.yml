@@ -65,12 +65,15 @@ scrape_configs:
   # ================================================================================
   # Airflow Metrics (if statsd exporter is configured)
   # ================================================================================
-  - job_name: 'airflow'
-    static_configs:
-      - targets: 
-        - 'host.docker.internal:9102'  # statsd-exporter
-    scrape_interval: 30s
-    metrics_path: /metrics
+  # 2026-10: commented out — no statsd exporter is configured (no AIRFLOW__METRICS__* settings in
+  # docker-compose.yml), so the job only produced a permanently-down target. Re-enable together
+  # with the exporter.
+  # - job_name: 'airflow'
+  #   static_configs:
+  #     - targets:
+  #       - 'host.docker.internal:9102'  # statsd-exporter
+  #   scrape_interval: 30s
+  #   metrics_path: /metrics
 
   # ================================================================================
   # MISP Metrics
@@ -100,8 +103,11 @@ scrape_configs:
   # ================================================================================
   # Neo4j Metrics (if Prometheus plugin enabled)
   # ================================================================================
-  - job_name: 'neo4j'
-    static_configs:
-      - targets:
-        - 'host.docker.internal:2004'  # Neo4j Prometheus endpoint
-    scrape_interval: 30s
+  # 2026-10: commented out — the Neo4j Community image in docker-compose.yml exposes no
+  # Prometheus endpoint (server.metrics.prometheus.* is not configured), so the job only produced
+  # a permanently-down target. Re-enable together with the Neo4j metrics configuration.
+  # - job_name: 'neo4j'
+  #   static_configs:
+  #     - targets:
+  #       - 'host.docker.internal:2004'  # Neo4j Prometheus endpoint
+  #   scrape_interval: 30s

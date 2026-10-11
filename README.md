@@ -528,7 +528,7 @@ done
 
 ### Step 3 — Monitor during the run
 
-- **Prometheus**: watch the `edgeguard` alert groups (35 rules at HEAD across 9 groups) — especially `edgeguard_pipeline_observability` (9 alerts) and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. Any **critical** alert → pause the DAG, triage, resume.
+- **Prometheus**: watch the `edgeguard` alert groups (37 alert rules at HEAD across 9 groups) — especially `edgeguard_pipeline_observability` (9 alerts) and the MISP fetch-fallback pair in `edgeguard_sync_integrity`. Any **critical** alert → pause the DAG, triage, resume.
 - **Logs**: `docker logs edgeguard_airflow 2>&1 --follow | grep -vE 'DEBUG|INFO'` (single Airflow standalone container per Airflow 3.x — see `docker-compose.yml`).
 - **Grep tokens for silent failures**: `[MERGE-REJECT]`, `[MERGE-RETURNED-FALSE]`, `[MERGE-INEFFECTIVE]`, `[BATCH-PERMANENT-FAILURE]`, `[honest-NULL]`, `[MISP-FETCH-FALLBACK-ACTIVE]` — each is documented in [`docs/RUNBOOK.md`](docs/RUNBOOK.md#top-8-failure-modes).
 
