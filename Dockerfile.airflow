@@ -72,6 +72,10 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends --only-upgrade perl-base perl perl-modules-5.36 libperl5.36 \
  && rm -rf /var/lib/apt/lists/*
 
+# Multi-process metrics directory (docker-compose mounts the named volume here). Created and
+# owned by the airflow user so the volume inherits writable ownership on first mount.
+RUN mkdir -p /opt/airflow/metrics_multiproc && chown -R airflow:root /opt/airflow/metrics_multiproc
+
 USER airflow
 
 COPY requirements-airflow-docker.txt /tmp/requirements-airflow-docker.txt

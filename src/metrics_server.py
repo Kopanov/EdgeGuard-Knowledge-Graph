@@ -39,6 +39,12 @@ from typing import Dict, Optional
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 2026-10: multi-process exposure (Airflow LocalExecutor). Importing metrics_exporter BEFORE
+# prometheus_client prepares PROMETHEUS_MULTIPROC_DIR (created, writability-probed, or the mode is
+# disabled for this process) — prometheus_client reads the variable when it is first imported.
+from metrics_exporter import build_registry as _build_multiproc_registry
+from metrics_exporter import multiprocess_mode_active as _multiprocess_mode_active
+
 # Prometheus client
 try:
     from prometheus_client import (
@@ -196,12 +202,24 @@ MISP_HONEST_NULL_VIOLATIONS = Counter(
     ["source", "field"],
 )
 
-MISP_HEALTH = Gauge("edgeguard_misp_health", "MISP health status (1=healthy, 0=unhealthy)", ["check_type"])
+MISP_HEALTH = Gauge(
+    "edgeguard_misp_health",
+    "MISP health status (1=healthy, 0=unhealthy)",
+    ["check_type"],
+    multiprocess_mode="mostrecent",
+)
 
 # Neo4j metrics
-NEO4J_NODES = Gauge("edgeguard_neo4j_nodes", "Number of nodes in Neo4j by label", ["label", "zone"])
+NEO4J_NODES = Gauge(
+    "edgeguard_neo4j_nodes", "Number of nodes in Neo4j by label", ["label", "zone"], multiprocess_mode="mostrecent"
+)
 
-NEO4J_RELATIONSHIPS = Gauge("edgeguard_neo4j_relationships", "Number of relationships in Neo4j by type", ["rel_type"])
+NEO4J_RELATIONSHIPS = Gauge(
+    "edgeguard_neo4j_relationships",
+    "Number of relationships in Neo4j by type",
+    ["rel_type"],
+    multiprocess_mode="mostrecent",
+)
 
 NEO4J_SYNC_DURATION = Histogram(
     "edgeguard_neo4j_sync_duration_seconds",
@@ -223,6 +241,7 @@ NEO4J_SYNC_LAST_SUCCESS = Gauge(
     "Unix timestamp (seconds) of the last successful MISP→Neo4j sync "
     "completion. Used by EdgeGuardNeo4jSyncStale alert. Set on every "
     "successful run of MISPToNeo4jSync.run() after counters are flushed.",
+    multiprocess_mode="mostrecent",
 )
 
 # Distribution of accumulator-list sizes on Neo4j nodes/relationships.
@@ -265,16 +284,19 @@ NEO4J_LIST_DEDUP_SIZE = Histogram(
 SYNC_EVENTS_PROCESSED = Gauge(
     "edgeguard_sync_events_processed",
     "Events successfully processed in the most recent MISP->Neo4j sync run",
+    multiprocess_mode="mostrecent",
 )
 
 SYNC_EVENTS_FAILED = Gauge(
     "edgeguard_sync_events_failed",
     "Events that failed in the most recent MISP->Neo4j sync run (after all retries)",
+    multiprocess_mode="mostrecent",
 )
 
 SYNC_EVENTS_INDEX_TOTAL = Gauge(
     "edgeguard_sync_events_index_total",
     "Total events returned by MISP events index for the most recent sync run",
+    multiprocess_mode="mostrecent",
 )
 
 # PR-N31 (post-PR-N29 follow-up, 2026-04-25): MISP fetch fallback activity.
@@ -361,6 +383,7 @@ MISP_TAG_IMPERSONATION_DEFENSE_DISABLED = Gauge(
     "MISP tag-impersonation defense: 1 = disabled (all source claims accepted "
     "without creator-org verification), 0 = enabled. Set EDGEGUARD_TRUSTED_MISP_ORG_UUIDS "
     "and/or EDGEGUARD_TRUSTED_MISP_ORG_NAMES to enable. See docs/SECURITY_ROADMAP.md.",
+    multiprocess_mode="mostrecent",
 )
 
 
@@ -538,7 +561,9 @@ APOC_BATCH_PARTIAL = Counter(
 
 PIPELINE_ERRORS = Counter("edgeguard_pipeline_errors_total", "Total pipeline errors", ["task", "error_type", "source"])
 
-PIPELINE_STAGES = Gauge("edgeguard_pipeline_stage", "Current pipeline stage (1=running, 0=idle)", ["stage"])
+PIPELINE_STAGES = Gauge(
+    "edgeguard_pipeline_stage", "Current pipeline stage (1=running, 0=idle)", ["stage"], multiprocess_mode="mostrecent"
+)
 
 # DAG/Airflow metrics
 DAG_RUNS = Counter("edgeguard_dag_runs_total", "Total DAG runs", ["dag_id", "status", "run_type"])
@@ -548,12 +573,14 @@ DAG_LAST_SUCCESS = Gauge(
     "edgeguard_dag_last_success_timestamp",
     "Unix timestamp of last successful DAG run (0 = never succeeded)",
     ["dag_id"],
+    multiprocess_mode="mostrecent",
 )
 
 DAG_RUN_START = Gauge(
     "edgeguard_dag_run_start_timestamp",
     "Unix timestamp when the current DAG run started (0 = idle)",
     ["dag_id"],
+    multiprocess_mode="mostrecent",
 )
 
 DAG_RUN_DURATION = Histogram(
@@ -572,7 +599,10 @@ TASK_DURATION = Histogram(
 
 # Data source health
 SOURCE_HEALTH = Gauge(
-    "edgeguard_source_health", "Data source health status (1=healthy, 0=unhealthy)", ["source", "zone"]
+    "edgeguard_source_health",
+    "Data source health status (1=healthy, 0=unhealthy)",
+    ["source", "zone"],
+    multiprocess_mode="mostrecent",
 )
 
 SOURCE_LATENCY = Histogram(
@@ -1060,7 +1090,9 @@ def record_apoc_batch_partial(step: str) -> None:
 
 
 def get_all_metrics() -> bytes:
-    """Get all metrics in Prometheus format."""
+    """All metrics in Prometheus format — aggregated across processes in multiprocess mode."""
+    if _multiprocess_mode_active():
+        return generate_latest(_build_multiproc_registry())
     return generate_latest(registry)
 
 

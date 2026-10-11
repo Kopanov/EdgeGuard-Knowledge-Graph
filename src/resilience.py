@@ -11,6 +11,11 @@ from enum import Enum
 from functools import wraps
 from typing import Any, Callable, Dict
 
+# 2026-10: must precede the first prometheus_client import — prometheus_client reads
+# PROMETHEUS_MULTIPROC_DIR when it is first imported; this call creates the directory, probes that
+# it is writable and otherwise disables the multi-process mode for this process (no exception).
+import metrics_exporter  # noqa: F401
+
 # Prometheus metrics (optional)
 try:
     from prometheus_client import Counter, Gauge, Histogram
@@ -67,21 +72,33 @@ logger = logging.getLogger(__name__)
 COLLECTION_FAILURES = Counter("edgeguard_collection_failures_total", "Collection failures by source", ["source"])
 
 # Track service health (1=up, 0=down)
-SERVICE_UP = Gauge("edgeguard_service_up", "Service availability (1=up, 0=down)", ["service"])
+SERVICE_UP = Gauge(
+    "edgeguard_service_up", "Service availability (1=up, 0=down)", ["service"], multiprocess_mode="mostrecent"
+)
 
 # Track last successful sync timestamp
-LAST_SUCCESS = Gauge("edgeguard_last_success_timestamp", "Unix timestamp of last successful sync", ["source"])
+LAST_SUCCESS = Gauge(
+    "edgeguard_last_success_timestamp",
+    "Unix timestamp of last successful sync",
+    ["source"],
+    multiprocess_mode="mostrecent",
+)
 
 # Track circuit breaker state
 CIRCUIT_BREAKER_STATE = Gauge(
-    "edgeguard_circuit_breaker_state", "Circuit breaker state (0=closed, 1=half-open, 2=open)", ["service"]
+    "edgeguard_circuit_breaker_state",
+    "Circuit breaker state (0=closed, 1=half-open, 2=open)",
+    ["service"],
+    multiprocess_mode="mostrecent",
 )
 
 # Track health check latency
 HEALTH_CHECK_DURATION = Histogram("edgeguard_health_check_duration_seconds", "Time spent on health checks", ["service"])
 
 # Track consecutive failures
-CONSECUTIVE_FAILURES = Gauge("edgeguard_consecutive_failures", "Consecutive failures count", ["service"])
+CONSECUTIVE_FAILURES = Gauge(
+    "edgeguard_consecutive_failures", "Consecutive failures count", ["service"], multiprocess_mode="mostrecent"
+)
 
 
 # ================================================================================
