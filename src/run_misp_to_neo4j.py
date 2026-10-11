@@ -500,6 +500,32 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
 # 500 rows per UNWIND batch — smaller batches reduce lock contention on shared nodes.
 _RELATIONSHIP_BATCH_DEFAULT = 500
 
+
+def _sync_min_events() -> int:
+    """Parse ``EDGEGUARD_SYNC_MIN_EVENTS`` (non-negative integer, default 0 = guard disabled).
+
+    When set to N >= 1, ``MISPToNeo4jSync.run`` treats a fetch window that returns fewer than
+    N events as a failed run instead of an empty success. Unset or empty selects the default;
+    a value that is not a non-negative integer is rejected with a WARNING and treated as the
+    default. Read per call so Airflow tasks pick up the environment at fork time.
+    """
+    raw = (os.environ.get("EDGEGUARD_SYNC_MIN_EVENTS") or "").strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid EDGEGUARD_SYNC_MIN_EVENTS=%r — expected a non-negative integer; using default 0 (disabled)",
+            raw,
+        )
+        return 0
+    if value < 0:
+        logger.warning("EDGEGUARD_SYNC_MIN_EVENTS=%s is negative; using default 0 (disabled)", value)
+        return 0
+    return value
+
+
 # ``r.source_id`` stamped on relationships built from items that share the same
 # source report (today: the OTX pulse). Replaces the pre-2026-10 whole-event
 # ``misp_cooccurrence`` edges — see ``_build_cross_item_relationships``.
@@ -960,6 +986,9 @@ class MISPToNeo4jSync:
             "actors_synced": 0,
             "techniques_synced": 0,
             "relationships_created": 0,
+            # Relationship rows dropped by permanent Neo4j batch failures
+            # (``RelationshipBatchResult.failed``); non-zero fails the run.
+            "relationships_failed": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -3435,8 +3464,19 @@ class MISPToNeo4jSync:
                 indicators.append(item)
             else:
                 try:
-                    self._sync_single_item(item)
-                    success += 1
+                    # ``_sync_single_item`` catches its own exceptions (counting them in
+                    # ``self.stats["errors"]``) and returns False both for a merge that
+                    # failed and for an item no merge path accepts. Neither is a success.
+                    if self._sync_single_item(item):
+                        success += 1
+                    else:
+                        item_value = (item.get("value") or item.get("name") or "N/A")[:50]
+                        logger.warning(
+                            "[WARN] Item not synced (%s, %s): no merge path accepted it or the merge failed",
+                            item_type or "unknown",
+                            item_value,
+                        )
+                        errors += 1
                 except Exception as e:
                     item_type = item.get("type", "unknown")
                     # PR-G1 Bug Hunter audit (HIGH): ``dict.get(k, default)``
@@ -3933,10 +3973,18 @@ class MISPToNeo4jSync:
         )
 
         created_count = 0
+        failed_rows = 0
         total_chunks = (len(relationships) + chunk_sz - 1) // chunk_sz
         for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
-            created_count += self.neo4j.create_misp_relationships_batch(chunk, source_id=source_id)
+            result = self.neo4j.create_misp_relationships_batch(chunk, source_id=source_id)
+            created_count += result
+            # ``Neo4jClient`` returns a ``RelationshipBatchResult`` whose ``failed`` attribute
+            # counts the rows of permanently failed batches. Plain ``int`` results (older
+            # clients, test doubles) carry no failure information and are read as zero.
+            chunk_failed = getattr(result, "failed", 0)
+            if isinstance(chunk_failed, int) and chunk_failed > 0:
+                failed_rows += chunk_failed
             if total_chunks > 1 and (idx + 1) % 10 == 0:
                 logger.info(
                     "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
@@ -3949,6 +3997,17 @@ class MISPToNeo4jSync:
             # PR #40: env-gated via EDGEGUARD_QUERY_PAUSE_SECONDS (default 0).
             if idx < total_chunks - 1:
                 query_pause()
+
+        if failed_rows:
+            self.stats["relationships_failed"] = int(self.stats.get("relationships_failed", 0) or 0) + failed_rows
+            logger.warning(
+                "[REL-ROWS-FAILED] %s of %s relationship rows were not written for source %s "
+                "(permanent Neo4j batch failures; see the [BATCH-PERMANENT-FAILURE] lines above). "
+                "The run will be reported as failed.",
+                failed_rows,
+                len(relationships),
+                source_id,
+            )
 
         return created_count
 
@@ -3973,8 +4032,16 @@ class MISPToNeo4jSync:
         # First, try to get the event metadata (without full attribute list for large events)
         full_event = self.fetch_event_details(event_id)
         if not full_event:
-            logger.warning(f"Skipping event {event_id} - failed to fetch details")
-            return 0, 0, 0
+            # ``fetch_event_details`` returns None only after its retries are exhausted or on
+            # a permanent (4xx / unparsable) failure. Count the event as failed so the
+            # coverage-gap invariant ``events_index_total == events_processed + events_failed``
+            # holds and the error count fails the run instead of reporting a silent skip.
+            logger.error(
+                "Event %s skipped — event details could not be fetched after retries; counted as failed",
+                event_id,
+            )
+            self.stats["events_failed"] += 1
+            return 0, 0, 1
 
         attributes = coerce_misp_attribute_list(full_event.get("Attribute"))
         attr_count = len(attributes)
@@ -4251,8 +4318,38 @@ class MISPToNeo4jSync:
             # Fetch events from MISP
             events = self.fetch_edgeguard_events(since=since, sector=sector)
 
+            # Exported by the ``finally`` block below on every exit path so the
+            # coverage-gap gauges reflect this run even when it stops here.
+            events_index_total = len(events)
+            self.stats["events_index_total"] = events_index_total
+
+            # EDGEGUARD_SYNC_MIN_EVENTS: a window returning fewer events than the operator
+            # declared plausible is a failed run (ERROR, no success recorded), not an empty
+            # success. Default 0 keeps the historical behaviour but makes it loud.
+            min_events = _sync_min_events()
+            if min_events > 0 and events_index_total < min_events:
+                msg = (
+                    f"MISP returned {events_index_total} event(s) for the sync window but "
+                    f"EDGEGUARD_SYNC_MIN_EVENTS={min_events} requires at least {min_events}; "
+                    "the run is reported as failed and nothing was processed (since="
+                    f"{since.isoformat() if since else 'full'}, sector={sector or 'all'})"
+                )
+                logger.error(msg)
+                self._last_sync_failure_reason = msg
+                self.stats["min_events_shortfall"] = True
+                self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
+                record_collection_failure("misp_to_neo4j", msg)
+                return False
+
             if not events:
-                logger.info("No events to sync")
+                logger.warning(
+                    "No events to sync — MISP returned zero events for the window (since=%s, sector=%s). "
+                    "The run is reported as successful because EDGEGUARD_SYNC_MIN_EVENTS is 0 (disabled); "
+                    "set it to 1 or more to fail on an empty window.",
+                    since.isoformat() if since else "full",
+                    sector or "all",
+                )
+                self.stats["zero_events"] = True
                 self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
                 record_collection_success("misp_to_neo4j")
                 return True
@@ -4299,10 +4396,9 @@ class MISPToNeo4jSync:
                 return 0  # unknown size → process first (safe default)
 
             sorted_events = sorted(events, key=_event_sort_key)
-            # Total input size — used by the coverage-gap alert to catch
-            # silently-skipped events (the exact failure mode of the
-            # 2026-04-14 NVD regression).
-            events_index_total = len(sorted_events)
+            # ``events_index_total`` (set right after the fetch above) is the total input
+            # size used by the coverage-gap alert to catch silently-skipped events (the
+            # exact failure mode of the 2026-04-14 NVD regression).
 
             for ev_idx, event in enumerate(sorted_events):
                 event_id = event.get("id")
@@ -4621,6 +4717,12 @@ class MISPToNeo4jSync:
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
             logger.info(f"Relationships created: {self.stats['relationships_created']}")
+            relationships_failed = int(self.stats.get("relationships_failed", 0) or 0)
+            if relationships_failed:
+                logger.warning(
+                    "Relationships failed (rows not written by permanent batch failures): %d",
+                    relationships_failed,
+                )
             logger.info(f"Errors: {total_errors}")
             # PR-N28: surface placeholder rejections separately so operators
             # can distinguish "graph corrupted by adversarial input" from
@@ -4640,23 +4742,37 @@ class MISPToNeo4jSync:
                 f"Circuit Breaker States: MISP={self.misp_circuit.state.name}, Neo4j={self.neo4j_circuit.state.name}"
             )
 
-            # Record success
-            if total_errors == 0:
+            # Verdict: every skipped or failed unit of work (events that could not be
+            # fetched or processed, items whose merge failed, relationship rows dropped
+            # by permanent batch failures) marks the run as failed. Success is recorded
+            # only when nothing was lost.
+            run_ok = total_errors == 0 and relationships_failed == 0
+            if run_ok:
                 record_collection_success("misp_to_neo4j")
+            else:
+                reasons = []
+                if events_failed:
+                    reasons.append(f"{events_failed} event(s) failed or were skipped after retries")
+                if total_errors:
+                    # PR-N19 Fix #3: point operators at the [MERGE-RETURNED-FALSE]
+                    # grep token so the "N errors" summary is traceable to specific
+                    # entities. Pre-PR-N19 the message said "see logs above" but no
+                    # per-entity log actually existed for return-False cases —
+                    # only for thrown exceptions.
+                    reasons.append(
+                        f"sync_to_neo4j reported {total_errors} merge/load error(s); "
+                        "grep '[MERGE-RETURNED-FALSE]' or '[MERGE-REJECT]' in the logs above for "
+                        "per-entity detail (CVE id / Malware name / Actor name / MITRE id)"
+                    )
+                if relationships_failed:
+                    reasons.append(
+                        f"{relationships_failed} relationship row(s) were not written "
+                        "(permanent Neo4j batch failures; grep '[BATCH-PERMANENT-FAILURE]')"
+                    )
+                self._last_sync_failure_reason = "; ".join(reasons)
+                record_collection_failure("misp_to_neo4j", self._last_sync_failure_reason)
 
-            if total_errors != 0:
-                # PR-N19 Fix #3: point operators at the new [MERGE-RETURNED-FALSE]
-                # grep token so the "N errors" summary is traceable to specific
-                # entities. Pre-PR-N19 the message said "see logs above" but no
-                # per-entity log actually existed for return-False cases —
-                # only for thrown exceptions. Fixed Bravo's "4 mystery errors".
-                self._last_sync_failure_reason = (
-                    f"sync_to_neo4j reported {total_errors} merge/load error(s); "
-                    "grep '[MERGE-RETURNED-FALSE]' or '[MERGE-REJECT]' in the logs above for "
-                    "per-entity detail (CVE id / Malware name / Actor name / MITRE id)"
-                )
-
-            return total_errors == 0
+            return run_ok
 
         except Exception as e:
             self._last_sync_failure_reason = f"{type(e).__name__}: {e}"

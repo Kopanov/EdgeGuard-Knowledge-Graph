@@ -422,6 +422,26 @@ def _confidence_respect_calibrator(value) -> str:
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
 _REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
+
+
+class RelationshipBatchResult(int):
+    """Return value of ``Neo4jClient.create_misp_relationships_batch``.
+
+    An ``int`` equal to the number of relationship rows written, so callers that add or
+    compare the return value keep working unchanged. ``failed`` additionally carries the
+    number of rows dropped by batches that failed permanently (non-retryable Neo4j error
+    or retries exhausted), so callers can account for the loss instead of treating the
+    attempted row count as the written count.
+    """
+
+    failed: int
+
+    def __new__(cls, written: int, failed: int = 0) -> "RelationshipBatchResult":
+        obj = super().__new__(cls, int(written))
+        obj.failed = int(failed)
+        return obj
+
+
 MAX_RETRIES = 5
 RETRY_DELAY_BASE = 2  # seconds (exponential backoff base)
 BATCH_SIZE = 1000  # Maximum items per batch
@@ -4274,7 +4294,9 @@ class Neo4jClient:
             logger.warning(f"Vulnerability-sector relationship error: {e}")
             return False
 
-    def create_misp_relationships_batch(self, relationships: List[Dict], source_id: str = "misp") -> int:
+    def create_misp_relationships_batch(
+        self, relationships: List[Dict], source_id: str = "misp"
+    ) -> "RelationshipBatchResult":
         """
         Create MISP-derived relationships in bulk via UNWIND.
 
@@ -4285,10 +4307,13 @@ class Neo4jClient:
 
         Unknown ``rel_type`` / shape combinations are skipped during row collection.
         Each UNWIND query runs in its own try/except so earlier groups still commit if a
-        later group fails (returns sum of row counts for successful groups only).
+        later group fails. Returns a ``RelationshipBatchResult``: as an ``int`` it is the
+        sum of row counts for the groups that were written; its ``failed`` attribute is the
+        number of rows belonging to groups that failed permanently (non-retryable error or
+        retries exhausted) and were therefore not written.
         """
         if not self.driver or not relationships:
-            return 0
+            return RelationshipBatchResult(0)
 
         # Specialized technique edge types (the legacy generic ``USES`` bucket
         # was retired in 2026-04 PR #41; the backward-compat ``rt == "USES"``
@@ -4580,6 +4605,9 @@ class Neo4jClient:
             )
 
         total = 0
+        # Rows belonging to groups that failed permanently; surfaced to the caller through
+        # ``RelationshipBatchResult.failed`` so the loss is accounted for, not only logged.
+        failed = 0
 
         # Canonical SET clause shared by every batch-relationship template
         # below. Eleven queries used to duplicate the same r.sources /
@@ -4753,7 +4781,7 @@ class Neo4jClient:
         """
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
-            nonlocal total
+            nonlocal total, failed
             if not rows:
                 return
             # PR-N16 Fix #4 (HIGH, 2026-04-22 pre-baseline merge-audit):
@@ -4790,6 +4818,7 @@ class Neo4jClient:
                             e,
                         )
                         _emit_batch_permanent_failure(label=label, source_id=source_id, reason="non_retryable")
+                        failed += len(rows)
                         return
                     if attempt >= max_retries:
                         break
@@ -4817,6 +4846,7 @@ class Neo4jClient:
                 last_exc,
             )
             _emit_batch_permanent_failure(label=label, source_id=source_id, reason="retries_exhausted")
+            failed += len(rows)
 
         with self.driver.session() as session:
             _run_rows(session, "EMPLOYS_TECHNIQUE_actor", q_actor_employs, actor_employs_rows)
@@ -4859,7 +4889,15 @@ class Neo4jClient:
                 query_pause()
                 _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
 
-        return total
+        if failed:
+            logger.warning(
+                "Relationship batch: %s of %s rows not written for source %s (permanent batch failures; "
+                "see the [BATCH-PERMANENT-FAILURE] lines above)",
+                failed,
+                total + failed,
+                source_id,
+            )
+        return RelationshipBatchResult(total, failed)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get graph statistics."""
