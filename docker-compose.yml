@@ -236,10 +236,7 @@ services:
     init: true
     ports:
       - "127.0.0.1:8082:8082"   # Airflow UI — loopback only
-      # Prometheus metrics endpoint (when EDGEGUARD_ENABLE_METRICS=true) —
-      # loopback only; prometheus/prometheus.yml scrapes host.docker.internal:8001.
-      # Without this mapping the documented scrape target could never connect.
-      - "127.0.0.1:8001:8001"
+      # Metrics are served by the `metrics` service below (127.0.0.1:8001), not by task processes.
     environment:
       <<: *common-env
       # Mounted repo src at /opt/airflow/src — ensure all PythonOperator imports resolve without relying only on DAG sys.path hacks.
@@ -289,15 +286,13 @@ services:
       #   python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
       AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
       AIRFLOW_CONN_NEO4J_DEFAULT: ${AIRFLOW_CONN_NEO4J_DEFAULT:-}
-      # Prometheus metrics (optional — disabled when metrics server is not started).
-      # METRICS_HOST was a hardcoded "127.0.0.1" literal (not overridable from
-      # .env, contradicting .env.example) — and container-loopback is unreachable
-      # from any scraper anyway. Default 0.0.0.0 binds inside the container only;
-      # host exposure stays loopback-only via the 127.0.0.1:8001 port mapping
-      # below, which is what prometheus/prometheus.yml's host.docker.internal:8001
-      # target scrapes. NOTE: per-task pipeline metrics still need the
-      # multiprocess-registry work (PR-H) to be fully visible; this fixes the
-      # transport so the long-running metrics-server DAG/process is scrapeable.
+      # Prometheus metrics (2026-10): PROMETHEUS_MULTIPROC_DIR switches prometheus_client to its
+      # multi-process mode — every Airflow task process writes its metric values to this shared
+      # directory and the `metrics` service below aggregates and serves them on 127.0.0.1:8001.
+      # Without it, LocalExecutor task processes each held a private registry that Prometheus
+      # never scraped. EDGEGUARD_ENABLE_METRICS only matters for the in-process server used on
+      # bare-metal single-process installs.
+      PROMETHEUS_MULTIPROC_DIR: /opt/airflow/metrics_multiproc
       EDGEGUARD_ENABLE_METRICS: ${EDGEGUARD_ENABLE_METRICS:-false}
       EDGEGUARD_METRICS_HOST: ${EDGEGUARD_METRICS_HOST:-0.0.0.0}
       EDGEGUARD_METRICS_PORT: "8001"
@@ -326,6 +321,7 @@ services:
       - ./src:/opt/airflow/src:ro
       - airflow_logs:/opt/airflow/logs
       - airflow_db:/opt/airflow
+      - metrics_multiproc:/opt/airflow/metrics_multiproc
     depends_on:
       neo4j:
         condition: service_healthy
@@ -349,6 +345,40 @@ services:
   # ─────────────────────────────────────────────────────────────────────────────
   # EdgeGuard REST API — FastAPI on port 8000
   # ─────────────────────────────────────────────────────────────────────────────
+  # ------------------------------------------------------------------------------
+  # Metrics exporter (2026-10) — aggregates the per-process metric files the Airflow
+  # task processes write to PROMETHEUS_MULTIPROC_DIR and serves /metrics on 8001.
+  # Same image as airflow (the exporter only needs prometheus_client and src/).
+  # ------------------------------------------------------------------------------
+  metrics:
+    image: edgeguard-airflow:3.3.2-python3.12
+    container_name: edgeguard_metrics
+    restart: unless-stopped
+    depends_on:
+      airflow:
+        condition: service_started
+    command: ["python", "-m", "src.metrics_exporter"]
+    working_dir: /opt/airflow
+    ports:
+      - "127.0.0.1:8001:8001"   # prometheus/prometheus.yml scrapes host.docker.internal:8001
+    environment:
+      PROMETHEUS_MULTIPROC_DIR: /opt/airflow/metrics_multiproc
+      EDGEGUARD_METRICS_HOST: 0.0.0.0   # inside the container; the host mapping above is loopback-only
+      EDGEGUARD_METRICS_PORT: "8001"
+      PYTHONPATH: /opt/airflow/src
+    volumes:
+      - ./src:/opt/airflow/src:ro
+      - metrics_multiproc:/opt/airflow/metrics_multiproc
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8001/metrics')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - edgeguard_net
+
   api:
     build:
       context: .
@@ -477,6 +507,7 @@ services:
 # ================================================================================
 volumes:
   neo4j_data:
+  metrics_multiproc:
   neo4j_logs:
   neo4j_plugins:
   airflow_logs:

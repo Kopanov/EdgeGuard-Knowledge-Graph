@@ -156,7 +156,13 @@ logger = logging.getLogger(__name__)
 # ================================================================================
 
 # Prometheus metrics export
-ENABLE_PROMETHEUS_METRICS = os.getenv("EDGEGUARD_ENABLE_METRICS", "false").lower() == "true"
+# 2026-10: in multiprocess mode (PROMETHEUS_MULTIPROC_DIR, set by docker-compose) every task process
+# writes its metrics to the shared directory and the `metrics` service exposes them, so metrics are
+# on regardless of the in-process-server flag.
+MULTIPROC_METRICS_DIR = (os.getenv("PROMETHEUS_MULTIPROC_DIR") or "").strip() or None
+ENABLE_PROMETHEUS_METRICS = os.getenv("EDGEGUARD_ENABLE_METRICS", "false").lower() == "true" or bool(
+    MULTIPROC_METRICS_DIR
+)
 
 # Slack alerting on failures — enable with EDGEGUARD_ENABLE_SLACK_ALERTS=1
 # plus SLACK_WEBHOOK_URL (or AIRFLOW__SLACK__WEBHOOK_URL). The env var has
@@ -260,6 +266,19 @@ def ensure_metrics_server():
     global _metrics_server_instance
     if not ENABLE_PROMETHEUS_METRICS or not METRICS_SERVER_AVAILABLE:
         return None
+    if MULTIPROC_METRICS_DIR:
+        # Values are written to the shared directory and served by the `metrics` compose service;
+        # an in-task HTTP server would expose only this process. Compact the directory when the
+        # files of exited task processes have piled up (lock-guarded; concurrent tasks skip).
+        try:
+            from metrics_exporter import compact_multiproc_dir
+
+            report = compact_multiproc_dir(MULTIPROC_METRICS_DIR, min_files=400)
+            if "merged_types" in report:
+                logger.info("Metrics directory compacted: %s", report)
+        except Exception as e:  # never let bookkeeping fail a task
+            logger.warning("Metrics directory compaction skipped: %s", e)
+        return None
 
     if _metrics_server_instance is None:
         with _metrics_server_lock:
@@ -301,7 +320,12 @@ if ENABLE_PROMETHEUS_METRICS and METRICS_SERVER_AVAILABLE:
         try:
             from prometheus_client import Gauge as _Gauge
 
-            CIRCUIT_OPEN = _Gauge("edgeguard_circuit_open", "Circuit breaker state (1=open, 0=closed)", ["service"])
+            CIRCUIT_OPEN = _Gauge(
+                "edgeguard_circuit_open",
+                "Circuit breaker state (1=open, 0=closed)",
+                ["service"],
+                multiprocess_mode="mostrecent",
+            )
         except Exception as e:
             CIRCUIT_OPEN = None
             logger.warning(f"Could not create CIRCUIT_OPEN gauge: {e}")
@@ -326,14 +350,26 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
         )
         MISP_PUSH_DURATION = Histogram("edgeguard_misp_push_duration_seconds", "Time spent pushing to MISP", ["source"])
         NEO4J_SYNC_DURATION = Histogram("edgeguard_neo4j_sync_duration_seconds", "Time spent syncing to Neo4j")
-        NEO4J_NODES = Gauge("edgeguard_neo4j_nodes", "Number of nodes in Neo4j by label", ["label", "zone"])
+        NEO4J_NODES = Gauge(
+            "edgeguard_neo4j_nodes",
+            "Number of nodes in Neo4j by label",
+            ["label", "zone"],
+            multiprocess_mode="mostrecent",
+        )
         PIPELINE_ERRORS = Counter(
             "edgeguard_pipeline_errors_total", "Total pipeline errors", ["task", "error_type", "source"]
         )
-        SOURCE_HEALTH = Gauge("edgeguard_source_health", "Data source health status", ["source", "zone"])
+        SOURCE_HEALTH = Gauge(
+            "edgeguard_source_health", "Data source health status", ["source", "zone"], multiprocess_mode="mostrecent"
+        )
 
         # Circuit breaker state metrics
-        CIRCUIT_OPEN = Gauge("edgeguard_circuit_open", "Circuit breaker state (1=open, 0=closed)", ["service"])
+        CIRCUIT_OPEN = Gauge(
+            "edgeguard_circuit_open",
+            "Circuit breaker state (1=open, 0=closed)",
+            ["service"],
+            multiprocess_mode="mostrecent",
+        )
         # Note: edgeguard_last_success_timestamp is already registered by resilience.py
         # (imported above). Do NOT re-register here to avoid duplicate timeseries error.
 
@@ -342,11 +378,13 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
             "edgeguard_dag_last_success_timestamp",
             "Unix timestamp of last successful DAG run (0 = never succeeded)",
             ["dag_id"],
+            multiprocess_mode="mostrecent",
         )
         DAG_RUN_START = Gauge(
             "edgeguard_dag_run_start_timestamp",
             "Unix timestamp when the current DAG run started (0 = idle)",
             ["dag_id"],
+            multiprocess_mode="mostrecent",
         )
 
         logger.info("Prometheus metrics enabled (standalone mode)")

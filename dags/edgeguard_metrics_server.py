@@ -58,6 +58,12 @@ def run_metrics_server(**context):
     This function starts the metrics server and runs it indefinitely.
     The server exposes /metrics endpoint for Prometheus scraping.
     """
+    if (os.getenv("PROMETHEUS_MULTIPROC_DIR") or "").strip():
+        logger.info(
+            "PROMETHEUS_MULTIPROC_DIR is set: metrics are written by every task process and served by the "
+            "`metrics` compose service (src/metrics_exporter.py). Nothing to run here."
+        )
+        return
     try:
         from metrics_server import MetricsServer
 

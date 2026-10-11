@@ -358,6 +358,32 @@ except Exception as e:
 
 ## Airflow Integration
 
+### Method 0: Multi-process exposure (Docker Compose — the default since 2026-10)
+
+Airflow's LocalExecutor runs every task in its own process. Before 2026-10 each task process
+kept a private metrics registry (and tried to start its own HTTP server), so pipeline counters
+and gauges never reached Prometheus. The compose deployment now runs `prometheus_client` in its
+multi-process mode:
+
+- `PROMETHEUS_MULTIPROC_DIR=/opt/airflow/metrics_multiproc` is set on the `airflow` service; every
+  task process writes its metric values to memory-mapped files in that shared volume.
+- The `metrics` service (`src/metrics_exporter.py`, same image) aggregates those files with
+  `MultiProcessCollector` and serves `/metrics` on `127.0.0.1:8001`, which `prometheus/prometheus.yml`
+  scrapes. Task processes start no HTTP server in this mode; the `edgeguard_metrics_server` DAG exits
+  immediately with a log line.
+- Gauges are declared with `multiprocess_mode="mostrecent"`: one series per label set, carrying
+  the newest value written by any process. Counters, histograms and summaries are summed across
+  processes, including processes that have exited.
+- Compaction: `compact_multiproc_dir()` merges the files of exited processes into one file per
+  type (`counter_merged.db`, `gauge_mostrecent_merged.db`, …) and deletes the originals. Tasks call
+  it opportunistically from `ensure_metrics_server()` once more than 400 files exist; it is
+  lock-guarded and must run inside the Airflow container (same PID namespace).
+- Not exported in this mode: the `edgeguard_info` `Info` metric (unsupported by multi-process
+  mode); everything else is unchanged.
+
+Methods 1 and 2 below describe the single-process server and apply to bare-metal installs without
+`PROMETHEUS_MULTIPROC_DIR`.
+
 ### Method 1: Separate Metrics DAG (Recommended)
 
 Create a dedicated DAG that runs the metrics server:
