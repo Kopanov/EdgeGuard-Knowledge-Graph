@@ -75,6 +75,8 @@ EDGEGUARD_LABELS = (
     "Campaign",
     "Source",
     "Sector",
+    # Alert nodes are created by EdgeGuard's alert processor (NATS); none exist on a baseline.
+    "Alert",
 )
 EDGEGUARD_REL_TYPES = (
     "SOURCED_FROM",
@@ -97,14 +99,15 @@ EDGEGUARD_REL_TYPES = (
     "HAS_CVSS_v30",
     "HAS_CVSS_v31",
     "HAS_CVSS_v40",
-    # NOT listed: INVOLVES (Alert → Indicator). It is written by the ResilMesh alert
-    # processor together with the Alert nodes, neither of which carries the ownership
-    # marker, so it is not part of the baseline contract this script polices.
+    # INVOLVES (Alert → Indicator) is written by EdgeGuard's alert processor and carries the
+    # marker since 2026-10; none exist on a baseline, so the checks below are vacuous until
+    # alerts flow.
+    "INVOLVES",
 )
 # Labels parsed from MISP attributes — the only nodes that carry ``tlp`` (the tag travels
 # with the attribute). Source/Sector/Campaign/CVSS* and the ResilMesh-model nodes written
-# on alert ingestion (Host, IP, Alert, …) are marker-stamped but never have a TLP, so the
-# check is an allowlist, not a skip-list.
+# on alert ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but
+# never have a TLP, so the check is an allowlist, not a skip-list.
 _TLP_LABELS = ("Indicator", "CVE", "Vulnerability", "Malware", "ThreatActor", "Technique", "Tactic", "Tool")
 # ATT&CK entries whose names contain ": Windows " — the MISP Import Regexp rule
 # rewrote them to ``%WINDIR%\`` before the 2026-10 fix, so they vanished.
@@ -252,9 +255,13 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
     )
     rep.add("tlp_on_every_node", (r.get("total") or 0) > 0 and r.get("missing") == 0, r)
 
-    # 8. Ownership marker on every EdgeGuard node and edge.
+    # 8. Ownership marker on every EdgeGuard node and edge. 2026-10: ``edgeguard_managed`` is
+    #    stamped only on nodes EdgeGuard created; a node a partner created first that EdgeGuard
+    #    wrote to carries ``edgeguard_enriched`` instead, so neither marker on an EdgeGuard label
+    #    means EdgeGuard never touched it (or a writer forgot the marker).
     nodes = _post(
-        "MATCH (n) WHERE n.edgeguard_managed IS NULL UNWIND labels(n) AS l RETURN l AS label, count(*) AS c ORDER BY c DESC"
+        "MATCH (n) WHERE n.edgeguard_managed IS NULL AND n.edgeguard_enriched IS NULL "
+        "UNWIND labels(n) AS l RETURN l AS label, count(*) AS c ORDER BY c DESC"
     )
     eg_nodes_missing = [x for x in nodes if x["label"] in EDGEGUARD_LABELS]
     rep.add("ownership_marker_on_nodes", not eg_nodes_missing, {"missing_by_label": nodes})

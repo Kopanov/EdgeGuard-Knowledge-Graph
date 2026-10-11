@@ -285,7 +285,7 @@ python src/edgeguard.py stats      # quick dashboard: node counts, last sync, pi
 | `edgeguard checkpoint clear` | Clear baseline state (preserves incremental by default) |
 | `edgeguard baseline --days N` | Additive baseline trigger — triggers the `edgeguard_baseline` DAG, no wipe |
 | `edgeguard fresh-baseline --days N` | **Destructive** wipe + rebuild — typed confirmation, blast-radius display, backup-timestamp gate |
-| `edgeguard clear neo4j` | Delete all graph data from Neo4j (keeps constraints). `--edgeguard-only` deletes only nodes with `edgeguard_managed = true` — use on a database shared with ResilMesh |
+| `edgeguard clear neo4j` | Delete all graph data from Neo4j (keeps constraints). `--edgeguard-only` deletes only the nodes EdgeGuard created (`edgeguard_managed = true`); nodes a partner created first are kept even where EdgeGuard enriched them — use on a database shared with ResilMesh |
 | `edgeguard clear misp` | Delete all EdgeGuard events from MISP |
 | `edgeguard clear all` | Full reset: Neo4j + MISP + checkpoints (`--force` skips confirmation) |
 | `edgeguard doctor` | Diagnose connectivity (MISP, Neo4j, Airflow, NATS, schema) |

@@ -262,21 +262,29 @@ A consumer reading this gets a clear picture: the underlying CVE was published i
 | `energy` | 24 months | ICS/SCADA vulnerabilities lag in patching |
 | `finance` | 24 months | Regulatory and fraud patterns |
 
-### 3.4 Node Identity Marking (`edgeguard_managed`)
+### 3.4 Node Identity Marking (`edgeguard_managed`, `edgeguard_enriched`)
 
-Every node written by EdgeGuard carries a constant property:
+Every node EdgeGuard **creates** carries a constant property:
 
 ```
 edgeguard_managed = true
 ```
 
-**2026-10:** the marker is now on **every relationship EdgeGuard writes** as well (`SOURCED_FROM`, every `build_relationships.py` edge, the batched MISP edges, `HAS_CVSS_*`, `REFERS_TO`, `RUNS`, `PART_OF`) and on the `Campaign` and `Source` nodes that previously lacked it. `edgeguard clear neo4j --edgeguard-only` deletes exactly this set and nothing else — the mode to use on a database shared with ResilMesh. Relationship *names* EdgeGuard shares with ResilMesh (`PART_OF`, `REFERS_TO`, `HAS_CVSS_*`) must never be selected by type alone on a shared database; scope by the marker and by EdgeGuard labels.
+**2026-10 (shared-database contract):** the marker is stamped on the MERGE *create* path only. When EdgeGuard writes onto a node another system created first — a CRUSOE scanner's `CVE` / `Vulnerability`, ResilMesh topology such as `Host` / `IP` — the node keeps its owner and receives `edgeguard_enriched = true` instead, so both sides can see which partner-owned nodes carry EdgeGuard properties. Consequences:
+
+- `edgeguard clear neo4j --edgeguard-only` deletes nodes with `edgeguard_managed = true` and leaves enriched nodes in place, EdgeGuard's properties on them included.
+- The REST / GraphQL APIs and the STIX 2.1 exporter expose nodes EdgeGuard created **or** enriched: `(n.edgeguard_managed = true OR n.edgeguard_enriched = true)`.
+- EdgeGuard declares UNIQUE constraints on its own labels and on `IP.address`, `Host.hostname`, `Subnet.range` (unique in CRUSOE's model too). It does **not** constrain `Device`, `NetworkService`, `SoftwareVersion`, `Application`, `Role` or `User` — DDL on those labels belongs to ResilMesh — and drops any such constraint an older build created.
+- CVSS de-duplication (run with constraint creation) only touches EdgeGuard-created nodes with a non-null `cve_id`.
+- `Alert` nodes and `INVOLVES` edges written by EdgeGuard's alert processor carry the marker like everything else; `Alert.zone` is a list.
+
+**2026-10:** the marker is also on **every relationship EdgeGuard writes** (`SOURCED_FROM`, every `build_relationships.py` edge, the batched MISP edges, `HAS_CVSS_*`, `REFERS_TO`, `RUNS`, `PART_OF`) and on the `Campaign` and `Source` nodes that previously lacked it. `edgeguard clear neo4j --edgeguard-only` deletes exactly this set and nothing else — the mode to use on a database shared with ResilMesh. Relationship *names* EdgeGuard shares with ResilMesh (`PART_OF`, `REFERS_TO`, `HAS_CVSS_*`) must never be selected by type alone on a shared database; scope by the marker and by EdgeGuard labels.
 
 This follows the same principle as Kubernetes' `app.kubernetes.io/managed-by: helm` label — when multiple systems share the same database, each system marks what it owns. Without this, a consumer querying the shared Neo4j has no reliable way to distinguish EdgeGuard-written nodes from ResilMesh-written nodes of the same label (e.g., both may write `CVE` or `Vulnerability` nodes).
 
 **Why this is a best practice in multi-system shared databases:**
 - Label-based filtering (`WHERE n:CVE`) is ambiguous if two systems can write the same label
-- Property-based ownership marker is explicit, self-documenting, and retroactively applies on next sync
+- Property-based ownership marker is explicit and self-documenting; a node from before the marker existed is treated as not EdgeGuard-created — it receives `edgeguard_enriched` on the next sync and stays visible to the APIs
 - Allows ResilMesh, PPCTI, and THF to query EdgeGuard data cleanly without hardcoding label lists
 
 **Useful filter queries:**
@@ -291,6 +299,10 @@ MATCH (n) WHERE n.edgeguard_managed = true
   AND 'energy' IN n.zone
   AND n.last_updated > datetime() - duration('P7D')
 RETURN labels(n)[0] AS type, n.zone, count(*) AS cnt
+
+// Partner-created nodes EdgeGuard has written to (shared database)
+MATCH (n) WHERE n.edgeguard_enriched = true
+RETURN labels(n)[0] AS type, count(*) AS cnt ORDER BY cnt DESC
 ```
 
 The `source` and `tag` properties provide finer-grained **intelligence-source-level** provenance (which external feed provided the data), while `edgeguard_managed` provides **system-level** ownership (EdgeGuard wrote this).

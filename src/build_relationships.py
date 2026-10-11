@@ -926,12 +926,12 @@ def build_relationships():
             # — silently DROPS the Sector identity SDO and the
             # ``targets`` SRO from every bundle. ResilMesh consumers
             # then think the indicator is unscoped (zone metadata
-            # invisible). One-line fix: stamp the flag on CREATE and
-            # on every SET. Pre-release framework — no production
-            # graph to backfill.
+            # invisible). 2026-10 shared-database contract: the flag is
+            # stamped on CREATE only; a Sector a partner created first gets
+            # ``edgeguard_enriched`` on the MATCH path instead.
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (i)-[r:TARGETS]->(sec) "
             'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
@@ -980,8 +980,8 @@ def build_relationships():
             # PR #37: same edgeguard_managed stamp as 7a — keeps STIX export
             # from silently dropping AFFECTS/TARGETS Sector edges.
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (v)-[r:AFFECTS]->(sec) "
             'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
@@ -1026,8 +1026,8 @@ def build_relationships():
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (a)-[r:TARGETS]->(sec) "
             'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '
@@ -1057,8 +1057,8 @@ def build_relationships():
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
             f"  ON CREATE SET sec.uuid = {_SECTOR_UUID_CASE}, sec.edgeguard_managed = true, sec.first_imported_at = datetime() "
+            "  ON MATCH SET sec.edgeguard_enriched = CASE WHEN sec.edgeguard_managed = true THEN sec.edgeguard_enriched ELSE true END "
             f"  SET sec.uuid = coalesce(sec.uuid, {_SECTOR_UUID_CASE}), "
-            "      sec.edgeguard_managed = true, "
             "      sec.last_updated = datetime() "
             "MERGE (m)-[r:TARGETS]->(sec) "
             'ON CREATE SET r.confidence_score = 0.5, r.match_type = "zone_classification", r.created_at = datetime() '

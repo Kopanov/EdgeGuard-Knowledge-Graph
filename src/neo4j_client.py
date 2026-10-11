@@ -43,6 +43,15 @@ from node_identity import (  # noqa: E402
     edge_endpoint_uuids,
     is_placeholder_name,
 )
+
+try:
+    from destructive_ops_audit import record_destructive_op
+except ImportError:  # pragma: no cover — embedding without src/ on sys.path
+
+    def record_destructive_op(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
 from query_pause import query_pause  # noqa: E402
 
 # Configure logging
@@ -992,6 +1001,45 @@ def _alert_default_tlp() -> str:
         return "white"
 
 
+# 2026-10 shared-database contract. ``edgeguard_managed = true`` means EdgeGuard CREATED the
+# node, so every node MERGE stamps it on the create path only. When EdgeGuard writes onto a node
+# another system created first (ResilMesh topology, a CRUSOE scanner's CVE / Vulnerability), the
+# MATCH path stamps ``edgeguard_enriched = true`` instead. ``clear_edgeguard_managed`` deletes the
+# first set and never the second; the REST / GraphQL / STIX readers expose both. The clause is
+# spliced literally into each query (same convention as ``_reactivation_clauses``); this helper is
+# the single definition the tests compare every splice against.
+def _enriched_on_match_clause(var: str) -> str:
+    """``ON MATCH`` sub-clause marking a node EdgeGuard wrote to but did not create."""
+    return (
+        f"ON MATCH SET {var}.edgeguard_enriched = CASE WHEN {var}.edgeguard_managed = true "
+        f"THEN {var}.edgeguard_enriched ELSE true END"
+    )
+
+
+# UNIQUE constraints EdgeGuard deliberately does NOT declare (2026-10, shared-database contract).
+# These labels belong to the ResilMesh / CRUSOE data model and their natural keys recur
+# legitimately there (the same SoftwareVersion.version per product, the same NetworkService
+# port/protocol per host, …); CRUSOE's own client refuses a UNIQUE on SoftwareVersion.version.
+# A constraint created by EdgeGuard made the partner's scanner writes fail with
+# ConstraintValidationFailed. ``node_identity._NATURAL_KEYS`` still defines their deterministic
+# uuid; ``create_constraints`` drops any instance an older EdgeGuard build created.
+SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT = frozenset(
+    {"Device", "NetworkService", "SoftwareVersion", "Application", "Role", "User"}
+)
+
+
+def _normalise_zone_list(value: Any) -> List[str]:
+    """``Alert.zone`` is a list like every other ``zone`` property; accept the scalar NATS form."""
+    if isinstance(value, str):
+        items = [value]
+    elif isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = []
+    cleaned = [z.strip() for z in items if isinstance(z, str) and z.strip()]
+    return cleaned or ["global"]
+
+
 def _reactivation_clauses(var: str, indent: str = "") -> str:
     """The SET fragments every node write applies for the active / retired lifecycle.
 
@@ -1283,6 +1331,7 @@ class Neo4jClient:
                 session.run("MATCH (s:Source) DETACH DELETE s", timeout=NEO4J_READ_TIMEOUT)
 
             logger.info(f"Cleared {deleted} nodes and relationships")
+            record_destructive_op("clear_all", target="neo4j", affected=deleted, scope="every node")
             return True
 
         except (
@@ -1298,14 +1347,15 @@ class Neo4jClient:
 
     @retry_with_backoff(max_retries=3)
     def clear_edgeguard_managed(self) -> bool:
-        """Delete only what EdgeGuard wrote (2026-10, fresh-baseline PR).
+        """Delete only the nodes EdgeGuard created (2026-10, fresh-baseline PR).
 
-        Scoped by the ownership marker ``n.edgeguard_managed = true`` that every
-        EdgeGuard node carries (threat-intel nodes, CVSS sub-nodes, Sector, Source,
-        Campaign). Nodes without the marker — ResilMesh's topology, identity and
-        mission layers on a shared database — are left untouched. ``DETACH DELETE``
-        also removes every relationship attached to a deleted node, including any
-        a partner drew to it; that is unavoidable when the node itself goes.
+        Scoped by the ownership marker ``n.edgeguard_managed = true``, which every
+        node MERGE stamps on its create path only. Nodes EdgeGuard merely wrote to
+        (``edgeguard_enriched = true`` — a partner created them first) and nodes it
+        never touched — ResilMesh's topology, identity and mission layers on a shared
+        database — are left in place, EdgeGuard's properties on them included.
+        ``DETACH DELETE`` also removes every relationship attached to a deleted node,
+        including any a partner drew to it; that is unavoidable when the node goes.
 
         Returns:
             True if successful, False otherwise
@@ -1326,7 +1376,17 @@ class Neo4jClient:
                     "MATCH (n) WHERE coalesce(n.edgeguard_managed, false) <> true RETURN count(n) AS count",
                     timeout=NEO4J_READ_TIMEOUT,
                 ).single()["count"]
-                logger.info("EdgeGuard-managed nodes: %s; nodes left untouched: %s", node_count, others)
+                enriched = session.run(
+                    "MATCH (n) WHERE coalesce(n.edgeguard_managed, false) <> true AND n.edgeguard_enriched = true "
+                    "RETURN count(n) AS count",
+                    timeout=NEO4J_READ_TIMEOUT,
+                ).single()["count"]
+                logger.info(
+                    "EdgeGuard-created nodes: %s; nodes left untouched: %s (of which EdgeGuard-enriched: %s)",
+                    node_count,
+                    others,
+                    enriched,
+                )
 
                 batch_size = 10000
                 deleted = 0
@@ -1343,6 +1403,13 @@ class Neo4jClient:
                     logger.debug(f"Deleted batch of {batch_deleted} EdgeGuard-managed nodes")
 
             logger.info(f"Cleared {deleted} EdgeGuard-managed nodes and their relationships")
+            record_destructive_op(
+                "clear_edgeguard_managed",
+                target="neo4j",
+                affected=deleted,
+                scope="edgeguard_managed = true",
+                details={"left_untouched": others, "enriched_kept": enriched},
+            )
             return True
 
         except (
@@ -1385,6 +1452,15 @@ class Neo4jClient:
             "DROP CONSTRAINT cvssv2_key IF EXISTS",
             "DROP CONSTRAINT cvssv30_key IF EXISTS",
             "DROP CONSTRAINT cvssv40_key IF EXISTS",
+            # 2026-10 shared-database contract: UNIQUE constraints EdgeGuard used to declare on
+            # partner-owned labels (SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT). Dropped on every run
+            # so a hosted database created by an older build heals itself; no-op once absent.
+            "DROP CONSTRAINT device_key IF EXISTS",
+            "DROP CONSTRAINT networkservice_key IF EXISTS",
+            "DROP CONSTRAINT softwareversion_key IF EXISTS",
+            "DROP CONSTRAINT application_key IF EXISTS",
+            "DROP CONSTRAINT role_key IF EXISTS",
+            "DROP CONSTRAINT user_key IF EXISTS",
         ]
         with self.driver.session() as session:
             for stmt in old_constraints:
@@ -1407,11 +1483,14 @@ class Neo4jClient:
                     dedup_result = session.run(
                         f"""
                         MATCH (n:{cvss_label})
+                        // 2026-10: never group on a null key (every key-less node would fall into one
+                        // group and all but the first be deleted) and never touch partner-created nodes.
+                        WHERE n.cve_id IS NOT NULL AND n.edgeguard_managed = true
                         WITH n.cve_id AS cid, collect(n) AS nodes
                         WHERE size(nodes) > 1
                         WITH nodes[0] AS keep, nodes[1..] AS dups
                         UNWIND dups AS dup
-                        // Move any relationships from duplicate to keeper
+                        // The keeper already carries the CVE edge; the duplicate's relationships go with it.
                         WITH keep, dup
                         OPTIONAL MATCH (dup)-[r]-()
                         DELETE r
@@ -1424,6 +1503,7 @@ class Neo4jClient:
                     removed = row["removed"] if row else 0
                     if removed > 0:
                         logger.info("CVSS dedup: removed %s duplicate %s nodes", removed, cvss_label)
+                        record_destructive_op("cvss_dedup", target="neo4j", affected=removed, scope=cvss_label)
                 except Exception as e:
                     logger.debug("CVSS dedup for %s skipped: %s", cvss_label, e)
 
@@ -1460,19 +1540,14 @@ class Neo4jClient:
             # nodes — silently violating the deterministic-uuid contract that
             # underpins delta sync. Pinned by
             # ``test_every_natural_key_label_has_a_unique_constraint``.
-            # ResilMesh / topology
+            # ResilMesh / topology — only the keys that are unique in CRUSOE's own model as well.
+            # 2026-10: Device / NetworkService / SoftwareVersion / Application / Role / User are no
+            # longer constrained (SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT): their keys recur
+            # legitimately in the partner's data, so a UNIQUE created here made the partner's own
+            # writes fail. Instances an older build created are dropped above.
             "CREATE CONSTRAINT ip_key IF NOT EXISTS FOR (n:IP) REQUIRE (n.address) IS UNIQUE",
             "CREATE CONSTRAINT host_key IF NOT EXISTS FOR (n:Host) REQUIRE (n.hostname) IS UNIQUE",
-            "CREATE CONSTRAINT device_key IF NOT EXISTS FOR (n:Device) REQUIRE (n.device_id) IS UNIQUE",
             "CREATE CONSTRAINT subnet_key IF NOT EXISTS FOR (n:Subnet) REQUIRE (n.range) IS UNIQUE",
-            "CREATE CONSTRAINT networkservice_key IF NOT EXISTS FOR (n:NetworkService) REQUIRE (n.port, n.protocol) IS UNIQUE",  # noqa: E501
-            "CREATE CONSTRAINT softwareversion_key IF NOT EXISTS FOR (n:SoftwareVersion) REQUIRE (n.version) IS UNIQUE",
-            "CREATE CONSTRAINT application_key IF NOT EXISTS FOR (n:Application) REQUIRE (n.name) IS UNIQUE",
-            "CREATE CONSTRAINT role_key IF NOT EXISTS FOR (n:Role) REQUIRE (n.permission) IS UNIQUE",
-            # User: composite (username, domain) — domain is normalized to
-            # 'default' for None/"" inputs (PR #34 round 25, see
-            # merge_resilmesh_user) so the constraint compares apples-to-apples.
-            "CREATE CONSTRAINT user_key IF NOT EXISTS FOR (n:User) REQUIRE (n.username, n.domain) IS UNIQUE",
             # Alert: alert_id is the upstream-provided idempotency key.
             "CREATE CONSTRAINT alert_key IF NOT EXISTS FOR (n:Alert) REQUIRE (n.alert_id) IS UNIQUE",
         ]
@@ -1659,13 +1734,14 @@ class Neo4jClient:
                     query = """
                     MERGE (s:Source {source_id: $source_id})
                     ON CREATE SET s.created_at = datetime(),
-                                  s.uuid = $source_uuid
+                                  s.uuid = $source_uuid,
+                                  s.edgeguard_managed = true
+                    ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
                     SET s.name = $name,
                         s.type = $type,
                         s.reliability = $reliability,
                         s.updated_at = datetime(),
-                        s.uuid = coalesce(s.uuid, $source_uuid),
-                        s.edgeguard_managed = true
+                        s.uuid = coalesce(s.uuid, $source_uuid)
                     """
                     session.run(
                         query,
@@ -1859,7 +1935,9 @@ class Neo4jClient:
             query = f"""
             MERGE (n:{label} {{{key_set}}})
             ON CREATE SET n.first_imported_at = datetime(),
-                          n.uuid = $node_uuid
+                          n.uuid = $node_uuid,
+                          n.edgeguard_managed = true
+            ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
 
             // Always accumulate sources and zones — provenance is never overwritten.
             // Use APOC to deduplicate the merged arrays in one step.
@@ -1877,7 +1955,6 @@ class Neo4jClient:
                 n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
                 n.last_decayed_tier = null,
                 n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
-                n.edgeguard_managed = true,
                 // n.uuid is deterministic — coalesce so we never overwrite it.
                 // (Defensive only; same input always produces same uuid, but if a
                 // node was created before this code was deployed it will get the
@@ -2612,11 +2689,11 @@ class Neo4jClient:
             query = f"""
             MATCH (cve:CVE {{cve_id: $cve_id}})
             MERGE (n:{label} {{cve_id: $cve_id}})
-            ON CREATE SET n.uuid = $cvss_uuid
+            ON CREATE SET n.uuid = $cvss_uuid, n.edgeguard_managed = true
+            ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
             SET {set_clause},
                 n.tag = coalesce(n.tag, $tag),
                 n.last_updated = datetime(),
-                n.edgeguard_managed = true,
                 n.uuid = coalesce(n.uuid, $cvss_uuid)
             MERGE (cve)-[r1:{rel_type}]->(n)
                 ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
@@ -3269,7 +3346,9 @@ class Neo4jClient:
                 UNWIND $batch as item
                 MERGE (n:Indicator {{indicator_type: item.indicator_type, value: item.value}})
                 ON CREATE SET n.first_imported_at = datetime(),
-                              n.uuid = item.node_uuid
+                              n.uuid = item.node_uuid,
+                              n.edgeguard_managed = true
+                ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
@@ -3283,7 +3362,6 @@ class Neo4jClient:
                     n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
                     n.last_decayed_tier = null,
                     n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
-                    n.edgeguard_managed = true,
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
                     n.misp_attribute_ids = {_dedup_concat_optional_clause("n.misp_attribute_ids", "item.misp_attribute_id")},
@@ -3575,7 +3653,9 @@ class Neo4jClient:
                 MERGE (n:Vulnerability {{cve_id: item.cve_id}})
                 ON CREATE SET n.first_imported_at = datetime(),
                     n.status = item.status,
-                    n.uuid = item.node_uuid
+                    n.uuid = item.node_uuid,
+                    n.edgeguard_managed = true
+                ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
                 SET n.confidence_score = CASE
                         WHEN n.confidence_score IS NULL OR item.confidence > n.confidence_score
                         THEN item.confidence
@@ -3590,7 +3670,6 @@ class Neo4jClient:
                     n.retired_at = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_at END,
                     n.last_decayed_tier = null,
                     n.retired_by = CASE WHEN coalesce(n.retired_by, '') = 'decay' THEN null ELSE n.retired_by END,
-                    n.edgeguard_managed = true,
                     n.tlp = {_tlp_most_restrictive_clause("n.tlp", "item.tlp")},
                     n.uuid = coalesce(n.uuid, item.node_uuid),
                     n.misp_event_ids = {_dedup_concat_optional_clause("n.misp_event_ids", "item.misp_event_id")},
@@ -3996,9 +4075,10 @@ class Neo4jClient:
         ensure_sector_query = """
         MERGE (s:Sector {name: $sector_name})
         ON CREATE SET s.created_at = datetime(),
-                      s.uuid = $sector_uuid
+                      s.uuid = $sector_uuid,
+                      s.edgeguard_managed = true
+        ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
         SET s.updated_at = datetime(),
-            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
@@ -4065,9 +4145,10 @@ class Neo4jClient:
         ensure_sector_query = """
         MERGE (s:Sector {name: $sector_name})
         ON CREATE SET s.created_at = datetime(),
-                      s.uuid = $sector_uuid
+                      s.uuid = $sector_uuid,
+                      s.edgeguard_managed = true
+        ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
         SET s.updated_at = datetime(),
-            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, $sector_uuid)
         """
 
@@ -4532,9 +4613,10 @@ class Neo4jClient:
         UNWIND $rows AS row
         MERGE (s:Sector {{name: row.sector}})
         ON CREATE SET s.created_at = datetime(),
-                      s.uuid = row.sector_uuid
+                      s.uuid = row.sector_uuid,
+                      s.edgeguard_managed = true
+        ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
         SET s.updated_at = datetime(),
-            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (i:Indicator {{value: row.value}})
@@ -4549,9 +4631,10 @@ class Neo4jClient:
         UNWIND $rows AS row
         MERGE (s:Sector {{name: row.sector}})
         ON CREATE SET s.created_at = datetime(),
-                      s.uuid = row.sector_uuid
+                      s.uuid = row.sector_uuid,
+                      s.edgeguard_managed = true
+        ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
         SET s.updated_at = datetime(),
-            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:Vulnerability {{cve_id: row.cve_id}})
@@ -4562,9 +4645,10 @@ class Neo4jClient:
         UNWIND $rows AS row
         MERGE (s:Sector {{name: row.sector}})
         ON CREATE SET s.created_at = datetime(),
-                      s.uuid = row.sector_uuid
+                      s.uuid = row.sector_uuid,
+                      s.edgeguard_managed = true
+        ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
         SET s.updated_at = datetime(),
-            s.edgeguard_managed = true,
             s.uuid = coalesce(s.uuid, row.sector_uuid)
         WITH row, s
         MATCH (v:CVE {{cve_id: row.cve_id}})
@@ -5041,11 +5125,12 @@ class Neo4jClient:
         query = f"""
         MERGE (i:IP {{address: $address}})
         ON CREATE SET i.uuid = $ip_uuid,
-                      i.first_imported_at = datetime()
+                      i.first_imported_at = datetime(),
+                      i.edgeguard_managed = true
+        ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
         SET i.status = $status,
             i.tag = {_dedup_concat_clause("i.tag", "$tag_list")},
             i.version = $version,
-            i.edgeguard_managed = true,
             i.last_updated = datetime(),
             i.uuid = coalesce(i.uuid, $ip_uuid)
         """
@@ -5082,9 +5167,9 @@ class Neo4jClient:
         host_uuid = compute_node_uuid("Host", {"hostname": hostname})
         query = """
         MERGE (h:Host {hostname: $hostname})
-        ON CREATE SET h.uuid = $host_uuid
-        SET h.edgeguard_managed = true,
-            h.first_seen = CASE WHEN h.first_seen IS NULL THEN datetime() ELSE h.first_seen END,
+        ON CREATE SET h.uuid = $host_uuid, h.edgeguard_managed = true
+        ON MATCH SET h.edgeguard_enriched = CASE WHEN h.edgeguard_managed = true THEN h.edgeguard_enriched ELSE true END
+        SET h.first_seen = CASE WHEN h.first_seen IS NULL THEN datetime() ELSE h.first_seen END,
             h.last_updated = datetime(),
             h.uuid = coalesce(h.uuid, $host_uuid)
         """
@@ -5114,9 +5199,9 @@ class Neo4jClient:
         device_uuid = compute_node_uuid("Device", {"device_id": device_id})
         query = """
         MERGE (d:Device {device_id: $device_id})
-        ON CREATE SET d.uuid = $device_uuid
-        SET d.edgeguard_managed = true,
-            d.first_seen = CASE WHEN d.first_seen IS NULL THEN datetime() ELSE d.first_seen END,
+        ON CREATE SET d.uuid = $device_uuid, d.edgeguard_managed = true
+        ON MATCH SET d.edgeguard_enriched = CASE WHEN d.edgeguard_managed = true THEN d.edgeguard_enriched ELSE true END
+        SET d.first_seen = CASE WHEN d.first_seen IS NULL THEN datetime() ELSE d.first_seen END,
             d.last_updated = datetime(),
             d.uuid = coalesce(d.uuid, $device_uuid)
         """
@@ -5135,9 +5220,9 @@ class Neo4jClient:
         subnet_uuid = compute_node_uuid("Subnet", {"range": subnet_range})
         query = """
         MERGE (s:Subnet {range: $range})
-        ON CREATE SET s.uuid = $subnet_uuid
-        SET s.edgeguard_managed = true,
-            s.note = $note,
+        ON CREATE SET s.uuid = $subnet_uuid, s.edgeguard_managed = true
+        ON MATCH SET s.edgeguard_enriched = CASE WHEN s.edgeguard_managed = true THEN s.edgeguard_enriched ELSE true END
+        SET s.note = $note,
             s.version = $version,
             s.first_seen = CASE WHEN s.first_seen IS NULL THEN datetime() ELSE s.first_seen END,
             s.last_updated = datetime(),
@@ -5166,9 +5251,9 @@ class Neo4jClient:
         ns_uuid = compute_node_uuid("NetworkService", {"port": port, "protocol": protocol})
         query = """
         MERGE (ns:NetworkService {port: $port, protocol: $protocol})
-        ON CREATE SET ns.uuid = $ns_uuid
-        SET ns.edgeguard_managed = true,
-            ns.service = $service,
+        ON CREATE SET ns.uuid = $ns_uuid, ns.edgeguard_managed = true
+        ON MATCH SET ns.edgeguard_enriched = CASE WHEN ns.edgeguard_managed = true THEN ns.edgeguard_enriched ELSE true END
+        SET ns.service = $service,
             ns.first_seen = CASE WHEN ns.first_seen IS NULL THEN datetime() ELSE ns.first_seen END,
             ns.last_updated = datetime(),
             ns.uuid = coalesce(ns.uuid, $ns_uuid)
@@ -5195,9 +5280,9 @@ class Neo4jClient:
         sv_uuid = compute_node_uuid("SoftwareVersion", {"version": version})
         query = """
         MERGE (sv:SoftwareVersion {version: $version})
-        ON CREATE SET sv.uuid = $sv_uuid
-        SET sv.edgeguard_managed = true,
-            sv.cve_timestamp = $cve_timestamp,
+        ON CREATE SET sv.uuid = $sv_uuid, sv.edgeguard_managed = true
+        ON MATCH SET sv.edgeguard_enriched = CASE WHEN sv.edgeguard_managed = true THEN sv.edgeguard_enriched ELSE true END
+        SET sv.cve_timestamp = $cve_timestamp,
             sv.first_seen = CASE WHEN sv.first_seen IS NULL THEN datetime() ELSE sv.first_seen END,
             sv.last_updated = datetime(),
             sv.uuid = coalesce(sv.uuid, $sv_uuid)
@@ -5223,9 +5308,9 @@ class Neo4jClient:
         app_uuid = compute_node_uuid("Application", {"name": name})
         query = """
         MERGE (a:Application {name: $name})
-        ON CREATE SET a.uuid = $app_uuid
-        SET a.edgeguard_managed = true,
-            a.first_seen = CASE WHEN a.first_seen IS NULL THEN datetime() ELSE a.first_seen END,
+        ON CREATE SET a.uuid = $app_uuid, a.edgeguard_managed = true
+        ON MATCH SET a.edgeguard_enriched = CASE WHEN a.edgeguard_managed = true THEN a.edgeguard_enriched ELSE true END
+        SET a.first_seen = CASE WHEN a.first_seen IS NULL THEN datetime() ELSE a.first_seen END,
             a.last_updated = datetime(),
             a.uuid = coalesce(a.uuid, $app_uuid)
         """
@@ -5251,9 +5336,9 @@ class Neo4jClient:
         role_uuid = compute_node_uuid("Role", {"permission": permission})
         query = """
         MERGE (r:Role {permission: $permission})
-        ON CREATE SET r.uuid = $role_uuid
-        SET r.edgeguard_managed = true,
-            r.first_seen = CASE WHEN r.first_seen IS NULL THEN datetime() ELSE r.first_seen END,
+        ON CREATE SET r.uuid = $role_uuid, r.edgeguard_managed = true
+        ON MATCH SET r.edgeguard_enriched = CASE WHEN r.edgeguard_managed = true THEN r.edgeguard_enriched ELSE true END
+        SET r.first_seen = CASE WHEN r.first_seen IS NULL THEN datetime() ELSE r.first_seen END,
             r.last_updated = datetime(),
             r.uuid = coalesce(r.uuid, $role_uuid)
         """
@@ -5270,8 +5355,9 @@ class Neo4jClient:
         """MERGE a Component node. Properties: name"""
         query = """
         MERGE (c:Component {name: $name})
-        SET c.edgeguard_managed = true,
-            c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
+        ON CREATE SET c.edgeguard_managed = true
+        ON MATCH SET c.edgeguard_enriched = CASE WHEN c.edgeguard_managed = true THEN c.edgeguard_enriched ELSE true END
+        SET c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
             c.last_updated = datetime()
         """
         try:
@@ -5287,8 +5373,9 @@ class Neo4jClient:
         """MERGE a Mission node. Properties: criticality, structure, description, name"""
         query = """
         MERGE (m:Mission {name: $name})
-        SET m.edgeguard_managed = true,
-            m.criticality = $criticality,
+        ON CREATE SET m.edgeguard_managed = true
+        ON MATCH SET m.edgeguard_enriched = CASE WHEN m.edgeguard_managed = true THEN m.edgeguard_enriched ELSE true END
+        SET m.criticality = $criticality,
             m.structure = $structure,
             m.description = $description,
             m.first_seen = CASE WHEN m.first_seen IS NULL THEN datetime() ELSE m.first_seen END,
@@ -5314,8 +5401,9 @@ class Neo4jClient:
         """MERGE an OrganizationUnit node. Properties: name"""
         query = """
         MERGE (o:OrganizationUnit {name: $name})
-        SET o.edgeguard_managed = true,
-            o.first_seen = CASE WHEN o.first_seen IS NULL THEN datetime() ELSE o.first_seen END,
+        ON CREATE SET o.edgeguard_managed = true
+        ON MATCH SET o.edgeguard_enriched = CASE WHEN o.edgeguard_managed = true THEN o.edgeguard_enriched ELSE true END
+        SET o.first_seen = CASE WHEN o.first_seen IS NULL THEN datetime() ELSE o.first_seen END,
             o.last_updated = datetime()
         """
         try:
@@ -5345,8 +5433,9 @@ class Neo4jClient:
             return False
         query = """
         MERGE (md:MissionDependency {dependency_id: $dependency_id})
-        SET md.edgeguard_managed = true,
-            md.first_seen = CASE WHEN md.first_seen IS NULL THEN datetime() ELSE md.first_seen END,
+        ON CREATE SET md.edgeguard_managed = true
+        ON MATCH SET md.edgeguard_enriched = CASE WHEN md.edgeguard_managed = true THEN md.edgeguard_enriched ELSE true END
+        SET md.first_seen = CASE WHEN md.first_seen IS NULL THEN datetime() ELSE md.first_seen END,
             md.last_updated = datetime()
         """
         try:
@@ -5384,9 +5473,9 @@ class Neo4jClient:
         node_uuid = compute_node_uuid("User", {"username": username, "domain": domain})
         query = """
         MERGE (u:User {username: $username, domain: $domain})
-        ON CREATE SET u.uuid = $node_uuid
-        SET u.edgeguard_managed = true,
-            u.first_seen = CASE WHEN u.first_seen IS NULL THEN datetime() ELSE u.first_seen END,
+        ON CREATE SET u.uuid = $node_uuid, u.edgeguard_managed = true
+        ON MATCH SET u.edgeguard_enriched = CASE WHEN u.edgeguard_managed = true THEN u.edgeguard_enriched ELSE true END
+        SET u.first_seen = CASE WHEN u.first_seen IS NULL THEN datetime() ELSE u.first_seen END,
             u.last_updated = datetime(),
             u.uuid = coalesce(u.uuid, $node_uuid)
         """
@@ -5438,11 +5527,12 @@ class Neo4jClient:
         query = """
         MERGE (v:Vulnerability {cve_id: $cve_id})
         ON CREATE SET v.uuid = $vuln_uuid,
-                      v.first_imported_at = datetime()
+                      v.first_imported_at = datetime(),
+                      v.edgeguard_managed = true
+        ON MATCH SET v.edgeguard_enriched = CASE WHEN v.edgeguard_managed = true THEN v.edgeguard_enriched ELSE true END
         SET v.name = coalesce(v.name, $name)
         SET v.status = $status,
             v.description = $description,
-            v.edgeguard_managed = true,
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
         """
@@ -5475,7 +5565,8 @@ class Neo4jClient:
         cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
         query = f"""
         MERGE (c:CVE {{cve_id: $cve_id}})
-        ON CREATE SET c.uuid = $cve_uuid
+        ON CREATE SET c.uuid = $cve_uuid, c.edgeguard_managed = true
+        ON MATCH SET c.edgeguard_enriched = CASE WHEN c.edgeguard_managed = true THEN c.edgeguard_enriched ELSE true END
         SET c.description = $description,
             c.published = $published,
             c.last_modified = $last_modified,
@@ -5483,7 +5574,6 @@ class Neo4jClient:
             c.result_impacts = $result_impacts,
             c.ref_tags = $ref_tags,
             c.cwe = $cwe,
-            c.edgeguard_managed = true,
             c.tags = {_dedup_concat_clause("c.tags", "[$tag]")},
             c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,
@@ -5517,8 +5607,9 @@ class Neo4jClient:
         """MERGE a ResilMesh Node entity with centrality metrics. Properties: node_id, degree_centrality, pagerank_centrality"""
         query = """
         MERGE (n:Node {node_id: $node_id})
-        SET n.edgeguard_managed = true,
-            n.degree_centrality = $degree_centrality,
+        ON CREATE SET n.edgeguard_managed = true
+        ON MATCH SET n.edgeguard_enriched = CASE WHEN n.edgeguard_managed = true THEN n.edgeguard_enriched ELSE true END
+        SET n.degree_centrality = $degree_centrality,
             n.pagerank_centrality = $pagerank_centrality,
             n.first_seen = CASE WHEN n.first_seen IS NULL THEN datetime() ELSE n.first_seen END,
             n.last_updated = datetime()
@@ -6368,7 +6459,7 @@ class Neo4jClient:
                 logger.error("create_alert_node: missing alert_id — cannot MERGE without natural key")
                 return False
             source = alert_data.get("source", "unknown")
-            zone = alert_data.get("zone", ["global"])  # zone is now an array
+            zone = _normalise_zone_list(alert_data.get("zone"))  # list, like every other zone property
             timestamp = alert_data.get("timestamp", datetime.now(timezone.utc).isoformat())
             _tags = alert_data.get("tags", [])
             threat = alert_data.get("threat", {})
@@ -6385,7 +6476,8 @@ class Neo4jClient:
 
             query = """
             MERGE (a:Alert {alert_id: $alert_id})
-            ON CREATE SET a.uuid = $node_uuid
+            ON CREATE SET a.uuid = $node_uuid, a.edgeguard_managed = true
+            ON MATCH SET a.edgeguard_enriched = CASE WHEN a.edgeguard_managed = true THEN a.edgeguard_enriched ELSE true END
             SET a.source = $source,
                 a.zone = $zone,
                 a.timestamp = $timestamp,
@@ -6396,7 +6488,7 @@ class Neo4jClient:
                 a.malware = $malware,
                 a.cve = $cve,
                 a.enriched = false,
-                a.received_at = datetime(),
+                a.received_at = coalesce(a.received_at, datetime()),
                 a.last_updated = datetime(),
                 a.uuid = coalesce(a.uuid, $node_uuid)
             """
@@ -6436,8 +6528,9 @@ class Neo4jClient:
             MATCH (a:Alert {alert_id: $alert_id})
             MATCH (i:Indicator {value: $indicator_value})
             MERGE (a)-[r:INVOLVES]->(i)
-            ON CREATE SET r.src_uuid = a.uuid, r.trg_uuid = i.uuid
-            SET r.created_at = datetime(),
+            ON CREATE SET r.src_uuid = a.uuid, r.trg_uuid = i.uuid, r.created_at = datetime()
+            SET r.updated_at = datetime(),
+                r.edgeguard_managed = true,
                 r.source = 'resilmesh',
                 r.src_uuid = coalesce(r.src_uuid, a.uuid),
                 r.trg_uuid = coalesce(r.trg_uuid, i.uuid)
@@ -6572,7 +6665,8 @@ class Neo4jClient:
         # and ``i.last_updated`` (= datetime() every MERGE).
         query = f"""
         MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
-        ON CREATE SET i.first_imported_at = datetime()
+        ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
+        ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
         SET i.last_updated = datetime(),
             i.source = {_dedup_concat_clause("i.source", "$source")},
             i.confidence_score = CASE
@@ -6581,7 +6675,6 @@ class Neo4jClient:
                 ELSE i.confidence_score END,
             {_zone_clause_i},
             i.tags = {_dedup_concat_clause("i.tags", "['resilmesh']")},
-            i.edgeguard_managed = true,
             i.tlp = coalesce(i.tlp, $tlp),
             i.active = CASE WHEN i.retired_at IS NOT NULL AND coalesce(i.retired_by, 'manual') <> 'decay' THEN i.active ELSE true END,
             i.retired_at = CASE WHEN coalesce(i.retired_by, '') = 'decay' THEN null ELSE i.retired_at END,
@@ -6604,14 +6697,14 @@ class Neo4jClient:
             # be the single source of truth for it.
             fallback_query = f"""
             MERGE (i:Indicator {{indicator_type: $indicator_type, value: $value}})
-            ON CREATE SET i.first_imported_at = datetime()
+            ON CREATE SET i.first_imported_at = datetime(), i.edgeguard_managed = true
+            ON MATCH SET i.edgeguard_enriched = CASE WHEN i.edgeguard_managed = true THEN i.edgeguard_enriched ELSE true END
             SET i.last_updated = datetime(),
                 i.confidence_score = CASE
                     WHEN i.confidence_score IS NULL OR $confidence_score > i.confidence_score
                     THEN $confidence_score
                     ELSE i.confidence_score END,
                 {_zone_clause_i},
-                i.edgeguard_managed = true,
                 i.tlp = coalesce(i.tlp, $tlp)
             """
             try:

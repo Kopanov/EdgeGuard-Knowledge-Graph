@@ -262,9 +262,14 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    constraint tokens). On a database ResilMesh has started writing to, use the
    edgeguard-only sequence instead: `edgeguard clear neo4j --edgeguard-only`,
    `edgeguard clear misp`, `edgeguard checkpoint clear --include-incremental`, then the
-   additive `edgeguard baseline --days 730` — and first delete unmarked leftovers from
-   before the marker existed (`MATCH (c:Campaign) WHERE c.edgeguard_managed IS NULL DETACH DELETE c`)
-   or `ownership_marker_on_nodes` fails. The gate
+   additive `edgeguard baseline --days 730`. `--edgeguard-only` deletes only the nodes
+   EdgeGuard created; nodes a partner created first stay, marked `edgeguard_enriched = true`
+   where EdgeGuard wrote to them (2026-10). Unmarked leftovers from before the marker existed
+   (`MATCH (c:Campaign) WHERE c.edgeguard_managed IS NULL AND c.edgeguard_enriched IS NULL DETACH DELETE c`)
+   must be deleted by hand first or `ownership_marker_on_nodes` fails. The first sync of this
+   build also drops the six UNIQUE constraints EdgeGuard used to hold on partner labels
+   (`device_key`, `networkservice_key`, `softwareversion_key`, `application_key`, `role_key`,
+   `user_key`) — no manual DDL needed. The gate
    and triggers the `edgeguard_baseline` DAG with `fresh_baseline=true`; the DAG
    chain then runs `build_relationships` and the enrichment jobs itself. When it
    finishes, run `python scripts/verify_fresh_baseline.py` (needs `NEO4J_HTTP_URL` or
@@ -389,7 +394,7 @@ It exits non-zero when any of these fail:
 | `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, Tool `S0005` | present (requires the MISP Import Regexp fix before re-import) |
 | `ThreatActor` names containing `,` or ` and ` | 0 |
 | `tlp` property | on every EdgeGuard node |
-| `edgeguard_managed` | on every EdgeGuard node and every EdgeGuard edge |
+| `edgeguard_managed` | on every node EdgeGuard created and every EdgeGuard edge; a node a partner created first that EdgeGuard wrote to carries `edgeguard_enriched = true` instead |
 | ICS (when `EDGEGUARD_ENABLE_MITRE_ICS`) | techniques with `attack_domain = 'ics'` link only to ICS tactics |
 | CISA ICS (when `EDGEGUARD_ENABLE_CISA_ICS`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges |
 | Sub-technique hierarchy (`subtechnique_of_complete`) | every dotted-id `Technique` whose parent exists has a `SUBTECHNIQUE_OF` edge to it (493 on the September graph; 0 missing) |

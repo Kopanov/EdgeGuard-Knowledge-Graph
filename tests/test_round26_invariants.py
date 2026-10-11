@@ -82,9 +82,20 @@ def test_every_natural_key_label_has_a_unique_constraint():
         fields = tuple(f.strip().split(".", 1)[1] for f in fields_str.split(","))
         declared[label] = fields
 
+    # 2026-10 shared-database contract: partner-owned labels whose keys recur legitimately in
+    # ResilMesh / CRUSOE data get NO constraint from EdgeGuard (a UNIQUE created here made the
+    # partner's own writes fail). They keep their deterministic uuid key; the carve-out is the
+    # single frozenset in neo4j_client so a label cannot slip out of both lists unnoticed.
+    shared = neo4j_client.SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT
+    assert shared <= set(node_identity._NATURAL_KEYS), "carve-out names a label without a natural key"
+    re_added = sorted(label for label in shared if label in declared)
+    assert not re_added, f"UNIQUE constraint re-declared on partner-owned labels: {re_added}"
+
     missing = []
     mismatched = []
     for label, expected_fields in node_identity._NATURAL_KEYS.items():
+        if label in shared:
+            continue
         if label not in declared:
             missing.append(label)
         elif set(declared[label]) != set(expected_fields):

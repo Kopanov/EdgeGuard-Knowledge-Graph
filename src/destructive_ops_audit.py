@@ -1,0 +1,87 @@
+"""Append-only audit trail for EdgeGuard's destructive graph operations (2026-10).
+
+EdgeGuard may share its Neo4j database with ResilMesh. Every code path that deletes nodes —
+the full wipe (``clear_all``), the edgeguard-only wipe (``clear_edgeguard_managed``) and the
+CVSS de-duplication that runs with ``create_constraints`` — records one JSON line here and
+increments the Prometheus counter ``edgeguard_destructive_ops_total{operation,target}``. The
+trail answers "what did EdgeGuard delete, when, and how much" for the operator of a shared
+database without reading application logs.
+
+Path: ``EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH`` (default ``logs/destructive_ops.jsonl`` under
+the working directory). Recording never raises: a failed write is logged and the operation
+that called it proceeds. Set the variable to an empty string to disable the file (the counter
+still increments).
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+AUDIT_PATH_ENV = "EDGEGUARD_DESTRUCTIVE_OPS_AUDIT_PATH"
+DEFAULT_AUDIT_PATH = os.path.join("logs", "destructive_ops.jsonl")
+
+try:  # optional, like every other metrics import in this code base
+    from metrics_server import DESTRUCTIVE_OPS as _DESTRUCTIVE_OPS
+except Exception:  # pragma: no cover — prometheus_client absent, an older metrics_server, or a duplicate
+    # collector registration when the module is reached under two import paths; none may break a delete.
+    _DESTRUCTIVE_OPS = None
+
+
+def audit_path() -> Optional[Path]:
+    """Resolved JSONL path, or ``None`` when the trail is disabled (variable set to empty)."""
+    raw = os.getenv(AUDIT_PATH_ENV)
+    if raw is None:
+        return Path(DEFAULT_AUDIT_PATH)
+    raw = raw.strip()
+    return Path(raw) if raw else None
+
+
+def record_destructive_op(
+    operation: str,
+    *,
+    target: str,
+    affected: int,
+    scope: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Append one audit line and bump the counter. Returns the record, or ``None`` if nothing was written.
+
+    ``operation`` names the code path (``clear_all``, ``clear_edgeguard_managed``, ``cvss_dedup``),
+    ``target`` the store (``neo4j``), ``affected`` the number of nodes removed, ``scope`` the
+    Cypher-level selection the operation used.
+    """
+    record: Dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "operation": operation,
+        "target": target,
+        "affected": int(affected),
+    }
+    if scope:
+        record["scope"] = scope
+    if details:
+        record["details"] = details
+
+    if _DESTRUCTIVE_OPS is not None:
+        try:
+            _DESTRUCTIVE_OPS.labels(operation=operation, target=target).inc()
+        except Exception as exc:  # pragma: no cover — metrics must never break a delete path
+            logger.debug("destructive-ops counter not incremented: %s", exc)
+
+    path = audit_path()
+    if path is None:
+        return record
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("destructive-ops audit line not written to %s: %s", path, exc)
+        return None
+    return record

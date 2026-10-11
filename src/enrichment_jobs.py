@@ -335,7 +335,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             MERGE (c:Campaign {{name: a.name + ' Campaign'}})
             ON CREATE SET c.created_at = datetime(),
                           c.actor_name = a.name,
-                          c.uuid = $campaign_uuids[a.name]
+                          c.uuid = $campaign_uuids[a.name],
+                          c.edgeguard_managed = true
+            ON MATCH SET c.edgeguard_enriched = CASE WHEN c.edgeguard_managed = true THEN c.edgeguard_enriched ELSE true END
             SET c.tags = {_dedup_concat_clause("c.tags", "coalesce(a.tags, [])")},
                 c.aliases          = apoc.coll.toSet(coalesce(a.aliases, [])),
                 c.active           = CASE WHEN indicator_total > 0 THEN true ELSE c.active END,
@@ -366,10 +368,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                                        AND (c.last_seen IS NULL OR last_seen > c.last_seen)
                                        THEN last_seen ELSE c.last_seen END,
                 c.zone             = all_zones,
-                c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name]),
-                // 2026-10: Campaign nodes are EdgeGuard-owned like every other
-                // node this pipeline writes (shared-database contract).
-                c.edgeguard_managed = true
+                c.uuid             = coalesce(c.uuid, $campaign_uuids[a.name])
             MERGE (a)-[r_runs:RUNS]->(c)
             // PR-N8 HIGH (audit Cross-Checker, 2026-04-21): stamp
             // created_at / updated_at so this edge is visible to cloud
