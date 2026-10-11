@@ -150,6 +150,33 @@ class TestGraphQLLimits:
         kwargs = session.run.call_args.kwargs
         assert kwargs["limit"] == exp_limit and kwargs["offset"] == exp_offset
 
+    def test_fragment_spreads_cannot_multiply_root_fields(self, monkeypatch):
+        """Bugbot on #151: aliases inside one fragment count once for MaxAliasesLimiter even when the
+        fragment is spread many times; the root-field rule expands spreads before counting."""
+        monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
+        for attr in ("neo4j_client", "client"):
+            if hasattr(graphql_api, attr):
+                monkeypatch.setattr(graphql_api, attr, _fake_client(MagicMock()))
+        spreads = " ".join("...F" for _ in range(graphql_api._GRAPHQL_MAX_ALIASES))
+        query = "fragment F on Query { a: tactics { __typename } b: tactics { __typename } } query { " + spreads + " }"
+        resp = TestClient(graphql_api.app, raise_server_exceptions=False).post("/graphql", json={"query": query})
+        errors = resp.json().get("errors") or []
+        assert any("root fields" in (e.get("message") or "") for e in errors), resp.json()
+        small = TestClient(graphql_api.app, raise_server_exceptions=False).post(
+            "/graphql",
+            json={
+                "query": "fragment F on Query { a: tactics { __typename } } query { ...F b: tactics { __typename } }"
+            },
+        )
+        assert not any("root fields" in (e.get("message") or "") for e in (small.json().get("errors") or []))
+        assert "MaxRootFieldsLimiter" in {type(e).__name__ for e in graphql_api._extensions}
+
+    def test_openapi_routes_are_rate_limited(self):
+        for name in ("query_api", "graphql_api"):
+            src = (_SRC / f"{name}.py").read_text()
+            block = src[src.index('@app.get("/openapi.json"') :]
+            assert "@limiter.limit(" in block[: block.index("async def openapi_document")]
+
     def test_body_cap_returns_413(self, monkeypatch):
         monkeypatch.setattr(graphql_api, "_MAX_BODY_BYTES", 64)
         resp = TestClient(graphql_api.app, raise_server_exceptions=False).post(

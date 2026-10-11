@@ -714,6 +714,7 @@ GRAPHQL_PLAYGROUND = os.getenv("EDGEGUARD_GRAPHQL_PLAYGROUND", "false").lower() 
 # Both are extensions, not middleware — they run inside Strawberry's
 # request lifecycle so the limit applies BEFORE the resolver fans out
 # (vs. middleware which would run after parse).
+from graphql import FieldNode, FragmentSpreadNode, GraphQLError, InlineFragmentNode, ValidationRule  # noqa: E402
 from graphql.validation import NoSchemaIntrospectionCustomRule  # noqa: E402
 from strawberry.extensions import MaxAliasesLimiter, QueryDepthLimiter  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
@@ -757,9 +758,59 @@ _MAX_BODY_BYTES = _env_positive_int("EDGEGUARD_MAX_BODY_BYTES", 1 * 1024 * 1024)
 # auth-gate check above ALWAYS agree. PR-N23 Bugbot round 1 (PR #107
 # MEDIUM) — pre-fix had two separate env reads that could disagree.
 
+
+def _make_root_field_limit_rule(max_fields: int) -> type:  # noqa: C901 — one rule, two small methods
+    """graphql-core validation rule capping the root fields one operation executes.
+
+    Counts aliases and expands fragment spreads (every spread occurrence counts), which is the
+    fan-out ``MaxAliasesLimiter`` misses: one fragment holding a few aliased root fields, spread
+    many times, still executed one Cypher statement per expanded field (Bugbot on #151).
+    """
+
+    class MaxRootFieldsRule(ValidationRule):
+        def enter_operation_definition(self, node, *_args):  # noqa: ANN001
+            total = self._count(node.selection_set, frozenset())
+            if total > max_fields:
+                self.report_error(
+                    GraphQLError(
+                        f"{total} root fields requested (aliases and fragments expanded); allowed: {max_fields}",
+                        node,
+                    )
+                )
+
+        def _count(self, selection_set, seen):  # noqa: ANN001
+            if selection_set is None:
+                return 0
+            total = 0
+            for sel in selection_set.selections:
+                if isinstance(sel, FieldNode):
+                    total += 1
+                elif isinstance(sel, InlineFragmentNode):
+                    total += self._count(sel.selection_set, seen)
+                elif isinstance(sel, FragmentSpreadNode):
+                    name = sel.name.value
+                    if name in seen:
+                        continue  # cycles are rejected by NoFragmentCyclesRule; never recurse into one
+                    fragment = self.context.get_fragment(name)
+                    if fragment is not None:
+                        total += self._count(fragment.selection_set, seen | {name})
+            return total
+
+    return MaxRootFieldsRule
+
+
+class MaxRootFieldsLimiter(AddValidationRules):
+    """Extension installing the root-field rule (its own class so it is distinguishable from the
+    prod-only introspection rule, which is also an AddValidationRules instance)."""
+
+    def __init__(self, max_fields: int) -> None:
+        super().__init__([_make_root_field_limit_rule(max_fields)])
+
+
 _extensions: list = [
     QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH),
     MaxAliasesLimiter(max_alias_count=_GRAPHQL_MAX_ALIASES),
+    MaxRootFieldsLimiter(_GRAPHQL_MAX_ALIASES),
 ]
 if _IS_PROD:
     # Block introspection in prod via the canonical graphql-core rule.
@@ -804,8 +855,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 if _IS_PROD:
 
     @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_verify_api_key)])
-    async def openapi_document() -> dict:
-        """OpenAPI document for key holders (prod)."""
+    @limiter.limit("120/minute")
+    async def openapi_document(request: Request) -> dict:
+        """OpenAPI document for key holders (prod); rate-limited like every other route."""
         return app.openapi()
 
 

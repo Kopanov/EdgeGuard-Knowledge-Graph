@@ -181,8 +181,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 if _IS_PROD:
 
     @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_verify_api_key)])
-    async def openapi_document() -> Dict[str, Any]:
-        """OpenAPI document for key holders (prod): discovery without exposing it anonymously."""
+    @limiter.limit(_RATE_LIMIT_READ)
+    async def openapi_document(request: Request) -> Dict[str, Any]:
+        """OpenAPI document for key holders (prod): discovery without exposing it anonymously; rate-limited."""
         return app.openapi()
 
 
