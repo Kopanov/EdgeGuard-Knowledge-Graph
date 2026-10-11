@@ -183,7 +183,9 @@ class TestSharedSchema:
             "user_key",
         ):
             assert name not in created, name
-            assert name in dropped, f"{name} must be dropped so an older hosted database heals itself"
+            assert name in dropped, (
+                f"{name} must be dropped so a database created by an older build converges without manual DDL"
+            )
         # the keys unique in CRUSOE's model too are still declared
         assert {"IP", "Host", "Subnet", "Alert"} <= set(created.values())
 
@@ -196,7 +198,9 @@ class TestSharedSchema:
         guard = src.index("WHERE n.cve_id IS NOT NULL AND n.edgeguard_managed = true")
         group = src.index("WITH n.cve_id AS cid, collect(n) AS nodes")
         assert guard < group, "the guard must filter before the collect()"
-        assert "Move any relationships" not in src, "the old comment promised a move that never happened"
+        assert "Move any relationships" not in src, (
+            "the previous comment described a relationship move that the statement does not perform"
+        )
         assert 'record_destructive_op("cvss_dedup"' in src
 
 

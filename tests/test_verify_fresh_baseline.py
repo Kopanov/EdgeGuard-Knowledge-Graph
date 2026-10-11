@@ -125,7 +125,7 @@ class TestNoFalsePositives:
         assert "Host" not in vfb.EDGEGUARD_LABELS
 
     def test_unmarked_alert_or_involves_fails_ownership_checks(self, vfb, monkeypatch):
-        """A node under an EdgeGuard label with neither marker means a writer forgot it (or a
+        """A node under an EdgeGuard label with neither marker means a writer omitted it (or a
         partner wrote under EdgeGuard's label) — the check must fail, not stay silent."""
 
         def broken(statement, rows):

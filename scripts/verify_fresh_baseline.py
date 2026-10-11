@@ -258,7 +258,7 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
     # 8. Ownership marker on every EdgeGuard node and edge. 2026-10: ``edgeguard_managed`` is
     #    stamped only on nodes EdgeGuard created; a node a partner created first that EdgeGuard
     #    wrote to carries ``edgeguard_enriched`` instead, so neither marker on an EdgeGuard label
-    #    means EdgeGuard never touched it (or a writer forgot the marker).
+    #    means EdgeGuard never wrote to it (or a writer omitted the marker).
     nodes = _post(
         "MATCH (n) WHERE n.edgeguard_managed IS NULL AND n.edgeguard_enriched IS NULL "
         "UNWIND labels(n) AS l RETURN l AS label, count(*) AS c ORDER BY c DESC"

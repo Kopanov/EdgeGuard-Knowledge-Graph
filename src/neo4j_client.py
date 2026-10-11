@@ -1472,7 +1472,7 @@ class Neo4jClient:
             "DROP CONSTRAINT cvssv40_key IF EXISTS",
             # 2026-10 shared-database contract: UNIQUE constraints EdgeGuard used to declare on
             # partner-owned labels (SHARED_LABELS_WITHOUT_UNIQUE_CONSTRAINT). Dropped on every run
-            # so a hosted database created by an older build heals itself; no-op once absent.
+            # so a database created by an older build converges without manual DDL; a no-op once absent.
             "DROP CONSTRAINT device_key IF EXISTS",
             "DROP CONSTRAINT networkservice_key IF EXISTS",
             "DROP CONSTRAINT softwareversion_key IF EXISTS",

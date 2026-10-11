@@ -189,7 +189,7 @@ def _node_props(node: Any) -> Dict[str, Any]:
 
     2026-10: FastAPI's encoder falls back to ``vars()`` for ``neo4j.time`` objects, so every
     ``last_updated`` / ``first_imported_at`` left the REST API as a ``{"_DateTime__date": …}``
-    blob. Every endpoint that returns raw node properties goes through this helper.
+    object. Every endpoint that returns raw node properties goes through this helper.
     """
     return {k: _jsonable(v) for k, v in dict(node or {}).items()}
 
