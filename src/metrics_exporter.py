@@ -77,11 +77,6 @@ def prepare_multiproc_env() -> Optional[str]:
         return None
 
 
-def ensure_multiproc_dir() -> Optional[str]:
-    """Alias of :func:`prepare_multiproc_env` kept for readability at call sites."""
-    return prepare_multiproc_env()
-
-
 def build_registry(path: Optional[str] = None):
     """A registry that aggregates every process's files; ``path`` defaults to the environment."""
     from prometheus_client import CollectorRegistry
@@ -195,33 +190,55 @@ def compact_multiproc_dir(
         }
 
 
-def serve(host: str, port: int) -> None:
-    """Serve the aggregated ``/metrics`` endpoint until interrupted."""
+def serve(host: str, port: int, directory: Optional[str] = None) -> None:
+    """Serve the aggregated ``/metrics`` endpoint for ``directory`` until interrupted."""
     from prometheus_client import start_http_server
 
-    ensure_multiproc_dir()
-    registry = build_registry()
+    directory = directory or multiproc_dir()
+    registry = build_registry(directory)
     start_http_server(port, addr=host, registry=registry)
-    logger.info("Multiprocess metrics exporter serving http://%s:%s/metrics from %s", host, port, multiproc_dir())
+    logger.info("Multiprocess metrics exporter serving http://%s:%s/metrics from %s", host, port, directory)
     while True:
         time.sleep(3600)
 
 
 def main() -> int:
+    """Entry point of the ``metrics`` compose service.
+
+    The exporter only reads the directory, so it serves whatever is there even when the writability
+    probe at import time failed (that probe protects the writers — Airflow task processes). It exits
+    with status 2 only when no directory is configured or the directory cannot be created.
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    if not multiprocess_mode_active():
+    directory = _CONFIGURED_DIR
+    if not directory:
         logger.error(
             "%s is not set — nothing to export; set it to the directory the task processes write to", MULTIPROC_ENV
         )
         return 2
+    try:
+        os.makedirs(directory, exist_ok=True)
+    except OSError as exc:
+        logger.error("%s=%s cannot be created: %s", MULTIPROC_ENV, directory, exc)
+        return 2
+    if not multiprocess_mode_active():
+        logger.warning(
+            "%s is not writable by this process; serving the existing files read-only (task processes need "
+            "write access for their values to appear here)",
+            directory,
+        )
     host = os.getenv("EDGEGUARD_METRICS_HOST", "127.0.0.1")
     try:
         port = int(os.getenv("EDGEGUARD_METRICS_PORT", "8001"))
     except ValueError:
         port = 8001
-    serve(host, port)
+    serve(host, port, directory)
     return 0
 
+
+# Captured before the guard below may remove the variable: the exporter entry point (``main``) only
+# reads the directory, so a failed writability probe must not stop it from serving.
+_CONFIGURED_DIR: Optional[str] = multiproc_dir()
 
 # Import-time side effect, by design: any module that imports this one before prometheus_client
 # (resilience, metrics_server) gets the directory created and the writability probe applied first.

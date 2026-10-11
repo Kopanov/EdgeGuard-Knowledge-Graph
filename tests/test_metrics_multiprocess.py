@@ -112,7 +112,7 @@ class TestModeSwitches:
         target = tmp_path / "mp"
         monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(target))
         assert metrics_exporter.multiprocess_mode_active() is True
-        assert metrics_exporter.ensure_multiproc_dir() == str(target) and target.is_dir()
+        assert metrics_exporter.prepare_multiproc_env() == str(target) and target.is_dir()
 
     def test_dag_and_metrics_dag_do_not_start_servers_in_multiprocess_mode(self):
         dag = (_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
@@ -202,4 +202,31 @@ class TestComposeWiring:
 
     def test_exporter_refuses_to_run_without_the_directory(self, monkeypatch):
         monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+        monkeypatch.setattr(metrics_exporter, "_CONFIGURED_DIR", None)
         assert metrics_exporter.main() == 2
+
+    def test_exporter_refuses_a_directory_it_cannot_create(self, monkeypatch, caplog):
+        monkeypatch.setattr(metrics_exporter, "_CONFIGURED_DIR", "/nonexistent-root-dir/edgeguard_metrics")
+        with caplog.at_level("ERROR", logger="metrics_exporter"):
+            assert metrics_exporter.main() == 2
+        assert any("cannot be created" in r.message for r in caplog.records)
+
+    def test_exporter_serves_a_directory_it_cannot_write(self, tmp_path, monkeypatch, caplog):
+        """Review finding on PR #154: the exporter only reads, so a failed write probe must not stop it."""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("permission bits do not restrict root")
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o500)
+        served = {}
+        monkeypatch.setattr(metrics_exporter, "serve", lambda host, port, directory=None: served.update(dir=directory))
+        monkeypatch.setattr(metrics_exporter, "_CONFIGURED_DIR", str(shared))
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(shared))
+        try:
+            assert metrics_exporter.prepare_multiproc_env() is None  # the writer-side guard disables the mode
+            with caplog.at_level("WARNING", logger="metrics_exporter"):
+                assert metrics_exporter.main() == 0
+        finally:
+            shared.chmod(0o700)
+        assert served["dir"] == str(shared)
+        assert any("read-only" in r.message for r in caplog.records)
