@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import strawberry
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -304,9 +304,19 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
     )
 
 
+def _clamp_limit(limit: int) -> int:
+    """1 ≤ limit ≤ _MAX_GRAPHQL_LIMIT (negative or zero values reached Cypher before 2026-10)."""
+    return min(max(int(limit), 1), _MAX_GRAPHQL_LIMIT)
+
+
+def _clamp_offset(offset: int) -> int:
+    """0 ≤ offset ≤ _MAX_GRAPHQL_OFFSET."""
+    return min(max(int(offset), 0), _MAX_GRAPHQL_OFFSET)
+
+
 def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> List[Vulnerability]:
     conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
-    params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset, "min_cvss": f.min_cvss}
+    params: dict = {"limit": _clamp_limit(f.limit), "offset": _clamp_offset(f.offset), "min_cvss": f.min_cvss}
 
     if f.zone is not strawberry.UNSET and f.zone:
         conditions.append("$zone IN n.zone")
@@ -363,7 +373,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
 
 def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicator]:
     conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
-    params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset}
+    params: dict = {"limit": _clamp_limit(f.limit), "offset": _clamp_offset(f.offset)}
 
     if f.zone is not strawberry.UNSET and f.zone:
         conditions.append("$zone IN n.zone")
@@ -435,7 +445,7 @@ _MAX_GRAPHQL_LIMIT = 500
 
 def _resolve_list(client: Neo4jClient, label: str, f: NodeFilter, cls, mapper):
     conditions = []
-    params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset}
+    params: dict = {"limit": _clamp_limit(f.limit), "offset": _clamp_offset(f.offset)}
 
     if f.edgeguard_managed_only:
         conditions.append("(n.edgeguard_managed = true OR n.edgeguard_enriched = true)")
@@ -705,7 +715,7 @@ GRAPHQL_PLAYGROUND = os.getenv("EDGEGUARD_GRAPHQL_PLAYGROUND", "false").lower() 
 # request lifecycle so the limit applies BEFORE the resolver fans out
 # (vs. middleware which would run after parse).
 from graphql.validation import NoSchemaIntrospectionCustomRule  # noqa: E402
-from strawberry.extensions import QueryDepthLimiter  # noqa: E402
+from strawberry.extensions import MaxAliasesLimiter, QueryDepthLimiter  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
 
 
@@ -723,13 +733,34 @@ def _env_graphql_max_depth(default: int = 8) -> int:
 
 
 _GRAPHQL_MAX_DEPTH = _env_graphql_max_depth()
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """Positive integer from the environment; unset, empty, non-numeric or non-positive → default."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# 2026-10 readiness check: 300 aliased root fields ran 300 Cypher statements in one request.
+_GRAPHQL_MAX_ALIASES = _env_positive_int("EDGEGUARD_GRAPHQL_MAX_ALIASES", 15)
+_MAX_GRAPHQL_OFFSET = 100_000  # same ceiling as the REST API
+_MAX_BODY_BYTES = _env_positive_int("EDGEGUARD_MAX_BODY_BYTES", 1 * 1024 * 1024)
 # Note: ``_IS_PROD`` is defined at the top of this module (line ~70)
 # alongside the API-key auth check. The single source of truth is
 # ``_is_prod_env()`` so the introspection-enable check below and the
 # auth-gate check above ALWAYS agree. PR-N23 Bugbot round 1 (PR #107
 # MEDIUM) — pre-fix had two separate env reads that could disagree.
 
-_extensions: list = [QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH)]
+_extensions: list = [
+    QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH),
+    MaxAliasesLimiter(max_alias_count=_GRAPHQL_MAX_ALIASES),
+]
 if _IS_PROD:
     # Block introspection in prod via the canonical graphql-core rule.
     _extensions.append(AddValidationRules([NoSchemaIntrospectionCustomRule]))
@@ -763,9 +794,30 @@ app = FastAPI(
     ),
     version=package_version(),
     lifespan=lifespan,
+    docs_url=None if _IS_PROD else "/docs",
+    redoc_url=None if _IS_PROD else "/redoc",
+    openapi_url=None if _IS_PROD else "/openapi.json",
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+if _IS_PROD:
+
+    @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_verify_api_key)])
+    async def openapi_document() -> dict:
+        """OpenAPI document for key holders (prod)."""
+        return app.openapi()
+
+
+@app.middleware("http")
+async def enforce_body_size(request: Request, call_next):
+    """Reject requests whose Content-Length exceeds the configured maximum (same cap as the REST API)."""
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > _MAX_BODY_BYTES:
+        return JSONResponse({"detail": f"Request body too large (max {_MAX_BODY_BYTES} bytes)"}, status_code=413)
+    return await call_next(request)
+
+
 app.add_middleware(SlowAPIMiddleware)
 
 allowed_origins = os.getenv("EDGEGUARD_CORS_ORIGINS", "http://localhost,http://localhost:3000").split(",")
