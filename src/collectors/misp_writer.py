@@ -414,6 +414,72 @@ _TRANSIENT_HTTP_ERRORS = (
 )
 
 
+def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
+    """``(type, value)`` key used to recognise a pushed attribute in a MISP event response.
+
+    MISP normalises some values on save (hashes, domains, hostnames and e-mail addresses are
+    lower-cased, surrounding whitespace is trimmed), so the comparison is case-insensitive
+    and whitespace-trimmed. Returns None when the attribute lacks a type or a value.
+    """
+    if not isinstance(attribute, dict):
+        return None
+    attr_type = attribute.get("type")
+    value = attribute.get("value")
+    if attr_type is None or value is None:
+        return None
+    value_norm = str(value).strip().lower()
+    if not value_norm:
+        return None
+    return (str(attr_type).strip().lower(), value_norm)
+
+
+def _strict_push_accounting() -> bool:
+    """``EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING`` truthy: attributes absent from the returned event
+    count as failed pushes (they then feed ``EDGEGUARD_MISP_MIN_SUCCESS_RATE``). Off by default:
+    MISP normalises some values on save (case, whitespace are tolerated by the comparison; rarer
+    rewrites such as IPv6 compression are not), so the strict mode is meant to be enabled after a
+    live check shows no spurious unconfirmed attributes.
+    """
+    return os.environ.get("EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _confirm_pushed_attributes(
+    attempted: List[Dict[str, Any]], saved: Any
+) -> Optional[Tuple[int, List[Tuple[str, str]]]]:
+    """Reconcile a pushed batch against the ``Event.Attribute`` list MISP returns on event edit.
+
+    ``POST /events/{id}`` answers with the full event; its ``Attribute`` list holds every
+    attribute now stored on the event (newly added and pre-existing). An attempted attribute
+    is confirmed when a stored attribute with the same type and normalised value is present.
+
+    Returns None when the response carries no usable attribute list, in which case the batch
+    cannot be verified from the response. Otherwise returns ``(confirmed_count,
+    unconfirmed_keys)`` where ``unconfirmed_keys`` lists the attempted attributes that are
+    absent from the stored event.
+    """
+    if isinstance(saved, dict):
+        saved = [saved]
+    if not isinstance(saved, list) or not saved:
+        return None
+    present = set()
+    for stored in saved:
+        key = _attribute_match_key(stored)
+        if key is not None:
+            present.add(key)
+    if not present:
+        return None
+    confirmed = 0
+    unconfirmed: List[Tuple[str, str]] = []
+    for attribute in attempted:
+        key = _attribute_match_key(attribute)
+        if key is not None and key in present:
+            confirmed += 1
+        else:
+            attr_type = attribute.get("type") if isinstance(attribute, dict) else None
+            unconfirmed.append(key or (str(attr_type or "unknown"), "<no value>"))
+    return confirmed, unconfirmed
+
+
 def _event_id_and_info_from_restsearch_row(row: Any) -> Tuple[Optional[str], Optional[str]]:
     """Extract (id, info) from one MISP restSearch row (wrapped or flat)."""
     if not isinstance(row, dict):
@@ -623,6 +689,11 @@ class MISPWriter:
             "batches_sent": 0,
             "errors": 0,
             "attrs_skipped_existing": 0,
+            # Batches MISP answered with HTTP 200 but without an attribute list, so the
+            # attempted count could not be verified against the stored event.
+            "batches_unverified": 0,
+            # Attributes absent from the stored event MISP returned after an HTTP 200 push.
+            "attributes_unconfirmed": 0,
         }
         # PR-F6 (Issue #65): per-batch parent-DAG liveness callback.
         # ``None`` = no check (legacy / incremental DAGs); a callable
@@ -2404,23 +2475,65 @@ class MISPWriter:
 
             if response.status_code == 200:
                 result = response.json()
-                # MISP returns all attributes in the event, not just the new ones
-                # We can only reliably report how many we attempted to add
-                # The response doesn't tell us exactly which were new vs existing
-                saved = result.get("Event", {}).get("Attribute", [])
-
-                # Count how many attributes we tried to add
                 attempted = len(attributes)
+                # MISP answers the event edit with the full event: ``Event.Attribute`` lists
+                # every attribute now stored on the event (newly added and pre-existing), not
+                # only the ones in this batch. A pushed attribute is therefore counted only
+                # when it is present in that list: HTTP 200 confirms the event edit, not every
+                # attribute in it, since MISP may store the event while rejecting individual
+                # attributes. A response without a usable attribute list leaves the batch
+                # unverified: the attempted count is kept and the batch is recorded as such
+                # in the stats.
+                saved: Any = []
+                errors_payload: Any = None
+                if isinstance(result, dict):
+                    event_body = result.get("Event")
+                    if isinstance(event_body, dict):
+                        saved = event_body.get("Attribute", [])
+                    errors_payload = result.get("errors")
+                stored_total = len(saved) if isinstance(saved, list) else (1 if isinstance(saved, dict) else 0)
 
-                # If the request succeeded, assume all were added (MISP handles deduplication)
-                # We can't reliably determine how many were truly new from the response
-                success_count = attempted
-                failed_count = 0
+                reconciled = _confirm_pushed_attributes(attributes, saved)
+                if reconciled is None:
+                    success_count = attempted
+                    failed_count = 0
+                    self.stats["batches_unverified"] = self.stats.get("batches_unverified", 0) + 1
+                    logger.info(
+                        "[UNVERIFIED] MISP accepted the batch for event %s (HTTP 200) but the response carried "
+                        "no attribute list; counting all %d attempted attributes as pushed",
+                        event_id,
+                        attempted,
+                    )
+                else:
+                    confirmed, unconfirmed = reconciled
+                    strict = _strict_push_accounting()
+                    if unconfirmed:
+                        self.stats["attributes_unconfirmed"] = self.stats.get("attributes_unconfirmed", 0) + len(
+                            unconfirmed
+                        )
+                        logger.warning(
+                            "[UNCONFIRMED] MISP returned HTTP 200 for event %s but %d of %d pushed attributes "
+                            "are absent from the returned event (sample: %s)%s — %s",
+                            event_id,
+                            len(unconfirmed),
+                            attempted,
+                            unconfirmed[:5],
+                            f" — response errors: {str(errors_payload)[:500]}" if errors_payload else "",
+                            "counted as failed (EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING)"
+                            if strict
+                            else "counted as pushed; set EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING=true to count them as failed",
+                        )
+                    if strict:
+                        success_count, failed_count = confirmed, len(unconfirmed)
+                    else:
+                        success_count, failed_count = attempted, 0
 
                 self.stats["attributes_added"] += success_count
                 self.stats["batches_sent"] += 1
 
-                logger.info(f"[OK] Added {success_count} attributes to event {event_id} (total in event: {len(saved)})")
+                logger.info(
+                    f"[OK] Added {success_count} attributes to event {event_id} (total in event: {stored_total})"
+                )
 
                 return success_count, failed_count
             else:
@@ -2488,6 +2601,8 @@ class MISPWriter:
             "batches_sent": 0,
             "errors": 0,
             "attrs_skipped_existing": 0,
+            "batches_unverified": 0,
+            "attributes_unconfirmed": 0,
         }
 
 

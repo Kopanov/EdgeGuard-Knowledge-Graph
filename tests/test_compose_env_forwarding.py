@@ -63,6 +63,25 @@ def test_common_env_is_inherited_by_the_airflow_service():
         assert name in airflow_env, f"{name} not visible on the airflow service environment"
 
 
+def test_sync_min_events_is_forwarded_on_the_airflow_service():
+    """``EDGEGUARD_SYNC_MIN_EVENTS`` is read by ``run_misp_to_neo4j.py`` inside the Airflow task.
+
+    It lives next to the other Neo4j-sync knobs on the ``airflow`` service (not in
+    ``x-common-env``) and must keep an empty compose default: the code treats empty as the
+    default 0 (guard disabled), so ``int("")`` can never be reached.
+    """
+    data = yaml.safe_load(COMPOSE.read_text())
+    airflow_env = data["services"]["airflow"]["environment"]
+    name = "EDGEGUARD_SYNC_MIN_EVENTS"
+    assert name in airflow_env, (
+        f"{name} is read by src/ but docker-compose.yml never forwards it into the airflow container"
+    )
+    value = str(airflow_env[name])
+    m = re.fullmatch(r"\$\{" + re.escape(name) + r":-(.*)\}", value)
+    assert m, f"{name} must be forwarded as ${{{name}:-<default>}} so .env can override it; got {value!r}"
+    assert m.group(1) == "", f"{name}: compose default must stay empty (code applies its own default 0)"
+
+
 def test_int_parsed_variables_never_default_to_empty():
     """Guard for the trap the comment in compose describes: set-but-empty + int() = ImportError."""
     env = _common_env()
