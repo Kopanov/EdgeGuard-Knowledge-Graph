@@ -2733,6 +2733,72 @@ baseline_misp_health = PythonOperator(
 )
 
 
+def _baseline_run_holder(context) -> dict:
+    """``{"dag_id", "run_id"}`` of the current DAG run, for the baseline lock."""
+    dag_run = context.get("dag_run")
+    run_id = getattr(dag_run, "run_id", None) or context.get("run_id") or ""
+    dag_id = getattr(dag_run, "dag_id", None) or getattr(context.get("dag"), "dag_id", None) or "edgeguard_baseline"
+    return {"dag_id": str(dag_id), "run_id": str(run_id)}
+
+
+def _baseline_acquire_lock(**context) -> None:
+    """Acquire ``checkpoints/baseline_in_progress.lock`` for this DAG run (Issue #57).
+
+    Runs before the destructive ``baseline_clean`` step. The scheduled DAGs check the
+    sentinel at task start (``baseline_skip_reason``) and skip while it is held; the
+    holder's liveness is the DAG-run state through the Airflow REST API, with the sentinel
+    age as fallback (see ``src/baseline_lock.py``). Idempotent for the same run id, so a
+    retry or a manual re-run of this task succeeds. A task of a scheduled DAG that is
+    already running when the lock is taken completes its current write.
+    """
+    from baseline_lock import acquire_baseline_lock, baseline_lock_path, is_baseline_running
+
+    holder = _baseline_run_holder(context)
+    if not holder["run_id"]:
+        raise AirflowException("baseline_acquire_lock: the task context carries no run_id")
+    if acquire_baseline_lock(holder=holder):
+        logger.info(
+            "[BASELINE] Baseline lock acquired for DAG run %s/%s at %s",
+            holder["dag_id"],
+            holder["run_id"],
+            baseline_lock_path(),
+        )
+        return
+    existing = is_baseline_running()
+    raise AirflowException(
+        f"Another baseline holds {baseline_lock_path()} ({existing}). Wait for it to finish; "
+        "if it is stale, remove the sentinel and re-trigger."
+    )
+
+
+def _baseline_release_lock(**context) -> None:
+    """Release the sentinel written by ``_baseline_acquire_lock``; never fails the run."""
+    try:
+        from baseline_lock import release_baseline_lock
+
+        release_baseline_lock(holder=_baseline_run_holder(context))
+    except Exception:
+        logger.warning("[BASELINE] Releasing the baseline lock failed", exc_info=True)
+
+
+baseline_acquire_lock_task = PythonOperator(
+    task_id="baseline_acquire_lock",
+    python_callable=_baseline_acquire_lock,
+    execution_timeout=timedelta(minutes=2),
+    dag=baseline_dag,
+)
+
+baseline_release_lock_task = PythonOperator(
+    task_id="baseline_release_lock",
+    python_callable=_baseline_release_lock,
+    execution_timeout=timedelta(minutes=2),
+    # Only after a successful chain: a failed run keeps the lock so that clearing the failed task
+    # resumes the same run under the mutex (see src/baseline_lock.py for how the sentinel is reaped).
+    trigger_rule=TriggerRule.ALL_SUCCESS,
+    dag=baseline_dag,
+)
+
+
 def _baseline_start_summary(**context):
     """Print baseline config at run-time so it shows clearly in the Airflow log.
 
@@ -3392,28 +3458,15 @@ baseline_complete = BashOperator(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Note on the missing baseline-lock task pair (BH-H2 from the 2026-04-19
-# production-readiness audit): an earlier draft of PR-F2 added
-# ``baseline_lock_task`` + ``baseline_unlock_task`` PythonOperators wrapping
-# ``acquire_baseline_lock()`` / ``release_baseline_lock()`` to close the
-# Bug-Hunter gap (incremental DAGs racing the baseline because no Airflow
-# task was acquiring the legacy sentinel lock). Bugbot caught two HIGH-
-# severity flaws on consecutive review rounds, both rooted in the same
-# architectural mismatch: the legacy ``baseline_lock`` module's PID-based
-# primitive was designed for the in-process CLI case; in Airflow's multi-
-# process model, the subprocess that wrote the PID exits seconds later
-# while the LOGICAL lock-holder (the DAG run) continues for hours. The
-# XCom-PID-handoff patch only fixed the unlock symptom; incremental DAGs
-# still saw the dead lock-task PID and treated the sentinel as stale.
-#
-# Per the global ``pr-bot-review`` Skill stop-and-ask rule, PR-F2 was
-# de-scoped to ship only the backup-gate work (BACKUP.md + the
-# EDGEGUARD_LAST_BACKUP_AT gate). The proper Airflow-aware lock primitive
-# requires real design (see Issue #57 for constraints + options).
-# Until that lands, operators MUST NOT trigger ``edgeguard fresh-baseline``
-# while incremental DAGs are running. The BH-H2 race was real before
-# PR-F2 too — we've been running for months without an Airflow-side
-# lock — so this is a "no-regression" de-scope, not a new gap.
+# Baseline lock (Issue #57, closed 2026-10): ``baseline_acquire_lock`` writes the
+# ``baseline_in_progress.lock`` sentinel with this DAG run as holder before the destructive
+# ``baseline_clean`` step; ``baseline_release_lock`` removes it after a successful run. A failed run
+# keeps the lock so that clearing the failed task resumes under the mutex (the liveness check keeps a
+# failed run's sentinel until the age cap and prunes it once the run state is success).
+# The scheduled DAGs skip while the sentinel is held. The earlier PID-based attempt failed
+# because the task process that writes the sentinel exits while the DAG run continues; the
+# holder's liveness is now the DAG-run state (Airflow REST API) with the sentinel age as
+# fallback — see ``src/baseline_lock.py``.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -3424,6 +3477,7 @@ baseline_complete = BashOperator(
 # → enrich → done
 (
     baseline_misp_health
+    >> baseline_acquire_lock_task
     >> baseline_clean_task
     >> baseline_start
     >> baseline_tier1
@@ -3434,3 +3488,7 @@ baseline_complete = BashOperator(
     >> baseline_postcheck_task  # PR-N21: invariant check, fails DAG on Campaign=0 etc.
     >> baseline_complete
 )
+# Released only after a successful run. A failed or timed-out run keeps the sentinel: clearing the
+# failed task resumes the run under the mutex; an abandoned run's sentinel is reaped by the liveness
+# check at the age cap (48 h default) or removed by the operator.
+baseline_complete >> baseline_release_lock_task
