@@ -39,10 +39,10 @@ from typing import Dict, Optional
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# 2026-10: multi-process exposure (Airflow LocalExecutor). The directory must exist before the
-# first metric is created, and exposition must aggregate every process's files.
+# 2026-10: multi-process exposure (Airflow LocalExecutor). Importing metrics_exporter BEFORE
+# prometheus_client prepares PROMETHEUS_MULTIPROC_DIR (created, writability-probed, or the mode is
+# disabled for this process) — prometheus_client reads the variable when it is first imported.
 from metrics_exporter import build_registry as _build_multiproc_registry
-from metrics_exporter import ensure_multiproc_dir as _ensure_multiproc_dir
 from metrics_exporter import multiprocess_mode_active as _multiprocess_mode_active
 
 # Prometheus client
@@ -64,9 +64,6 @@ except ImportError:
 
 # Import existing metrics from resilience module
 from resilience import PROMETHEUS_AVAILABLE as RESILIENCE_PROMETHEUS_AVAILABLE
-
-# Multi-process mode: the shared directory must exist before the first metric below is created.
-_ensure_multiproc_dir()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

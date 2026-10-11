@@ -228,6 +228,13 @@ except ImportError:
     RESILIENCE_METRICS_AVAILABLE = False
     logger.warning("resilience module not available - circuit breaker metrics disabled")
 
+# The import above runs the guard in metrics_exporter, which removes PROMETHEUS_MULTIPROC_DIR from
+# this process when the directory cannot be created or written (it logs an ERROR). Re-read the
+# flags so the rest of the module reflects the mode actually in effect.
+if MULTIPROC_METRICS_DIR and not os.getenv("PROMETHEUS_MULTIPROC_DIR"):
+    MULTIPROC_METRICS_DIR = None
+    ENABLE_PROMETHEUS_METRICS = os.getenv("EDGEGUARD_ENABLE_METRICS", "false").lower() == "true"
+
 # Import metrics server for enhanced metrics
 try:
     from metrics_server import (

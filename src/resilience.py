@@ -11,6 +11,11 @@ from enum import Enum
 from functools import wraps
 from typing import Any, Callable, Dict
 
+# 2026-10: must precede the first prometheus_client import — prometheus_client reads
+# PROMETHEUS_MULTIPROC_DIR when it is first imported; this call creates the directory, probes that
+# it is writable and otherwise disables the multi-process mode for this process (no exception).
+import metrics_exporter  # noqa: F401
+
 # Prometheus metrics (optional)
 try:
     from prometheus_client import Counter, Gauge, Histogram

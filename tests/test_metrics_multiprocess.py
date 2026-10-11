@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 from prometheus_client import generate_latest
 from prometheus_client.mmap_dict import MmapedDict
@@ -52,6 +53,56 @@ class TestGaugeSemantics:
         for start in calls:
             window = src[start : start + 400]
             assert 'multiprocess_mode="mostrecent"' in window, window[:120]
+
+
+class TestEnvironmentPreparation:
+    def test_unwritable_directory_disables_the_mode_for_this_process(self, tmp_path, monkeypatch, caplog):
+        """Review finding on PR #154: a root-owned volume made every task import raise PermissionError."""
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("permission bits do not restrict root")
+        locked = tmp_path / "locked"
+        locked.mkdir()
+        locked.chmod(0o500)
+        target = locked / "metrics"
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(target))
+        try:
+            with caplog.at_level("ERROR", logger="metrics_exporter"):
+                assert metrics_exporter.prepare_multiproc_env() is None
+            assert "PROMETHEUS_MULTIPROC_DIR" not in os.environ
+            assert any("not writable" in r.message for r in caplog.records)
+        finally:
+            locked.chmod(0o700)
+
+    def test_writable_directory_is_created_and_kept(self, tmp_path, monkeypatch):
+        target = tmp_path / "ok" / "metrics"
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(target))
+        assert metrics_exporter.prepare_multiproc_env() == str(target)
+        assert target.is_dir() and os.environ["PROMETHEUS_MULTIPROC_DIR"] == str(target)
+
+    def test_guard_runs_before_prometheus_client_is_imported(self):
+        exporter_src = (_SRC / "metrics_exporter.py").read_text()
+        assert not re.search(r"^from prometheus_client", exporter_src, re.M), (
+            "exporter must import prometheus_client lazily"
+        )
+        for name in ("resilience.py", "metrics_server.py"):
+            src = (_SRC / name).read_text()
+            guard = re.search(r"^(?:from|import) metrics_exporter\b", src, re.M)
+            first_prom = re.search(r"from prometheus_client import", src)
+            assert guard and first_prom and guard.start() < first_prom.start(), (
+                f"{name}: metrics_exporter must be imported before prometheus_client"
+            )
+
+    def test_dag_rereads_the_flags_after_the_guard_ran(self):
+        dag_src = (_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
+        reread = dag_src.index('if MULTIPROC_METRICS_DIR and not os.getenv("PROMETHEUS_MULTIPROC_DIR")')
+        assert dag_src.index("from resilience import") < reread < dag_src.index("def ensure_metrics_server")
+
+    def test_image_creates_the_directory_for_the_airflow_user(self):
+        dockerfile = (_ROOT / "Dockerfile.airflow").read_text()
+        assert (
+            "mkdir -p /opt/airflow/metrics_multiproc" in dockerfile
+            and "chown -R airflow:root /opt/airflow/metrics_multiproc" in dockerfile
+        )
 
 
 class TestModeSwitches:

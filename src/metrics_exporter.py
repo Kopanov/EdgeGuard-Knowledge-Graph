@@ -24,11 +24,11 @@ import os
 import time
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-from prometheus_client import CollectorRegistry, start_http_server
-from prometheus_client.mmap_dict import MmapedDict
-from prometheus_client.multiprocess import MultiProcessCollector
-
 logger = logging.getLogger(__name__)
+
+# NOTE: prometheus_client is imported lazily inside the functions below. It reads
+# PROMETHEUS_MULTIPROC_DIR when it is first imported, so ``prepare_multiproc_env()`` (called at the
+# bottom of this module, i.e. when any module imports this one before prometheus_client) must run first.
 
 MULTIPROC_ENV = "PROMETHEUS_MULTIPROC_DIR"
 MERGED_TOKEN = "merged"
@@ -45,16 +45,48 @@ def multiprocess_mode_active() -> bool:
     return multiproc_dir() is not None
 
 
-def ensure_multiproc_dir() -> Optional[str]:
-    """Create the directory if the mode is on (``prometheus_client`` needs it before the first metric)."""
+def prepare_multiproc_env() -> Optional[str]:
+    """Make the multi-process mode safe to enter for this process.
+
+    Creates ``PROMETHEUS_MULTIPROC_DIR`` and probes that it is writable. If it is not (a volume
+    mounted root-owned, a read-only filesystem), the variable is removed from this process's
+    environment and an ERROR is logged, so ``prometheus_client`` falls back to in-process values
+    instead of raising inside a DAG parse or a task import (review finding on PR #154). Returns the directory,
+    or ``None`` when the mode is off or was disabled here.
+    """
     path = multiproc_dir()
-    if path:
+    if not path:
+        return None
+    try:
         os.makedirs(path, exist_ok=True)
-    return path
+        probe = os.path.join(path, f".write_probe_{os.getpid()}")
+        with open(probe, "w"):
+            pass
+        os.remove(probe)
+        return path
+    except OSError as exc:
+        logger.error(
+            "%s=%s is not writable (%s) — multi-process metrics disabled for this process; "
+            "fix the directory ownership (uid 50000 in the Airflow image) to restore them",
+            MULTIPROC_ENV,
+            path,
+            exc,
+        )
+        os.environ.pop(MULTIPROC_ENV, None)
+        os.environ.pop("prometheus_multiproc_dir", None)
+        return None
 
 
-def build_registry(path: Optional[str] = None) -> CollectorRegistry:
+def ensure_multiproc_dir() -> Optional[str]:
+    """Alias of :func:`prepare_multiproc_env` kept for readability at call sites."""
+    return prepare_multiproc_env()
+
+
+def build_registry(path: Optional[str] = None):
     """A registry that aggregates every process's files; ``path`` defaults to the environment."""
+    from prometheus_client import CollectorRegistry
+    from prometheus_client.multiprocess import MultiProcessCollector
+
     registry = CollectorRegistry()
     MultiProcessCollector(registry, path=path or multiproc_dir())
     return registry
@@ -88,6 +120,8 @@ def _classify(filename: str) -> Tuple[Optional[str], Optional[int]]:
 
 
 def _merge(group: str, inputs: Iterable[str]) -> Dict[str, Tuple[float, float]]:
+    from prometheus_client.mmap_dict import MmapedDict
+
     values: Dict[str, Tuple[float, float]] = {}
     for path in inputs:
         for key, value, timestamp, _pos in MmapedDict.read_all_values_from_file(path):
@@ -113,6 +147,8 @@ def compact_multiproc_dir(
     directory = path or multiproc_dir()
     if not directory or not os.path.isdir(directory):
         return {"skipped": "no multiprocess directory"}
+    from prometheus_client.mmap_dict import MmapedDict
+
     files = glob.glob(os.path.join(directory, "*.db"))
     if len(files) < min_files:
         return {"skipped": f"{len(files)} files below the threshold of {min_files}"}
@@ -161,6 +197,8 @@ def compact_multiproc_dir(
 
 def serve(host: str, port: int) -> None:
     """Serve the aggregated ``/metrics`` endpoint until interrupted."""
+    from prometheus_client import start_http_server
+
     ensure_multiproc_dir()
     registry = build_registry()
     start_http_server(port, addr=host, registry=registry)
@@ -183,6 +221,11 @@ def main() -> int:
         port = 8001
     serve(host, port)
     return 0
+
+
+# Import-time side effect, by design: any module that imports this one before prometheus_client
+# (resilience, metrics_server) gets the directory created and the writability probe applied first.
+prepare_multiproc_env()
 
 
 if __name__ == "__main__":

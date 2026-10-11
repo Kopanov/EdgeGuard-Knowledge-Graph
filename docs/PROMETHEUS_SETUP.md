@@ -384,6 +384,8 @@ multi-process mode:
 Methods 1 and 2 below describe the single-process server and apply to bare-metal installs without
 `PROMETHEUS_MULTIPROC_DIR`.
 
+If the directory cannot be created or written (for example a volume mounted with the wrong ownership), the process logs an ERROR, removes `PROMETHEUS_MULTIPROC_DIR` from its own environment and keeps in-process metrics, so DAG parsing and task imports never fail because of metrics. The image creates `/opt/airflow/metrics_multiproc` owned by the `airflow` user so the named volume inherits writable ownership on first mount.
+
 ### Method 1: Separate Metrics DAG (Recommended)
 
 Create a dedicated DAG that runs the metrics server:
