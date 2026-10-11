@@ -1177,7 +1177,7 @@ _SHA512 = _SHA256 + _SHA256
             "3:AXGBicFlgVNhBGcL6wCrFQEv:AXGHsNhxLsr2C",
             "[file:hashes.'SSDEEP' = '3:AXGBicFlgVNhBGcL6wCrFQEv:AXGHsNhxLsr2C']",
         ),
-        # No algorithm fits: an honest custom key rather than a wrong label.
+        # No algorithm fits: a custom key rather than a wrong label.
         ("hash", "abc123", "[file:hashes.'UNKNOWN' = 'abc123']"),
         ("url", "http://evil.example/a'b\\c", "[url:value = 'http://evil.example/a\\'b\\\\c']"),
         ("domain", "evil.example", "[domain-name:value = 'evil.example']"),
