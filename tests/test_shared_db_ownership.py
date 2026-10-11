@@ -155,7 +155,8 @@ class TestMarkerOnCreatePathOnly:
             assert nc._normalise_zone_list(["us-gov\nINJECTED LINE", "energy"]) == ["energy"]
         records = [r for r in caplog.records if "outside EdgeGuard's vocabulary" in r.message]
         assert records and all(r.levelname == "DEBUG" for r in records)
-        assert "\n" not in records[0].message and "us-gov INJECTED LINE" in records[0].message
+        # the normaliser lower-cases before logging; the line break must be gone
+        assert "\n" not in records[0].message and "us-gov injected line" in records[0].message
 
     def test_clear_edgeguard_managed_deletes_created_nodes_only(self):
         src = inspect.getsource(nc.Neo4jClient.clear_edgeguard_managed)
