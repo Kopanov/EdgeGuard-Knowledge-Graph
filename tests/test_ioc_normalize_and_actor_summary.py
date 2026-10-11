@@ -536,15 +536,15 @@ class TestStixCveExportNormalization:
             def __init__(self, neo4j_client):
                 pass
 
-            def export_cve(self, cve_id, depth=2):
+            def export_cve(self, cve_id, depth=2, limit=100):
                 captured["cve_id"] = cve_id
                 return {"type": "bundle", "objects": []}
 
-            def export_indicator(self, value, depth=2):
+            def export_indicator(self, value, depth=2, limit=100):
                 captured["indicator_value"] = value
                 return {"type": "bundle", "objects": []}
 
-            def export_technique(self, mid, depth=2):
+            def export_technique(self, mid, depth=2, limit=100):
                 captured["mitre_id"] = mid
                 return {"type": "bundle", "objects": []}
 

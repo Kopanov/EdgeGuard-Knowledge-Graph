@@ -123,13 +123,15 @@ for ot in "${OBJECT_TYPES[@]}"; do
         continue
     fi
 
+    # Provenance lives on the EdgeGuard producer identity (the identity
+    # object with an x_edgeguard_exporter property), not on the bundle.
     obj_count=$(jq '.objects | length' "$response")
-    producer=$(jq -r '.x_edgeguard_source.producer // "missing"' "$response")
-    generated=$(jq -r '.x_edgeguard_source.generated_at // "missing"' "$response")
+    producer=$(jq -r '[.objects[] | select(.type == "identity" and has("x_edgeguard_exporter"))][0].name // "missing"' "$response")
+    generated=$(jq -r '[.objects[] | select(.type == "identity" and has("x_edgeguard_exporter"))][0].x_edgeguard_generated_at // "missing"' "$response")
     echo "  ✓ $obj_count objects   producer=$producer   generated_at=$generated"
 
     if [[ $PRETTY -eq 1 ]]; then
-        jq '{type, id, x_edgeguard_source, object_count: (.objects | length), object_types: ([.objects[].type] | group_by(.) | map({(.[0]): length}) | add)}' "$response"
+        jq '{type, id, producer: ([.objects[] | select(.type == "identity" and has("x_edgeguard_exporter"))][0]), object_count: (.objects | length), object_types: ([.objects[].type] | group_by(.) | map({(.[0]): length}) | add)}' "$response"
     fi
     rm -f "$response"
     echo

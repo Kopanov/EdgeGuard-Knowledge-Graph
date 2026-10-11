@@ -1213,6 +1213,15 @@ async def graph_explore(
         _raise_api_error(exc, "Graph explore failed")
 
 
+# Per-collection bound on related nodes in a STIX export. Declared here
+# (rather than imported) because ``stix_exporter`` is imported lazily inside
+# the route; the values MUST equal ``stix_exporter._DEFAULT_LIMIT`` and
+# ``stix_exporter._MAX_LIMIT`` (pinned by tests/test_stix_exporter.py) and
+# follow the ``Query(..., ge=1, le=500)`` read clamps used above.
+_STIX_DEFAULT_LIMIT = 100
+_STIX_MAX_LIMIT = 500
+
+
 @app.get("/stix/types", dependencies=[Depends(_verify_api_key)])
 @limiter.limit(_RATE_LIMIT_READ)
 async def stix_types(request: Request):
@@ -1228,6 +1237,10 @@ async def stix_types(request: Request):
         "media_type": "application/stix+json;version=2.1",
         "default_depth": 2,
         "supported_depths": [1, 2],
+        # Per-collection bound on related nodes (``?limit=``); mirrors
+        # ``stix_exporter._DEFAULT_LIMIT`` / ``_MAX_LIMIT``.
+        "default_limit": _STIX_DEFAULT_LIMIT,
+        "max_limit": _STIX_MAX_LIMIT,
         "object_types": [
             {
                 "name": "indicator",
@@ -1238,10 +1251,10 @@ async def stix_types(request: Request):
             },
             {
                 "name": "actor",
-                "identifier": "ThreatActor name or alias",
+                "identifier": "ThreatActor name or alias (case-insensitive)",
                 "example": "APT28",
                 "returns": "actor + attributed malware + techniques + campaigns",
-                "primary_relation": "malware attributed-to actor",
+                "primary_relation": "intrusion-set uses malware",
             },
             {
                 "name": "technique",
@@ -1255,7 +1268,7 @@ async def stix_types(request: Request):
                 "identifier": "CVE identifier",
                 "example": "CVE-2021-44228",
                 "returns": "CVE + exploiting indicators + affected sectors",
-                "primary_relation": "indicators indicate CVE",
+                "primary_relation": "indicators related-to CVE",
             },
         ],
     }
@@ -1272,6 +1285,15 @@ async def stix_export(
         ge=1,
         le=2,
         description="1 = primary relation only (smaller bundle); 2 = full 1-hop neighborhood (default)",
+    ),
+    limit: int = Query(
+        _STIX_DEFAULT_LIMIT,
+        ge=1,
+        le=_STIX_MAX_LIMIT,
+        description=(
+            "Maximum related nodes per collection (malware, techniques, indicators, ...); "
+            "each collection is ordered by its natural key before truncation"
+        ),
     ),
 ):
     """Export a STIX 2.1 bundle centred on a threat-intel object.
@@ -1296,6 +1318,16 @@ async def stix_export(
     ``depth=1`` returns a minimal bundle (seed + primary relation only);
     ``depth=2`` (default) returns the full 1-hop neighborhood. Useful
     for ResilMesh smoke tests that want a smaller response.
+
+    ``limit`` (default 100, maximum 500; values outside ``[1, 500]`` are
+    rejected with 422) bounds every related-node collection in the
+    bundle. Collections are ordered by their natural key before the
+    bound is applied, so truncation is deterministic.
+
+    Every bundle carries the EdgeGuard producer ``identity`` (referenced
+    by ``created_by_ref``), the ``extension-definition`` that declares
+    the ``x_edgeguard_*`` properties, and the TLP ``marking-definition``
+    objects referenced by ``object_marking_refs``.
 
     Response Content-Type: ``application/stix+json;version=2.1``.
 
@@ -1328,19 +1360,21 @@ async def stix_export(
                     status_code=400,
                     detail="Indicator identifier is empty after normalization.",
                 )
-            bundle = exporter.export_indicator(_norm, depth=depth)
+            bundle = exporter.export_indicator(_norm, depth=depth, limit=limit)
         elif ot == "actor":
-            bundle = exporter.export_threat_actor(identifier, depth=depth)
+            bundle = exporter.export_threat_actor(identifier, depth=depth, limit=limit)
         elif ot == "technique":
             # READ-side canonicalization (parity with the cve/indicator
             # branches): 't1059' / 'T 1059' → 'T1059' (the graph stores the
             # canonical uppercase Tnnnn(.nnn) form). Raw fallback when the
             # paste isn't a recognizable technique id.
-            bundle = exporter.export_technique(normalize_mitre_technique_id(identifier) or identifier, depth=depth)
+            bundle = exporter.export_technique(
+                normalize_mitre_technique_id(identifier) or identifier, depth=depth, limit=limit
+            )
         elif ot == "cve":
             # READ-side canonicalization: 'cve 2021 44228' / en-dash paste
             # variants → 'CVE-2021-44228' (graph stores uppercase CVE ids).
-            bundle = exporter.export_cve(normalize_cve_id(identifier) or identifier, depth=depth)
+            bundle = exporter.export_cve(normalize_cve_id(identifier) or identifier, depth=depth, limit=limit)
         else:
             # Static error string (no f-string interpolation of the URL
             # path parameter). Every other HTTPException in this file uses
