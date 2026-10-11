@@ -16,6 +16,10 @@ services:
     image: prom/prometheus:v3.5.0
     container_name: edgeguard_prometheus
     restart: unless-stopped
+    # 2026-10: the EdgeGuard scrape target is host.docker.internal:8001, which only resolves on
+    # Docker Desktop by default; host-gateway makes it resolve on Linux hosts too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:9090:9090"
     volumes:

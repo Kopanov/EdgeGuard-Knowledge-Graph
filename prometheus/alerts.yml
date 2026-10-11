@@ -38,15 +38,55 @@ groups:
           summary: "High failure rate for {{ $labels.source }} collector"
           description: "{{ $labels.source }} collector has a failure rate above 20% for the last 5 minutes."
 
+      # 2026-10 readiness check: a single 1 h threshold paged permanently for every collector that
+      # runs every 4 / 8 / 24 h. Each collector's limit is twice its DAG cadence plus margin; the
+      # map lives in a recording rule so the alert below stays one expression.
+      #   edgeguard_pipeline     */30 min  -> otx
+      #   edgeguard_medium_freq  4 h       -> cisa, virustotal
+      #   edgeguard_low_freq     8 h       -> nvd
+      #   edgeguard_daily        24 h      -> mitre, cisa_ics, abuseipdb, threatfox, urlhaus, cybercure, feodo, sslbl
+      - record: edgeguard:collector_max_stale_seconds
+        expr: |
+          label_replace(vector(7200), "source", "otx", "", "")
+          or label_replace(vector(32400), "source", "cisa", "", "")
+          or label_replace(vector(32400), "source", "virustotal", "", "")
+          or label_replace(vector(61200), "source", "nvd", "", "")
+          or label_replace(vector(93600), "source", "mitre", "", "")
+          or label_replace(vector(93600), "source", "cisa_ics", "", "")
+          or label_replace(vector(93600), "source", "abuseipdb", "", "")
+          or label_replace(vector(93600), "source", "threatfox", "", "")
+          or label_replace(vector(93600), "source", "urlhaus", "", "")
+          or label_replace(vector(93600), "source", "cybercure", "", "")
+          or label_replace(vector(93600), "source", "feodo", "", "")
+          or label_replace(vector(93600), "source", "sslbl", "", "")
+
       - alert: EdgeGuardCollectionStale
-        expr: time() - edgeguard_last_success_timestamp > 3600
+        expr: |
+          (time() - edgeguard_last_success_timestamp)
+            > on (source) group_left ()
+          edgeguard:collector_max_stale_seconds
         for: 5m
         labels:
           severity: critical
           component: collector
         annotations:
           summary: "Collection stale for {{ $labels.source }}"
-          description: "No successful collection from {{ $labels.source }} in over 1 hour."
+          description: "No successful collection from {{ $labels.source }} for longer than twice its scheduled cadence."
+
+      - alert: EdgeGuardCollectionStaleUnmappedSource
+        # A collector that is not in edgeguard:collector_max_stale_seconds (a new source) still
+        # gets a daily-cadence guard instead of silence.
+        expr: |
+          (time() - edgeguard_last_success_timestamp > 93600)
+            unless on (source)
+          edgeguard:collector_max_stale_seconds
+        for: 5m
+        labels:
+          severity: warning
+          component: collector
+        annotations:
+          summary: "Collection stale for {{ $labels.source }} (no cadence configured)"
+          description: "No successful collection from {{ $labels.source }} in 26 hours; add the source to edgeguard:collector_max_stale_seconds."
 
       - alert: EdgeGuardNoIndicatorsCollected
         # PR-N12 Fix #5 (cursor-audit 2026-04-21 BLOCK): two issues in
@@ -69,7 +109,7 @@ groups:
         # `max == 1` correctly expresses "is this source healthy in any
         # zone" without depending on zone cardinality.
         expr: |
-          sum by (source) (increase(edgeguard_indicators_collected_total[1h])) == 0
+          sum by (source) (increase(edgeguard_indicators_collected_total[26h])) == 0
           and on (source)
           max by (source) (edgeguard_source_health) == 1
         for: 30m
@@ -129,6 +169,18 @@ groups:
         annotations:
           summary: "Service {{ $labels.service }} is DOWN"
           description: "Health check failed for {{ $labels.service }}."
+
+      - alert: EdgeGuardMetricsEndpointDown
+        # 2026-10 readiness check: nothing told the operator when the EdgeGuard metrics endpoint
+        # itself was unreachable (metrics disabled, metrics server not started, scrape path broken).
+        expr: up{job="edgeguard"} == 0
+        for: 15m
+        labels:
+          severity: warning
+          component: monitoring
+        annotations:
+          summary: "EdgeGuard metrics endpoint is not being scraped"
+          description: "Prometheus cannot reach the EdgeGuard /metrics endpoint. Check EDGEGUARD_ENABLE_METRICS, that the metrics server is running on port 8001, and that host.docker.internal resolves (extra_hosts: host-gateway on Linux)."
 
       - alert: EdgeGuardMISPUnhealthy
         # check_type="workers" is optional in misp_health (degraded, not unhealthy)
