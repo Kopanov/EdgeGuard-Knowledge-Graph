@@ -314,8 +314,9 @@ def fake_baseline_clean(monkeypatch):
     class BaselineCleanError(RuntimeError):
         pass
 
-    def reset_baseline_data():
+    def reset_baseline_data(**kwargs):
         calls.reset_called = True
+        calls.reset_kwargs = kwargs
         return SimpleNamespace(
             before=SimpleNamespace(neo4j_count=1, misp_count=2, checkpoint_count=3),
             duration_seconds=0.1,
