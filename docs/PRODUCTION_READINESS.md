@@ -30,7 +30,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | **Documentation** | ✅ Ready | 20+ docs updated to match current code |
 | **Production CLI** | ✅ Ready | 16 commands: `preflight`, `stats --full`, `dag status/kill`, `checkpoint status/clear`, `doctor`, `heal`, `validate`, `monitor` |
 | **Security Hardening** | ✅ Ready | Input sanitization, injection guards, SSL, rate limiting |
-| **Monitoring/Metrics** | ✅ Ready | Prometheus on **8001** (loopback); Alertmanager enabled; alerts: `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` + 12 others; Grafana dashboard |
+| **Monitoring/Metrics** | ⚠️ Partially | Metrics of every Airflow task process are served by the `metrics` compose service on **8001** (loopback, 2026-10); alert rules evaluate in Prometheus; **Alertmanager receivers are placeholders** (no notification is delivered until a Slack webhook or mailbox is configured and the configuration is rendered); Grafana dashboard. |
 | **CI/CD Pipeline** | ✅ Ready | GitHub Actions: lint, type-check, unit tests, Docker build, security scan |
 | **Automated Code Review** | ✅ Ready | Bugbot active on every PR with comprehensive rules |
 

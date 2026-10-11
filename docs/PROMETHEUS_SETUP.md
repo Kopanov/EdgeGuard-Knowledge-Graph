@@ -50,9 +50,16 @@ python src/metrics_server.py --port 8001
 python src/metrics_server.py --port 8001 --test-metrics
 ```
 
-**Option B: Via Dedicated Airflow DAG (Recommended for Airflow deployments)**
+**Option B: Docker Compose (default since 2026-10)**
 
-The metrics server runs as a long-lived task in the `edgeguard_metrics_server` DAG. This avoids side effects during DAG parsing — never start the HTTP server at module level.
+The `metrics` compose service serves the aggregate of every Airflow task process on
+`127.0.0.1:8001` from the shared `PROMETHEUS_MULTIPROC_DIR` (Method 0 below). Nothing has to be
+triggered.
+
+**Option C: Via Dedicated Airflow DAG (bare-metal installs without `PROMETHEUS_MULTIPROC_DIR`)**
+
+The metrics server runs as a long-lived task in the `edgeguard_metrics_server` DAG; in the Compose
+deployment this DAG exits immediately because the multi-process mode is active. This avoids side effects during DAG parsing — never start the HTTP server at module level.
 
 ```bash
 # Trigger the metrics server DAG
@@ -406,7 +413,7 @@ def run_metrics_server():
 
 with DAG(
     'edgeguard_metrics',
-    schedule_interval=None,  # Run continuously
+    schedule=None,  # Airflow 3: `schedule` replaces `schedule_interval`
     start_date=datetime(2024, 1, 1),
     catchup=False,
 ) as dag:

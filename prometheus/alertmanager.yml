@@ -7,7 +7,10 @@ global:
   smtp_from: 'alertmanager@edgeguard.local'
   smtp_auth_username: ''
   smtp_auth_password: ''
-  slack_api_url: ''  # Set via SLACK_WEBHOOK_URL environment variable
+  # Placeholder. Alertmanager does not expand environment variables: set the Slack webhook URL
+  # here (or render this file at deploy time) before notifications can be delivered. The
+  # receivers below are placeholders until then (README, In Progress / Planned).
+  slack_api_url: ''
 
 # Templates for notifications
 templates:
