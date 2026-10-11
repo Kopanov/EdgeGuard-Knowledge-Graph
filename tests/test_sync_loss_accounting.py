@@ -4,15 +4,17 @@ A run that skipped or failed work must never report unqualified success. These t
 behaviour that closed the silent partial-loss paths:
 
 * an event whose details cannot be fetched is counted in ``events_failed`` and fails the run;
-* ``_sync_single_item`` returning False is counted as an error, not a success;
+* an item no merge path accepts is reported as unroutable (stats + WARNING), counted neither as a
+  success nor as an error;
 * relationship rows dropped by permanent Neo4j batch failures are returned through
   ``RelationshipBatchResult.failed``, recorded in ``stats["relationships_failed"]`` with a
   WARNING, and fail the run;
 * a zero-event window is a WARNING with a successful run by default and, with
   ``EDGEGUARD_SYNC_MIN_EVENTS`` >= 1, an ERROR with a failed run; the variable is forwarded
   by ``docker-compose.yml`` and documented;
-* ``MISPWriter._push_batch`` counts only the attributes the MISP response confirms and records
-  a batch as unverified when the response carries no attribute list.
+* ``MISPWriter._push_batch`` reconciles the pushed attributes against the MISP response: absent
+  attributes are reported (and, with ``EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING``, counted as
+  failed); a batch whose response carries no attribute list is recorded as unverified.
 
 Every test here fails when its fix is reverted; control cases pin the unchanged happy path so
 that the failure assertions are not vacuous.
@@ -202,12 +204,13 @@ def test_fetched_event_without_attributes_is_still_a_successful_run(monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_sync_single_item_false_is_counted_as_an_error(monkeypatch, caplog):
+def test_sync_single_item_false_is_reported_as_unroutable_not_as_success_or_error(monkeypatch, caplog):
     sync = rm.MISPToNeo4jSync(neo4j_client=MagicMock())
     monkeypatch.setattr(sync, "_sync_single_item", lambda item: False)
     with caplog.at_level(logging.WARNING, logger=SYNC_LOGGER):
-        assert sync._sync_to_neo4j_chunk([{"type": "campaign", "name": "Operation X"}]) == (0, 1)
-    assert any("Item not synced" in r.getMessage() for r in caplog.records)
+        assert sync._sync_to_neo4j_chunk([{"type": "campaign", "name": "Operation X"}]) == (0, 0)
+    assert sync.stats["items_unroutable"] == 1
+    assert any("[ITEM-UNROUTABLE]" in r.getMessage() for r in caplog.records)
 
 
 def test_sync_single_item_true_is_counted_as_a_success(monkeypatch):
@@ -216,9 +219,23 @@ def test_sync_single_item_true_is_counted_as_a_success(monkeypatch):
     assert sync._sync_to_neo4j_chunk([{"type": "campaign", "name": "Operation X"}]) == (1, 0)
 
 
-def test_item_no_merge_path_accepts_is_one_error_with_the_real_single_item_path():
+def test_item_no_merge_path_accepts_is_unroutable_with_the_real_single_item_path():
     sync = rm.MISPToNeo4jSync(neo4j_client=MagicMock())
-    assert sync._sync_to_neo4j_chunk([{"type": "campaign", "name": "Operation X"}]) == (0, 1)
+    assert sync._sync_to_neo4j_chunk([{"type": "campaign", "name": "Operation X"}]) == (0, 0)
+    assert sync.stats["items_unroutable"] == 1
+    assert sync.stats["errors"] == 0
+
+
+def test_unroutable_items_are_summarised_without_failing_the_run(monkeypatch, caplog):
+    sync, _fetched, outcomes = _run_sync(
+        monkeypatch, [{"id": "1", "info": "EdgeGuard-test"}], details={"1": {"Attribute": []}}
+    )
+    monkeypatch.setattr(sync, "_process_single_event", lambda *a, **k: (0, 0, 0))
+    sync.stats["items_unroutable"] = 2
+    with caplog.at_level(logging.WARNING, logger=SYNC_LOGGER):
+        assert sync.run() is True
+    assert outcomes["success"] == 1 and outcomes["failure"] == []
+    assert any("no merge path accepted them: 2" in r.getMessage() for r in caplog.records)
 
 
 def test_single_item_merge_exception_returns_false_and_counts_one_error():
@@ -408,7 +425,8 @@ def test_push_batch_counts_every_attribute_present_in_the_returned_event(monkeyp
     assert writer.stats["attributes_unconfirmed"] == 0
 
 
-def test_push_batch_counts_only_confirmed_attributes_and_warns_about_the_rest(monkeypatch, caplog):
+def test_push_batch_reports_unconfirmed_attributes_without_counting_them_as_failed_by_default(monkeypatch, caplog):
+    monkeypatch.delenv("EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING", raising=False)
     stored = [
         {"type": "ip-dst", "value": "203.0.113.10"},
         {"type": "sha256", "value": ("ABCDEF" + "0" * 58).lower()},
@@ -417,13 +435,35 @@ def test_push_batch_counts_only_confirmed_attributes_and_warns_about_the_rest(mo
     payload["errors"] = {"Attribute": [{"value": ["Invalid domain"]}]}
     writer, _posted = _writer(monkeypatch, payload)
     with caplog.at_level(logging.WARNING, logger="collectors.misp_writer"):
-        assert writer._push_batch("5", PUSHED) == (2, 1)
-    assert writer.stats["attributes_added"] == 2
+        assert writer._push_batch("5", PUSHED) == (3, 0)
+    assert writer.stats["attributes_added"] == 3
     assert writer.stats["attributes_unconfirmed"] == 1
     assert writer.stats["batches_unverified"] == 0
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("[UNCONFIRMED]" in m and "1 of 3" in m and "malicious.example" in m for m in warnings)
     assert any("Invalid domain" in m for m in warnings), "a present errors payload is surfaced in the warning"
+    assert any("counted as pushed" in m for m in warnings)
+
+
+def test_push_batch_counts_unconfirmed_attributes_as_failed_in_strict_mode(monkeypatch, caplog):
+    monkeypatch.setenv("EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING", "true")
+    stored = [
+        {"type": "ip-dst", "value": "203.0.113.10"},
+        {"type": "sha256", "value": ("ABCDEF" + "0" * 58).lower()},
+    ]
+    writer, _posted = _writer(monkeypatch, _event_payload(stored))
+    with caplog.at_level(logging.WARNING, logger="collectors.misp_writer"):
+        assert writer._push_batch("5", PUSHED) == (2, 1)
+    assert writer.stats["attributes_added"] == 2
+    assert writer.stats["attributes_unconfirmed"] == 1
+    assert any("counted as failed" in r.getMessage() for r in caplog.records)
+
+
+def test_strict_push_accounting_flag_is_forwarded_and_documented():
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text())
+    env = compose["services"]["airflow"]["environment"]
+    assert env["EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING"] == "${EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING:-}"
+    assert "# EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING=false" in (REPO_ROOT / ".env.example").read_text()
 
 
 def test_push_batch_without_an_attribute_list_keeps_the_attempted_count_as_unverified(monkeypatch, caplog):

@@ -309,6 +309,9 @@ services:
       # (src/run_misp_to_neo4j.py). Unset / 0 disables the guard: a zero-event
       # window is logged as a WARNING and still counts as a successful run.
       EDGEGUARD_SYNC_MIN_EVENTS: ${EDGEGUARD_SYNC_MIN_EVENTS:-}
+      # MISP push accounting: attributes absent from the returned event are reported; with this
+      # flag they also count as failed pushes (feeds EDGEGUARD_MISP_MIN_SUCCESS_RATE).
+      EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING: ${EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING:-}
       # Backup-timestamp gate for the destructive baseline_clean DAG task
       # (UI/API triggers; the CLI wrapper checks these on the host instead).
       EDGEGUARD_LAST_BACKUP_AT: ${EDGEGUARD_LAST_BACKUP_AT:-}

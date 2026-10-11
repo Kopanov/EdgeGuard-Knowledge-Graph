@@ -989,6 +989,9 @@ class MISPToNeo4jSync:
             # Relationship rows dropped by permanent Neo4j batch failures
             # (``RelationshipBatchResult.failed``); non-zero fails the run.
             "relationships_failed": 0,
+            # Items no merge path accepts (unknown type, indicator without a value); reported in
+            # the run summary, counted neither as successes nor as errors.
+            "items_unroutable": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -3465,18 +3468,21 @@ class MISPToNeo4jSync:
             else:
                 try:
                     # ``_sync_single_item`` catches its own exceptions (counting them in
-                    # ``self.stats["errors"]``) and returns False both for a merge that
-                    # failed and for an item no merge path accepts. Neither is a success.
+                    # ``self.stats["errors"]``) and returns False for an item that no merge
+                    # path accepts. Such items (unknown type, indicator without a value) used
+                    # to be counted as successes; they are now reported as unroutable in the
+                    # run summary. They do not fail the run: one malformed attribute in a
+                    # shared MISP event must not turn every scheduled sync red.
                     if self._sync_single_item(item):
                         success += 1
                     else:
                         item_value = (item.get("value") or item.get("name") or "N/A")[:50]
                         logger.warning(
-                            "[WARN] Item not synced (%s, %s): no merge path accepted it or the merge failed",
+                            "[ITEM-UNROUTABLE] Item not synced (%s, %s): no merge path accepted it",
                             item_type or "unknown",
                             item_value,
                         )
-                        errors += 1
+                        self.stats["items_unroutable"] = int(self.stats.get("items_unroutable", 0) or 0) + 1
                 except Exception as e:
                     item_type = item.get("type", "unknown")
                     # PR-G1 Bug Hunter audit (HIGH): ``dict.get(k, default)``
@@ -4724,6 +4730,13 @@ class MISPToNeo4jSync:
                     relationships_failed,
                 )
             logger.info(f"Errors: {total_errors}")
+            items_unroutable = int(self.stats.get("items_unroutable", 0) or 0)
+            if items_unroutable:
+                logger.warning(
+                    "Items not synced because no merge path accepted them: %d "
+                    "(grep '[ITEM-UNROUTABLE]'; counted neither as success nor as error)",
+                    items_unroutable,
+                )
             # PR-N28: surface placeholder rejections separately so operators
             # can distinguish "graph corrupted by adversarial input" from
             # "PR-N10 working as intended" at-a-glance. Already counted by

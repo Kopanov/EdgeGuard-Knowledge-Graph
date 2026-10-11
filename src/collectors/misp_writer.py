@@ -433,6 +433,16 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     return (str(attr_type).strip().lower(), value_norm)
 
 
+def _strict_push_accounting() -> bool:
+    """``EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING`` truthy: attributes absent from the returned event
+    count as failed pushes (they then feed ``EDGEGUARD_MISP_MIN_SUCCESS_RATE``). Off by default:
+    MISP normalises some values on save (case, whitespace are tolerated by the comparison; rarer
+    rewrites such as IPv6 compression are not), so the strict mode is meant to be enabled after a
+    live check shows no spurious unconfirmed attributes.
+    """
+    return os.environ.get("EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _confirm_pushed_attributes(
     attempted: List[Dict[str, Any]], saved: Any
 ) -> Optional[Tuple[int, List[Tuple[str, str]]]]:
@@ -2495,21 +2505,28 @@ class MISPWriter:
                         attempted,
                     )
                 else:
-                    success_count, unconfirmed = reconciled
-                    failed_count = len(unconfirmed)
-                    if failed_count:
-                        self.stats["attributes_unconfirmed"] = (
-                            self.stats.get("attributes_unconfirmed", 0) + failed_count
+                    confirmed, unconfirmed = reconciled
+                    strict = _strict_push_accounting()
+                    if unconfirmed:
+                        self.stats["attributes_unconfirmed"] = self.stats.get("attributes_unconfirmed", 0) + len(
+                            unconfirmed
                         )
                         logger.warning(
                             "[UNCONFIRMED] MISP returned HTTP 200 for event %s but %d of %d pushed attributes "
-                            "are absent from the returned event (sample: %s)%s",
+                            "are absent from the returned event (sample: %s)%s — %s",
                             event_id,
-                            failed_count,
+                            len(unconfirmed),
                             attempted,
                             unconfirmed[:5],
                             f" — response errors: {str(errors_payload)[:500]}" if errors_payload else "",
+                            "counted as failed (EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING)"
+                            if strict
+                            else "counted as pushed; set EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING=true to count them as failed",
                         )
+                    if strict:
+                        success_count, failed_count = confirmed, len(unconfirmed)
+                    else:
+                        success_count, failed_count = attempted, 0
 
                 self.stats["attributes_added"] += success_count
                 self.stats["batches_sent"] += 1
