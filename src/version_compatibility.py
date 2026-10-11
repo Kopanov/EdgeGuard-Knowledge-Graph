@@ -60,8 +60,6 @@ import re
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
-from neo4j_client import session_kwargs
-
 logger = logging.getLogger(__name__)
 
 
@@ -215,6 +213,18 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
         return None
 
     driver = None
+    # Best-effort probe: the module must stay importable without the Neo4j driver (``edgeguard
+    # doctor`` / ``validate`` print the other version rows). The import failure is reported, not
+    # swallowed, because a probe of the wrong database would be misleading.
+    try:
+        from neo4j_client import session_kwargs
+
+        session_kw = session_kwargs()
+    except ImportError as exc:
+        logger.warning(
+            "neo4j_client is not importable (%s); the version probe targets the server default database", exc
+        )
+        session_kw = {}
 
     try:
         # ``connection_timeout`` is the per-connection acquisition timeout;
@@ -227,7 +237,7 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
             connection_timeout=2.0,
             max_connection_lifetime=10,
         )
-        with driver.session(default_access_mode="READ", **session_kwargs()) as session:
+        with driver.session(default_access_mode="READ", **session_kw) as session:
             # PR #36 commit X (bugbot MED): Neo4j 2025.05+ added a "Cypher"
             # row to ``CALL dbms.components()`` output (with ``versions:
             # ["5", "25"]`` — the Cypher language version). Without an
