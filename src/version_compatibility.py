@@ -60,6 +60,8 @@ import re
 import subprocess
 from typing import Dict, List, Optional, Tuple
 
+from neo4j_client import session_kwargs
+
 logger = logging.getLogger(__name__)
 
 
@@ -214,14 +216,6 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
 
     driver = None
 
-    def _session_kwargs():
-        try:
-            from neo4j_client import session_kwargs
-
-            return session_kwargs()
-        except Exception:
-            return {}
-
     try:
         # ``connection_timeout`` is the per-connection acquisition timeout;
         # ``max_connection_lifetime`` keeps the pooled connection short-lived
@@ -233,7 +227,7 @@ def _get_neo4j_server_version_fast() -> Optional[str]:
             connection_timeout=2.0,
             max_connection_lifetime=10,
         )
-        with driver.session(default_access_mode="READ", **_session_kwargs()) as session:
+        with driver.session(default_access_mode="READ", **session_kwargs()) as session:
             # PR #36 commit X (bugbot MED): Neo4j 2025.05+ added a "Cypher"
             # row to ``CALL dbms.components()`` output (with ``versions:
             # ["5", "25"]`` — the Cypher language version). Without an

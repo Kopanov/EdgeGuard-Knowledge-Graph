@@ -222,7 +222,7 @@ class TestDatabaseNameReachesSessions:
         assert cli.count("driver.session(**session_kwargs())") == 2, "both raw CLI sessions must pass the database"
         assert "driver.session()" not in cli
         probe = (_ROOT / "src" / "version_compatibility.py").read_text()
-        assert 'driver.session(default_access_mode="READ", **_session_kwargs())' in probe
+        assert 'driver.session(default_access_mode="READ", **session_kwargs())' in probe
 
 
 class _Ctx:
