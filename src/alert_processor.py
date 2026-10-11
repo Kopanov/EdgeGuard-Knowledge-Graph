@@ -85,6 +85,23 @@ class ResilMeshAlert:
         )
 
 
+def _invalid_payload_reason(alert_data: Dict) -> Optional[str]:
+    """Why an inbound alert payload cannot be processed, or ``None`` when it can.
+
+    2026-10 readiness review: a payload without ``alert_id`` used to be processed under the
+    id ``"unknown"`` and answered ``enriched=true``; a non-object ``threat`` raised inside the
+    handler and the message was lost. Both are rejected here, before any database access.
+    ``threat`` may be absent (an alert without an indicator is a supported case).
+    """
+    alert_id = alert_data.get("alert_id")
+    if not isinstance(alert_id, str) or not alert_id.strip():
+        return "alert_id missing or not a non-empty string"
+    threat = alert_data.get("threat", {})
+    if threat is not None and not isinstance(threat, dict):
+        return "threat is not an object"
+    return None
+
+
 @dataclass
 class EnrichedAlert:
     """
@@ -223,6 +240,14 @@ class AlertProcessor:
 
         # Parse alert
         alert = ResilMeshAlert.from_dict(alert_data)
+        if alert.threat is None:
+            alert.threat = {}
+        if alert_data.get("threat") is None:
+            alert_data["threat"] = {}  # the write path (process_complete_resilmesh_alert) reads alert_data
+        invalid = _invalid_payload_reason(alert_data)
+        if invalid:
+            logger.warning("[ALERT-REJECTED] %s", invalid)  # reason only, never payload values
+            return self._create_error_response(alert, f"invalid payload: {invalid}", original_alert_snapshot)
         logger.info(f"🚨 Processing alert: {alert.alert_id} (zone: {alert.zone})")
 
         # Ensure connection

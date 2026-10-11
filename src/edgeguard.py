@@ -1450,12 +1450,15 @@ def get_circuit_breaker_info():
         except Exception:
             pass
 
-    return {"misp": "CLOSED", "neo4j": "CLOSED"}
+    # No component writes this file today (breakers are per-process); reporting CLOSED here
+    # would be an invention. UNKNOWN is the truthful default.
+    return {"misp": "UNKNOWN", "neo4j": "UNKNOWN"}
 
 
 def cmd_monitor(args):
-    """Show health status."""
+    """Show health status. Exit code 1 when MISP is in an error state or Neo4j is down."""
     section("EdgeGuard Monitor - Health Status")
+    exit_code = 0
 
     # Get MISP status
     info("MISP Status:")
@@ -1466,6 +1469,8 @@ def cmd_monitor(args):
     print(f"  {status_color}●{Colors.END} {misp['status']} (v{misp.get('version', 'unknown')})")
     if "error" in misp:
         print(f"    Error: {misp['error']}")
+    if misp["status"] not in ("HEALTHY", "DEGRADED"):
+        exit_code = 1
 
     # Get Neo4j status
     info("\nNeo4j Status:")
@@ -1477,6 +1482,8 @@ def cmd_monitor(args):
         print(f"    Relationships: {neo4j['stats'].get('Relationships', 0):,}")
     if "error" in neo4j:
         print(f"    Error: {neo4j['error']}")
+    if neo4j["status"] != "UP":
+        exit_code = 1
 
     # Get sync status
     info("\nSync Status:")
@@ -1488,7 +1495,9 @@ def cmd_monitor(args):
     info("\nCircuit Breakers:")
     cbs = get_circuit_breaker_info()
     for service, state in cbs.items():
-        color = Colors.GREEN if state == "CLOSED" else Colors.YELLOW if state == "HALF_OPEN" else Colors.RED
+        color = (
+            Colors.GREEN if state == "CLOSED" else Colors.YELLOW if state in ("HALF_OPEN", "UNKNOWN") else Colors.RED
+        )
         print(f"  {service}: {color}{state}{Colors.END}")
 
     # Prometheus metrics status
@@ -1499,7 +1508,7 @@ def cmd_monitor(args):
         warn("Prometheus metrics not available (prometheus_client not installed)")
 
     section("Monitor Complete")
-    return 0
+    return exit_code
 
 
 # ================================================================================
@@ -1875,7 +1884,8 @@ def cmd_clear_misp(args) -> int:
         # Each iteration deletes up to 500 events, then re-fetches page 1
         # (deleted events won't reappear). Max 20 iterations = 10,000 events safety cap.
         deleted = 0
-        total_found = 0
+        seen_ids: set = set()  # unique event ids returned by the search (deleted or skipped)
+        skipped_ids: set = set()  # search hits whose info does not name EdgeGuard
         _http_error = False
         _max_pages = 20
         for _page in range(_max_pages):
@@ -1897,9 +1907,26 @@ def cmd_clear_misp(args) -> int:
             if not events:
                 break
 
-            total_found += len(events)
+            page_ids = {str(ev.get("id") or ev.get("Event", {}).get("id")) for ev in events} - {"None"}
+            if not (page_ids - seen_ids):
+                break  # only already-skipped events remain in the search result: the wipe is complete
             for ev in events:
                 eid = ev.get("id") or ev.get("Event", {}).get("id")
+                if not eid or str(eid) in seen_ids:
+                    continue
+                seen_ids.add(str(eid))
+                # Same guard as baseline_clean: ``searchall=EdgeGuard`` matches any field, so an
+                # unrelated event on a shared MISP could be returned; only wipe events whose info
+                # names EdgeGuard.
+                event_info = str(ev.get("info", "") or ev.get("Event", {}).get("info", ""))
+                if eid and "EdgeGuard" not in event_info:
+                    logger.warning(
+                        "Skipping MISP event id=%s — info=%r does not contain 'EdgeGuard' (searchall false positive)",
+                        eid,
+                        event_info[:80],
+                    )
+                    skipped_ids.add(str(eid))
+                    continue
                 if eid:
                     with warnings.catch_warnings():
                         if not SSL_VERIFY:
@@ -1924,13 +1951,19 @@ def cmd_clear_misp(args) -> int:
         if _http_error:
             err("MISP clear failed due to HTTP error — check API key and MISP status")
             return 1
-        if total_found == 0:
-            info("No EdgeGuard events found in MISP.")
-        elif deleted < total_found:
-            err(f"Partial clear: deleted {deleted}/{total_found} EdgeGuard events ({total_found - deleted} failed)")
+        total_found = len(seen_ids)
+        skipped = len(skipped_ids)
+        expected = total_found - skipped  # events that are EdgeGuard's and had to be deleted
+        skipped_note = f" ({skipped} skipped: info does not name EdgeGuard)" if skipped else ""
+        if expected == 0:
+            info(f"No EdgeGuard events found in MISP.{skipped_note}")
+        elif deleted < expected:
+            err(
+                f"Partial clear: deleted {deleted}/{expected} EdgeGuard events ({expected - deleted} failed){skipped_note}"
+            )
             return 1
         else:
-            ok(f"Deleted {deleted}/{total_found} EdgeGuard events from MISP")
+            ok(f"Deleted {deleted}/{expected} EdgeGuard events from MISP{skipped_note}")
     except Exception as e:
         err(f"Failed to clear MISP: {e}")
         return 1
@@ -2153,9 +2186,9 @@ def cmd_stats(args) -> int:
         summary = pm.get_summary()
         result["pipeline"] = summary
         if not use_json and summary.get("total_runs", 0) > 0:
-            print(f"\n  Pipeline: {summary['total_runs']} runs, {summary.get('success_rate', 0):.0f}% success")
-            if summary.get("avg_duration"):
-                print(f"  Avg duration: {summary['avg_duration']:.0f}s")
+            print(f"\n  Pipeline: {summary['total_runs']} runs, {summary.get('success_rate_percent', 0):.0f}% success")
+            if summary.get("average_duration_seconds"):
+                print(f"  Avg duration: {summary['average_duration_seconds']:.0f}s")
     except Exception:
         pass
 
@@ -2676,7 +2709,9 @@ def cmd_preflight(args) -> int:
 
         checker = MISPHealthCheck()
         misp_result = checker.check_health()
-        healthy = misp_result.get("healthy", False) if isinstance(misp_result, dict) else False
+        # check_health() returns a MISPHealthCheckResult dataclass (dict-like .get); the former
+        # isinstance(dict) guard made this check report "unhealthy" on every run.
+        healthy = bool(misp_result.get("healthy", False)) if hasattr(misp_result, "get") else False
         if healthy:
             ok("MISP: healthy")
         else:

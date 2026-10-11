@@ -214,11 +214,11 @@ def _probe_dag_run_state(dag_id: str, run_id: str) -> Optional[str]:
         logger.debug("Liveness probe raised unexpectedly (%s) — probe returns None", e)
         return None
     if not isinstance(result, dict):
-        logger.debug("Liveness probe non-dict response (%r) — probe returns None", type(result))
+        logger.warning("Liveness probe non-dict response (%r) — probe returns None (fail-open)", type(result))
         return None
     if "error" in result:
         # API unreachable / 4xx / 5xx
-        logger.debug("Liveness probe API error: %s — probe returns None", result.get("error"))
+        logger.warning("Liveness probe API error: %s — probe returns None (fail-open)", result.get("error"))
         return None
     state = result.get("state")
     return str(state) if state else None
