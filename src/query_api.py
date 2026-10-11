@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, NoReturn, Optional
 
@@ -435,6 +436,31 @@ class ActorSummaryResponse(BaseModel):
 # ============================================================================
 
 
+# Lazy reconnect (2026-10): when the client failed to connect at startup, every request used to
+# fail with 503 until the process was restarted. The guard retries ``connect()`` at most once per
+# ``_RECONNECT_MIN_INTERVAL_SEC`` and otherwise answers 503 as before.
+_RECONNECT_MIN_INTERVAL_SEC = 30.0
+_last_reconnect_attempt = float("-inf")
+
+
+def _require_neo4j() -> None:
+    """Raise 503 unless the Neo4j client is connected, after a rate-limited reconnect attempt."""
+    global _last_reconnect_attempt
+    client = neo4j_client
+    if client is not None and client.is_connected():
+        return
+    now = time.monotonic()
+    if client is not None and now - _last_reconnect_attempt >= _RECONNECT_MIN_INTERVAL_SEC:
+        _last_reconnect_attempt = now
+        try:
+            if client.connect():
+                logger.info("Neo4j connection established on request (startup connection had failed)")
+                return
+        except Exception as exc:  # the driver reports; the request answers 503 below
+            logger.warning("Neo4j reconnect attempt failed: %s", exc)
+    raise HTTPException(status_code=503, detail="Neo4j not connected")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """
@@ -450,11 +476,17 @@ async def health():
         # Full ping + APOC check — Neo4jClient.is_connected() is driver-only (fast path for other routes).
         neo4j_ok = bool(neo4j_client.health_check().get("healthy"))
 
-    return HealthResponse(
+    payload = HealthResponse(
         status="ok" if neo4j_ok else "degraded",
         neo4j_connected=neo4j_ok,
         version=_PKG_VERSION,
     )
+    if not neo4j_ok:
+        # 503 while degraded: the compose healthcheck and partner probes see the outage
+        # (a 200 "degraded" could never fail a healthcheck).
+        body = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        return JSONResponse(status_code=503, content=body)
+    return payload
 
 
 @app.post("/query", response_model=ThreatResponse, dependencies=[Depends(_verify_api_key)])
@@ -478,8 +510,7 @@ async def query_threats(request: Request, q: ThreatQuery):
 
         start_time = time.time()
 
-        if not neo4j_client or not neo4j_client.is_connected():
-            raise HTTPException(status_code=503, detail="Neo4j not connected")
+        _require_neo4j()
 
         # Parse natural language query to Cypher.
         # Sanitize newlines before logging to prevent log injection.
@@ -532,8 +563,7 @@ async def search_indicator(request: Request, s: IndicatorSearch):
 
     Returns the indicator and related threats/entities.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         # READ-side canonicalization (src/ioc_normalize.py): infer the type
@@ -618,8 +648,7 @@ async def get_zone_threats(
 
     Returns all threat intelligence relevant to the specified zone.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session() as session:
@@ -732,8 +761,7 @@ async def list_indicators(
 
     Supports pagination with limit/offset.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session() as session:
@@ -785,8 +813,7 @@ async def list_vulnerabilities(
 
     Returns CVEs with optional severity and zone filters.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session() as session:
@@ -878,8 +905,7 @@ async def export_wazuh_cdb(
     via ``_indicator_filter_conditions`` / ``_vulnerability_filter_conditions``
     — not forked.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         zone_value = zone.value if zone else None
@@ -973,8 +999,7 @@ async def graph_explore(
     - **indicators**: IOCs grouped by zone
     - **vulnerabilities**: CVEs sized by CVSS, CISA KEV highlighted
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     zone_param: dict = {}
     if zone:
@@ -1307,8 +1332,7 @@ async def stix_export(
 
     from stix_exporter import StixExporter
 
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     exporter = StixExporter(neo4j_client)
     try:
@@ -1426,8 +1450,7 @@ async def actor_summary(request: Request, name: str):
     canonical (lowercase-stored) actor name or any alias in its observed
     display case. Returns 404 when no actor matches.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session(default_access_mode="READ") as session:
@@ -1494,8 +1517,7 @@ async def admin_query(
     if not x_admin_token or x_admin_token != ADMIN_QUERY_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid or missing admin token")
 
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     # Block any write/destructive Cypher operations — this endpoint is read-only.
     _WRITE_PATTERN = re.compile(

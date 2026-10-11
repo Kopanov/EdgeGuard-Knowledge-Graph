@@ -2563,6 +2563,13 @@ def cmd_fresh_baseline(args) -> int:
     for line in state.render_summary().splitlines():
         print(line)
     print()
+    if getattr(args, "wipe_all", False):
+        print(
+            f"{Colors.RED}Neo4j scope: ALL nodes in the database (--wipe-all), including nodes created by other "
+            f"producers.{Colors.END}"
+        )
+    else:
+        print("Neo4j scope: EdgeGuard-managed nodes only; nodes created by other producers are kept.")
     print(f"Then collect {days} days of historical data from scratch.")
     print("ETA: ~6-8 hours (per recent baseline runs).")
     print()
@@ -2599,6 +2606,8 @@ def cmd_fresh_baseline(args) -> int:
     # so the DAG logs it with the same WARNING framing as a UI bypass
     # instead of a false "gate passed" attestation.
     _conf: dict = {"fresh_baseline": True, "baseline_days": days}
+    if getattr(args, "wipe_all", False):
+        _conf["wipe_scope"] = "all"
     if getattr(args, "skip_backup_check", False):
         _conf["skip_backup_check"] = True
     else:
@@ -3060,6 +3069,12 @@ Examples:
         "EDGEGUARD_BACKUP_MAX_AGE_HOURS, default 240h, OR pass this flag). Use ONLY for "
         "dev/test where data loss is acceptable; "
         "production runs MUST take a backup first (see docs/BACKUP.md)",
+    )
+    fresh_baseline_p.add_argument(
+        "--wipe-all",
+        action="store_true",
+        help="Delete EVERY Neo4j node, including nodes created by other producers on a shared database. "
+        "Default: only EdgeGuard-managed nodes are deleted (shared-database contract)",
     )
 
     # Preflight

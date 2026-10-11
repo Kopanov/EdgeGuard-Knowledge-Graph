@@ -587,7 +587,7 @@ class TestResetBaselineDataOrchestrator:
             def _ck():
                 call_order.append("checkpoints")
 
-            def _n4(_c):
+            def _n4(_c, *_scope):
                 call_order.append("neo4j")
 
             def _ms(*_a, **_kw):
@@ -847,25 +847,47 @@ class TestProbeHelpers:
         _, kwargs = clear.call_args
         assert kwargs.get("include_incremental") is True
 
-    def test_wipe_neo4j_calls_clear_all(self):
-        """``_wipe_neo4j(client)`` must call ``client.clear_all()`` and
-        raise if it returns False."""
+    def test_wipe_neo4j_default_scope_deletes_only_edgeguard_managed_nodes(self):
+        """Shared-database contract (2026-10): the default wipe keeps partner data."""
         from baseline_clean import _wipe_neo4j
 
         fake_client = MagicMock()
         fake_client.driver = MagicMock()  # truthy "connected" sentinel
-        fake_client.clear_all.return_value = True
+        fake_client.clear_edgeguard_managed.return_value = True
         _wipe_neo4j(fake_client)
-        fake_client.clear_all.assert_called_once()
+        fake_client.clear_edgeguard_managed.assert_called_once()
+        fake_client.clear_all.assert_not_called()
 
-    def test_wipe_neo4j_raises_when_clear_all_returns_false(self):
-        from baseline_clean import _wipe_neo4j
+    def test_wipe_neo4j_all_scope_calls_clear_all(self):
+        from baseline_clean import WIPE_SCOPE_ALL, _wipe_neo4j
 
         fake_client = MagicMock()
         fake_client.driver = MagicMock()
-        fake_client.clear_all.return_value = False
-        with pytest.raises(RuntimeError, match="returned False"):
+        fake_client.clear_all.return_value = True
+        _wipe_neo4j(fake_client, WIPE_SCOPE_ALL)
+        fake_client.clear_all.assert_called_once()
+        fake_client.clear_edgeguard_managed.assert_not_called()
+
+    def test_wipe_neo4j_rejects_an_unknown_scope_before_touching_the_client(self):
+        from baseline_clean import _wipe_neo4j
+
+        fake_client = MagicMock()
+        with pytest.raises(ValueError, match="wipe scope"):
+            _wipe_neo4j(fake_client, "everything")
+        fake_client.clear_all.assert_not_called()
+        fake_client.clear_edgeguard_managed.assert_not_called()
+
+    def test_wipe_neo4j_raises_when_the_scoped_wipe_returns_false(self):
+        from baseline_clean import WIPE_SCOPE_ALL, _wipe_neo4j
+
+        fake_client = MagicMock()
+        fake_client.driver = MagicMock()
+        fake_client.clear_edgeguard_managed.return_value = False
+        with pytest.raises(RuntimeError, match=r"clear_edgeguard_managed\(\) returned False"):
             _wipe_neo4j(fake_client)
+        fake_client.clear_all.return_value = False
+        with pytest.raises(RuntimeError, match=r"clear_all\(\) returned False"):
+            _wipe_neo4j(fake_client, WIPE_SCOPE_ALL)
 
     def test_wipe_neo4j_raises_when_client_not_connected(self):
         from baseline_clean import _wipe_neo4j

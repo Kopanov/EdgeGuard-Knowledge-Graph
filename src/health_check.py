@@ -31,6 +31,9 @@ from config import (
 )
 from neo4j_client import Neo4jClient
 
+# Upper bound for the Neo4j health probe (connect + ping + APOC check), in seconds.
+NEO4J_HEALTH_TIMEOUT_SEC = 30
+
 # Suppress InsecureRequestWarning only when SSL verification is explicitly disabled.
 if not SSL_VERIFY:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -124,7 +127,7 @@ def health_check_neo4j(neo4j_uri: str = None, neo4j_user: str = None, neo4j_pass
     user = neo4j_user or NEO4J_USER
     password = neo4j_password or NEO4J_PASSWORD
 
-    neo4j_health_timeout = 30  # seconds
+    neo4j_health_timeout = NEO4J_HEALTH_TIMEOUT_SEC
 
     def _run_neo4j_health():
         client = Neo4jClient(uri=uri, user=user, password=password)
@@ -134,10 +137,13 @@ def health_check_neo4j(neo4j_uri: str = None, neo4j_user: str = None, neo4j_pass
         client.close()
         return health
 
+    # Not a ``with`` block: the executor's ``__exit__`` waits for the worker thread, which made the
+    # timeout below ineffective when the probe hung on an unreachable server. ``shutdown(wait=False)``
+    # lets the caller return at the deadline; the thread ends when the driver gives up.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_run_neo4j_health)
-            return future.result(timeout=neo4j_health_timeout)
+        future = executor.submit(_run_neo4j_health)
+        return future.result(timeout=neo4j_health_timeout)
 
     except concurrent.futures.TimeoutError:
         logger.error(f"Neo4j health check timed out after {neo4j_health_timeout}s")
@@ -145,6 +151,8 @@ def health_check_neo4j(neo4j_uri: str = None, neo4j_user: str = None, neo4j_pass
     except Exception as e:
         logger.error(f"Neo4j health check failed: {type(e).__name__}: {e}")
         return {"healthy": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        executor.shutdown(wait=False)
 
 
 def get_neo4j_node_counts(neo4j_uri: str = None, neo4j_user: str = None, neo4j_password: str = None) -> Dict[str, Any]:

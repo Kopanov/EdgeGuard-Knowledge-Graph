@@ -223,7 +223,7 @@ the `dag_run.conf` JSON when triggered:
 **`baseline_clean` task semantics (introduced in PR-C):**
 
 - Reads `dag_run.conf.fresh_baseline`. Accepts Python `True`, integer `1`, or strings `"true"`/`"True"`/`"1"`/`"yes"`/`"on"` (case- and whitespace-insensitive). Anything else (including the explicit-falsy strings `"false"`/`"0"`) is treated as additive — a typo in the JSON config does NOT trigger destruction.
-- Calls `src.baseline_clean.reset_baseline_data()` — atomic 3-step wipe (checkpoints → Neo4j `clear_all` → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero.
+- Calls `src.baseline_clean.reset_baseline_data(wipe_scope=…)` — atomic 3-step wipe (checkpoints → Neo4j → MISP DELETE) followed by a settle period and a verify-poll until all three datastores read zero. The Neo4j step deletes only EdgeGuard-managed nodes (`clear_edgeguard_managed`) unless `dag_run.conf.wipe_scope` is `"all"` (`clear_all`), so partner data on a shared ResilMesh database is kept by default.
 - Has `retries=0` and `trigger_rule=ALL_SUCCESS` — destructive task does NOT auto-retry on failure (would re-execute the wipe), and ONLY runs after `misp_health_check` has fully succeeded.
 
 **Baseline DAG conf — accepted keys (PR-F5, 2026-04-20):**
@@ -239,6 +239,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | `clear_checkpoints` | `"all"` | Wipe incremental cursors too (default: keep them). | `_baseline_start_summary` |
 | `backup_check_passed_cli` | bool-ish (same parse as `fresh_baseline`) | Set automatically by `edgeguard fresh-baseline` AFTER its client-side backup gate ran — tells the DAG-side gate not to re-check (the container env may lack `EDGEGUARD_LAST_BACKUP_AT` in the CLI flow). Do not set by hand; use `skip_backup_check` instead. | `_baseline_clean` (gate, 2026-06) |
 | `skip_backup_check` | bool-ish (same parse as `fresh_baseline`) | Explicit, loudly-logged operator bypass of the backup-timestamp gate for UI/API triggers — mirrors the CLI `--skip-backup-check` flag. Dev/test only; production wipes MUST take a backup first (docs/BACKUP.md). | `_baseline_clean` (gate, 2026-06) |
+| `wipe_scope` | `\"edgeguard\"` (default) or `\"all\"` | Neo4j scope of the destructive step: EdgeGuard-managed nodes only, or every node in the database (CLI flag `--wipe-all`). Shared-database contract, 2026-10. | `_baseline_clean` |
 
 **Unknown keys are SILENTLY IGNORED** by Airflow's conf-passing mechanism, but PR-F5 emits a `WARNING [BASELINE_CONF]` log line for each unrecognized key, with a "did you mean?" suggestion for common typos (e.g. `days` → `baseline_days`). This catches the 2026-04-19 incident where an operator triggered with `{"days": 730}` (missing the `baseline_` prefix) and silently fell through to defaults — additive mode with the wrong window depth, no visible error. Grep your DAG logs for `[BASELINE_CONF]` to spot misconfigured triggers.
 

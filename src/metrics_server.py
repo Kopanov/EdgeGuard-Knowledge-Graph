@@ -934,7 +934,18 @@ def record_source_truthful_creator_rejected(source_id: str | None, reason: str) 
     except ImportError:  # pragma: no cover — defensive
         valid_rejection_reasons = frozenset({"creator_org_not_allowlisted", "creator_org_missing"})
 
-    safe_source = (source_id or "<unknown>").strip().lower()[:80] or "<unknown>"
+    # ``source_id`` comes from MISP tags that other parties can write: only registered source
+    # identifiers become label values, anything else collapses to ``<other>`` (bounded cardinality).
+    raw_source = (source_id or "").strip().lower()[:80]
+    safe_source = "<unknown>"
+    if raw_source:
+        try:
+            from source_registry import get_source
+
+            known = get_source(raw_source)
+        except Exception:  # pragma: no cover — registry import failure must not break metrics
+            known = None
+        safe_source = known.canonical_id if known is not None else "<other>"
     norm_reason = (reason or "").strip().lower()[:80].replace('"', "")
     safe_reason = norm_reason if norm_reason in valid_rejection_reasons else "<other>"
     SOURCE_TRUTHFUL_CREATOR_REJECTED.labels(source_id=safe_source, reason=safe_reason).inc()

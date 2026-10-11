@@ -2056,6 +2056,9 @@ _KNOWN_BASELINE_CONF_KEYS = frozenset(
         # bypass where UI/API triggers skipped the CLI-side PR-F2 gate):
         "backup_check_passed_cli",  # set by `edgeguard fresh-baseline` AFTER its own gate ran
         "skip_backup_check",  # explicit, audited operator bypass (mirrors the CLI flag)
+        # Neo4j wipe scope of the destructive step (2026-10, shared-database contract):
+        # "edgeguard" (default) deletes only EdgeGuard-managed nodes; "all" deletes every node.
+        "wipe_scope",
         # PR-K1 Bugbot round-2 (Medium): the ``clear_checkpoints`` key
         # used to be consumed by ``_baseline_start_summary`` to choose
         # between baseline-only and full wipe. PR-K1 §1-8 removed that
@@ -3120,7 +3123,15 @@ def _baseline_clean(**context):
         raise AirflowException(f"baseline_clean module unavailable: {e}") from e
 
     try:
-        result = reset_baseline_data()
+        wipe_scope = str(conf.get("wipe_scope") or "edgeguard").strip().lower()
+        if wipe_scope not in ("edgeguard", "all"):
+            raise AirflowException(f"wipe_scope must be 'edgeguard' or 'all', got {wipe_scope!r}")
+        if wipe_scope == "all":
+            logger.warning(
+                "[BASELINE] wipe_scope=all — deleting EVERY node in the database, including nodes created by "
+                "other producers on a shared database"
+            )
+        result = reset_baseline_data(wipe_scope=wipe_scope)
         logger.info(
             "BASELINE_CLEAN: deleted %d Neo4j nodes, %d MISP events, %d checkpoint entries (%.1fs)",
             result.before.neo4j_count,

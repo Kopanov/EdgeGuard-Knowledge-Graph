@@ -276,6 +276,8 @@ A consumer reading this gets a clear picture: the underlying CVE was published i
 
 ### 3.4 Node Identity Marking (`edgeguard_managed`, `edgeguard_enriched`)
 
+The marker also bounds EdgeGuard's destructive operations: `edgeguard fresh-baseline` and the `baseline_clean` DAG step delete only `edgeguard_managed` nodes by default (`clear_edgeguard_managed`); deleting every node requires the explicit `--wipe-all` flag / `wipe_scope: "all"` (2026-10).
+
 Every node EdgeGuard **creates** carries a constant property:
 
 ```
