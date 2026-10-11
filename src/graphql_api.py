@@ -764,6 +764,7 @@ _MAX_GRAPHQL_OFFSET = 100_000  # same ceiling as the REST API
 # fragments costs exponential validation time regardless of the alias / root-field caps.
 _GRAPHQL_MAX_SELECTIONS = _env_positive_int("EDGEGUARD_GRAPHQL_MAX_SELECTIONS", 2000)
 _GRAPHQL_MAX_FRAGMENT_DEPTH = 16
+_GRAPHQL_MAX_FIELD_NESTING = 64  # plain field nesting; the depth limiter (8) still applies after validation
 _MAX_BODY_BYTES = _env_positive_int("EDGEGUARD_MAX_BODY_BYTES", 1 * 1024 * 1024)
 # Note: ``_IS_PROD`` is defined at the top of this module (line ~70)
 # alongside the API-key auth check. The single source of truth is
@@ -835,7 +836,9 @@ def _expanded_selection_count(document: Any, cap: int, max_depth: int) -> tuple[
     def nesting(name: str, stack: frozenset) -> int:
         """Spread levels below fragment ``name`` (memoised by name; independent of where it is used —
         Bugbot on #151: a depth check that only ran on the first visit was bypassed by spreading F0..Fn
-        in that order)."""
+        in that order). The walk itself is bounded: once the chain of spreads being followed is longer
+        than ``max_depth`` the document is rejected without recursing further, so a long linear chain
+        can never exhaust the interpreter stack (Bugbot round 4)."""
         nonlocal problem
         if name in nest_memo:
             return nest_memo[name]
@@ -845,30 +848,42 @@ def _expanded_selection_count(document: Any, cap: int, max_depth: int) -> tuple[
         if name in stack:
             problem = f"fragment cycle through {name}"
             return max_depth + 1
+        if len(stack) > max_depth:
+            problem = f"fragment nesting deeper than {max_depth}"
+            return max_depth + 1
         below = 0
 
-        def walk(selection_set: Any) -> None:
-            nonlocal below
-            if selection_set is None:
+        def walk(selection_set: Any, field_depth: int) -> None:
+            nonlocal below, problem
+            if selection_set is None or problem is not None:
+                return
+            if field_depth > _GRAPHQL_MAX_FIELD_NESTING:
+                problem = f"selection nesting deeper than {_GRAPHQL_MAX_FIELD_NESTING}"
                 return
             for sel in selection_set.selections:
                 if isinstance(sel, (FieldNode, InlineFragmentNode)):
-                    walk(sel.selection_set)
+                    walk(sel.selection_set, field_depth + 1)
                 elif isinstance(sel, FragmentSpreadNode):
                     below = max(below, 1 + nesting(sel.name.value, stack | {name}))
+                if problem is not None:
+                    return
 
-        walk(fragment.selection_set)
-        nest_memo[name] = below
+        walk(fragment.selection_set, 0)
+        if problem is None:
+            nest_memo[name] = below
         return below
 
-    def size(selection_set: Any, stack: frozenset, depth: int) -> int:
+    def size(selection_set: Any, stack: frozenset, depth: int, field_depth: int = 0) -> int:
         nonlocal problem
         if selection_set is None or problem is not None:
             return 0
+        if field_depth > _GRAPHQL_MAX_FIELD_NESTING:
+            problem = f"selection nesting deeper than {_GRAPHQL_MAX_FIELD_NESTING}"
+            return cap + 1
         total = 0
         for sel in selection_set.selections:
             if isinstance(sel, FieldNode):
-                total += 1 + size(sel.selection_set, stack, depth)
+                total += 1 + size(sel.selection_set, stack, depth, field_depth + 1)
             elif isinstance(sel, InlineFragmentNode):
                 total += size(sel.selection_set, stack, depth + 1)
             elif isinstance(sel, FragmentSpreadNode):

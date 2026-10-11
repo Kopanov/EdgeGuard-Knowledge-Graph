@@ -208,6 +208,28 @@ class TestGraphQLLimits:
         errors = resp.json().get("errors") or []
         assert any("nesting deeper" in (e.get("message") or "") for e in errors), resp.json()
 
+    @pytest.mark.parametrize("length", [300, 3000])
+    def test_long_linear_chains_never_exhaust_the_stack(self, monkeypatch, length):
+        """Bugbot on #151 round 4: the nesting walk recursed the whole chain before comparing with the
+        cap. It now stops at the cap, so even a 3,000-fragment chain is a budget rejection, not a 500."""
+        monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
+        parts = ["fragment F0 on Query { a: tactics { __typename } }"]
+        parts += [f"fragment F{i} on Query {{ ...F{i - 1} }}" for i in range(1, length)]
+        for root in (f"...F{length - 1}", " ".join(f"...F{i}" for i in range(length))):
+            resp = TestClient(graphql_api.app, raise_server_exceptions=False).post(
+                "/graphql", json={"query": " ".join(parts) + " query { " + root + " }"}
+            )
+            assert resp.status_code in (200, 400), resp.status_code
+            errors = resp.json().get("errors") or []
+            assert any("Query rejected" in (e.get("message") or "") for e in errors), resp.json()
+
+    def test_deeply_nested_plain_fields_are_rejected_before_validation(self, monkeypatch):
+        monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
+        query = "query { tactics " + "{ a " * 80 + "{ __typename }" + " }" * 80 + " }"
+        resp = TestClient(graphql_api.app, raise_server_exceptions=False).post("/graphql", json={"query": query})
+        errors = resp.json().get("errors") or []
+        assert any("selection nesting" in (e.get("message") or "") for e in errors), resp.json()
+
     def test_fragment_cycle_is_rejected_before_validation(self, monkeypatch):
         monkeypatch.setattr(graphql_api, "_API_KEY", None, raising=False)
         query = "fragment A on Query { ...B } fragment B on Query { ...A } query { ...A }"
