@@ -511,6 +511,7 @@ airflow logs <task_id> <dag_run_id>
 | Collectors failing repeatedly | Reset circuit breakers + retry: `edgeguard heal` |
 | Need a completely fresh start | `edgeguard fresh-baseline --days N` — enforces the PR-F2 backup-timestamp gate + requires typed `FRESH-BASELINE` confirmation. See [`docs/BACKUP.md`](BACKUP.md) for the backup prerequisite. (The legacy `python src/run_pipeline.py --baseline --fresh-baseline` path has NO backup gate and NO typed confirmation — **do not use** unless you understand you're bypassing both.) |
 | Airflow not reachable | `edgeguard doctor` retries after 10s; check container: `docker compose ps airflow` |
+| `edgeguard dag` reports 401 or rejected credentials | The CLI speaks the Airflow 3 API (`/api/v2`, bearer token from `POST /auth/token`). Set `AIRFLOW_API_USER` / `AIRFLOW_API_PASSWORD` in `.env` (the `admin` password is in `/opt/airflow/simple_auth_manager_passwords.json.generated` inside the container); for an Airflow 2 deployment set `AIRFLOW_API_VERSION=v1`. |
 | Pipeline already running (lock error) | Wait for it to finish, or delete `checkpoints/pipeline.lock` if stale |
 | Need to clear just Neo4j or MISP | `edgeguard clear neo4j` / `edgeguard clear misp` / `edgeguard clear all` |
 | OOM on large MISP events (100K+ attrs) | Events >5000 attributes are automatically streamed in pages. Increase `AIRFLOW_MEMORY_LIMIT` in `.env` if still failing |

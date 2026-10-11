@@ -99,6 +99,9 @@ _ALIVE_STATES = frozenset({"running", "queued"})
 # right balance: catches an orphan within ~1 minute of its parent DAG
 # dying, doesn't hammer the API.
 _DEFAULT_THROTTLE_SEC = 60.0
+# Consecutive failed probes after which the inactive safeguard is reported at ERROR (once per streak).
+_DEFAULT_DEGRADED_AFTER = 3
+_DEGRADED_AFTER_FAILURES = _DEFAULT_DEGRADED_AFTER
 
 # Env flags
 _ENV_ENABLED = "EDGEGUARD_PARENT_DAG_LIVENESS_CHECK"
@@ -206,7 +209,9 @@ def _probe_dag_run_state(dag_id: str, run_id: str) -> Optional[str]:
         logger.debug("airflow_client not importable (%s) — probe returns None", e)
         return None
     try:
-        result = _get(f"/dags/{dag_id}/dagRuns/{run_id}")
+        from urllib.parse import quote
+
+        result = _get(f"/dags/{quote(dag_id, safe='')}/dagRuns/{quote(run_id, safe='')}")
     except Exception as e:
         # Belt-and-suspenders: _get already catches everything and
         # returns ``{"error": ...}``, but defend against future changes
@@ -296,6 +301,10 @@ def make_liveness_callback(
     # safeguard inactive during early system uptime. ``-inf`` makes
     # the first probe always fire.
     last_probe_at: list[float] = [float("-inf")]
+    # Consecutive failed probes. The safeguard stays fail-open, but a persistent probe failure
+    # (wrong API version, missing credentials, API server down) is reported once at ERROR so the
+    # inactive safeguard is visible in the task log instead of a stream of WARNINGs only.
+    consecutive_failures: list[int] = [0]
 
     def _callback() -> None:
         now = time.monotonic()
@@ -311,7 +320,18 @@ def make_liveness_callback(
         state = _probe_dag_run_state(dag_id, run_id)
         if state is None:
             # Fail-OPEN — transient API blip, assume alive
+            consecutive_failures[0] += 1
+            if consecutive_failures[0] == _DEGRADED_AFTER_FAILURES:
+                logger.error(
+                    "[PARENT_DAG_LIVENESS_DEGRADED] dag_run=%s/%s: %d consecutive probe failures — the "
+                    "orphan-process safeguard is inactive for this task until the Airflow API answers "
+                    "(check AIRFLOW_WEBSERVER_URL, AIRFLOW_API_VERSION and the API credentials).",
+                    dag_id,
+                    run_id,
+                    consecutive_failures[0],
+                )
             return
+        consecutive_failures[0] = 0
         if state in _ALIVE_STATES:
             return  # alive
         # Confirmed terminal state — abort the collector cleanly
