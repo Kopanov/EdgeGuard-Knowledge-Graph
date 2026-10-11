@@ -180,11 +180,15 @@ def test_unfetchable_event_fails_the_run_and_records_no_success(monkeypatch, cap
     assert outcomes["success"] == 0
     assert len(outcomes["failure"]) == 1
     reason = sync.get_stats()["last_failure_reason"]
-    assert "1 event(s) failed or were skipped" in reason
+    assert "1 event(s) could not be fetched from MISP" in reason
     assert outcomes["failure"][0] == reason
     assert any(r.levelno == logging.ERROR and "could not be fetched" in r.getMessage() for r in caplog.records), (
         "the skipped event must be logged at ERROR"
     )
+    reason = outcomes["failure"][0]
+    assert "could not be fetched from MISP" in reason
+    assert "[MERGE-RETURNED-FALSE]" not in reason, "fetch failures must not be described as merge errors"
+    assert sync.stats["events_unfetchable"] == 1
 
 
 def test_fetched_event_without_attributes_is_still_a_successful_run(monkeypatch):
@@ -358,8 +362,15 @@ def test_zero_events_with_min_events_one_is_an_error_and_a_failed_run(monkeypatc
 def test_fewer_events_than_min_events_fails_before_any_event_is_processed(monkeypatch):
     monkeypatch.setenv("EDGEGUARD_SYNC_MIN_EVENTS", "3")
     sync, fetched, outcomes = _run_sync(monkeypatch, [{"id": "1", "info": "a"}, {"id": "2", "info": "b"}])
+    exported: list = []
+    monkeypatch.setattr(rm, "record_sync_event_accounting", lambda **kw: exported.append(kw))
     assert sync.run(incremental=False) is False
     assert fetched == []
+    # Nothing was attempted: the exported input total is 0 so the coverage-gap invariant holds
+    # (events_index_total == events_processed + events_failed); the summary keeps the found count.
+    assert exported and exported[-1]["events_index_total"] == 0
+    assert exported[-1]["events_processed"] == 0 and exported[-1]["events_failed"] == 0
+    assert sync.stats["events_index_total"] == 2
     assert sync.stats["events_index_total"] == 2
     assert outcomes["success"] == 0
 

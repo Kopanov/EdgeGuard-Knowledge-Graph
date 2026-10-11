@@ -980,6 +980,8 @@ class MISPToNeo4jSync:
         self.stats = {
             "events_processed": 0,
             "events_failed": 0,
+            # Subset of events_failed: the event details could not be fetched from MISP.
+            "events_unfetchable": 0,
             "indicators_synced": 0,
             "vulnerabilities_synced": 0,
             "malware_synced": 0,
@@ -4047,6 +4049,7 @@ class MISPToNeo4jSync:
                 event_id,
             )
             self.stats["events_failed"] += 1
+            self.stats["events_unfetchable"] = int(self.stats.get("events_unfetchable", 0) or 0) + 1
             return 0, 0, 1
 
         attributes = coerce_misp_attribute_list(full_event.get("Attribute"))
@@ -4345,6 +4348,11 @@ class MISPToNeo4jSync:
                 self.stats["min_events_shortfall"] = True
                 self.stats["end_time"] = datetime.now(timezone.utc).isoformat()
                 record_collection_failure("misp_to_neo4j", msg)
+                # Nothing was attempted: export 0 as the input total so the coverage-gap
+                # invariant (``events_index_total == events_processed + events_failed``) holds
+                # and ``EdgeGuardSyncCoverageGap`` does not fire on this deliberate abort. The
+                # number of events found stays in ``stats["events_index_total"]`` for the summary.
+                events_index_total = 0
                 return False
 
             if not events:
@@ -4764,16 +4772,27 @@ class MISPToNeo4jSync:
                 record_collection_success("misp_to_neo4j")
             else:
                 reasons = []
-                if events_failed:
-                    reasons.append(f"{events_failed} event(s) failed or were skipped after retries")
-                if total_errors:
+                events_unfetchable = int(self.stats.get("events_unfetchable", 0) or 0)
+                if events_unfetchable:
+                    reasons.append(
+                        f"{events_unfetchable} event(s) could not be fetched from MISP after retries "
+                        "(details request failed; nothing of them was processed)"
+                    )
+                if events_failed - events_unfetchable > 0:
+                    reasons.append(
+                        f"{events_failed - events_unfetchable} event(s) failed or were skipped after retries"
+                    )
+                # Unfetchable events count once in total_errors (the per-event error element); the
+                # merge/load text applies only to errors from sync_to_neo4j itself.
+                merge_errors = max(0, total_errors - events_unfetchable)
+                if merge_errors:
                     # PR-N19 Fix #3: point operators at the [MERGE-RETURNED-FALSE]
                     # grep token so the "N errors" summary is traceable to specific
                     # entities. Pre-PR-N19 the message said "see logs above" but no
                     # per-entity log actually existed for return-False cases —
                     # only for thrown exceptions.
                     reasons.append(
-                        f"sync_to_neo4j reported {total_errors} merge/load error(s); "
+                        f"sync_to_neo4j reported {merge_errors} merge/load error(s); "
                         "grep '[MERGE-RETURNED-FALSE]' or '[MERGE-REJECT]' in the logs above for "
                         "per-entity detail (CVE id / Malware name / Actor name / MITRE id)"
                     )
