@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from neo4j import GraphDatabase
+    from neo4j import GraphDatabase, Query
     from neo4j import exceptions as neo4j_exceptions
 except ImportError:
     raise ImportError("neo4j package not installed. Run: pip install neo4j")
@@ -1082,6 +1082,63 @@ def _reactivation_clauses(var: str, indent: str = "") -> str:
     )
 
 
+class _TimeoutSession:
+    """Session proxy: a ``timeout=`` keyword on ``run()`` becomes a real transaction timeout.
+
+    2026-10 production-readiness check: the neo4j 5 driver merges unknown ``run()`` keywords into
+    the Cypher parameters, so every ``session.run(q, timeout=30)`` in this code base sent a
+    ``$timeout`` parameter and enforced nothing — a stalled statement ran until Airflow's task
+    timeout. Wrapping the statement in ``neo4j.Query(text, timeout=…)`` makes the server abort
+    the auto-commit transaction after that many seconds (``TransactionTimedOut``), which the retry
+    classifier and the circuit breaker then see. Every other attribute is delegated unchanged.
+    """
+
+    __slots__ = ("_inner", "_cm")
+
+    def __init__(self, session: Any) -> None:
+        self._inner = session
+        self._cm: Any = None
+
+    def run(self, query: Any, parameters: Optional[Dict[str, Any]] = None, *, timeout: Any = None, **kwargs: Any):
+        if timeout is not None and isinstance(query, str):
+            query = Query(query, timeout=float(timeout))
+        # Not a call site: the timeout now travels inside the Query object (see the module's
+        # scan test, which requires ``timeout=`` on every real ``session.run`` caller).
+        return self._inner.run(query, parameters, **kwargs)
+
+    def __enter__(self) -> "_TimeoutSession":
+        # Delegate to whatever the inner context manager yields (a real Session yields itself;
+        # test doubles may yield another object) and remember the manager for __exit__.
+        self._cm = self._inner
+        entered = self._cm.__enter__()
+        if entered is not None:
+            self._inner = entered
+        return self
+
+    def __exit__(self, *exc: Any) -> Any:
+        manager = self._cm if self._cm is not None else self._inner
+        self._cm = None
+        return manager.__exit__(*exc)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class _TimeoutDriver:
+    """Driver proxy whose sessions translate ``timeout=`` into transaction timeouts (see above)."""
+
+    __slots__ = ("_raw",)
+
+    def __init__(self, driver: Any) -> None:
+        self._raw = driver
+
+    def session(self, **kwargs: Any) -> _TimeoutSession:
+        return _TimeoutSession(self._raw.session(**kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
 class Neo4jClient:
     """Production-ready Neo4j client with retry logic and batch processing."""
 
@@ -1104,13 +1161,17 @@ class Neo4jClient:
         """
         try:
             logger.info(f"Connecting to Neo4j at {self.uri}")
-            self.driver = GraphDatabase.driver(
-                self.uri,
-                auth=(self.user, self.password),
-                connection_timeout=NEO4J_CONNECTION_TIMEOUT,
-                max_connection_lifetime=3600,
-                max_connection_pool_size=50,
-                connection_acquisition_timeout=120,
+            # _TimeoutDriver: every ``session.run(..., timeout=)`` in this code base becomes a real
+            # server-side transaction timeout (see the proxy classes above).
+            self.driver = _TimeoutDriver(
+                GraphDatabase.driver(
+                    self.uri,
+                    auth=(self.user, self.password),
+                    connection_timeout=NEO4J_CONNECTION_TIMEOUT,
+                    max_connection_lifetime=3600,
+                    max_connection_pool_size=50,
+                    connection_acquisition_timeout=120,
+                )
             )
 
             # Verify connection with health check
