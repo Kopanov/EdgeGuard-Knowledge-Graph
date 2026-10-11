@@ -3,11 +3,13 @@ FastAPI Query Engine for GraphRAG
 REST endpoints for threat intelligence queries
 """
 
+import asyncio
 import hmac
 import logging
 import os
 import re
 import sys
+import threading
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, NoReturn, Optional
 
@@ -57,15 +59,26 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🔌 Connecting to Neo4j...")
     neo4j_client = Neo4jClient()
+    reconnect_task = None
     if not neo4j_client.connect():
-        logger.error("[ERR] Failed to connect to Neo4j on startup")
+        # Keep trying in the background (off the event loop, every _RECONNECT_INTERVAL_SEC): the
+        # data routes answer 503 at once while disconnected and recover without a restart.
+        logger.error("[ERR] Failed to connect to Neo4j on startup — retrying in the background")
+        reconnect_task = asyncio.create_task(_reconnect_until_connected(neo4j_client))
     else:
         logger.info("[OK] Connected to Neo4j")
 
     yield
 
-    # Shutdown
-    if neo4j_client:
+    if reconnect_task is not None:
+        # Cancel and wait for the task to acknowledge; the awaited future resolves at once, the
+        # daemon worker thread (if a connect attempt is in flight) ends with the process.
+        reconnect_task.cancel()
+        await asyncio.gather(reconnect_task, return_exceptions=True)
+
+    # Shutdown. While a connect attempt is still in flight the driver may be assigned or closed
+    # by the worker thread; nothing is closed here in that case (the process is exiting).
+    if neo4j_client and not _reconnect_in_progress:
         logger.info("🔌 Closing Neo4j connection...")
         neo4j_client.close()
 
@@ -435,6 +448,75 @@ class ActorSummaryResponse(BaseModel):
 # ============================================================================
 
 
+# Background reconnect (2026-10): when the client failed to connect at startup, every request used
+# to fail with 503 until the process was restarted. ``connect()`` retries with backoff and a 60 s
+# connection timeout, so it must never run on the event loop; the lifespan runs it in a worker
+# thread every ``_RECONNECT_INTERVAL_SEC`` until it succeeds, and the request guard only reads the
+# connection state.
+_RECONNECT_INTERVAL_SEC = 30.0
+# True while a background ``connect()`` attempt is in flight. ``connect()`` assigns the driver
+# before its verification query and closes it again on failure, so requests must not use the
+# client during that window; the guard and ``/health`` answer 503 instead.
+_reconnect_in_progress = False
+
+
+def _run_in_daemon_thread(fn):
+    """Run ``fn`` in a daemon thread and return a future that resolves on the event loop.
+
+    A daemon thread (not the default executor) so that a connect attempt still waiting on the
+    driver's connection timeout cannot delay process exit; a cancelled future simply drops the
+    result when the thread finishes.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+
+    def _deliver(setter, value) -> None:
+        if not future.done():
+            setter(value)
+
+    def _target() -> None:
+        try:
+            result = fn()
+        except BaseException as exc:  # delivered to the awaiting task as an exception
+            payload, setter = exc, future.set_exception
+        else:
+            payload, setter = result, future.set_result
+        try:
+            loop.call_soon_threadsafe(_deliver, setter, payload)
+        except RuntimeError:  # event loop already closed (process exiting)
+            pass
+
+    threading.Thread(target=_target, name="neo4j-reconnect", daemon=True).start()
+    return future
+
+
+async def _reconnect_until_connected(client, interval: float = _RECONNECT_INTERVAL_SEC) -> None:
+    """Retry ``client.connect()`` off the event loop until it succeeds (cancelled on shutdown)."""
+    global _reconnect_in_progress
+    while True:
+        _reconnect_in_progress = True
+        try:
+            ok = await _run_in_daemon_thread(client.connect)
+        except asyncio.CancelledError:
+            raise  # the flag stays True: the worker may still touch the driver
+        except Exception as exc:  # the driver already logged; keep retrying
+            ok = False
+            logger.warning("Neo4j reconnect attempt failed: %s", exc)
+        _reconnect_in_progress = False
+        if ok:
+            logger.info("[OK] Connected to Neo4j (startup connection had failed)")
+            return
+        await asyncio.sleep(interval)
+
+
+def _require_neo4j() -> None:
+    """Raise 503 unless the Neo4j client is connected and no connect attempt is in flight.
+    Never blocks: reconnection is the lifespan's background task."""
+    client = neo4j_client
+    if client is None or _reconnect_in_progress or not client.is_connected():
+        raise HTTPException(status_code=503, detail="Neo4j not connected")
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """
@@ -444,17 +526,24 @@ async def health():
     """
     global neo4j_client
 
-    if neo4j_client is None:
+    if neo4j_client is None or _reconnect_in_progress:
+        # No client, or a background connect attempt is assigning/closing the driver right now.
         neo4j_ok = False
     else:
         # Full ping + APOC check — Neo4jClient.is_connected() is driver-only (fast path for other routes).
         neo4j_ok = bool(neo4j_client.health_check().get("healthy"))
 
-    return HealthResponse(
+    payload = HealthResponse(
         status="ok" if neo4j_ok else "degraded",
         neo4j_connected=neo4j_ok,
         version=_PKG_VERSION,
     )
+    if not neo4j_ok:
+        # 503 while degraded: the compose healthcheck and partner probes see the outage
+        # (a 200 "degraded" could never fail a healthcheck).
+        body = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        return JSONResponse(status_code=503, content=body)
+    return payload
 
 
 @app.post("/query", response_model=ThreatResponse, dependencies=[Depends(_verify_api_key)])
@@ -478,8 +567,7 @@ async def query_threats(request: Request, q: ThreatQuery):
 
         start_time = time.time()
 
-        if not neo4j_client or not neo4j_client.is_connected():
-            raise HTTPException(status_code=503, detail="Neo4j not connected")
+        _require_neo4j()
 
         # Parse natural language query to Cypher.
         # Sanitize newlines before logging to prevent log injection.
@@ -532,8 +620,7 @@ async def search_indicator(request: Request, s: IndicatorSearch):
 
     Returns the indicator and related threats/entities.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         # READ-side canonicalization (src/ioc_normalize.py): infer the type
@@ -618,8 +705,7 @@ async def get_zone_threats(
 
     Returns all threat intelligence relevant to the specified zone.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session() as session:
@@ -732,8 +818,7 @@ async def list_indicators(
 
     Supports pagination with limit/offset.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session() as session:
@@ -785,8 +870,7 @@ async def list_vulnerabilities(
 
     Returns CVEs with optional severity and zone filters.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session() as session:
@@ -878,8 +962,7 @@ async def export_wazuh_cdb(
     via ``_indicator_filter_conditions`` / ``_vulnerability_filter_conditions``
     — not forked.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         zone_value = zone.value if zone else None
@@ -973,8 +1056,7 @@ async def graph_explore(
     - **indicators**: IOCs grouped by zone
     - **vulnerabilities**: CVEs sized by CVSS, CISA KEV highlighted
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     zone_param: dict = {}
     if zone:
@@ -1339,8 +1421,7 @@ async def stix_export(
 
     from stix_exporter import StixExporter
 
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     exporter = StixExporter(neo4j_client)
     try:
@@ -1460,8 +1541,7 @@ async def actor_summary(request: Request, name: str):
     canonical (lowercase-stored) actor name or any alias in its observed
     display case. Returns 404 when no actor matches.
     """
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     try:
         with neo4j_client.driver.session(default_access_mode="READ") as session:
@@ -1528,8 +1608,7 @@ async def admin_query(
     if not x_admin_token or x_admin_token != ADMIN_QUERY_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid or missing admin token")
 
-    if not neo4j_client or not neo4j_client.is_connected():
-        raise HTTPException(status_code=503, detail="Neo4j not connected")
+    _require_neo4j()
 
     # Block any write/destructive Cypher operations — this endpoint is read-only.
     _WRITE_PATTERN = re.compile(

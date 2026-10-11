@@ -66,7 +66,7 @@ class BaselineState:
     """
 
     neo4j_count: int = 0
-    # Every node in the database — ``reset_baseline_data`` wipes via ``clear_all()``, so this is
+    # Every node in the database — ``reset_baseline_data`` deletes only EdgeGuard-managed nodes unless ``wipe_scope="all"``, so this is
     # the real blast radius on a database shared with ResilMesh (2026-10).
     neo4j_total_count: int = 0
     neo4j_breakdown: tuple[tuple[str, int], ...] = field(default_factory=tuple)
@@ -111,7 +111,7 @@ class BaselineState:
                 other = self.neo4j_total_count - self.neo4j_count
                 lines.append(
                     f"  Neo4j nodes in total:         {self.neo4j_total_count:>12,}   "
-                    f"({other:,} not created by EdgeGuard — the wipe deletes every node)"
+                    f"({other:,} not created by EdgeGuard — kept unless the wipe scope is 'all')"
                 )
             if self.neo4j_breakdown:
                 top5 = ", ".join(f"{lbl}={cnt:,}" for lbl, cnt in self.neo4j_breakdown[:5])
@@ -529,16 +529,32 @@ def _wipe_checkpoints() -> None:
     clear_checkpoint(include_incremental=True)
 
 
-def _wipe_neo4j(client: Any) -> None:
-    """Step 2: wipe all Neo4j graph data via ``Neo4jClient.clear_all()``.
+# Neo4j wipe scope of the destructive step (2026-10, shared-database contract). On a database
+# shared with ResilMesh the default deletes only the nodes EdgeGuard created
+# (``edgeguard_managed = true``); ``all`` deletes every node and is an explicit operator choice.
+WIPE_SCOPE_EDGEGUARD = "edgeguard"
+WIPE_SCOPE_ALL = "all"
+VALID_WIPE_SCOPES = frozenset({WIPE_SCOPE_EDGEGUARD, WIPE_SCOPE_ALL})
 
-    Constraints + indexes are preserved (clear_all is documented to keep
-    schema). Caller is responsible for the open connection.
+
+def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD) -> None:
+    """Step 2: wipe Neo4j graph data.
+
+    ``scope="edgeguard"`` (default) calls ``Neo4jClient.clear_edgeguard_managed()`` — only the
+    nodes EdgeGuard created, so partner data on a shared database is kept; ``scope="all"`` calls
+    ``Neo4jClient.clear_all()``. Constraints and indexes are preserved by both. Caller is
+    responsible for the open connection.
     """
+    if scope not in VALID_WIPE_SCOPES:
+        raise ValueError(f"wipe scope must be one of {sorted(VALID_WIPE_SCOPES)}, got {scope!r}")
     if not client.driver:
         raise RuntimeError("Neo4jClient is not connected — cannot wipe")
-    if not client.clear_all():
-        raise RuntimeError("Neo4jClient.clear_all() returned False")
+    if scope == WIPE_SCOPE_ALL:
+        if not client.clear_all():
+            raise RuntimeError("Neo4jClient.clear_all() returned False")
+        return
+    if not client.clear_edgeguard_managed():
+        raise RuntimeError("Neo4jClient.clear_edgeguard_managed() returned False")
 
 
 def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pages: int = 20) -> int:
@@ -730,13 +746,16 @@ def reset_baseline_data(
     verify_timeout_seconds: Optional[float] = None,
     verify_poll_interval_seconds: float = 2.0,
     misp_max_pages: int = 20,
+    wipe_scope: str = WIPE_SCOPE_EDGEGUARD,
 ) -> CleanResult:
     """Atomically wipe + verify the three baseline datastores.
 
     Order:
       1. Probe pre-wipe state (for blast-radius display + audit log).
       2. Wipe checkpoints (idempotent; safe to re-run).
-      3. Wipe Neo4j graph data via ``clear_all`` (preserves schema).
+      3. Wipe Neo4j graph data: ``wipe_scope="edgeguard"`` (default) deletes only
+         EdgeGuard-managed nodes via ``clear_edgeguard_managed``; ``"all"`` wipes every
+         node via ``clear_all`` (schema preserved by both).
       4. Wipe MISP EdgeGuard events via paginated DELETE.
       5. Settle for ``settle_seconds`` (let async commits flush).
       6. Poll-verify every ``verify_poll_interval_seconds`` until all
@@ -798,6 +817,11 @@ def reset_baseline_data(
         # Math: max(60s, count / 5000) — 60s floor for small graphs;
         # 350K-node baseline → 70s; 1M-node graph → 200s.
         # See ``verify_timeout_seconds`` argument doc for rationale.
+        if wipe_scope not in VALID_WIPE_SCOPES:
+            raise BaselineCleanError(
+                f"wipe_scope must be one of {sorted(VALID_WIPE_SCOPES)}, got {wipe_scope!r}",
+                partial_state=before,
+            )
         if verify_timeout_seconds is None:
             verify_timeout_seconds = max(60.0, before.neo4j_count / 5000.0)
             logger.info(
@@ -832,9 +856,20 @@ def reset_baseline_data(
         logger.info("  ✓ checkpoints cleared")
 
         # 3. Wipe Neo4j
-        logger.info("Step 2/3: wiping Neo4j graph data via clear_all()…")
+        if wipe_scope == WIPE_SCOPE_ALL:
+            logger.warning(
+                "Step 2/3: wiping EVERY Neo4j node via clear_all() (wipe_scope=all) — %d node(s) not created by "
+                "EdgeGuard are deleted as well",
+                max(0, before.neo4j_total_count - before.neo4j_count),
+            )
+        else:
+            logger.info(
+                "Step 2/3: wiping EdgeGuard-managed Neo4j nodes via clear_edgeguard_managed() — %d node(s) created "
+                "by other producers are kept",
+                max(0, before.neo4j_total_count - before.neo4j_count),
+            )
         try:
-            _wipe_neo4j(client)
+            _wipe_neo4j(client, wipe_scope)
         except Exception as e:
             raise BaselineCleanError(
                 f"Neo4j wipe failed: {type(e).__name__}: {e}",
@@ -876,7 +911,7 @@ def reset_baseline_data(
         while time.monotonic() < verify_deadline:
             attempt += 1
             after = probe_baseline_state(client=client)
-            if after.all_zero:
+            if after.all_zero and (wipe_scope != WIPE_SCOPE_ALL or after.neo4j_total_count == 0):
                 logger.info("  ✓ verified all-zero on attempt #%d", attempt)
                 break
             logger.info(

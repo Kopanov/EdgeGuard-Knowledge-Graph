@@ -58,12 +58,19 @@ class NATSClient:
 
                 tls_config = ssl.create_default_context()
 
+            # Reconnect indefinitely: with a bounded attempt count (previously 10 × 5 s) a NATS
+            # outage longer than about a minute closed the client for good and the consumer had
+            # to be restarted by hand. Every state change is logged through the callbacks.
             self.nc = await nats.connect(
                 servers=self.servers,
                 tls=tls_config,
-                max_reconnect_attempts=10,
+                max_reconnect_attempts=-1,
                 reconnect_time_wait=5,
                 connect_timeout=30,
+                disconnected_cb=self._on_disconnected,
+                reconnected_cb=self._on_reconnected,
+                error_cb=self._on_error,
+                closed_cb=self._on_closed,
             )
 
             logger.info(f"[OK] Connected to NATS servers: {self.servers}")
@@ -72,6 +79,19 @@ class NATSClient:
         except Exception as e:
             logger.error(f"[ERR] Failed to connect to NATS: {e}")
             return False
+
+    async def _on_disconnected(self) -> None:
+        logger.warning("[NATS] Disconnected from %s — reconnecting (unbounded attempts, 5 s apart)", self.servers)
+
+    async def _on_reconnected(self) -> None:
+        connected_url = getattr(self.nc, "connected_url", None) if self.nc is not None else None
+        logger.info("[NATS] Reconnected to %s", connected_url or self.servers)
+
+    async def _on_error(self, exc: Exception) -> None:
+        logger.error("[NATS] Client error: %s: %s", type(exc).__name__, exc)
+
+    async def _on_closed(self) -> None:
+        logger.error("[NATS] Connection closed — no further reconnect attempts; the consumer must be restarted")
 
     async def subscribe(self, subject: str, callback: Callable):
         """

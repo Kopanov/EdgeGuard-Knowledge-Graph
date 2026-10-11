@@ -15,12 +15,14 @@ client = TestClient(query_api.app)
 
 
 def test_health_endpoint():
-    """Health endpoint should return 200 with status and neo4j_connected fields."""
+    """Health endpoint returns the status and neo4j_connected fields: 200 while healthy, 503 while
+    degraded (so the compose healthcheck and partner probes see a database outage)."""
     response = client.get("/health")
-    assert response.status_code == 200
     data = response.json()
     assert "status" in data
     assert "neo4j_connected" in data
+    assert response.status_code == (200 if data["neo4j_connected"] else 503)
+    assert data["status"] == ("ok" if response.status_code == 200 else "degraded")
 
 
 def test_query_endpoint_missing_neo4j(monkeypatch):
@@ -33,7 +35,7 @@ def test_query_endpoint_missing_neo4j(monkeypatch):
 def test_health_endpoint_returns_version():
     """Health endpoint should include a version field."""
     response = client.get("/health")
-    assert response.status_code == 200
+    assert response.status_code in (200, 503)
     data = response.json()
     # Version may or may not be present depending on package_meta availability
     # but status should always be there

@@ -151,7 +151,7 @@ class TestDestructiveFlows:
         state = baseline_clean.BaselineState(neo4j_count=10, neo4j_total_count=25, neo4j_ok=True)
         text = state.render_summary()
         assert "Neo4j EdgeGuard nodes:" in text and "25" in text
-        assert "15 not created by EdgeGuard" in text and "the wipe deletes every node" in text
+        assert "15 not created by EdgeGuard" in text and "kept unless the wipe scope is 'all'" in text
         same = baseline_clean.BaselineState(neo4j_count=10, neo4j_total_count=10, neo4j_ok=True).render_summary()
         assert "not created by EdgeGuard" not in same
 
