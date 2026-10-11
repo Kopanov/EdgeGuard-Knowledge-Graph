@@ -384,20 +384,42 @@ _TLP_RANK_BY_ID: Dict[str, int] = {
 }
 
 
+# Set once the fallback to TLP:WHITE in ``_default_tlp_marking_id`` has been
+# logged, so a misconfigured deployment produces one warning per process
+# rather than one per exported node.
+_TLP_DEFAULT_WARNED = False
+
+
 def _default_tlp_marking_id() -> str:
     """Marking applied when a node carries no ``tlp`` property.
 
     This is the deployment default ``config.EDGEGUARD_DEFAULT_TLP``
     (``white`` unless configured) — the same value the write side stamps
-    on nodes that arrive without a TLP, so export and storage agree.
+    on nodes that arrive without a TLP, so export and storage agree. When
+    the configuration cannot be read, or names a level outside the TLP
+    ladder, TLP:WHITE is applied and a warning is logged once per process.
     """
+    global _TLP_DEFAULT_WARNED
+    level = "white"
+    problem: Optional[str] = None
     try:
         import config
 
         level = str(getattr(config, "EDGEGUARD_DEFAULT_TLP", "white") or "white").strip().lower()
-    except Exception:  # pragma: no cover - config import failure is a deployment error
-        level = "white"
-    return _TLP_MARKING_BY_LEVEL.get(level, stix2.TLP_WHITE).id
+    except Exception as exc:
+        problem = f"configuration could not be read ({type(exc).__name__}: {exc})"
+    marking = _TLP_MARKING_BY_LEVEL.get(level)
+    if marking is None:
+        problem = problem or f"configured level {level!r} is not a TLP level"
+        marking = stix2.TLP_WHITE
+    if problem and not _TLP_DEFAULT_WARNED:
+        _TLP_DEFAULT_WARNED = True
+        logger.warning(
+            "[stix-export] Deployment default TLP (EDGEGUARD_DEFAULT_TLP) unavailable: %s; "
+            "TLP:WHITE applied to nodes without a tlp property",
+            problem,
+        )
+    return marking.id
 
 
 def _marking_ref_for(props: Dict[str, Any]) -> str:
@@ -675,7 +697,11 @@ class StixExporter:
         # The seed is reduced to one row (the unique key is
         # (indicator_type, value), so one value may exist under several
         # types) and every stage is ordered and limited before it is
-        # collected.
+        # collected. A CVE may exist as twin ``CVE`` / ``Vulnerability``
+        # nodes sharing one cve_id (and one STIX id); the EXPLOITS stage
+        # keeps one node per cve_id — the ``CVE`` twin when present, the
+        # same preference as ``export_cve`` — before the bound, so twins
+        # never take two of the ``limit`` slots.
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
@@ -688,6 +714,8 @@ class StixExporter:
             OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
               WHERE (v:CVE OR v:Vulnerability)
                 AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
+            WITH i, malware, v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
+            WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS v
             WITH i, malware, v ORDER BY v.cve_id LIMIT $limit
             WITH i, malware, collect(DISTINCT v) AS vulns
             OPTIONAL MATCH (i)-[:USES_TECHNIQUE]->(t:Technique)
@@ -780,6 +808,13 @@ class StixExporter:
         thousands of throwaway rows, materially impacting query
         latency. Aggregating at each step keeps the row count bounded
         by the size of one collection at a time.
+
+        The malware → technique pairs are bounded inside a ``CALL``
+        subquery (variable scope clause, Neo4j 5.23+): a plain ``MATCH``
+        there means malware without ``IMPLEMENTS_TECHNIQUE`` edges
+        produces no row and cannot consume a slot of the bound, while
+        the aggregating ``RETURN collect(...)`` always yields exactly one
+        row, so an actor without any such pair still exports.
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
@@ -804,14 +839,13 @@ class StixExporter:
               WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
             WITH a, malware, t ORDER BY t.mitre_id LIMIT $limit
             WITH a, malware, collect(DISTINCT t) AS actor_tech
-            UNWIND (CASE WHEN size(malware) = 0 THEN [null] ELSE malware END) AS m_each
-            OPTIONAL MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
-              WHERE m_each IS NOT NULL AND (mt.edgeguard_managed = true OR mt.edgeguard_enriched = true)
-            WITH a, malware, actor_tech, m_each, mt ORDER BY m_each.name, mt.mitre_id LIMIT $limit
-            WITH a, malware, actor_tech,
-                 collect(DISTINCT CASE WHEN mt IS NULL THEN null ELSE {m: m_each, t: mt} END) AS mal_tech_raw
-            WITH a, malware, actor_tech,
-                 [pair IN mal_tech_raw WHERE pair IS NOT NULL] AS mal_tech
+            CALL (malware) {
+                UNWIND malware AS m_each
+                MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
+                  WHERE (mt.edgeguard_managed = true OR mt.edgeguard_enriched = true)
+                WITH m_each, mt ORDER BY m_each.name, mt.mitre_id LIMIT $limit
+                RETURN collect(DISTINCT {m: m_each, t: mt}) AS mal_tech
+            }
             OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
               WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
             WITH a, malware, actor_tech, mal_tech, c ORDER BY c.name LIMIT $limit
@@ -1007,9 +1041,14 @@ class StixExporter:
         ``limit`` bounds the indicator and sector collections.
 
         A CVE may exist as two twin nodes (``CVE`` — NVD canonical — and
-        ``Vulnerability`` — MISP derived) that share one STIX id. The
-        seed is reduced to one row, preferring the ``CVE`` node because
-        it carries the NVD enrichment promoted by ``_vulnerability_sdo``.
+        ``Vulnerability`` — MISP derived) that share one cve_id and one
+        STIX id. The SDO properties are taken from one twin — the ``CVE``
+        node when present, because it carries the NVD enrichment promoted
+        by ``_vulnerability_sdo`` — while the EXPLOITS and AFFECTS
+        relationships are walked from every twin, so edges that exist
+        only on the other twin still enter the bundle. Rows are
+        de-duplicated before each bound and rows without a match sort
+        last, so they never displace real neighbours.
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
@@ -1022,15 +1061,18 @@ class StixExporter:
             WHERE (v:CVE OR v:Vulnerability)
               AND v.cve_id = $cve_id
               AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
-            WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END) LIMIT 1
-            OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(v)
+            WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
+            WITH head(collect(v)) AS seed, collect(v) AS twins
+            UNWIND twins AS tw
+            OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(tw)
               WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
-            WITH v, i ORDER BY i.value, i.indicator_type LIMIT $limit
-            WITH v, collect(DISTINCT i) AS indicators
-            OPTIONAL MATCH (v)-[:AFFECTS]->(s:Sector)
+            WITH DISTINCT seed, twins, i ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit
+            WITH seed, twins, collect(DISTINCT i) AS indicators
+            UNWIND twins AS tw
+            OPTIONAL MATCH (tw)-[:AFFECTS]->(s:Sector)
               WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
-            WITH v, indicators, s ORDER BY s.name LIMIT $limit
-            RETURN v AS seed,
+            WITH DISTINCT seed, indicators, s ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit
+            RETURN seed,
                    indicators,
                    collect(DISTINCT s) AS sectors
             """,
@@ -1196,9 +1238,17 @@ class StixExporter:
             keys = natural_key_props(label)
             where = " AND ".join(f"n.`{k}` = row.`{k}`" for k in keys)
             key_columns = ", ".join(f"n.`{k}` AS `{k}`" for k in keys)
+            if label in ("CVE", "Vulnerability"):
+                # Twin ``CVE`` / ``Vulnerability`` nodes share the cve_id and
+                # the STIX id; match either label so the aggregate covers
+                # the SOURCED_FROM edges of both twins (the RETURN groups
+                # by cve_id, which merges them into one row).
+                match_clause = f"MATCH (n) WHERE (n:CVE OR n:Vulnerability) AND {where}"
+            else:
+                match_clause = f"MATCH (n:{label}) WHERE {where}"
             cypher = f"""
                 UNWIND $rows AS row
-                MATCH (n:{label}) WHERE {where}
+                {match_clause}
                 OPTIONAL MATCH (n)-[r:SOURCED_FROM]->(:Source)
                 RETURN {key_columns},
                        min(r.source_reported_first_at) AS first_seen_at_source,

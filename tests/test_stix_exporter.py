@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock
 
@@ -45,6 +46,19 @@ class _FakeResult:
 
 
 _AGGREGATE_LABEL_RE = re.compile(r"MATCH \(n:(\w+)\)")
+
+
+def _aggregate_label(cypher: str) -> str:
+    """Node label targeted by a batched ``SOURCED_FROM`` aggregate statement.
+
+    The CVE / Vulnerability twins are matched by either label
+    (``(n:CVE OR n:Vulnerability)``); that form is reported as
+    ``Vulnerability``, the label the exporter prefetches under.
+    """
+    if "(n:CVE OR n:Vulnerability)" in cypher:
+        return "Vulnerability"
+    match = _AGGREGATE_LABEL_RE.search(cypher)
+    return match.group(1) if match else ""
 
 
 class _FakeSession:
@@ -95,9 +109,7 @@ class _FakeSession:
         self.cypher_history.append(cypher)
         self.call_history.append((cypher, params))
         if self._aggregate_rows_by_label is not None and "SOURCED_FROM" in cypher:
-            match = _AGGREGATE_LABEL_RE.search(cypher)
-            label = match.group(1) if match else ""
-            return _FakeResult(self._aggregate_rows_by_label.get(label, []))
+            return _FakeResult(self._aggregate_rows_by_label.get(_aggregate_label(cypher), []))
         return _FakeResult(self._rows)
 
 
@@ -287,7 +299,7 @@ def test_export_cve_uses_with_aggregation_to_avoid_cartesian():
     StixExporter(client).export_cve("CVE-2021-44228")
     q = client.driver._session.main_cypher
     # Aggregation step between the two OPTIONAL MATCHes.
-    assert "WITH v, collect(DISTINCT i) AS indicators" in q
+    assert "WITH seed, twins, collect(DISTINCT i) AS indicators" in q
     # Sectors still collected at RETURN time.
     assert "collect(DISTINCT s) AS sectors" in q
 
@@ -843,12 +855,19 @@ def test_limit_default_and_clamping(method, identifier, row, _collections):
 def test_seed_match_is_reduced_to_one_deterministic_row():
     """The per-collection limits are only well defined for a single seed
     row, so the seed stage carries its own ``ORDER BY ... LIMIT 1`` where
-    the key is not unique (indicator value across types, CVE twin nodes,
-    actor alias hits). Technique.mitre_id is unique and needs none."""
+    the key is not unique (indicator value across types, actor alias
+    hits). The CVE twins are folded into one row instead (properties from
+    the CVE-preferred head, relationships walked from every twin).
+    Technique.mitre_id is unique and needs none."""
     cases = {
         "export_indicator": ("1.2.3.4", _INDICATOR_ROW, "WITH i ORDER BY i.indicator_type LIMIT 1"),
         "export_threat_actor": ("APT28", _ACTOR_ROW, "ORDER BY _match_rank, a.name\n            LIMIT 1"),
-        "export_cve": ("CVE-2021-44228", _CVE_ROW, "WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END) LIMIT 1"),
+        "export_cve": (
+            "CVE-2021-44228",
+            _CVE_ROW,
+            "WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)\n"
+            "            WITH head(collect(v)) AS seed, collect(v) AS twins",
+        ),
     }
     for method, (identifier, row, fragment) in cases.items():
         client = _mk_client([row])
@@ -877,7 +896,7 @@ def test_source_aggregates_use_exactly_one_batched_query_per_label():
     StixExporter(client).export_indicator("1.2.3.4")
     session = client.driver._session
     aggregate_calls = session.aggregate_calls
-    labels = [_AGGREGATE_LABEL_RE.search(c).group(1) for c, _ in aggregate_calls]  # type: ignore[union-attr]
+    labels = [_aggregate_label(c) for c, _ in aggregate_calls]
     assert sorted(labels) == ["Indicator", "Malware", "Technique", "Vulnerability"], labels
     assert len(labels) == len(set(labels)), "one aggregate query per label"
     # 1 export query + 4 aggregate queries — eight nodes, not eight queries.
@@ -939,10 +958,7 @@ def test_batched_aggregates_are_mapped_back_to_the_right_node():
     assert indicator["valid_from"].startswith("2023-01-01")
     assert "x_edgeguard_first_seen_inferred" not in indicator
     # Still one aggregate query per label.
-    assert sorted(_AGGREGATE_LABEL_RE.search(c).group(1) for c, _ in client.driver._session.aggregate_calls) == [  # type: ignore[union-attr]
-        "Indicator",
-        "Malware",
-    ]
+    assert sorted(_aggregate_label(c) for c, _ in client.driver._session.aggregate_calls) == ["Indicator", "Malware"]
 
 
 def test_actor_lookup_is_case_insensitive_and_alias_aware():
@@ -959,6 +975,166 @@ def test_actor_lookup_is_case_insensitive_and_alias_aware():
     assert "$name IN coalesce(a.aliases, [])" not in q
     # The raw input is bound as a parameter; folding happens in Cypher.
     assert client.driver._session.main_params["name"] == "APT28"
+
+
+# The bounds below are applied inside the Cypher, which the fake driver
+# cannot execute; these tests pin the statement shape that prevents the
+# defect and exercise the Python side with rows in the problematic order.
+# The statements themselves are validated with EXPLAIN against a live
+# Neo4j as part of the review process.
+
+
+def test_actor_malware_technique_pairs_bounded_without_null_rows():
+    """Malware without IMPLEMENTS_TECHNIQUE edges must not consume slots of
+    the malware → technique bound: the pairs are produced by a plain
+    ``MATCH`` inside a ``CALL`` subquery (no ``OPTIONAL MATCH`` null rows,
+    no ``[null]`` padding) that is ordered and limited before it is
+    collected, and the aggregating ``RETURN`` keeps the outer row alive
+    when no pair exists."""
+    rows = [
+        {
+            "seed": {"name": "apt28"},
+            # ``a-no-tech`` sorts before ``b-with-tech`` by name and has no
+            # technique; the only pair belongs to the second malware.
+            "malware": [{"name": "a-no-tech"}, {"name": "b-with-tech"}],
+            "actor_tech": [],
+            "mal_tech": [{"m": {"name": "b-with-tech"}, "t": {"mitre_id": "T1059", "name": "CLI"}}],
+            "campaigns": [],
+        }
+    ]
+    client = _mk_client(rows)
+    bundle = StixExporter(client).export_threat_actor("APT28", limit=1)
+    q = client.driver._session.main_cypher
+    start = q.index("CALL (malware) {")
+    end = q.index("OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)", start)
+    subquery = q[start:end]
+    assert subquery.rstrip().endswith("}"), subquery
+    assert "UNWIND malware AS m_each" in subquery
+    assert "MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)" in subquery
+    assert "OPTIONAL MATCH (m_each)" not in q
+    assert "[null]" not in q
+    limited = [line for line in subquery.splitlines() if "LIMIT $limit" in line]
+    assert len(limited) == 1 and "ORDER BY m_each.name, mt.mitre_id" in limited[0]
+    assert "RETURN collect(DISTINCT {m: m_each, t: mt}) AS mal_tech" in subquery
+    # The pair that survives the bound is exported as malware uses attack-pattern.
+    rels = _by_type(bundle, "relationship")
+    pair = [
+        r for r in rels if r["source_ref"].startswith("malware--") and r["target_ref"].startswith("attack-pattern--")
+    ]
+    assert len(pair) == 1
+    assert pair[0]["source_ref"] == _deterministic_id("malware", "b-with-tech")
+    assert pair[0]["relationship_type"] == "uses"
+
+
+def test_indicator_export_dedupes_cve_twins_before_limit():
+    """Twin ``CVE`` / ``Vulnerability`` nodes share a cve_id (and a STIX
+    id). The EXPLOITS stage must keep one node per cve_id — the ``CVE``
+    twin when present — BEFORE ``LIMIT $limit``, so twins do not take two
+    slots and the surviving twin is deterministic."""
+    rows = [
+        {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [{"cve_id": "CVE-2021-44228", "severity": "CRITICAL"}, {"cve_id": "CVE-2021-44228"}],
+            "techniques": [],
+            "sectors": [],
+        }
+    ]
+    client = _mk_client(rows)
+    bundle = StixExporter(client).export_indicator("1.2.3.4")
+    q = client.driver._session.main_cypher
+    prefer = q.index("WITH i, malware, v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)")
+    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS v")
+    bound = q.index("WITH i, malware, v ORDER BY v.cve_id LIMIT $limit")
+    collect = q.index("WITH i, malware, collect(DISTINCT v) AS vulns")
+    assert prefer < dedupe < bound < collect
+    # Twins returned by the driver still collapse to one vulnerability SDO.
+    vulns = _by_type(bundle, "vulnerability")
+    assert len(vulns) == 1
+    assert vulns[0]["id"] == _deterministic_id("vulnerability", "CVE-2021-44228")
+
+
+def test_cve_export_walks_both_twins_and_aggregates_either_label():
+    """The CVE seed takes its properties from the CVE-preferred twin but
+    walks EXPLOITS and AFFECTS from every node sharing the cve_id, so
+    edges attached only to the ``Vulnerability`` twin enter the bundle;
+    rows without a match sort last so they never displace neighbours. The
+    source-aggregate prefetch matches either label and groups by cve_id,
+    so a CVE-only seed still receives its SOURCED_FROM timestamps."""
+    rows = [
+        {
+            "seed": {"cve_id": "CVE-2021-44228", "severity": "CRITICAL"},
+            "indicators": [{"value": "evil.example", "indicator_type": "domain"}],
+            "sectors": [{"name": "energy"}],
+        }
+    ]
+    aggregates = {
+        "Vulnerability": [
+            {
+                "cve_id": "CVE-2021-44228",
+                "first_seen_at_source": "2021-12-10T00:00:00+00:00",
+                "last_seen_at_source": "2024-01-05T00:00:00+00:00",
+            }
+        ]
+    }
+    client = _mk_client(rows, aggregate_rows_by_label=aggregates)
+    bundle = StixExporter(client).export_cve("CVE-2021-44228")
+    q = client.driver._session.main_cypher
+    # Seed folding: one row, CVE-preferred head, every twin kept.
+    assert "LIMIT 1" not in q
+    fold = q.index("WITH head(collect(v)) AS seed, collect(v) AS twins")
+    exploits = q.index("OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(tw)")
+    affects = q.index("OPTIONAL MATCH (tw)-[:AFFECTS]->(s:Sector)")
+    assert fold < exploits < affects
+    assert q.count("UNWIND twins AS tw") == 2
+    # Neighbours are de-duplicated across twins before each bound, nulls last.
+    assert (
+        "WITH DISTINCT seed, twins, i ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit"
+        in q
+    )
+    assert (
+        "WITH DISTINCT seed, indicators, s ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit" in q
+    )
+    assert "RETURN seed," in q
+    # Aggregate prefetch for the seed matches either twin label.
+    vuln_aggregate = next(
+        c for c, _ in client.driver._session.aggregate_calls if _aggregate_label(c) == "Vulnerability"
+    )
+    assert "MATCH (n) WHERE (n:CVE OR n:Vulnerability) AND n.`cve_id` = row.`cve_id`" in vuln_aggregate
+    assert "MATCH (n:Vulnerability)" not in vuln_aggregate
+    assert "RETURN n.`cve_id` AS `cve_id`" in vuln_aggregate
+    seed_sdo = _by_type(bundle, "vulnerability")[0]
+    assert seed_sdo["x_edgeguard_first_seen_at_source"].startswith("2021-12-10")
+    assert seed_sdo["x_edgeguard_last_seen_at_source"].startswith("2024-01-05")
+    assert seed_sdo["x_edgeguard_severity"] == "CRITICAL"
+
+
+def test_default_tlp_marking_warns_once_when_config_unreadable(monkeypatch, caplog):
+    """When ``config`` cannot be imported the default falls back to
+    TLP:WHITE and says so — once per process, not once per node."""
+    monkeypatch.setattr(stix_exporter, "_TLP_DEFAULT_WARNED", False)
+    monkeypatch.setitem(sys.modules, "config", None)  # ``import config`` raises ImportError
+    with caplog.at_level("WARNING", logger="stix_exporter"):
+        assert stix_exporter._default_tlp_marking_id() == _TLP_SPEC_IDS["white"]
+        assert stix_exporter._default_tlp_marking_id() == _TLP_SPEC_IDS["white"]
+    warnings = [r for r in caplog.records if "Deployment default TLP" in r.message]
+    assert len(warnings) == 1, [r.message for r in caplog.records]
+    assert "configuration could not be read" in warnings[0].message
+    assert "TLP:WHITE applied" in warnings[0].message
+
+
+def test_default_tlp_marking_warns_when_configured_level_unknown(monkeypatch, caplog):
+    """A configured ``EDGEGUARD_DEFAULT_TLP`` outside the TLP ladder is not
+    silently replaced: TLP:WHITE is applied and a warning names the level."""
+    import config
+
+    monkeypatch.setattr(stix_exporter, "_TLP_DEFAULT_WARNED", False)
+    monkeypatch.setattr(config, "EDGEGUARD_DEFAULT_TLP", "purple")
+    with caplog.at_level("WARNING", logger="stix_exporter"):
+        assert stix_exporter._default_tlp_marking_id() == _TLP_SPEC_IDS["white"]
+    warnings = [r for r in caplog.records if "Deployment default TLP" in r.message]
+    assert len(warnings) == 1
+    assert "'purple'" in warnings[0].message
 
 
 # ---------------------------------------------------------------------------
