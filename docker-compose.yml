@@ -249,9 +249,15 @@ services:
         # anything already there, so the recorded sync watermark and the resume points are not
         # hidden by the new mounts (a hidden state file would trigger a full sync and a
         # re-collection from scratch).
+        # The two process-held lock files are not migrated: they belong to processes of the
+        # previous container (a different hostname), where the dead-PID pruning cannot see them,
+        # and a copied baseline_in_progress.lock would make the scheduled DAGs skip for up to the
+        # lock age cap (48 h) although no baseline runs.
         for d in state checkpoints; do
           if [ -d "/legacy/$d" ]; then
-            cp -an "/legacy/$d/." "/opt/airflow/$d/" || true
+            find "/legacy/$d" -mindepth 1 -maxdepth 1 \
+              ! -name baseline_in_progress.lock ! -name pipeline.lock \
+              -exec cp -an {} "/opt/airflow/$d/" \; || true
           fi
         done
         chown -R 50000:0 /opt/airflow/state /opt/airflow/checkpoints

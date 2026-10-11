@@ -53,8 +53,11 @@ class TestSharedStateDirectories:
         init = _compose()["services"]["airflow-init"]
         assert "airflow_db:/legacy:ro" in init["volumes"]
         script = "\n".join(init["command"])
-        assert 'cp -an "/legacy/$d/." "/opt/airflow/$d/"' in script
+        assert 'find "/legacy/$d" -mindepth 1 -maxdepth 1' in script and "-exec cp -an {}" in script
         assert script.index("cp -an") < script.index("chown -R 50000:0"), "copy before the ownership fix"
+        # Process-held lock files of the previous container must not be carried over: a copied
+        # baseline_in_progress.lock would make the scheduled DAGs skip until the age cap.
+        assert "! -name baseline_in_progress.lock" in script and "! -name pipeline.lock" in script
 
     def test_container_paths_match_the_code_defaults(self):
         """The DAG derives BASE_DIR from its own location and the lock module from src/..; with src
