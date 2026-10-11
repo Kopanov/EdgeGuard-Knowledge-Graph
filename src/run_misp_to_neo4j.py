@@ -232,6 +232,12 @@ def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
     return True
 
 
+# Outcome of the last index listing (read by ``fetch_edgeguard_events`` to record it in the run
+# stats): ``truncated`` is True when the listing stopped at ``EDGEGUARD_MISP_MAX_PAGES`` with a
+# full last page, i.e. events beyond the cap were not listed.
+INDEX_FETCH_STATE: Dict[str, bool] = {"truncated": False}
+
+
 def _fetch_edgeguard_events_via_requests_index(
     session: requests.Session,
     misp_base: str,
@@ -264,9 +270,11 @@ def _fetch_edgeguard_events_via_requests_index(
     filter at the post-loop comprehension stays as defense-in-depth.
     """
     base = misp_base.rstrip("/")
+    INDEX_FETCH_STATE["truncated"] = False
     for path in ("/events/index", "/events"):
         pages: List[Dict[str, Any]] = []
         path_unusable = False
+        truncated = False
         for page in range(1, MISP_EVENTS_INDEX_MAX_PAGES + 1):
             try:
                 params: dict = {"limit": MISP_EVENTS_INDEX_PAGE_SIZE, "page": page}
@@ -298,8 +306,21 @@ def _fetch_edgeguard_events_via_requests_index(
             pages.extend(norm)
             if len(norm) < MISP_EVENTS_INDEX_PAGE_SIZE:
                 break
+            if page == MISP_EVENTS_INDEX_MAX_PAGES:
+                # The last allowed page was full: the listing most likely continues.
+                truncated = True
         if path_unusable:
             continue
+        if truncated:
+            INDEX_FETCH_STATE["truncated"] = True
+            logger.warning(
+                "[FETCH] Index %s stopped at the page cap (%d pages × %d rows = %d events): events beyond the cap "
+                "are not synced this run — raise EDGEGUARD_MISP_MAX_PAGES or narrow the window",
+                path,
+                MISP_EVENTS_INDEX_MAX_PAGES,
+                MISP_EVENTS_INDEX_PAGE_SIZE,
+                len(pages),
+            )
         filtered = [ev for ev in pages if _is_edgeguard_index_event(ev) and _event_covers_since(ev, since)]
         logger.info(
             "[FETCH] Index %s: %s event(s) from API, %s after EdgeGuard filter (since=%s)",
@@ -1160,6 +1181,8 @@ class MISPToNeo4jSync:
             logger.info(f"Fetching EdgeGuard events from MISP (since: {since})...")
 
             indexed = _fetch_edgeguard_events_via_requests_index(self.session, self.misp_url, since)
+            if INDEX_FETCH_STATE.get("truncated"):
+                self.stats["events_index_truncated"] = True
             if indexed is not None:
                 normalized = normalize_misp_event_index_payload(indexed)
                 if normalized:
@@ -4721,6 +4744,13 @@ class MISPToNeo4jSync:
             logger.info("[OK] MISP → Neo4j Sync Complete")
             logger.info("=" * 60)
             logger.info(f"Duration: {duration:.2f} seconds")
+            if self.stats.get("events_index_truncated"):
+                logger.warning(
+                    "MISP event index was cut at the page cap this run (EDGEGUARD_MISP_MAX_PAGES=%d × "
+                    "EDGEGUARD_MISP_PAGE_SIZE=%d): events beyond the cap were not synced",
+                    MISP_EVENTS_INDEX_MAX_PAGES,
+                    MISP_EVENTS_INDEX_PAGE_SIZE,
+                )
             logger.info(f"Events processed: {self.stats['events_processed']}")
             events_failed = self.stats.get("events_failed", 0)
             if events_failed:
