@@ -15,6 +15,7 @@ import asyncio
 import inspect
 import logging
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -26,10 +27,25 @@ from fastapi.testclient import TestClient
 import baseline_clean
 import health_check
 import metrics_server
-import nats_client
 import query_api
 
 _ROOT = Path(__file__).resolve().parents[1]
+
+
+def _real_nats_client():
+    """Import ``nats_client`` against the real ``nats`` package.
+
+    Other test modules register ``MagicMock`` placeholders for ``nats`` in ``sys.modules``; a
+    placeholder is not a package, so ``from nats.aio.client import ...`` fails at import time.
+    """
+    for key in list(sys.modules):
+        if key == "nats_client" or key == "nats" or key.startswith("nats."):
+            if key == "nats_client" or isinstance(sys.modules[key], MagicMock):
+                del sys.modules[key]
+    pytest.importorskip("nats.aio.client")
+    import nats_client
+
+    return nats_client
 
 
 class TestWipeScopeWiring:
@@ -144,6 +160,7 @@ class TestRestHealthAndReconnect:
 
 class TestNatsReconnectPolicy:
     def test_connect_requests_unbounded_reconnects_with_callbacks(self, monkeypatch):
+        nats_client = _real_nats_client()
         captured: dict = {}
 
         async def fake_connect(**kwargs):
@@ -159,6 +176,7 @@ class TestNatsReconnectPolicy:
             assert asyncio.iscoroutinefunction(captured[name]), name
 
     def test_callbacks_log_state_changes(self, caplog):
+        nats_client = _real_nats_client()
         client = nats_client.NATSClient(["nats://edge:4222"], use_tls=False)
         client.nc = MagicMock(connected_url="nats://edge:4222")
         with caplog.at_level(logging.INFO, logger="nats_client"):
