@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, NoReturn, Optional
 
@@ -69,11 +70,15 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    if reconnect_task is not None and not reconnect_task.done():
+    if reconnect_task is not None:
+        # Cancel and wait for the task to acknowledge; the awaited future resolves at once, the
+        # daemon worker thread (if a connect attempt is in flight) ends with the process.
         reconnect_task.cancel()
+        await asyncio.gather(reconnect_task, return_exceptions=True)
 
-    # Shutdown
-    if neo4j_client:
+    # Shutdown. While a connect attempt is still in flight the driver may be assigned or closed
+    # by the worker thread; nothing is closed here in that case (the process is exiting).
+    if neo4j_client and not _reconnect_in_progress:
         logger.info("🔌 Closing Neo4j connection...")
         neo4j_client.close()
 
@@ -449,16 +454,55 @@ class ActorSummaryResponse(BaseModel):
 # thread every ``_RECONNECT_INTERVAL_SEC`` until it succeeds, and the request guard only reads the
 # connection state.
 _RECONNECT_INTERVAL_SEC = 30.0
+# True while a background ``connect()`` attempt is in flight. ``connect()`` assigns the driver
+# before its verification query and closes it again on failure, so requests must not use the
+# client during that window; the guard and ``/health`` answer 503 instead.
+_reconnect_in_progress = False
+
+
+def _run_in_daemon_thread(fn):
+    """Run ``fn`` in a daemon thread and return a future that resolves on the event loop.
+
+    A daemon thread (not the default executor) so that a connect attempt still waiting on the
+    driver's connection timeout cannot delay process exit; a cancelled future simply drops the
+    result when the thread finishes.
+    """
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+
+    def _deliver(setter, value) -> None:
+        if not future.done():
+            setter(value)
+
+    def _target() -> None:
+        try:
+            result = fn()
+        except BaseException as exc:  # delivered to the awaiting task as an exception
+            payload, setter = exc, future.set_exception
+        else:
+            payload, setter = result, future.set_result
+        try:
+            loop.call_soon_threadsafe(_deliver, setter, payload)
+        except RuntimeError:  # event loop already closed (process exiting)
+            pass
+
+    threading.Thread(target=_target, name="neo4j-reconnect", daemon=True).start()
+    return future
 
 
 async def _reconnect_until_connected(client, interval: float = _RECONNECT_INTERVAL_SEC) -> None:
-    """Retry ``client.connect()`` in a worker thread until it succeeds (cancelled on shutdown)."""
-    while not client.is_connected():
+    """Retry ``client.connect()`` off the event loop until it succeeds (cancelled on shutdown)."""
+    global _reconnect_in_progress
+    while True:
+        _reconnect_in_progress = True
         try:
-            ok = await asyncio.to_thread(client.connect)
+            ok = await _run_in_daemon_thread(client.connect)
+        except asyncio.CancelledError:
+            raise  # the flag stays True: the worker may still touch the driver
         except Exception as exc:  # the driver already logged; keep retrying
             ok = False
             logger.warning("Neo4j reconnect attempt failed: %s", exc)
+        _reconnect_in_progress = False
         if ok:
             logger.info("[OK] Connected to Neo4j (startup connection had failed)")
             return
@@ -466,10 +510,10 @@ async def _reconnect_until_connected(client, interval: float = _RECONNECT_INTERV
 
 
 def _require_neo4j() -> None:
-    """Raise 503 unless the Neo4j client is connected. Never blocks: reconnection is the
-    lifespan's background task."""
+    """Raise 503 unless the Neo4j client is connected and no connect attempt is in flight.
+    Never blocks: reconnection is the lifespan's background task."""
     client = neo4j_client
-    if client is None or not client.is_connected():
+    if client is None or _reconnect_in_progress or not client.is_connected():
         raise HTTPException(status_code=503, detail="Neo4j not connected")
 
 
@@ -482,7 +526,8 @@ async def health():
     """
     global neo4j_client
 
-    if neo4j_client is None:
+    if neo4j_client is None or _reconnect_in_progress:
+        # No client, or a background connect attempt is assigning/closing the driver right now.
         neo4j_ok = False
     else:
         # Full ping + APOC check — Neo4jClient.is_connected() is driver-only (fast path for other routes).

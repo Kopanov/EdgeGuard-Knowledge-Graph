@@ -102,6 +102,63 @@ class TestRestHealthAndReconnect:
     @pytest.fixture(autouse=True)
     def _reset_guard(self, monkeypatch):
         monkeypatch.setattr(query_api, "_API_KEY", None)
+        monkeypatch.setattr(query_api, "_reconnect_in_progress", False)
+
+    def test_guard_and_health_refuse_while_a_connect_attempt_is_in_flight(self, monkeypatch):
+        """connect() assigns the driver before verifying it; during that window the client looks
+        connected but must not be used."""
+        client = _Client(connected=True, healthy=True)
+        monkeypatch.setattr(query_api, "neo4j_client", client)
+        monkeypatch.setattr(query_api, "_reconnect_in_progress", True)
+        with pytest.raises(query_api.HTTPException) as exc:
+            query_api._require_neo4j()
+        assert exc.value.status_code == 503
+        calls = {"n": 0}
+        client.health_check = lambda: calls.__setitem__("n", calls["n"] + 1) or {"healthy": True}  # type: ignore[method-assign]
+        assert TestClient(query_api.app).get("/health").status_code == 503
+        assert calls["n"] == 0, "the driver must not be touched while a connect attempt is in flight"
+        monkeypatch.setattr(query_api, "_reconnect_in_progress", False)
+        query_api._require_neo4j()
+
+    def test_connect_attempts_run_in_a_daemon_thread_and_clear_the_flag(self):
+        seen: dict = {}
+
+        def connect():
+            t = threading.current_thread()
+            seen["daemon"], seen["name"], seen["in_progress"] = t.daemon, t.name, query_api._reconnect_in_progress
+            return True
+
+        client = _Client(connected=False)
+        client.connect = connect  # type: ignore[method-assign]
+        asyncio.run(query_api._reconnect_until_connected(client, interval=0))
+        assert seen == {"daemon": True, "name": "neo4j-reconnect", "in_progress": True}
+        assert query_api._reconnect_in_progress is False
+
+    def test_cancelled_reconnect_leaves_the_flag_set_and_returns_promptly(self):
+        release = threading.Event()
+
+        def connect():
+            release.wait(5)  # a connect attempt still waiting on the driver
+            return True
+
+        client = _Client(connected=False)
+        client.connect = connect  # type: ignore[method-assign]
+
+        async def scenario():
+            task = asyncio.create_task(query_api._reconnect_until_connected(client, interval=0))
+            await asyncio.sleep(0.05)
+            task.cancel()
+            started = time.monotonic()
+            await asyncio.gather(task, return_exceptions=True)
+            return time.monotonic() - started
+
+        try:
+            waited = asyncio.run(scenario())
+        finally:
+            release.set()
+        assert waited < 1.0, "shutdown must not wait for the in-flight connect attempt"
+        assert query_api._reconnect_in_progress is True, "an in-flight attempt keeps the flag so close() is skipped"
+        query_api._reconnect_in_progress = False
 
     def test_health_is_503_while_degraded_and_200_when_healthy(self, monkeypatch):
         monkeypatch.setattr(query_api, "neo4j_client", _Client(connected=True, healthy=False))
@@ -166,6 +223,8 @@ class TestRestHealthAndReconnect:
         src = inspect.getsource(query_api.lifespan)
         assert "asyncio.create_task(_reconnect_until_connected(neo4j_client))" in src
         assert "reconnect_task.cancel()" in src
+        assert "await asyncio.gather(reconnect_task, return_exceptions=True)" in src
+        assert "if neo4j_client and not _reconnect_in_progress:" in src, "close() must not race an in-flight connect"
 
     def test_every_data_route_uses_the_guard(self):
         src = (_ROOT / "src" / "query_api.py").read_text()
