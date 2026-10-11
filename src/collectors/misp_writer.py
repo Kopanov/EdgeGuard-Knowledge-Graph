@@ -24,7 +24,7 @@ import requests
 import urllib3
 
 import source_registry  # noqa: E402  — single source of truth for source→MISP-tag mapping (chip 5a)
-from collectors.collector_utils import TransientServerError, retry_with_backoff
+from collectors.collector_utils import TransientServerError, retry_after_sleep_seconds, retry_with_backoff
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
@@ -402,6 +402,14 @@ class MispTransientError(TransientServerError):
     stay permanent."""
 
 
+class MispLookupError(Exception):
+    """The event lookup (``/events/restSearch``) answered with a non-transient failure.
+
+    Raised instead of returning an empty result: an empty result means "no such event" and leads
+    to event creation, which after a failed lookup could duplicate a same-day event that exists.
+    """
+
+
 # Let @retry_with_backoff on _get_or_create_event / _push_batch retry these (must re-raise, not swallow).
 # MispTransientError is a TransientServerError subclass, which is also in the
 # decorator's catch tuple in collector_utils.retry_with_backoff.
@@ -710,12 +718,26 @@ class MISPWriter:
             timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
         )
         if response.status_code != 200:
-            logger.warning(
-                "MISP restSearch failed for event lookup: HTTP %s — %s",
+            detail = (response.text or "")[:500]
+            if response.status_code == 429 or response.status_code >= 500:
+                # Rate limit or server error: let @retry_with_backoff on the caller retry with its
+                # exponential backoff. No sleep here: the confirming lookup runs inside the
+                # cross-process event-creation lock, and a Retry-After wait taken there would hold
+                # the lock against every parallel collector.
+                logger.warning(
+                    "MISP restSearch for event lookup answered HTTP %s — the caller retries with backoff: %s",
+                    response.status_code,
+                    detail,
+                )
+                raise MispTransientError(
+                    f"MISP {response.status_code} on event lookup for {event_name!r}", response=response
+                )
+            logger.error(
+                "MISP restSearch for event lookup failed: HTTP %s — %s; no event is created after a failed lookup",
                 response.status_code,
-                (response.text or "")[:500],
+                detail,
             )
-            return []
+            raise MispLookupError(f"MISP {response.status_code} on event lookup for {event_name!r}")
         data = response.json()
         return data.get("response") or []
 
@@ -967,7 +989,11 @@ class MISPWriter:
         except _TRANSIENT_HTTP_ERRORS:
             raise
         except Exception as e:
-            logger.warning(f"Event lookup error: {e}")
+            # A lookup that failed for a non-transient reason must not fall through to event
+            # creation: the same-day event may exist and a second one would duplicate it. The
+            # batch is reported as failed by the caller (push_items counts a missing event id).
+            logger.error("Event lookup for %r failed (%s: %s) — no event is created", event_name, type(e).__name__, e)
+            return None
 
         event_data = {
             "Event": {
@@ -1946,8 +1972,21 @@ class MISPWriter:
                     seen.add(key)
                     unique_attrs.append(attr)
 
-            # Get or create event
-            event_id = self._get_or_create_event(source, date)
+            # Get or create event. A transient failure that survives the retry decorator is
+            # recorded as a failed batch for this source group; the remaining groups are pushed.
+            try:
+                event_id = self._get_or_create_event(source, date)
+            except _TRANSIENT_HTTP_ERRORS as e:
+                logger.error(
+                    "Event lookup/creation for source %r failed after retries (%s: %s) — %d attribute(s) counted as failed",
+                    source,
+                    type(e).__name__,
+                    e,
+                    len(unique_attrs),
+                )
+                self.stats["errors"] += 1
+                total_failed += len(unique_attrs)
+                continue
             if not event_id:
                 total_failed += len(unique_attrs)
                 continue
@@ -2553,12 +2592,23 @@ class MISPWriter:
                 # don't want to inflate the counter once per retry. The
                 # terminal failure path (last raise from the decorator) is
                 # handled by the outer caller which counts failed_count.
-                if response.status_code >= 500:
+                if response.status_code == 429 or response.status_code >= 500:
+                    if response.status_code == 429:
+                        # Rate limited: honour Retry-After (bounded by collector_utils) before the
+                        # decorator's exponential backoff retries the batch.
+                        wait = retry_after_sleep_seconds(response, fallback=0.0)
+                        if wait:
+                            logger.warning(
+                                "MISP rate limit (HTTP 429) on event %s — sleeping %.0fs (Retry-After) before the retry",
+                                event_id,
+                                wait,
+                            )
+                            time.sleep(wait)
                     raise MispTransientError(
                         f"MISP {response.status_code} pushing batch to event {event_id}",
                         response=response,
                     )
-                # 4xx: permanent validation failure — count once and return.
+                # Other 4xx: permanent validation failure — count once and return.
                 self.stats["errors"] += 1
                 return 0, len(attributes)
 
