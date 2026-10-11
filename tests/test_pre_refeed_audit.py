@@ -261,7 +261,8 @@ class TestComposeForwardsTrustAllowlistAndAirflowApiCredentials:
     def test_airflow_api_credentials_reach_only_the_airflow_service(self):
         d = self._compose()
         af = d["services"]["airflow"]["environment"]
-        assert af["AIRFLOW_API_USER"] == "${AIRFLOW_API_USER:-airflow}"
+        # ``admin`` is the user ``airflow standalone`` creates (Airflow 3 Simple auth manager).
+        assert af["AIRFLOW_API_USER"] == "${AIRFLOW_API_USER:-admin}"
         assert af["AIRFLOW_API_PASSWORD"] == "${AIRFLOW_API_PASSWORD:-}"
         assert af["EDGEGUARD_PARENT_DAG_LIVENESS_CHECK"] == "${EDGEGUARD_PARENT_DAG_LIVENESS_CHECK:-true}", (
             "empty would disable the safeguard"
