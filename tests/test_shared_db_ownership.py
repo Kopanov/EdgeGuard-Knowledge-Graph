@@ -133,6 +133,22 @@ class TestMarkerOnCreatePathOnly:
         """Scalar or list in; lower-cased, de-duplicated, vocabulary-checked list out (Bugbot on #147)."""
         assert nc._normalise_zone_list(raw) == expected
 
+    def test_indicator_from_alert_carries_the_same_validated_zones(self):
+        """Bugbot on #147 round 2: the Indicator written for an alert must get the same normalised
+        zone list as the Alert node, not the raw payload strings."""
+        client = _client()
+        client.create_indicator_from_alert(
+            "1.2.3.4", "ipv4", "US-Gov", alert_data={"alert_id": "a-1"}, zones=["Energy", "us-gov"]
+        )
+        session = client.driver.session.return_value.__enter__.return_value
+        kwargs = next(c.kwargs for c in session.run.call_args_list if "zone" in c.kwargs)
+        assert kwargs["zone"] == ["energy"]
+        assert kwargs["tag"] == "energy_ipv4"
+        client2 = _client()
+        client2.create_indicator_from_alert("1.2.3.4", "ipv4", "us-gov", alert_data={"alert_id": "a-2"})
+        session2 = client2.driver.session.return_value.__enter__.return_value
+        assert next(c.kwargs for c in session2.run.call_args_list if "zone" in c.kwargs)["zone"] == ["global"]
+
     def test_unknown_zones_are_logged_and_dropped(self, caplog):
         with caplog.at_level("WARNING", logger="neo4j_client"):
             assert nc._normalise_zone_list(["us-gov", "energy"]) == ["energy"]

@@ -6642,8 +6642,9 @@ class Neo4jClient:
         # so the alert path keys the node sync data already uses.
         normalized_type = normalized_type or "unknown"
 
-        # zone is now an array
-        zone_array = zones if zones else (zone if isinstance(zone, list) else [zone])
+        # One validated zone list for the whole alert (Bugbot on #147): the Indicator must carry
+        # the same zones as the Alert node it is INVOLVED in, or zone-filtered reads see one side only.
+        zone_array = _normalise_zone_list(zones if zones else zone)
 
         data = {
             "indicator_type": normalized_type,
