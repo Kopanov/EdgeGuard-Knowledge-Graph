@@ -21,10 +21,10 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import strawberry
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -304,9 +304,19 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
     )
 
 
+def _clamp_limit(limit: int) -> int:
+    """1 ≤ limit ≤ _MAX_GRAPHQL_LIMIT (negative or zero values reached Cypher before 2026-10)."""
+    return min(max(int(limit), 1), _MAX_GRAPHQL_LIMIT)
+
+
+def _clamp_offset(offset: int) -> int:
+    """0 ≤ offset ≤ _MAX_GRAPHQL_OFFSET."""
+    return min(max(int(offset), 0), _MAX_GRAPHQL_OFFSET)
+
+
 def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> List[Vulnerability]:
     conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
-    params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset, "min_cvss": f.min_cvss}
+    params: dict = {"limit": _clamp_limit(f.limit), "offset": _clamp_offset(f.offset), "min_cvss": f.min_cvss}
 
     if f.zone is not strawberry.UNSET and f.zone:
         conditions.append("$zone IN n.zone")
@@ -363,7 +373,7 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
 
 def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicator]:
     conditions = ["(n.edgeguard_managed = true OR n.edgeguard_enriched = true)"]
-    params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset}
+    params: dict = {"limit": _clamp_limit(f.limit), "offset": _clamp_offset(f.offset)}
 
     if f.zone is not strawberry.UNSET and f.zone:
         conditions.append("$zone IN n.zone")
@@ -435,7 +445,7 @@ _MAX_GRAPHQL_LIMIT = 500
 
 def _resolve_list(client: Neo4jClient, label: str, f: NodeFilter, cls, mapper):
     conditions = []
-    params: dict = {"limit": min(f.limit, _MAX_GRAPHQL_LIMIT), "offset": f.offset}
+    params: dict = {"limit": _clamp_limit(f.limit), "offset": _clamp_offset(f.offset)}
 
     if f.edgeguard_managed_only:
         conditions.append("(n.edgeguard_managed = true OR n.edgeguard_enriched = true)")
@@ -704,8 +714,17 @@ GRAPHQL_PLAYGROUND = os.getenv("EDGEGUARD_GRAPHQL_PLAYGROUND", "false").lower() 
 # Both are extensions, not middleware — they run inside Strawberry's
 # request lifecycle so the limit applies BEFORE the resolver fans out
 # (vs. middleware which would run after parse).
+from graphql import (  # noqa: E402
+    FieldNode,
+    FragmentDefinitionNode,
+    FragmentSpreadNode,
+    GraphQLError,
+    InlineFragmentNode,
+    OperationDefinitionNode,
+    ValidationRule,
+)
 from graphql.validation import NoSchemaIntrospectionCustomRule  # noqa: E402
-from strawberry.extensions import QueryDepthLimiter  # noqa: E402
+from strawberry.extensions import MaxAliasesLimiter, QueryDepthLimiter, SchemaExtension  # noqa: E402
 from strawberry.extensions.add_validation_rules import AddValidationRules  # noqa: E402
 
 
@@ -723,13 +742,210 @@ def _env_graphql_max_depth(default: int = 8) -> int:
 
 
 _GRAPHQL_MAX_DEPTH = _env_graphql_max_depth()
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    """Positive integer from the environment; unset, empty, non-numeric or non-positive → default."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# 2026-10 readiness check: 300 aliased root fields ran 300 Cypher statements in one request.
+_GRAPHQL_MAX_ALIASES = _env_positive_int("EDGEGUARD_GRAPHQL_MAX_ALIASES", 15)
+_MAX_GRAPHQL_OFFSET = 100_000  # same ceiling as the REST API
+# Expanded selection budget checked BEFORE validation (Bugbot on #151, round 2): Strawberry's
+# QueryDepthLimiter re-walks every fragment spread without memoisation, so a chain of doubling
+# fragments costs exponential validation time regardless of the alias / root-field caps.
+_GRAPHQL_MAX_SELECTIONS = _env_positive_int("EDGEGUARD_GRAPHQL_MAX_SELECTIONS", 2000)
+_GRAPHQL_MAX_FRAGMENT_DEPTH = 16
+_GRAPHQL_MAX_FIELD_NESTING = 64  # plain field nesting; the depth limiter (8) still applies after validation
+_MAX_BODY_BYTES = _env_positive_int("EDGEGUARD_MAX_BODY_BYTES", 1 * 1024 * 1024)
 # Note: ``_IS_PROD`` is defined at the top of this module (line ~70)
 # alongside the API-key auth check. The single source of truth is
 # ``_is_prod_env()`` so the introspection-enable check below and the
 # auth-gate check above ALWAYS agree. PR-N23 Bugbot round 1 (PR #107
 # MEDIUM) — pre-fix had two separate env reads that could disagree.
 
-_extensions: list = [QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH)]
+
+def _make_root_field_limit_rule(max_fields: int) -> type:  # noqa: C901 — one rule, two small methods
+    """graphql-core validation rule capping the root fields one operation executes.
+
+    Counts aliases and expands fragment spreads (every spread occurrence counts), which is the
+    fan-out ``MaxAliasesLimiter`` misses: one fragment holding a few aliased root fields, spread
+    many times, still executed one Cypher statement per expanded field (Bugbot on #151).
+    """
+
+    class MaxRootFieldsRule(ValidationRule):
+        # Bugbot on #151: a chain of doubling fragments made the expansion exponential and a long
+        # linear chain hit RecursionError before the cap was checked. The walk now stops as soon as
+        # the running total exceeds the cap (bounded work: at most max_fields + 1 fields are ever
+        # counted) and refuses nesting deeper than _MAX_SPREAD_DEPTH.
+        _MAX_SPREAD_DEPTH = 16
+
+        def enter_operation_definition(self, node, *_args):  # noqa: ANN001
+            total = self._count(node.selection_set, frozenset(), 0, 0)
+            if total > max_fields:
+                self.report_error(
+                    GraphQLError(
+                        f"more than {max_fields} root fields requested (aliases and fragments expanded); "
+                        f"allowed: {max_fields}",
+                        node,
+                    )
+                )
+
+        def _count(self, selection_set, seen, total, depth):  # noqa: ANN001
+            """Running count of root fields; returns early once ``total`` exceeds the cap."""
+            if selection_set is None:
+                return total
+            if depth > self._MAX_SPREAD_DEPTH:
+                return max_fields + 1  # too deeply nested to be legitimate: treat as over the cap
+            for sel in selection_set.selections:
+                if total > max_fields:
+                    return total
+                if isinstance(sel, FieldNode):
+                    total += 1
+                elif isinstance(sel, InlineFragmentNode):
+                    total = self._count(sel.selection_set, seen, total, depth + 1)
+                elif isinstance(sel, FragmentSpreadNode):
+                    name = sel.name.value
+                    if name in seen:
+                        continue  # cycles are rejected by NoFragmentCyclesRule; never recurse into one
+                    fragment = self.context.get_fragment(name)
+                    if fragment is not None:
+                        total = self._count(fragment.selection_set, seen | {name}, total, depth + 1)
+            return total
+
+    return MaxRootFieldsRule
+
+
+def _expanded_selection_count(document: Any, cap: int, max_depth: int) -> tuple[int, Optional[str]]:
+    """Selections an operation would execute after expanding fragments, computed with memoisation
+    (linear in document size). Returns ``(count, problem)``; ``problem`` names a fragment cycle or
+    nesting deeper than ``max_depth``. Counting stops once ``cap`` is exceeded."""
+    fragments = {d.name.value: d for d in document.definitions if isinstance(d, FragmentDefinitionNode)}
+    size_memo: Dict[str, int] = {}
+    nest_memo: Dict[str, int] = {}
+    problem: Optional[str] = None
+
+    def nesting(name: str, stack: frozenset) -> int:
+        """Spread levels below fragment ``name`` (memoised by name; independent of where it is used —
+        Bugbot on #151: a depth check that only ran on the first visit was bypassed by spreading F0..Fn
+        in that order). The walk itself is bounded: once the chain of spreads being followed is longer
+        than ``max_depth`` the document is rejected without recursing further, so a long linear chain
+        can never exhaust the interpreter stack (Bugbot round 4)."""
+        nonlocal problem
+        if name in nest_memo:
+            return nest_memo[name]
+        fragment = fragments.get(name)
+        if fragment is None:
+            return 0
+        if name in stack:
+            problem = f"fragment cycle through {name}"
+            return max_depth + 1
+        if len(stack) > max_depth:
+            problem = f"fragment nesting deeper than {max_depth}"
+            return max_depth + 1
+        below = 0
+
+        def walk(selection_set: Any, field_depth: int) -> None:
+            nonlocal below, problem
+            if selection_set is None or problem is not None:
+                return
+            if field_depth > _GRAPHQL_MAX_FIELD_NESTING:
+                problem = f"selection nesting deeper than {_GRAPHQL_MAX_FIELD_NESTING}"
+                return
+            for sel in selection_set.selections:
+                if isinstance(sel, (FieldNode, InlineFragmentNode)):
+                    walk(sel.selection_set, field_depth + 1)
+                elif isinstance(sel, FragmentSpreadNode):
+                    below = max(below, 1 + nesting(sel.name.value, stack | {name}))
+                if problem is not None:
+                    return
+
+        walk(fragment.selection_set, 0)
+        if problem is None:
+            nest_memo[name] = below
+        return below
+
+    def size(selection_set: Any, stack: frozenset, depth: int, field_depth: int = 0) -> int:
+        nonlocal problem
+        if selection_set is None or problem is not None:
+            return 0
+        if field_depth > _GRAPHQL_MAX_FIELD_NESTING:
+            problem = f"selection nesting deeper than {_GRAPHQL_MAX_FIELD_NESTING}"
+            return cap + 1
+        total = 0
+        for sel in selection_set.selections:
+            if isinstance(sel, FieldNode):
+                total += 1 + size(sel.selection_set, stack, depth, field_depth + 1)
+            elif isinstance(sel, InlineFragmentNode):
+                total += size(sel.selection_set, stack, depth + 1)
+            elif isinstance(sel, FragmentSpreadNode):
+                name = sel.name.value
+                if name in stack:
+                    problem = f"fragment cycle through {name}"
+                    return cap + 1
+                if depth + 1 + nesting(name, stack) > max_depth:
+                    problem = problem or f"fragment nesting deeper than {max_depth}"
+                    return cap + 1
+                if name not in size_memo:
+                    fragment = fragments.get(name)
+                    size_memo[name] = size(fragment.selection_set, stack | {name}, depth + 1) if fragment else 0
+                total += size_memo[name]
+            if total > cap or problem is not None:
+                return total
+        return total
+
+    total = 0
+    for definition in document.definitions:
+        if isinstance(definition, OperationDefinitionNode):
+            total += size(definition.selection_set, frozenset(), 0)
+            if total > cap or problem:
+                break
+    return total, problem
+
+
+class FragmentBudget(SchemaExtension):
+    """Rejects a document whose expanded size, fragment nesting or fragment cycles would make
+    validation itself expensive — before any validation rule runs. Setting
+    ``pre_execution_errors`` makes Strawberry skip ``validate_document`` and answer with the error."""
+
+    def on_validate(self):  # noqa: ANN201 — Strawberry hook (generator)
+        ctx = self.execution_context
+        document = getattr(ctx, "graphql_document", None)
+        if document is not None and ctx.pre_execution_errors is None:
+            count, problem = _expanded_selection_count(document, _GRAPHQL_MAX_SELECTIONS, _GRAPHQL_MAX_FRAGMENT_DEPTH)
+            if problem is not None:
+                ctx.pre_execution_errors = [GraphQLError(f"Query rejected: {problem}")]
+            elif count > _GRAPHQL_MAX_SELECTIONS:
+                ctx.pre_execution_errors = [
+                    GraphQLError(
+                        f"Query rejected: more than {_GRAPHQL_MAX_SELECTIONS} selections after fragment expansion"
+                    )
+                ]
+        yield
+
+
+class MaxRootFieldsLimiter(AddValidationRules):
+    """Extension installing the root-field rule (its own class so it is distinguishable from the
+    prod-only introspection rule, which is also an AddValidationRules instance)."""
+
+    def __init__(self, max_fields: int) -> None:
+        super().__init__([_make_root_field_limit_rule(max_fields)])
+
+
+_extensions: list = [
+    FragmentBudget(),
+    QueryDepthLimiter(max_depth=_GRAPHQL_MAX_DEPTH),
+    MaxAliasesLimiter(max_alias_count=_GRAPHQL_MAX_ALIASES),
+    MaxRootFieldsLimiter(_GRAPHQL_MAX_ALIASES),
+]
 if _IS_PROD:
     # Block introspection in prod via the canonical graphql-core rule.
     _extensions.append(AddValidationRules([NoSchemaIntrospectionCustomRule]))
@@ -763,9 +979,31 @@ app = FastAPI(
     ),
     version=package_version(),
     lifespan=lifespan,
+    docs_url=None if _IS_PROD else "/docs",
+    redoc_url=None if _IS_PROD else "/redoc",
+    openapi_url=None if _IS_PROD else "/openapi.json",
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+if _IS_PROD:
+
+    @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_verify_api_key)])
+    @limiter.limit("120/minute")
+    async def openapi_document(request: Request) -> dict:
+        """OpenAPI document for key holders (prod); rate-limited like every other route."""
+        return app.openapi()
+
+
+@app.middleware("http")
+async def enforce_body_size(request: Request, call_next):
+    """Reject requests whose Content-Length exceeds the configured maximum (same cap as the REST API)."""
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > _MAX_BODY_BYTES:
+        return JSONResponse({"detail": f"Request body too large (max {_MAX_BODY_BYTES} bytes)"}, status_code=413)
+    return await call_next(request)
+
+
 app.add_middleware(SlowAPIMiddleware)
 
 allowed_origins = os.getenv("EDGEGUARD_CORS_ORIGINS", "http://localhost,http://localhost:3000").split(",")

@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NoReturn, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,6 +24,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from neo4j import exceptions as _neo4j_exceptions
 from neo4j import time as _neo4j_time
 
 # Add src to path
@@ -167,9 +168,23 @@ app = FastAPI(
     description="REST API for querying threat intelligence data from Neo4j GraphRAG",
     version=_PKG_VERSION,
     lifespan=lifespan,
+    # 2026-10 readiness check: Swagger / ReDoc / the OpenAPI document were served without the
+    # API key. In prod they are disabled; the OpenAPI document stays available to key holders
+    # on /openapi.json (route below) for partner discovery.
+    docs_url=None if _IS_PROD else "/docs",
+    redoc_url=None if _IS_PROD else "/redoc",
+    openapi_url=None if _IS_PROD else "/openapi.json",
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+if _IS_PROD:
+
+    @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(_verify_api_key)])
+    @limiter.limit(_RATE_LIMIT_READ)
+    async def openapi_document(request: Request) -> Dict[str, Any]:
+        """OpenAPI document for key holders (prod): discovery without exposing it anonymously; rate-limited."""
+        return app.openapi()
 
 
 _NEO4J_TEMPORAL_TYPES = (_neo4j_time.DateTime, _neo4j_time.Date, _neo4j_time.Time, _neo4j_time.Duration)
@@ -182,6 +197,22 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(v) for v in value]
     return value
+
+
+_NEO4J_UNAVAILABLE = (_neo4j_exceptions.ServiceUnavailable, _neo4j_exceptions.SessionExpired)
+
+
+def _raise_api_error(exc: BaseException, what: str) -> NoReturn:
+    """Turn a handler exception into the right HTTP status: 503 while the graph database is
+    unavailable (2026-10 readiness check: an outage used to surface as 500), 500 otherwise.
+    Details stay in the server log; HTTPExceptions raised inside the handler pass through."""
+    if isinstance(exc, HTTPException):
+        raise exc
+    if isinstance(exc, _NEO4J_UNAVAILABLE):
+        logger.error("%s: graph database unavailable", what, exc_info=True)
+        raise HTTPException(status_code=503, detail="Graph database unavailable — retry later") from exc
+    logger.error("%s", what, exc_info=True)
+    raise HTTPException(status_code=500, detail="Internal error — see server logs") from exc
 
 
 def _node_props(node: Any) -> Dict[str, Any]:
@@ -488,10 +519,9 @@ async def query_threats(request: Request, q: ThreatQuery):
             )
 
         except Exception as e:
-            logger.error("Query failed", exc_info=True)
             span.set_attribute("error", True)
             span.set_attribute("error.message", str(e))
-            raise HTTPException(status_code=500, detail="Internal error — see server logs")
+            _raise_api_error(e, "Query failed")
 
 
 @app.post("/search/indicator", response_model=IndicatorResponse, dependencies=[Depends(_verify_api_key)])
@@ -528,12 +558,15 @@ async def search_indicator(request: Request, s: IndicatorSearch):
             )
         with neo4j_client.driver.session() as session:
             # Find the indicator
+            # 2026-10 readiness check: ``zone`` was accepted and echoed but never applied.
+            zone_value = s.zone.value if s.zone else None
             query = """
                 MATCH (n:Indicator {value: $value})
                 WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+                  AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
                 RETURN n LIMIT 1
             """
-            result = session.run(query, value=normalized_value, timeout=_NEO4J_QUERY_TIMEOUT)
+            result = session.run(query, value=normalized_value, zone=zone_value, timeout=_NEO4J_QUERY_TIMEOUT)
             record = result.single()
 
             if not record:
@@ -550,10 +583,13 @@ async def search_indicator(request: Request, s: IndicatorSearch):
             related_query = """
                 MATCH (n:Indicator {value: $value})--(related)
                 WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+                  AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
                   AND (related.edgeguard_managed = true OR related.edgeguard_enriched = true)
                 RETURN related LIMIT 10
             """
-            related_result = session.run(related_query, value=normalized_value, timeout=_NEO4J_QUERY_TIMEOUT)
+            related_result = session.run(
+                related_query, value=normalized_value, zone=zone_value, timeout=_NEO4J_QUERY_TIMEOUT
+            )
             related = [_node_props(r["related"]) for r in related_result]
 
             return IndicatorResponse(
@@ -565,9 +601,8 @@ async def search_indicator(request: Request, s: IndicatorSearch):
                 normalized_value=normalized_value,
             )
 
-    except Exception:
-        logger.error("Indicator search failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "Indicator search failed")
 
 
 @app.get("/zone/{zone}", response_model=ZoneThreatsResponse, dependencies=[Depends(_verify_api_key)])
@@ -635,9 +670,8 @@ async def get_zone_threats(
 
             return ZoneThreatsResponse(zone=zone.value, threats=threats, total=len(threats), summary=summary)
 
-    except Exception:
-        logger.error("Zone threats query failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "Zone threats query failed")
 
 
 def _indicator_filter_conditions(
@@ -734,9 +768,8 @@ async def list_indicators(
 
             return {"indicators": indicators, "total": total, "limit": limit, "offset": offset}
 
-    except Exception:
-        logger.error("List indicators failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "List indicators failed")
 
 
 @app.get("/vulnerabilities", dependencies=[Depends(_verify_api_key)])
@@ -777,9 +810,8 @@ async def list_vulnerabilities(
 
             return {"vulnerabilities": vulnerabilities, "total": len(vulnerabilities)}
 
-    except Exception:
-        logger.error("List vulnerabilities failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "List vulnerabilities failed")
 
 
 class CdbListEnum(str, Enum):
@@ -913,9 +945,8 @@ async def export_wazuh_cdb(
             },
         )
 
-    except Exception:
-        logger.error("Wazuh CDB export failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "Wazuh CDB export failed")
 
 
 class GraphView(str, Enum):
@@ -1178,9 +1209,8 @@ async def graph_explore(
             "stats": {"nodes": len(nodes), "edges": len(edges)},
         }
 
-    except Exception:
-        logger.error("Graph explore failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "Graph explore failed")
 
 
 @app.get("/stix/types", dependencies=[Depends(_verify_api_key)])
@@ -1323,9 +1353,8 @@ async def stix_export(
             )
     except HTTPException:
         raise
-    except Exception:
-        logger.error("STIX export failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "STIX export failed")
 
     return _JSON(
         content=bundle,
@@ -1433,9 +1462,8 @@ async def actor_summary(request: Request, name: str):
 
     except HTTPException:
         raise
-    except Exception:
-        logger.error("Actor summary failed", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+    except Exception as exc:
+        _raise_api_error(exc, "Actor summary failed")
 
 
 @app.post("/admin/query", dependencies=[Depends(_verify_api_key)])
@@ -1493,8 +1521,7 @@ async def admin_query(
             return {"results": records, "count": len(records)}
 
     except Exception as e:
-        logger.error(f"Admin query failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal error — see server logs")
+        _raise_api_error(e, "Admin query failed")
 
 
 # ============================================================================

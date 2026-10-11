@@ -20,6 +20,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
+# Another test module installs a MagicMock under sys.modules["neo4j_client"]; this module needs the real one.
+if "neo4j_client" in sys.modules and not hasattr(sys.modules["neo4j_client"], "__file__"):
+    del sys.modules["neo4j_client"]
 import neo4j_client as nc  # noqa: E402
 import node_identity  # noqa: E402
 
