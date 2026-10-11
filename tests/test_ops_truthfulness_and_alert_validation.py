@@ -86,10 +86,60 @@ class TestMonitor:
         assert "UNKNOWN" in capsys.readouterr().out
 
 
+class _FakeResponse:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._payload = payload if payload is not None else []
+
+    def json(self):
+        return self._payload
+
+
+class _FakeMispSession:
+    """Search returns the foreign event on every page (it is never deleted); EdgeGuard events vanish once deleted."""
+
+    def __init__(self):
+        self.headers = {}
+        self.deleted = []
+        self.events = {
+            "1": {"id": "1", "info": "EdgeGuard OTX pulses"},
+            "2": {"id": "2", "info": "Partner event about CVEs (searchall hit on an attribute)"},
+            "3": {"id": "3", "info": "[EdgeGuard] NVD CVEs"},
+        }
+        self.gets = 0
+
+    def get(self, url, **kwargs):
+        self.gets += 1
+        return _FakeResponse(200, [dict(e) for e in self.events.values()])
+
+    def delete(self, url, **kwargs):
+        eid = url.rsplit("/", 1)[-1]
+        self.deleted.append(eid)
+        self.events.pop(eid, None)
+        return _FakeResponse(200, {})
+
+
 class TestDestructiveFlows:
     def test_clear_misp_applies_the_info_guard(self):
         src = inspect.getsource(edgeguard.cmd_clear_misp)
         assert '"EdgeGuard" not in event_info' in src and "continue" in src
+
+    def test_clear_misp_skips_false_positives_and_terminates(self, monkeypatch, capsys):
+        """Bugbot on #150: a skipped search hit used to stay in page 1 forever (loop to the page cap)
+        and then count as a failed delete. Only the two EdgeGuard-named events are deleted, the
+        loop stops when a page holds nothing new, and the command exits 0."""
+        import requests
+
+        edgeguard._ensure_runtime_imports()
+        fake = _FakeMispSession()
+        monkeypatch.setattr(requests, "Session", lambda: fake)
+        monkeypatch.setattr(edgeguard, "apply_misp_http_host_header", lambda s: None, raising=False)
+        rc = edgeguard.cmd_clear_misp(SimpleNamespace(force=True))
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert sorted(fake.deleted) == ["1", "3"]
+        assert fake.gets <= 3, "the loop must stop once only skipped events remain"
+        assert "Deleted 2/2" in out and "1 skipped" in out
 
     def test_probe_total_and_blast_radius_render(self):
         client = MagicMock()
@@ -139,6 +189,22 @@ class TestInboundAlertValidation:
     )
     def test_valid_payloads_pass(self, payload):
         assert alert_processor._invalid_payload_reason(payload) is None
+
+    def test_null_threat_is_normalised_for_the_write_path(self, monkeypatch):
+        """Bugbot on #150: ``threat: null`` passed validation but the write path received the raw
+        payload with ``None`` and crashed before persisting the Alert node."""
+        proc = alert_processor.AlertProcessor.__new__(alert_processor.AlertProcessor)
+        proc.neo4j = MagicMock()
+        monkeypatch.setattr(proc, "connect", lambda: True)
+        payload = {"alert_id": "a-3", "zone": "energy", "threat": None}
+        try:
+            proc.process_alert(payload)
+        except Exception:  # enrichment against a MagicMock graph may fail later; the write call is what matters
+            pass
+        proc.neo4j.process_complete_resilmesh_alert.assert_called_once()
+        written = proc.neo4j.process_complete_resilmesh_alert.call_args.args[0]
+        # the canonicaliser fills indicator/type into the (now dict) threat before the write
+        assert isinstance(written["threat"], dict) and written["alert_id"] == "a-3"
 
     def test_process_alert_rejects_before_touching_the_database(self, monkeypatch, caplog):
         proc = alert_processor.AlertProcessor.__new__(alert_processor.AlertProcessor)

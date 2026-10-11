@@ -242,6 +242,8 @@ class AlertProcessor:
         alert = ResilMeshAlert.from_dict(alert_data)
         if alert.threat is None:
             alert.threat = {}
+        if alert_data.get("threat") is None:
+            alert_data["threat"] = {}  # the write path (process_complete_resilmesh_alert) reads alert_data
         invalid = _invalid_payload_reason(alert_data)
         if invalid:
             logger.warning("[ALERT-REJECTED] %s", invalid)  # reason only, never payload values

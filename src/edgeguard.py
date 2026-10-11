@@ -1884,7 +1884,8 @@ def cmd_clear_misp(args) -> int:
         # Each iteration deletes up to 500 events, then re-fetches page 1
         # (deleted events won't reappear). Max 20 iterations = 10,000 events safety cap.
         deleted = 0
-        total_found = 0
+        seen_ids: set = set()  # unique event ids returned by the search (deleted or skipped)
+        skipped_ids: set = set()  # search hits whose info does not name EdgeGuard
         _http_error = False
         _max_pages = 20
         for _page in range(_max_pages):
@@ -1906,9 +1907,14 @@ def cmd_clear_misp(args) -> int:
             if not events:
                 break
 
-            total_found += len(events)
+            page_ids = {str(ev.get("id") or ev.get("Event", {}).get("id")) for ev in events} - {"None"}
+            if not (page_ids - seen_ids):
+                break  # only already-skipped events remain in the search result: the wipe is complete
             for ev in events:
                 eid = ev.get("id") or ev.get("Event", {}).get("id")
+                if not eid or str(eid) in seen_ids:
+                    continue
+                seen_ids.add(str(eid))
                 # Same guard as baseline_clean: ``searchall=EdgeGuard`` matches any field, so an
                 # unrelated event on a shared MISP could be returned; only wipe events whose info
                 # names EdgeGuard.
@@ -1919,6 +1925,7 @@ def cmd_clear_misp(args) -> int:
                         eid,
                         event_info[:80],
                     )
+                    skipped_ids.add(str(eid))
                     continue
                 if eid:
                     with warnings.catch_warnings():
@@ -1944,13 +1951,19 @@ def cmd_clear_misp(args) -> int:
         if _http_error:
             err("MISP clear failed due to HTTP error — check API key and MISP status")
             return 1
-        if total_found == 0:
-            info("No EdgeGuard events found in MISP.")
-        elif deleted < total_found:
-            err(f"Partial clear: deleted {deleted}/{total_found} EdgeGuard events ({total_found - deleted} failed)")
+        total_found = len(seen_ids)
+        skipped = len(skipped_ids)
+        expected = total_found - skipped  # events that are EdgeGuard's and had to be deleted
+        skipped_note = f" ({skipped} skipped: info does not name EdgeGuard)" if skipped else ""
+        if expected == 0:
+            info(f"No EdgeGuard events found in MISP.{skipped_note}")
+        elif deleted < expected:
+            err(
+                f"Partial clear: deleted {deleted}/{expected} EdgeGuard events ({expected - deleted} failed){skipped_note}"
+            )
             return 1
         else:
-            ok(f"Deleted {deleted}/{total_found} EdgeGuard events from MISP")
+            ok(f"Deleted {deleted}/{expected} EdgeGuard events from MISP{skipped_note}")
     except Exception as e:
         err(f"Failed to clear MISP: {e}")
         return 1
