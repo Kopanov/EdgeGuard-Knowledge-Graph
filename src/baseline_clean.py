@@ -66,6 +66,9 @@ class BaselineState:
     """
 
     neo4j_count: int = 0
+    # Every node in the database — ``reset_baseline_data`` wipes via ``clear_all()``, so this is
+    # the real blast radius on a database shared with ResilMesh (2026-10).
+    neo4j_total_count: int = 0
     neo4j_breakdown: tuple[tuple[str, int], ...] = field(default_factory=tuple)
     neo4j_ok: bool = False
     neo4j_error: Optional[str] = None
@@ -104,6 +107,12 @@ class BaselineState:
         # Neo4j
         if self.neo4j_ok:
             lines.append(f"  Neo4j EdgeGuard nodes:        {self.neo4j_count:>12,}   ✓")
+            if self.neo4j_total_count != self.neo4j_count:
+                other = self.neo4j_total_count - self.neo4j_count
+                lines.append(
+                    f"  Neo4j nodes in total:         {self.neo4j_total_count:>12,}   "
+                    f"({other:,} not created by EdgeGuard — the wipe deletes every node)"
+                )
             if self.neo4j_breakdown:
                 top5 = ", ".join(f"{lbl}={cnt:,}" for lbl, cnt in self.neo4j_breakdown[:5])
                 lines.append(f"      top labels: {top5}")
@@ -267,6 +276,11 @@ MATCH (n) WHERE n.edgeguard_managed = true
 RETURN count(n) AS cnt
 """
 
+_NEO4J_ALL_NODES_COUNT_QUERY = """
+MATCH (n)
+RETURN count(n) AS cnt
+"""
+
 _NEO4J_BREAKDOWN_QUERY = """
 MATCH (n) WHERE n.edgeguard_managed = true
 RETURN labels(n)[0] AS label, count(n) AS cnt
@@ -290,6 +304,16 @@ def _probe_neo4j(client: Any) -> tuple[int, tuple[tuple[str, int], ...], Optiona
     except Exception as e:
         logger.debug("probe_neo4j failed", exc_info=True)
         return 0, (), f"{type(e).__name__}: {str(e)[:160]}"
+
+
+def _probe_neo4j_total(client: Any) -> int:
+    """Every node in the database (the ``clear_all`` wipe scope); 0 when the probe fails."""
+    try:
+        rows = client.run(_NEO4J_ALL_NODES_COUNT_QUERY)
+        return int(rows[0].get("cnt") or 0) if rows else 0
+    except Exception:
+        logger.debug("probe_neo4j_total failed", exc_info=True)
+        return 0
 
 
 def _probe_misp(misp_url: str, misp_api_key: str, ssl_verify: bool) -> tuple[int, Optional[str]]:
@@ -466,8 +490,10 @@ def probe_baseline_state(client: Any = None) -> BaselineState:
 
         c_count, c_err = _probe_checkpoint()
 
+        n_total = _probe_neo4j_total(client) if n_err is None else 0
         return BaselineState(
             neo4j_count=n_count,
+            neo4j_total_count=max(n_total, n_count),
             neo4j_breakdown=n_breakdown,
             neo4j_ok=n_err is None,
             neo4j_error=n_err,

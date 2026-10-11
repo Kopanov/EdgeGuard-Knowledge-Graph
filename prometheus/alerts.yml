@@ -131,7 +131,8 @@ groups:
           description: "Health check failed for {{ $labels.service }}."
 
       - alert: EdgeGuardMISPUnhealthy
-        expr: edgeguard_misp_health == 0
+        # check_type="workers" is optional in misp_health (degraded, not unhealthy)
+        expr: edgeguard_misp_health{check_type!="workers"} == 0
         for: 2m
         labels:
           severity: critical
