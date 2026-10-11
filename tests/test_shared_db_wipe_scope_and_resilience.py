@@ -101,7 +101,6 @@ class _Client:
 class TestRestHealthAndReconnect:
     @pytest.fixture(autouse=True)
     def _reset_guard(self, monkeypatch):
-        monkeypatch.setattr(query_api, "_last_reconnect_attempt", float("-inf"))
         monkeypatch.setattr(query_api, "_API_KEY", None)
 
     def test_health_is_503_while_degraded_and_200_when_healthy(self, monkeypatch):
@@ -117,45 +116,67 @@ class TestRestHealthAndReconnect:
         monkeypatch.setattr(query_api, "neo4j_client", None)
         assert TestClient(query_api.app).get("/health").status_code == 503
 
-    def test_guard_reconnects_once_then_rate_limits(self, monkeypatch):
-        client = _Client(connected=False, connect_result=False)
+    def test_guard_never_blocks_on_the_driver(self, monkeypatch):
+        """connect() retries with backoff and a 60 s timeout: it must not run on a request."""
+        client = _Client(connected=False, connect_result=True)
         monkeypatch.setattr(query_api, "neo4j_client", client)
         with pytest.raises(query_api.HTTPException) as exc:
             query_api._require_neo4j()
-        assert exc.value.status_code == 503 and client.connect_calls == 1
-        with pytest.raises(query_api.HTTPException):
-            query_api._require_neo4j()
-        assert client.connect_calls == 1, "a second attempt within the interval must not hit the driver"
-        monkeypatch.setattr(query_api, "_last_reconnect_attempt", float("-inf"))
-        client._connect_result = True
-        query_api._require_neo4j()  # reconnect succeeds: no exception
-        assert client.connect_calls == 2 and client.is_connected()
-
-    def test_guard_is_a_no_op_when_connected_and_503_without_a_client(self, monkeypatch):
-        client = _Client(connected=True)
-        monkeypatch.setattr(query_api, "neo4j_client", client)
+        assert exc.value.status_code == 503 and client.connect_calls == 0
+        client._connected = True
         query_api._require_neo4j()
         assert client.connect_calls == 0
+
+    def test_guard_is_503_without_a_client(self, monkeypatch):
         monkeypatch.setattr(query_api, "neo4j_client", None)
         with pytest.raises(query_api.HTTPException):
             query_api._require_neo4j()
+
+    def test_background_reconnect_retries_off_the_loop_until_connected(self):
+        attempts = iter([False, False, True])
+        client = _Client(connected=False)
+
+        def connect():
+            client.connect_calls += 1
+            ok = next(attempts)
+            if ok:
+                client._connected = True
+            return ok
+
+        client.connect = connect  # type: ignore[method-assign]
+        asyncio.run(query_api._reconnect_until_connected(client, interval=0))
+        assert client.connect_calls == 3 and client.is_connected()
+
+    def test_background_reconnect_survives_a_raising_driver(self):
+        client = _Client(connected=False)
+        state = {"n": 0}
+
+        def connect():
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("driver exploded")
+            client._connected = True
+            return True
+
+        client.connect = connect  # type: ignore[method-assign]
+        asyncio.run(query_api._reconnect_until_connected(client, interval=0))
+        assert state["n"] == 2 and client.is_connected()
+
+    def test_lifespan_schedules_the_background_reconnect_on_startup_failure(self):
+        src = inspect.getsource(query_api.lifespan)
+        assert "asyncio.create_task(_reconnect_until_connected(neo4j_client))" in src
+        assert "reconnect_task.cancel()" in src
 
     def test_every_data_route_uses_the_guard(self):
         src = (_ROOT / "src" / "query_api.py").read_text()
         assert "if not neo4j_client or not neo4j_client.is_connected():" not in src
         assert src.count("_require_neo4j()") >= 10
 
-    def test_request_through_the_guard_reconnects(self, monkeypatch):
-        """A route call after a failed startup connection succeeds once the database is back."""
-        session = MagicMock()
-        session.run.return_value = []
+    def test_request_while_disconnected_is_503_without_touching_the_driver(self, monkeypatch):
         client = _Client(connected=False, connect_result=True)
-        client.driver = MagicMock()
-        client.driver.session.return_value.__enter__.return_value = session
-        client.driver.session.return_value.__exit__.return_value = False
         monkeypatch.setattr(query_api, "neo4j_client", client)
         resp = TestClient(query_api.app).post("/search/indicator", json={"value": "1.2.3.4"})
-        assert resp.status_code != 503 and client.connect_calls == 1
+        assert resp.status_code == 503 and client.connect_calls == 0
 
 
 class TestNatsReconnectPolicy:
@@ -213,6 +234,38 @@ class TestHealthProbeTimeout:
         elapsed = time.monotonic() - started
         assert result["healthy"] is False and "timed out" in result["error"]
         assert elapsed < 2.0, f"the caller waited {elapsed:.1f}s for a hung probe; the timeout was 0.3s"
+        leftover = [t for t in threading.enumerate() if t.name == "neo4j-health-probe"]
+        assert leftover and all(t.daemon for t in leftover), "a hung probe thread must not keep the process alive"
+
+    def test_probe_errors_and_results_are_returned(self, monkeypatch):
+        class _Broken:
+            def __init__(self, **_kw):
+                pass
+
+            def connect(self):
+                raise ValueError("bad uri")
+
+        monkeypatch.setattr(health_check, "Neo4jClient", _Broken)
+        result = health_check.health_check_neo4j(neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")
+        assert result["healthy"] is False and "ValueError" in result["error"]
+
+        class _Healthy:
+            def __init__(self, **_kw):
+                pass
+
+            def connect(self):
+                return True
+
+            def health_check(self):
+                return {"healthy": True, "version": "5"}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(health_check, "Neo4jClient", _Healthy)
+        assert (
+            health_check.health_check_neo4j(neo4j_uri="bolt://x", neo4j_user="u", neo4j_password="p")["healthy"] is True
+        )
 
 
 class TestRejectionCounterLabel:

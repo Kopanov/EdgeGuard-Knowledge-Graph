@@ -6,10 +6,10 @@ Provides health check functionality for MISP and Neo4j connectivity.
 Used by the monitoring system and CLI to report system status.
 """
 
-import concurrent.futures
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -137,22 +137,29 @@ def health_check_neo4j(neo4j_uri: str = None, neo4j_user: str = None, neo4j_pass
         client.close()
         return health
 
-    # Not a ``with`` block: the executor's ``__exit__`` waits for the worker thread, which made the
-    # timeout below ineffective when the probe hung on an unreachable server. ``shutdown(wait=False)``
-    # lets the caller return at the deadline; the thread ends when the driver gives up.
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        future = executor.submit(_run_neo4j_health)
-        return future.result(timeout=neo4j_health_timeout)
+    # A daemon thread, not a ThreadPoolExecutor: the executor's ``with`` block waited for the worker
+    # (the timeout was ineffective), and its non-daemon worker kept the process alive after a
+    # timed-out probe (``edgeguard doctor`` appeared to hang). The caller returns at the deadline;
+    # a hung worker ends when the driver gives up and never blocks process exit.
+    outcome: Dict[str, Any] = {}
 
-    except concurrent.futures.TimeoutError:
+    def _target() -> None:
+        try:
+            outcome["result"] = _run_neo4j_health()
+        except Exception as exc:  # reported below as an unhealthy probe
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_target, name="neo4j-health-probe", daemon=True)
+    worker.start()
+    worker.join(neo4j_health_timeout)
+    if worker.is_alive():
         logger.error(f"Neo4j health check timed out after {neo4j_health_timeout}s")
         return {"healthy": False, "error": f"Health check timed out after {neo4j_health_timeout}s"}
-    except Exception as e:
+    if "error" in outcome:
+        e = outcome["error"]
         logger.error(f"Neo4j health check failed: {type(e).__name__}: {e}")
         return {"healthy": False, "error": f"{type(e).__name__}: {e}"}
-    finally:
-        executor.shutdown(wait=False)
+    return outcome.get("result", {"healthy": False, "error": "Health probe returned no result"})
 
 
 def get_neo4j_node_counts(neo4j_uri: str = None, neo4j_user: str = None, neo4j_password: str = None) -> Dict[str, Any]:

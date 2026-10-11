@@ -3,12 +3,12 @@ FastAPI Query Engine for GraphRAG
 REST endpoints for threat intelligence queries
 """
 
+import asyncio
 import hmac
 import logging
 import os
 import re
 import sys
-import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, NoReturn, Optional
 
@@ -58,12 +58,19 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🔌 Connecting to Neo4j...")
     neo4j_client = Neo4jClient()
+    reconnect_task = None
     if not neo4j_client.connect():
-        logger.error("[ERR] Failed to connect to Neo4j on startup")
+        # Keep trying in the background (off the event loop, every _RECONNECT_INTERVAL_SEC): the
+        # data routes answer 503 at once while disconnected and recover without a restart.
+        logger.error("[ERR] Failed to connect to Neo4j on startup — retrying in the background")
+        reconnect_task = asyncio.create_task(_reconnect_until_connected(neo4j_client))
     else:
         logger.info("[OK] Connected to Neo4j")
 
     yield
+
+    if reconnect_task is not None and not reconnect_task.done():
+        reconnect_task.cancel()
 
     # Shutdown
     if neo4j_client:
@@ -436,29 +443,34 @@ class ActorSummaryResponse(BaseModel):
 # ============================================================================
 
 
-# Lazy reconnect (2026-10): when the client failed to connect at startup, every request used to
-# fail with 503 until the process was restarted. The guard retries ``connect()`` at most once per
-# ``_RECONNECT_MIN_INTERVAL_SEC`` and otherwise answers 503 as before.
-_RECONNECT_MIN_INTERVAL_SEC = 30.0
-_last_reconnect_attempt = float("-inf")
+# Background reconnect (2026-10): when the client failed to connect at startup, every request used
+# to fail with 503 until the process was restarted. ``connect()`` retries with backoff and a 60 s
+# connection timeout, so it must never run on the event loop; the lifespan runs it in a worker
+# thread every ``_RECONNECT_INTERVAL_SEC`` until it succeeds, and the request guard only reads the
+# connection state.
+_RECONNECT_INTERVAL_SEC = 30.0
+
+
+async def _reconnect_until_connected(client, interval: float = _RECONNECT_INTERVAL_SEC) -> None:
+    """Retry ``client.connect()`` in a worker thread until it succeeds (cancelled on shutdown)."""
+    while not client.is_connected():
+        try:
+            ok = await asyncio.to_thread(client.connect)
+        except Exception as exc:  # the driver already logged; keep retrying
+            ok = False
+            logger.warning("Neo4j reconnect attempt failed: %s", exc)
+        if ok:
+            logger.info("[OK] Connected to Neo4j (startup connection had failed)")
+            return
+        await asyncio.sleep(interval)
 
 
 def _require_neo4j() -> None:
-    """Raise 503 unless the Neo4j client is connected, after a rate-limited reconnect attempt."""
-    global _last_reconnect_attempt
+    """Raise 503 unless the Neo4j client is connected. Never blocks: reconnection is the
+    lifespan's background task."""
     client = neo4j_client
-    if client is not None and client.is_connected():
-        return
-    now = time.monotonic()
-    if client is not None and now - _last_reconnect_attempt >= _RECONNECT_MIN_INTERVAL_SEC:
-        _last_reconnect_attempt = now
-        try:
-            if client.connect():
-                logger.info("Neo4j connection established on request (startup connection had failed)")
-                return
-        except Exception as exc:  # the driver reports; the request answers 503 below
-            logger.warning("Neo4j reconnect attempt failed: %s", exc)
-    raise HTTPException(status_code=503, detail="Neo4j not connected")
+    if client is None or not client.is_connected():
+        raise HTTPException(status_code=503, detail="Neo4j not connected")
 
 
 @app.get("/health", response_model=HealthResponse)
