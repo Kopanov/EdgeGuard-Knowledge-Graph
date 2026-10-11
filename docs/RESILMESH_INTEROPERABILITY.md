@@ -1,6 +1,6 @@
 # EdgeGuard ↔ ResilMesh Interoperability Guide
 
-**Last updated: 2026-10-10** — fresh-baseline PR (ResilMesh conformance check of 2026-10-09): relationships are no longer derived from whole-MISP-event co-occurrence — only items from the same source report (OTX pulse) are linked, under the same relationship names, with an explicit evidence label (`match_type`) and confidence (§3.2.2); OTX pulse-level ATT&CK ids are `reported_techniques` (`match_type = "otx_pulse"`), never `mitre_explicit`; the four ResilMesh CVE list properties are on the `CVE` node (§5); every EdgeGuard edge and the Campaign/Source nodes carry `edgeguard_managed` (§3.4); `tlp:<level>` on every MISP attribute → `n.tlp` (§3.3). Prior: 2026-06-12 — Wazuh integration phase 1: documented `GET /export/wazuh/cdb` (sector IOC/CVE intelligence as Wazuh CDB lists — export-lists-first per the 2026-06 team decision). Prior: 2026-06-11 — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
+**Last updated: 2026-10-11** — shared-database contract (PR #147: `edgeguard_managed` on create only, `edgeguard_enriched` on partner nodes EdgeGuard writes to, no UNIQUE constraints on partner labels) and the honesty pass from the 2026-10-10 readiness check — §3.1, §3.2, §3.4, §4.4, §6, §8.2 and §10.1 now state what is written, exported and queryable today. Prior (2026-10-10) — fresh-baseline PR (ResilMesh conformance check of 2026-10-09): relationships are no longer derived from whole-MISP-event co-occurrence — only items from the same source report (OTX pulse) are linked, under the same relationship names, with an explicit evidence label (`match_type`) and confidence (§3.2.2); OTX pulse-level ATT&CK ids are `reported_techniques` (`match_type = "otx_pulse"`), never `mitre_explicit`; the four ResilMesh CVE list properties are on the `CVE` node (§5); every EdgeGuard edge and the Campaign/Source nodes carry `edgeguard_managed` (§3.4); `tlp:<level>` on every MISP attribute → `n.tlp` (§3.3). Prior: 2026-06-12 — Wazuh integration phase 1: documented `GET /export/wazuh/cdb` (sector IOC/CVE intelligence as Wazuh CDB lists — export-lists-first per the 2026-06 team decision). Prior: 2026-06-11 — PR #126: documented the SOC-analyst REST endpoint `GET /actors/{name}/summary` (alias-aware actor resolution) and the read-side IOC/CVE input normalization layer (`src/ioc_normalize.py`). Prior: 2026-04-26 PR-N33 docs audit: explicitly noted that the 4 PR-N26 edge types (`INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`) carry `r.misp_event_ids[]` for edge-level provenance (not just node-level). Prior: 2026-04-18 PR #41 cleanup pass.
 **Document type:** Integration contract — shared reference between EdgeGuard (IICT-BAS + Ratio1) and ResilMesh  
 **Purpose:** Defines exactly what EdgeGuard produces, what it relies on ResilMesh to provide, and what neither system covers today.
 
@@ -68,7 +68,7 @@ All EdgeGuard nodes are **ResilMesh-schema compatible** where they overlap.
 | Node Label | Key Properties | Source |
 |------------|---------------|--------|
 | `Indicator` | `value`, `indicator_type`, `zone[]`, `confidence_score`, `first_imported_at` (DB-local; the source's own claim lives on `SOURCED_FROM.source_reported_first_at`), `last_updated`, `misp_event_ids[]`, `misp_attribute_ids[]`, `pulse_id` (OTX report), `attack_ids[]` (pulse-level), `tlp` (2026-10), **`uuid`** (deterministic, equal to the UUID portion of the STIX SDO id), … | OTX, ThreatFox, URLhaus, AbuseIPDB, VirusTotal, CyberCure, Feodo, SSLBlacklist |
-| `Vulnerability` | `cve_id`, `severity`, `cvss_score`, `attack_vector`, `zone[]`, `published`, `last_modified` | NVD, CISA KEV, OTX |
+| `Vulnerability` | `cve_id`, `severity`, `cvss_score`, `attack_vector`, `zone[]`, `published`, `last_modified` | **Not written by the scheduled pipeline** (0 live, 2026-10-11): NVD data lands as `CVE` + `CVSSv*` via `merge_cve`; `merge_vulnerabilities_batch` only serves MISP `vulnerability` objects. In CRUSOE's model `Vulnerability` is the scanner's finding — see §6. |
 | `CVE` | `cve_id`, `description`, `published`, `last_modified`, `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]` | NVD |
 | `CVSSv31` | `vector_string`, `base_score`, `base_severity`, `attack_vector`, `attack_complexity`, `privileges_required`, `user_interaction`, `scope`, `confidentiality_impact`, `integrity_impact`, `availability_impact`, `impact_score`, `exploitability_score` | NVD (via CVE node) |
 | `CVSSv2` | `vector_string`, `base_score`, `base_severity`, `access_vector`, `access_complexity`, `authentication`, `confidentiality_impact`, `integrity_impact`, `availability_impact`, `impact_score`, `exploitability_score`, `obtain_all_privilege`, `obtain_user_privilege`, `ac_insuf_info` | NVD (via CVE node) |
@@ -77,16 +77,23 @@ All EdgeGuard nodes are **ResilMesh-schema compatible** where they overlap.
 | `Technique` | `mitre_id`, `name`, `description`, `tactic_phases[]`, `attack_domain` (`enterprise` \| `ics`, 2026-10), `zone[]`, `tlp` | MITRE ATT&CK Enterprise; ATT&CK for ICS when `EDGEGUARD_ENABLE_MITRE_ICS` is on |
 | `Tactic` | `mitre_id`, `name`, `shortname`, `attack_domain` (2026-10) | MITRE ATT&CK (Enterprise; ICS when enabled — 9 of 12 ICS short names equal Enterprise ones, so `IN_TACTIC` is matched within the domain) |
 | `Source` | `source_id`, `name` | Internal registry |
+| `Tool` | `mitre_id` (ATT&CK S-id), `name`, `uses_techniques[]`, `zone[]`, `tlp` | MITRE ATT&CK software (tools) |
+| `Campaign` | `name`, `actor_name`, `aliases[]`, `tags[]`, `indicator_count`, `malware_count`, `first_seen`, `last_seen`, `active`, `zone[]` | Derived — `enrichment_jobs.build_campaign_nodes`, one per actor with attributed malware (202 live, 2026-10-11) |
+| `Sector` | `name` (`energy`, `finance`, `healthcare`, `global`) | Derived from `zone[]` by the sync and `build_relationships.py` Q7a–d |
+| `CVSSv30`, `CVSSv40` | per-version score fields, same pattern as `CVSSv31` | NVD; bidirectional `HAS_CVSS_v30` / `HAS_CVSS_v40` |
+| `Alert` | `alert_id`, `source`, `zone[]`, `timestamp`, `severity`, `indicator`, `indicator_type`, `malware`, `cve`, `enriched`, `received_at` | EdgeGuard's alert processor, from inbound NATS alerts only (none on a baseline). Not in CRUSOE's model, which has `SecurityEvent` — label ownership to agree with ResilMesh |
 
-#### ResilMesh Topology Layer (schema-compatible stubs)
+**Secondary sector labels:** nodes classified into a sector also carry `:Energy` / `:Finance` / `:Healthcare` as additional labels (applied by the sync after each run; 7,364 `:Energy` nodes live on 2026-10-11). They are a convenience for label-based filtering — the authoritative sector relation is `TARGETS` / `AFFECTS` → `Sector`.
 
-EdgeGuard creates these nodes only when enriching an inbound alert — not during scheduled collection. They are written to be fully compatible with ResilMesh's schema.
+#### ResilMesh Topology Layer (schema-compatible helpers)
+
+EdgeGuard has schema-compatible `merge_*` helpers for these labels, but **no pipeline path writes them today** — nothing calls `merge_ip` / `merge_host`; the alert processor writes `Alert`, the `Indicator`, `INVOLVES` and the indicator's sector link. When a path does write them, §3.4 applies: a node EdgeGuard creates gets `edgeguard_managed`, a partner-created one `edgeguard_enriched`.
 
 | Node Label | When created | Properties aligned to ResilMesh |
 |------------|-------------|----------------------------------|
-| `IP` | On alert ingestion from ResilMesh | `address`, `version`, `tag[]`, `status` |
-| `Host` | On alert ingestion | `hostname` |
-| `SoftwareVersion` | When a CVE affects a known product | `version`, `cve_timestamp` |
+| `IP` | helper only (`merge_ip`) | `address`, `version`, `tag[]`, `status` |
+| `Host` | helper only (`merge_host`) | `hostname` |
+| `SoftwareVersion` | helper only (`merge_softwareversion`); see §4.4 | `version`, `cve_timestamp` |
 
 ### 3.2 Relationships Produced by EdgeGuard
 
@@ -101,12 +108,17 @@ EdgeGuard creates these nodes only when enriching an inbound alert — not durin
 | `ATTRIBUTED_TO` | `Malware` → `ThreatActor` | Malware linked to an actor. Either the malware's own `attributed_to` claim matched exactly to the actor's name or alias (`match_type = "exact"`, 1.0, `build_relationships.py` Q2), or — 2026-10 — malware and actor named in the **same OTX pulse** (`match_type = "otx_pulse"`, 0.6, `r.report_ids[]` = pulse ids, written by the MISP→Neo4j sync). Whole-event co-occurrence attribution was removed (it had attributed one malware to up to 152 actors). |
 | `EXPLOITS` | `Indicator` → `Vulnerability` / `CVE` | Only from the indicator's own `cve_id` tag (`match_type = "cve_tag"`; 1.0 from `build_relationships.py` Q3, or the attribute's own confidence (≥ 0.7) when the sync created the edge first from the `exploits:` tag). 2026-10: no longer produced from event co-membership (an IP or hash listed next to a CVE does not exploit it). Edge carries `r.misp_event_ids[]`. |
 | `INDICATES` | `Indicator` → `Malware` | Two evidence levels (§3.2.2): a source-asserted `malware_family` on the indicator matched to the malware name/alias (`match_type = "malware_family"`, 0.8, ThreatFox/VT/OTX), or — 2026-10 — indicator and malware listed in the **same OTX pulse** (`match_type = "otx_pulse"`, 0.6, `r.report_ids[]`). Whole-event co-occurrence (`misp_cooccurrence`, 0.5, 96% of all INDICATES on the 2026-09 baseline) was removed. Edge carries `r.misp_event_ids[]`. |
-| `TARGETS` | `Indicator` → `Sector`; **`ThreatActor` → `Sector`, `Malware` → `Sector` (2026-10)** | From `zone[]` on the node — indicators: written by the sync (0.5, `source_id='misp'`) and by `build_relationships.py` Q7a (0.5 since the 2026-10 audit — an inferred classification, never 1.0; `global` is never an edge target) (1.0); actors and malware: Q7c / Q7d (1.0), `global` skipped so an actor never "targets global". `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
+| `TARGETS` | `Indicator` → `Sector`; **`ThreatActor` → `Sector`, `Malware` → `Sector` (2026-10)** | From `zone[]` on the node — indicators: written by the sync (0.5, `source_id='misp'`) and by `build_relationships.py` Q7a (0.5 since the 2026-10 audit — an inferred classification, never 1.0; `global` is never an edge target); actors and malware: Q7c / Q7d (0.5), `global` skipped so an actor never "targets global". `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
 | `AFFECTS` | `Vulnerability` / `CVE` → `Sector` | From `zone[]` on vuln/CVE nodes — sync (0.5, `source_id='misp'`) and `build_relationships.py` Q7b (0.5 since the 2026-10 audit; `global` never an edge target); `match_type='zone_classification'` (2026-10). **PR-N26:** edge carries `r.misp_event_ids[]`. |
 | `IN_TACTIC` | `Technique` → `Tactic` | MITRE kill-chain phase match (`build_relationships.py`) |
 | `SUBTECHNIQUE_OF` | `Technique` → `Technique` | **2026-10 (R6).** Sub-technique → parent technique, from MITRE's dotted id (`T1021.006` → `T1021`; the same claim as the STIX `subtechnique-of` relationship). `build_relationships.py` Q1b, `match_type='mitre_explicit'`, 1.0, same `attack_domain` on both ends. 493 edges on the September graph. |
 | `USES_MALWARE` | `ThreatActor` → `Malware` | **2026-10 (R6).** MITRE's explicit STIX `uses` relationship from a group to malware, carried on the actor as `uses_malware[]` and written by `build_relationships.py` Q2b (`match_type='mitre_explicit'`, 0.95; canonical lower-case **name** match only — never `aliases`, which are rehydrated from untrusted MISP tags). The precise form of what the legacy CLI path inferred as `ATTRIBUTED_TO` (`mitre_derived`). |
 | `USES_TOOL` | `ThreatActor` → `Tool` | **2026-10 (R6).** Same source for tools (`uses_tools[]` = ATT&CK S-ids), Q2c. |
+| `RUNS` | `ThreatActor` → `Campaign` | Actor runs the campaign materialised for it by `enrichment_jobs.build_campaign_nodes` (one `Campaign` per actor with attributed malware). |
+| `PART_OF` | `Malware` → `Campaign`; `Indicator` → `Campaign` | Membership of the actor's malware and of the indicators that indicate it; the indicator edge is pruned when the indicator is retired. |
+| `INVOLVES` | `Alert` → `Indicator` | Written by the alert processor for inbound NATS alerts; carries the ownership marker since 2026-10 (`created_at` once, `updated_at` per delivery). |
+
+**STIX 2.1 bundle coverage (`/stix/export/*`, 2026-10):** the exporter emits `INDICATES`, `EXPLOITS` and `USES_TECHNIQUE` as `indicates`, `ATTRIBUTED_TO` and `RUNS` as `attributed-to`, `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` as `uses`, and `Indicator → Sector TARGETS` as `targets`. **Not in bundles yet:** `SUBTECHNIQUE_OF`, `USES_MALWARE`, `USES_TOOL`, `ThreatActor` / `Malware → Sector TARGETS`, `AFFECTS`, `PART_OF`, `IN_TACTIC` (no `Tactic` SDO), `SOURCED_FROM`, `REFERS_TO`, `HAS_CVSS_*` (CVSS travels as properties of the `vulnerability` SDO) and `INVOLVES`; edge evidence (`confidence_score`, `match_type`, report ids, TLP) is not carried on the SROs. Partners who need these read the graph or the GraphQL API until the exporter is extended (§8.6).
 
 #### ResilMesh-compatible relationships
 
@@ -118,8 +130,8 @@ These match the ResilMesh schema exactly and allow cross-layer graph traversal:
 | `HAS_CVSS_v30` | `CVE` ↔ `CVSSv30` | Bidirectional |
 | `HAS_CVSS_v40` | `CVE` ↔ `CVSSv40` | Bidirectional |
 | `HAS_CVSS_v2` | `CVE` ↔ `CVSSv2` | Bidirectional |
-| `REFERS_TO` | `Vulnerability` ↔ `CVE` | Bidirectional link bridging EdgeGuard `Vulnerability` and `CVE` nodes — created by the post-sync enrichment job (`bridge_vulnerability_cve` in `enrichment_jobs.py`) |
-| `IN` | `SoftwareVersion` → `Vulnerability` | Software affected by vulnerability — ResilMesh-defined; EdgeGuard has helper code but no pipeline path writes it |
+| `REFERS_TO` | `Vulnerability` ↔ `CVE` | ResilMesh's edge in CRUSOE's model (the scanner links its finding to the CVE). EdgeGuard's post-sync job `bridge_vulnerability_cve` MERGEs it in both directions for any `Vulnerability` node carrying `cve_id` — none exists today: EdgeGuard writes `CVE`, not `Vulnerability` (0 `REFERS_TO` live, 2026-10-11). |
+| `IN` | `Vulnerability` → `SoftwareVersion` | Vulnerable software, as ISIM traverses it (`vulnerabilities { software_versions }`) — ResilMesh-defined; EdgeGuard has helpers for both directions but no pipeline path writes it (see §4.4) |
 | `ON` | `SoftwareVersion` → `Host` | Software installed on host — ResilMesh-defined; EdgeGuard has helper code but no pipeline path writes it |
 
 #### Cross-layer bridges (threat intel ↔ topology) — gaps
@@ -307,6 +319,12 @@ RETURN labels(n)[0] AS type, count(*) AS cnt ORDER BY cnt DESC
 
 The `source` and `tag` properties provide finer-grained **intelligence-source-level** provenance (which external feed provided the data), while `edgeguard_managed` provides **system-level** ownership (EdgeGuard wrote this).
 
+**Identity and lifecycle notes (2026-10):**
+
+- `uuid` is deterministic from the natural key, and `CVE` and `Vulnerability` with the same `cve_id` share **one** uuid — look-ups by uuid must be label-scoped (`MATCH (n:CVE {uuid: $u})`, never `MATCH (n {uuid: $u})`).
+- Nodes carry a decay lifecycle — `active`, `retired_at`, `retired_by` (`'decay'` for the 90 / 180 / 365-day tiers on `last_updated`; re-observation reactivates decay-retired nodes; manual decommissions are never overridden) — see [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md).
+- Constraints: EdgeGuard declares UNIQUE keys for its own labels plus `IP.address`, `Host.hostname`, `Subnet.range` and `Alert.alert_id`; the full list is in [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) (§ Neo4j constraints).
+
 ---
 
 ## 4. What EdgeGuard Does NOT Provide
@@ -351,10 +369,10 @@ These relationship types should only be written by ResilMesh's own pipeline:
 The ResilMesh schema defines the chain:
 
 ```
-(CVE)-[:IN]-(Vulnerability)-[:IN]->(SoftwareVersion)-[:ON]->(Host)
+(CVE)<-[:REFERS_TO]-(Vulnerability)-[:IN]->(SoftwareVersion)-[:ON]->(Host)
 ```
 
-This chain enables the query: *"Which of our hosts is vulnerable to this CVE?"* — the most operationally valuable query in attack surface management. Currently EdgeGuard writes `CVE` and `Vulnerability` nodes but does **not** create `SoftwareVersion` nodes or the `IN`/`ON` relationships linking them to `Host`.
+This chain enables the query: *"Which of our hosts is vulnerable to this CVE?"* — the most operationally valuable query in attack surface management. Currently EdgeGuard writes `CVE` (+ `CVSSv*`) nodes only; `Vulnerability`, `SoftwareVersion`, `Host` and the `REFERS_TO` / `IN` / `ON` relationships are ResilMesh's scanner data (0 `Vulnerability` nodes live on 2026-10-11).
 
 **What's needed to implement this:**
 
@@ -365,7 +383,9 @@ This chain enables the query: *"Which of our hosts is vulnerable to this CVE?"* 
    MATCH (cve:CVE), (sv:SoftwareVersion)
    WHERE cve.cpe_type IS NOT NULL
      AND any(cpe IN cve.cpe_type WHERE sv.version CONTAINS cpe)
-   MERGE (cve)-[:IN]->(sv)
+   // via ResilMesh's Vulnerability node: (cve)<-[:REFERS_TO]-(v)-[:IN]->(sv)
+   MERGE (v:Vulnerability {cve_id: cve.cve_id})-[:IN]->(sv)
+   MERGE (v)-[:REFERS_TO]->(cve)
    ```
    The CPE matching logic is non-trivial (version ranges, wildcards) and requires a dedicated parser.
 
@@ -376,7 +396,7 @@ This chain enables the query: *"Which of our hosts is vulnerable to this CVE?"* 
 Once implemented, the full attack surface query becomes:
 ```cypher
 MATCH (cve:CVE {cve_id: 'CVE-2021-44228'})  // Log4Shell
-     -[:IN]->(sv:SoftwareVersion)
+     <-[:REFERS_TO]-(:Vulnerability)-[:IN]->(sv:SoftwareVersion)
      -[:ON]->(host:Host)
      <-[:PROVIDED_BY]-(comp:Component)
      <-[:SUPPORTS]-(mission:Mission)
@@ -466,7 +486,7 @@ For the complete cross-layer graph traversal to work, ResilMesh must:
 
 3. **Use the same Neo4j instance** — EdgeGuard and ResilMesh must point to the same database for the shared graph to work. Connection is configured via `NEO4J_URI` in `.env`.
 
-4. **Not overwrite EdgeGuard nodes** — ResilMesh should not create `CVE`, `Vulnerability`, `Indicator`, `Malware`, `ThreatActor`, `Technique`, or `Tactic` nodes. These are EdgeGuard's responsibility.
+4. **Shared labels are safe to write (2026-10)** — ResilMesh's scanner may create `CVE` and `Vulnerability` nodes, as its model does: EdgeGuard MERGEs on `cve_id`, enriches the existing node (`edgeguard_enriched = true`) and never deletes a node it did not create. `Vulnerability`, `REFERS_TO`, `IN` and `ON` are ResilMesh's to write (key `REFERS_TO` on `cve_id`, EdgeGuard's property name). `Indicator`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Tool`, `Campaign`, `Sector` and `Source` are EdgeGuard's vocabulary — a partner node under those labels is enriched, not claimed, but its properties are not guaranteed to follow EdgeGuard's conventions.
 
 ---
 
@@ -491,7 +511,7 @@ Despite running on separate hardware, we intentionally choose ports that do not 
 | EdgeGuard Service | Our Port | Rationale |
 |---|---|---|
 | REST Query API | **8000** | Standard FastAPI default; no ResilMesh service uses it |
-| GraphQL API | **4001** | Mirrors the ISIM GraphQL port — intentional alignment so ResilMesh can treat EdgeGuard as an additional ISIM-compatible data source |
+| GraphQL API | **4001** | Mirrors the ISIM GraphQL port — intentional alignment so ResilMesh can treat EdgeGuard as an additional ISIM-compatible data source. On EdgeGuard's own host; when co-located with iSIM, change `EDGEGUARD_GRAPHQL_PORT` |
 | Airflow webserver | **8082** | Default (8080) collides with ResilMesh **Temporal** — explicitly overridden via `AIRFLOW__WEBSERVER__WEB_SERVER_PORT=8082` |
 | Airflow metadata DB (PostgreSQL) | *(internal only)* | Docker Compose service **`airflow_postgres`** — not published on the host; backs **`LocalExecutor`** scheduler/UI state. |
 | Prometheus metrics | **8001** (loopback only) | No ResilMesh service on this port; bound to `127.0.0.1` by default so it is not reachable from other hosts |
@@ -546,6 +566,8 @@ ResilMesh exposes two query interfaces:
 **ISIM GraphQL is available at:** `http://<host>:4001/graphql`
 
 **EdgeGuard GraphQL** (`src/graphql_api.py`, Strawberry + FastAPI) also listens on **4001** by default (`EDGEGUARD_GRAPHQL_PORT`). **Auth:** when `EDGEGUARD_API_KEY` is set in the environment, requests must include header **`X-Api-Key`**. **GraphiQL** is off unless `EDGEGUARD_GRAPHQL_PLAYGROUND=true`. **Rate limiting:** default **120 requests/minute** per IP (`slowapi`). **Health:** `GET /health` — **HTTP 200** only when Neo4j is healthy (ping + APOC); **503** otherwise. (REST API on port 8000 always returns **200** with `neo4j_connected` in JSON — see [README.md](../README.md) § *HTTP APIs*.)
+
+**Shape of EdgeGuard's GraphQL (2026-10):** field names are camelCase (Strawberry's default — `cveId`, `cvssV31`, `lastUpdated`), the schema is flat (node types with scalar and list fields, no relationship-traversal fields yet) and no SDL file is committed; introspection is disabled in prod. The ISIM examples in this section are snake_case with traversal. "ISIM-compatible" today means the **data model** matches (labels, keys, property names) — not that the two GraphQL schemas are interchangeable. Aligning case and traversal needs ISIM's real SDL (§8.6).
 
 **SOC-analyst REST endpoints (port 8000):** `GET /actors/{name}/summary` (2026-06) resolves a threat actor by canonical name **or alias** (case-insensitive; `resolved_by` reports which) and returns an aggregated profile — attributed malware, employed techniques, campaigns, with counts — backing analyst "tell me about this actor" queries. Analyst-supplied IOC/CVE/technique inputs at the REST and GraphQL boundaries are refanged + canonicalized to graph form via `src/ioc_normalize.py` (write-side parity), so defanged paste (`1.2.3[.]4`, `hxxp://`), uppercase hashes, and en-dash CVE ids resolve to the stored nodes.
 
@@ -675,9 +697,9 @@ EdgeGuard creates `CVSSv40`, `CVSSv31`, `CVSSv30`, and `CVSSv2` nodes from NVD m
 
 ## 10. Example: End-to-End Query Across Both Layers
 
-### 10.1 Via ISIM GraphQL — works today (CVE + topology layer)
+### 10.1 Via ISIM GraphQL — once ResilMesh has written `Vulnerability` / `SoftwareVersion` (CVE + topology layer)
 
-EdgeGuard's CVE/Vulnerability data is already in the ISIM schema and queryable now:
+EdgeGuard supplies the `CVE` + `CVSSv*` half of this query; the `Vulnerability → SoftwareVersion → Host` half is ResilMesh's scanner data (0 `Vulnerability` nodes live on 2026-10-11, so the query returns nothing yet):
 
 ```graphql
 # Which hosts are running software affected by a high-severity CVE?
@@ -709,7 +731,7 @@ query HighSeverityVulnerableHosts {
 }
 ```
 
-This query is **fully supported today** — it traverses `Vulnerability → CVE → CVSSv31` (EdgeGuard data) and `Vulnerability → SoftwareVersion → Host → Component → Mission` (ResilMesh topology data). The SoftwareVersion bridge (section 4.4) must be implemented first for the full chain.
+This query is supported by the shared model — it traverses `Vulnerability → CVE → CVSSv31` (EdgeGuard data) and `Vulnerability → SoftwareVersion → Host → Component → Mission` (ResilMesh topology data). The SoftwareVersion bridge (section 4.4) must be implemented first for the full chain.
 
 ### 10.2 Via Direct Neo4j Bolt — full threat intelligence (pending ISIM schema extension)
 
