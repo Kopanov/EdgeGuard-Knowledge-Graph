@@ -622,7 +622,7 @@ Topics* below).
 |--------|------|-------------|------------|
 | GET | `/health` | Health check — **HTTP 200** always; JSON includes `status` (`ok`/`degraded`), `neo4j_connected` (from `Neo4jClient.health_check()`: ping + APOC). | - |
 | POST | `/query` | Natural-language threat query | `query`, `zone`, `limit` (body) |
-| POST | `/search/indicator` | Search a single indicator. Input is canonicalized via `ioc_normalize.canonicalize_lookup` (refang, NFC, case-fold, type resolution) before querying — see *Type Mapping* below. | `value`, `type` (body) |
+| POST | `/search/indicator` | Search a single indicator. Input is canonicalized via `ioc_normalize.canonicalize_lookup` (refang, NFC, case-fold, type resolution) before querying — see *Type Mapping* below. | `value`, `indicator_type`, `zone` (body) |
 | GET | `/zone/{zone}` | Threats for a zone/sector | `zone` (path), `limit`, `severity` |
 | GET | `/indicators` | List indicators with filters | `indicator_type`, `zone`, `source`, `limit`, `offset` |
 | GET | `/vulnerabilities` | List CVEs | `severity`, `zone`, `limit` |
@@ -646,7 +646,7 @@ curl -X POST http://localhost:8000/search/indicator \
   -H "X-API-Key: $EDGEGUARD_API_KEY" \
   -d '{
     "value": "hxxp://evil[.]com/payload",
-    "type": "url"
+    "indicator_type": "url"
   }'
 ```
 
@@ -669,8 +669,12 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 ```
 
 > Alert enrichment has no REST endpoint — ResilMesh alerts arrive on the
-> NATS subjects below and enriched responses are published to
-> `resilmesh.enriched.alerts` (`src/alert_processor.py`).
+> NATS subjects below and `src/alert_processor.py` enriches them against the graph.
+> **Publishing the enriched response back is not wired yet (2026-10):** the handler
+> returns the response to its caller and the only `publish` in the code is the
+> `NATSClient.publish` method itself. Subject, response schema and delivery guarantees
+> are pending agreement with ResilMesh — see
+> [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 8.6.
 
 ---
 
@@ -678,21 +682,18 @@ curl -H "X-API-Key: $EDGEGUARD_API_KEY" \
 
 ### Subscribe (EdgeGuard ← ResilMesh)
 
-| Topic | Description |
-|-------|-------------|
-| `resilmesh.alerts.zone.healthcare` | Healthcare alerts |
-| `resilmesh.alerts.zone.energy` | Energy sector alerts |
-| `resilmesh.alerts.zone.finance` | Finance sector alerts |
-| `resilmesh.alerts.zone.global` | Global alerts |
-| `resilmesh.threats.zone.{zone}` | Zone-specific threat intel |
-| `resilmesh.cve.kev` | Known Exploited Vulnerabilities |
+| Topic | Description | Status (2026-10) |
+|-------|-------------|------------------|
+| `resilmesh.alerts.zone.*` (`healthcare`, `energy`, `finance`, `global`) | Zone alerts → `alert_processor.handle_resilmesh_alert` | **Implemented** as a wildcard subscription. No deployable consumer service yet (no compose service, DAG task or CLI command); `demo/mock_resilmesh_publisher.py` is a self-contained mock. |
+| `resilmesh.threats.zone.{zone}` | Zone-specific threat intel | Planned — nothing subscribes or publishes |
+| `resilmesh.cve.kev` | Known Exploited Vulnerabilities | Planned — nothing subscribes or publishes |
 
 ### Publish (EdgeGuard → ResilMesh)
 
-| Topic | Description |
-|-------|-------------|
-| `resilmesh.enriched.alerts` | Enriched alert responses |
-| `resilmesh.threats.cross_zone` | Cross-zone threat alerts |
+| Topic | Description | Status (2026-10) |
+|-------|-------------|------------------|
+| `resilmesh.enriched.alerts` | Enriched alert responses | Planned — the response is built but not published (see the note above) |
+| `resilmesh.threats.cross_zone` | Cross-zone threat alerts | Planned — no code path |
 
 ---
 
