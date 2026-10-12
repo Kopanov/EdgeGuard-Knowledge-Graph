@@ -2405,6 +2405,31 @@ def get_baseline_config(context=None) -> tuple:
     return effective_limit, baseline_days
 
 
+def _require_baseline_start(context, step: str) -> None:
+    """Refuse to run a baseline step whose ``baseline_start`` did not succeed (2026-10-12).
+
+    The tier groups and ``full_neo4j_sync`` use ``trigger_rule=ALL_DONE`` so that one failed
+    source does not skip the others, but ALL_DONE also fires on ``upstream_failed``: on the
+    2026-10-12 smoke run a failed ``baseline_clean`` was followed by every collector and by
+    ``full_neo4j_sync`` on the un-wiped graph. ``baseline_start`` publishes an XCom only when it
+    ran to completion, which only happens after ``baseline_clean`` succeeded; no XCom means the
+    chain is broken above this step.
+    """
+    ti = (context or {}).get("ti")
+    if ti is None:
+        return
+    try:
+        marker = ti.xcom_pull(task_ids="baseline_start")
+    except Exception as e:  # API drift must not turn into a false refusal
+        logger.warning("[BASELINE] %s: could not read the baseline_start XCom (%s); proceeding", step, e)
+        return
+    if not marker:
+        raise AirflowException(
+            f"[BASELINE] {step}: baseline_start did not succeed (no XCom marker) — refusing to run after a "
+            "failed baseline_clean / baseline_start; clear the failed task to resume the run"
+        )
+
+
 def run_baseline_collector(collector_name: str, collector_class, context=None, **kwargs):
     """
     Run a single collector in baseline mode.
@@ -2422,6 +2447,8 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
     context         : Airflow task context (for dag_run.conf overrides)
     **kwargs        : passed through to the collector constructor
     """
+    _require_baseline_start(context, collector_name)
+
     from collectors.misp_writer import MISPWriter
 
     limit, baseline_days = get_baseline_config(context=context)
@@ -2581,6 +2608,8 @@ def run_baseline_malwarebazaar(**context):
 
 def run_baseline_full_sync(**context):
     """Run a FULL (non-incremental) MISP→Neo4j sync after baseline collection."""
+    _require_baseline_start(context, "full_neo4j_sync")
+
     from run_misp_to_neo4j import MISPToNeo4jSync
 
     logger.info("[BASELINE] Starting full MISP→Neo4j sync (all history)")
@@ -3026,6 +3055,9 @@ def _baseline_start_summary(**context):
     # a no-op instruction.
     logger.info('  Fresh-baseline (wipe Neo4j + MISP + checkpoints): {"fresh_baseline": "true"}')
     logger.info("=" * 55)
+    # XCom marker read by _require_baseline_start: present only when this task ran to the end,
+    # which (ALL_SUCCESS) only happens after baseline_clean succeeded.
+    return {"started": True, "limit": limit, "baseline_days": baseline_days, "fresh_baseline": is_fresh_baseline}
 
 
 baseline_start = PythonOperator(
