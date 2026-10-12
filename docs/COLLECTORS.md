@@ -432,7 +432,7 @@ Hashes are looked up **once**: the ledger remembers every delivered lookup, incl
 
 Every quota message is logged with the prefix **`[VT-QUOTA]`** (budget state at the start of the run, exhaustion events, run summary with lookups / enriched / unknown / errors), so `grep VT-QUOTA` on the task log shows what happened. The task result carries `vt_lookups`, `vt_enriched`, `vt_unknown`, `vt_lookup_errors`, `vt_stopped`, `vt_budget_used`, `vt_budget_remaining`.
 
-Growth: at the defaults, up to 360 hashes per day gain VirusTotal corroboration; a ThreatFox-sized backlog (~16,000 hashes) is covered in about six weeks. A premium key raises the budget knobs; the collector logic does not change.
+Coverage: at the defaults at most 360 hashes per day (six runs of 60) gain VirusTotal corroboration. This is a sample, not full coverage: after a fresh baseline every SHA-256 attribute in MISP is inside the candidate window (the window is the attribute's MISP timestamp, not the age of the indicator), candidates are taken in the order MISP returns them, and hashes that are not reached within the window are not looked up later. Fuller coverage needs a premium key (raise the two budget knobs; the collector logic does not change) or a narrower candidate selection, for example by source.
 
 ### Zone Detection
 ```python
