@@ -89,9 +89,10 @@ class VTCollector:
     """
     VirusTotal lookup-enrichment collector for MISP.
 
-    One run: list SHA-256 attributes in MISP that no VirusTotal attribute covers yet
-    (newest ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` days), look each up with
-    ``GET /files/{sha256}`` within the per-run cap and the daily budget, and push the
+    One run: list the SHA-256 attributes other sources pushed to MISP (newest
+    ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` days; VirusTotal's own attributes are excluded
+    by tag), drop the hashes the ledger remembers as already looked up, look the rest up
+    with ``GET /files/{sha256}`` within the per-run cap and the daily budget, and push the
     enriched items to MISP.
 
     Features:
@@ -403,13 +404,17 @@ class VTCollector:
         return response.json()
 
     def _candidate_hashes(self, wanted: int, budget: VirusTotalBudget) -> List[str]:
-        """Return up to *wanted* SHA-256 values from MISP that still lack VirusTotal enrichment.
+        """Return up to *wanted* SHA-256 values from MISP that have not been looked up yet.
 
         Uses ``attributes/restSearch`` on the collector's MISP instance: type ``sha256``,
         attribute timestamp within ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` days, and not
-        already tagged with the VirusTotal source tag. Hashes recorded in the ledger
-        (looked up before, found or not) are excluded. Raises on MISP transport or
-        HTTP errors that survive the retries — the caller turns that into a skipped run.
+        tagged with the VirusTotal source tag (so the collector never re-reads its own
+        output). MISP does not tell which of the other sources' hashes were enriched
+        already: that exclusion is the ledger memory (looked up before, found or not).
+        Without the ledger file the hashes inside the window are looked up again — quota
+        only, since the writer does not duplicate attributes MISP already holds. Raises on
+        MISP transport or HTTP errors that survive the retries — the caller turns that
+        into a skipped run.
         """
         days = candidate_days()
         url = f"{self.misp_writer.url}/attributes/restSearch"

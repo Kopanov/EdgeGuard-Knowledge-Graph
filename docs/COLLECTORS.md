@@ -413,11 +413,11 @@ Typically **`global`** or derived from feed context — see `collect()` implemen
 ### What It Does
 The public (free) VirusTotal API v3 offers **single-object lookups only** (`GET /files/{hash}`); feed and Intelligence-search endpoints need a premium licence and return nothing on a free key. The collector therefore does not act as a feed. Each run:
 
-1. lists SHA-256 attributes in MISP that no `source:VirusTotal` attribute covers yet (`attributes/restSearch`, type `sha256`, attribute timestamp within `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`, default 30 days) — hashes pushed by ThreatFox, MalwareBazaar, OTX and other sources;
-2. looks each hash up within the per-run cap and the daily budget (below);
+1. lists the SHA-256 attributes other sources pushed to MISP — ThreatFox, MalwareBazaar, OTX and others (`attributes/restSearch`, type `sha256`, attribute timestamp within `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`, default 30 days; VirusTotal's own attributes are excluded by tag) — and drops the hashes the ledger remembers as already looked up;
+2. looks each remaining hash up within the per-run cap and the daily budget (below);
 3. pushes the enriched items to MISP under `source:VirusTotal`. The MISP→Neo4j sync merges them into the **same** Indicator node: a second `SOURCED_FROM` edge, VirusTotal confidence (`last_analysis_stats`), threat label, file names (zone detection) and the first-submission date (source-truthful `first_seen`).
 
-Hashes are looked up **once**: the ledger remembers every lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs.
+Hashes are looked up **once**: the ledger remembers every delivered lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs. An enriched hash is remembered only after its MISP push succeeded. The ledger is the only record of what was looked up (MISP cannot tell which hashes of other sources were enriched): if the file is lost, hashes inside the candidate window are looked up again, which costs quota but creates no duplicate attributes. The query shape was confirmed against a live MISP 2.5 on 2026-10-12 (HTTP 200, `response.Attribute` list).
 
 ### Free-tier safety (never blocks the workflow)
 
