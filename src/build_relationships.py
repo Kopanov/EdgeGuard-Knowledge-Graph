@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import logging
 
 from config import VALID_ZONES
-from neo4j_client import Neo4jClient
+from neo4j_client import APOC_ITERATE_YIELD, Neo4jClient, apoc_iterate_failures
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid
 from query_pause import query_pause
 
@@ -229,28 +229,8 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         return False
 
 
-def _apoc_iterate_failures(row) -> list:
-    """Return the failure signals in an ``apoc.periodic.iterate`` result row.
-
-    ``errorMessages`` alone is not enough: on 2026-09-16 a Neo4j heap OOM
-    during the (since removed) whole-event Indicator → Malware co-occurrence
-    step came back with empty ``errorMessages`` and was logged ``[OK]``.
-    Columns missing from the row (older callers, mocks) count as clean.
-    """
-    failures = []
-    if row.get("errorMessages"):
-        failures.append(f"errorMessages={row['errorMessages']}")
-    if row.get("failedBatches"):
-        failures.append(f"failedBatches={row['failedBatches']}")
-    if row.get("failedOperations"):
-        failures.append(f"failedOperations={row['failedOperations']}")
-    if row.get("wasTerminated"):
-        failures.append("wasTerminated=true")
-    for column in ("batch", "operations"):
-        errors = (row.get(column) or {}).get("errors")
-        if errors:
-            failures.append(f"{column}.errors={errors}")
-    return failures
+# Kept under the old name: callers and tests reference it here.
+_apoc_iterate_failures = apoc_iterate_failures
 
 
 def _safe_run_batched(
@@ -333,8 +313,7 @@ def _safe_run_batched(
         '{inner_query}',
         {{batchSize: {batch_size}, parallel: false{params_config}}}
     )
-    YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
-          batch, operations, updateStatistics
+    YIELD {APOC_ITERATE_YIELD}
     RETURN total AS count, batches, errorMessages, failedBatches, failedOperations, wasTerminated,
            batch, operations, updateStatistics
     """

@@ -423,6 +423,37 @@ NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
 _REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
 
+# Every column ``apoc.periodic.iterate`` yields that a caller needs to judge a batched step.
+# ``errorMessages`` alone is not enough: a Neo4j heap OOM inside a batch came back with an
+# empty ``errorMessages`` and only ``failedBatches`` / ``batch.errors`` set (local 800-day
+# baseline, 2026-09-16).
+APOC_ITERATE_YIELD = (
+    "batches, total, errorMessages, failedBatches, failedOperations, wasTerminated, batch, operations, updateStatistics"
+)
+
+
+def apoc_iterate_failures(row) -> list:
+    """Return the failure signals in an ``apoc.periodic.iterate`` result row.
+
+    ``row`` is a ``neo4j.Record`` or a dict with the ``APOC_ITERATE_YIELD`` columns.
+    Columns missing from the row (older callers, mocks) count as clean. ``errorMessages``
+    is a map ``{message: count}``, so the result is a list of strings, never the map.
+    """
+    failures = []
+    if row.get("errorMessages"):
+        failures.append(f"errorMessages={row['errorMessages']}")
+    if row.get("failedBatches"):
+        failures.append(f"failedBatches={row['failedBatches']}")
+    if row.get("failedOperations"):
+        failures.append(f"failedOperations={row['failedOperations']}")
+    if row.get("wasTerminated"):
+        failures.append("wasTerminated=true")
+    for column in ("batch", "operations"):
+        errors = (row.get(column) or {}).get("errors")
+        if errors:
+            failures.append(f"{column}.errors={errors}")
+    return failures
+
 
 class RelationshipBatchResult(int):
     """Return value of ``Neo4jClient.create_misp_relationships_batch``.

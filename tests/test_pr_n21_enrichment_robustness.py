@@ -173,6 +173,7 @@ class TestFix5LinkIndicatorsBatched:
         a dict with errors and we'd be back to silent partial-loss."""
         body = self._campaigns_body()
         assert "errorMessages" in body, "post-call must inspect errorMessages"
+        assert "failedBatches" in body, "post-call must inspect every APOC failure column, not only errorMessages"
         assert "raise" in body, "any non-empty errorMessages must raise"
 
 
