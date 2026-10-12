@@ -709,6 +709,7 @@ def run_collector_with_metrics(
     limit: int = 100,
     baseline: bool = False,
     baseline_days: int = 365,
+    baseline_holder: Optional[dict] = None,
     **collector_kwargs,
 ):
     """
@@ -722,6 +723,9 @@ def run_collector_with_metrics(
         baseline: If True, request baseline mode for collect() when the method accepts it;
             otherwise ``limit`` is pre-resolved with baseline semantics (unlimited vs incremental cap).
         baseline_days: Passed to collect() only when it accepts ``baseline_days`` (with baseline mode).
+        baseline_holder: ``{"dag_id", "run_id"}`` of the ``edgeguard_baseline`` DAG run this task belongs
+            to (set by ``run_baseline_collector``). The baseline lock held by that same run does not
+            skip the task; any other holder still does. ``None`` for scheduled DAGs.
         **collector_kwargs: Additional arguments passed to the collector constructor only
 
     Returns:
@@ -738,15 +742,22 @@ def run_collector_with_metrics(
 
     task_start = time.time()
 
-    # Baseline mutex: if a CLI baseline run is holding the sentinel lock,
+    # Baseline mutex: if a baseline (the edgeguard_baseline DAG run or an
+    # in-process ``run_pipeline --baseline``) is holding the sentinel lock,
     # skip this scheduled run instead of racing against it for MISP/Neo4j
     # writes. The baseline is treated as authoritative — it's a long,
     # expensive, operator-driven run that shouldn't be undermined by
     # interleaved partial writes from the incremental DAGs.
+    #
+    # The baseline DAG's own collector tasks come through this function too
+    # (``run_baseline_collector``). They pass ``baseline_holder`` so that the
+    # sentinel written by their own run is not a reason to skip: since the DAG
+    # takes the lock itself, an unconditional check made every collector of
+    # the baseline stand down and the run collected nothing.
     try:
         from baseline_lock import baseline_skip_reason
 
-        _baseline_skip = baseline_skip_reason()
+        _baseline_skip = baseline_skip_reason(own_holder=baseline_holder)
     except Exception:
         # If the module can't load for any reason, fail-open (run as
         # before). Import errors must not break the whole DAG.
@@ -756,7 +767,15 @@ def run_collector_with_metrics(
     if _baseline_skip is not None:
         from collectors.collector_utils import make_skipped_optional_source
 
-        logger.warning("%s: %s", collector_name.upper(), _baseline_skip)
+        if baseline:
+            # A baseline collector standing down means another baseline holds the lock.
+            logger.error(
+                "[BASELINE] %s NOT collected — the baseline lock is held by another run: %s",
+                collector_name.upper(),
+                _baseline_skip,
+            )
+        else:
+            logger.warning("%s: %s", collector_name.upper(), _baseline_skip)
         result = make_skipped_optional_source(
             collector_name,
             skip_reason=_baseline_skip,
@@ -2432,6 +2451,8 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
     writer = MISPWriter(liveness_callback=liveness_cb)
     logger.info(f"[BASELINE] Starting {collector_name} — limit={limit or 'unlimited'}, baseline_days={baseline_days}")
 
+    # Identity of this DAG run: the baseline lock it holds must not skip its own collectors.
+    own_holder = _baseline_run_holder(context) if context else None
     return run_collector_with_metrics(
         collector_name,
         collector_class,
@@ -2439,6 +2460,7 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
         limit=limit,
         baseline=True,
         baseline_days=baseline_days,
+        baseline_holder=own_holder if own_holder and own_holder.get("run_id") else None,
         **kwargs,
     )
 
@@ -2814,6 +2836,18 @@ def _baseline_acquire_lock(**context) -> None:
             holder["run_id"],
             baseline_lock_path(),
         )
+        # Self-check before the destructive step: the collectors of this run ask the same
+        # question with the same identity. If the lock just taken would make them stand
+        # down, fail here — before ``baseline_clean`` wipes anything — instead of running
+        # a baseline that collects nothing.
+        from baseline_lock import baseline_skip_reason
+
+        blocked = baseline_skip_reason(own_holder=holder)
+        if blocked is not None:
+            raise AirflowException(
+                "baseline_acquire_lock: the lock held by this run would skip this run's own collectors "
+                f"({blocked}). Refusing to continue to the destructive step."
+            )
         return
     existing = is_baseline_running()
     raise AirflowException(
