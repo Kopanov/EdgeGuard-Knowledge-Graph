@@ -26,6 +26,7 @@ Usage:
   python scripts/verify_fresh_baseline.py                 # human-readable
   python scripts/verify_fresh_baseline.py --json          # machine-readable
   python scripts/verify_fresh_baseline.py --require-ics --require-cisa-ics
+  python scripts/verify_fresh_baseline.py --require-malwarebazaar   # after enabling that source
 
 Exit code 0 = every mandatory check passed; 1 = at least one failed; 2 = could
 not reach Neo4j.
@@ -154,7 +155,7 @@ def _one(statement: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, A
     return rows[0] if rows else {}
 
 
-def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
+def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar: bool = False) -> Report:
     rep = Report()
 
     # 0. Inventory for the record.
@@ -291,6 +292,22 @@ def run_checks(require_ics: bool, require_cisa_ics: bool) -> Report:
         mandatory=require_cisa_ics,
     )
 
+    # 10c. MalwareBazaar (opt-in, 2026-10): the Source node exists and at least one sha256 hash
+    #      indicator is sourced from it. The sync stores every file hash as ``indicator_type = 'hash'``
+    #      (``run_misp_to_neo4j.TYPE_MAPPING``), so a sha256 is recognised by its 64 hex characters.
+    r = _one(
+        "OPTIONAL MATCH (s:Source {source_id: 'malwarebazaar'}) "
+        "RETURN s IS NOT NULL AS present, COUNT { (s)<-[:SOURCED_FROM]-(:Indicator) } AS indicators, "
+        "COUNT { (s)<-[:SOURCED_FROM]-(i:Indicator) WHERE i.indicator_type = 'hash' "
+        "AND toLower(i.value) =~ '[0-9a-f]{64}' } AS sha256_indicators"
+    )
+    rep.add(
+        "malwarebazaar_source_present",
+        (bool(r.get("present")) and (r.get("sha256_indicators") or 0) > 0) if require_malwarebazaar else None,
+        r,
+        mandatory=require_malwarebazaar,
+    )
+
     # 10a. Sub-technique hierarchy complete (2026-10 R6): every dotted-id technique whose parent
     #      exists links to it with SUBTECHNIQUE_OF.
     r = _one(
@@ -381,10 +398,15 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="print the full report as JSON")
     ap.add_argument("--require-ics", action="store_true", help="fail if no ATT&CK for ICS techniques are present")
     ap.add_argument("--require-cisa-ics", action="store_true", help="fail if the cisa_ics source has no data")
+    ap.add_argument(
+        "--require-malwarebazaar",
+        action="store_true",
+        help="fail if the malwarebazaar source has no sha256 indicator",
+    )
     args = ap.parse_args()
 
     try:
-        rep = run_checks(args.require_ics, args.require_cisa_ics)
+        rep = run_checks(args.require_ics, args.require_cisa_ics, args.require_malwarebazaar)
     except (urllib.error.URLError, OSError, RuntimeError) as exc:
         print(f"ERROR: cannot query {URL}: {exc}", file=sys.stderr)
         return 2

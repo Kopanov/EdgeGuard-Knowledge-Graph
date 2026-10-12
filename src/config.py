@@ -634,6 +634,14 @@ INCREMENTAL_COLLECTION_LIMIT = _env_int("EDGEGUARD_INCREMENTAL_LIMIT", 200)
 # Add sources here when needed (e.g., {'cisa', 'mitre'})
 NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 
+# Sources whose collector enforces its own per-run cap. The generic incremental default
+# (EDGEGUARD_INCREMENTAL_LIMIT) does not apply to them; the global hard override
+# (EDGEGUARD_MAX_ENTRIES) still does.
+#   malwarebazaar (2026-10): one 48-hour export holds about 1,000 samples. A daily run cut at
+#   the incremental default (200) would let most of them age out of the export window for good;
+#   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN (default 500) is the per-run limit for this source.
+OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar"})
+
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:
     """
@@ -642,7 +650,9 @@ def get_effective_limit(source: str = None, default_limit: int = None) -> Option
     Priority (highest to lowest):
       1. NO_LIMIT_SOURCES — per-source bypass, always returns None
       2. EDGEGUARD_MAX_ENTRIES — global hard override (0 = use incremental default)
-      3. EDGEGUARD_INCREMENTAL_LIMIT — default cap for regular cron runs
+      3. OWN_RUN_CAP_SOURCES — the collector applies its own per-run cap, so the
+         incremental default below is not used (returns None)
+      4. EDGEGUARD_INCREMENTAL_LIMIT — default cap for regular cron runs
          (0 = unlimited; baseline runs have their own separate limit)
 
     Args:
@@ -659,6 +669,9 @@ def get_effective_limit(source: str = None, default_limit: int = None) -> Option
     # Explicit global override takes precedence
     if MAX_ENTRIES_PER_SOURCE != 0:
         return MAX_ENTRIES_PER_SOURCE
+    # The collector enforces its own per-run cap: no generic incremental cut
+    if source and source.lower() in OWN_RUN_CAP_SOURCES:
+        return None
     # Default: apply incremental cap (0 means unlimited)
     return INCREMENTAL_COLLECTION_LIMIT if INCREMENTAL_COLLECTION_LIMIT > 0 else None
 
@@ -1163,6 +1176,22 @@ CISA_ICS_MAX_ADVISORIES_PER_RUN = _env_int("EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PE
 # attempted but fewer parsed successfully, the collector raises a transient
 # error (task skipped + alert) instead of pushing a thin dataset.
 CISA_ICS_MIN_EXPECTED_ADVISORIES = _env_int("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES", 50)
+
+# ---------------------------------------------------------------------------
+# MalwareBazaar (abuse.ch) collector (2026-10)
+# ---------------------------------------------------------------------------
+# ``MalwareBazaarCollector`` in ``src/collectors/global_feed_collector.py`` —
+# one ``sha256`` indicator per sample from the public "recent" CSV export
+# (the last 48 hours, about 1,000 samples, no API key required). The
+# ``signature`` column is the malware family and links the hash to ``Malware``
+# nodes through the same TF_META path as ThreatFox. Flag-guarded and OFF by
+# default: the daily and baseline DAG tasks return a skipped status (success,
+# 0 items) until an operator sets ``EDGEGUARD_ENABLE_MALWAREBAZAAR=true``.
+ENABLE_MALWAREBAZAAR = _env_bool("EDGEGUARD_ENABLE_MALWAREBAZAAR", "false")
+# Per-run cap on samples pushed to MISP. Labelled samples (``signature`` other
+# than "n/a") are kept before unlabelled ones, then the list is cut at the cap.
+# ``0`` disables the cap (only the regular collection limit applies).
+MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
 
 # ---------------------------------------------------------------------------
 # ThreatActor alias-duplicate merge (2026-10, fresh-baseline PR)

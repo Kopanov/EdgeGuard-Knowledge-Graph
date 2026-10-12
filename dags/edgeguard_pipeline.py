@@ -1188,6 +1188,44 @@ def run_sslblacklist_collection(**context):
     return run_collector_with_metrics("sslbl", SSLBlacklistCollector, MISPWriter(), limit=limit)
 
 
+def run_malwarebazaar_collection(**context):
+    """Run the MalwareBazaar (abuse.ch) collector with metrics (flag-guarded, default OFF).
+
+    ``EDGEGUARD_ENABLE_MALWAREBAZAAR`` unset/false → log "disabled by flag" and
+    return a skipped status (success, 0 items) WITHOUT instantiating the
+    collector or touching MISP — the task can never fail while the flag is
+    off. When enabled it goes through ``run_collector_with_metrics`` exactly
+    like the other collectors (transient upstream failure → skip + alert;
+    code defects fail loudly).
+    """
+    try:
+        from config import ENABLE_MALWAREBAZAAR as _malwarebazaar_enabled
+    except Exception:  # noqa: BLE001 - a config import problem must not fail a flag-off task
+        logger.warning(
+            "MALWAREBAZAAR: could not read EDGEGUARD_ENABLE_MALWAREBAZAAR from config — treating as disabled"
+        )
+        _malwarebazaar_enabled = False
+
+    if not _malwarebazaar_enabled:
+        from collectors.collector_utils import make_skipped_optional_source
+
+        logger.info(
+            "MALWAREBAZAAR skipped — disabled by flag (set EDGEGUARD_ENABLE_MALWAREBAZAAR=true to enable); "
+            "task success with 0 items"
+        )
+        return make_skipped_optional_source(
+            "malwarebazaar",
+            skip_reason="disabled by flag EDGEGUARD_ENABLE_MALWAREBAZAAR",
+            skip_reason_class="malwarebazaar_disabled_by_flag",
+        )
+
+    from collectors.global_feed_collector import MalwareBazaarCollector
+    from collectors.misp_writer import MISPWriter
+
+    limit = get_effective_limit("malwarebazaar")
+    return run_collector_with_metrics("malwarebazaar", MalwareBazaarCollector, MISPWriter(), limit=limit)
+
+
 # PR-F9 / multi-agent audit (Maintainer Medium): the old
 # ``run_energy_placeholder`` and ``run_healthcare_placeholder`` functions
 # lived here as no-op stubs — never wired into any PythonOperator task,
@@ -1696,6 +1734,15 @@ collect_sslblacklist_daily = PythonOperator(
     dag=daily_dag,
 )
 
+# MalwareBazaar (abuse.ch, 2026-10): flag-guarded by EDGEGUARD_ENABLE_MALWAREBAZAAR
+# (default OFF → task logs "disabled by flag" and succeeds with 0 items).
+collect_malwarebazaar_daily = PythonOperator(
+    task_id="collect_malwarebazaar",
+    python_callable=run_malwarebazaar_collection,
+    execution_timeout=timedelta(hours=2),
+    dag=daily_dag,
+)
+
 log_daily_summary = BashOperator(
     task_id="log_summary",
     bash_command="""
@@ -1707,6 +1754,7 @@ log_daily_summary = BashOperator(
         echo "  - URLhaus"
         echo "  - Feodo Tracker"
         echo "  - SSL Blacklist"
+        echo "  - MalwareBazaar (flag-guarded: EDGEGUARD_ENABLE_MALWAREBAZAAR)"
     """,
     execution_timeout=timedelta(minutes=5),
     trigger_rule=TriggerRule.ALL_DONE,
@@ -1723,6 +1771,7 @@ log_daily_summary = BashOperator(
         collect_urlhaus_daily,
         collect_feodo_daily,
         collect_sslblacklist_daily,
+        collect_malwarebazaar_daily,
     ]
     >> log_daily_summary
 )
@@ -2471,6 +2520,31 @@ def run_baseline_sslblacklist(**context):
     from collectors.finance_feed_collector import SSLBlacklistCollector
 
     return run_baseline_collector("sslbl", SSLBlacklistCollector, context=context)
+
+
+def run_baseline_malwarebazaar(**context):
+    """Baseline run of the MalwareBazaar collector (2026-10; flag-guarded like the daily task).
+
+    The recent export is the only key-free export, so a baseline loads the same 48-hour
+    window as a daily run; the history then builds up over the daily runs.
+    """
+    try:
+        from config import ENABLE_MALWAREBAZAAR as _malwarebazaar_enabled
+    except Exception:  # noqa: BLE001 - a config import problem must not fail a flag-off task
+        logger.warning("MALWAREBAZAAR baseline: could not read EDGEGUARD_ENABLE_MALWAREBAZAAR — treating as disabled")
+        _malwarebazaar_enabled = False
+    if not _malwarebazaar_enabled:
+        from collectors.collector_utils import make_skipped_optional_source
+
+        logger.info("MALWAREBAZAAR baseline skipped — disabled by flag (EDGEGUARD_ENABLE_MALWAREBAZAAR)")
+        return make_skipped_optional_source(
+            "malwarebazaar",
+            skip_reason="disabled by flag EDGEGUARD_ENABLE_MALWAREBAZAAR",
+            skip_reason_class="malwarebazaar_disabled_by_flag",
+        )
+    from collectors.global_feed_collector import MalwareBazaarCollector
+
+    return run_baseline_collector("malwarebazaar", MalwareBazaarCollector, context=context)
 
 
 def run_baseline_full_sync(**context):
@@ -3273,6 +3347,14 @@ with TaskGroup(
     bl_cisa_ics = PythonOperator(
         task_id="collect_cisa_ics",
         python_callable=run_baseline_cisa_ics,
+        execution_timeout=timedelta(hours=2),
+        dag=baseline_dag,
+    )
+    # 2026-10: MalwareBazaar — flag-guarded (EDGEGUARD_ENABLE_MALWAREBAZAAR); the wrapper
+    # returns a skipped status when the flag is off, so the task is inert.
+    bl_malwarebazaar = PythonOperator(
+        task_id="collect_malwarebazaar",
+        python_callable=run_baseline_malwarebazaar,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )

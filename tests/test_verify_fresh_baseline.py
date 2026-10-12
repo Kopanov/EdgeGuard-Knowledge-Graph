@@ -66,6 +66,8 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"c": 0}]
     if "source_id: 'cisa_ics'" in s:
         return [{"present": False, "edges": 0}]
+    if "source_id: 'malwarebazaar'" in s:
+        return [{"present": False, "indicators": 0, "sha256_indicators": 0}]
     if "db.relationshipTypes" in s:
         return [{"t": t} for t in ("SOURCED_FROM", "INDICATES", "INVOLVES", "ON")]
     if "'mitre_attck' IN coalesce(a.source, [])" in s:
@@ -94,7 +96,9 @@ def _run(vfb, monkeypatch, override=None, **kw):
         return override(statement, rows) if override else rows
 
     monkeypatch.setattr(vfb, "_post", fake_post)
-    return vfb.run_checks(kw.get("require_ics", False), kw.get("require_cisa_ics", False))
+    return vfb.run_checks(
+        kw.get("require_ics", False), kw.get("require_cisa_ics", False), kw.get("require_malwarebazaar", False)
+    )
 
 
 def _check(rep, name):
@@ -112,6 +116,41 @@ class TestHealthyBaselinePasses:
         assert _check(rep, "cisa_ics_source_present")["ok"] is None
         rep = _run(vfb, monkeypatch, require_ics=True, require_cisa_ics=True)
         assert {c["check"] for c in rep.failed} == {"ics_techniques_present", "cisa_ics_source_present"}
+
+    def test_malwarebazaar_check_is_informational_unless_required(self, vfb, monkeypatch):
+        """``--require-malwarebazaar`` (2026-10): off → INFO even with no Source node; on → the Source
+        node must exist with at least one sha256 hash indicator sourced from it."""
+        rep = _run(vfb, monkeypatch)
+        assert _check(rep, "malwarebazaar_source_present")["ok"] is None and rep.failed == []
+        rep = _run(vfb, monkeypatch, require_malwarebazaar=True)
+        assert [c["check"] for c in rep.failed] == ["malwarebazaar_source_present"]
+
+        def present(statement, rows):
+            if "source_id: 'malwarebazaar'" in statement:
+                return [{"present": True, "indicators": 812, "sha256_indicators": 812}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=present, require_malwarebazaar=True)
+        assert _check(rep, "malwarebazaar_source_present")["ok"] is True and rep.failed == []
+
+        def source_without_hashes(statement, rows):
+            if "source_id: 'malwarebazaar'" in statement:
+                return [{"present": True, "indicators": 3, "sha256_indicators": 0}]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=source_without_hashes, require_malwarebazaar=True)
+        assert [c["check"] for c in rep.failed] == ["malwarebazaar_source_present"]
+
+    def test_malwarebazaar_check_counts_sha256_hashes_only(self, vfb, monkeypatch):
+        seen = {}
+
+        def capture(statement, rows):
+            if "source_id: 'malwarebazaar'" in statement:
+                seen["stmt"] = statement
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        assert "i.indicator_type = 'hash'" in seen["stmt"] and "[0-9a-f]{64}" in seen["stmt"]
 
 
 class TestNoFalsePositives:

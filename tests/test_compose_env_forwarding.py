@@ -28,6 +28,8 @@ FORWARDED = [
     ("EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...)) — empty would raise
     ("EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN", None),  # _env_int tolerates empty
     ("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES", None),
+    ("EDGEGUARD_ENABLE_MALWAREBAZAAR", "false"),  # 2026-10 MalwareBazaar source, flag-guarded
+    ("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", "500"),  # _env_int; compose carries the code default
     ("EDGEGUARD_CISA_INCREMENTAL_DAYS", "30"),  # int(os.environ.get(...))
     ("EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET", "400"),
     ("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", "60"),

@@ -19,6 +19,7 @@ This document details all data collectors in EdgeGuard, including their sources,
 11. [Energy Feed Collector](#10-energy-feed-collector)
 12. [MISP Collector](#11-misp-collector)
 13. [CISA ICS Advisories Collector](#12-cisa-ics-advisories-collector)
+14. [MalwareBazaar Collector](#13-malwarebazaar-collector)
 
 ---
 
@@ -797,6 +798,69 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 
 ---
 
+## 13. MalwareBazaar Collector
+
+**File:** `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`) — **flag-guarded, OFF by default** (`EDGEGUARD_ENABLE_MALWAREBAZAAR=true` to enable). Added 2026-10.
+
+### What It Does
+Collects the sha256 hashes of recent malware samples from [MalwareBazaar](https://bazaar.abuse.ch/) (abuse.ch) and emits **one `sha256` indicator per sample**. The `signature` column is the malware family: it becomes `malware_family` on the item, travels to MISP inside the `TF_META` comment exactly like the ThreatFox family, is rehydrated as `Indicator.malware_family` by `run_misp_to_neo4j.parse_attribute`, and `build_relationships` step 9 links it to `Malware` nodes (`INDICATES`, `match_type = malware_family`). Samples whose `signature` is `n/a` are pushed without a family.
+
+### Source
+- **Export URL:** `https://bazaar.abuse.ch/export/csv/recent/` — the samples of the last 48 hours (about 1,000 rows; 1,027 on 2026-10-12, of which 458 Mirai and 265 `n/a`). No API key is required. The **full export** (`/export/csv/full/`) is the complete history and is deliberately **not** used: baseline and regular runs both read the recent export, so the history in MISP / Neo4j builds up over successive daily runs.
+- **Columns:** `first_seen_utc, sha256_hash, md5_hash, sha1_hash, reporter, file_name, file_type_guess, mime_type, signature, clamav, vtpercent, imphash, ssdeep, tlsh` (quoted, `", "` separated; the header is a `#` comment line and is read by name, so a reordered export still parses).
+- **Auth:** when `THREATFOX_API_KEY` (the abuse.ch Auth-Key, shared by all abuse.ch platforms) is configured it is sent as the `Auth-Key` header; placeholders (`demo`, `YOUR_THREATFOX_API_KEY_HERE`) are treated as unset.
+- **Terms:** MalwareBazaar data is free of charge for commercial and non-commercial use ([Terms of Use](https://bazaar.abuse.ch/faq/#tos)).
+
+### Flags & knobs (`src/config.py`, section "MalwareBazaar (abuse.ch) collector (2026-10)")
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `EDGEGUARD_ENABLE_MALWAREBAZAAR` | `false` | Master switch. Off → the daily and baseline tasks and `collect()` log "disabled by flag" and return a skipped status (success, 0 items, `skip_reason_class = malwarebazaar_disabled_by_flag`) **without any HTTP request** |
+| `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` | `500` | Per-run cap on samples pushed to MISP. Labelled samples (`signature` other than `n/a`) are kept before unlabelled ones, then the list is cut at the cap. This cap is the per-run limit for the source: the generic `EDGEGUARD_INCREMENTAL_LIMIT` (200) does not apply (`malwarebazaar` is in `config.OWN_RUN_CAP_SOURCES`), because one 48-hour export holds about 1,000 samples and a daily run cut at 200 would let most of them age out of the window. The global hard override `EDGEGUARD_MAX_ENTRIES` and an explicit baseline limit still apply when lower. `0` removes the cap. |
+
+Both variables are forwarded into the containers by `docker-compose.yml` (`x-common-env`) with the code defaults.
+
+### Zone Detection
+`detect_zones_from_text(signature)` (via `get_zones_from_malware`); `global` when the label is `n/a`.
+
+### Failure contract (optional source)
+- Flag off → skipped, no HTTP request.
+- HTTP 401/403 → skipped (`malwarebazaar_auth_denied`); the circuit breaker is not tripped.
+- HTTP 429 after the `Retry-After` retries, HTTP 5xx, timeouts and connection errors → `MalwareBazaarTransientError` (a `TransientServerError`) propagates; `run_collector_with_metrics` marks the task **skipped** (`transient_external_error`), sends the alert and marks the source unhealthy — the DAG continues.
+- Other HTTP errors (for example 404 after an upstream layout change) → `success=False` (the task fails and needs an operator).
+- Own circuit breaker (`malwarebazaar`, 3 failures → open 30 min) and `RateLimiter` (one download per run); `retry_with_backoff` (3 retries) + `request_with_rate_limit_retries` (429/5xx backoff).
+
+### Example Output
+
+```python
+# MalwareBazaar Indicator
+{
+    'indicator_type': 'sha256',
+    'value': '38cbdf411e85b4136c8d4b725f7b46530919d45799a8065965d408db5ebcc15d',
+    'zone': ['global'],                     # detect_zones_from_text(signature)
+    'tag': 'malwarebazaar',
+    'source': ['malwarebazaar'],
+    'first_seen': '2026-10-12T19:25:15+00:00',   # first_seen_utc, tz-aware UTC (source-truthful)
+    'confidence_score': 0.7,                # 0.6 when the family label is n/a
+    'malware_family': 'Mirai',              # '' when signature is n/a
+    'md5': '2cbdeeb34862d4f0a40aabcc3236b891',
+    'sha1': 'd382bede96d914347228a5392812851da046858f',
+    'file_name': 'net.arm5',
+    'file_type': 'elf',
+    'mime_type': 'application/x-executable',
+    'reporter': 'abuse_ch',
+    'reference': 'https://bazaar.abuse.ch/sample/38cbdf41…/',   # sample page; triggers TF_META
+    'tags': ['elf'],                        # TF_META.tags → tf_tags in Neo4j
+}
+```
+
+In MISP the attribute is `sha256` with the tags `source:MalwareBazaar`, `zone:*`, `tlp:*`, `confidence:*`, the MISP-native `first_seen`, and a `TF_META:` comment carrying `malware_family`, `reporter`, `reference` and `tags`.
+
+### Acceptance
+`python scripts/verify_fresh_baseline.py --require-malwarebazaar` fails unless `Source {source_id: 'malwarebazaar'}` exists with at least one sha256 hash indicator sourced from it.
+
+---
+
 ## Collector Summary Table
 
 | Collector | Sources | Status | Zone Detection |
@@ -813,6 +877,7 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 | Energy | — (EE-ISAC not planned, decision 2026-10; ICS-CERT via `cisa_ics`) | ⏳ Placeholder | - |
 | MISP | Local MISP | ✅ Active | `detect_sectors()` → list |
 | CISA ICS | cisagov/CSAF (ICS-CERT advisories) | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) | Source-asserted sector → fixed table (`map_sectors_to_zones()`), no keyword detector |
+| MalwareBazaar | abuse.ch recent sample export (sha256 + family label) | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) | `detect_zones_from_text()` on the family label → list |
 
 ---
 
@@ -837,6 +902,7 @@ upper bound for a single baseline run.
 | **Global (URLhaus / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
 | **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (EE-ISAC) is planned (decision 2026-10). Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1. **Since 2026-10 the ICS-CERT part is a real collector:** [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
 | **CISA ICS Advisories** | `min(index entries in window, CISA_ICS_MAX_ADVISORIES_PER_RUN=1200)` advisory files (~900 on a 730-day run), one item per CVE | Public GitHub raw files, no auth; polite sequential fetch ≤ 4 req/s | Flag-guarded, default **off**. Baseline sanity floor `CISA_ICS_MIN_EXPECTED_ADVISORIES=50` → transient skip + alert instead of a thin dataset |
+| **MalwareBazaar** | `min(samples in the recent export ≈ 1,000, MALWAREBAZAAR_MAX_PER_RUN=500)` sha256 indicators per run (baseline and daily; the incremental default of 200 does not apply), labelled samples first | The key-free export covers the last 48 hours only; the full export is the whole history and is not used | Flag-guarded, default **off**. A baseline loads the same window as a daily run; the history builds up over daily runs |
 | **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (HC3, Health-ISAC) is planned (decision 2026-10). Same skip-dashboard behaviour as Energy |
 
 ### Planned improvements (future PRs)
@@ -959,4 +1025,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
+_Last updated: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._

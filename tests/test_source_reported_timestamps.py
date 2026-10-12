@@ -105,6 +105,7 @@ def test_collector_emitted_tags_match_allowlist():
         "urlhaus",  # global_feed_collector
         "feodo_tracker",  # finance_feed_collector
         "ssl_blacklist",  # finance_feed_collector
+        "malwarebazaar",  # global_feed_collector (MalwareBazaarCollector) — flag-guarded, 2026-10
         # Intentionally excluded from the reliable allowlist:
         "alienvault_otx",  # otx_collector — pulse-publish-date, not IOC first-seen
         "misp",  # misp_collector — pipeline metadata

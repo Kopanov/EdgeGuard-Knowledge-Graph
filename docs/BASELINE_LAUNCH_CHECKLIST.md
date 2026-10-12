@@ -240,9 +240,10 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    Instrumentation` became `T104%WINDIR%\Management Instrumentation`), so T1047,
    T1021.006, T1543.003, T1222.001, T1546.003 and tool S0005 never reached Neo4j.
    The acceptance script checks for them after the run.
-2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS` and `EDGEGUARD_ENABLE_CISA_ICS`
-   (both default `false`). Recommended: run the baseline with both **off**, run
-   `scripts/verify_fresh_baseline.py`, then enable them one at a time (step 6).
+2. **Flags.** Decide `EDGEGUARD_ENABLE_MITRE_ICS`, `EDGEGUARD_ENABLE_CISA_ICS` and
+   `EDGEGUARD_ENABLE_MALWAREBAZAAR` (all default `false`). Recommended: run the baseline
+   with all three **off**, run `scripts/verify_fresh_baseline.py`, then enable them one at
+   a time (step 6).
    On the Compose deployment the flags live in `.env` and reach the `airflow`
    container only through the `x-common-env` block of `docker-compose.yml` (added
    October 2026 — a checkout older than that silently ignores them); after changing
@@ -291,14 +292,20 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    [RESILMESH_INTEROPERABILITY.md § 3.2](RESILMESH_INTEROPERABILITY.md)) — and
    `TARGETS` now also runs from actors and malware to sectors, so the Cypher model's
    training set needs examples for them.
-6. **Enable the ICS sources one at a time** (each followed by the acceptance script
-   with `--require-cisa-ics` / `--require-ics`):
+6. **Enable the optional sources one at a time** (each followed by the acceptance script
+   with `--require-cisa-ics` / `--require-ics` / `--require-malwarebazaar`):
    - `EDGEGUARD_ENABLE_CISA_ICS=true`, `docker compose up -d airflow`, then one **additive**
      `edgeguard baseline --days 730` (same DAG, no wipe). The daily task alone would load
      only the last `EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS` (30) days of advisories.
    - `EDGEGUARD_ENABLE_MITRE_ICS=true`, `docker compose up -d airflow`, then either the same
      additive baseline or `MITRE_FORCE_REFETCH=true` for one daily run — the daily MITRE
      task skips both bundles while the Enterprise bundle's ETag is unchanged.
+   - `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`, `docker compose up -d airflow`, then one
+     `edgeguard_daily` run (or the additive baseline — both load the same recent export: the
+     last 48 hours, at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` = 500 samples, labelled
+     first), followed by `edgeguard_neo4j_sync` and
+     `python scripts/verify_fresh_baseline.py --require-malwarebazaar`. The history builds up
+     over the daily runs; there is no bulk load.
 
 ### [6] PR-N32 unicode-bypass audit
 
@@ -399,6 +406,7 @@ It exits non-zero when any of these fail:
 | `edgeguard_managed` | on every node EdgeGuard created and every EdgeGuard edge; a node a partner created first that EdgeGuard wrote to carries `edgeguard_enriched = true` instead |
 | ICS (when `EDGEGUARD_ENABLE_MITRE_ICS`) | techniques with `attack_domain = 'ics'` link only to ICS tactics |
 | CISA ICS (when `EDGEGUARD_ENABLE_CISA_ICS`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges |
+| MalwareBazaar (when `EDGEGUARD_ENABLE_MALWAREBAZAAR`) | `Source {source_id: 'malwarebazaar'}` present with at least one sha256 hash indicator sourced from it (`--require-malwarebazaar`) |
 | Sub-technique hierarchy (`subtechnique_of_complete`) | every dotted-id `Technique` whose parent exists has a `SUBTECHNIQUE_OF` edge to it (493 on the September graph; 0 missing) |
 | Group → software (`uses_malware_complete`, `uses_tool_complete`) | every MITRE `uses_malware` / `uses_tools` claim whose target node exists has its edge (informational until the MITRE collector of the R6 build has run) |
 | Sector coverage (`sector_coverage`, informational) | `ThreatActor` / `Malware` → `Sector` `TARGETS` present for finance, energy, healthcare (2026-10: ~200/100/100 actors and ~750/400/320 malware on the September graph); energy CVEs well above the 234 of the keyword-only vocabulary |
@@ -452,7 +460,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._
