@@ -1135,6 +1135,16 @@ class MISPWriter:
         Returns:
             MISP attribute type string
         """
+        # A generic "hash" carries MD5, SHA1, SHA256 or SHA512 values (the OTX collector maps every
+        # FileHash-* indicator to "hash"). Pick the MISP type from the digest length, because MISP
+        # answers HTTP 200 and silently drops an attribute whose value does not fit its type.
+        if edgeguard_type == "hash" and value:
+            digest = value.strip()
+            if all(c in "0123456789abcdefABCDEF" for c in digest):
+                by_length = {32: "md5", 40: "sha1", 64: "sha256", 128: "sha512"}
+                if len(digest) in by_length:
+                    return by_length[len(digest)]
+
         # Direct mapping
         if edgeguard_type in self.TYPE_MAPPING:
             return self.TYPE_MAPPING[edgeguard_type]
