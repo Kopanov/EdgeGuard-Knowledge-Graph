@@ -86,11 +86,13 @@ callers / tests use the other.
 * ✅ ``abuseipdb`` — ``firstSeen`` (when first reported to AbuseIPDB;
   the blacklist endpoint intentionally emits NULL for first_seen —
   see abuseipdb_collector.py for rationale)
-* ✅ ``threatfox`` — ``first_seen`` (when first tracked by ThreatFox)
+* ✅ ``threatfox`` — ``first_seen`` (when first tracked by ThreatFox;
+  the API writes ``"YYYY-MM-DD HH:MM:SS UTC"`` — ``coerce_iso`` accepts
+  the suffix)
 * ✅ ``urlhaus`` — ``dateadded`` (when added to URLhaus catalog;
   ``last_online`` → ``last_seen``)
 * ✅ ``feodo_tracker`` / ``feodo`` — ``first_seen`` (when first C2 IP
-  sighted by Feodo Tracker)
+  sighted by Feodo Tracker; ``last_online`` → ``last_seen``)
 * ✅ ``ssl_blacklist`` / ``abusech_ssl`` — CSV ``Listingdate``
 * ✅ ``malwarebazaar`` — ``first_seen_utc`` (when MalwareBazaar first saw
   the sample; the collector emits it as tz-aware UTC ISO-8601)
@@ -487,6 +489,13 @@ def coerce_iso(val: Any) -> Optional[str]:
         #   batch crashed. Fix: validate ALL string inputs via
         #   ``datetime.fromisoformat``; return None on parse failure.
         s = val.strip()
+        # 0. abuse.ch APIs (ThreatFox ``first_seen`` / ``last_seen``) report
+        #    ``"YYYY-MM-DD HH:MM:SS UTC"``. The suffix names the zone and is not
+        #    ISO-8601, so ``fromisoformat`` rejected the value and the source's
+        #    first-seen claim was dropped for every such indicator. Strip it: the
+        #    remaining naive value is re-emitted below with an explicit UTC offset.
+        if s[-4:].upper() == " UTC":
+            s = s[:-4].rstrip()
         # 1. Date-only branch (YYYY-MM-DD, 10 chars): normalize to UTC
         #    midnight after validating the calendar date is real.
         if (
@@ -528,6 +537,11 @@ def coerce_iso(val: Any) -> Optional[str]:
         # of the ``_stix_ts`` pattern in ``stix_exporter.py``.
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc).isoformat()
+        # A tz-aware value written with a space separator ("2026-10-12 08:00:00+00:00")
+        # parses in Python but not in Cypher ``datetime()``, which requires the ``T``.
+        # Re-emit it in ISO form so it cannot take a MERGE batch down.
+        if "T" not in s:
+            return parsed.isoformat()
         return s
     return None
 
@@ -535,6 +549,27 @@ def coerce_iso(val: Any) -> Optional[str]:
 # Backward-compat alias kept private — internal callers in this module
 # still spell it _coerce_iso. Public consumers should use coerce_iso.
 _coerce_iso = coerce_iso
+
+
+def iso_before(a: Optional[str], b: Optional[str]) -> bool:
+    """True when ISO-8601 timestamp *a* is strictly earlier than *b*.
+
+    False when either value is missing or does not parse, so a caller that uses the
+    result to drop an inconsistent claim never drops on a parse problem. Naive values
+    are read as UTC, like everywhere else in this module.
+    """
+    if not a or not b:
+        return False
+    try:
+        da = datetime.fromisoformat(a.replace("Z", "+00:00") if a.endswith("Z") else a)
+        db = datetime.fromisoformat(b.replace("Z", "+00:00") if b.endswith("Z") else b)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if da.tzinfo is None:
+        da = da.replace(tzinfo=timezone.utc)
+    if db.tzinfo is None:
+        db = db.replace(tzinfo=timezone.utc)
+    return da < db
 
 
 def iso_str(val: Any) -> Optional[str]:
@@ -757,6 +792,15 @@ def extract_source_truthful_timestamps(
     # see the per-source baseline rate.
     final_first = _clamp_future_to_now(first_seen)
     final_last = _clamp_future_to_now(last_seen)
+    # A last-seen claim earlier than the first-seen claim is inconsistent source data. The
+    # MISP writer already omits such a native ``last_seen``, but the pair can still arrive
+    # here: from the Layer-2 comment fallback above, or from an attribute another writer
+    # pushed. Keep the first-seen claim and drop the last-seen one, so an inverted window
+    # never reaches ``SOURCED_FROM.source_reported_last_at``.
+    if final_first is not None and final_last is not None and iso_before(final_last, final_first):
+        _metric_accept(source_id, "first_seen")
+        _metric_drop(source_id, "last_seen_before_first_seen", "last_seen")
+        return (final_first, None)
     if final_first is not None:
         _metric_accept(source_id, "first_seen")
     else:

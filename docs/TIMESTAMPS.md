@@ -104,9 +104,11 @@ them to EdgeGuard's canonical `first_seen` / `last_seen` keys (concepts
 | **MITRE ATT&CK** | STIX object's `created` | STIX object's `modified` | Aware ISO; canonical |
 | **CISA KEV** | `dateAdded` | (not exposed; omit) | Date-only string; `coerce_iso` normalizes to `T00:00:00+00:00` |
 | **VirusTotal** | `attributes.first_submission_date` | `attributes.last_submission_date` | Unix epoch int; `coerce_iso` converts. **Missing → omit** (do NOT fall back to `now()`) |
-| **ThreatFox** | `first_seen` | `last_seen` | Aware ISO |
+| **ThreatFox** | `first_seen` | `last_seen` | `YYYY-MM-DD HH:MM:SS UTC`; `coerce_iso` strips the ` UTC` suffix (before 2026-10-13 the suffix made the value unparseable and both claims were dropped) |
 | **URLhaus** | `dateadded` | `last_online` | Date or aware ISO |
-| **Feodo / SSLBL** | First-seen column from CSV | (varies; often absent) | Date string; `coerce_iso` normalizes |
+| **Feodo Tracker** | `first_seen_utc` (earliest row of the address) | `last_online` (date; the first-seen time when both fall on the same day) | Naive UTC string / date; `coerce_iso` normalizes |
+| **SSL Blacklist** | `Listingdate` | — | Naive UTC string; `coerce_iso` normalizes |
+| **MalwareBazaar** | `first_seen_utc` | — | Emitted as aware UTC ISO by the collector |
 | **AbuseIPDB blacklist** | (endpoint doesn't expose; omit) | `lastReportedAt` | **Reference pattern** for honest NULL |
 | **MISP collector** | `event.date` | (varies) | Re-syncs from another MISP. **Missing → omit** (PR-M2 fixes 10 NOW-leaks at lines 248, 282, 302, 346, 373, 396, 422, 443, 465, 484) |
 

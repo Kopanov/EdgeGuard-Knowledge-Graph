@@ -212,7 +212,7 @@
 
 **Download URLs:**
 - IP blocklist (last 30 days, regular runs): https://feodotracker.abuse.ch/downloads/ipblocklist.csv
-- Aggressive IP blocklist (complete history, baseline runs): https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv — 7,980 rows on 2026-10-12, 7,979 offline. abuse.ch advises against blocking on this list (false positives); EdgeGuard loads it as history: offline servers get low confidence and no MISP detection flag.
+- Aggressive IP blocklist (complete history, baseline runs): https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv — 7,980 rows (7,607 distinct servers) on 2026-10-12; the feed header says it was last updated on 2026-03-04. abuse.ch advises against blocking on this list (false positives); EdgeGuard loads it as history: servers not seen online in the last 30 days get low confidence and no MISP detection flag.
 - JSON: https://feodotracker.abuse.ch/api/v1/feodotracker/ipblocklist
 
 **Pricing:** Free

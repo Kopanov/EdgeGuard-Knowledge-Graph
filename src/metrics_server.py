@@ -666,6 +666,7 @@ SOURCE_TRUTHFUL_CLAIM_DROPPED = Counter(
     # reason ∈ {
     #   "source_not_in_allowlist",  # caller's source not on the reliable list (Layer 1 filter)
     #   "no_data_from_source",      # source on the list but Layer 1 + Layer 2 both empty (honest-NULL)
+    #   "last_seen_before_first_seen",  # inconsistent pair: the last-seen claim is dropped, first-seen kept
     # }
     # field: first_seen / last_seen — "both" is used for the single
     # source_not_in_allowlist emit (we never even attempt per-field).
@@ -850,7 +851,9 @@ def _safe_source_label(source_id: str | None) -> str:
 # ``field`` label gets the same treatment for the same reason, plus
 # the historical ``"both"`` value was dropped when source_not_in_allowlist
 # switched to per-field emit (see source_truthful_timestamps.py).
-_VALID_DROP_REASONS: frozenset[str] = frozenset({"source_not_in_allowlist", "no_data_from_source"})
+_VALID_DROP_REASONS: frozenset[str] = frozenset(
+    {"source_not_in_allowlist", "no_data_from_source", "last_seen_before_first_seen"}
+)
 _VALID_COERCE_REASONS: frozenset[str] = frozenset({"sentinel_epoch", "malformed_string", "overflow"})
 _VALID_FIELD_LABELS: frozenset[str] = frozenset({"first_seen", "last_seen"})
 
