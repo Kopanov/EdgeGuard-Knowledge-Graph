@@ -19,7 +19,7 @@
 | 6 | ThreatFox | TBD | ✅ Auto-tagged | Malware IOCs | ✅ Active |
 | 7 | AbuseIPDB | TBD | ✅ Auto-tagged | IP reputation | ✅ Active |
 | 8 | URLhaus | ~500 | ✅ Auto-tagged | Malware URLs | ✅ Active |
-| 9 | Feodo Tracker | 7,980 on a baseline (complete history, 2026-10-12); a handful per daily run | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
+| 9 | Feodo Tracker | 7,607 servers on a baseline (complete history; feed not updated by abuse.ch since 2026-03-04) | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
 | 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12) | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
@@ -233,7 +233,7 @@
 ---
 
 ### 8. Feodo Tracker
-**Items:** 30-day list: a handful of active C2s (5 on 2026-10-12); complete history (baseline): 7,980 rows, 7,979 of them offline (first seen 2021-01 to 2026-03) | **Zone:** Global (keyword detector on the family name; no family is hard-coded to a sector)
+**Items:** complete history (baseline): 7,980 rows merged to 7,607 servers, last seen online mostly in 2021–2023; 30-day list: 5 rows. Both downloads were last updated by abuse.ch on 2026-03-04 (checked 2026-10-12), so daily runs add nothing at present | **Zone:** Global (keyword detector on the family name; no family is hard-coded to a sector)
 
 | Attribute | Value |
 |-----------|-------|
@@ -246,7 +246,7 @@
 **What we get:**
 - C&C server IPs
 - Malware family (QakBot, BumbleBee, TrickBot, Emotet, Dridex, Pikabot) — carried to MISP and Neo4j, where it links the indicator to the `Malware` node (`INDICATES`)
-- Status (online/offline), port and last-online date as labels; offline servers are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
+- Last-online date as `Indicator.last_online` and as the source-reported last-seen time; ports and status kept with the source record. Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
 
 ---
 
@@ -265,7 +265,7 @@ Used for: OTX, MISP, CISA KEV, NVD
 ### Method 2: Malware family through graph relationships (not keywords)
 Used for: ThreatFox, URLhaus, Feodo Tracker, MalwareBazaar
 
-No malware family is mapped to a sector by name, and no source is hard-coded to a sector: the keyword list deliberately excludes family names. A family reaches a sector through the graph (`Indicator -INDICATES-> Malware`, and the sectors of the campaigns and actors that use that malware). Feodo Tracker and SSL Blacklist rows are therefore tagged Global at collection time (measured 2026-10-12: 7,980 of 7,980 and 10,964 of 10,964).
+No malware family is mapped to a sector by name, and no source is hard-coded to a sector: the keyword list deliberately excludes family names. A family reaches a sector through the graph (`Indicator -INDICATES-> Malware`, and the sectors of the campaigns and actors that use that malware). Feodo Tracker and SSL Blacklist rows are therefore tagged Global at collection time (measured 2026-10-12: all 7,980 Feodo rows and all 10,964 SSL Blacklist rows).
 
 ---
 

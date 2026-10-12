@@ -11,8 +11,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import csv
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+import re
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from collectors.collector_utils import (
     RateLimiter,
@@ -45,14 +46,109 @@ FEODO_HOST_URL = "https://feodotracker.abuse.ch/browse/host/{ip}/"
 # ThreatFox vocabulary for a botnet command-and-control endpoint (same value ThreatFox reports).
 FEODO_THREAT_TYPE = "botnet_cc"
 FEODO_THREAT_TYPE_DESC = "Botnet Command&Control server (C&C)"
-# A C2 that Feodo Tracker reports online is actionable; an offline one is history. The complete
-# history loaded by a baseline is almost entirely offline servers (7,979 of 7,980 on 2026-10-12),
-# so they are published at low confidence: MISP tag ``confidence:low`` (0.3 in the graph) against
-# ``confidence:medium`` (0.5) for online servers. Consumers filter with ``min_confidence``.
-# Offline servers are also published with the MISP detection flag cleared (``to_ids=False``):
-# abuse.ch states that the complete history causes false positives when used for blocking.
-FEODO_CONFIDENCE_ONLINE = 0.7
-FEODO_CONFIDENCE_OFFLINE = 0.4
+# Actionable versus historical. A server counts as recently active when Feodo Tracker saw it
+# online within ``FEODO_ACTIVE_DAYS`` of the collection day; the ``c2_status`` column alone is
+# not used, because it is only as fresh as the feed (on 2026-10-12 the feed had not been updated
+# since 2026-03-04 and its single "online" row was last seen online on 2026-03-12).
+# Recently active servers are published with ``confidence:medium`` (0.5 in the graph) and the MISP
+# detection flag; everything else is history: ``confidence:low`` (0.3) and ``to_ids=False``.
+# abuse.ch itself advises against blocking on the complete history because addresses are re-used.
+FEODO_ACTIVE_DAYS = 30
+FEODO_CONFIDENCE_ACTIVE = 0.7
+FEODO_CONFIDENCE_HISTORICAL = 0.4
+# The download header carries "# Last updated: <timestamp> UTC"; older than this many days is logged.
+FEODO_STALE_FEED_DAYS = 7
+_FEODO_LAST_UPDATED_RE = re.compile(r"^#\s*Last updated:\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", re.MULTILINE)
+
+
+def _utc_today() -> date:
+    """Collection day in UTC (a function so tests can pin it)."""
+    return datetime.now(timezone.utc).date()
+
+
+def feodo_feed_last_updated(raw_text: str) -> Optional[datetime]:
+    """Timestamp of the ``# Last updated:`` header line of a Feodo download, or ``None``."""
+    match = _FEODO_LAST_UPDATED_RE.search(raw_text or "")
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def feodo_last_seen(first_seen: str, last_online: str) -> Optional[str]:
+    """Source-reported last-seen time of a server, from the ``last_online`` date column.
+
+    ``last_online`` has day resolution. Later than the first-seen day: that date (published as
+    midnight UTC). Same day: the first-seen timestamp itself, which is the last observation the
+    feed reports for that day and keeps ``last_seen >= first_seen`` (MISP rejects the opposite).
+    Empty, or earlier than the first-seen day: ``None`` — no last-seen claim is made.
+    """
+    first_day = (first_seen or "")[:10]
+    if not last_online or not first_day:
+        return None
+    if last_online > first_day:
+        return last_online
+    if last_online == first_day:
+        return first_seen
+    return None
+
+
+def feodo_is_recently_active(last_online: str, today: Optional[date] = None) -> bool:
+    """True when ``last_online`` (``YYYY-MM-DD``) is within ``FEODO_ACTIVE_DAYS`` of *today* (UTC)."""
+    try:
+        seen = datetime.strptime(last_online, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return False
+    return (((today or _utc_today()) - seen).days) <= FEODO_ACTIVE_DAYS
+
+
+def feodo_merge_rows(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """One record per address from the feed rows (file order of first appearance is kept).
+
+    The feed lists one row per address and port, and an address re-used by another botnet appears
+    again with another family (373 of 7,980 rows repeated an address on 2026-10-12; 81 addresses
+    carried more than one family). MISP holds one attribute per value, so without merging only the
+    first row of an address would survive. Merged record: earliest ``first_seen``, latest
+    ``last_online``, every port, every family; the primary family, status and port are those of
+    the most recently active row.
+    """
+
+    def recency(row: Dict[str, str]) -> Tuple[str, str]:
+        return (row.get("last_online") or "", row.get("first_seen") or "")
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        rec = merged.get(row["ip"])
+        if rec is None:
+            merged[row["ip"]] = {
+                "ip": row["ip"],
+                "first_seen": row["first_seen"],
+                "last_online": row["last_online"],
+                "primary": row,
+                "ports": [row["port"]] if row["port"] else [],
+                "families": [row["malware"]] if row["malware"] else [],
+                "rows": 1,
+            }
+            continue
+        rec["rows"] += 1
+        if row["first_seen"] and (not rec["first_seen"] or row["first_seen"] < rec["first_seen"]):
+            rec["first_seen"] = row["first_seen"]
+        if row["last_online"] > rec["last_online"]:
+            rec["last_online"] = row["last_online"]
+        if recency(row) > recency(rec["primary"]):
+            rec["primary"] = row
+        if row["port"] and row["port"] not in rec["ports"]:
+            rec["ports"].append(row["port"])
+        if row["malware"] and row["malware"] not in rec["families"]:
+            rec["families"].append(row["malware"])
+    for rec in merged.values():
+        primary_family = rec["primary"]["malware"]
+        if primary_family and rec["families"] and rec["families"][0] != primary_family:
+            rec["families"] = [primary_family] + [f for f in rec["families"] if f != primary_family]
+        rec["ports"].sort(key=lambda port: (not port.isdigit(), int(port) if port.isdigit() else 0, port))
+    return list(merged.values())
 
 
 class FeodoCollector:
@@ -63,6 +159,7 @@ class FeodoCollector:
     # Both lists are public and need no key; the aggressive list is several
     # thousand rows, the 30-day list a handful, so a fresh baseline seeds the
     # history once and the daily task only adds what is currently active.
+    # Rows are merged per address (see ``feodo_merge_rows``).
     URL_RECENT = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
     URL_AGGRESSIVE = "https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv"
 
@@ -125,61 +222,87 @@ class FeodoCollector:
             # lines start with ``#``; the header row is recognised by its first column name.
             data_lines = [ln for ln in raw_text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
 
-            results = []
-            online = 0
+            rows: List[Dict[str, str]] = []
             for row in csv.reader(data_lines):
-                if limit is not None and len(results) >= limit:
-                    break
-
                 parts = [field.strip() for field in row]
-                if len(parts) < 5 or parts[0].lower() == "first_seen_utc":
+                if len(parts) < 5 or parts[0].lower() == "first_seen_utc" or not parts[1]:
                     continue
-
-                first_seen, dst_ip, dst_port, c2_status, last_online = parts[:5]
-                malware = parts[5] if len(parts) > 5 else ""
-
-                if not dst_ip:
-                    continue
-
-                status = c2_status.lower()
-                is_online = status == "online"
-                online += 1 if is_online else 0
-
-                # Zones come from the conservative keyword detector on the family name; malware
-                # families are linked to sectors through graph relationships, not keywords.
-                zones = detect_zones_from_text(malware.lower())
-
-                # Labels that survive the MISP round-trip (TF_META.tags -> Indicator.tf_tags).
-                labels = [f"c2_status:{status}"] if status else []
-                if dst_port:
-                    labels.append(f"port:{dst_port}")
-                if last_online:
-                    labels.append(f"last_online:{last_online}")
-
-                results.append(
+                rows.append(
                     {
-                        "indicator_type": "ipv4",
-                        "value": dst_ip,
-                        "zone": zones,  # zone is now an array
-                        "tag": self.tag,
-                        "source": [self.tag],
-                        "first_seen": first_seen,
-                        "last_updated": datetime.now(timezone.utc).isoformat(),
-                        "confidence_score": FEODO_CONFIDENCE_ONLINE if is_online else FEODO_CONFIDENCE_OFFLINE,
-                        "to_ids": is_online,  # history is knowledge, not a detection candidate
-                        "malware_family": malware,  # source spelling; graph matching is case-insensitive
-                        "port": dst_port,
-                        "status": c2_status,
-                        "last_online": last_online,  # C2 actuality - active vs stale
-                        "reference": FEODO_HOST_URL.format(ip=dst_ip),
-                        "threat_type": FEODO_THREAT_TYPE,
-                        "threat_type_desc": FEODO_THREAT_TYPE_DESC,
-                        "tags": labels,
+                        "first_seen": parts[0],
+                        "ip": parts[1],
+                        "port": parts[2],
+                        "status": parts[3],
+                        "last_online": parts[4],
+                        "malware": parts[5] if len(parts) > 5 else "",
                     }
                 )
 
+            records = feodo_merge_rows(rows)
+            if limit is not None:
+                records = records[:limit]
+
+            today = _utc_today()
+            feed_updated = feodo_feed_last_updated(raw_text)
+            if feed_updated is not None and (today - feed_updated.date()).days > FEODO_STALE_FEED_DAYS:
+                logger.warning(
+                    "Feodo Tracker feed was last updated on %s (%d days ago): the download is a historical "
+                    "snapshot and no new servers will arrive until abuse.ch updates it",
+                    feed_updated.strftime("%Y-%m-%d"),
+                    (today - feed_updated.date()).days,
+                )
+
+            results = []
+            active = 0
+            for rec in records:
+                primary = rec["primary"]
+                malware = primary["malware"]
+                status = primary["status"].lower()
+                first_seen = rec["first_seen"]
+                last_online = rec["last_online"]
+                is_active = feodo_is_recently_active(last_online, today)
+                active += 1 if is_active else 0
+
+                # Zones come from the conservative keyword detector on the family name; malware
+                # families are linked to sectors through graph relationships, not keywords.
+                zones = detect_zones_from_text(" ".join(rec["families"]).lower())
+
+                # Labels kept with the source record (TF_META.tags; stored in the raw data of the
+                # SOURCED_FROM edge): status of the most recent row, every port, and every family
+                # when the address served more than one.
+                labels = [f"c2_status:{status}"] if status else []
+                labels.extend(f"port:{port}" for port in rec["ports"])
+                if len(rec["families"]) > 1:
+                    labels.extend(f"family:{family}" for family in rec["families"])
+
+                item: Dict[str, Any] = {
+                    "indicator_type": "ipv4",
+                    "value": rec["ip"],
+                    "zone": zones,  # zone is now an array
+                    "tag": self.tag,
+                    "source": [self.tag],
+                    "first_seen": first_seen,
+                    "last_updated": datetime.now(timezone.utc).isoformat(),
+                    "confidence_score": FEODO_CONFIDENCE_ACTIVE if is_active else FEODO_CONFIDENCE_HISTORICAL,
+                    "to_ids": is_active,  # history is knowledge, not a detection candidate
+                    "malware_family": malware,  # most recent family; source spelling (matching is case-insensitive)
+                    "port": primary["port"],
+                    "status": primary["status"],
+                    "last_online": last_online,  # → Indicator.last_online
+                    "reference": FEODO_HOST_URL.format(ip=rec["ip"]),
+                    "threat_type": FEODO_THREAT_TYPE,
+                    "threat_type_desc": FEODO_THREAT_TYPE_DESC,
+                    "tags": labels,
+                }
+                # Source-reported last-seen → SOURCED_FROM.source_reported_last_at (activity window).
+                last_seen = feodo_last_seen(first_seen, last_online)
+                if last_seen:
+                    item["last_seen"] = last_seen
+                results.append(item)
+
             logger.info(
-                f"[OK] Feodo: Collected {len(results)} C&C servers ({online} online, {len(results) - online} offline)"
+                f"[OK] Feodo: Collected {len(results)} C&C servers from {len(rows)} rows "
+                f"({active} active in the last {FEODO_ACTIVE_DAYS} days, {len(results) - active} historical)"
             )
             if not results:
                 logger.warning("Feodo returned 0 C&C servers — check feed availability")

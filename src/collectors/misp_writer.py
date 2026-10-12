@@ -238,7 +238,18 @@ _META_SHRINK_LISTS = (
     "pulse_tags",
     "pulse_references",
     "tags",
+    "yara_rules",
+    "sigma_rules",
 )
+# Optional keys of the shared feed-metadata comment (``TF_META``). They are written only when
+# the item carries a value and are rehydrated by the sync into the Indicator properties of the
+# same name, which the REST and GraphQL APIs expose. Without them those properties stayed empty
+# for every indicator that arrives through MISP (URLhaus ``url_status`` / ``last_online``,
+# Feodo Tracker ``last_online``, VirusTotal ``threat_label`` / ``yara_rules`` / ``sigma_rules``).
+_TF_META_OPTIONAL_STRINGS = ("url_status", "last_online", "threat_label")
+_TF_META_OPTIONAL_LISTS = ("yara_rules", "sigma_rules")
+_TF_META_MAX_LIST_ITEMS = 20
+_TF_META_MAX_ITEM_CHARS = 200
 _META_SHRINK_STRINGS = ("description", "pulse_name", "reference")
 
 
@@ -370,10 +381,35 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     first_seen = coerce_iso(item.get("first_seen"))
     # last_modified (NVD / STIX) is accepted as an alias for last_seen.
     last_seen = coerce_iso(item.get("last_seen")) or coerce_iso(item.get("last_modified"))
+    if first_seen and last_seen and _iso_before(last_seen, first_seen):
+        # MISP rejects an attribute whose last_seen precedes its first_seen, and a rejected
+        # attribute counts against the collector's push success rate. The pair is inconsistent
+        # source data: keep the first-seen claim, drop the last-seen one.
+        logger.debug(
+            "Dropping last_seen %s earlier than first_seen %s for %s",
+            last_seen,
+            first_seen,
+            sanitize_value(str(item.get("value", "")), max_length=80),
+        )
+        last_seen = None
     if first_seen:
         attribute["first_seen"] = first_seen
     if last_seen:
         attribute["last_seen"] = last_seen
+
+
+def _iso_before(a: str, b: str) -> bool:
+    """True when ISO-8601 timestamp *a* is strictly earlier than *b*; False when either does not parse."""
+    try:
+        da = datetime.fromisoformat(a.replace("Z", "+00:00") if a.endswith("Z") else a)
+        db = datetime.fromisoformat(b.replace("Z", "+00:00") if b.endswith("Z") else b)
+    except (ValueError, TypeError):
+        return False
+    if da.tzinfo is None:
+        da = da.replace(tzinfo=timezone.utc)
+    if db.tzinfo is None:
+        db = db.replace(tzinfo=timezone.utc)
+    return da < db
 
 
 def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
@@ -1216,7 +1252,12 @@ class MISPWriter:
                 "pulse_malware_actor_pairs",
             )
         )
-        has_tf_meta = indicator.get("malware_malpedia") or indicator.get("reference") or indicator.get("tags")
+        has_tf_meta = (
+            indicator.get("malware_malpedia")
+            or indicator.get("reference")
+            or indicator.get("tags")
+            or any(indicator.get(_k) for _k in _TF_META_OPTIONAL_STRINGS + _TF_META_OPTIONAL_LISTS)
+        )
 
         if has_otx_meta:
             otx_meta = {
@@ -1298,6 +1339,17 @@ class MISPWriter:
                 "ioc_id": indicator.get("ioc_id", ""),
                 "malware_alias": indicator.get("malware_alias", ""),
             }
+            for _k in _TF_META_OPTIONAL_STRINGS:
+                _v = indicator.get(_k)
+                if _v:
+                    tf_meta[_k] = str(_v)[:_TF_META_MAX_ITEM_CHARS]
+            for _k in _TF_META_OPTIONAL_LISTS:
+                _raw = indicator.get(_k)
+                _vals = [
+                    str(x)[:_TF_META_MAX_ITEM_CHARS] for x in (_raw if isinstance(_raw, (list, tuple)) else []) if x
+                ]
+                if _vals:
+                    tf_meta[_k] = _vals[:_TF_META_MAX_LIST_ITEMS]
             comment = _fit_meta_comment("TF_META:", tf_meta)
         else:
             comment = sanitize_value(indicator.get("pulse_name") or indicator.get("description", ""), max_length=255)

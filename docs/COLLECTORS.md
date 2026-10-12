@@ -415,7 +415,19 @@ The public (free) VirusTotal API v3 offers **single-object lookups only** (`GET 
 
 1. lists the SHA-256 attributes other sources pushed to MISP — ThreatFox, MalwareBazaar, OTX and others (`attributes/restSearch`, type `sha256`, attribute timestamp within `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`, default 30 days; VirusTotal's own attributes are excluded by tag) — and drops the hashes the ledger remembers as already looked up;
 2. looks each remaining hash up within the per-run cap and the daily budget (below);
-3. pushes the enriched items to MISP under `source:VirusTotal`. The MISP→Neo4j sync merges them into the **same** Indicator node: a second `SOURCED_FROM` edge, VirusTotal confidence (`last_analysis_stats`), threat label, file names (zone detection) and the first-submission date (source-truthful `first_seen`).
+3. pushes the enriched items to MISP under `source:VirusTotal`. The MISP→Neo4j sync merges each one into the **same** Indicator node as the source that reported the hash (the hash key is case-insensitive).
+
+What a lookup adds to the graph:
+
+| Graph element | Value | From |
+|---|---|---|
+| `(Indicator)-[:SOURCED_FROM]->(Source {source_id: "virustotal"})` | a second source edge; `source_reported_first_at` / `source_reported_last_at` = first and last submission to VirusTotal | `first_submission_date`, `last_submission_date` |
+| `confidence_score` | 0.8 when about two thirds or more of the engines flag the file, otherwise 0.5; the node keeps the highest value across its sources | `last_analysis_stats` |
+| `threat_label` | VirusTotal's suggested label, for example `trojan.mirai/gafgyt` | `popular_threat_classification.suggested_threat_label` |
+| `yara_rules`, `sigma_rules` | names of matching crowdsourced rules (added to the lists on the node) | `crowdsourced_yara_results`, `sigma_analysis_results` |
+| `zone` | sectors detected in file names, tags and sandbox verdicts (usually `global`) | keyword detector |
+
+VirusTotal deliberately sends no `malware_family` and no `reference`: both are single-valued on the node and the last writer wins, so a corroborating source would overwrite the family reported by ThreatFox or MalwareBazaar. For the same reason a lookup creates no `INDICATES` edge by itself. MD5, SHA-1, file size and sandbox verdicts are not carried. The label and rule names travel in the shared feed-metadata comment (`TF_META`), written only when VirusTotal returns them.
 
 Hashes are looked up **once**: the ledger remembers every delivered lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs. An enriched hash is remembered only after its MISP push succeeded. The ledger is the only record of what was looked up (MISP cannot tell which hashes of other sources were enriched): if the file is lost, hashes inside the candidate window are looked up again, which costs quota but creates no duplicate attributes. The query shape was confirmed against a live MISP 2.5 on 2026-10-12 (HTTP 200, `response.Attribute` list).
 
@@ -493,34 +505,49 @@ zones = detect_zones_from_text(malware.lower())
 zones = detect_zones_from_text(reason)
 ```
 
-The keyword detector deliberately contains no malware family names (families are linked to sectors through graph relationships), so in practice both feeds are tagged `zone:Global`: measured on 2026-10-12, 7,980 of 7,980 Feodo rows and 10,964 of 10,964 SSL Blacklist rows. Neither feed is hard-coded to Finance.
+The keyword detector deliberately contains no malware family names (families are linked to sectors through graph relationships), so in practice both feeds are tagged `zone:Global`: measured on 2026-10-12, all 7,980 Feodo rows (7,607 servers) and all 10,964 SSL Blacklist rows. Neither feed is hard-coded to Finance.
 
-### Feodo Tracker: parsing, family, status
-- **Parsing.** The download is CSV with every field quoted and CRLF line endings; it is read with the `csv` module and the header row is recognised by name.
-- **Malware family → graph.** The item carries `reference` (the Feodo Tracker host page), so `MISPWriter` emits the shared abuse.ch metadata comment (`TF_META`) with `malware_family`, `threat_type=botnet_cc` and the labels `c2_status:<status>`, `port:<port>`, `last_online:<date>`. The sync rehydrates them as `Indicator.malware_family`, `threat_type` and `tf_tags`; `build_relationships` then links the indicator to the matching `Malware` node (`INDICATES`, case-insensitive name or alias match).
-- **Online versus offline.** The complete history loaded by a baseline is almost entirely offline servers (7,979 of 7,980 on 2026-10-12; first seen 2021-01 to 2026-03). abuse.ch states that this list causes false positives when used for blocking. Offline servers are therefore published with `confidence:low` (0.3 in the graph) and the MISP detection flag cleared (`to_ids=false`); servers reported online get `confidence:medium` (0.5) and `to_ids=true`. Consumers that want actionable C2s filter with `min_confidence` or on `tf_tags`.
-- **Status is the status at first collection.** EdgeGuard does not rewrite an attribute MISP already holds, so a server first collected online keeps that label after it goes offline; `last_online` in `tf_tags` shows how recent the observation was.
+### Feodo Tracker: what is loaded and what reaches the graph
+- **The feed is a historical snapshot at present.** Both downloads carry the header `# Last updated: 2026-03-04 14:28:39 UTC` (checked 2026-10-12): abuse.ch has not updated Feodo Tracker for seven months. A baseline loads the history once; the daily task then finds nothing new until the feed moves again. The collector logs a warning when the header is older than 7 days.
+- **Parsing.** CSV with every field quoted and CRLF line endings, read with the `csv` module; the header row is recognised by name.
+- **One record per address.** The feed has one row per address and port, and a re-used address appears again under another family: 7,980 rows describe 7,607 addresses (290 addresses on several rows, 81 with more than one family). MISP holds one attribute per value, so rows are merged per address: earliest `first_seen`, latest `last_online`, every port, every family. The primary family is that of the most recently active row.
+- **Actionable or historical.** A server counts as recently active when its `last_online` date is within 30 days of the collection day (`FEODO_ACTIVE_DAYS`). The `c2_status` column is not used for this: it is only as fresh as the feed (the single "online" row of 2026-10-12 was last seen online on 2026-03-12). Recently active: `confidence:medium`, MISP detection flag set. Everything else: `confidence:low`, `to_ids=false`. abuse.ch advises against blocking on the complete history because addresses are re-used. On 2026-10-12 all 7,607 servers were historical.
+- **Not rewritten.** EdgeGuard does not update an attribute MISP already holds, so confidence and detection flag are those of the first collection.
+
+| Graph element | Value | From |
+|---|---|---|
+| `Indicator {indicator_type: "ipv4", value}` | the address; shared with ThreatFox, AbuseIPDB and OTX when they report the same address | `dst_ip` |
+| `malware_family` | primary family, source spelling | `malware` |
+| `last_online` | date the server was last seen online | `last_online` |
+| `reference` | Feodo Tracker host page | built from the address |
+| `confidence_score` | 0.5 recently active, 0.3 historical (the node keeps the highest value across its sources) | recency rule |
+| `zone` | `global` | keyword detector on the family names |
+| `(Indicator)-[:SOURCED_FROM]->(Source {source_id: "feodo_tracker"})` | `source_reported_first_at` = `first_seen_utc`; `source_reported_last_at` = `last_online` (the first-seen time when both fall on the same day; absent when the feed gives no date); `raw_data` JSON keeps `threat_type=botnet_cc` and the labels `c2_status:…`, `port:…`, `family:…` | per source |
+| `(Indicator)-[:INDICATES]->(Malware)` | built by `build_relationships` when `malware_family` equals a Malware node name or alias (case-insensitive); QakBot, Emotet, TrickBot, Dridex, BumbleBee and Pikabot all match MITRE ATT&CK software | family match |
+
+The source-reported last-seen time matters for campaigns: a Campaign's `last_seen` falls back to the import time for an indicator with no such claim, which would make a botnet that stopped in 2021 look active today.
 
 ### Example Output
 
 ```python
-# Feodo Indicator (botnet C&C, offline entry from the complete history)
+# Feodo Indicator (botnet C&C; an address re-used by a second botnet, merged from three rows)
 {
     'indicator_type': 'ipv4',
-    'value': '27.133.154.218',
+    'value': '103.61.101.11',
     'zone': ['global'],
     'tag': 'feodo_tracker',
     'source': ['feodo_tracker'],
-    'first_seen': '2026-03-04 14:28:39',   # first_seen_utc; published to MISP as 2026-03-04T14:28:39+00:00
-    'confidence_score': 0.4,               # 0.7 when c2_status is online
-    'to_ids': False,                       # True when c2_status is online
-    'malware_family': 'QakBot',
-    'port': '443',
+    'first_seen': '2021-01-17 10:00:00',   # earliest row; published to MISP as 2021-01-17T10:00:00+00:00
+    'last_seen': '2021-03-02',             # from last_online; → SOURCED_FROM.source_reported_last_at
+    'last_online': '2021-03-02',           # latest row; → Indicator.last_online
+    'confidence_score': 0.4,               # 0.7 when last_online is within 30 days of the collection day
+    'to_ids': False,                       # True when recently active
+    'malware_family': 'TrickBot',          # family of the most recently active row
+    'port': '447',
     'status': 'offline',
-    'last_online': '2026-03-05',
-    'reference': 'https://feodotracker.abuse.ch/browse/host/27.133.154.218/',
+    'reference': 'https://feodotracker.abuse.ch/browse/host/103.61.101.11/',
     'threat_type': 'botnet_cc',
-    'tags': ['c2_status:offline', 'port:443', 'last_online:2026-03-05']
+    'tags': ['c2_status:offline', 'port:447', 'port:449', 'family:TrickBot', 'family:Dridex']
 }
 
 # SSL Blacklist Indicator
@@ -893,6 +920,20 @@ In MISP the attribute is `sha256` with the tags `source:MalwareBazaar`, `zone:*`
 
 ---
 
+## Feed metadata that reaches the Indicator node
+
+Indicators arrive in Neo4j only through MISP. Fields beyond type, value, tags and the native first/last-seen times travel in a JSON comment on the MISP attribute (`OTX_META:` for OTX, `TF_META:` for the abuse.ch feeds and VirusTotal) and are rehydrated by `run_misp_to_neo4j.parse_attribute`. A collector field that is not in that comment does not reach the graph.
+
+| `TF_META` key | Indicator property | Set by |
+|---|---|---|
+| `malware_family` | `malware_family` (drives `INDICATES`) | ThreatFox, MalwareBazaar, Feodo Tracker |
+| `malware_malpedia`, `reference`, `reporter` | same names | ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker (`reference`) |
+| `url_status`, `last_online` (optional) | same names | URLhaus; Feodo Tracker (`last_online`) |
+| `threat_label`, `yara_rules`, `sigma_rules` (optional) | same names | VirusTotal |
+| `tags`, `threat_type`, `threat_type_desc`, `ioc_id`, `malware_alias` | none: kept in `raw_data` on the `SOURCED_FROM` edge | ThreatFox, URLhaus, MalwareBazaar, Feodo Tracker |
+
+The optional keys are written only when the item carries a value, and the sync sets a property only when the key is present, so a source never blanks another source's value on a shared node. `tests/test_source_graph_footprint.py` checks this path per source up to the row handed to the MERGE query.
+
 ## Baseline collection limits — current & planned
 
 This table captures **what each collector actually pulls on a 730-day
@@ -910,7 +951,7 @@ upper bound for a single baseline run.
 | **MISP (local)** | Full MISP server content matching the filter | Bounded by local MISP; no external quota | No change planned |
 | **AbuseIPDB** | As per `ABUSEIPDB_*` limits | Public API daily checks quota (1k free) | No change planned |
 | **VirusTotal** | `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` lookups per run (default 60), `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` per UTC day (default 400); not in the baseline DAG | Free tier: **4 req/min**, **500 req/day**; lookups only (`GET /files/{hash}`), no feed or search endpoints | Enrichment of hashes already in MISP (see [§ 6](#6-virustotal-lookup-enrichment)); the ledger in `./state` carries the daily counter across runs and remembers looked-up hashes. A premium key raises the two knobs |
-| **Finance (Feodo / SSLBL)** | Feodo: full C2 history on baselines (`ipblocklist_aggressive.csv`), 30-day list on regular runs; SSLBL: full feed | Public CSV/text feeds, no rate limit | No change planned |
+| **Finance (Feodo / SSLBL)** | Feodo: full C2 history on baselines (`ipblocklist_aggressive.csv`: 7,980 rows merged to 7,607 servers on 2026-10-12), 30-day list on regular runs; SSLBL: full feed | Public CSV/text feeds, no rate limit | Feodo Tracker has not been updated by abuse.ch since 2026-03-04: a baseline loads history, daily runs add nothing until the feed moves again |
 | **Global (URLhaus / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
 | **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (EE-ISAC) is planned (decision 2026-10). Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1. **Since 2026-10 the ICS-CERT part is a real collector:** [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
 | **CISA ICS Advisories** | `min(index entries in window, CISA_ICS_MAX_ADVISORIES_PER_RUN=1200)` advisory files (~900 on a 730-day run), one item per CVE | Public GitHub raw files, no auth; polite sequential fetch ≤ 4 req/s | Flag-guarded, default **off**. Baseline sanity floor `CISA_ICS_MIN_EXPECTED_ADVISORIES=50` → transient skip + alert instead of a thin dataset |

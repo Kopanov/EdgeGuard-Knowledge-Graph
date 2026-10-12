@@ -86,11 +86,13 @@ callers / tests use the other.
 * ✅ ``abuseipdb`` — ``firstSeen`` (when first reported to AbuseIPDB;
   the blacklist endpoint intentionally emits NULL for first_seen —
   see abuseipdb_collector.py for rationale)
-* ✅ ``threatfox`` — ``first_seen`` (when first tracked by ThreatFox)
+* ✅ ``threatfox`` — ``first_seen`` (when first tracked by ThreatFox;
+  the API writes ``"YYYY-MM-DD HH:MM:SS UTC"`` — ``coerce_iso`` accepts
+  the suffix)
 * ✅ ``urlhaus`` — ``dateadded`` (when added to URLhaus catalog;
   ``last_online`` → ``last_seen``)
 * ✅ ``feodo_tracker`` / ``feodo`` — ``first_seen`` (when first C2 IP
-  sighted by Feodo Tracker)
+  sighted by Feodo Tracker; ``last_online`` → ``last_seen``)
 * ✅ ``ssl_blacklist`` / ``abusech_ssl`` — CSV ``Listingdate``
 * ✅ ``malwarebazaar`` — ``first_seen_utc`` (when MalwareBazaar first saw
   the sample; the collector emits it as tz-aware UTC ISO-8601)
@@ -487,6 +489,13 @@ def coerce_iso(val: Any) -> Optional[str]:
         #   batch crashed. Fix: validate ALL string inputs via
         #   ``datetime.fromisoformat``; return None on parse failure.
         s = val.strip()
+        # 0. abuse.ch APIs (ThreatFox ``first_seen`` / ``last_seen``) report
+        #    ``"YYYY-MM-DD HH:MM:SS UTC"``. The suffix names the zone and is not
+        #    ISO-8601, so ``fromisoformat`` rejected the value and the source's
+        #    first-seen claim was dropped for every such indicator. Strip it: the
+        #    remaining naive value is re-emitted below with an explicit UTC offset.
+        if s[-4:].upper() == " UTC":
+            s = s[:-4].rstrip()
         # 1. Date-only branch (YYYY-MM-DD, 10 chars): normalize to UTC
         #    midnight after validating the calendar date is real.
         if (
@@ -528,6 +537,11 @@ def coerce_iso(val: Any) -> Optional[str]:
         # of the ``_stix_ts`` pattern in ``stix_exporter.py``.
         if parsed.tzinfo is None:
             return parsed.replace(tzinfo=timezone.utc).isoformat()
+        # A tz-aware value written with a space separator ("2026-10-12 08:00:00+00:00")
+        # parses in Python but not in Cypher ``datetime()``, which requires the ``T``.
+        # Re-emit it in ISO form so it cannot take a MERGE batch down.
+        if "T" not in s:
+            return parsed.isoformat()
         return s
     return None
 

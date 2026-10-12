@@ -3475,6 +3475,20 @@ class MISPToNeo4jSync:
                 item["threat_type"] = tf_meta.get("threat_type", "")
                 item["ioc_id"] = tf_meta.get("ioc_id", "")
                 item["malware_alias"] = tf_meta.get("malware_alias", "")
+                # 2026-10: optional feed-metadata keys → the Indicator properties of the same
+                # name that ``merge_indicators_batch`` writes and the REST / GraphQL APIs expose.
+                # Set only when present, so a source that does not report them never overwrites
+                # another source's value on the shared node.
+                for _opt in ("url_status", "last_online", "threat_label"):
+                    _opt_val = tf_meta.get(_opt)
+                    if isinstance(_opt_val, str) and _opt_val.strip():
+                        item[_opt] = _opt_val.strip()[:200]
+                for _opt in ("yara_rules", "sigma_rules"):
+                    _opt_list = tf_meta.get(_opt)
+                    if isinstance(_opt_list, list):
+                        _clean = [str(x).strip()[:200] for x in _opt_list if isinstance(x, str) and x.strip()][:20]
+                        if _clean:
+                            item[_opt] = _clean
 
             return item, relationships
 
