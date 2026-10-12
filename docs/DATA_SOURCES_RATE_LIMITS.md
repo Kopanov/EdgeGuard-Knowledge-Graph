@@ -125,7 +125,7 @@
 |--------|---------|
 | **API Required** | Yes |
 | **Registration** | Free account required |
-| **Rate Limit (Free)** | 4 requests/minute |
+| **Rate Limit (Free)** | 4 requests/minute, 500 requests/day; lookups only (no feed or search endpoints) |
 | **Rate Limit (Lite)** | 60 requests/minute |
 | **Rate Limit (Basic)** | 120 requests/minute |
 | **Data Provided** | File hashes, URLs, IPs, domains, malware analysis |
@@ -141,6 +141,8 @@
 - **Lite:** $50/month, 60 requests/min
 - **Basic:** $200/month, 120 requests/min, 1M queries/month
 - **Enterprise:** Custom pricing, unlimited
+
+**EdgeGuard usage (free tier):** `VTCollector` enriches SHA-256 hashes already in MISP with `GET /files/{hash}` — `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (default 60) per run and `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` (default 400) per UTC day, tracked in a ledger in the state directory. Quota events are logged with the prefix `[VT-QUOTA]`; an exhausted budget or an HTTP 429 skips the task instead of failing it. See docs/COLLECTORS.md § 6.
 
 ---
 
@@ -209,7 +211,8 @@
 | **Update Frequency** | Daily |
 
 **Download URLs:**
-- IP blocklist: https://feodotracker.abuse.ch/downloads/ipblocklist.csv
+- IP blocklist (last 30 days, regular runs): https://feodotracker.abuse.ch/downloads/ipblocklist.csv
+- Aggressive IP blocklist (complete history, baseline runs): https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv
 - JSON: https://feodotracker.abuse.ch/api/v1/feodotracker/ipblocklist
 
 **Pricing:** Free

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 from collectors.collector_utils import (
     RateLimiter,
@@ -41,18 +41,31 @@ SSLBL_RATE_LIMITER = RateLimiter(min_interval=1.0)
 class FeodoCollector:
     """Collects Feodo Tracker Botnet C2 IP Blocklist"""
 
+    # Regular runs: C2 servers active in the last 30 days (abuse.ch "ipblocklist").
+    # Baseline runs: the complete C2 history (abuse.ch "aggressive" list, same columns).
+    # Both lists are public and need no key; the aggressive list is several
+    # thousand rows, the 30-day list a handful, so a fresh baseline seeds the
+    # history once and the daily task only adds what is currently active.
+    URL_RECENT = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
+    URL_AGGRESSIVE = "https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv"
+
     def __init__(self, misp_writer: MISPWriter = None):
-        self.url = "https://feodotracker.abuse.ch/downloads/ipblocklist.csv"
+        self.url = self.URL_RECENT
+        self.baseline_url = self.URL_AGGRESSIVE
         self.tag = "feodo_tracker"
         self.source_name = "feodo"
         self.misp_writer = misp_writer or MISPWriter()
 
+    def list_url(self, baseline: bool) -> str:
+        """URL of the blocklist a run downloads: full history for baselines, 30-day list otherwise."""
+        return self.baseline_url if baseline else self.url
+
     @retry_with_backoff(max_retries=3, base_delay=5.0)
-    def _fetch_raw(self) -> str:
-        """Download the Feodo blocklist CSV with retry."""
+    def _fetch_raw(self, url: Optional[str] = None) -> str:
+        """Download a Feodo blocklist CSV (default: the 30-day list) with retry."""
         response = request_with_rate_limit_retries(
             "GET",
-            self.url,
+            url or self.url,
             session=None,
             timeout=30,
             verify=SSL_VERIFY,
@@ -68,9 +81,13 @@ class FeodoCollector:
         self, limit=None, push_to_misp=True, baseline: bool = False, baseline_days: int = 365
     ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """Fetch and parse Feodo blocklist. Returns status dict when ``push_to_misp=True``."""
-        # Feodo is a bulk download - baseline doesn't change much
+        # Baseline runs download the complete C2 history (aggressive list); regular
+        # runs the 30-day list. Same columns, so one parser serves both.
+        list_url = self.list_url(baseline)
         if baseline:
-            logger.info("📜 Baseline mode: Collecting all Feodo data...")
+            logger.info("📜 Baseline mode: downloading the full Feodo C2 history (%s)", list_url)
+        else:
+            logger.info("Feodo: downloading C2 servers active in the last 30 days (%s)", list_url)
 
         # Check circuit breaker
         if not FEODO_CIRCUIT_BREAKER.can_execute():
@@ -84,7 +101,7 @@ class FeodoCollector:
 
         limit = resolve_collection_limit(limit, "feodo", baseline=baseline)
         try:
-            raw_text = self._fetch_raw()
+            raw_text = self._fetch_raw(list_url)
 
             # Parse CSV - skip comment lines and header
             lines = [ln for ln in raw_text.strip().split("\n") if ln and not ln.startswith("#")]

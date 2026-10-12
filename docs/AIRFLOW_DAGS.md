@@ -266,7 +266,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | Source | DAG | Rate Limit | Items/Run |
 |--------|-----|------------|-----------|
 | CISA KEV | `edgeguard_medium_freq` | No limit | 500 CVEs |
-| VirusTotal | `edgeguard_medium_freq` | 4 req/min | 10-20 IOCs |
+| VirusTotal | `edgeguard_medium_freq` | 4 req/min, 500/day (ledger budget 400/day, 60 per run) | ≤ 60 hash enrichments per run |
 
 #### Low Frequency (Every 8 hours)
 | Source | DAG | Rate Limit | Items/Run |
@@ -690,7 +690,7 @@ After Tier1 succeeds, remove env overrides or restore Variables for production.
 |---------|--------------------------------|
 | **`ABUSEIPDB_API_KEY`** | `missing_abuseipdb_key` (also **`abuseipdb_auth_denied`** on HTTP 401/403) |
 | **`OTX_API_KEY`** | `missing_otx_key` (also **`otx_auth_denied`** on 401/403) |
-| **`VIRUSTOTAL_API_KEY`** | `missing_virustotal_key` (also **`virustotal_auth_denied`** on 401/403) |
+| **`VIRUSTOTAL_API_KEY`** | `missing_virustotal_key` (also **`virustotal_auth_denied`** on 401/403; **`virustotal_daily_budget`** / **`virustotal_rate_limited`** when the free-tier budget is spent; **`virustotal_candidates_unavailable`** when MISP cannot list hashes to enrich) |
 | **`THREATFOX_API_KEY`** | `missing_threatfox_key` (also **`threatfox_auth_denied`** on 401/403) |
 
 Add keys when you want those feeds. Values that are **empty**, **whitespace-only**, or YAML **placeholders** from `credentials/config.example.yaml` are treated as unset. **ThreatFox** requires a free key from **https://auth.abuse.ch/** — without it the task **skips** (success) so the baseline DAG can continue.

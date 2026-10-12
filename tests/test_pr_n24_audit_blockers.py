@@ -407,7 +407,6 @@ class TestB3AstScanNoSilentSwallowers:
         {
             "finance_feed_collector.py",
             "global_feed_collector.py",
-            "vt_collector.py",
         }
     )
 

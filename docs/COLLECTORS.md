@@ -12,7 +12,7 @@ This document details all data collectors in EdgeGuard, including their sources,
 4. [CISA Collector](#3-cisa-collector)
 5. [MITRE Collector](#4-mitre-collector)
 6. [AbuseIPDB Collector](#5-abuseipdb-collector)
-7. [VirusTotal](#6-virustotal-two-modules)
+7. [VirusTotal](#6-virustotal-lookup-enrichment)
 8. [Finance Feed Collector](#7-finance-feed-collector)
 9. [Global Feed Collector](#8-global-feed-collector)
 10. [Healthcare Feed Collector](#9-healthcare-feed-collector)
@@ -404,69 +404,65 @@ Typically **`global`** or derived from feed context — see `collect()` implemen
 
 ---
 
-## 6. VirusTotal (two modules)
+## 6. VirusTotal (lookup enrichment)
 
-Airflow **`edgeguard_medium_freq`** runs **`VTCollector`** from **`src/collectors/vt_collector.py`** (`run_vt_collection`). The file `dags/edgeguard_pipeline.py` also defines **`run_virustotal_enrichment_collection`** using **`VirusTotalCollector`**, but that callable is **not wired to a DAG** in the default repository layout — add a `PythonOperator` if you want it on a schedule. **`VIRUSTOTAL_API_KEY`** is **optional** for Airflow: if unset, whitespace-only, or a YAML template value (`YOUR_VT_API_KEY`, `YOUR_VIRUSTOTAL_API_KEY_HERE`), the task **succeeds** with **`skipped: true`** and skip metrics (see **`docs/AIRFLOW_DAGS.md`**).
-
-
-### 6a. `virustotal_collector.py` (`VirusTotalCollector`)
-
-**File:** `src/collectors/virustotal_collector.py`
+**File:** `src/collectors/vt_collector.py` (`VTCollector`)  
+**DAG:** `edgeguard_medium_freq` (every 4 hours) — task id `collect_virustotal` → `run_vt_collection`. Not part of the baseline DAG.
 
 ### What It Does
-Collects threat intelligence from VirusTotal, including:
-- File hash analysis
-- Domain reputation
-- IP reputation
-- Real-time and enrichment queries
+The public (free) VirusTotal API v3 offers **single-object lookups only** (`GET /files/{hash}`); feed and Intelligence-search endpoints need a premium licence and return nothing on a free key. The collector therefore does not act as a feed. Each run:
 
-### Source
-- **URL:** `https://www.virustotal.com/api/v3`
-- **API Key:** Optional for scheduled Airflow runs (missing / placeholder → `skipped`; required for real VT API data)
-- **Rate Limits:** 4 requests/min, 500/day (free tier)
+1. lists SHA-256 attributes in MISP that no `source:VirusTotal` attribute covers yet (`attributes/restSearch`, type `sha256`, attribute timestamp within `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`, default 30 days) — hashes pushed by ThreatFox, MalwareBazaar, OTX and other sources;
+2. looks each hash up within the per-run cap and the daily budget (below);
+3. pushes the enriched items to MISP under `source:VirusTotal`. The MISP→Neo4j sync merges them into the **same** Indicator node: a second `SOURCED_FROM` edge, VirusTotal confidence (`last_analysis_stats`), threat label, file names (zone detection) and the first-submission date (source-truthful `first_seen`).
+
+Hashes are looked up **once**: the ledger remembers every lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs.
+
+### Free-tier safety (never blocks the workflow)
+
+| Limit | Enforcement |
+|-------|-------------|
+| 4 lookups/min | `RateLimiter(requests_per_minute=4)` in-process |
+| 500 lookups/day | Ledger `virustotal_daily_budget.json` in the state directory (`./state` bind mount): `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` (default **400**) per UTC day, `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (default **60**) per run — six runs a day stay below the budget |
+| HTTP 429 | The day is marked exhausted in the ledger; the run stops and pushes what it has |
+| Budget exhausted | Task returns `skipped=True`, `skip_reason_class="virustotal_daily_budget"` (`virustotal_rate_limited` when VirusTotal answered 429 before any lookup succeeded); the Airflow task stays green and downstream continues |
+| MISP candidate listing fails | `skip_reason_class="virustotal_candidates_unavailable"` |
+| API key missing / rejected | `missing_virustotal_key` / `virustotal_auth_denied` |
+
+Every quota message is logged with the prefix **`[VT-QUOTA]`** (budget state at the start of the run, exhaustion events, run summary with lookups / enriched / unknown / errors), so `grep VT-QUOTA` on the task log shows what happened. The task result carries `vt_lookups`, `vt_enriched`, `vt_unknown`, `vt_lookup_errors`, `vt_stopped`, `vt_budget_used`, `vt_budget_remaining`.
+
+Growth: at the defaults, up to 360 hashes per day gain VirusTotal corroboration; a ThreatFox-sized backlog (~16,000 hashes) is covered in about six weeks. A premium key raises the budget knobs; the collector logic does not change.
 
 ### Zone Detection
 ```python
-def _detect_zones_from_names(self, attrs):
-    """Detect ALL sectors from file names/paths."""
-    names = str(attrs.get('meaningful_name', '')) + str(attrs.get('names', ''))
-    return detect_zones_from_text(names)
+def _detect_zones_from_attributes(self, attrs):
+    """Detect ALL sectors from file names, tags, sandbox verdicts and the popular threat label."""
+    ...
+    return detect_zones_from_text(combined_text)
 ```
 
 ### Example Output
 
 ```python
-# Hash Indicator (from file collection)
+# Hash enrichment (from GET /files/{sha256})
 {
     'indicator_type': 'hash',
     'value': 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    'zone': ['finance', 'healthcare'],  # Array of all matching zones
+    'zone': ['finance'],                 # from file names / tags / sandbox verdicts
     'tag': 'virustotal',
-    'sources': ['virustotal'],
-    'first_seen': '2024-01-01T00:00:00Z',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
-    'confidence_score': 0.85  # Based on malicious scan count
-}
-
-# Domain Enrichment (from query_domain)
-{
-    'indicator_type': 'domain',
-    'value': 'evil-bank-phish.com',
-    'zone': ['global'],  # Array of all matching zones
-    'tag': 'virustotal',
-    'sources': ['virustotal'],
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
-    'confidence_score': 0.95,
-    'vt_reputation': 0,
-    'vt_last_analysis_stats': {'malicious': 65, 'suspicious': 5, 'harmless': 0}
+    'source': ['virustotal'],
+    'first_seen': '2024-01-01T00:00:00+00:00',   # first_submission_date (source-truthful)
+    'confidence_score': 0.85,           # from last_analysis_stats
+    'md5': '...', 'sha1': '...', 'sha256': '...',
+    'file_type': 'Win32 EXE', 'file_size': 123456,
+    'vt_reputation': -12, 'vt_names': ['invoice.exe'],
+    'threat_label': 'trojan.emotet/heodo', 'threat_category': 'trojan',
+    'yara_rules': [...], 'sigma_rules': [...], 'sandbox_verdicts': {...}
 }
 ```
 
-### 6b. `vt_collector.py` (`VTCollector`)
-
-**File:** `src/collectors/vt_collector.py`  
-**DAG:** `edgeguard_medium_freq` — task id `collect_virustotal` → `run_vt_collection`.  
-Pulls VirusTotal v3 intelligence and normalises items for `MISPWriter` (see class docstring for rate-limit notes).
+### `virustotal_collector.py` (`VirusTotalCollector`) — not scheduled
+`src/collectors/virustotal_collector.py` is an older module (`run_virustotal_enrichment_collection` in the DAG file, `virustotal_enrich` in `run_pipeline`) that lists `/files` — a premium endpoint — and offers `query_domain` / `query_hash` / `query_ip` helpers. No DAG schedules it; it shares the key and the 4/min limiter but not the daily ledger. Use `VTCollector` for production runs.
 
 ---
 
@@ -480,7 +476,8 @@ Collects finance-specific threat feeds from abuse.ch, including:
 - **SSL Blacklist:** Malicious SSL certificate fingerprints
 
 ### Sources
-- **Feodo:** `https://feodotracker.abuse.ch/downloads/ipblocklist.csv`
+- **Feodo (regular runs):** `https://feodotracker.abuse.ch/downloads/ipblocklist.csv` — C2 servers active in the last 30 days
+- **Feodo (baseline runs):** `https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv` — the complete C2 history (same columns); a fresh baseline seeds the history once, the daily task then adds what is currently active
 - **SSL Blacklist:** `https://sslbl.abuse.ch/blacklist/sslblacklist.csv`
 - **API Key:** Not required
 
@@ -605,14 +602,11 @@ zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
 ### What It Does
 Placeholder for healthcare-specific threat feed collection.
 
-### Future Implementation
-- HC3 (HHS Cybersecurity) alerts integration
-- FDA medical device vulnerability feeds
-- H-ISAC threat feeds (requires membership)
-- Healthcare-targeting ransomware tracking
+### Decision (2026-10)
+No healthcare member-only feed collector is planned: HC3 and Health-ISAC (H-ISAC) require memberships that are not budgeted. Public healthcare advisories are covered by the CISA KEV and CISA ICS Advisories collectors. The placeholder stays so the slot is visible on the skip dashboard.
 
 ### Current State
-Returns empty list until actual feeds are implemented.
+Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
 
 ### Example Output
 ```python
@@ -634,14 +628,11 @@ Returns empty list until actual feeds are implemented.
 ### What It Does
 Placeholder for energy/ICS-specific threat feed collection.
 
-### Future Implementation
-- E-ISAC threat feeds (requires membership)
-- CISA ICS-CERT energy sector advisories
-- OT/ICS vulnerability databases (Claroty, Dragos, Mandiant)
-- Energy-targeting APT tracking (Industroyer, TRITON, Havex)
+### Decision (2026-10)
+No energy member-only feed collector is planned: EE-ISAC (European Energy ISAC) membership is not budgeted. CISA ICS-CERT energy sector advisories are collected by the flag-guarded CISA ICS Advisories collector (`cisa_ics`); MITRE ATT&CK for ICS is available through the MITRE collector flag. The placeholder stays so the slot is visible on the skip dashboard.
 
 ### Current State
-Returns empty list until actual feeds are implemented.
+Returns `skipped=True` (`skip_reason_class="placeholder"`); no feed is wired.
 
 ### Example Output
 ```python
@@ -815,11 +806,11 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 | CISA | CISA KEV | ✅ Active | `detect_zones_from_text()` → list |
 | MITRE | MITRE ATT&CK | ✅ Active | `detect_zones_from_text()` → list |
 | AbuseIPDB | AbuseIPDB API | ✅ Active | See `AbuseIPDBCollector` |
-| VirusTotal | VirusTotal API | ✅ Active | `VTCollector` (`vt_collector.py`); `VirusTotalCollector` (`virustotal_collector.py`) |
+| VirusTotal | VirusTotal API v3 lookups (free tier) | ✅ Active | `VTCollector` (`vt_collector.py`): enrichment of MISP hashes within a daily budget; `VirusTotalCollector` (`virustotal_collector.py`) is not scheduled |
 | Finance Feed | Feodo, SSLBL | ✅ Active | `detect_zones_from_text()` → list |
 | Global Feed | URLhaus, ThreatFox | ✅ Active | `detect_zones_from_text()` → list |
-| Healthcare | HC3, FDA, H-ISAC | ⏳ Placeholder | - |
-| Energy | E-ISAC, ICS-CERT | ⏳ Placeholder | - |
+| Healthcare | — (HC3 / Health-ISAC not planned, decision 2026-10) | ⏳ Placeholder | - |
+| Energy | — (EE-ISAC not planned, decision 2026-10; ICS-CERT via `cisa_ics`) | ⏳ Placeholder | - |
 | MISP | Local MISP | ✅ Active | `detect_sectors()` → list |
 | CISA ICS | cisagov/CSAF (ICS-CERT advisories) | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) | Source-asserted sector → fixed table (`map_sectors_to_zones()`), no keyword detector |
 
@@ -841,17 +832,16 @@ upper bound for a single baseline run.
 | **MITRE ATT&CK** | Full STIX 2.1 bundle per run | Public GitHub raw file, no rate limit | No change planned |
 | **MISP (local)** | Full MISP server content matching the filter | Bounded by local MISP; no external quota | No change planned |
 | **AbuseIPDB** | As per `ABUSEIPDB_*` limits | Public API daily checks quota (1k free) | No change planned |
-| **VirusTotal** | `limit = 100` (baseline default, raised from 20 in PR-M1) | Free tier: **4 req/min**, **500 req/day** | At `limit=100` a baseline run consumes ~100-105 API calls (~26 min wall-clock at 4/min); comfortably inside the 500/day quota with headroom for incremental runs. **VT is enrichment-only on the free tier** — genuine bulk or historical depth requires the Premium API (no 4 req/min cap; per-step daily quotas). A Premium path is a future option, not planned |
-| **Finance (Feodo / SSLBL)** | Full feed | Public CSV/text feeds, no rate limit | No change planned |
+| **VirusTotal** | `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` lookups per run (default 60), `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` per UTC day (default 400); not in the baseline DAG | Free tier: **4 req/min**, **500 req/day**; lookups only (`GET /files/{hash}`), no feed or search endpoints | Enrichment of hashes already in MISP (see [§ 6](#6-virustotal-lookup-enrichment)); the ledger in `./state` carries the daily counter across runs and remembers looked-up hashes. A premium key raises the two knobs |
+| **Finance (Feodo / SSLBL)** | Feodo: full C2 history on baselines (`ipblocklist_aggressive.csv`), 30-day list on regular runs; SSLBL: full feed | Public CSV/text feeds, no rate limit | No change planned |
 | **Global (URLhaus / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
-| **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** ENTSO-E, EU-CERT, E-ISAC, national CERT integrations. Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1. **Since 2026-10 the ICS-CERT part is a real collector:** [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
+| **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (EE-ISAC) is planned (decision 2026-10). Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1. **Since 2026-10 the ICS-CERT part is a real collector:** [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
 | **CISA ICS Advisories** | `min(index entries in window, CISA_ICS_MAX_ADVISORIES_PER_RUN=1200)` advisory files (~900 on a 730-day run), one item per CVE | Public GitHub raw files, no auth; polite sequential fetch ≤ 4 req/s | Flag-guarded, default **off**. Baseline sanity floor `CISA_ICS_MIN_EXPECTED_ADVISORIES=50` → transient skip + alert instead of a thin dataset |
-| **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** HC3, FDA, H-ISAC, national healthcare CERT integrations. Same skip-dashboard behaviour as Energy |
+| **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | No member-only feed (HC3, Health-ISAC) is planned (decision 2026-10). Same skip-dashboard behaviour as Energy |
 
 ### Planned improvements (future PRs)
 
 - **ThreatFox bulk-import collector** for historical IOCs >7 days (reads the abuse.ch JSON/CSV export, pushes to MISP with a dedicated `Source(source_id="threatfox_bulk")`)
-- **Energy + Healthcare sector collectors** — implementations for the placeholder slots; ENTSO-E + HC3 are the likeliest near-term integrations
 - **VT Premium API path** for operators with licensed service steps (unlocks bulk Intelligence search beyond the 500/day free-tier cap)
 - **OTX max-pages env knob** (`EDGEGUARD_OTX_BASELINE_MAX_PAGES`) for paid-tier operators with very active pulse subscriptions
 

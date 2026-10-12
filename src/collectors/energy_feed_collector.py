@@ -153,7 +153,7 @@ class EnergyPlaceholderCollector:
                 skip_reason=(
                     "Energy sector feed is a placeholder — no active feeds are wired yet. "
                     "See src/collectors/energy_feed_collector.py docstring for planned sources "
-                    "(ENTSO-E, EU-CERT, E-ISAC, national CERTs). "
+                    "(ENTSO-E, EU-CERT, EE-ISAC, national CERTs; member-only feeds are not planned). "
                     "Public energy/ICS advisories are already collected via cisa_collector."
                 ),
                 skip_reason_class="placeholder",
