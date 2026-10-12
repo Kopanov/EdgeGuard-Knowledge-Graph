@@ -633,8 +633,12 @@ class MalwareBazaarCollector:
     MISP/Neo4j builds up over successive daily runs.
 
     Selection: labelled samples (``signature`` other than ``n/a``) are kept before
-    unlabelled ones, then the list is cut at ``MALWAREBAZAAR_MAX_PER_RUN`` (and at the
-    regular collection limit when that is lower).
+    unlabelled ones, then the list is cut at ``MALWAREBAZAAR_MAX_PER_RUN``. The generic
+    incremental limit (``EDGEGUARD_INCREMENTAL_LIMIT``, 200 by default) does not apply: the
+    source is listed in ``config.OWN_RUN_CAP_SOURCES`` because one 48-hour export holds about
+    1,000 samples and a daily run cut at 200 would let most of them age out of the window.
+    An explicit ``limit`` (baseline smoke-test limit, or the global ``EDGEGUARD_MAX_ENTRIES``
+    override) is still honoured when it is lower than the cap.
 
     Failure contract (optional source): flag off → skipped status
     (``malwarebazaar_disabled_by_flag``) without an HTTP request; HTTP 401/403 →

@@ -634,6 +634,14 @@ INCREMENTAL_COLLECTION_LIMIT = _env_int("EDGEGUARD_INCREMENTAL_LIMIT", 200)
 # Add sources here when needed (e.g., {'cisa', 'mitre'})
 NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 
+# Sources whose collector enforces its own per-run cap. The generic incremental default
+# (EDGEGUARD_INCREMENTAL_LIMIT) does not apply to them; the global hard override
+# (EDGEGUARD_MAX_ENTRIES) still does.
+#   malwarebazaar (2026-10): one 48-hour export holds about 1,000 samples. A daily run cut at
+#   the incremental default (200) would let most of them age out of the export window for good;
+#   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN (default 500) is the per-run limit for this source.
+OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar"})
+
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:
     """
@@ -642,7 +650,9 @@ def get_effective_limit(source: str = None, default_limit: int = None) -> Option
     Priority (highest to lowest):
       1. NO_LIMIT_SOURCES — per-source bypass, always returns None
       2. EDGEGUARD_MAX_ENTRIES — global hard override (0 = use incremental default)
-      3. EDGEGUARD_INCREMENTAL_LIMIT — default cap for regular cron runs
+      3. OWN_RUN_CAP_SOURCES — the collector applies its own per-run cap, so the
+         incremental default below is not used (returns None)
+      4. EDGEGUARD_INCREMENTAL_LIMIT — default cap for regular cron runs
          (0 = unlimited; baseline runs have their own separate limit)
 
     Args:
@@ -659,6 +669,9 @@ def get_effective_limit(source: str = None, default_limit: int = None) -> Option
     # Explicit global override takes precedence
     if MAX_ENTRIES_PER_SOURCE != 0:
         return MAX_ENTRIES_PER_SOURCE
+    # The collector enforces its own per-run cap: no generic incremental cut
+    if source and source.lower() in OWN_RUN_CAP_SOURCES:
+        return None
     # Default: apply incremental cap (0 means unlimited)
     return INCREMENTAL_COLLECTION_LIMIT if INCREMENTAL_COLLECTION_LIMIT > 0 else None
 
