@@ -789,8 +789,13 @@ def _extract_tlp_tag(tags: List[Dict[str, Any]]) -> str:
 
     MISPWriter stamps one ``tlp:<level>`` tag on every attribute (``_tlp_tag``);
     this is the read half. Returns the lower-case level (``white``, ``green``,
-    ``amber``, …) or ``""`` when the attribute carries no TLP tag, so callers can
-    skip the property instead of writing an empty string.
+    ``amber``, …). An attribute without a TLP tag gets ``EDGEGUARD_DEFAULT_TLP``,
+    the level the writer would have stamped: on 2026-10-12 a host reboot
+    interrupted a URLhaus push between the attribute insert and its tags, the
+    retry kept the existing attribute untagged, and the node synced with no
+    ``tlp`` at all, failing the ``tlp_on_every_node`` acceptance check. The merge
+    keeps the most restrictive level, so the default never loosens a stricter
+    value already on the node.
     """
     for tag in tags:
         name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
@@ -798,7 +803,9 @@ def _extract_tlp_tag(tags: List[Dict[str, Any]]) -> str:
             level = name[len("tlp:") :].strip().lower()
             if level:
                 return level
-    return ""
+    from config import EDGEGUARD_DEFAULT_TLP
+
+    return EDGEGUARD_DEFAULT_TLP
 
 
 def _extract_attack_domain_tag(tags: List[Dict[str, Any]]) -> str:
