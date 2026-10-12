@@ -94,7 +94,14 @@ class TestApocFailureColumns:
             {"batch": {"total": 1, "committed": 0, "failed": 1, "errors": {"java.lang.OutOfMemoryError": 1}}},
             {"operations": {"total": 3905, "committed": 0, "failed": 0, "errors": {"boom": 1}}},
         ],
-        ids=["errorMessages", "failedBatches", "failedOperations", "wasTerminated", "batch.errors", "operations.errors"],
+        ids=[
+            "errorMessages",
+            "failedBatches",
+            "failedOperations",
+            "wasTerminated",
+            "batch.errors",
+            "operations.errors",
+        ],
     )
     def test_any_failure_signal_returns_false(self, overrides):
         result, _, _ = _run(_clean_row(**overrides))
