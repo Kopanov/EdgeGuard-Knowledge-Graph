@@ -1379,7 +1379,7 @@ def test_safe_run_batched_returns_false_on_apoc_errors():
     from unittest.mock import MagicMock
 
     client = MagicMock()
-    client.run.return_value = [{"count": 5, "batches": 2, "errorMessages": ["constraint violation on row 3"]}]
+    client.run.return_value = [{"count": 5, "batches": 2, "errorMessages": {"constraint violation on row 3": 1}}]
     stats: dict = {}
     result = build_relationships._safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "k")
     assert result is False, "errorMessages > 0 must flip return value to False"

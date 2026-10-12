@@ -99,11 +99,16 @@ class TestBatchedSuccess:
         assert stats["ok_key"] == 100
 
     def test_empty_result(self):
+        """apoc.periodic.iterate always returns one row, even when the
+        outer query matches nothing (checked on Neo4j 2026 + APOC 2026.03.1:
+        total=0, batches=1). Neo4jClient.run returns [] only when it swallowed
+        a syntax or terminal database error, so [] is a failed step, not
+        "0 (no matches)"."""
         client = _mock_client()
         client.run.return_value = []
         stats = {}
         result = _safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "empty_key")
-        assert result is True
+        assert result is False
         assert stats["empty_key"] == 0
 
 
@@ -120,7 +125,7 @@ class TestBatchedPartialFailure:
         False so the caller's failures counter reflects partial APOC errors.
         Prior to round 13 this returned True (silent partial-failure)."""
         client = _mock_client()
-        client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": ["some error"]}]
+        client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": {"some error": 1}}]
         stats = {}
         result = _safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "partial_key")
         assert result is False, (
@@ -129,14 +134,14 @@ class TestBatchedPartialFailure:
 
     def test_stats_updated_on_partial(self):
         client = _mock_client()
-        client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": ["some error"]}]
+        client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": {"some error": 1}}]
         stats = {}
         _safe_run_batched(client, "test", "MATCH (n) RETURN n", "SET n.x = 1", stats, "partial_key")
         assert stats["partial_key"] == 80
 
     def test_warning_logged_on_partial(self, caplog):
         client = _mock_client()
-        client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": ["some error"]}]
+        client.run.return_value = [{"count": 80, "batches": 5, "errorMessages": {"some error": 1}}]
         stats = {}
         with caplog.at_level(logging.WARNING):
             _safe_run_batched(client, "test-label", "MATCH (n) RETURN n", "SET n.x = 1", stats, "partial_key")

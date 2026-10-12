@@ -229,6 +229,30 @@ def _safe_run(client, label: str, query: str, stats: dict, stat_key: str) -> boo
         return False
 
 
+def _apoc_iterate_failures(row) -> list:
+    """Return the failure signals in an ``apoc.periodic.iterate`` result row.
+
+    ``errorMessages`` alone is not enough: on 2026-09-16 a Neo4j heap OOM
+    during the (since removed) whole-event Indicator → Malware co-occurrence
+    step came back with empty ``errorMessages`` and was logged ``[OK]``.
+    Columns missing from the row (older callers, mocks) count as clean.
+    """
+    failures = []
+    if row.get("errorMessages"):
+        failures.append(f"errorMessages={row['errorMessages']}")
+    if row.get("failedBatches"):
+        failures.append(f"failedBatches={row['failedBatches']}")
+    if row.get("failedOperations"):
+        failures.append(f"failedOperations={row['failedOperations']}")
+    if row.get("wasTerminated"):
+        failures.append("wasTerminated=true")
+    for column in ("batch", "operations"):
+        errors = (row.get(column) or {}).get("errors")
+        if errors:
+            failures.append(f"{column}.errors={errors}")
+    return failures
+
+
 def _safe_run_batched(
     client,
     label,
@@ -238,13 +262,18 @@ def _safe_run_batched(
     stat_key,
     batch_size=5000,
     skip_query=None,
+    params=None,
 ):
     """Run a relationship query in batches using apoc.periodic.iterate.
 
     Splits the work into mini-transactions of batch_size to prevent OOM.
-    Returns True on success (zero APOC errorMessages), False on partial or
-    full failure (PR #33 round 13: previously returned True even when
-    apoc.periodic.iterate reported errorMessages — silent partial failure).
+    Returns True on success, False on partial or full failure. Any APOC
+    failure signal counts (see ``_apoc_iterate_failures``), not only
+    ``errorMessages`` (PR #33 round 13 added errorMessages; the rest were added
+    after a heap OOM on the 800-day local baseline was logged ``[OK]``).
+
+    ``params`` (optional dict) is passed to ``apoc.periodic.iterate`` as its
+    ``params`` config, so both the outer and inner query can read ``$<key>``.
 
     If ``skip_query`` is provided (a Cypher string returning a single
     column ``c``), it is run BEFORE the apoc batch and is expected to
@@ -297,14 +326,17 @@ def _safe_run_batched(
         # malformed outer).
         logger.debug("pre-count failed for %s: %s", label, _count_err)
 
+    params_config = ", params: $iterate_params" if params is not None else ""
     query = f"""
     CALL apoc.periodic.iterate(
         '{outer_query}',
         '{inner_query}',
-        {{batchSize: {batch_size}, parallel: false}}
+        {{batchSize: {batch_size}, parallel: false{params_config}}}
     )
-    YIELD batches, total, errorMessages
-    RETURN total AS count, batches, errorMessages
+    YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
+          batch, operations, updateStatistics
+    RETURN total AS count, batches, errorMessages, failedBatches, failedOperations, wasTerminated,
+           batch, operations, updateStatistics
     """
     # Timing measurement + explicit start log so operators see the
     # apoc call boundary in logs (distinguishes "APOC running" from
@@ -314,18 +346,22 @@ def _safe_run_batched(
     _start = _time.time()
     logger.info("[LINK] %s: starting apoc.periodic.iterate (batch_size=%d)...", label, batch_size)
     try:
-        result = client.run(query)
+        result = client.run(query, {"iterate_params": params}) if params is not None else client.run(query)
         _elapsed = _time.time() - _start
         if result:
             row = result[0]
             count = row.get("count", 0)
             batches_n = row.get("batches", 0)
-            errors = row.get("errorMessages", []) or []
+            errors = _apoc_iterate_failures(row)
+            created = (row.get("updateStatistics") or {}).get("relationshipsCreated")
             stats[stat_key] = count
             if errors:
                 logger.warning(
-                    f"  [PARTIAL] {label}: {count} in {batches_n} batches, "
-                    f"elapsed {_elapsed:.1f}s, errors: {errors[:3]}"
+                    # updateStatistics also counts work done in failed (rolled-back)
+                    # batches, so on failure it is not the number of edges kept.
+                    f"  [PARTIAL] {label}: outer rows {count} in {batches_n} batches, "
+                    f"relationships reported {created} (may include rolled-back batches), "
+                    f"elapsed {_elapsed:.1f}s, failures: {errors[:3]}"
                     f"{' (+more)' if len(errors) > 3 else ''}"
                 )
                 # PR-N21 Bravo-ops: fire the partial-batch counter so the
@@ -345,7 +381,10 @@ def _safe_run_batched(
                     except Exception:
                         logger.debug("APOC partial counter failed", exc_info=True)
             else:
-                logger.info(f"  [OK] {label}: {count} in {batches_n} batches, elapsed {_elapsed:.1f}s")
+                logger.info(
+                    f"  [OK] {label}: outer rows {count} in {batches_n} batches, "
+                    f"relationships created {created}, elapsed {_elapsed:.1f}s"
+                )
             # PR #34 round 20: orphan-count log when skip_query was provided.
             # No comparison needed — skip_count IS the count of input rows
             # whose target doesn't exist.
@@ -359,9 +398,15 @@ def _safe_run_batched(
             # the caller's failures counter reflects partial APOC errors.
             return not errors
         else:
+            # apoc.periodic.iterate always returns one row, even for an
+            # empty outer query (total=0). No row means Neo4jClient.run returned []
+            # after a swallowed syntax or terminal database error, or with no driver.
             stats[stat_key] = 0
-            logger.info(f"  [OK] {label}: 0 (no matches), elapsed {_elapsed:.1f}s")
-            return True
+            logger.error(
+                f"  [FAIL] {label}: apoc.periodic.iterate returned no result row "
+                f"(query error logged by neo4j_client), elapsed {_elapsed:.1f}s"
+            )
+            return False
     except Exception as e:
         _elapsed = _time.time() - _start
         # PR-N8 HIGH (audit Bug Hunter H3, 2026-04-21): narrow the
