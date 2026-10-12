@@ -10,6 +10,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import csv
+import ipaddress
 import logging
 import re
 from datetime import date, datetime, timezone
@@ -223,9 +224,18 @@ class FeodoCollector:
             data_lines = [ln for ln in raw_text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
 
             rows: List[Dict[str, str]] = []
+            not_an_address = 0
             for row in csv.reader(data_lines):
                 parts = [field.strip() for field in row]
                 if len(parts) < 5 or parts[0].lower() == "first_seen_utc" or not parts[1]:
+                    continue
+                # The address column must hold an IPv4 address: an HTTP 200 body that is not the
+                # CSV (an error page) must not turn into "C&C servers".
+                try:
+                    if ipaddress.ip_address(parts[1]).version != 4:
+                        raise ValueError("not IPv4")
+                except ValueError:
+                    not_an_address += 1
                     continue
                 rows.append(
                     {
@@ -236,6 +246,13 @@ class FeodoCollector:
                         "last_online": parts[4],
                         "malware": parts[5] if len(parts) > 5 else "",
                     }
+                )
+
+            if not_an_address:
+                logger.warning(
+                    "Feodo: %d row(s) skipped — the address column did not hold an IPv4 address%s",
+                    not_an_address,
+                    "" if rows else "; the download does not look like the Feodo CSV",
                 )
 
             records = feodo_merge_rows(rows)

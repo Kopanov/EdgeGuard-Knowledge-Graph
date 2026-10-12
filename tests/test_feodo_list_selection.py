@@ -140,6 +140,40 @@ def test_short_and_empty_rows_are_skipped_and_do_not_consume_the_limit(feodo, mo
     assert [i["value"] for i in items] == ["198.51.100.8"], "the limit counts accepted rows"
 
 
+def test_a_body_that_is_not_the_csv_yields_no_servers(feodo, monkeypatch, caplog) -> None:
+    """An error page served with HTTP 200 must not be published as addresses."""
+    from collectors import finance_feed_collector as mod
+
+    class Html(FakeResponse):
+        text = "<html><body>\r\n<p>a, b, c, d, e, f</p>\r\nService, temporarily, unavailable, please, retry, later\r\n</body></html>"
+
+    monkeypatch.setattr(mod, "request_with_rate_limit_retries", lambda *a, **k: Html())
+    with caplog.at_level(logging.WARNING):
+        status = feodo.collect(limit=None, push_to_misp=True, baseline=True)
+    assert status["success"] is True and status["count"] == 0
+    feodo.misp_writer.push_indicators.assert_not_called()
+    assert any("does not look like the Feodo CSV" in r.getMessage() for r in caplog.records)
+
+
+def test_rows_with_an_invalid_address_are_skipped(feodo, monkeypatch) -> None:
+    from collectors import finance_feed_collector as mod
+
+    body = (
+        '"first_seen_utc","dst_ip","dst_port","c2_status","last_online","malware"\r\n'
+        '"2026-10-01 08:30:00","999.1.1.1","443","offline","2026-10-02","QakBot"\r\n'
+        '"2026-10-01 08:30:00","2001:db8::1","443","offline","2026-10-02","QakBot"\r\n'
+        '"2026-10-01 08:30:00","example.org","443","offline","2026-10-02","QakBot"\r\n'
+        '"2026-10-01 08:30:00","198.51.100.8","443","offline","2026-10-02","QakBot"\r\n'
+    )
+
+    class Resp(FakeResponse):
+        text = body
+
+    monkeypatch.setattr(mod, "request_with_rate_limit_retries", lambda *a, **k: Resp())
+    items = feodo.collect(limit=None, push_to_misp=False, baseline=False)
+    assert [i["value"] for i in items] == ["198.51.100.8"]
+
+
 # ---------------------------------------------------------------------------
 # Recency, confidence and the metadata that travels to MISP and Neo4j
 # ---------------------------------------------------------------------------
