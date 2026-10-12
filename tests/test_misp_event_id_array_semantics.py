@@ -177,7 +177,10 @@ def test_calibrate_large_event_query_is_parameterized_array_only():
     assert "RETURN id(r) AS rid" in big, (
         "outer query must RETURN id(r) — raw entity refs are unsafe across apoc.periodic.iterate per-batch transactions"
     )
-    assert "id(r) = $rid" in big, "inner action must re-MATCH the relationship by id() in the new transaction"
+    assert "id(r) = rid" in big and "$rid" not in big, (
+        "inner action must re-MATCH the relationship by the batch variable rid: apoc.periodic.iterate "
+        "exposes outer columns as variables, and $rid failed with 'Expected parameter(s): rid' (2026-10-12)"
+    )
     assert "WITH $r AS r" not in big, (
         "round-19 dropped the unsafe `WITH $r AS r` rebind — entity handles from outer "
         "query don't survive apoc.periodic.iterate's per-batch transactions"
