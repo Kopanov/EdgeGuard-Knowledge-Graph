@@ -254,12 +254,13 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    Record the backup time in `EDGEGUARD_LAST_BACKUP_AT` — `fresh-baseline` and the
    `baseline_clean` task refuse to run without a backup inside
    `EDGEGUARD_BACKUP_MAX_AGE_HOURS` (default 240 h).
-4. **One command for the re-feed.** `edgeguard fresh-baseline --days 730` wipes
-   **the whole Neo4j database** (every node, not only `edgeguard_managed` ones) and the
-   EdgeGuard MISP events (typed confirmation, blast-radius display, backup-timestamp gate).
-   That is the right mode for the October 2026 re-feed: the hosted database holds no
-   partner-written nodes (verified 2026-10-10 — the ResilMesh labels exist only as
-   constraint tokens). On a database ResilMesh has started writing to, use the
+4. **One command for the re-feed.** `edgeguard fresh-baseline --days 730` deletes the
+   EdgeGuard-managed Neo4j nodes (the default since 2026-10-12; `--wipe-all` deletes every node)
+   and the EdgeGuard MISP events (typed confirmation, blast-radius display, backup-timestamp gate).
+   For the October 2026 re-feed pass `--wipe-all`: the hosted database holds no partner-written
+   nodes (verified 2026-10-10 and again 2026-10-12 — the 221 unmarked nodes are EdgeGuard's own
+   pre-marker Campaign and Source nodes), and those would otherwise survive the scoped wipe and
+   fail the `ownership_marker_on_nodes` acceptance check. On a database ResilMesh has started writing to, use the
    edgeguard-only sequence instead: `edgeguard clear neo4j --edgeguard-only`,
    `edgeguard clear misp`, `edgeguard checkpoint clear --include-incremental`, then the
    additive `edgeguard baseline --days 730`. `--edgeguard-only` deletes only the nodes
@@ -278,7 +279,8 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    partners or the demo. `uses_malware_complete` / `uses_tool_complete` are mandatory as soon
    as a MITRE actor exists (2026-10 audit): zero claims then means the `m` / `s` lists were
    lost in transit, not "collector not run yet".
-   Pause the scheduled DAGs before triggering, as for any baseline
+   The baseline DAG holds the baseline lock for the whole run (Issue #57, 2026-10); pausing the
+   scheduled DAGs before triggering remains the recommended extra step for a destructive run
    ([RUNBOOK § Baseline day protocol](RUNBOOK.md#baseline-day-protocol)).
 5. **Hand back.** Return the acceptance JSON
    (`python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json`),
