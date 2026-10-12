@@ -407,6 +407,43 @@ def test_200_without_a_usable_object_keeps_the_hash_eligible(collector, ledger_p
     assert out["vt_lookup_errors"] == 2 and out["vt_enriched"] == 1
 
 
+def test_enriched_hash_is_remembered_only_after_the_misp_push_succeeded(collector, ledger_path: Path) -> None:
+    collector.misp_writer.session.post.return_value = _misp_rows(H1, H2)
+    collector._test_responses.update({H1: FakeResponse(200, _vt_file(H1)), H2: FakeResponse(200, _vt_file(H2))})
+    collector.misp_writer.push_items.return_value = (1, 1)  # one attribute failed, the writer cannot say which
+    out = collector.collect(limit=10, push_to_misp=True)
+    on_disk = json.loads(ledger_path.read_text())
+    assert H1 not in on_disk["looked_up"] and H2 not in on_disk["looked_up"]
+    assert on_disk["used"] == 2  # the quota was spent
+    assert out["count"] == 2 and out["vt_enriched"] == 2
+    pushed = collector.misp_writer.push_items.call_args.args[0]
+    assert all("_vt_lookup_sha256" not in i for i in pushed)
+    # Next run: both hashes are looked up again (and remembered once the push succeeds).
+    collector._test_calls.clear()
+    collector.misp_writer.push_items.return_value = (2, 0)
+    collector.collect(limit=10, push_to_misp=True)
+    assert collector._test_calls == [H1, H2]
+    assert json.loads(ledger_path.read_text())["looked_up"] == {H1: "ok", H2: "ok"}
+
+
+def test_misp_push_exception_leaves_the_hashes_eligible_and_persists_the_quota(collector, ledger_path: Path) -> None:
+    collector.misp_writer.session.post.return_value = _misp_rows(H1)
+    collector._test_responses[H1] = FakeResponse(200, _vt_file(H1))
+    collector.misp_writer.push_items.side_effect = requests.exceptions.ConnectionError("misp down")
+    out = collector.collect(limit=10, push_to_misp=True)
+    assert out["success"] is False  # MISP unreachable is a real failure, not a skip
+    on_disk = json.loads(ledger_path.read_text())
+    assert on_disk["used"] == 1 and on_disk["looked_up"] == {}
+
+
+def test_without_misp_push_delivered_items_are_remembered(collector, ledger_path: Path) -> None:
+    collector.misp_writer.session.post.return_value = _misp_rows(H1)
+    collector._test_responses[H1] = FakeResponse(200, _vt_file(H1))
+    out = collector.collect(limit=10, push_to_misp=False)
+    assert [i["value"] for i in out] == [H1] and "_vt_lookup_sha256" not in out[0]
+    assert json.loads(ledger_path.read_text())["looked_up"] == {H1: "ok"}
+
+
 @pytest.mark.parametrize("status", [401, 403])
 def test_rejected_key_is_skipped_as_auth_denied(collector, status: int) -> None:
     collector.misp_writer.session.post.return_value = _misp_rows(H1)

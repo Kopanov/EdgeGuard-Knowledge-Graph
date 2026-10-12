@@ -460,7 +460,8 @@ class VTCollector:
     def _lookup_hashes(self, candidates: List[str], budget: VirusTotalBudget) -> Tuple[List[Dict], Dict[str, Any]]:
         """Look up *candidates* one by one within the budget; returns (items, run summary).
 
-        HTTP 200 with a usable object → enriched item (remembered); 200 without one →
+        HTTP 200 with a usable object → enriched item (remembered in the ledger only after
+        the MISP push succeeded, see :meth:`_remember_delivered`); 200 without one →
         counted as an error, hash stays eligible; 404 → remembered as unknown to
         VirusTotal (never retried); 429 → the day is marked exhausted and the run stops; 401/403 →
         ``requests.HTTPError`` (the caller skips the source as auth-denied); other
@@ -520,7 +521,7 @@ class VTCollector:
                 item = self._process_file(file_data) if isinstance(file_data, dict) and file_data else None
                 if item:
                     consecutive_errors = 0
-                    budget.remember(sha256, "ok")
+                    item["_vt_lookup_sha256"] = sha256  # remembered only once the item reached MISP
                     items.append(item)
                     summary["found"] += 1
                     continue
@@ -545,6 +546,14 @@ class VTCollector:
                 summary["stopped"] = "http_errors"
                 break
         return items, summary
+
+    @staticmethod
+    def _remember_delivered(items: List[Dict], budget: VirusTotalBudget) -> None:
+        """Record the looked-up hashes of *items* as ``ok`` once their enrichment has been delivered."""
+        for item in items:
+            sha256 = item.pop("_vt_lookup_sha256", None)
+            if sha256:
+                budget.remember(sha256, "ok")
 
     def collect(
         self,
@@ -654,6 +663,9 @@ class VTCollector:
             logger.info(f"[OK] VirusTotal: Processed {len(unique)} unique indicators")
 
             if not push_to_misp:
+                # The caller receives the items: the lookups are delivered.
+                self._remember_delivered(unique, budget)
+                budget.save()
                 return unique
             if not unique and summary["stopped"] == "rate_limited":
                 return make_skipped_optional_source(
@@ -669,6 +681,23 @@ class VTCollector:
                     logger.info(f"[OK] VirusTotal: Successfully pushed {success} items to MISP")
                 if failed > 0:
                     logger.warning(f"[WARN] VirusTotal: Failed to push {failed} items to MISP")
+                if failed == 0:
+                    self._remember_delivered(unique, budget)
+                else:
+                    # The writer reports counts, not which attributes failed: none of the
+                    # enriched hashes is remembered, so the next run looks them up again
+                    # (the writer skips attributes MISP already holds).
+                    logger.warning(
+                        "%s %d enrichment(s) not confirmed in MISP (%d pushed, %d failed) — the hashes stay "
+                        "eligible and will be looked up again on a later run",
+                        QUOTA_LOG_PREFIX,
+                        len(unique),
+                        success,
+                        failed,
+                    )
+                    for item in unique:
+                        item.pop("_vt_lookup_sha256", None)
+                budget.save()
                 status = status_after_misp_push("virustotal", len(unique), success, failed)
             status.update(
                 {
@@ -684,12 +713,14 @@ class VTCollector:
             return status
 
         except requests.exceptions.Timeout as e:
+            budget.save()
             error_msg = f"Timeout: {e}"
             logger.error(f"VirusTotal timeout: {e}")
             if push_to_misp:
                 return self._return_status(False, 0, error_msg)
             raise
         except requests.exceptions.ConnectionError as e:
+            budget.save()
             error_msg = f"Connection error: {e}"
             logger.error(f"VirusTotal connection error: {e}")
             if push_to_misp:
