@@ -40,11 +40,13 @@ import requests
 from collectors.collector_utils import (
     VIRUSTOTAL_API_KEY_PLACEHOLDERS,
     RateLimiter,
+    TransientServerError,
     is_auth_or_access_denied,
     make_skipped_optional_source,
     make_status,
     optional_api_key_effective,
     request_with_rate_limit_retries,
+    retry_with_backoff,
     status_after_misp_push,
 )
 
@@ -382,6 +384,24 @@ class VTCollector:
     # Candidate selection (MISP) and lookups (VirusTotal)
     # ------------------------------------------------------------------
 
+    @retry_with_backoff(max_retries=MAX_RETRIES, base_delay=RETRY_DELAY_BASE)
+    def _fetch_candidate_page(self, url: str, payload: Dict[str, Any]) -> Any:
+        """One ``attributes/restSearch`` page from MISP, retried with backoff on transport errors and 5xx/429.
+
+        Other HTTP errors raise ``requests.HTTPError`` immediately; the caller turns any
+        failure that survives the retries into a skipped run.
+        """
+        response = self.misp_writer.session.post(
+            url,
+            json=payload,
+            verify=self.misp_writer.verify_ssl,
+            timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT * 2),
+        )
+        if response.status_code in (429, 500, 502, 503, 504):
+            raise TransientServerError(f"MISP attributes/restSearch HTTP {response.status_code}", response=response)
+        response.raise_for_status()
+        return response.json()
+
     def _candidate_hashes(self, wanted: int, budget: VirusTotalBudget) -> List[str]:
         """Return up to *wanted* SHA-256 values from MISP that still lack VirusTotal enrichment.
 
@@ -389,7 +409,7 @@ class VTCollector:
         attribute timestamp within ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` days, and not
         already tagged with the VirusTotal source tag. Hashes recorded in the ledger
         (looked up before, found or not) are excluded. Raises on MISP transport or
-        HTTP errors — the caller turns that into a skipped run.
+        HTTP errors that survive the retries — the caller turns that into a skipped run.
         """
         days = candidate_days()
         url = f"{self.misp_writer.url}/attributes/restSearch"
@@ -405,14 +425,7 @@ class VTCollector:
                 "page": page,
                 "limit": MISP_CANDIDATE_PAGE_SIZE,
             }
-            response = self.misp_writer.session.post(
-                url,
-                json=payload,
-                verify=self.misp_writer.verify_ssl,
-                timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT * 2),
-            )
-            response.raise_for_status()
-            data = response.json()
+            data = self._fetch_candidate_page(url, payload)
             resp = data.get("response", data) if isinstance(data, dict) else data
             rows: List[Any] = []
             if isinstance(resp, list):
@@ -447,8 +460,9 @@ class VTCollector:
     def _lookup_hashes(self, candidates: List[str], budget: VirusTotalBudget) -> Tuple[List[Dict], Dict[str, Any]]:
         """Look up *candidates* one by one within the budget; returns (items, run summary).
 
-        HTTP 200 → enriched item; 404 → remembered as unknown to VirusTotal (never
-        retried); 429 → the day is marked exhausted and the run stops; 401/403 →
+        HTTP 200 with a usable object → enriched item (remembered); 200 without one →
+        counted as an error, hash stays eligible; 404 → remembered as unknown to
+        VirusTotal (never retried); 429 → the day is marked exhausted and the run stops; 401/403 →
         ``requests.HTTPError`` (the caller skips the source as auth-denied); other
         errors are counted and the run stops after
         :data:`MAX_CONSECUTIVE_LOOKUP_ERRORS` consecutive ones.
@@ -499,16 +513,25 @@ class VTCollector:
             budget.consume(1)
             summary["lookups"] += 1
             if code == 200:
-                consecutive_errors = 0
-                budget.remember(sha256, "ok")
                 try:
                     file_data = response.json().get("data", {})
                 except ValueError:
-                    file_data = {}
-                item = self._process_file(file_data) if isinstance(file_data, dict) else None
+                    file_data = None
+                item = self._process_file(file_data) if isinstance(file_data, dict) and file_data else None
                 if item:
+                    consecutive_errors = 0
+                    budget.remember(sha256, "ok")
                     items.append(item)
                     summary["found"] += 1
+                    continue
+                # The lookup counted against the quota but produced nothing usable (truncated body,
+                # unexpected shape): leave the hash eligible for a later run instead of excluding it.
+                summary["errors"] += 1
+                consecutive_errors += 1
+                logger.warning("VirusTotal lookup %s… answered HTTP 200 without a usable object", sha256[:16])
+                if consecutive_errors >= MAX_CONSECUTIVE_LOOKUP_ERRORS:
+                    summary["stopped"] = "http_errors"
+                    break
                 continue
             if code == 404:
                 consecutive_errors = 0

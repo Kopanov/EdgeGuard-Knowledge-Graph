@@ -264,6 +264,41 @@ def test_candidate_pages_stop_once_enough_hashes_are_collected(collector, ledger
     assert collector.misp_writer.session.post.call_count == 2
 
 
+def test_candidate_listing_retries_transient_misp_errors(collector, monkeypatch) -> None:
+    from collectors import collector_utils
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    monkeypatch.setattr(collector_utils.time, "sleep", lambda s: None)
+    collector.misp_writer.session.post.side_effect = [
+        requests.exceptions.ConnectionError("blip"),
+        FakeResponse(503, {}),
+        _misp_rows(H1),
+    ]
+    assert collector._candidate_hashes(5, VirusTotalBudget()) == [H1]
+    assert collector.misp_writer.session.post.call_count == 3
+
+
+def test_candidate_listing_gives_up_after_the_retry_budget(collector, monkeypatch) -> None:
+    from collectors import collector_utils
+
+    monkeypatch.setattr(collector_utils.time, "sleep", lambda s: None)
+    collector.misp_writer.session.post.return_value = FakeResponse(503, {})
+    out = collector.collect(limit=10, push_to_misp=True)
+    assert out.get("skipped") is True and out["skip_reason_class"] == "virustotal_candidates_unavailable"
+    assert collector.misp_writer.session.post.call_count == 4  # first attempt + MAX_RETRIES
+    assert collector._test_calls == []
+
+
+def test_non_transient_misp_http_error_is_not_retried(collector, monkeypatch) -> None:
+    from collectors import collector_utils
+
+    monkeypatch.setattr(collector_utils.time, "sleep", lambda s: None)
+    collector.misp_writer.session.post.return_value = FakeResponse(403, {})
+    out = collector.collect(limit=10, push_to_misp=True)
+    assert out["skip_reason_class"] == "virustotal_candidates_unavailable"
+    assert collector.misp_writer.session.post.call_count == 1
+
+
 def test_misp_failure_while_listing_candidates_is_a_skip_not_a_failure(collector) -> None:
     collector.misp_writer.session.post.side_effect = requests.exceptions.ConnectionError("misp down")
     out = collector.collect(limit=10, push_to_misp=True)
@@ -347,6 +382,29 @@ def test_lookups_counted_persist_across_runs(collector, ledger_path: Path) -> No
     out = collector.collect(limit=10, push_to_misp=True)
     assert collector._test_calls == []
     assert out["count"] == 0 and json.loads(ledger_path.read_text())["used"] == 2
+
+
+def test_200_without_a_usable_object_keeps_the_hash_eligible(collector, ledger_path: Path) -> None:
+    """A truncated body or an unexpected shape must not exclude the hash forever (it is retried later)."""
+
+    class BrokenJSON(FakeResponse):
+        def json(self) -> Any:
+            raise ValueError("truncated")
+
+    collector.misp_writer.session.post.return_value = _misp_rows(H1, H2, H3)
+    collector._test_responses.update(
+        {
+            H1: BrokenJSON(200, {}),
+            H2: FakeResponse(200, {"data": {"id": H2, "attributes": {}}}),  # no sha256 → _process_file keeps id
+            H3: FakeResponse(200, {"data": {}}),  # empty object
+        }
+    )
+    out = collector.collect(limit=10, push_to_misp=True)
+    on_disk = json.loads(ledger_path.read_text())
+    assert H1 not in on_disk["looked_up"] and H3 not in on_disk["looked_up"]
+    assert on_disk["looked_up"][H2] == "ok"  # a minimal object still yields an item
+    assert on_disk["used"] == 3  # the quota was spent either way
+    assert out["vt_lookup_errors"] == 2 and out["vt_enriched"] == 1
 
 
 @pytest.mark.parametrize("status", [401, 403])
