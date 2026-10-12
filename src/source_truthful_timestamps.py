@@ -551,6 +551,27 @@ def coerce_iso(val: Any) -> Optional[str]:
 _coerce_iso = coerce_iso
 
 
+def iso_before(a: Optional[str], b: Optional[str]) -> bool:
+    """True when ISO-8601 timestamp *a* is strictly earlier than *b*.
+
+    False when either value is missing or does not parse, so a caller that uses the
+    result to drop an inconsistent claim never drops on a parse problem. Naive values
+    are read as UTC, like everywhere else in this module.
+    """
+    if not a or not b:
+        return False
+    try:
+        da = datetime.fromisoformat(a.replace("Z", "+00:00") if a.endswith("Z") else a)
+        db = datetime.fromisoformat(b.replace("Z", "+00:00") if b.endswith("Z") else b)
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if da.tzinfo is None:
+        da = da.replace(tzinfo=timezone.utc)
+    if db.tzinfo is None:
+        db = db.replace(tzinfo=timezone.utc)
+    return da < db
+
+
 def iso_str(val: Any) -> Optional[str]:
     """Public utility: coerce a Neo4j-driver temporal value (or anything
     date-like) into a plain ISO-8601 string for JSON / STIX serialization.
@@ -771,6 +792,15 @@ def extract_source_truthful_timestamps(
     # see the per-source baseline rate.
     final_first = _clamp_future_to_now(first_seen)
     final_last = _clamp_future_to_now(last_seen)
+    # A last-seen claim earlier than the first-seen claim is inconsistent source data. The
+    # MISP writer already omits such a native ``last_seen``, but the pair can still arrive
+    # here: from the Layer-2 comment fallback above, or from an attribute another writer
+    # pushed. Keep the first-seen claim and drop the last-seen one, so an inverted window
+    # never reaches ``SOURCED_FROM.source_reported_last_at``.
+    if final_first is not None and final_last is not None and iso_before(final_last, final_first):
+        _metric_accept(source_id, "first_seen")
+        _metric_drop(source_id, "last_seen_before_first_seen", "last_seen")
+        return (final_first, None)
     if final_first is not None:
         _metric_accept(source_id, "first_seen")
     else:

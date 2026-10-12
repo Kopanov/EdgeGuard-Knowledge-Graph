@@ -299,6 +299,46 @@ def test_writer_drops_a_last_seen_that_precedes_first_seen() -> None:
     assert only_last["last_seen"] == "2026-10-11T00:00:00+00:00" and "first_seen" not in only_last
 
 
+def test_an_inverted_pair_does_not_come_back_through_the_metadata_comment(path) -> None:
+    """ThreatFox has a comment fallback for its timestamps: a last-seen the writer omitted from the
+    native field must not return from ``TF_META`` and land on the SOURCED_FROM edge."""
+    item = {
+        "indicator_type": "ipv4",
+        "value": "203.0.113.60",
+        "zone": ["global"],
+        "tag": "threatfox",
+        "source": ["threatfox"],
+        "first_seen": "2026-09-10 08:00:00 UTC",
+        "last_seen": "2026-09-09 08:00:00 UTC",
+        "confidence_score": 0.75,
+        "malware_family": "Cobalt Strike",
+        "reference": "https://threatfox.abuse.ch/ioc/1/",
+        "tags": ["c2"],
+    }
+    attr, _sync_item, row = path(item)
+    assert attr["first_seen"] == "2026-09-10T08:00:00+00:00" and "last_seen" not in attr
+    assert json.loads(attr["comment"][len("TF_META:") :])["last_seen"] == "", "the comment agrees with the attribute"
+    assert row["first_seen_at_source"] == "2026-09-10T08:00:00+00:00" and row["last_seen_at_source"] is None
+
+
+def test_sync_drops_an_inverted_pair_written_by_someone_else() -> None:
+    """Read-path guard: an attribute already in MISP (or pushed by another writer) with last < first."""
+    from source_truthful_timestamps import extract_source_truthful_timestamps, iso_before
+
+    attr = {"first_seen": "2026-09-10T08:00:00+00:00", "last_seen": "2026-09-09T08:00:00+00:00"}
+    assert extract_source_truthful_timestamps(attr, "threatfox") == ("2026-09-10T08:00:00+00:00", None)
+    meta_only = {"first_seen": "2026-09-10T08:00:00+00:00"}
+    tf_meta = {"last_seen": "2026-09-09 08:00:00 UTC"}
+    assert extract_source_truthful_timestamps(meta_only, "threatfox", tf_meta=tf_meta) == (
+        "2026-09-10T08:00:00+00:00",
+        None,
+    )
+    consistent = {"first_seen": "2026-09-10T08:00:00+00:00", "last_seen": "2026-09-10T08:00:00+00:00"}
+    assert extract_source_truthful_timestamps(consistent, "threatfox")[1] == "2026-09-10T08:00:00+00:00"
+    assert iso_before("2026-09-09", "2026-09-10T00:00:00Z") is True
+    assert iso_before("garbage", "2026-09-10") is False and iso_before(None, "2026-09-10") is False
+
+
 def test_optional_metadata_keys_are_written_only_when_present_and_stay_bounded() -> None:
     from collectors.misp_writer import MISPWriter
 

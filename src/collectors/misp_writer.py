@@ -368,7 +368,7 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     # Lazy import to avoid a potential circular dependency (the
     # source_truthful_timestamps module lives at src/ root; this
     # collector module is under src/collectors/).
-    from source_truthful_timestamps import coerce_iso
+    from source_truthful_timestamps import coerce_iso, iso_before
 
     # PR-N5 C7 (audit 09): runtime honest-NULL invariant check.
     # Detects collectors that manufacture wall-clock-NOW substitutes
@@ -381,7 +381,7 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
     first_seen = coerce_iso(item.get("first_seen"))
     # last_modified (NVD / STIX) is accepted as an alias for last_seen.
     last_seen = coerce_iso(item.get("last_seen")) or coerce_iso(item.get("last_modified"))
-    if first_seen and last_seen and _iso_before(last_seen, first_seen):
+    if first_seen and last_seen and iso_before(last_seen, first_seen):
         # MISP rejects an attribute whose last_seen precedes its first_seen, and a rejected
         # attribute counts against the collector's push success rate. The pair is inconsistent
         # source data: keep the first-seen claim, drop the last-seen one.
@@ -398,18 +398,18 @@ def _apply_source_truthful_timestamps(attribute: Dict[str, Any], item: Dict[str,
         attribute["last_seen"] = last_seen
 
 
-def _iso_before(a: str, b: str) -> bool:
-    """True when ISO-8601 timestamp *a* is strictly earlier than *b*; False when either does not parse."""
-    try:
-        da = datetime.fromisoformat(a.replace("Z", "+00:00") if a.endswith("Z") else a)
-        db = datetime.fromisoformat(b.replace("Z", "+00:00") if b.endswith("Z") else b)
-    except (ValueError, TypeError):
-        return False
-    if da.tzinfo is None:
-        da = da.replace(tzinfo=timezone.utc)
-    if db.tzinfo is None:
-        db = db.replace(tzinfo=timezone.utc)
-    return da < db
+def _consistent_last_seen(item: Dict[str, Any]) -> Any:
+    """``item["last_seen"]`` for the metadata comment, or ``""`` when it precedes ``first_seen``.
+
+    ``_apply_source_truthful_timestamps`` omits such a value from the attribute's native field;
+    the comment must not keep it, or the sync's comment fallback would bring it back.
+    """
+    from source_truthful_timestamps import coerce_iso, iso_before
+
+    raw = item.get("last_seen", "")
+    if raw and iso_before(coerce_iso(raw), coerce_iso(item.get("first_seen"))):
+        return ""
+    return raw
 
 
 def _resolve_vulnerability_cve_id_for_misp(item: Dict) -> Optional[str]:
@@ -1317,7 +1317,7 @@ class MISPWriter:
                 "malware_malpedia": indicator.get("malware_malpedia", ""),
                 "reference": indicator.get("reference", ""),
                 "tags": indicator.get("tags", []),
-                "last_seen": indicator.get("last_seen", ""),
+                "last_seen": _consistent_last_seen(indicator),
                 "threat_type_desc": indicator.get("threat_type_desc", ""),
                 "malware_family": indicator.get("malware_family", ""),
                 "reporter": indicator.get("reporter", ""),
