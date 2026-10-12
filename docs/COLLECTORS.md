@@ -413,11 +413,11 @@ Typically **`global`** or derived from feed context — see `collect()` implemen
 ### What It Does
 The public (free) VirusTotal API v3 offers **single-object lookups only** (`GET /files/{hash}`); feed and Intelligence-search endpoints need a premium licence and return nothing on a free key. The collector therefore does not act as a feed. Each run:
 
-1. lists SHA-256 attributes in MISP that no `source:VirusTotal` attribute covers yet (`attributes/restSearch`, type `sha256`, attribute timestamp within `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`, default 30 days) — hashes pushed by ThreatFox, MalwareBazaar, OTX and other sources;
-2. looks each hash up within the per-run cap and the daily budget (below);
+1. lists the SHA-256 attributes other sources pushed to MISP — ThreatFox, MalwareBazaar, OTX and others (`attributes/restSearch`, type `sha256`, attribute timestamp within `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`, default 30 days; VirusTotal's own attributes are excluded by tag) — and drops the hashes the ledger remembers as already looked up;
+2. looks each remaining hash up within the per-run cap and the daily budget (below);
 3. pushes the enriched items to MISP under `source:VirusTotal`. The MISP→Neo4j sync merges them into the **same** Indicator node: a second `SOURCED_FROM` edge, VirusTotal confidence (`last_analysis_stats`), threat label, file names (zone detection) and the first-submission date (source-truthful `first_seen`).
 
-Hashes are looked up **once**: the ledger remembers every lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs.
+Hashes are looked up **once**: the ledger remembers every delivered lookup, including hashes unknown to VirusTotal (HTTP 404), so no lookup is repeated across runs. An enriched hash is remembered only after its MISP push succeeded. The ledger is the only record of what was looked up (MISP cannot tell which hashes of other sources were enriched): if the file is lost, hashes inside the candidate window are looked up again, which costs quota but creates no duplicate attributes. The query shape was confirmed against a live MISP 2.5 on 2026-10-12 (HTTP 200, `response.Attribute` list).
 
 ### Free-tier safety (never blocks the workflow)
 
@@ -432,7 +432,7 @@ Hashes are looked up **once**: the ledger remembers every lookup, including hash
 
 Every quota message is logged with the prefix **`[VT-QUOTA]`** (budget state at the start of the run, exhaustion events, run summary with lookups / enriched / unknown / errors), so `grep VT-QUOTA` on the task log shows what happened. The task result carries `vt_lookups`, `vt_enriched`, `vt_unknown`, `vt_lookup_errors`, `vt_stopped`, `vt_budget_used`, `vt_budget_remaining`.
 
-Growth: at the defaults, up to 360 hashes per day gain VirusTotal corroboration; a ThreatFox-sized backlog (~16,000 hashes) is covered in about six weeks. A premium key raises the budget knobs; the collector logic does not change.
+Coverage: at the defaults at most 360 hashes per day (six runs of 60) gain VirusTotal corroboration. This is a sample, not full coverage: after a fresh baseline every SHA-256 attribute in MISP is inside the candidate window (the window is the attribute's MISP timestamp, not the age of the indicator), candidates are taken in the order MISP returns them, and hashes that are not reached within the window are not looked up later. Fuller coverage needs a premium key (raise the two budget knobs; the collector logic does not change) or a narrower candidate selection, for example by source.
 
 ### Zone Detection
 ```python
@@ -472,9 +472,9 @@ def _detect_zones_from_attributes(self, attrs):
 **File:** `src/collectors/finance_feed_collector.py`
 
 ### What It Does
-Collects finance-specific threat feeds from abuse.ch, including:
-- **Feodo Tracker:** Banking trojan C&C server IPs
-- **SSL Blacklist:** Malicious SSL certificate fingerprints
+Collects two abuse.ch feeds historically associated with banking trojans:
+- **Feodo Tracker:** botnet C&C server IPs (QakBot, Emotet, TrickBot, Dridex, BumbleBee, Pikabot) with the malware family, port and online/offline status
+- **SSL Blacklist:** malicious SSL certificate fingerprints (SHA-1) with the listing reason
 
 ### Sources
 - **Feodo (regular runs):** `https://feodotracker.abuse.ch/downloads/ipblocklist.csv` — C2 servers active in the last 30 days
@@ -493,22 +493,34 @@ zones = detect_zones_from_text(malware.lower())
 zones = detect_zones_from_text(reason)
 ```
 
+The keyword detector deliberately contains no malware family names (families are linked to sectors through graph relationships), so in practice both feeds are tagged `zone:Global`: measured on 2026-10-12, 7,980 of 7,980 Feodo rows and 10,964 of 10,964 SSL Blacklist rows. Neither feed is hard-coded to Finance.
+
+### Feodo Tracker: parsing, family, status
+- **Parsing.** The download is CSV with every field quoted and CRLF line endings; it is read with the `csv` module and the header row is recognised by name.
+- **Malware family → graph.** The item carries `reference` (the Feodo Tracker host page), so `MISPWriter` emits the shared abuse.ch metadata comment (`TF_META`) with `malware_family`, `threat_type=botnet_cc` and the labels `c2_status:<status>`, `port:<port>`, `last_online:<date>`. The sync rehydrates them as `Indicator.malware_family`, `threat_type` and `tf_tags`; `build_relationships` then links the indicator to the matching `Malware` node (`INDICATES`, case-insensitive name or alias match).
+- **Online versus offline.** The complete history loaded by a baseline is almost entirely offline servers (7,979 of 7,980 on 2026-10-12; first seen 2021-01 to 2026-03). abuse.ch states that this list causes false positives when used for blocking. Offline servers are therefore published with `confidence:low` (0.3 in the graph) and the MISP detection flag cleared (`to_ids=false`); servers reported online get `confidence:medium` (0.5) and `to_ids=true`. Consumers that want actionable C2s filter with `min_confidence` or on `tf_tags`.
+- **Status is the status at first collection.** EdgeGuard does not rewrite an attribute MISP already holds, so a server first collected online keeps that label after it goes offline; `last_online` in `tf_tags` shows how recent the observation was.
+
 ### Example Output
 
 ```python
-# Feodo Indicator (Banking Trojan C&C)
+# Feodo Indicator (botnet C&C, offline entry from the complete history)
 {
     'indicator_type': 'ipv4',
-    'value': '185.220.101.42',
-    'zone': ['finance', 'healthcare'],  # Emotet targets both - array only
+    'value': '27.133.154.218',
+    'zone': ['global'],
     'tag': 'feodo_tracker',
-    'sources': ['feodo_tracker'],
-    'first_seen': '2024-01-10',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
-    'confidence_score': 0.7,
-    'malware_family': 'emotet',
+    'source': ['feodo_tracker'],
+    'first_seen': '2026-03-04 14:28:39',   # first_seen_utc; published to MISP as 2026-03-04T14:28:39+00:00
+    'confidence_score': 0.4,               # 0.7 when c2_status is online
+    'to_ids': False,                       # True when c2_status is online
+    'malware_family': 'QakBot',
     'port': '443',
-    'status': 'online'
+    'status': 'offline',
+    'last_online': '2026-03-05',
+    'reference': 'https://feodotracker.abuse.ch/browse/host/27.133.154.218/',
+    'threat_type': 'botnet_cc',
+    'tags': ['c2_status:offline', 'port:443', 'last_online:2026-03-05']
 }
 
 # SSL Blacklist Indicator

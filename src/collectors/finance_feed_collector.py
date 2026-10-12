@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import csv
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -36,6 +37,22 @@ SSLBL_CIRCUIT_BREAKER = get_circuit_breaker("sslbl", failure_threshold=3, recove
 
 FEODO_RATE_LIMITER = RateLimiter(min_interval=1.0)
 SSLBL_RATE_LIMITER = RateLimiter(min_interval=1.0)
+
+# Feodo Tracker host page of a C2 address. Setting it as the item ``reference`` also makes
+# ``MISPWriter`` emit the shared abuse.ch metadata comment (``TF_META``), which is what carries
+# ``malware_family`` to MISP and on to ``Indicator.malware_family`` in Neo4j (INDICATES edges).
+FEODO_HOST_URL = "https://feodotracker.abuse.ch/browse/host/{ip}/"
+# ThreatFox vocabulary for a botnet command-and-control endpoint (same value ThreatFox reports).
+FEODO_THREAT_TYPE = "botnet_cc"
+FEODO_THREAT_TYPE_DESC = "Botnet Command&Control server (C&C)"
+# A C2 that Feodo Tracker reports online is actionable; an offline one is history. The complete
+# history loaded by a baseline is almost entirely offline servers (7,979 of 7,980 on 2026-10-12),
+# so they are published at low confidence: MISP tag ``confidence:low`` (0.3 in the graph) against
+# ``confidence:medium`` (0.5) for online servers. Consumers filter with ``min_confidence``.
+# Offline servers are also published with the MISP detection flag cleared (``to_ids=False``):
+# abuse.ch states that the complete history causes false positives when used for blocking.
+FEODO_CONFIDENCE_ONLINE = 0.7
+FEODO_CONFIDENCE_OFFLINE = 0.4
 
 
 class FeodoCollector:
@@ -103,33 +120,41 @@ class FeodoCollector:
         try:
             raw_text = self._fetch_raw(list_url)
 
-            # Parse CSV - skip comment lines and header
-            lines = [ln for ln in raw_text.strip().split("\n") if ln and not ln.startswith("#")]
+            # Parse with the csv module: every field is quoted and the download uses CRLF line
+            # endings. (A hand-rolled split left the last column as ``QakBot"\r``.) Comment
+            # lines start with ``#``; the header row is recognised by its first column name.
+            data_lines = [ln for ln in raw_text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
 
             results = []
-            for i, line in enumerate(lines[1:]):  # Skip header row
-                if limit is not None and i >= limit:
+            online = 0
+            for row in csv.reader(data_lines):
+                if limit is not None and len(results) >= limit:
                     break
 
-                parts = line.split('","')
-                if len(parts) < 5:
+                parts = [field.strip() for field in row]
+                if len(parts) < 5 or parts[0].lower() == "first_seen_utc":
                     continue
 
-                # Clean up quotes
-                first_seen = parts[0].strip('"')
-                dst_ip = parts[1].strip('"')
-                dst_port = parts[2].strip('"')
-                c2_status = parts[3].strip('"')
-                last_online = parts[4].strip('"')
-                malware = parts[5].strip('"') if len(parts) > 5 else ""
+                first_seen, dst_ip, dst_port, c2_status, last_online = parts[:5]
+                malware = parts[5] if len(parts) > 5 else ""
 
                 if not dst_ip:
                     continue
 
-                malware = malware.lower()
+                status = c2_status.lower()
+                is_online = status == "online"
+                online += 1 if is_online else 0
 
-                # Feodo = banking trojans, but detect all matching zones
-                zones = detect_zones_from_text(malware)
+                # Zones come from the conservative keyword detector on the family name; malware
+                # families are linked to sectors through graph relationships, not keywords.
+                zones = detect_zones_from_text(malware.lower())
+
+                # Labels that survive the MISP round-trip (TF_META.tags -> Indicator.tf_tags).
+                labels = [f"c2_status:{status}"] if status else []
+                if dst_port:
+                    labels.append(f"port:{dst_port}")
+                if last_online:
+                    labels.append(f"last_online:{last_online}")
 
                 results.append(
                     {
@@ -140,15 +165,22 @@ class FeodoCollector:
                         "source": [self.tag],
                         "first_seen": first_seen,
                         "last_updated": datetime.now(timezone.utc).isoformat(),
-                        "confidence_score": 0.7,
-                        "malware_family": malware,
+                        "confidence_score": FEODO_CONFIDENCE_ONLINE if is_online else FEODO_CONFIDENCE_OFFLINE,
+                        "to_ids": is_online,  # history is knowledge, not a detection candidate
+                        "malware_family": malware,  # source spelling; graph matching is case-insensitive
                         "port": dst_port,
                         "status": c2_status,
                         "last_online": last_online,  # C2 actuality - active vs stale
+                        "reference": FEODO_HOST_URL.format(ip=dst_ip),
+                        "threat_type": FEODO_THREAT_TYPE,
+                        "threat_type_desc": FEODO_THREAT_TYPE_DESC,
+                        "tags": labels,
                     }
                 )
 
-            logger.info(f"[OK] Feodo: Collected {len(results)} C&C servers")
+            logger.info(
+                f"[OK] Feodo: Collected {len(results)} C&C servers ({online} online, {len(results) - online} offline)"
+            )
             if not results:
                 logger.warning("Feodo returned 0 C&C servers — check feed availability")
 
