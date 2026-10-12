@@ -1267,6 +1267,24 @@ EDGEGUARD_DEFAULT_TLP = os.getenv("EDGEGUARD_DEFAULT_TLP", "white").strip().lowe
 # and OFF by default: the daily DAG task returns a skipped status (success,
 # 0 items) until an operator sets ``EDGEGUARD_ENABLE_CISA_ICS=true``.
 ENABLE_CISA_ICS = _env_bool("EDGEGUARD_ENABLE_CISA_ICS", "false")
+
+# CVE threat-signal feeds: post-sync enrichment jobs in
+# ``src/cve_feed_enrichment.py``. Default on; a feed outage is logged and skipped.
+ENABLE_EPSS = _env_bool("EDGEGUARD_ENABLE_EPSS", "true")
+ENABLE_VULNRICHMENT = _env_bool("EDGEGUARD_ENABLE_VULNRICHMENT", "true")
+# FIRST EPSS daily gzip CSV (redirects to epss.empiricalsecurity.com).
+EPSS_URL = os.getenv("EPSS_URL") or "https://epss.cyentia.com/epss_scores-current.csv.gz"
+# CISA Vulnrichment branch zip (~360 MB repo, one JSON per CVE).
+VULNRICHMENT_ARCHIVE_URL = (
+    os.getenv("VULNRICHMENT_ARCHIVE_URL") or "https://codeload.github.com/cisagov/vulnrichment/zip/refs/heads/develop"
+)
+# Abort the EPSS download beyond this many compressed bytes.
+EPSS_MAX_BYTES = _env_int("EPSS_MAX_BYTES", 64 * 1024 * 1024)
+# Vulnrichment archive guards: per-member size (larger members are skipped) and member count.
+VULNRICHMENT_MAX_MEMBER_BYTES = _env_int("VULNRICHMENT_MAX_MEMBER_BYTES", 1024 * 1024)
+VULNRICHMENT_MAX_MEMBERS = _env_int("VULNRICHMENT_MAX_MEMBERS", 2_000_000)
+# Abort the Vulnrichment download beyond this many bytes.
+VULNRICHMENT_MAX_BYTES = _env_int("VULNRICHMENT_MAX_BYTES", 1_500_000_000)
 # Raw base URL of the ``csaf_files/OT/white/`` folder (must end with "/";
 # ``index.txt`` and ``changes.csv`` live directly under it).
 CISA_ICS_BASE_URL = os.getenv(
