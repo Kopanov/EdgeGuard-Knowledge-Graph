@@ -1488,7 +1488,7 @@ check_containers = BashOperator(
     task_id="check_containers",
     bash_command="""
         echo "Checking Docker containers..."
-        docker ps --filter "name=edgeguard" --filter "name=misp" --format "{{.Names}}: {{.Status}}" 2>/dev/null || echo "Docker check skipped"
+        docker ps --filter "name=edgeguard" --filter "name=misp" --format "{% raw %}{{.Names}}: {{.Status}}{% endraw %}" 2>/dev/null || echo "Docker check skipped"
         echo "Done checking containers"
     """,
     execution_timeout=timedelta(minutes=5),

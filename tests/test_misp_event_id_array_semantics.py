@@ -13,6 +13,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Capturing fake Neo4j driver — records every Cypher session.run() call.
 # ---------------------------------------------------------------------------
@@ -153,8 +155,11 @@ def test_calibrate_large_event_query_is_parameterized_array_only():
 
     client.driver.session = _sess
 
+    # The stub answers every .single() with the event-sizes record, so the large path
+    # has no "updated" column; that tier fails and the job now raises after all tiers ran.
     with patch.object(enrichment_jobs.time, "sleep", lambda *_: None):
-        enrichment_jobs.calibrate_cooccurrence_confidence(client)
+        with pytest.raises(RuntimeError, match=r"\[CALIBRATE\] 1 tier\(s\) failed"):
+            enrichment_jobs.calibrate_cooccurrence_confidence(client)
 
     large_queries = [c for c, _ in client.driver.captured if "apoc.periodic.iterate" in c and "$eid" in c]
     assert large_queries, "expected at least one parameterized apoc.periodic.iterate (large event path)"

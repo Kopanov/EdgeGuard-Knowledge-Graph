@@ -23,7 +23,7 @@ from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause  # noqa: E402
+from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause, apoc_iterate_failures  # noqa: E402
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
 
@@ -493,17 +493,22 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                    r.edgeguard_managed = true",
               {batchSize: 25, parallel: false, retries: 2}
             )
-            YIELD batches, total, errorMessages, committedOperations
-            RETURN batches, total, errorMessages, committedOperations
+            YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
+                  batch, operations, updateStatistics
+            RETURN batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
+                   batch, operations, updateStatistics
             """
             result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             if record:
-                err_msgs = record.get("errorMessages") or {}
-                if err_msgs:
-                    # Fail loudly: any per-batch error counts as a partial
-                    # data-loss event; we want the operator to see it.
-                    raise RuntimeError(f"[CAMPAIGNS] link_indicators apoc.periodic.iterate batch errors: {err_msgs}")
+                # Fail loudly: any per-batch failure counts as a partial
+                # data-loss event; we want the operator to see it. Every
+                # APOC failure column is read, not only errorMessages: a
+                # heap OOM inside a batch reports empty errorMessages with
+                # failedBatches=1 and batch.errors set.
+                failures = apoc_iterate_failures(record)
+                if failures:
+                    raise RuntimeError(f"[CAMPAIGNS] link_indicators apoc.periodic.iterate batch failures: {failures}")
             query_pause()
 
             # Bugbot round 1 (PR #105, MEDIUM): the pre-fix code used
@@ -725,6 +730,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                 return results
 
             # Step 2: For each tier, collect matching event IDs and update edges in chunks.
+            failed_tiers: List[Tuple[str, str]] = []
             for min_s, max_s, conf in tiers:
                 tier_label = f"size {min_s}\u2013{max_s if max_s else '\u221e'} \u2192 conf={conf}"
                 try:
@@ -810,13 +816,22 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         "  'MATCH ()-[r]->() WHERE id(r) = $rid "
                         "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
                         "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
-                        ") YIELD total "
-                        "RETURN total AS updated"
+                        ") YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated, "
+                        "  batch, operations, updateStatistics "
+                        "RETURN total AS updated, batches, errorMessages, failedBatches, failedOperations, "
+                        "  wasTerminated, batch, operations, updateStatistics"
                     )
                     for eid in large_eids:
                         evt_size = event_sizes.get(eid, 0)
                         result = session.run(large_batch_query, eid=eid, conf=conf, timeout=NEO4J_READ_TIMEOUT)
                         record = result.single()
+                        failures = apoc_iterate_failures(record) if record else []
+                        if failures:
+                            # A failed batch leaves part of the event uncalibrated; the
+                            # outer ``total`` would still count every outer row.
+                            raise RuntimeError(
+                                f"[CALIBRATE] event {eid} apoc.periodic.iterate batch failures: {failures}"
+                            )
                         evt_updated = record["updated"] if record else 0
                         total_updated += evt_updated
                         logger.info(
@@ -830,17 +845,22 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                 except Exception as tier_err:
                     logger.error(f"  [CALIBRATE] {tier_label} FAILED: {tier_err}")
                     results[tier_label] = 0
+                    failed_tiers.append((tier_label, str(tier_err)))
+
+            if failed_tiers:
+                # Every tier was attempted (best effort per tier), but a failed
+                # tier leaves edges uncalibrated, so the job must not end green.
+                raise RuntimeError(f"[CALIBRATE] {len(failed_tiers)} tier(s) failed: {failed_tiers}")
 
     except Exception as e:
         # PR-N21 BLOCKER: see decay_ioc_confidence + build_campaign_nodes
         # for full rationale. Re-raise so enrichment task fails loudly.
-        # Note: per-tier exception handling at line ~743 already catches
-        # transient per-event failures and continues with the next tier
-        # (results[tier_label] = 0 + log) — that's the correct
-        # best-effort behaviour at the FINE-GRAINED level. The OUTER
-        # except (here) catches whole-session failures (driver dead,
-        # schema corruption, etc.) which must NOT be silently
-        # swallowed.
+        # Note: per-tier exception handling above catches per-event
+        # failures and continues with the next tier (results[tier_label]
+        # = 0 + log) so the remaining tiers still get calibrated; the
+        # job then raises once all tiers ran. The OUTER except (here)
+        # also catches whole-session failures (driver dead, schema
+        # corruption, etc.) which must NOT be silently swallowed.
         logger.error(f"[CALIBRATE] calibrate_cooccurrence_confidence FAILED: {e}", exc_info=True)
         raise
 
@@ -899,8 +919,10 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
         'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) ON CREATE SET r1.created_at = datetime() SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid), r1.updated_at = datetime(), r1.edgeguard_managed = true MERGE (c)-[r2:REFERS_TO]->(v) ON CREATE SET r2.created_at = datetime() SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid), r2.updated_at = datetime(), r2.edgeguard_managed = true',
         {batchSize: 5000, parallel: false}
     )
-    YIELD total
-    RETURN total AS linked
+    YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
+          batch, operations, updateStatistics
+    RETURN total AS linked, batches, errorMessages, failedBatches, failedOperations, wasTerminated,
+           batch, operations, updateStatistics
     """
 
     # PR #34 round 20: count Vulnerability orphans directly with NOT EXISTS.
@@ -927,6 +949,9 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
                 logger.debug("bridge_vulnerability_cve skip_query failed: %s", exp_err)
                 skip_count = 0
             record = session.run(query, timeout=NEO4J_READ_TIMEOUT).single()
+            failures = apoc_iterate_failures(record) if record else []
+            if failures:
+                raise RuntimeError(f"[BRIDGE] Vulnerability↔CVE apoc.periodic.iterate batch failures: {failures}")
             results["linked"] = record["linked"] if record else 0
         logger.info(f"[BRIDGE] Vulnerability↔CVE REFERS_TO: {results['linked']} pairs linked")
         if skip_count > 0:
