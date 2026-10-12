@@ -52,6 +52,12 @@ The sentinel records who holds it:
   cap; a ``success`` state prunes it. Acquiring again for the same run id is
   idempotent (task retries, manual re-runs).
 
+  The collector tasks of that same DAG run pass their run identity to
+  ``baseline_skip_reason(own_holder=...)`` and are not skipped by the sentinel
+  their own run holds; a sentinel of another run or of an in-process baseline
+  still skips them. ``baseline_acquire_lock`` checks this before the
+  destructive step and fails the run if the own collectors would be skipped.
+
 Why not Airflow pools / ExternalTaskSensor
 ------------------------------------------
 
@@ -578,11 +584,35 @@ def release_baseline_lock(holder: Optional[Dict[str, Any]] = None) -> None:
     logger.info("Released baseline lock at %s", path)
 
 
-def baseline_skip_reason() -> Optional[str]:
+def is_own_dag_run_sentinel(data: Optional[Dict[str, Any]], own_holder: Optional[Dict[str, Any]]) -> bool:
+    """True when the sentinel *data* is held by the Airflow DAG run that *own_holder* names.
+
+    Both ``dag_id`` and ``run_id`` must be present and equal. A process-held sentinel
+    (``run_pipeline --baseline``) is never "own" for a DAG task.
+    """
+    if not data or not own_holder or sentinel_holder(data) != HOLDER_AIRFLOW_DAG_RUN:
+        return False
+    run_id = str(own_holder.get("run_id") or "")
+    dag_id = str(own_holder.get("dag_id") or "")
+    return (
+        bool(run_id and dag_id) and run_id == str(data.get("run_id") or "") and dag_id == str(data.get("dag_id") or "")
+    )
+
+
+def baseline_skip_reason(own_holder: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """
     Human-readable reason for an Airflow task to skip if a baseline is
     running. Returns None if no baseline is holding the lock.
+
+    ``own_holder`` (``{"dag_id", "run_id"}``) is passed by the tasks of the
+    ``edgeguard_baseline`` DAG itself: the sentinel their own run wrote in
+    ``baseline_acquire_lock`` must not make them skip. Without it every collector
+    of the baseline would stand down for "the baseline in progress" — its own —
+    and the run would collect nothing. A sentinel held by another DAG run or by
+    an in-process baseline still returns a reason. Scheduled DAGs pass nothing.
     """
+    if own_holder and is_own_dag_run_sentinel(_read_sentinel(baseline_lock_path()), own_holder):
+        return None
     data = is_baseline_running()
     if data is None:
         return None

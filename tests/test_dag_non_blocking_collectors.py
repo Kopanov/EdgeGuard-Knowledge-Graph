@@ -248,7 +248,7 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
         patch.object(ep, "record_collector_skip", MagicMock()) as record_skip,
         patch.object(ep, "record_pipeline_error", MagicMock()),
         patch.object(ep, "record_error", MagicMock()),
-        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+        patch("baseline_lock.baseline_skip_reason", lambda **_kw: None, create=True),
     ):
         result = ep.run_collector_with_metrics(
             "urlhaus",
@@ -307,7 +307,7 @@ def test_run_collector_with_metrics_still_raises_on_real_bugs():
         patch.object(ep, "record_collection", MagicMock()),
         patch.object(ep, "record_pipeline_error", MagicMock()),
         patch.object(ep, "record_error", MagicMock()),
-        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+        patch("baseline_lock.baseline_skip_reason", lambda **_kw: None, create=True),
     ):
         with pytest.raises(TypeError, match="real bug"):
             ep.run_collector_with_metrics(
@@ -383,7 +383,7 @@ def test_metric_emission_failure_does_not_break_transient_skip_path():
         # control through there by mistake.
         patch.object(ep, "record_pipeline_error", side_effect=_bomb),
         patch.object(ep, "record_error", side_effect=_bomb),
-        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+        patch("baseline_lock.baseline_skip_reason", lambda **_kw: None, create=True),
     ):
         # Must NOT raise. If the bomb propagates, the task FAILS and PR #35 is dead.
         result = ep.run_collector_with_metrics(
@@ -443,7 +443,7 @@ def test_metric_emission_failure_does_not_mask_catastrophic_exception():
         patch.object(ep, "record_collection_duration", side_effect=_bomb),
         patch.object(ep, "record_pipeline_error", side_effect=_bomb),
         patch.object(ep, "record_error", side_effect=_bomb),
-        patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
+        patch("baseline_lock.baseline_skip_reason", lambda **_kw: None, create=True),
     ):
         # Must propagate the TypeError, NOT the RuntimeError from the metric bomb.
         with pytest.raises(TypeError, match="real bug"):
