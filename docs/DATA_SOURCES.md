@@ -1,7 +1,7 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-10-14 (measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
-**Total Sources:** 14 (10 active + 2 placeholders + 2 flag-guarded, off by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
+**Last Updated:** 2026-10-15 (EPSS and Vulnrichment rows 15-16 added; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
+**Total Sources:** 16 (10 active + 2 placeholders + 2 flag-guarded, off by default + 2 post-sync enrichment feeds, on by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
 
@@ -25,6 +25,8 @@
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
 | 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
 | 14 | MalwareBazaar | ~1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label), ≤ 500 pushed per run | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) — added 2026-10 |
+| 15 | FIRST EPSS | ~385,000 scores / day (only existing CVEs updated) | N/A | Exploit-prediction score and percentile per CVE | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, default on) — added 2026-10 |
+| 16 | CISA Vulnrichment | one JSON per CVE (~360 MB repo; only graph CVEs kept) | N/A | SSVC exploitation / automatable / technical impact | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_VULNRICHMENT`, default on) — added 2026-10 |
 
 **Note:** Energy and Healthcare collectors are placeholders. Member-only ISAC feeds (EE-ISAC, Health-ISAC, HC3) are not planned and no membership is budgeted (decision 2026-10). CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
 
@@ -253,6 +255,49 @@
 - C&C server IPs
 - Malware family (QakBot, BumbleBee, TrickBot, Emotet, Dridex, Pikabot) — carried to MISP and Neo4j, where it links the indicator to the `Malware` node (`INDICATES`)
 - Last-online date as `Indicator.last_online` and as the source-reported last-seen time; ports and status kept with the source record. Servers not seen online in the last 30 days are published at low confidence with the MISP detection flag cleared (see docs/COLLECTORS.md § 7)
+
+---
+
+### 8b. FIRST EPSS (Exploit Prediction Scoring System) — post-sync enrichment, added 2026-10
+**Items:** ~385,000 rows per daily file; only `CVE` nodes already in the graph are updated | **Zone:** n/a (CVE properties, not new nodes)
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://epss.cyentia.com/epss_scores-current.csv.gz` (override `EPSS_URL`; redirects to `epss.empiricalsecurity.com`) — per `src/cve_feed_enrichment.py` |
+| Format | gzip CSV, first line `#model_version:...,score_date:...`, header `cve,epss,percentile` (~2.7 MB) |
+| Auth | None (public) |
+| Update | Daily, post-sync enrichment job `enrich_cve_epss`, only when `EDGEGUARD_ENABLE_EPSS=true` (default) |
+| Classification | n/a |
+
+**What we get:**
+- `CVE.epss_score` (probability of exploitation in the next 30 days, 0-1)
+- `CVE.epss_percentile`, `CVE.epss_score_date`, `CVE.epss_model_version`, `CVE.epss_updated_at`
+
+**How classified:** n/a — no sector logic; properties only. No node or relationship is created, so there is no relationship provenance to record.
+
+**Licence:** free to use; FIRST asks for attribution ("EPSS data provided by FIRST", https://www.first.org/epss). A feed outage is logged and skipped; it never fails the DAG task.
+
+---
+
+### 8c. CISA Vulnrichment (SSVC) — post-sync enrichment, added 2026-10
+**Items:** one JSON per CVE in the repo; only CVEs already in the graph are read | **Zone:** n/a (CVE properties, not new nodes)
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://codeload.github.com/cisagov/vulnrichment/zip/refs/heads/develop` (override `VULNRICHMENT_ARCHIVE_URL`; download capped by `VULNRICHMENT_MAX_BYTES`, default 1.5 GB) — per `src/cve_feed_enrichment.py` |
+| Format | Branch zip, CVE JSON 5 files under `<year>/<Nxxx>/CVE-<year>-<n>.json`; the `CISA-ADP` container holds the SSVC decision points |
+| Auth | None (public) |
+| Update | Daily, post-sync enrichment job `enrich_cve_vulnrichment`, only when `EDGEGUARD_ENABLE_VULNRICHMENT=true` (default) |
+| Classification | n/a |
+
+**What we get:**
+- `CVE.ssvc_exploitation` (`none` / `poc` / `active`), `CVE.ssvc_automatable` (`yes` / `no`), `CVE.ssvc_technical_impact` (`partial` / `total`)
+- `CVE.ssvc_timestamp`, `CVE.ssvc_updated_at`
+- `CVE.cwe` is not written: it stays NVD-owned (replaced from NVD's record on a node whose only source is NVD)
+
+**How classified:** n/a — no sector logic; properties only. No node or relationship is created, so there is no relationship provenance to record.
+
+**Licence:** CC0 1.0 (public domain); no attribution required.
 
 ---
 
