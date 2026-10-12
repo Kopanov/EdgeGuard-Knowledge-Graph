@@ -15,8 +15,8 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  │  edgeguard_baseline  (MANUAL TRIGGER ONLY — run once)               │    │
 │  │  misp_health → baseline_start                                        │    │
 │  │    → tier1 cisa → mitre → otx → nvd  (SEQUENTIAL, PR-F4)             │    │
-│  │    → tier2 [abuseipdb, threatfox, urlhaus, cybercure,                │    │
-│  │             feodo, sslbl] (parallel)                                 │    │
+│  │    → tier2 [abuseipdb, threatfox, urlhaus, feodo, sslbl]             │    │
+│  │             (parallel)                                               │    │
 │  │    → full_neo4j_sync → build_relationships                           │    │
 │  │    → run_enrichment_jobs → baseline_complete                         │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
@@ -39,7 +39,7 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  edgeguard_daily  (daily at 2 AM)                                    │    │
 │  │  misp_health → [mitre, abuseipdb, threatfox, urlhaus,                │    │
-│  │               cybercure, feodo, sslblacklist] → log_summary          │    │
+│  │               feodo, sslblacklist] → log_summary                     │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │

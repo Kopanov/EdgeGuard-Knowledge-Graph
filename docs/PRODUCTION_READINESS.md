@@ -24,7 +24,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | **Knowledge Graph Schema** | ✅ Ready | Full node/relationship design, UNIQUE constraints |
 | **MISP Integration** | ✅ Ready | Writer with sanitization, retry, rate limiting |
 | **Airflow DAGs** | ✅ Ready | **6** DAGs; `max_active_runs=1` + `dagrun_timeout` on all; `on_failure_callback`/`on_success_callback`; baseline `is_paused_upon_creation=False`; `ShortCircuitOperator` on Neo4j sync |
-| **Data Collectors** | ✅ Ready | 11 active collectors → MISP → Neo4j |
+| **Data Collectors** | ✅ Ready | 10 active collectors → MISP → Neo4j |
 | **Neo4j Client** | ✅ Ready | Constraints, indexes, batch ops, sector labels applied |
 | **Health Checks** | ✅ Ready | MISP health sensor + Docker service healthchecks |
 | **Documentation** | ✅ Ready | 20+ docs updated to match current code |

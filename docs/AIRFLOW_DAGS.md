@@ -178,7 +178,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | Every 30 min | High-frequency updates | AlienVault OTX |
 | `edgeguard_medium_freq` | Every 4 hours | Medium-frequency sources | CISA KEV, VirusTotal |
 | `edgeguard_low_freq` | Every 8 hours | Low-frequency sources | NVD |
-| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`), ThreatFox, AbuseIPDB, URLhaus, CyberCure, Feodo, SSLBlacklist |
+| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`), ThreatFox, AbuseIPDB, URLhaus, Feodo, SSLBlacklist |
 | `edgeguard_neo4j_sync` | `0 3 */3 * *` (every 3 days at 03:00) | MISP → Neo4j sync + `build_relationships` + `run_enrichment_jobs` | All sources |
 
 **Concurrency and timeout guards (all 6 DAGs):**
@@ -281,7 +281,6 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | ThreatFox | `edgeguard_daily` | No limit | 100 IOCs |
 | AbuseIPDB | `edgeguard_daily` | 1000/day | 100 IPs |
 | URLhaus | `edgeguard_daily` | No limit | 100 URLs |
-| CyberCure | `edgeguard_daily` | No limit | 50 IOCs |
 | Feodo Tracker | `edgeguard_daily` | No limit | 10 IPs |
 | SSL Blacklist | `edgeguard_daily` | No limit | 100 certs |
 
@@ -301,7 +300,6 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | AbuseIPDB | `AbuseIPDBCollector` | `abuseipdb_collector.py` | Confidence-based |
 | ThreatFox | `ThreatFoxCollector` | `global_feed_collector.py` | Malware family |
 | URLhaus | `URLhausCollector` | `global_feed_collector.py` | Tags |
-| CyberCure | `CyberCureCollector` | `global_feed_collector.py` | Keyword-based |
 | Feodo | `FeodoCollector` | `finance_feed_collector.py` | Hardcoded Finance |
 | SSL Blacklist | `SSLBlacklistCollector` | `finance_feed_collector.py` | Malware family |
 | CISA ICS Advisories | `CISAICSCollector` | `cisa_ics_collector.py` | Source-asserted CISA sector → fixed table (Energy / Healthcare and Public Health / Financial Services); **flag-guarded**: `run_cisa_ics_collection` logs "disabled by flag" and returns a skipped status (success, 0 items) unless `EDGEGUARD_ENABLE_CISA_ICS=true` |
@@ -341,7 +339,6 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | AbuseIPDB | `source:AbuseIPDB` |
 | ThreatFox | `source:ThreatFox` |
 | URLhaus | `source:URLhaus` |
-| CyberCure | `source:CyberCure` |
 | Feodo Tracker | `source:Feodo-Tracker` |
 | SSL Blacklist | `source:SSL-Blacklist` |
 
@@ -698,7 +695,7 @@ After Tier1 succeeds, remove env overrides or restore Variables for production.
 
 Add keys when you want those feeds. Values that are **empty**, **whitespace-only**, or YAML **placeholders** from `credentials/config.example.yaml` are treated as unset. **ThreatFox** requires a free key from **https://auth.abuse.ch/** — without it the task **skips** (success) so the baseline DAG can continue.
 
-**Other optional HTTP feeds** (no API key today, but if the upstream returns **401/403**, the task **skips** instead of failing): **NVD** (`nvd_auth_denied`), **CISA KEV** (`cisa_auth_denied`), **MITRE** (`mitre_auth_denied`, e.g. GitHub), **Feodo** (`feodo_auth_denied`), **SSL Blacklist** (`sslbl_auth_denied`). **URLhaus** / **CyberCure** usually return empty success if downloads fail; they are public CSV endpoints.
+**Other optional HTTP feeds** (no API key today, but if the upstream returns **401/403**, the task **skips** instead of failing): **NVD** (`nvd_auth_denied`), **CISA KEV** (`cisa_auth_denied`), **MITRE** (`mitre_auth_denied`, e.g. GitHub), **Feodo** (`feodo_auth_denied`), **SSL Blacklist** (`sslbl_auth_denied`). **URLhaus** usually returns empty success if downloads fail; it is a public CSV endpoint.
 
 **Collector allowlist (`EDGEGUARD_COLLECT_SOURCES`):** Optional comma-separated list of which collectors may run (e.g. `otx,nvd,cisa,mitre`). **Unset or empty** → all collectors run (subject to optional-key skips above). **`none`**, **`-`**, or **`0`** alone → no external collectors run; each collection task **succeeds** with **`skipped: true`** and **`skip_reason_class=collector_disabled_by_config`**. Unknown names are **logged and ignored**; if no valid names remain, behavior matches **unset** (fail-open). Applies to **Airflow** (`run_collector_with_metrics`) and **CLI** [`run_pipeline.py`](../src/run_pipeline.py) Step 2 (same canonical source keys as scheduled tasks, including both `virustotal` and `virustotal_enrich`). Implementation: [`src/collector_allowlist.py`](../src/collector_allowlist.py).
 

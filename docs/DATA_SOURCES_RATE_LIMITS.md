@@ -18,7 +18,6 @@
 | URLhaus | ❌ No | No limit (CSV) | Free | CSV |
 | Feodo Tracker | ❌ No | No limit (CSV) | Free | CSV |
 | SSL Blacklist | ❌ No | No limit (CSV) | Free | CSV |
-| CyberCure | ❌ No | No limit (public feed) | Free | Mixed |
 | ThreatFox | ✅ Yes | Varies by key | Free tier | JSON |
 | MISP | ✅ Yes | Varies (self-hosted) | Free (self-hosted) | JSON |
 

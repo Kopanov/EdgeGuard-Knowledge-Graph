@@ -2895,7 +2895,7 @@ class Neo4jClient:
         PR #37 (Logic Tracker Tier S): the natural-key ``name`` is now
         lowercase + NFC + stripped via ``canonicalize_merge_key`` BEFORE
         the MERGE. Without this, ``Malware{name:"TrickBot"}`` (OTX) and
-        ``Malware{name:"trickbot"}`` (CyberCure) became two distinct
+        ``Malware{name:"trickbot"}`` (ThreatFox) became two distinct
         nodes that shared the SAME ``n.uuid`` (UUID computation already
         lowercases its hash input — see node_identity.py:340 — so the
         original Cypher-side case-sensitive MERGE was the only thing

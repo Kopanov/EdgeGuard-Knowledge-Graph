@@ -50,7 +50,7 @@ the source's first-seen claim. This module:
    sources have a meaningfully-semantic first-reported timestamp
    (NVD, CISA, MITRE, VirusTotal, AbuseIPDB, ThreatFox, URLhaus,
    Feodo Tracker, SSL Blacklist) vs. excluded (OTX pulse-publish-date,
-   CyberCure synthetic now, MISP pipeline metadata).
+   MISP pipeline metadata).
 2. Exposes ``extract_source_truthful_timestamps(attr, source_id, ...)``
    which reads MISP-native + Layer-2 META-JSON fallbacks and returns
    ``(first_seen, last_seen)`` claims for the allowlisted source.
@@ -94,7 +94,6 @@ callers / tests use the other.
 * ✅ ``ssl_blacklist`` / ``abusech_ssl`` — CSV ``Listingdate``
 * ❌ ``alienvault_otx`` — pulse.created is the pulse-author-time,
   NOT the IOC first-observed time. Excluded.
-* ❌ ``cybercure`` — synthetic ``now()``. Excluded.
 * ❌ ``misp`` — MISP-collector / sector feeds; pipeline metadata only.
 
 **When the source is NOT in the allowlist OR the source's field
@@ -272,7 +271,7 @@ def is_reliable_first_seen_source(source_id: Optional[str]) -> bool:
 
     Rejects relay-only sources (OTX whose pulse-created date is when
     the analyst wrote the pulse, NOT when the IOC first appeared in
-    the world) and synthetic sources (CyberCure now()).
+    the world) and any source that is not on the allowlist.
     """
     return _normalize_source_key(source_id) in _RELIABLE_FIRST_SEEN_SOURCES
 
@@ -636,7 +635,7 @@ def extract_source_truthful_timestamps(
     operational evidence shows Layer 1 dropouts for any source.
 
     Future-dated values are clamped to ``now()`` with a WARNING log.
-    Unreliable / relay-only sources (OTX, CyberCure, MISP-only)
+    Unreliable / relay-only sources (OTX, MISP-only)
     return ``(None, None)`` regardless of what the attribute
     contains — their first_seen field is semantically wrong for our
     purpose (pulse-publish-date, not IOC first-seen).

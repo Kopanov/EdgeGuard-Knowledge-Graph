@@ -934,7 +934,6 @@ class MISPToNeo4jSync:
         "Feodo-Tracker": "feodo_tracker",
         "SSL-Blacklist": "ssl_blacklist",
         "URLhaus": "urlhaus",
-        "CyberCure": "cybercure",
         "ThreatFox": "threatfox",
     }
 
@@ -1589,8 +1588,21 @@ class MISPToNeo4jSync:
             logger.error(f"Error fetching event {event_id}: {type(e).__name__}: {e}")
             return None
 
+    # Distinct unmapped ``source:*`` tag names that receive their own
+    # Prometheus label value; later names collapse to ``<other>`` so a
+    # hostile or misconfigured MISP peer cannot inflate label cardinality.
+    _UNMAPPED_SOURCE_TAG_LABEL_CAP = 50
+
     def extract_source_from_tags(self, tags: List[Dict]) -> str:
-        """Extract source_id from MISP tags."""
+        """Extract source_id from MISP tags.
+
+        A ``source:<name>`` tag whose name is not in ``SOURCE_MAPPING`` (for
+        example a tag written by a collector that has since been removed
+        from the framework) falls back to ``"misp"``. The fallback is
+        logged once per distinct name per sync instance and counted in
+        ``edgeguard_misp_unmapped_source_tags_total``, so the attribute is
+        still ingested while the unmapped provenance stays visible.
+        """
         tags = normalize_misp_tag_list(tags)
         for tag in tags:
             tag_name = tag.get("name", "")
@@ -1598,13 +1610,43 @@ class MISPToNeo4jSync:
             # Check for source tags
             if tag_name.startswith("source:"):
                 source_name = tag_name.replace("source:", "")
-                return self.SOURCE_MAPPING.get(source_name, "misp")
+                mapped = self.SOURCE_MAPPING.get(source_name)
+                if mapped is None:
+                    self._note_unmapped_source_tag(source_name)
+                    return "misp"
+                return mapped
 
             # Check direct mappings
             if tag_name in self.SOURCE_MAPPING:
                 return self.SOURCE_MAPPING[tag_name]
 
         return "misp"
+
+    def _note_unmapped_source_tag(self, source_name: str) -> None:
+        """Log (once per distinct name) and count an unmapped ``source:*`` tag.
+
+        The tracking dict is created on first use rather than in ``__init__``
+        so instances built without the constructor behave the same way.
+        Metric recording is best-effort: a metrics failure must never stop
+        the attribute from being ingested.
+        """
+        name = (source_name or "").strip() or "<empty>"
+        seen: Dict[str, str] = self.__dict__.setdefault("_unmapped_source_tags_seen", {})
+        label = seen.get(name)
+        if label is None:
+            label = name if len(seen) < self._UNMAPPED_SOURCE_TAG_LABEL_CAP else "<other>"
+            seen[name] = label
+            logger.warning(
+                "MISP tag %r is not in SOURCE_MAPPING; attributes carrying it are attributed to "
+                "source_id='misp' and counted in edgeguard_misp_unmapped_source_tags_total",
+                f"source:{name}",
+            )
+        try:
+            from metrics_server import record_misp_unmapped_source_tag
+
+            record_misp_unmapped_source_tag(label)
+        except Exception:
+            logger.debug("Metrics recording for unmapped source tag failed", exc_info=True)
 
     def extract_zones_from_tags(self, tags: List[Dict]) -> List[str]:
         """Extract ALL zones/sectors from MISP tags, filtered against the canonical whitelist."""
@@ -2645,7 +2687,7 @@ class MISPToNeo4jSync:
 
         # PR (security A9) — Red Team Tier A: cap inbound attribute value
         # size. Without this, a poisoned/buggy upstream feed (compromised
-        # OTX pulse, hostile CyberCure indicator, malformed NVD item)
+        # OTX pulse, hostile feed indicator, malformed NVD item)
         # could stuff a 100MB string into one attribute → sync worker
         # OOMs, MISP cache bloats, Neo4j page cache thrashes once stored.
         # 4 KB is generous: longest legitimate MISP value is a SHA-512

@@ -17,7 +17,7 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
 │              COLLECTORS (per source)                       │
-│  • Fetch data from 11 active sources (+ 2 sector placeholders) │
+│  • Fetch data from 10 active sources (+ 2 sector placeholders) │
 │  • Detect zone(s) using detect_zones_from_text()          │
 │  • Return indicators with zone: ['healthcare', 'finance'] │
 └─────────────────────────┬───────────────────────────────────┘
@@ -364,7 +364,6 @@ script ships; a fresh baseline rerun stamps every uuid at write time. See
 | feodo_tracker | Feodo Tracker | Threat Intel | finance_feed_collector.py |
 | ssl_blacklist | SSL Blacklist | Threat Intel | finance_feed_collector.py |
 | urlhaus | URLhaus | Threat Intel | global_feed_collector.py |
-| cybercure | CyberCure | Threat Intel | global_feed_collector.py |
 | threatfox | ThreatFox | Threat Intel | global_feed_collector.py |
 | healthcare | Healthcare Feeds | Threat Intel | healthcare_feed_collector.py (placeholder) |
 | energy | Energy Feeds | Threat Intel | energy_feed_collector.py (placeholder) |
@@ -390,7 +389,7 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/vt_collector.py` | VirusTotal — primary `VTCollector` used by medium-freq DAG |
 | `src/collectors/virustotal_collector.py` | VirusTotal — `VirusTotalCollector` enrichment DAG path |
 | `src/collectors/finance_feed_collector.py` | Feodo, SSL Blacklist collectors |
-| `src/collectors/global_feed_collector.py` | URLhaus, CyberCure, ThreatFox collectors |
+| `src/collectors/global_feed_collector.py` | URLhaus, ThreatFox collectors |
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
 | `src/collectors/energy_feed_collector.py` | Energy placeholder |
 | `src/collectors/misp_collector.py` | Fetch/normalize events from MISP API (ingest) — **not** used in default baseline collector tier |

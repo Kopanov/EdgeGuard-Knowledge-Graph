@@ -50,7 +50,9 @@ if _SRC not in sys.path:
 #
 # The legacy dicts had specific byte-for-byte shapes. The refactor MUST
 # preserve them for every existing key (it MAY add new alias entries —
-# documented separately below).
+# documented separately below). Sources removed from the framework after
+# the capture date are omitted from every snapshot below; the removals
+# are listed in docs/DATA_SOURCES.md.
 
 
 # Captured 2026-04-18 from the pre-refactor hand-maintained dict.
@@ -70,7 +72,6 @@ _LEGACY_NEO4J_SOURCES = {
     "ssl_blacklist": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
     "abusech_ssl": {"name": "SSL Blacklist", "type": "threat_intel", "reliability": 0.65},
     "urlhaus": {"name": "URLhaus", "type": "threat_intel", "reliability": 0.7},
-    "cybercure": {"name": "CyberCure", "type": "threat_intel", "reliability": 0.6},
     "threatfox": {"name": "ThreatFox", "type": "threat_intel", "reliability": 0.7},
 }
 
@@ -126,13 +127,6 @@ _LEGACY_DEFAULT_SOURCES = {
         "rate_limit": "unlimited",
         "enabled": True,
         "description": "Malware URLs",
-    },
-    "cybercure": {
-        "name": "CyberCure",
-        "api_key_env": None,
-        "rate_limit": "unlimited",
-        "enabled": True,
-        "description": "Threat intelligence feeds",
     },
     "feodo": {
         "name": "Feodo Tracker",
@@ -213,7 +207,6 @@ _LEGACY_MISP_WRITER_SOURCE_TAGS = {
     "feodo": "source:Feodo-Tracker",
     "sslbl": "source:SSL-Blacklist",
     "urlhaus": "source:URLhaus",
-    "cybercure": "source:CyberCure",
     "threatfox": "source:ThreatFox",
 }
 
@@ -741,7 +734,6 @@ def test_audit2_to_cli_sources_dict_preserves_legacy_iteration_order():
         "mitre",
         "abuseipdb",
         "urlhaus",
-        "cybercure",
         "feodo",
         "sslbl",
         "threatfox",

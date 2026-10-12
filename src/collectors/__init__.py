@@ -9,7 +9,6 @@ Available Collectors:
 - AbuseIPDBCollector: IP reputation and blacklist from AbuseIPDB
 - ThreatFoxCollector: Malware IOCs from ThreatFox
 - URLhausCollector: Malware URLs from URLhaus
-- CyberCureCollector: General IOC feeds from CyberCure
 - CISACollector: Known Exploited Vulnerabilities from CISA
 - CISAICSCollector: CISA ICS advisories (CSAF 2.0) with source-asserted sectors (flag-guarded)
 - MITRECollector: MITRE ATT&CK framework data
@@ -49,7 +48,6 @@ from collectors.cisa_ics_collector import CISAICSCollector
 from collectors.energy_feed_collector import EnergyCollector, EnergyPlaceholderCollector
 from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
 from collectors.global_feed_collector import (
-    CyberCureCollector,
     ThreatFoxCollector,
     URLhausCollector,
     collect_all_global_feeds,
@@ -72,7 +70,6 @@ __all__ = [
     "AbuseIPDBCollector",
     "ThreatFoxCollector",
     "URLhausCollector",
-    "CyberCureCollector",
     "collect_all_global_feeds",
     # Vulnerability/framework
     "CISACollector",

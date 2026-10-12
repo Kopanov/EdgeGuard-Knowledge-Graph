@@ -17,7 +17,7 @@
 | MITRE ATT&CK | STIX bundle download | Scheduled | TTPs, actors, malware |
 | VirusTotal | REST API | Scheduled (`vt_collector`) | IOCs / enrichment |
 | AbuseIPDB | REST API | Scheduled | IP reputation |
-| URLhaus, ThreatFox, CyberCure, Feodo, SSLBL | CSV/API | Scheduled | Feeds (see `global_feed_collector.py`, `finance_feed_collector.py`) |
+| URLhaus, ThreatFox, Feodo, SSLBL | CSV/API | Scheduled | Feeds (see `global_feed_collector.py`, `finance_feed_collector.py`) |
 
 _Full inventory: [`DATA_SOURCES.md`](DATA_SOURCES.md)._
 

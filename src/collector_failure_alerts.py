@@ -140,7 +140,7 @@ def is_transient_external_error(exc: BaseException | None) -> bool:
     known transient classes). Collectors that need to wrap a transient
     error should make their wrapper inherit from the underlying
     transient class (e.g.
-    ``class CyberCureNetworkError(ConnectionError): pass``); the MRO
+    ``class URLhausNetworkError(ConnectionError): pass``); the MRO
     walk above will catch it.
 
     Conservative: when in doubt, return False so the exception re-raises
@@ -154,7 +154,7 @@ def is_transient_external_error(exc: BaseException | None) -> bool:
     if _is_transient_http_5xx(exc):
         return True
     # Walk the MRO of exc's class so subclasses match too (e.g. a
-    # custom CyberCureRequestTimeout that subclasses TimeoutError).
+    # custom URLhausRequestTimeout that subclasses TimeoutError).
     for cls in type(exc).__mro__:
         if cls.__name__ in _TRANSIENT_EXTERNAL_EXCEPTION_NAMES:
             return True

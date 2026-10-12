@@ -109,7 +109,7 @@ def test_collector_emitted_tags_match_allowlist():
         "alienvault_otx",  # otx_collector — pulse-publish-date, not IOC first-seen
         "misp",  # misp_collector — pipeline metadata
     }
-    intentionally_excluded = {"alienvault_otx", "misp", "cybercure"}
+    intentionally_excluded = {"alienvault_otx", "misp"}
 
     for tag in collector_emitted_tags:
         is_reliable = is_reliable_first_seen_source(tag)
@@ -129,12 +129,12 @@ def test_collector_emitted_tags_match_allowlist():
 
 
 def test_unreliable_sources_excluded_from_allowlist():
-    """OTX (pulse-publish-date), CyberCure (synthetic now()), and
-    MISP-only feeds must be EXCLUDED so their wrong-semantic dates
-    don't silently corrupt n.first_seen_at_source."""
+    """OTX (pulse-publish-date) and MISP-only feeds must be EXCLUDED
+    so their wrong-semantic dates don't silently corrupt
+    n.first_seen_at_source."""
     from source_truthful_timestamps import is_reliable_first_seen_source
 
-    for src in ("otx", "alienvault_otx", "cybercure", "misp", "sector_feed"):
+    for src in ("otx", "alienvault_otx", "misp", "sector_feed"):
         assert not is_reliable_first_seen_source(src), (
             f"{src!r} must NOT be on the allowlist — its first_seen field has wrong semantic"
         )

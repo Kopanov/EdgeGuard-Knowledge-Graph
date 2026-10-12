@@ -121,6 +121,17 @@ MISP_UNMAPPED_ATTRIBUTE_TYPES = Counter(
     ["attr_type"],
 )
 
+# 2026-10: counter for ``source:*`` MISP tags that ``run_misp_to_neo4j``
+# cannot map to a registered source (for example a tag written by a
+# collector that has since been removed from the framework). The attribute
+# is still ingested under source_id ``misp``; this counter keeps the
+# unmapped provenance visible. The caller bounds the label cardinality.
+MISP_UNMAPPED_SOURCE_TAGS = Counter(
+    "edgeguard_misp_unmapped_source_tags_total",
+    "MISP source:* tags not in EdgeGuard's source mapping — by tag name",
+    ["source_tag"],
+)
+
 # Chip 5e — defense-in-depth against MISP tag impersonation. Counter
 # fires when ``extract_source_truthful_timestamps`` drops a claim
 # because the parent event's creator org is NOT on the EdgeGuard
@@ -763,7 +774,6 @@ _REJECTED_ON_PURPOSE_SOURCES: frozenset[str] = frozenset(
     {
         "otx",
         "alienvault_otx",
-        "cybercure",
         "misp",
     }
 )
@@ -959,6 +969,16 @@ def record_misp_unmapped_attribute_type(attr_type: str, count: int = 1):
     """
     safe = (attr_type or "<empty>").replace('"', "")[:80]
     MISP_UNMAPPED_ATTRIBUTE_TYPES.labels(attr_type=safe).inc(count)
+
+
+def record_misp_unmapped_source_tag(source_tag: str, count: int = 1):
+    """Record a MISP ``source:*`` tag that ``SOURCE_MAPPING`` does not recognize.
+
+    See MISP_UNMAPPED_SOURCE_TAGS — the attribute falls back to source_id
+    ``misp``; this surfaces how often that happens and for which tag.
+    """
+    safe = (source_tag or "<empty>").replace('"', "")[:80]
+    MISP_UNMAPPED_SOURCE_TAGS.labels(source_tag=safe).inc(count)
 
 
 def record_neo4j_sync(node_counts: Dict[str, int], duration: float):

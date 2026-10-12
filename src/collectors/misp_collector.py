@@ -53,7 +53,6 @@ class MISPCollector:
         "Feodo-Tracker": "feodo",
         "SSL-Blacklist": "sslbl",
         "URLhaus": "urlhaus",
-        "CyberCure": "cybercure",
         "ThreatFox": "threatfox",
     }
 

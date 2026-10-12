@@ -327,7 +327,6 @@ class TestIncrementalDagsNoTier1Parallel:
             "collect_abuseipdb",
             "collect_threatfox",
             "collect_urlhaus",
-            "collect_cybercure",
             "collect_feodo",
             "collect_sslblacklist",
         }

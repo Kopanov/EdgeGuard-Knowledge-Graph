@@ -220,7 +220,7 @@ class VirusTotalCollector:
         because the VT rate limiter is a 4 req/min sliding window —
         retrying inside the rate-limited scope would burn the full
         per-minute quota on a single failing call. Matches the
-        URLhaus/CyberCure pattern (rate limiter outside, retry inside).
+        URLhaus pattern (rate limiter outside, retry inside).
         """
         indicators = []
 
@@ -289,7 +289,7 @@ class VirusTotalCollector:
         whole per-minute quota on its 4 attempts.
 
         The caller (``_collect_from_files``) handles rate limiting
-        once, before this helper runs. Matches the URLhaus/CyberCure
+        once, before this helper runs. Matches the URLhaus
         split in ``global_feed_collector.py``, which includes
         ``response.raise_for_status()`` at the end to surface HTTP
         5xx as exceptions that hit the retry decorator (and, on
@@ -311,7 +311,7 @@ class VirusTotalCollector:
         )
         # Raise HTTPError on 4xx/5xx so the retry decorator above gets a
         # shot at transient 5xx, and terminal failures propagate to
-        # collect() — matches URLhaus/CyberCure. 200 responses pass
+        # collect() — matches URLhaus. 200 responses pass
         # through unchanged to the caller for normal parsing.
         response.raise_for_status()
         return response

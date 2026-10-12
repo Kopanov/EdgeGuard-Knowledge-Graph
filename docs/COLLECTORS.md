@@ -537,7 +537,6 @@ zones = detect_zones_from_text(reason)
 Collects universal threat feeds that apply to all zones, including:
 - **ThreatFox:** IOCs with malware family context
 - **URLhaus:** Malware distribution URLs
-- **CyberCure:** IP, URL, and hash feeds
 
 ### Configuration
 - **ThreatFox** requires **`THREATFOX_API_KEY`** in the same environment as the collector (Airflow worker / `.env`). Get a free key from [auth.abuse.ch](https://auth.abuse.ch/). Without it, the task **skips** or returns **401 Unauthorized** if the API is called without credentials.
@@ -545,10 +544,6 @@ Collects universal threat feeds that apply to all zones, including:
 ### Sources
 - **ThreatFox:** `https://threatfox-api.abuse.ch/api/v1/`
 - **URLhaus:** `https://urlhaus.abuse.ch/downloads/csv_recent/`
-- **CyberCure:**
-  - IPs: `https://api.cybercure.ai/feed/get_ips?type=csv`
-  - URLs: `https://api.cybercure.ai/feed/get_url?type=csv`
-  - Hashes: `https://api.cybercure.ai/feed/get_hash?type=csv`
 
 ### Zone Detection
 
@@ -562,9 +557,6 @@ zones = get_zones_from_malware(malware)
 
 # URLhaus uses threat tags
 zones = get_zones_from_malware(threat) or get_zones_from_malware(tags)
-
-# CyberCure defaults to global
-zones = ['global']
 ```
 
 ### Example Output
@@ -601,18 +593,6 @@ zones = ['global']
     'confidence_score': 0.6,
     'threat_type': 'malware_download',
     'tags': 'exe,windows'
-}
-
-# CyberCure Indicator
-{
-    'indicator_type': 'ipv4',
-    'value': '192.0.2.100',
-    'zone': ['global'],  # Array of all matching zones
-    'tag': 'cybercure',
-    'sources': ['cybercure'],
-    'first_seen': '2024-01-15T12:00:00Z',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
-    'confidence_score': 0.5
 }
 ```
 
@@ -716,7 +696,6 @@ SOURCE_TAG_MAPPING = {
     'Feodo-Tracker': 'feodo',
     'SSL-Blacklist': 'sslbl',
     'URLhaus': 'urlhaus',
-    'CyberCure': 'cybercure',
     'ThreatFox': 'threatfox'
 }
 ```
@@ -838,7 +817,7 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
 | AbuseIPDB | AbuseIPDB API | ✅ Active | See `AbuseIPDBCollector` |
 | VirusTotal | VirusTotal API | ✅ Active | `VTCollector` (`vt_collector.py`); `VirusTotalCollector` (`virustotal_collector.py`) |
 | Finance Feed | Feodo, SSLBL | ✅ Active | `detect_zones_from_text()` → list |
-| Global Feed | URLhaus, CyberCure, ThreatFox | ✅ Active | `detect_zones_from_text()` → list |
+| Global Feed | URLhaus, ThreatFox | ✅ Active | `detect_zones_from_text()` → list |
 | Healthcare | HC3, FDA, H-ISAC | ⏳ Placeholder | - |
 | Energy | E-ISAC, ICS-CERT | ⏳ Placeholder | - |
 | MISP | Local MISP | ✅ Active | `detect_sectors()` → list |
@@ -864,7 +843,7 @@ upper bound for a single baseline run.
 | **AbuseIPDB** | As per `ABUSEIPDB_*` limits | Public API daily checks quota (1k free) | No change planned |
 | **VirusTotal** | `limit = 100` (baseline default, raised from 20 in PR-M1) | Free tier: **4 req/min**, **500 req/day** | At `limit=100` a baseline run consumes ~100-105 API calls (~26 min wall-clock at 4/min); comfortably inside the 500/day quota with headroom for incremental runs. **VT is enrichment-only on the free tier** — genuine bulk or historical depth requires the Premium API (no 4 req/min cap; per-step daily quotas). A Premium path is a future option, not planned |
 | **Finance (Feodo / SSLBL)** | Full feed | Public CSV/text feeds, no rate limit | No change planned |
-| **Global (URLhaus / CyberCure / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus/CyberCure full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
+| **Global (URLhaus / ThreatFox)** | **ThreatFox: last 7 days via API** (clamped in PR-M1); URLhaus full feeds | **abuse.ch ThreatFox:** `get_iocs` `days` param `Min 1, Max 7` per [abuse.ch docs](https://threatfox.abuse.ch/api/); historical >7d is the documented **JSON/CSV bulk export** (`https://threatfox.abuse.ch/export/`), NOT this endpoint | **Planned:** bulk-import collector that ingests the ThreatFox JSON/CSV export for true historical depth beyond 7 days |
 | **Energy (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** ENTSO-E, EU-CERT, E-ISAC, national CERT integrations. Surfaces on the skip dashboard as a placeholder (not silent zero-count) since PR-M1. **Since 2026-10 the ICS-CERT part is a real collector:** [CISA ICS Advisories](#12-cisa-ics-advisories-collector) (`cisa_ics`, flag-guarded by `EDGEGUARD_ENABLE_CISA_ICS`, default off) feeds `energy` / `healthcare` / `finance` from CISA's own sector assertion |
 | **CISA ICS Advisories** | `min(index entries in window, CISA_ICS_MAX_ADVISORIES_PER_RUN=1200)` advisory files (~900 on a 730-day run), one item per CVE | Public GitHub raw files, no auth; polite sequential fetch ≤ 4 req/s | Flag-guarded, default **off**. Baseline sanity floor `CISA_ICS_MIN_EXPECTED_ADVISORIES=50` → transient skip + alert instead of a thin dataset |
 | **Healthcare (sector)** | Placeholder (returns `skipped=True`, `skip_reason_class="placeholder"`) | — | **Planned:** HC3, FDA, H-ISAC, national healthcare CERT integrations. Same skip-dashboard behaviour as Energy |
@@ -929,8 +908,8 @@ only NVD).
 The ``reliable_first_seen`` flag controls whether the source's
 first/last_seen claims land on the ``SOURCED_FROM`` edge. ``False``
 for sources whose first_seen field means something other than "first
-observed in the wild" (OTX pulse-publish-date, CyberCure synthetic
-now, MISP pipeline metadata).
+observed in the wild" (OTX pulse-publish-date, MISP pipeline
+metadata).
 
 ### 2. Have the collector emit `item["first_seen"]` (and `item["last_seen"]` if available)
 

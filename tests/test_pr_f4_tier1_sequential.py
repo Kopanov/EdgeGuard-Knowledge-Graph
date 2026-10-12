@@ -141,12 +141,11 @@ class TestTier2StaysParallel:
         end = src.find("baseline_full_sync_task", start)
         assert end > start
         block = src[start:end]
-        # The 6 tier2 task IDs MUST exist.
+        # The 5 tier2 task IDs MUST exist.
         for task_id in (
             "collect_abuseipdb",
             "collect_threatfox",
             "collect_urlhaus",
-            "collect_cybercure",
             "collect_feodo",
             "collect_sslblacklist",
         ):
@@ -154,9 +153,9 @@ class TestTier2StaysParallel:
         # No ``bl_<tier2> >> bl_<tier2>`` chain edges expected.
         normalized = re.sub(r"\s+", " ", block)
         chain = re.search(
-            r"bl_(?:abuseipdb|threatfox|urlhaus|cybercure|feodo|sslblacklist)"
+            r"bl_(?:abuseipdb|threatfox|urlhaus|feodo|sslblacklist)"
             r"\s*>>\s*"
-            r"bl_(?:abuseipdb|threatfox|urlhaus|cybercure|feodo|sslblacklist)",
+            r"bl_(?:abuseipdb|threatfox|urlhaus|feodo|sslblacklist)",
             normalized,
         )
         assert chain is None, (

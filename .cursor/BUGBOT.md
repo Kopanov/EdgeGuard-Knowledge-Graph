@@ -12,7 +12,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
                                                         REST API (port 8000)  +  GraphQL API (port 4001)
 ```
 
-- **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist, CyberCure
+- **Collectors** (`src/collectors/`) fetch from OTX, NVD, CISA, MITRE ATT&CK, VirusTotal, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist
 - **MISP** is the only place collector output lands first — no collector writes directly to Neo4j
 - **Neo4j (primary path):** `src/run_misp_to_neo4j.py` syncs from MISP. **Optional CLI path:** `run_pipeline.py` with STIX flow calls `load_stix21_to_neo4j()` — still not collector→Neo4j direct writes
 - **Optional allowlist:** `EDGEGUARD_COLLECT_SOURCES` — canonical names in `src/collector_allowlist.py` (import this from DAGs at parse time, **not** `collectors/__init__.py`, which loads every collector)

@@ -1,7 +1,7 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-03-21  
-**Total Sources:** 13 (11 active + 2 placeholders) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
+**Last Updated:** 2026-10-12  
+**Total Sources:** 12 (10 active + 2 placeholders) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
 
@@ -21,12 +21,17 @@
 | 8 | URLhaus | ~500 | ✅ Auto-tagged | Malware URLs | ✅ Active |
 | 9 | Feodo Tracker | TBD | ✅ Finance | Banking trojan C&C | ✅ Active |
 | 10 | SSL Blacklist | ~500 | ✅ Finance | Malware SSL certs | ✅ Active |
-| 11 | CyberCure | TBD | ✅ Auto-tagged | Automated threats | ✅ Active |
-| 12 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
-| 13 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
-| 14 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
+| 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
+| 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
+| 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
 
-**Note:** Energy and Healthcare collectors are placeholders requiring ISAC membership (ENTSO-E, H-ISAC/EHFC). CISA ICS Advisories (row 14) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
+**Note:** Energy and Healthcare collectors are placeholders requiring ISAC membership (ENTSO-E, H-ISAC/EHFC). CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
+
+## Removed sources
+
+| Source | Removed | Reason |
+|--------|---------|--------|
+| CyberCure | 2026-10 | The feed API (`api.cybercure.ai`) answered HTTP 520 on every endpoint as of 2026-10-12; the service offers no paid or authenticated tier to fall back to; the collector produced zero events on the production instance and skipped silently on every run. MISP attributes still tagged `source:CyberCure` are ingested by the sync under `source_id = misp`; each such tag name is logged once and counted in `edgeguard_misp_unmapped_source_tags_total`. |
 
 ---
 

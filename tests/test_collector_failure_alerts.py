@@ -186,7 +186,7 @@ def test_classifier_does_NOT_walk_explicit_cause_chain():
     The classifier now walks ONLY the MRO of the OUTER exception. If a
     collector wants a custom exception class to count as transient, it
     must subclass an existing transient class (e.g.
-    ``class CyberCureNetworkError(ConnectionError): pass``).
+    ``class URLhausNetworkError(ConnectionError): pass``).
 
     This test pins the new contract by setting up the dangerous pattern
     and asserting NO transient classification."""
@@ -223,10 +223,10 @@ def test_classifier_does_NOT_walk_explicit_cause_chain():
 
     # Sanity: a custom class that DOES subclass a transient class IS
     # still classified transient (the documented escape hatch).
-    class CyberCureNetworkError(ConnectionError):
+    class URLhausNetworkError(ConnectionError):
         pass
 
-    assert is_transient_external_error(CyberCureNetworkError("provider down")), (
+    assert is_transient_external_error(URLhausNetworkError("provider down")), (
         "subclassing a transient class is the documented way to declare a custom transient — must still work"
     )
 
@@ -327,12 +327,12 @@ def test_report_collector_failure_transient_emits_skip_metrics(monkeypatch):
 
     from collector_failure_alerts import report_collector_failure
 
-    classification = report_collector_failure("cybercure", ConnectionError("upstream 503"))
+    classification = report_collector_failure("urlhaus", ConnectionError("upstream 503"))
 
     assert classification == "transient"
-    metrics["record_collector_skip"].assert_called_once_with("cybercure", "transient_external_error")
-    metrics["record_collection"].assert_called_once_with("cybercure", "global", 0, "skipped")
-    metrics["set_source_health"].assert_called_once_with("cybercure", "global", False)
+    metrics["record_collector_skip"].assert_called_once_with("urlhaus", "transient_external_error")
+    metrics["record_collection"].assert_called_once_with("urlhaus", "global", 0, "skipped")
+    metrics["set_source_health"].assert_called_once_with("urlhaus", "global", False)
     # PR #35 commit 8 (bugbot MED): pipeline_errors_total MUST NOT increment on
     # transient skips — would false-positive operator alerts on
     # ``rate(pipeline_errors_total) > 0``. The structured METRICS log line
@@ -432,7 +432,7 @@ def test_failure_log_block_for_http_503_includes_status_url_and_action():
     EXACTLY why and what to do — not just "transient external error".
 
     Pin the structure of ``_format_failure_log_block`` for the canonical
-    HTTP 503 case so an operator running ``grep "[cybercure] SKIPPED"`` in
+    HTTP 503 case so an operator running ``grep "[urlhaus] SKIPPED"`` in
     the Airflow logs sees:
       - source name + SKIPPED status
       - reason + exception class
@@ -451,23 +451,23 @@ def test_failure_log_block_for_http_503_includes_status_url_and_action():
             self.status_code = code
             self.url = url
 
-    exc = HTTPError("503 Server Error: Service Unavailable for url: https://api.cybercure.io/v1/ioc")
-    exc.response = _Resp(503, "https://api.cybercure.io/v1/ioc")  # type: ignore[attr-defined]
+    exc = HTTPError("503 Server Error: Service Unavailable for url: https://urlhaus.abuse.ch/downloads/csv_recent/")
+    exc.response = _Resp(503, "https://urlhaus.abuse.ch/downloads/csv_recent/")  # type: ignore[attr-defined]
 
-    block = _format_failure_log_block("cybercure", exc, classification="transient", duration_s=35.2)
+    block = _format_failure_log_block("urlhaus", exc, classification="transient", duration_s=35.2)
 
-    assert block.startswith("[cybercure] SKIPPED  "), f"header wrong: {block[:60]!r}"
+    assert block.startswith("[urlhaus] SKIPPED  "), f"header wrong: {block[:60]!r}"
     assert "reason=transient_external_error" in block
     assert "exc=HTTPError" in block
     assert "http_status=503" in block, "must extract HTTP status from exc.response.status_code"
-    assert "url=https://api.cybercure.io/v1/ioc" in block, "must extract URL from exc.response.url"
+    assert "url=https://urlhaus.abuse.ch/downloads/csv_recent/" in block, "must extract URL from exc.response.url"
     assert "duration=35.20s" in block, "duration must include trailing 's'"
     assert "\nACTION:" in block, "must have a literal ACTION: line so operator sees next-step"
     assert "pipeline CONTINUED" in block
     assert "next scheduled DAG run" in block
     assert "\nMETRICS:" in block, "must have a literal METRICS: line referencing Prometheus counters"
-    assert "edgeguard_collector_skips_total{source=cybercure" in block
-    assert "edgeguard_source_health{source=cybercure,zone=global}=0" in block
+    assert "edgeguard_collector_skips_total{source=urlhaus" in block
+    assert "edgeguard_source_health{source=urlhaus,zone=global}=0" in block
 
 
 def test_failure_log_block_for_aiohttp_4xx_extracts_status_via_exc_status():
@@ -739,5 +739,5 @@ def test_safe_helper_does_not_crash_on_callable_without_dunder_name(monkeypatch)
 
     # Must NOT raise. If _safe accesses .__name__ directly, the partial
     # has no __name__ → AttributeError escapes → re-raised → test fails.
-    classification = report_collector_failure("cybercure", ConnectionError("upstream 503"))
+    classification = report_collector_failure("urlhaus", ConnectionError("upstream 503"))
     assert classification == "transient", "transient classification must succeed despite metric bomb"
