@@ -139,8 +139,8 @@ class Source:
         ``r.source_reported_first_at`` / ``r.source_reported_last_at``.
         ``False`` ⇒ the source publishes a first_seen field but it
         means something other than "first observed" (OTX
-        pulse-publish-date, CyberCure synthetic now, MISP-only
-        pipeline metadata) — extractor returns
+        pulse-publish-date, MISP-only pipeline metadata) —
+        extractor returns
         ``(None, None)`` and the value never reaches the edge.
     """
 
@@ -357,21 +357,6 @@ _REGISTRY: Tuple[Source, ...] = (
         reliable_first_seen=True,
     ),
     Source(
-        canonical_id="cybercure",
-        display_name="CyberCure",
-        source_type="threat_intel",
-        reliability=0.6,
-        cli_id="cybercure",
-        api_key_env=None,
-        rate_limit="unlimited",
-        cli_default_enabled=True,
-        cli_description="Threat intelligence feeds",
-        misp_tag="source:CyberCure",
-        # CyberCure synthesizes a now() timestamp on every call —
-        # not a real source-truthful first-seen claim.
-        reliable_first_seen=False,
-    ),
-    Source(
         canonical_id="threatfox",
         display_name="ThreatFox",
         source_type="threat_intel",
@@ -506,7 +491,7 @@ def to_neo4j_sources_dict() -> Dict[str, Dict[str, object]]:
 # PR #43 audit-2 (LOW — bugbot): the legacy `edgeguard.DEFAULT_SOURCES`
 # dict had a hand-curated key order that drove the `edgeguard sources`
 # CLI listing. The pre-refactor order was (otx, nvd, virustotal, cisa,
-# mitre, abuseipdb, urlhaus, cybercure, feodo, sslbl, threatfox, misp);
+# mitre, abuseipdb, urlhaus, feodo, sslbl, threatfox, misp);
 # the registry order matches `neo4j_client.SOURCES` instead, which
 # differs. Use this explicit list to preserve operator-facing ordering.
 # Anything not in the list is appended in registry order at the end —
@@ -521,7 +506,6 @@ _LEGACY_CLI_LISTING_ORDER: Tuple[str, ...] = (
     "mitre",
     "abuseipdb",
     "urlhaus",
-    "cybercure",
     "feodo",
     "sslbl",
     "threatfox",

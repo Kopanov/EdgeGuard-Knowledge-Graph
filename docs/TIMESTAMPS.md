@@ -108,7 +108,6 @@ them to EdgeGuard's canonical `first_seen` / `last_seen` keys (concepts
 | **URLhaus** | `dateadded` | `last_online` | Date or aware ISO |
 | **Feodo / SSLBL** | First-seen column from CSV | (varies; often absent) | Date string; `coerce_iso` normalizes |
 | **AbuseIPDB blacklist** | (endpoint doesn't expose; omit) | `lastReportedAt` | **Reference pattern** for honest NULL |
-| **CyberCure** | (synthetic — not on reliable allowlist) | (synthetic) | Not source-truthful; safe |
 | **MISP collector** | `event.date` | (varies) | Re-syncs from another MISP. **Missing → omit** (PR-M2 fixes 10 NOW-leaks at lines 248, 282, 302, 346, 373, 396, 422, 443, 465, 484) |
 
 ### Layer 1 — Item dict (collector → MISP writer)

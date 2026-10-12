@@ -2,7 +2,7 @@
 """
 EdgeGuard - Global Threat Feed Collectors
 Universal feeds that apply to all zones
-Sources: ThreatFox, URLhaus, CyberCure
+Sources: ThreatFox, URLhaus
 """
 
 import os
@@ -40,11 +40,9 @@ logger = logging.getLogger(__name__)
 # Circuit breakers for each feed
 THREATFOX_CIRCUIT_BREAKER = get_circuit_breaker("threatfox", failure_threshold=3, recovery_timeout=1800)
 URLHAUS_CIRCUIT_BREAKER = get_circuit_breaker("urlhaus", failure_threshold=3, recovery_timeout=1800)
-CYBERCURE_CIRCUIT_BREAKER = get_circuit_breaker("cybercure", failure_threshold=3, recovery_timeout=1800)
 
 THREATFOX_RATE_LIMITER = RateLimiter(min_interval=2.0)  # 2 sec between requests
 URLHAUS_RATE_LIMITER = RateLimiter(min_interval=1.0)  # 1 req/sec for URLhaus
-CYBERCURE_RATE_LIMITER = RateLimiter(min_interval=2.0)  # 2 sec for CyberCure
 
 
 def get_zones_from_malware(malware_name: str) -> List[str]:
@@ -380,9 +378,8 @@ class URLhausCollector:
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
     def _fetch_feed(self, url: str) -> str:
-        """Download a URLhaus feed CSV with retry. Matches the CyberCure
-        pattern — transient network errors retry 4x with backoff before the
-        exception propagates."""
+        """Download a URLhaus feed CSV with retry. Transient network errors
+        retry 4x with backoff before the exception propagates."""
         response = request_with_rate_limit_retries(
             "GET",
             url,
@@ -550,217 +547,6 @@ class URLhausCollector:
         return out
 
 
-class CyberCureCollector:
-    """
-    Collects from CyberCure free feeds - Global IOC feed.
-
-    CyberCure provides free CSV feeds of malicious IPs, URLs, and hashes.
-    Public feeds available without authentication.
-
-    Status: Limited data quality - may return empty or sparse results.
-    """
-
-    def __init__(self, misp_writer: MISPWriter = None):
-        """
-        Initialize CyberCure collector.
-
-        Args:
-            misp_writer: MISPWriter instance for pushing to MISP
-        """
-        self.feeds = {
-            "ip": "https://api.cybercure.ai/feed/get_ips?type=csv",
-            "url": "https://api.cybercure.ai/feed/get_url?type=csv",
-            "hash": "https://api.cybercure.ai/feed/get_hash?type=csv",
-        }
-        self.source_name = "cybercure"
-        self.misp_writer = misp_writer or MISPWriter()
-
-    @retry_with_backoff(max_retries=3, base_delay=5.0)
-    def _fetch_feed(self, url: str) -> str:
-        """Download a CyberCure feed CSV with retry."""
-        response = request_with_rate_limit_retries(
-            "GET",
-            url,
-            session=None,
-            timeout=(15, 30),  # tuple: connect=15s, read=30s
-            verify=SSL_VERIFY,
-            max_rate_limit_retries=3,
-            fallback_delay_sec=30.0,
-            retry_on_403=False,
-            context="CyberCure",
-        )
-        response.raise_for_status()
-        return response.text
-
-    def collect(
-        self, limit: Optional[int] = None, push_to_misp: bool = True, baseline: bool = False, baseline_days: int = 365
-    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
-        """
-        Fetch from CyberCure feeds.
-
-        Args:
-            limit: Maximum number of indicators to collect (split across feed types)
-            push_to_misp: Whether to push collected indicators to MISP
-            baseline: If True, collect historical data (all available)
-            baseline_days: How many days back in baseline mode
-
-        Returns:
-            Status dict if ``push_to_misp=True``, else list of indicators.
-        """
-        # CyberCure is a bulk download - baseline doesn't change much
-        if baseline:
-            logger.info("📜 Baseline mode: Collecting all CyberCure data...")
-
-        # Check circuit breaker
-        # 2026-04-19 (Vanko's overnight baseline regression): CyberCure
-        # was returning HTTP 503 across all 3 feeds (ip / url / hash);
-        # circuit breaker tripped open and the task FAILED, contributing
-        # noise to a baseline that was already failing on
-        # build_relationships timeout. CyberCure is intentionally on the
-        # ``_REJECTED_ON_PURPOSE`` list in source_truthful_timestamps
-        # (synthetic ``now()`` first_seen — not authoritative); failing
-        # the entire baseline DAG over an outage in this LOW-VALUE source
-        # is operator noise. Promote to soft-skip so the pipeline keeps
-        # going and Prometheus tracks the rejection rate via the
-        # ``edgeguard_collector_skips_total{reason_class="cybercure_circuit_breaker_open"}``
-        # counter.
-        if not CYBERCURE_CIRCUIT_BREAKER.can_execute():
-            logger.warning(
-                "CyberCure circuit breaker open — skipping as soft-skip "
-                "(CyberCure is a low-value optional feed; outages must not "
-                "fail the baseline DAG)"
-            )
-            if push_to_misp:
-                return make_skipped_optional_source(
-                    "cybercure",
-                    skip_reason="CyberCure circuit breaker open (likely upstream 5xx outage)",
-                    skip_reason_class="cybercure_circuit_breaker_open",
-                )
-            return []
-
-        limit = resolve_collection_limit(limit, "cybercure", baseline=baseline)
-        results = []
-        # Track per-feed failures so an all-feeds-down outage reports as
-        # a collector failure rather than silent-zero-success. Same
-        # rationale as URLhaus above.
-        feed_failures = 0
-        feed_success_count = 0
-
-        for feed_type, url in self.feeds.items():
-            # Rate limiting
-            CYBERCURE_RATE_LIMITER.wait_if_needed()
-
-            try:
-                raw_text = self._fetch_feed(url)
-
-                lines = raw_text.strip().split("\n")
-
-                # Safety check for limit
-                # Divide the overall limit across the 3 feed types; None means unlimited.
-                batch_limit = max(1, limit // 3) if limit is not None and limit > 0 else None
-                lines_iter = lines if batch_limit is None else lines[:batch_limit]
-                for line in lines_iter:  # Distribute limit across feed types
-                    if not line or line.startswith("#"):
-                        continue
-
-                    value = line.strip()
-                    if not value:
-                        continue
-
-                    # CyberCure feeds provide bare IP/URL/hash lists without metadata
-                    # (no ISP, country, description, or tags) — zone detection would
-                    # always return ["global"], so we hardcode it to avoid the overhead.
-                    if feed_type == "ip":
-                        results.append(
-                            {
-                                "indicator_type": "ipv4",
-                                "value": value,
-                                "zone": ["global"],
-                                "tag": "cybercure",
-                                "source": ["cybercure"],
-                                "first_seen": datetime.now(timezone.utc).isoformat(),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
-                                "confidence_score": 0.5,
-                            }
-                        )
-                    elif feed_type == "url" and value.startswith("http"):
-                        results.append(
-                            {
-                                "indicator_type": "url",
-                                "value": value,
-                                "zone": ["global"],
-                                "tag": "cybercure",
-                                "source": ["cybercure"],
-                                "first_seen": datetime.now(timezone.utc).isoformat(),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
-                                "confidence_score": 0.5,
-                            }
-                        )
-                    elif feed_type == "hash":
-                        # Detect hash type by length
-                        hash_type = "sha256"
-                        if len(value) == 32:
-                            hash_type = "md5"
-                        elif len(value) == 40:
-                            hash_type = "sha1"
-
-                        results.append(
-                            {
-                                "indicator_type": hash_type,
-                                "value": value,
-                                "zone": ["global"],
-                                "tag": "cybercure",
-                                "source": ["cybercure"],
-                                "first_seen": datetime.now(timezone.utc).isoformat(),
-                                "last_updated": datetime.now(timezone.utc).isoformat(),
-                                "confidence_score": 0.5,
-                            }
-                        )
-
-                CYBERCURE_CIRCUIT_BREAKER.record_success()
-                feed_success_count += 1
-
-            except Exception as e:
-                logger.warning(f"CyberCure {feed_type}: {e}")
-                CYBERCURE_CIRCUIT_BREAKER.record_failure()
-                feed_failures += 1
-                continue
-
-        logger.info(f"[OK] CyberCure: Collected {len(results)} indicators")
-        if not results:
-            logger.warning("CyberCure returned 0 indicators — check feed availability")
-
-        # All feeds failed → soft-skip. Same rationale as the
-        # circuit-breaker-open branch above (2026-04-19): CyberCure is
-        # intentionally a low-value optional feed; an upstream outage
-        # must not fail the baseline DAG. The non-MISP caller (which
-        # has no Airflow soft-skip semantics) still gets a RuntimeError
-        # so legacy enrichment workflows see the failure. The
-        # circuit-breaker-open path above + this all-feeds-down path
-        # use distinct ``skip_reason_class`` labels so Prometheus can
-        # distinguish "we hit the breaker" from "every feed 5xx'd in
-        # one run".
-        if feed_success_count == 0 and feed_failures >= len(self.feeds) and self.feeds:
-            err = f"CyberCure: all {feed_failures} feed(s) failed"
-            logger.warning(err + " — soft-skipping; CyberCure is a low-value optional feed")
-            if push_to_misp:
-                return make_skipped_optional_source(
-                    "cybercure",
-                    skip_reason=err,
-                    skip_reason_class="cybercure_all_feeds_unreachable",
-                )
-            raise RuntimeError(err)
-
-        if push_to_misp:
-            if not results:
-                return make_status("cybercure", True, count=0, failed=0)
-            success, failed = self.misp_writer.push_indicators(results, self.source_name)
-            logger.info(f"[PUSH] CyberCure: Pushed {success} to MISP ({failed} failed)")
-            return status_after_misp_push("cybercure", len(results), success, failed)
-
-        return results
-
-
 def collect_all_global_feeds(
     push_to_misp: bool = True, limit_per_source: Optional[int] = None
 ) -> Dict[str, Union[Dict[str, Any], List[Dict[str, Any]]]]:
@@ -786,11 +572,6 @@ def collect_all_global_feeds(
     uh = URLhausCollector()
     results["urlhaus"] = uh.collect(limit=limit_per_source, push_to_misp=push_to_misp)
 
-    # CyberCure
-    logger.info("=== Collecting from CyberCure ===")
-    cc = CyberCureCollector()
-    results["cybercure"] = cc.collect(limit=limit_per_source, push_to_misp=push_to_misp)
-
     def _entry_count(entry: Union[Dict[str, Any], List[Dict[str, Any]]]) -> int:
         if isinstance(entry, dict):
             return int(entry.get("count", 0))
@@ -814,13 +595,6 @@ def test():
     print("\n=== Testing URLhaus ===")
     uh = URLhausCollector()
     data = uh.collect(limit=50, push_to_misp=False)
-    print(f"Collected: {len(data)}")
-    if data:
-        print(f"Sample: {data[0]}")
-
-    print("\n=== Testing CyberCure ===")
-    cc = CyberCureCollector()
-    data = cc.collect(limit=50, push_to_misp=False)
     print(f"Collected: {len(data)}")
     if data:
         print(f"Sample: {data[0]}")

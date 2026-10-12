@@ -26,7 +26,7 @@ from collectors.abuseipdb_collector import AbuseIPDBCollector
 from collectors.cisa_collector import CISACollector
 from collectors.cisa_ics_collector import CISAICSCollector
 from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
-from collectors.global_feed_collector import CyberCureCollector, ThreatFoxCollector, URLhausCollector
+from collectors.global_feed_collector import ThreatFoxCollector, URLhausCollector
 from collectors.misp_collector import MISPCollector
 from collectors.misp_writer import MISPWriter
 from collectors.mitre_collector import MITRECollector
@@ -96,7 +96,6 @@ SOURCE_ID_MAP = {
     "sslbl": "sslbl",
     "ssl_blacklist": "sslbl",  # tag used by SSLBlacklistCollector
     "urlhaus": "urlhaus",
-    "cybercure": "cybercure",
     "threatfox": "threatfox",
 }
 
@@ -172,7 +171,6 @@ class EdgeGuardPipeline:
             "sslbl": SSLBlacklistCollector(misp_writer=self.misp_writer),
             # Additional feeds
             "urlhaus": URLhausCollector(misp_writer=self.misp_writer),
-            "cybercure": CyberCureCollector(misp_writer=self.misp_writer),
             # ThreatFox: free key from https://auth.abuse.ch/ — without it collect() skips (optional).
             "threatfox": ThreatFoxCollector(misp_writer=self.misp_writer),
             # AbuseIPDB requires ABUSEIPDB_API_KEY env var (free tier: 1000 req/day)

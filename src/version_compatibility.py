@@ -2,7 +2,7 @@
 
 Why this module exists
 ----------------------
-Vanko's PR #36 audit (CyberCure follow-up) caught two adjacent gaps:
+The PR #36 audit caught two adjacent gaps:
 
 1. The pinned Neo4j docker image (``neo4j:5.26.23-community``) drifted from
    what was actually running locally (Neo4j 2026.03.x). When a server has

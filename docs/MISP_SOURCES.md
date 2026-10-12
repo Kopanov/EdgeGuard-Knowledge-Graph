@@ -46,11 +46,10 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**13** rows: **11** acti
 | URLhaus | API | Active | Yes | |
 | Feodo Tracker | CSV | Active | Yes | Finance-heavy families |
 | SSL Blacklist | CSV | Active | Yes | |
-| CyberCure | API | Active | Yes | |
 | Energy sector | — | Placeholder | No | Needs membership / feed |
 | Healthcare sector | — | Placeholder | No | Needs membership / feed |
 
-**Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; **not** wired into default baseline collector step 2. This is **not** counted as one of the **13** DATA_SOURCES slots.
+**Optional `MISPCollector`:** pulls from MISP **`/events`** with **its own** limits; **not** wired into default baseline collector step 2. This is **not** counted as one of the **12** DATA_SOURCES slots.
 
 **Sector mix in your graph:** Depends on feeds, classifier, and time range. Use Neo4j (`MATCH (n) RETURN labels(n), count(*)`) or the MISP UI — **do not** rely on static percentage tables in old docs.
 
@@ -66,7 +65,7 @@ Canonical list: **[DATA_SOURCES.md](DATA_SOURCES.md)** (**13** rows: **11** acti
 | `MITRECollector` | MITRE ATT&CK | Yes |
 | `VTCollector` | VirusTotal | Yes |
 | `AbuseIPDBCollector` | AbuseIPDB | Yes |
-| `ThreatFoxCollector`, `URLhausCollector`, `CyberCureCollector` | abuse.ch / CyberCure | Yes |
+| `ThreatFoxCollector`, `URLhausCollector` | abuse.ch | Yes |
 | `FeodoCollector`, `SSLBlacklistCollector` | Feodo / SSLBL CSV | Yes |
 | `EnergyCollector`, `HealthcareCollector` | Placeholders | No |
 

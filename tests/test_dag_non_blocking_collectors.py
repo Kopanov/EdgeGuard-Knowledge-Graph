@@ -2,8 +2,8 @@
 
 Background
 ----------
-A CyberCure feed outage on 2026-04-18 raised ``ConnectionError`` from inside
-``CyberCureCollector.collect()``. The previous ``run_collector_with_metrics``
+A public-feed outage on 2026-04-18 raised ``ConnectionError`` from inside a
+collector's ``collect()``. The previous ``run_collector_with_metrics``
 re-raised every ``Exception``, marking the Airflow task FAILED. The default
 ``trigger_rule="all_success"`` on downstream baseline tasks
 (``build_relationships``, ``run_enrichment_jobs``, ``baseline_complete``)
@@ -67,7 +67,7 @@ def _import_dag_module():
 
 def test_transient_error_classifier_recognizes_common_network_errors():
     """The classifier must recognize stdlib + popular HTTP library errors
-    by class name. Without this, ``CyberCureCollector`` raising a
+    by class name. Without this, ``URLhausCollector`` raising a
     ``requests.ConnectionError`` would be treated as a hard bug instead
     of a transient external failure."""
     try:
@@ -88,10 +88,10 @@ def test_transient_error_classifier_recognizes_common_network_errors():
     # wrapped real bugs), MRO is the ONLY way for custom transient
     # classes. Collectors that need to wrap a transient error should
     # subclass it directly.
-    class CyberCureRequestTimeout(TimeoutError):
+    class URLhausRequestTimeout(TimeoutError):
         pass
 
-    assert ep._is_transient_external_error(CyberCureRequestTimeout())
+    assert ep._is_transient_external_error(URLhausRequestTimeout())
 
     # Negative pin: ``raise X from transient`` (the recommended add-context
     # pattern) MUST NOT be classified transient. The classifier deliberately
@@ -230,7 +230,7 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
             pass
 
         def collect(self, *_a, **_kw):
-            raise ConnectionError("simulated CyberCure outage")
+            raise ConnectionError("simulated URLhaus outage")
 
     fake_writer = MagicMock()
 
@@ -251,7 +251,7 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
         patch("baseline_lock.baseline_skip_reason", lambda: None, create=True),
     ):
         result = ep.run_collector_with_metrics(
-            "cybercure",
+            "urlhaus",
             _FailingCollector,
             fake_writer,
             limit=10,
@@ -267,7 +267,7 @@ def test_run_collector_with_metrics_grace_path_returns_skipped_on_transient_erro
     # ``(set_health.assert_called_with(...), "msg")`` discarded the
     # message — assert_called_with's failure already raises with its own
     # mismatch detail, the docstring above the test explains why.
-    set_health.assert_called_with("cybercure", "global", False)
+    set_health.assert_called_with("urlhaus", "global", False)
     # The skip metric must record the reason so operators can see WHY downstream proceeded.
     assert any(call.args[1] == "transient_external_error" for call in record_skip.call_args_list), (
         "must record_collector_skip(..., 'transient_external_error') for visibility"
@@ -387,7 +387,7 @@ def test_metric_emission_failure_does_not_break_transient_skip_path():
     ):
         # Must NOT raise. If the bomb propagates, the task FAILS and PR #35 is dead.
         result = ep.run_collector_with_metrics(
-            "cybercure",
+            "urlhaus",
             _FailingCollector,
             fake_writer,
             limit=10,

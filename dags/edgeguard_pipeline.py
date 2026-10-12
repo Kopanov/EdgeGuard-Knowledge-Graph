@@ -49,7 +49,6 @@ DAILY (Once per day):
 - ThreatFox: abuse.ch malware IOC feed
 - AbuseIPDB: IP reputation (1,000/day limit)
 - URLhaus: Malware distribution sites
-- CyberCure: Automated threat feed
 - Feodo Tracker: Botnet C2 IPs
 - SSLBlacklist: Malicious SSL certificates
 
@@ -77,7 +76,6 @@ IP Reputation:
 Global Feeds (global_feed_collector.py):
 ✅ ThreatFox - Malware IOCs (daily)
 ✅ URLhaus - Malware distribution (daily)
-✅ CyberCure - Automated threats (daily)
 
 Finance Sector (finance_feed_collector.py):
 ✅ Feodo Tracker - Botnet C2 (daily)
@@ -957,7 +955,7 @@ def run_collector_with_metrics(
         # 5xx, DNS, SSL handshake, timeout) from CATASTROPHIC bugs
         # (TypeError, ImportError, programming mistakes). The user policy
         # is "if a feed fails for an external reason, log + continue;
-        # don't block the whole pipeline." A CyberCure outage on the
+        # don't block the whole pipeline." An outage on a feed
         # provider's end shouldn't keep the baseline DAG from running
         # build_relationships + enrichment + completion.
         #
@@ -1170,15 +1168,6 @@ def run_urlhaus_collection(**context):
 
     limit = get_effective_limit("urlhaus")
     return run_collector_with_metrics("urlhaus", URLhausCollector, MISPWriter(), limit=limit)
-
-
-def run_cybercure_collection(**context):
-    """Run CyberCure collector with metrics."""
-    from collectors.global_feed_collector import CyberCureCollector
-    from collectors.misp_writer import MISPWriter
-
-    limit = get_effective_limit("cybercure")
-    return run_collector_with_metrics("cybercure", CyberCureCollector, MISPWriter(), limit=limit)
 
 
 def run_feodo_collection(**context):
@@ -1464,7 +1453,7 @@ def run_neo4j_sync():
 #    edgeguard_medium_freq  → CISA, VirusTotal  (every 4 h)
 #    edgeguard_low_freq     → NVD               (every 8 h)
 #    edgeguard_daily        → MITRE, AbuseIPDB, ThreatFox, URLhaus,
-#                             CyberCure, Feodo, SSLBlacklist  (daily @ 02:00)
+#                             Feodo, SSLBlacklist  (daily @ 02:00)
 #    edgeguard_neo4j_sync   → MISP → Neo4j      (every 3 days @ 03:00)
 #
 #  Having medium/low/daily task groups inside this DAG caused every API to
@@ -1693,13 +1682,6 @@ collect_urlhaus_daily = PythonOperator(
     dag=daily_dag,
 )
 
-collect_cybercure_daily = PythonOperator(
-    task_id="collect_cybercure",
-    python_callable=run_cybercure_collection,
-    execution_timeout=timedelta(hours=2),
-    dag=daily_dag,
-)
-
 collect_feodo_daily = PythonOperator(
     task_id="collect_feodo",
     python_callable=run_feodo_collection,
@@ -1723,7 +1705,6 @@ log_daily_summary = BashOperator(
         echo "  - AbuseIPDB"
         echo "  - ThreatFox"
         echo "  - URLhaus"
-        echo "  - CyberCure"
         echo "  - Feodo Tracker"
         echo "  - SSL Blacklist"
     """,
@@ -1740,7 +1721,6 @@ log_daily_summary = BashOperator(
         collect_abuseipdb_daily,
         collect_threatfox_daily,
         collect_urlhaus_daily,
-        collect_cybercure_daily,
         collect_feodo_daily,
         collect_sslblacklist_daily,
     ]
@@ -2479,12 +2459,6 @@ def run_baseline_urlhaus(**context):
     from collectors.global_feed_collector import URLhausCollector
 
     return run_baseline_collector("urlhaus", URLhausCollector, context=context)
-
-
-def run_baseline_cybercure(**context):
-    from collectors.global_feed_collector import CyberCureCollector
-
-    return run_baseline_collector("cybercure", CyberCureCollector, context=context)
 
 
 def run_baseline_feodo(**context):
@@ -3279,12 +3253,6 @@ with TaskGroup(
     bl_urlhaus = PythonOperator(
         task_id="collect_urlhaus",
         python_callable=run_baseline_urlhaus,
-        execution_timeout=timedelta(hours=2),
-        dag=baseline_dag,
-    )
-    bl_cybercure = PythonOperator(
-        task_id="collect_cybercure",
-        python_callable=run_baseline_cybercure,
         execution_timeout=timedelta(hours=2),
         dag=baseline_dag,
     )

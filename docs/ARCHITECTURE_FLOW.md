@@ -21,7 +21,7 @@ de-risk the **730-day baseline production-test**.
 
 ## Why this document exists
 
-EdgeGuard's data path is 11 collectors → MISP → Neo4j → STIX/GraphQL/
+EdgeGuard's data path is 10 collectors → MISP → Neo4j → STIX/GraphQL/
 REST, with deterministic merge, zone detection, cross-event dedup,
 creator-org trust checks, and resumable checkpoints along the way.
 Any single file shows a fragment. This document shows the whole.
@@ -136,7 +136,7 @@ Target: complete before the next 730-day baseline attempt.
 **Files covered:**
 - `src/edgeguard.py` (CLI entry points `cmd_baseline`, `cmd_fresh_baseline`)
 - `src/run_pipeline.py` (orchestration)
-- `src/collectors/*_collector.py` (11 collectors — tier-1/2/3 sequencing per PR-F4)
+- `src/collectors/*_collector.py` (10 collectors — tier-1/2/3 sequencing per PR-F4)
 - `src/collectors/misp_writer.py` (write-side)
 - `src/run_misp_to_neo4j.py` (sync to Neo4j)
 - `src/build_relationships.py` (post-sync edges)

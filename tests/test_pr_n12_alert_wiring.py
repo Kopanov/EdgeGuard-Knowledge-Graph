@@ -58,8 +58,8 @@ Two bugs in the prior expr:
   ``edgeguard_source_health`` kept it → PromQL ``and`` found no match
   → alert was silent.
 - Hard-coded regex ``source=~"otx|nvd|cisa|abuseipdb"`` silently
-  excluded every new source (ThreatFox, URLhaus, CyberCure, Feodo,
-  SSLBL, MITRE, MISP federated, …).
+  excluded every new source (ThreatFox, URLhaus, Feodo, SSLBL,
+  MITRE, MISP federated, …).
 
 Fix: collapse both sides via ``and on (source)``; drop the allow-list.
 """
@@ -300,7 +300,7 @@ class TestFix5NoIndicatorsCollectedLabelMatch:
         expr = rule["expr"]
         assert 'source=~"otx|nvd|cisa|abuseipdb"' not in expr, (
             "hard-coded source allow-list re-introduced; would silently "
-            "exclude ThreatFox, URLhaus, CyberCure, Feodo, SSLBL, MITRE, …"
+            "exclude ThreatFox, URLhaus, Feodo, SSLBL, MITRE, …"
         )
 
     def test_both_sides_reduced_to_source_only(self):

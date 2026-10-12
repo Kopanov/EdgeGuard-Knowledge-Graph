@@ -38,9 +38,9 @@ LOCK_DIR=/var/lock/edgeguard
     >> $EDGEGUARD_DIR/logs/nvd.log 2>&1
 
 # ─── Daily (02:00) ───────────────────────────────────────────────────────────
-# MITRE ATT&CK, AbuseIPDB, ThreatFox, URLhaus, CyberCure, Feodo, SSLBlacklist
+# MITRE ATT&CK, AbuseIPDB, ThreatFox, URLhaus, Feodo, SSLBlacklist
 0 2 * * * mkdir -p $LOCK_DIR && flock -n $LOCK_DIR/daily.lock \
-    bash -c 'cd $EDGEGUARD_DIR && python3 src/run_pipeline.py --sources mitre,abuseipdb,threatfox,urlhaus,cybercure,feodo,sslblacklist' \
+    bash -c 'cd $EDGEGUARD_DIR && python3 src/run_pipeline.py --sources mitre,abuseipdb,threatfox,urlhaus,feodo,sslblacklist' \
     >> $EDGEGUARD_DIR/logs/daily_collectors.log 2>&1
 
 # ─── Neo4j sync (every 3 days at 03:00) ──────────────────────────────────────

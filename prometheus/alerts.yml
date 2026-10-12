@@ -44,7 +44,7 @@ groups:
       #   edgeguard_pipeline     */30 min  -> otx
       #   edgeguard_medium_freq  4 h       -> cisa, virustotal
       #   edgeguard_low_freq     8 h       -> nvd
-      #   edgeguard_daily        24 h      -> mitre, cisa_ics, abuseipdb, threatfox, urlhaus, cybercure, feodo, sslbl
+      #   edgeguard_daily        24 h      -> mitre, cisa_ics, abuseipdb, threatfox, urlhaus, feodo, sslbl
       - record: edgeguard:collector_max_stale_seconds
         expr: |
           label_replace(vector(7200), "source", "otx", "", "")
@@ -56,7 +56,6 @@ groups:
           or label_replace(vector(93600), "source", "abuseipdb", "", "")
           or label_replace(vector(93600), "source", "threatfox", "", "")
           or label_replace(vector(93600), "source", "urlhaus", "", "")
-          or label_replace(vector(93600), "source", "cybercure", "", "")
           or label_replace(vector(93600), "source", "feodo", "", "")
           or label_replace(vector(93600), "source", "sslbl", "", "")
 
@@ -95,7 +94,7 @@ groups:
         # so the vector `and` had no matching labels and the alert was
         # silent; (2) the hard-coded allow-list `source=~"otx|nvd|cisa|
         # abuseipdb"` silently excluded every new source (ThreatFox,
-        # URLhaus, CyberCure, Feodo, SSLBL, MITRE, …). Fix: collapse
+        # URLhaus, Feodo, SSLBL, MITRE, …). Fix: collapse
         # both sides to `source` with `on (source)`, drop the
         # regex allow-list — `source_health==1` already scopes to
         # known-to-pipeline sources.

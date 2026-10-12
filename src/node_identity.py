@@ -373,7 +373,7 @@ def compute_node_uuid(label: str, key_dict: Dict[str, Any]) -> str:
 # already lowercases its hash input (see ``canonical_node_key`` line 340)
 # but Cypher MERGE patterns like ``MERGE (n:Malware {name: $name})``
 # match case-SENSITIVELY. Result: ``Malware{name:"TrickBot"}`` (OTX) and
-# ``Malware{name:"trickbot"}`` (CyberCure) become two distinct Neo4j
+# ``Malware{name:"trickbot"}`` (ThreatFox) become two distinct Neo4j
 # nodes that share the SAME ``n.uuid`` (because UUID is computed
 # case-insensitively). Two physically-different nodes claiming the
 # same uuid violates the uuid uniqueness intent and silently inflates

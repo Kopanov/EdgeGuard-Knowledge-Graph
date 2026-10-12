@@ -32,7 +32,6 @@ _SCHEDULED_SOURCES = {
     "abuseipdb": 93600,
     "threatfox": 93600,
     "urlhaus": 93600,
-    "cybercure": 93600,
     "feodo": 93600,
     "sslbl": 93600,
 }
