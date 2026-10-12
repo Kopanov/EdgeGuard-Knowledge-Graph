@@ -405,7 +405,6 @@ class TestB3AstScanNoSilentSwallowers:
     # short-circuit can be deleted entirely.
     _KNOWN_OFFENDERS_BACKLOG = frozenset(
         {
-            "finance_feed_collector.py",
             "global_feed_collector.py",
         }
     )

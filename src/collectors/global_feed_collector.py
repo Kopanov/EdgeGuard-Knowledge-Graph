@@ -695,14 +695,9 @@ class MalwareBazaarCollector:
         return {"Auth-Key": key} if key else None
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
-    def _fetch_export(self) -> str:
-        """Download the recent export.
-
-        Raises ``MalwareBazaarTransientError`` (retried) on 429 after the Retry-After
-        retries and on 5xx; plain ``requests.exceptions.HTTPError`` (not retried) on any
-        other non-200 code, so 401/403 reach the auth-denied skip in ``collect``.
-        """
-        response = request_with_rate_limit_retries(
+    def _download_export(self) -> requests.Response:
+        """One download with transport-error retry; HTTP 429 / 5xx are retried inside the helper."""
+        return request_with_rate_limit_retries(
             "GET",
             self.export_url,
             session=None,
@@ -714,6 +709,19 @@ class MalwareBazaarCollector:
             retry_on_403=False,
             context="MalwareBazaar",
         )
+
+    def _fetch_export(self) -> str:
+        """Download the recent export.
+
+        Raises ``MalwareBazaarTransientError`` on 429 after the Retry-After retries and on
+        5xx; plain ``requests.exceptions.HTTPError`` on any other non-200 code, so 401/403
+        reach the auth-denied skip in ``collect``. The status check sits outside the
+        ``retry_with_backoff``-decorated download on purpose: the decorator retries
+        ``TransientServerError``, so raising inside it repeated the helper's four attempts
+        four times (16 requests; with a ``Retry-After`` of ten minutes on every response
+        the sleeps alone exceeded the task's two-hour execution timeout).
+        """
+        response = self._download_export()
         code = response.status_code
         if code == 200:
             return response.text
@@ -754,10 +762,22 @@ class MalwareBazaarCollector:
 
         min_fields = columns.index("signature") + 1 if "signature" in columns else len(MALWAREBAZAAR_CSV_COLUMNS)
         rows: List[Dict[str, str]] = []
+        shifted = 0
         for parts in csv.reader(data_lines, skipinitialspace=True):
             if len(parts) < min_fields:
                 continue
+            if len(parts) > len(columns):
+                # More fields than columns: an unescaped quote or comma inside a field (a file
+                # name) split the row, so every later column would be read from the wrong field.
+                shifted += 1
+                continue
             rows.append({col: (parts[i].strip() if i < len(parts) else "") for i, col in enumerate(columns)})
+        if shifted:
+            logger.warning(
+                "MalwareBazaar: %d row(s) skipped — more fields than the %d export columns (unescaped separator in a field)",
+                shifted,
+                len(columns),
+            )
         return rows
 
     def build_item(self, row: Dict[str, str]) -> Optional[Dict[str, Any]]:

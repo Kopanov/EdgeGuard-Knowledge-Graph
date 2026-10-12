@@ -37,6 +37,8 @@ QUOTA_LOG_PREFIX = "[VT-QUOTA]"
 
 DAILY_BUDGET_DEFAULT = 400
 MAX_LOOKUPS_PER_RUN_DEFAULT = 60
+# At 4 lookups a minute a run of 200 takes 50 minutes; the Airflow task is killed after 60.
+MAX_LOOKUPS_PER_RUN_CEILING = 200
 CANDIDATE_DAYS_DEFAULT = 30
 LOOKED_UP_MAX = 20000
 
@@ -71,8 +73,22 @@ def daily_budget() -> int:
 
 
 def max_lookups_per_run() -> int:
-    """Lookups one collector run may spend (``EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN``, default 60)."""
-    return _env_int(_PER_RUN_ENV, MAX_LOOKUPS_PER_RUN_DEFAULT)
+    """Lookups one collector run may spend (``EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN``, default 60).
+
+    Capped at :data:`MAX_LOOKUPS_PER_RUN_CEILING`: a larger run cannot finish inside the task's
+    one-hour execution timeout at four lookups a minute and would be killed before it is accounted.
+    """
+    value = _env_int(_PER_RUN_ENV, MAX_LOOKUPS_PER_RUN_DEFAULT)
+    if value > MAX_LOOKUPS_PER_RUN_CEILING:
+        logger.warning(
+            "%s %s=%d exceeds what one run can finish in its execution timeout — using %d",
+            QUOTA_LOG_PREFIX,
+            _PER_RUN_ENV,
+            value,
+            MAX_LOOKUPS_PER_RUN_CEILING,
+        )
+        return MAX_LOOKUPS_PER_RUN_CEILING
+    return value
 
 
 def candidate_days() -> int:

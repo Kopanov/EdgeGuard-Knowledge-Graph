@@ -435,12 +435,17 @@ Hashes are looked up **once**: the ledger remembers every delivered lookup, incl
 
 | Limit | Enforcement |
 |-------|-------------|
-| 4 lookups/min | `RateLimiter(requests_per_minute=4)` in-process |
+| 4 lookups/min | `RateLimiter(requests_per_minute=4)` in-process. Every lookup passes the limiter exactly once: the HTTP helper is called without retries, because a retried request would bypass the limiter and the budget |
 | 500 lookups/day | Ledger `virustotal_daily_budget.json` in the state directory (`./state` bind mount): `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` (default **400**) per UTC day, `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` (default **60**) per run — six runs a day stay below the budget |
-| HTTP 429 | The day is marked exhausted in the ledger; the run stops and pushes what it has |
+| HTTP 429 | The day is marked exhausted in the ledger; the run stops and pushes what it has. A 5xx or a transport error is counted and the run goes on; three in a row stop it |
 | Budget exhausted | Task returns `skipped=True`, `skip_reason_class="virustotal_daily_budget"` (`virustotal_rate_limited` when VirusTotal answered 429 before any lookup succeeded); the Airflow task stays green and downstream continues |
-| MISP candidate listing fails | `skip_reason_class="virustotal_candidates_unavailable"` |
+| MISP candidate listing fails | `skip_reason_class="virustotal_candidates_unavailable"` (no lookup is spent) |
+| MISP unreachable while pushing the results | `skip_reason_class="virustotal_misp_unavailable"`: a skip, not a failed task, because Airflow retries a failed task and each retry would spend the same lookups again. The hashes stay eligible for the next run |
+| Task killed mid-run (execution timeout, worker restart) | The ledger is written every 10 lookups, so at most 10 lookups are unaccounted on the retry |
+| Per-run cap set too high | `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` is capped at 200: more cannot finish in the task's one-hour timeout at 4 lookups a minute |
 | API key missing / rejected | `missing_virustotal_key` / `virustotal_auth_denied` |
+
+Keep `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` at or above six times the per-run cap (the task runs six times a day). A skipped run does not refresh the collector's last-success time, so a budget that runs out early in the day, or a day ended by an HTTP 429, raises the `EdgeGuardCollectionStale` alert for `virustotal` after nine hours; with the defaults (400 and 60) the budget is never exhausted by the schedule itself.
 
 Every quota message is logged with the prefix **`[VT-QUOTA]`** (budget state at the start of the run, exhaustion events, run summary with lookups / enriched / unknown / errors), so `grep VT-QUOTA` on the task log shows what happened. The task result carries `vt_lookups`, `vt_enriched`, `vt_unknown`, `vt_lookup_errors`, `vt_stopped`, `vt_budget_used`, `vt_budget_remaining`.
 
@@ -513,6 +518,7 @@ The keyword detector deliberately contains no malware family names (families are
 - **One record per address.** The feed has one row per address and port, and a re-used address appears again under another family: 7,980 rows describe 7,607 addresses (290 addresses on several rows, 81 with more than one family). MISP holds one attribute per value, so rows are merged per address: earliest `first_seen`, latest `last_online`, every port, every family. The primary family is that of the most recently active row.
 - **Actionable or historical.** A server counts as recently active when its `last_online` date is within 30 days of the collection day (`FEODO_ACTIVE_DAYS`). The `c2_status` column is not used for this: it is only as fresh as the feed (the single "online" row of 2026-10-12 was last seen online on 2026-03-12). Recently active: `confidence:medium`, MISP detection flag set. Everything else: `confidence:low`, `to_ids=false`. abuse.ch advises against blocking on the complete history because addresses are re-used. On 2026-10-12 all 7,607 servers were historical.
 - **Not rewritten.** EdgeGuard does not update an attribute MISP already holds, so confidence and detection flag are those of the first collection.
+- **Outages (Feodo Tracker and SSL Blacklist).** A timeout, a connection error, a truncated transfer or an HTTP 429 / 5xx after the retries is raised as a transient error: the Airflow task is skipped (`transient_external_error`) and the alert path is used; it no longer fails the task. An open circuit breaker skips the run (`feodo_circuit_breaker_open`, `sslbl_circuit_breaker_open`). HTTP 401 / 403 skips (`*_auth_denied`). Any other HTTP status, or a defect in the code, fails the task. A body that is not the CSV yields zero items and a warning.
 
 | Graph element | Value | From |
 |---|---|---|

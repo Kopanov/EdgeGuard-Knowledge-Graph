@@ -114,9 +114,12 @@ def collector(ledger_path: Path, monkeypatch: pytest.MonkeyPatch):
     calls: List[str] = []
     responses: Dict[str, Any] = {}
 
+    request_kwargs: List[Dict[str, Any]] = []
+
     def fake_request(method: str, url: str, **kwargs: Any) -> FakeResponse:
         sha = url.rsplit("/", 1)[-1]
         calls.append(sha)
+        request_kwargs.append(kwargs)
         resp = responses.get(sha)
         if isinstance(resp, Exception):
             raise resp
@@ -124,6 +127,7 @@ def collector(ledger_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(mod, "request_with_rate_limit_retries", fake_request)
     vt._test_calls = calls  # type: ignore[attr-defined]
+    vt._test_request_kwargs = request_kwargs  # type: ignore[attr-defined]
     vt._test_responses = responses  # type: ignore[attr-defined]
     return vt
 
@@ -426,14 +430,109 @@ def test_enriched_hash_is_remembered_only_after_the_misp_push_succeeded(collecto
     assert json.loads(ledger_path.read_text())["looked_up"] == {H1: "ok", H2: "ok"}
 
 
-def test_misp_push_exception_leaves_the_hashes_eligible_and_persists_the_quota(collector, ledger_path: Path) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ConnectionError("misp down"),
+        requests.exceptions.ReadTimeout("misp slow"),
+    ],
+)
+def test_misp_outage_during_the_push_is_a_skip_so_airflow_does_not_repeat_the_lookups(
+    collector, ledger_path: Path, error
+) -> None:
+    """A failed task is retried by Airflow (retries=2): three attempts would spend the same lookups three times."""
     collector.misp_writer.session.post.return_value = _misp_rows(H1)
     collector._test_responses[H1] = FakeResponse(200, _vt_file(H1))
-    collector.misp_writer.push_items.side_effect = requests.exceptions.ConnectionError("misp down")
+    collector.misp_writer.push_items.side_effect = error
     out = collector.collect(limit=10, push_to_misp=True)
-    assert out["success"] is False  # MISP unreachable is a real failure, not a skip
+    assert out["success"] is True and out.get("skipped") is True
+    assert out["skip_reason_class"] == "virustotal_misp_unavailable"
     on_disk = json.loads(ledger_path.read_text())
-    assert on_disk["used"] == 1 and on_disk["looked_up"] == {}
+    assert on_disk["used"] == 1 and on_disk["looked_up"] == {}, "the lookup is counted, the hash stays eligible"
+
+
+def test_a_code_defect_in_the_push_is_still_a_failure(collector, ledger_path: Path) -> None:
+    collector.misp_writer.session.post.return_value = _misp_rows(H1)
+    collector._test_responses[H1] = FakeResponse(200, _vt_file(H1))
+    collector.misp_writer.push_items.side_effect = TypeError("unexpected keyword")
+    out = collector.collect(limit=10, push_to_misp=True)
+    assert out["success"] is False and not out.get("skipped"), "only transient MISP errors are skips"
+    assert json.loads(ledger_path.read_text())["used"] == 1
+
+
+def test_every_lookup_passes_the_limiter_once_and_is_never_retried_inside_the_http_helper(collector) -> None:
+    """A retry inside the helper bypasses the 4-per-minute limiter and is not counted against the budget."""
+    collector.misp_writer.session.post.return_value = _misp_rows(H1, H2, H3)
+    collector._test_responses.update({H1: FakeResponse(200, _vt_file(H1)), H2: FakeResponse(503, {})})
+    collector.collect(limit=10, push_to_misp=True)
+    assert [k["max_rate_limit_retries"] for k in collector._test_request_kwargs] == [0, 0, 0]
+    assert collector.rate_limiter.wait_if_needed.call_count == 3
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        requests.exceptions.ChunkedEncodingError("truncated"),
+        requests.exceptions.ContentDecodingError("gzip"),
+        FakeResponse(200, []),
+        FakeResponse(200, "text"),
+        FakeResponse(200, {"data": ["not", "an", "object"]}),
+    ],
+)
+def test_a_broken_answer_is_counted_and_the_run_continues(collector, ledger_path: Path, bad) -> None:
+    collector.misp_writer.session.post.return_value = _misp_rows(H1, H2)
+    collector._test_responses.update({H1: bad, H2: FakeResponse(200, _vt_file(H2))})
+    out = collector.collect(limit=10, push_to_misp=True)
+    assert out["success"] is True and out["count"] == 1 and not out.get("skipped")
+    assert out["vt_lookup_errors"] == 1 and out["vt_enriched"] == 1
+    assert json.loads(ledger_path.read_text())["looked_up"] == {H2: "ok"}, "the broken hash stays eligible"
+
+
+def test_ledger_is_written_during_the_run_so_a_killed_task_stays_accounted(collector, ledger_path: Path) -> None:
+    """Airflow's execution timeout raises a BaseException: no ``except Exception`` and no final save runs."""
+    from collectors import vt_collector as mod
+
+    hashes = [f"{i:064x}" for i in range(1, 31)]
+    collector.misp_writer.session.post.return_value = _misp_rows(*hashes)
+
+    class Killed(BaseException):
+        pass
+
+    collector._test_responses[hashes[24]] = Killed("task timeout")  # raised on the 25th lookup
+    real = mod.request_with_rate_limit_retries
+
+    def killing(method: str, url: str, **kwargs: Any):
+        resp = collector._test_responses.get(url.rsplit("/", 1)[-1])
+        if isinstance(resp, BaseException):
+            raise resp
+        return real(method, url, **kwargs)
+
+    mod.request_with_rate_limit_retries = killing
+    try:
+        with pytest.raises(Killed):
+            collector.collect(limit=30, push_to_misp=True)
+    finally:
+        mod.request_with_rate_limit_retries = real
+    on_disk = json.loads(ledger_path.read_text())
+    assert on_disk["used"] == 20, "24 lookups were made; the ledger holds the last periodic save (every 10)"
+    assert len(on_disk["looked_up"]) == 20, "hashes unknown to VirusTotal are remembered as the run goes"
+
+
+def test_per_run_cap_is_bounded_by_what_fits_in_the_task_timeout(monkeypatch, caplog) -> None:
+    from collectors import virustotal_budget as vb
+
+    monkeypatch.setenv("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", "500")
+    with caplog.at_level(logging.WARNING):
+        assert vb.max_lookups_per_run() == vb.MAX_LOOKUPS_PER_RUN_CEILING == 200
+    assert any("[VT-QUOTA]" in r.getMessage() and "exceeds" in r.getMessage() for r in caplog.records)
+    monkeypatch.setenv("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", "200")
+    assert vb.max_lookups_per_run() == 200
+
+
+def test_description_and_zone_text_use_the_label_virustotal_returns(collector) -> None:
+    item = collector._process_file(_vt_file(H1)["data"])
+    assert "Threat: trojan.emotet" in item["description"], "suggested_threat_label, not a non-existent attribute"
+    assert item["threat_label"] == "trojan.emotet"
 
 
 def test_without_misp_push_delivered_items_are_remembered(collector, ledger_path: Path) -> None:

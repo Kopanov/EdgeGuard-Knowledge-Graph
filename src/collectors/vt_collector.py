@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests
 
+from collector_failure_alerts import is_transient_external_error
 from collectors.collector_utils import (
     VIRUSTOTAL_API_KEY_PLACEHOLDERS,
     RateLimiter,
@@ -77,6 +78,10 @@ MISP_CANDIDATE_MAX_PAGES = 25
 
 # Consecutive transport/server errors after which a run stops early (transient outage).
 MAX_CONSECUTIVE_LOOKUP_ERRORS = 3
+
+# The ledger is written every this many lookups, so a task killed mid-run (execution timeout,
+# worker restart) leaves at most this many lookups unaccounted for the next attempt.
+LEDGER_SAVE_EVERY = 10
 
 _HEX = frozenset("0123456789abcdef")
 
@@ -216,8 +221,9 @@ class VTCollector:
                     text_parts.append(str(mf) if mf else "")
 
         # Add popular threat label
-        if attrs.get("popular_threat_label"):
-            text_parts.append(str(attrs["popular_threat_label"]))
+        suggested_label = (attrs.get("popular_threat_classification") or {}).get("suggested_threat_label")
+        if suggested_label:
+            text_parts.append(str(suggested_label))
 
         # Combine all text
         combined_text = " ".join(filter(None, text_parts))
@@ -311,7 +317,9 @@ class VTCollector:
             # Build description
             names = attrs.get("names", [])
             meaningful_name = attrs.get("meaningful_name", "")
-            popular_threat = attrs.get("popular_threat_label", "")
+            # ``popular_threat_classification.suggested_threat_label`` is the label the API returns;
+            # there is no ``popular_threat_label`` attribute.
+            popular_threat = (attrs.get("popular_threat_classification") or {}).get("suggested_threat_label", "")
 
             description_parts = []
             if meaningful_name:
@@ -470,13 +478,21 @@ class VTCollector:
         counted as an error, hash stays eligible; 404 → remembered as unknown to
         VirusTotal (never retried); 429 → the day is marked exhausted and the run stops; 401/403 →
         ``requests.HTTPError`` (the caller skips the source as auth-denied); other
-        errors are counted and the run stops after
-        :data:`MAX_CONSECUTIVE_LOOKUP_ERRORS` consecutive ones.
+        errors (5xx, transport errors of any kind) are counted and the run stops after
+        :data:`MAX_CONSECUTIVE_LOOKUP_ERRORS` consecutive ones. Every request goes through
+        the rate limiter exactly once: the HTTP helper is called without retries. The ledger
+        is written every :data:`LEDGER_SAVE_EVERY` lookups.
         """
         items: List[Dict] = []
         summary: Dict[str, Any] = {"lookups": 0, "found": 0, "not_found": 0, "errors": 0, "stopped": None}
         consecutive_errors = 0
+        saved_at = 0
         for sha256 in candidates:
+            # Periodic save at the top of the loop, so the outcome of the previous lookup
+            # (counter and "unknown to VirusTotal" memory) is part of what is written.
+            if summary["lookups"] - saved_at >= LEDGER_SAVE_EVERY:
+                budget.save()
+                saved_at = summary["lookups"]
             if budget.is_exhausted():
                 summary["stopped"] = "daily_budget"
                 logger.warning(
@@ -493,12 +509,15 @@ class VTCollector:
                     session=self.session,
                     timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT),
                     verify=SSL_VERIFY,
-                    max_rate_limit_retries=1,
+                    # No retry inside the helper: a retried request would bypass the
+                    # 4-per-minute limiter and would not be counted against the budget.
+                    max_rate_limit_retries=0,
                     fallback_delay_sec=60.0,
                     retry_on_403=False,
                     context="VT",
                 )
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            except requests.exceptions.RequestException as exc:
+                # Timeouts, connection errors, truncated transfers: counted, never fatal for the run.
                 summary["errors"] += 1
                 consecutive_errors += 1
                 logger.warning("VirusTotal lookup %s… failed: %s", sha256[:16], exc)
@@ -520,9 +539,10 @@ class VTCollector:
             summary["lookups"] += 1
             if code == 200:
                 try:
-                    file_data = response.json().get("data", {})
+                    body = response.json()
                 except ValueError:
-                    file_data = None
+                    body = None
+                file_data = body.get("data") if isinstance(body, dict) else None
                 item = self._process_file(file_data) if isinstance(file_data, dict) and file_data else None
                 if item:
                     consecutive_errors = 0
@@ -681,7 +701,30 @@ class VTCollector:
             if not unique:
                 status = self._return_status(True, 0, failed=0)
             else:
-                success, failed = self.misp_writer.push_items(unique)
+                try:
+                    success, failed = self.misp_writer.push_items(unique)
+                except Exception as exc:
+                    if not is_transient_external_error(exc):
+                        raise
+                    # MISP became unreachable after the lookups. A failed task would be retried by
+                    # Airflow and every retry would spend the same lookups again; skip instead, keep
+                    # the hashes eligible and let the next scheduled run deliver them.
+                    for item in unique:
+                        item.pop("_vt_lookup_sha256", None)
+                    budget.save()
+                    logger.error(
+                        "%s MISP push failed after %d lookups (%s: %s) — nothing was delivered; the hashes "
+                        "stay eligible for the next run",
+                        QUOTA_LOG_PREFIX,
+                        summary["lookups"],
+                        type(exc).__name__,
+                        exc,
+                    )
+                    return make_skipped_optional_source(
+                        "virustotal",
+                        skip_reason=f"MISP unavailable while pushing {len(unique)} enrichment(s): {type(exc).__name__}: {exc}",
+                        skip_reason_class="virustotal_misp_unavailable",
+                    )
                 if success > 0:
                     logger.info(f"[OK] VirusTotal: Successfully pushed {success} items to MISP")
                 if failed > 0:

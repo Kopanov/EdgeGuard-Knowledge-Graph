@@ -666,8 +666,8 @@ def get_effective_limit(source: str = None, default_limit: int = None) -> Option
     """
     if source and source.lower() in NO_LIMIT_SOURCES:
         return None
-    # Explicit global override takes precedence
-    if MAX_ENTRIES_PER_SOURCE != 0:
+    # Explicit global override takes precedence (0 or a negative value = no override)
+    if MAX_ENTRIES_PER_SOURCE > 0:
         return MAX_ENTRIES_PER_SOURCE
     # The collector enforces its own per-run cap: no generic incremental cut
     if source and source.lower() in OWN_RUN_CAP_SOURCES:
