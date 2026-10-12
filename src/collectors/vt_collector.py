@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 """
-EdgeGuard - VirusTotal MISP Collector
-Collects threat indicators from VirusTotal API and pushes to MISP
+EdgeGuard - VirusTotal MISP Collector (free-tier lookup enrichment)
 
-This collector focuses on gathering IOCs from VirusTotal's public feeds
-and pushing them to MISP as the single source of truth.
+Enriches hashes that other EdgeGuard sources already pushed to MISP (ThreatFox,
+MalwareBazaar, OTX, ...) with VirusTotal's file analysis and pushes the result to
+MISP under ``source:VirusTotal``. The MISP→Neo4j sync then merges the VirusTotal
+attribute into the same Indicator node (second SOURCED_FROM edge, VirusTotal
+confidence, threat label, first-submission date).
 
-Rate Limits (Free Tier):
-- 4 lookups/minute
-- 500 lookups/day
-- 15,500 lookups/month
+Why lookups and not a feed: the public (free) VirusTotal API v3 offers single-object
+lookups only (``GET /files/{hash}``). Feed and Intelligence-search endpoints require
+a premium licence, so a "recent malware" query returns nothing on a free key.
 
-For production, consider a paid plan at https://www.virustotal.com/gui/join-us
+Rate limits (free tier) and how the collector respects them:
+- 4 lookups/minute  — ``RateLimiter(requests_per_minute=4)`` (in-process)
+- 500 lookups/day   — ``virustotal_budget.VirusTotalBudget`` ledger in the shared
+                      state directory (default budget 400/day, 60 per run); all
+                      quota messages are prefixed ``[VT-QUOTA]``
+- HTTP 429          — marks the day exhausted; the run stops and returns what it
+                      has; the Airflow task stays green (optional source)
+- quota exhausted   — the task is skipped with ``skip_reason_class=virustotal_daily_budget``
+
+Knobs: ``EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET`` (400), ``EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN``
+(60), ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` (30), ``EDGEGUARD_VIRUSTOTAL_BUDGET_PATH``.
 """
 
 import json
@@ -20,7 +31,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -34,12 +45,17 @@ from collectors.collector_utils import (
     make_status,
     optional_api_key_effective,
     request_with_rate_limit_retries,
-    retry_with_backoff,
     status_after_misp_push,
 )
 
 # Import MISP writer
 from collectors.misp_writer import MISPWriter
+from collectors.virustotal_budget import (
+    QUOTA_LOG_PREFIX,
+    VirusTotalBudget,
+    candidate_days,
+    max_lookups_per_run,
+)
 from config import SOURCE_TAGS, SSL_VERIFY, VIRUSTOTAL_API_KEY, detect_zones_from_text, resolve_collection_limit
 
 logger = logging.getLogger(__name__)
@@ -53,18 +69,35 @@ RETRY_DELAY_BASE = 2  # seconds
 # VirusTotal API v3 base URL
 VT_BASE_URL = "https://www.virustotal.com/api/v3"
 
+# MISP candidate paging (hashes awaiting enrichment)
+MISP_CANDIDATE_PAGE_SIZE = 1000
+MISP_CANDIDATE_MAX_PAGES = 25
+
+# Consecutive transport/server errors after which a run stops early (transient outage).
+MAX_CONSECUTIVE_LOOKUP_ERRORS = 3
+
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_sha256(value: str) -> bool:
+    return len(value) == 64 and set(value) <= _HEX
+
 
 class VTCollector:
     """
-    VirusTotal Collector for MISP.
+    VirusTotal lookup-enrichment collector for MISP.
 
-    Collects IOCs from VirusTotal's public API and pushes to MISP.
+    One run: list SHA-256 attributes in MISP that no VirusTotal attribute covers yet
+    (newest ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` days), look each up with
+    ``GET /files/{sha256}`` within the per-run cap and the daily budget, and push the
+    enriched items to MISP.
 
     Features:
-    - Rate limiting (4 requests/min free tier)
-    - Retry logic with exponential backoff
-    - Automatic zone detection from metadata
+    - Rate limiting (4 requests/min free tier) and a persisted daily budget
+    - Hashes are looked up once (ledger memory, including hashes unknown to VirusTotal)
+    - Automatic zone detection from file names, tags and sandbox verdicts
     - Proper MISP tagging (source:VirusTotal, zone tags)
+    - Never blocks the workflow: quota, 429 and auth problems are skips, not failures
     """
 
     # Class-level rate limiter (shared across instances)
@@ -74,6 +107,7 @@ class VTCollector:
         self.base_url = VT_BASE_URL
         self.api_key = optional_api_key_effective(VIRUSTOTAL_API_KEY, VIRUSTOTAL_API_KEY_PLACEHOLDERS)
         self.tag = SOURCE_TAGS.get("virustotal", "virustotal")
+        self.misp_tag = MISPWriter.SOURCE_TAGS.get(self.tag, f"source:{self.tag}")
         self.misp_writer = misp_writer or MISPWriter()
         self.source_name = "virustotal"
 
@@ -214,162 +248,6 @@ class VTCollector:
         confidence = 0.5 + (score * 0.45)
         return round(min(confidence, 0.95), 2)
 
-    @retry_with_backoff(max_retries=MAX_RETRIES)
-    def _fetch_recent_files(self, limit: int) -> List[Dict]:
-        """
-        Fetch recent files analyzed by VirusTotal using search API.
-
-        Args:
-            limit: Maximum number of files to fetch
-
-        Returns:
-            List of file dicts
-        """
-        logger.info(f"Fetching {limit} recent files from VirusTotal...")
-
-        # Rate limit check
-        self.rate_limiter.wait_if_needed()
-
-        # Use search endpoint instead of /files (v3 API change)
-        response = request_with_rate_limit_retries(
-            "GET",
-            f"{self.base_url}/search",
-            session=self.session,
-            params={"query": "type:file+tag:malware", "limit": min(limit, 10)},
-            timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT),
-            verify=SSL_VERIFY,
-            max_rate_limit_retries=3,
-            fallback_delay_sec=60.0,
-            retry_on_403=False,
-            context="VT",
-        )
-
-        if response.status_code == 401:
-            raise requests.exceptions.HTTPError("Invalid VirusTotal API key")
-        elif response.status_code != 200:
-            raise requests.exceptions.HTTPError(f"VT API error: {response.status_code}")
-
-        data = response.json()
-        files = data.get("data", [])
-
-        logger.info(f"[FETCH] VT: Fetched {len(files)} files")
-        return files
-
-    @retry_with_backoff(max_retries=MAX_RETRIES)
-    def _fetch_recent_urls(self, limit: int) -> List[Dict]:
-        """
-        Fetch recent URLs analyzed by VirusTotal using search API.
-
-        Args:
-            limit: Maximum number of URLs to fetch
-
-        Returns:
-            List of URL dicts
-        """
-        logger.info(f"Fetching {limit} recent URLs from VirusTotal...")
-
-        # Rate limit check
-        self.rate_limiter.wait_if_needed()
-
-        # Use search endpoint instead of /urls (v3 API change)
-        response = request_with_rate_limit_retries(
-            "GET",
-            f"{self.base_url}/search",
-            session=self.session,
-            params={"query": "type:url+tag:malware", "limit": min(limit, 10)},
-            timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT),
-            verify=SSL_VERIFY,
-            max_rate_limit_retries=3,
-            fallback_delay_sec=60.0,
-            retry_on_403=False,
-            context="VT",
-        )
-
-        if response.status_code == 401:
-            raise requests.exceptions.HTTPError("Invalid VirusTotal API key")
-        elif response.status_code != 200:
-            raise requests.exceptions.HTTPError(f"VT API error: {response.status_code}")
-
-        data = response.json()
-        urls = data.get("data", [])
-
-        logger.info(f"[FETCH] VT: Fetched {len(urls)} URLs")
-        return urls
-
-    def _fetch_known_malware(self, limit: int) -> List[Dict]:
-        """
-        Fetch known malicious indicators as fallback when search doesn't work.
-        This queries specific known malware samples from VT.
-        Note: Free tier has limited search, so we use known samples.
-
-        Args:
-            limit: Maximum number to fetch
-
-        Returns:
-            List of processed indicators
-        """
-        logger.info("Fetching known malware samples from VirusTotal (fallback)...")
-
-        # Known malicious hashes (publicly known malware)
-        # Free tier: 4 requests/minute - we limit to 4 per run
-        # These are queried individually - rate limit applies
-        known_malware_hashes = [
-            "44d88612fea8a8f36de82e1278abb02f",  # EICAR test hash
-            "098f6bcd4621d373cade4e832627b4f6",  # Test hash
-            "5d41402abc4b2a76b9719d911017c592",  # 'hello' hash
-            "5ebe2294ecd0e0f08eab7690d2a6ee69",  # 'secret' hash
-        ]
-
-        processed = []
-
-        for _i, hash_val in enumerate(known_malware_hashes[:limit]):
-            # Rate limit check
-            self.rate_limiter.wait_if_needed()
-
-            try:
-                response = request_with_rate_limit_retries(
-                    "GET",
-                    f"{self.base_url}/files/{hash_val}",
-                    session=self.session,
-                    timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT),
-                    verify=SSL_VERIFY,
-                    max_rate_limit_retries=3,
-                    fallback_delay_sec=60.0,
-                    retry_on_403=False,
-                    context="VT",
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    file_data = data.get("data", {})
-                    processed_item = self._process_file(file_data)
-                    if processed_item:
-                        processed.append(processed_item)
-                        logger.info(f"  ✓ Queried: {hash_val[:16]}...")
-
-            except Exception as e:
-                logger.warning(f"  ✗ Error querying {hash_val[:16]}: {e}")
-
-        logger.info(f"[FETCH] VT Fallback: Processed {len(processed)} known malware samples")
-        return processed
-
-    @retry_with_backoff(max_retries=MAX_RETRIES)
-    def _fetch_ip_addresses(self, limit: int) -> List[Dict]:
-        """
-        Fetch recent IP addresses from VirusTotal (via comments or intelligence).
-        Note: This requires VT Intelligence subscription for full access.
-
-        Args:
-            limit: Maximum number of IPs to fetch
-
-        Returns:
-            List of IP dicts (may be empty for free tier)
-        """
-        # For free tier, we can't easily get a list of IPs
-        # This would require VT Intelligence subscription
-        logger.info("VT IP collection requires Intelligence subscription - skipping for free tier")
-        return []
-
     def _process_file(self, file_data: Dict) -> Optional[Dict]:
         """
         Process a VirusTotal file entry into EdgeGuard format.
@@ -500,94 +378,150 @@ class VTCollector:
             logger.warning(f"Error processing VT file: {e}")
             return None
 
-    def _process_url(self, url_data: Dict) -> Optional[Dict]:
+    # ------------------------------------------------------------------
+    # Candidate selection (MISP) and lookups (VirusTotal)
+    # ------------------------------------------------------------------
+
+    def _candidate_hashes(self, wanted: int, budget: VirusTotalBudget) -> List[str]:
+        """Return up to *wanted* SHA-256 values from MISP that still lack VirusTotal enrichment.
+
+        Uses ``attributes/restSearch`` on the collector's MISP instance: type ``sha256``,
+        attribute timestamp within ``EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS`` days, and not
+        already tagged with the VirusTotal source tag. Hashes recorded in the ledger
+        (looked up before, found or not) are excluded. Raises on MISP transport or
+        HTTP errors — the caller turns that into a skipped run.
         """
-        Process a VirusTotal URL entry into EdgeGuard format.
-
-        Args:
-            url_data: VT URL data dict
-
-        Returns:
-            Processed indicator dict or None
-        """
-        try:
-            attrs = url_data.get("attributes", {})
-            url_id = url_data.get("id", "")
-
-            # Get the URL
-            url = attrs.get("url", "")
-            if not url:
-                # Try to decode base64 URL ID
-                try:
-                    import base64
-
-                    url = base64.urlsafe_b64decode(url_id.encode()).decode("utf-8")
-                except (ValueError, UnicodeDecodeError, TypeError):
-                    url = url_id
-
-            if not url:
-                return None
-
-            # Detect zones from URL and page content
-            text_to_analyze = url
-            if attrs.get("title"):
-                text_to_analyze += " " + str(attrs["title"])
-            if attrs.get("last_final_url"):
-                text_to_analyze += " " + str(attrs["last_final_url"])
-
-            zones = detect_zones_from_text(text_to_analyze)
-
-            # Calculate confidence
-            confidence = self._calculate_confidence(attrs)
-
-            # PR-M2 §4-F4 (HIGH): same honest-NULL pattern as the file
-            # path above — see that comment for full reasoning. Omit
-            # ``first_seen`` from the URL item when VT's
-            # ``first_submission_date`` is absent or zero.
-            first_seen_ts = attrs.get("first_submission_date", 0)
-            first_seen = datetime.fromtimestamp(first_seen_ts, tz=timezone.utc).isoformat() if first_seen_ts else None
-            # PR-M2: also propagate last_submission_date for URLs.
-            last_seen_ts = attrs.get("last_submission_date", 0)
-            last_seen = datetime.fromtimestamp(last_seen_ts, tz=timezone.utc).isoformat() if last_seen_ts else None
-
-            # Get categories
-            categories = attrs.get("categories", {})
-            category_list = [f"{k}:{v}" for k, v in list(categories.items())[:3]]
-
-            # Build description
-            title = attrs.get("title", "")
-            last_final_url = attrs.get("last_final_url", "")
-
-            description_parts = []
-            if title:
-                description_parts.append(f"Title: {title}")
-            if last_final_url and last_final_url != url:
-                description_parts.append(f"Final URL: {last_final_url}")
-            if category_list:
-                description_parts.append(f"Categories: {', '.join(category_list)}")
-
-            description = " | ".join(description_parts) if description_parts else "Malicious URL detected by VirusTotal"
-
-            url_item: Dict[str, Any] = {
-                "indicator_type": "url",
-                "value": url,
-                "zone": zones,
-                "tag": self.tag,
-                "source": [self.tag],
-                "confidence_score": confidence,
-                "description": description[:500],
-                "vt_reputation": attrs.get("reputation", 0),
-                "vt_last_analysis_stats": attrs.get("last_analysis_stats", {}),
+        days = candidate_days()
+        url = f"{self.misp_writer.url}/attributes/restSearch"
+        out: List[str] = []
+        seen: set = set()
+        page = 1
+        while len(out) < wanted and page <= MISP_CANDIDATE_MAX_PAGES:
+            payload = {
+                "returnFormat": "json",
+                "type": "sha256",
+                "tags": [f"!{self.misp_tag}"],
+                "timestamp": f"{days}d",
+                "page": page,
+                "limit": MISP_CANDIDATE_PAGE_SIZE,
             }
-            if first_seen is not None:
-                url_item["first_seen"] = first_seen
-            if last_seen is not None:
-                url_item["last_seen"] = last_seen
-            return url_item
+            response = self.misp_writer.session.post(
+                url,
+                json=payload,
+                verify=self.misp_writer.verify_ssl,
+                timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT * 2),
+            )
+            response.raise_for_status()
+            data = response.json()
+            resp = data.get("response", data) if isinstance(data, dict) else data
+            rows: List[Any] = []
+            if isinstance(resp, list):
+                rows = resp
+            elif isinstance(resp, dict):
+                raw = resp.get("Attribute")
+                if isinstance(raw, list):
+                    rows = raw
+                elif isinstance(raw, dict):
+                    rows = [raw]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                value = str(row.get("value", "")).strip().lower()
+                if not _is_sha256(value) or value in seen or budget.already_looked_up(value):
+                    continue
+                seen.add(value)
+                out.append(value)
+                if len(out) >= wanted:
+                    break
+            if len(rows) < MISP_CANDIDATE_PAGE_SIZE:
+                break
+            page += 1
+        logger.info(
+            "VirusTotal: %d candidate sha256 hashes awaiting enrichment (MISP window %d days, %d page(s) read)",
+            len(out),
+            days,
+            page,
+        )
+        return out
 
-        except Exception as e:
-            logger.warning(f"Error processing VT URL: {e}")
-            return None
+    def _lookup_hashes(self, candidates: List[str], budget: VirusTotalBudget) -> Tuple[List[Dict], Dict[str, Any]]:
+        """Look up *candidates* one by one within the budget; returns (items, run summary).
+
+        HTTP 200 → enriched item; 404 → remembered as unknown to VirusTotal (never
+        retried); 429 → the day is marked exhausted and the run stops; 401/403 →
+        ``requests.HTTPError`` (the caller skips the source as auth-denied); other
+        errors are counted and the run stops after
+        :data:`MAX_CONSECUTIVE_LOOKUP_ERRORS` consecutive ones.
+        """
+        items: List[Dict] = []
+        summary: Dict[str, Any] = {"lookups": 0, "found": 0, "not_found": 0, "errors": 0, "stopped": None}
+        consecutive_errors = 0
+        for sha256 in candidates:
+            if budget.is_exhausted():
+                summary["stopped"] = "daily_budget"
+                logger.warning(
+                    "%s daily budget reached during the run (%s) — stopping lookups; the workflow continues",
+                    QUOTA_LOG_PREFIX,
+                    budget.summary(),
+                )
+                break
+            self.rate_limiter.wait_if_needed()
+            try:
+                response = request_with_rate_limit_retries(
+                    "GET",
+                    f"{self.base_url}/files/{sha256}",
+                    session=self.session,
+                    timeout=(VT_CONNECT_TIMEOUT, VT_REQUEST_TIMEOUT),
+                    verify=SSL_VERIFY,
+                    max_rate_limit_retries=1,
+                    fallback_delay_sec=60.0,
+                    retry_on_403=False,
+                    context="VT",
+                )
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                summary["errors"] += 1
+                consecutive_errors += 1
+                logger.warning("VirusTotal lookup %s… failed: %s", sha256[:16], exc)
+                if consecutive_errors >= MAX_CONSECUTIVE_LOOKUP_ERRORS:
+                    summary["stopped"] = "transport_errors"
+                    break
+                continue
+            code = response.status_code
+            if code == 429:
+                budget.mark_exhausted(f"HTTP 429 after {summary['lookups']} lookups this run")
+                budget.save()
+                summary["stopped"] = "rate_limited"
+                break
+            if code in (401, 403):
+                raise requests.exceptions.HTTPError(
+                    f"VirusTotal HTTP {code}: API key rejected or access denied", response=response
+                )
+            budget.consume(1)
+            summary["lookups"] += 1
+            if code == 200:
+                consecutive_errors = 0
+                budget.remember(sha256, "ok")
+                try:
+                    file_data = response.json().get("data", {})
+                except ValueError:
+                    file_data = {}
+                item = self._process_file(file_data) if isinstance(file_data, dict) else None
+                if item:
+                    items.append(item)
+                    summary["found"] += 1
+                continue
+            if code == 404:
+                consecutive_errors = 0
+                budget.remember(sha256, "not_found")
+                summary["not_found"] += 1
+                continue
+            summary["errors"] += 1
+            consecutive_errors += 1
+            logger.warning("VirusTotal lookup %s… answered HTTP %s", sha256[:16], code)
+            if consecutive_errors >= MAX_CONSECUTIVE_LOOKUP_ERRORS:
+                summary["stopped"] = "http_errors"
+                break
+        return items, summary
 
     def collect(
         self,
@@ -597,45 +531,21 @@ class VTCollector:
         baseline_days: int = 365,
     ) -> Any:
         """
-        Collect indicators from VirusTotal and optionally push to MISP.
+        Enrich MISP hashes with VirusTotal lookups and optionally push the results to MISP.
 
         Args:
-            limit: Maximum number of indicators to collect
+            limit: Maximum number of lookups for this run (further bounded by
+                ``EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN`` and the daily budget)
             push_to_misp: Whether to push collected data to MISP
-            baseline: If True, do not substitute incremental default when limit is None
+            baseline: Baseline runs pass ``limit=None``; the per-run cap still applies
+                (the daily quota does not care which DAG spends it)
             baseline_days: Reserved for parity with other collectors
 
         Returns:
             List of processed items or status dict
         """
         limit = resolve_collection_limit(limit, "virustotal", baseline=baseline)
-        # PR-M1 §7-H6: bumped from 20 to 100 (still well inside the free-tier
-        # daily cap).
-        #
-        # VirusTotal public API quota (documented at
-        # https://docs.virustotal.com/reference/public-vs-premium-api):
-        #   * 4 requests / minute
-        #   * 500 requests / day
-        #
-        # At ``limit=100`` the collector makes ~50 file lookups + ~50 URL
-        # lookups + a couple of search/fallback calls ≈ 100-105 API calls.
-        # That is:
-        #   * ~26 min wall-clock at 4 req/min (acceptable for a baseline run)
-        #   * well under the 500/day daily quota with headroom for
-        #     incremental runs throughout the rest of the day
-        #
-        # The previous default of 20 dated from the initial proof-of-concept
-        # wiring where we deliberately kept the ceiling tiny.  Bumping to
-        # 100 gives a useful enrichment sample while staying safely
-        # ``free-tier-compatible``.  For genuine bulk / historical depth
-        # the Premium API (no 4 req/min cap, per-step daily quotas) is
-        # required — documented in docs/COLLECTORS.md under "VT is
-        # enrichment-only on the free tier".
-        if limit is None:
-            limit = 100
 
-        # Optional source: no key → DAG succeeds with skipped + skip metrics (see run_collector_with_metrics)
-        # Re-check at collect() time (handles post-init assignment + placeholders)
         if not optional_api_key_effective(self.api_key, VIRUSTOTAL_API_KEY_PLACEHOLDERS):
             logger.warning(
                 "VirusTotal: No API key — skipping collection (optional source). "
@@ -653,86 +563,117 @@ class VTCollector:
                 )
             return []
 
+        budget = VirusTotalBudget()
+        per_run = max_lookups_per_run()
+        allowed = per_run if limit is None else min(limit, per_run)
+        allowed = min(allowed, budget.remaining)
+        if budget.is_exhausted() or allowed <= 0:
+            logger.warning(
+                "%s skipping this run — %s; lookups resume after 00:00 UTC (task success; downstream continues)",
+                QUOTA_LOG_PREFIX,
+                budget.summary(),
+            )
+            if push_to_misp:
+                return make_skipped_optional_source(
+                    "virustotal",
+                    skip_reason=f"VirusTotal daily lookup budget exhausted ({budget.summary()})",
+                    skip_reason_class="virustotal_daily_budget",
+                )
+            return []
+        logger.info(
+            "%s %s — this run performs at most %d lookups (per-run cap %d%s)",
+            QUOTA_LOG_PREFIX,
+            budget.summary(),
+            allowed,
+            per_run,
+            "" if limit is None else f", task limit {limit}",
+        )
+
         try:
-            processed = []
+            candidates = self._candidate_hashes(allowed, budget)
+        except Exception as exc:
+            logger.warning("VirusTotal: listing candidate hashes in MISP failed — skipping this run: %s", exc)
+            if push_to_misp:
+                return make_skipped_optional_source(
+                    "virustotal",
+                    skip_reason=f"could not list candidate hashes in MISP: {type(exc).__name__}: {exc}",
+                    skip_reason_class="virustotal_candidates_unavailable",
+                )
+            raise
+        if not candidates:
+            logger.info(
+                "VirusTotal: no sha256 indicators awaiting enrichment in MISP (window %d days) — nothing to look up",
+                candidate_days(),
+            )
+            return self._return_status(True, 0) if push_to_misp else []
 
-            # PR-M1 §7-H6: the inner per-batch caps were hard-coded at 10
-            # which silently bound ``limit`` to 20 (10 files + 10 URLs)
-            # regardless of the caller's ask.  Raised to 50 so the new
-            # default of ``limit=100`` actually flows through to the
-            # fetchers; the per-minute rate limit (4 req/min) and the
-            # daily quota (500/day) are the real ceilings and are
-            # comfortably respected even at 50+50.
-            # ~(50 files + 50 URLs) × 1 call each ≈ 100 API calls per
-            # baseline run; 500/day quota keeps 4 headroom runs/day.
-            files_limit = min(limit // 2, 50)  # Half for files, capped at 50
-            if files_limit > 0:
-                try:
-                    files = self._fetch_recent_files(files_limit)
-                    for file_data in files:
-                        processed_item = self._process_file(file_data)
-                        if processed_item:
-                            processed.append(processed_item)
-                except Exception as e:
-                    logger.warning(f"Error fetching files: {e}")
+        try:
+            items, summary = self._lookup_hashes(candidates, budget)
+            budget.save()
+            logger.info(
+                "%s run finished: %d lookups (%d enriched, %d unknown to VirusTotal, %d errors)%s — %s",
+                QUOTA_LOG_PREFIX,
+                summary["lookups"],
+                summary["found"],
+                summary["not_found"],
+                summary["errors"],
+                f", stopped early: {summary['stopped']}" if summary["stopped"] else "",
+                budget.summary(),
+            )
 
-            # If no files found, try fallback with known malicious hashes
-            if not processed:
-                logger.info("VT: Search returned no results, trying known malware hashes...")
-                processed = self._fetch_known_malware(limit)
-
-            # Fetch recent URLs (consumes 1 API call)
-            urls_limit = min(limit - len(processed), 50)  # Remaining for URLs, capped at 50
-            if urls_limit > 0:
-                try:
-                    urls = self._fetch_recent_urls(urls_limit)
-                    for url_data in urls:
-                        processed_item = self._process_url(url_data)
-                        if processed_item:
-                            processed.append(processed_item)
-                except Exception as e:
-                    logger.warning(f"Error fetching URLs: {e}")
-
-            # Deduplicate by value
-            seen = set()
-            unique = []
-            for item in processed:
+            seen: set = set()
+            unique: List[Dict] = []
+            for item in items:
                 value = item.get("value", "")
                 if value and value not in seen:
                     seen.add(value)
                     unique.append(item)
-
             logger.info(f"[OK] VirusTotal: Processed {len(unique)} unique indicators")
-            if not unique and optional_api_key_effective(self.api_key, VIRUSTOTAL_API_KEY_PLACEHOLDERS):
-                logger.warning(
-                    "VirusTotal returned 0 indicators despite valid API key — verify API key and connectivity"
+
+            if not push_to_misp:
+                return unique
+            if not unique and summary["stopped"] == "rate_limited":
+                return make_skipped_optional_source(
+                    "virustotal",
+                    skip_reason=f"VirusTotal answered HTTP 429 before any lookup succeeded ({budget.summary()})",
+                    skip_reason_class="virustotal_rate_limited",
                 )
-
-            # Push to MISP if requested
-            if push_to_misp:
-                if not unique:
-                    return self._return_status(True, 0, failed=0)
-
+            if not unique:
+                status = self._return_status(True, 0, failed=0)
+            else:
                 success, failed = self.misp_writer.push_items(unique)
-
                 if success > 0:
                     logger.info(f"[OK] VirusTotal: Successfully pushed {success} items to MISP")
                 if failed > 0:
                     logger.warning(f"[WARN] VirusTotal: Failed to push {failed} items to MISP")
-
-                return status_after_misp_push("virustotal", len(unique), success, failed)
-            else:
-                return unique
+                status = status_after_misp_push("virustotal", len(unique), success, failed)
+            status.update(
+                {
+                    "vt_lookups": summary["lookups"],
+                    "vt_enriched": summary["found"],
+                    "vt_unknown": summary["not_found"],
+                    "vt_lookup_errors": summary["errors"],
+                    "vt_stopped": summary["stopped"],
+                    "vt_budget_used": budget.used,
+                    "vt_budget_remaining": budget.remaining,
+                }
+            )
+            return status
 
         except requests.exceptions.Timeout as e:
             error_msg = f"Timeout: {e}"
             logger.error(f"VirusTotal timeout: {e}")
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
         except requests.exceptions.ConnectionError as e:
             error_msg = f"Connection error: {e}"
             logger.error(f"VirusTotal connection error: {e}")
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
         except requests.exceptions.HTTPError as e:
+            budget.save()
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal: auth/access denied — skipping (optional): {e}")
                 return make_skipped_optional_source(
@@ -742,8 +683,11 @@ class VTCollector:
                 )
             error_msg = f"HTTP error: {e}"
             logger.error(f"VirusTotal HTTP error: {e}")
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
         except Exception as e:
+            budget.save()
             if push_to_misp and is_auth_or_access_denied(e):
                 logger.warning(f"VirusTotal: auth/access denied — skipping (optional): {e}")
                 return make_skipped_optional_source(
@@ -753,7 +697,9 @@ class VTCollector:
                 )
             error_msg = f"{type(e).__name__}: {e}"
             logger.error(f"VirusTotal collection error: {type(e).__name__}: {e}")
-            return self._return_status(False, 0, error_msg)
+            if push_to_misp:
+                return self._return_status(False, 0, error_msg)
+            raise
 
     def _return_status(self, success: bool, count: int, error: str = None, failed: int = 0) -> Dict[str, Any]:
         """Return standardized status dict."""
@@ -761,7 +707,7 @@ class VTCollector:
 
 
 def test_vt_collector() -> Dict[str, Any]:
-    """Test VirusTotal collection and MISP push"""
+    """Manual check: VirusTotal health, then one bounded enrichment run."""
     collector = VTCollector()
 
     # First check health
@@ -773,8 +719,8 @@ def test_vt_collector() -> Dict[str, Any]:
         print("⚠️ VirusTotal API is not healthy - skipping collection test")
         return {"health": health, "collection": None}
 
-    # Test collection
-    result = collector.collect(limit=10)  # VT: Free tier = 4 req/min (max 10 safe)
+    # Bounded run (free tier: 4 lookups/min; the daily budget ledger is honoured)
+    result = collector.collect(limit=10)
     print("\n📥 VirusTotal Test Result:")
     if isinstance(result, list):
         print(f"Collected {len(result)} indicators")

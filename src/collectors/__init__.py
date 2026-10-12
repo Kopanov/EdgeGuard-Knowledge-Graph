@@ -20,8 +20,8 @@ Available Collectors:
 - MISPWriter: Pushes indicators to MISP
 
 Sector-Specific Collectors (Placeholders):
-- EnergyPlaceholderCollector: Placeholder for E-ISAC feeds (requires membership)
-- HealthcarePlaceholderCollector: Placeholder for H-ISAC feeds (requires membership)
+- EnergyPlaceholderCollector: Placeholder (member-only EE-ISAC feeds are not planned)
+- HealthcarePlaceholderCollector: Placeholder (member-only HC3 / Health-ISAC feeds are not planned)
 - FeodoCollector: Feodo Tracker feeds
 - SSLBlacklistCollector: SSL Blacklist feeds
 

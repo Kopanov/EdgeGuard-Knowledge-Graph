@@ -105,51 +105,32 @@ class TestNvdBaselineIgnoresRunLevelLimit:
 
 
 # ===========================================================================
-# §7-H6 — VirusTotal: default bumped from 20 to 100
+# §7-H6 — VirusTotal: per-run lookups follow the free-tier budget
 # ===========================================================================
 
 
 class TestVirusTotalDefaultLimit:
-    """The ``vt_collector`` baseline default when ``limit is None``
-    MUST be 100 (raised from 20) and the inner per-batch caps raised
-    from 10 to 50 so the new default actually flows through."""
+    """``vt_collector`` performs lookups (free tier: 4/min, 500/day). A
+    baseline run passes ``limit=None``; that must resolve to the per-run cap
+    (``EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN``, default 60), never to an
+    unbounded run and never to the pre-2026-10 incremental default of 20."""
 
-    @pytest.fixture(scope="class")
-    def source(self) -> str:
-        return (SRC / "collectors" / "vt_collector.py").read_text()
+    def test_baseline_limit_none_resolves_to_the_per_run_cap(self, tmp_path, monkeypatch) -> None:
+        from unittest.mock import MagicMock
 
-    def test_default_limit_is_100_not_20(self, source: str) -> None:
-        """The ``if limit is None: limit = <N>`` default must be 100."""
-        start = source.find("def collect(")
-        assert start != -1
-        end = source.find("\n    def ", start + 1)
-        body = source[start:end]
-        # Positive pin: new default
-        assert "limit = 100" in body, "VT baseline default must be bumped to 100"
-        # Negative pin: old default must be gone from the active substitution
-        # (the comment mentioning the old value is allowed).
-        for line in body.splitlines():
-            stripped = line.lstrip()
-            if stripped.startswith("#"):
-                continue
-            if stripped == "limit = 20":
-                raise AssertionError(
-                    f"Regression: pre-PR-M1 VT default ``limit = 20`` found in "
-                    f"active (non-comment) code: {line.strip()!r}"
-                )
+        from collectors import vt_collector as mod
+        from collectors.virustotal_budget import MAX_LOOKUPS_PER_RUN_DEFAULT
 
-    def test_inner_file_batch_cap_raised_to_50(self, source: str) -> None:
-        """The files-per-run cap of 10 must be raised to 50 so
-        ``limit=100`` is not silently bounded by the inner batch cap."""
-        assert "files_limit = min(limit // 2, 50)" in source, (
-            "VT inner files cap must be 50 so limit=100 flows through (was 10)"
-        )
-
-    def test_inner_url_batch_cap_raised_to_50(self, source: str) -> None:
-        """Same for URLs."""
-        assert "urls_limit = min(limit - len(processed), 50)" in source, (
-            "VT inner URLs cap must be 50 so limit=100 flows through (was 10)"
-        )
+        monkeypatch.setenv("EDGEGUARD_VIRUSTOTAL_BUDGET_PATH", str(tmp_path / "vt.json"))
+        monkeypatch.delenv("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", raising=False)
+        monkeypatch.delenv("EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET", raising=False)
+        vt = mod.VTCollector(misp_writer=MagicMock())
+        vt.api_key = "k" * 64
+        wanted: list[int] = []
+        monkeypatch.setattr(vt, "_candidate_hashes", lambda n, budget: wanted.append(n) or [])
+        vt.collect(limit=None, push_to_misp=True, baseline=True)
+        assert wanted == [MAX_LOOKUPS_PER_RUN_DEFAULT]
+        assert MAX_LOOKUPS_PER_RUN_DEFAULT == 60
 
 
 # ===========================================================================

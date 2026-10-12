@@ -176,7 +176,7 @@ class HealthcarePlaceholderCollector:
                 skip_reason=(
                     "Healthcare sector feed is a placeholder — no active feeds are wired yet. "
                     "See src/collectors/healthcare_feed_collector.py docstring for planned "
-                    "sources (HC3, FDA, H-ISAC, national healthcare CERTs). "
+                    "sources (HC3, FDA, H-ISAC, national healthcare CERTs; member-only feeds are not planned). "
                     "Public healthcare advisories are already collected via cisa_collector."
                 ),
                 skip_reason_class="placeholder",

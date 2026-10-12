@@ -15,7 +15,7 @@
 | 2 | NVD | ~500 | ✅ Auto-tagged | CVE database | ✅ Active |
 | 3 | CISA KEV | ~500 | ✅ Auto-tagged | Known exploits | ✅ Active |
 | 4 | MITRE ATT&CK | ~300 | N/A | TTPs & relationships | ✅ Active |
-| 5 | VirusTotal | TBD | ✅ Auto-tagged | File/URL analysis | ✅ Active |
+| 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
 | 6 | ThreatFox | TBD | ✅ Auto-tagged | Malware IOCs | ✅ Active |
 | 7 | AbuseIPDB | TBD | ✅ Auto-tagged | IP reputation | ✅ Active |
 | 8 | URLhaus | ~500 | ✅ Auto-tagged | Malware URLs | ✅ Active |
@@ -208,11 +208,11 @@
 ---
 
 ### 8. Feodo Tracker
-**Items:** 3 | **Zone:** Finance 100%
+**Items:** 30-day list: a handful of active C2s; complete history (baseline): several thousand rows | **Zone:** Finance 100%
 
 | Attribute | Value |
 |-----------|-------|
-| URL | https://feodotracker.abuse.ch/downloads/ipblocklist.csv |
+| URL | `ipblocklist.csv` (C2s active in the last 30 days — regular runs); `ipblocklist_aggressive.csv` (complete history — baseline runs) |
 | Format | CSV |
 | Auth | None (public) |
 | Update | Daily |
