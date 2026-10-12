@@ -1991,6 +1991,8 @@ def run_build_relationships(**context):
     # Success: output already streamed to the task log line-by-line
     # by the helper; no final stdout dump needed.
     logger.info("[build_relationships] complete (exit 0)")
+    # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
+    return {"built": True, "returncode": returncode}
 
 
 def run_enrichment_jobs(**context):
@@ -2622,6 +2624,8 @@ def run_baseline_full_sync(**context):
         )
         raise AirflowException(f"Baseline full MISP→Neo4j sync failed: {detail}")
     logger.info("[BASELINE] Full sync complete")
+    # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
+    return {"synced": True}
 
 
 def run_baseline_enrichment(**context):
@@ -2639,6 +2643,8 @@ def run_baseline_enrichment(**context):
         raise AirflowException(f"Baseline enrichment failed: {e}")
     finally:
         client.close()
+    # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
+    return {"enriched": True}
 
 
 def assert_baseline_postconditions(**context):
@@ -2743,12 +2749,32 @@ def assert_baseline_postconditions(**context):
         except Exception as _ctx_err:
             # Context introspection is best-effort — if Airflow internals
             # change shape we don't want to BLOCK the invariant check that
-            # would have run anyway. Log and continue.
+            # would have run anyway.
+            # Airflow 3's RuntimeTaskInstance has no get_dagrun(): on the 2026-10-12 smoke run
+            # this branch logged "running invariants anyway", the invariants passed on the synced
+            # graph and the run ended success with run_enrichment_jobs failed. Fall back to the
+            # XCom markers the chain tasks return on success and FAIL (not skip) when one is
+            # missing: Airflow derives the run state from the leaf tasks, and a skipped leaf
+            # counts as success.
             logger.warning(
-                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); running invariants anyway.",
+                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); checking the chain's XCom markers instead.",
                 type(_ctx_err).__name__,
                 _ctx_err,
             )
+            missing: list[str] = []
+            for upstream_task_id in sorted(_BASELINE_CRITICAL_CHAIN):
+                try:
+                    marker = ti.xcom_pull(task_ids=upstream_task_id)
+                except Exception as _xcom_err:
+                    logger.warning("[BASELINE-POSTCHECK] XCom pull for %s failed: %s", upstream_task_id, _xcom_err)
+                    marker = None
+                if not marker:
+                    missing.append(upstream_task_id)
+            if missing:
+                raise AirflowException(
+                    f"[BASELINE-POSTCHECK] upstream task(s) {missing} did not succeed (no XCom marker) — "
+                    "the baseline is incomplete; fix the failed task and clear it to resume the run"
+                )
 
     client = Neo4jClient()
     violations = []
