@@ -31,6 +31,8 @@ COLLECT_SOURCES_CANONICAL: FrozenSet[str] = frozenset(
         "sslbl",
         # CISA ICS advisories (2026-10) — flag-guarded by EDGEGUARD_ENABLE_CISA_ICS
         "cisa_ics",
+        # MalwareBazaar (2026-10) — flag-guarded by EDGEGUARD_ENABLE_MALWAREBAZAAR
+        "malwarebazaar",
     }
 )
 

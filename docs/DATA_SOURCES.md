@@ -1,7 +1,7 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-10-12  
-**Total Sources:** 12 (10 active + 2 placeholders) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
+**Last Updated:** 2026-10-12 (MalwareBazaar row 14 added)  
+**Total Sources:** 14 (10 active + 2 placeholders + 2 flag-guarded, off by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
 
@@ -24,6 +24,7 @@
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
 | 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
+| 14 | MalwareBazaar | ~1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label), ≤ 500 pushed per run | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) — added 2026-10 |
 
 **Note:** Energy and Healthcare collectors are placeholders requiring ISAC membership (ENTSO-E, H-ISAC/EHFC). CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
 
@@ -146,6 +147,30 @@
 - Sector names come from CISA's own note in the advisory; the keyword detector is not used
 
 **Safety:** own circuit breaker + rate limiter, per-file failures counted and skipped, baseline sanity floor (`EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES`, default 50) raises a transient error → task skipped + alert rather than a thin dataset. See [COLLECTORS.md §12](COLLECTORS.md#12-cisa-ics-advisories-collector).
+
+---
+
+### 4c. MalwareBazaar (abuse.ch) — flag-guarded, added 2026-10
+**Items:** one `sha256` indicator per sample; the recent export holds the samples of the last 48 hours (1,027 rows on 2026-10-12: 458 Mirai, 265 without a label) and at most `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) are pushed per run | **Zone:** `detect_zones_from_text()` on the family label (`global` when the label is `n/a`)
+
+| Attribute | Value |
+|-----------|-------|
+| URL | `https://bazaar.abuse.ch/export/csv/recent/` — per `src/collectors/global_feed_collector.py` (`MalwareBazaarCollector`). The full export (`/export/csv/full/`) is the complete history and is not used |
+| Format | CSV with `#` comment lines; columns `first_seen_utc, sha256_hash, md5_hash, sha1_hash, reporter, file_name, file_type_guess, mime_type, signature, clamav, vtpercent, imphash, ssdeep, tlsh` |
+| Auth | None required; a configured `THREATFOX_API_KEY` (the abuse.ch Auth-Key) is sent as `Auth-Key` |
+| Update | Daily (`edgeguard_daily` → `collect_malwarebazaar`) and baseline tier 2, only when `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`; both read the recent export, so the history builds up over the daily runs |
+| Classification | ✅ `detect_zones_from_text()` on `signature` |
+| Terms | Free of charge for commercial and non-commercial use (https://bazaar.abuse.ch/faq/#tos) |
+
+**What we get:**
+- sha256 (the indicator), md5 and sha1 of the sample
+- Family label (`signature`, "n/a" when unknown) → `malware_family` → `Indicator → Malware` `INDICATES` edges (`match_type = malware_family`), the same path as the ThreatFox family
+- File name, file type guess, MIME type, reporter, sample page URL
+- `first_seen_utc` as source-truthful `first_seen` (tz-aware UTC)
+
+**Selection:** labelled samples are kept before unlabelled ones, then the list is cut at the per-run cap (and at the regular collection limit when that is lower).
+
+**Safety:** own circuit breaker + rate limiter; flag off → skipped status without an HTTP request; 401/403 → skipped (`malwarebazaar_auth_denied`); 429 after the Retry-After retries, 5xx and timeouts → transient error → task skipped + alert. See [COLLECTORS.md §13](COLLECTORS.md#13-malwarebazaar-collector).
 
 ---
 

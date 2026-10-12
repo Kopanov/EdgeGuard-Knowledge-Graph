@@ -935,6 +935,7 @@ class MISPToNeo4jSync:
         "SSL-Blacklist": "ssl_blacklist",
         "URLhaus": "urlhaus",
         "ThreatFox": "threatfox",
+        "MalwareBazaar": "malwarebazaar",  # 2026-10: MalwareBazaar collector (sha256 samples, family label)
     }
 
     # MISP attribute type to EdgeGuard type mapping

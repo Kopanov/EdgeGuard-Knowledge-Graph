@@ -388,6 +388,25 @@ _REGISTRY: Tuple[Source, ...] = (
         # timestamps — a genuine source-truthful first/last claim.
         reliable_first_seen=True,
     ),
+    # MalwareBazaar (abuse.ch, 2026-10): sha256 hashes of recent malware samples with the
+    # family label (``signature``). Flag-guarded (EDGEGUARD_ENABLE_MALWAREBAZAAR, default
+    # OFF) — hence cli_default_enabled=False. No API key is required for the recent export.
+    Source(
+        canonical_id="malwarebazaar",
+        aliases=("bazaar", "mb"),
+        display_name="MalwareBazaar",
+        source_type="threat_intel",
+        reliability=0.7,
+        cli_id="malwarebazaar",
+        api_key_env=None,
+        rate_limit="unlimited",
+        cli_default_enabled=False,
+        cli_description="Malware sample hashes with family labels",
+        misp_tag="source:MalwareBazaar",
+        # first_seen_utc is when MalwareBazaar first saw the sample — a genuine
+        # source-truthful first-seen claim (same treatment as URLhaus / ThreatFox).
+        reliable_first_seen=True,
+    ),
 )
 
 

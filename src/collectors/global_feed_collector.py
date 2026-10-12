@@ -21,6 +21,7 @@ import requests
 from collectors.collector_utils import (
     THREATFOX_API_KEY_PLACEHOLDERS,
     RateLimiter,
+    TransientServerError,
     is_auth_or_access_denied,
     make_skipped_optional_source,
     make_status,
@@ -56,6 +57,45 @@ def get_zones_from_malware(malware_name: str) -> List[str]:
         List of zone names (e.g., ['finance', 'healthcare'] or ['global'] if no match)
     """
     return detect_zones_from_text(malware_name or "")
+
+
+# MalwareBazaar (abuse.ch) — flag-guarded source added 2026-10 (see MalwareBazaarCollector).
+MALWAREBAZAAR_CIRCUIT_BREAKER = get_circuit_breaker("malwarebazaar", failure_threshold=3, recovery_timeout=1800)
+MALWAREBAZAAR_RATE_LIMITER = RateLimiter(min_interval=2.0)  # one export download per run; 2 s guard
+MALWAREBAZAAR_SOURCE_ID = "malwarebazaar"
+# Public "recent" export: samples of the last 48 hours (about 1,000 rows), no API key required.
+# The full export (``/export/csv/full/``) is the complete history and is deliberately not used.
+MALWAREBAZAAR_EXPORT_URL = "https://bazaar.abuse.ch/export/csv/recent/"
+MALWAREBAZAAR_SAMPLE_URL = "https://bazaar.abuse.ch/sample/{sha256}/"
+# Column order of the export (verified 2026-10-12); the header is read from the ``#`` comment
+# line when present so a reordered export still parses by name.
+MALWAREBAZAAR_CSV_COLUMNS = (
+    "first_seen_utc",
+    "sha256_hash",
+    "md5_hash",
+    "sha1_hash",
+    "reporter",
+    "file_name",
+    "file_type_guess",
+    "mime_type",
+    "signature",
+    "clamav",
+    "vtpercent",
+    "imphash",
+    "ssdeep",
+    "tlsh",
+)
+_MALWAREBAZAAR_NA = "n/a"
+_SHA256_HEX_LEN = 64
+
+
+class MalwareBazaarTransientError(TransientServerError):
+    """HTTP 429 / 5xx from the MalwareBazaar export, or an open circuit breaker.
+
+    Subclasses ``TransientServerError`` so ``retry_with_backoff`` retries it and
+    ``run_collector_with_metrics`` classifies it as transient (task skipped with an
+    alert, nothing written) instead of failing the DAG task.
+    """
 
 
 class ThreatFoxCollector:
@@ -545,6 +585,327 @@ class URLhausCollector:
             logger.info(f"[PUSH] URLhaus: Pushed {success} to MISP ({failed} failed)")
             return status_after_misp_push("urlhaus", len(unique), success, failed)
         return out
+
+
+def _malwarebazaar_field(value: Optional[str]) -> str:
+    """Strip an export field and map the literal ``n/a`` to an empty string."""
+    text = (value or "").strip()
+    return "" if text.lower() == _MALWAREBAZAAR_NA else text
+
+
+def _malwarebazaar_first_seen_iso(value: Optional[str]) -> Optional[str]:
+    """``first_seen_utc`` (``YYYY-MM-DD HH:MM:SS``, UTC) → tz-aware ISO-8601; ``None`` when unparseable.
+
+    The export states its timestamps are UTC, so the offset is made explicit here rather
+    than left to the reader. An unparseable value is an honest NULL — never wall-clock now.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+class MalwareBazaarCollector:
+    """
+    Collects malware sample hashes from MalwareBazaar (abuse.ch) — flag-guarded, OFF by default.
+
+    One ``sha256`` indicator per sample from the public **recent** CSV export
+    (``MALWAREBAZAAR_EXPORT_URL``: the last 48 hours, about 1,000 samples). The
+    export needs no API key; when ``THREATFOX_API_KEY`` (the abuse.ch Auth-Key,
+    shared by all abuse.ch platforms) is configured it is sent as ``Auth-Key``.
+    The ``signature`` column is the malware family: it becomes ``malware_family``
+    on the item, travels to MISP inside the ``TF_META`` comment exactly like the
+    ThreatFox family and is rehydrated as ``Indicator.malware_family`` in Neo4j,
+    where ``build_relationships`` step 9 links it to ``Malware`` nodes
+    (``INDICATES``, ``match_type = malware_family``).
+
+    Baseline and regular runs both read the recent export: the full export is the
+    complete history and is far too large for a scheduled task, so the history in
+    MISP/Neo4j builds up over successive daily runs.
+
+    Selection: labelled samples (``signature`` other than ``n/a``) are kept before
+    unlabelled ones, then the list is cut at ``MALWAREBAZAAR_MAX_PER_RUN`` (and at the
+    regular collection limit when that is lower).
+
+    Failure contract (optional source): flag off → skipped status
+    (``malwarebazaar_disabled_by_flag``) without an HTTP request; HTTP 401/403 →
+    skipped (``malwarebazaar_auth_denied``); timeouts, connection errors, HTTP 429
+    after the Retry-After retries and 5xx → ``MalwareBazaarTransientError`` propagates
+    so ``run_collector_with_metrics`` marks the task skipped with an alert; other HTTP
+    errors (for example 404 after an upstream layout change) → ``success=False``.
+    Code defects fail loudly.
+
+    Terms: MalwareBazaar data is free of charge for commercial and non-commercial use
+    (https://bazaar.abuse.ch/faq/#tos).
+    """
+
+    def __init__(self, api_key: Optional[str] = None, misp_writer: MISPWriter = None):
+        """
+        Initialize MalwareBazaar collector.
+
+        Args:
+            api_key: Optional abuse.ch Auth-Key (defaults to ``THREATFOX_API_KEY``; not required)
+            misp_writer: MISPWriter instance for pushing to MISP
+        """
+        self.api_key = api_key if api_key is not None else os.getenv("THREATFOX_API_KEY")
+        self.export_url = MALWAREBAZAAR_EXPORT_URL
+        self.source_name = MALWAREBAZAAR_SOURCE_ID
+        self.misp_writer = misp_writer or MISPWriter()
+
+    # ------------------------------------------------------------------
+    # Flags
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_enabled() -> bool:
+        """``config.ENABLE_MALWAREBAZAAR`` (resolved when ``config`` is imported; tests patch the attribute)."""
+        import config as _config
+
+        return bool(getattr(_config, "ENABLE_MALWAREBAZAAR", False))
+
+    @staticmethod
+    def max_per_run() -> int:
+        """``config.MALWAREBAZAAR_MAX_PER_RUN`` clamped at 0 (``0`` = no per-run cap)."""
+        import config as _config
+
+        try:
+            return max(0, int(getattr(_config, "MALWAREBAZAAR_MAX_PER_RUN", 500)))
+        except (TypeError, ValueError):
+            return 500
+
+    # ------------------------------------------------------------------
+    # HTTP
+    # ------------------------------------------------------------------
+
+    def _headers(self) -> Optional[Dict[str, str]]:
+        key = optional_api_key_effective(self.api_key, THREATFOX_API_KEY_PLACEHOLDERS)
+        return {"Auth-Key": key} if key else None
+
+    @retry_with_backoff(max_retries=3, base_delay=5.0)
+    def _fetch_export(self) -> str:
+        """Download the recent export.
+
+        Raises ``MalwareBazaarTransientError`` (retried) on 429 after the Retry-After
+        retries and on 5xx; plain ``requests.exceptions.HTTPError`` (not retried) on any
+        other non-200 code, so 401/403 reach the auth-denied skip in ``collect``.
+        """
+        response = request_with_rate_limit_retries(
+            "GET",
+            self.export_url,
+            session=None,
+            headers=self._headers(),
+            timeout=(15, 60),  # tuple: connect=15s, read=60s (about 450 KB)
+            verify=SSL_VERIFY,
+            max_rate_limit_retries=3,
+            fallback_delay_sec=30.0,
+            retry_on_403=False,
+            context="MalwareBazaar",
+        )
+        code = response.status_code
+        if code == 200:
+            return response.text
+        if code == 429 or code >= 500:
+            raise MalwareBazaarTransientError(f"MalwareBazaar export HTTP {code}", response=response)
+        response.raise_for_status()
+        # 3xx (redirects are not followed by the shared helper) or any other non-200 code.
+        raise requests.exceptions.HTTPError(f"MalwareBazaar export HTTP {code}", response=response)
+
+    # ------------------------------------------------------------------
+    # Parsing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def parse_export(raw_text: str) -> List[Dict[str, str]]:
+        """Rows of the CSV export as dicts keyed by column name.
+
+        ``#`` comment lines are skipped; the quoted header inside the comment block
+        (``# "first_seen_utc","sha256_hash",...`` — recognised by the ``sha256_hash``
+        column name) overrides the default column order. Fields are quoted and
+        separated by ``, `` (comma + space), hence ``skipinitialspace``. Rows shorter
+        than the ``signature`` column are dropped.
+        """
+        columns = list(MALWAREBAZAAR_CSV_COLUMNS)
+        data_lines: List[str] = []
+        for line in (raw_text or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                header = stripped.lstrip("#").strip()
+                if header.startswith('"'):
+                    names = [c.strip().strip('"') for c in next(csv.reader([header], skipinitialspace=True))]
+                    if "sha256_hash" in names:
+                        columns = names
+                continue
+            data_lines.append(stripped)
+
+        min_fields = columns.index("signature") + 1 if "signature" in columns else len(MALWAREBAZAAR_CSV_COLUMNS)
+        rows: List[Dict[str, str]] = []
+        for parts in csv.reader(data_lines, skipinitialspace=True):
+            if len(parts) < min_fields:
+                continue
+            rows.append({col: (parts[i].strip() if i < len(parts) else "") for i, col in enumerate(columns)})
+        return rows
+
+    def build_item(self, row: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """One ``sha256`` indicator for an export row; ``None`` when the hash is missing or malformed."""
+        sha256 = _malwarebazaar_field(row.get("sha256_hash")).lower()
+        if len(sha256) != _SHA256_HEX_LEN or any(c not in "0123456789abcdef" for c in sha256):
+            return None
+        signature = _malwarebazaar_field(row.get("signature"))
+        file_type = _malwarebazaar_field(row.get("file_type_guess")).lower()
+        zones = get_zones_from_malware(signature) if signature else ["global"]
+        return {
+            "indicator_type": "sha256",
+            "value": sha256,
+            "zone": zones if zones else ["global"],  # zone is an array
+            "tag": MALWAREBAZAAR_SOURCE_ID,
+            "source": [MALWAREBAZAAR_SOURCE_ID],
+            # Source-truthful: when MalwareBazaar first saw the sample (UTC). NULL when absent.
+            "first_seen": _malwarebazaar_first_seen_iso(row.get("first_seen_utc")),
+            "confidence_score": 0.7 if signature else 0.6,
+            # Family label ("n/a" → empty). Reaches Neo4j via TF_META like the ThreatFox family.
+            "malware_family": signature,
+            "md5": _malwarebazaar_field(row.get("md5_hash")).lower(),
+            "sha1": _malwarebazaar_field(row.get("sha1_hash")).lower(),
+            "file_name": _malwarebazaar_field(row.get("file_name")),
+            "file_type": file_type,
+            "mime_type": _malwarebazaar_field(row.get("mime_type")),
+            "reporter": _malwarebazaar_field(row.get("reporter")),
+            # Sample page; also what makes MISPWriter emit the TF_META comment for this item.
+            "reference": MALWAREBAZAAR_SAMPLE_URL.format(sha256=sha256),
+            # Classification label that survives the MISP round-trip (TF_META.tags → tf_tags).
+            "tags": [file_type] if file_type else [],
+        }
+
+    @staticmethod
+    def select_items(items: List[Dict[str, Any]], limit: Optional[int], cap: int) -> List[Dict[str, Any]]:
+        """Labelled samples first (stable order within each group), then cut at ``min(limit, cap)``.
+
+        ``cap`` ≤ 0 means no per-run cap; ``limit`` ``None`` means no regular limit.
+        """
+        labelled = [item for item in items if item.get("malware_family")]
+        unlabelled = [item for item in items if not item.get("malware_family")]
+        ordered = labelled + unlabelled
+        effective: Optional[int] = cap if cap > 0 else None
+        if limit is not None:
+            effective = limit if effective is None else min(limit, effective)
+        return ordered if effective is None else ordered[:effective]
+
+    # ------------------------------------------------------------------
+    # Collect
+    # ------------------------------------------------------------------
+
+    def collect(
+        self, limit: Optional[int] = None, push_to_misp: bool = True, baseline: bool = False, baseline_days: int = 365
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
+        """
+        Fetch the recent export and emit one ``sha256`` indicator per sample.
+
+        Args:
+            limit: Regular collection limit (``resolve_collection_limit`` semantics)
+            push_to_misp: Whether to push collected indicators to MISP
+            baseline: Accepted for the shared collector contract; the recent export is read either way
+            baseline_days: Not applicable (the export has no date parameter); logged only
+
+        Returns:
+            Status dict if ``push_to_misp=True``, else list of indicators.
+        """
+        if not self.is_enabled():
+            logger.info(
+                "MalwareBazaar collector disabled by flag (EDGEGUARD_ENABLE_MALWAREBAZAAR is not true) "
+                "— skipping, 0 items"
+            )
+            if push_to_misp:
+                return make_skipped_optional_source(
+                    MALWAREBAZAAR_SOURCE_ID,
+                    skip_reason="disabled by flag EDGEGUARD_ENABLE_MALWAREBAZAAR",
+                    skip_reason_class="malwarebazaar_disabled_by_flag",
+                )
+            return []
+
+        if baseline:
+            logger.info(
+                "MalwareBazaar baseline: the recent export (last 48 hours) is the only key-free export; "
+                "baseline_days=%d is not applicable and the history accumulates over daily runs",
+                baseline_days,
+            )
+        limit = resolve_collection_limit(limit, MALWAREBAZAAR_SOURCE_ID, baseline=baseline)
+        cap = self.max_per_run()
+
+        if not MALWAREBAZAAR_CIRCUIT_BREAKER.can_execute():
+            logger.warning("MalwareBazaar circuit breaker open - skipping run (transient)")
+            raise MalwareBazaarTransientError("MalwareBazaar circuit breaker open — skipping run")
+
+        MALWAREBAZAAR_RATE_LIMITER.wait_if_needed()
+        try:
+            raw_text = self._fetch_export()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, TransientServerError) as e:
+            # Upstream outage / rate limiting → propagate so run_collector_with_metrics
+            # classifies it as transient (task skipped + alert, nothing written).
+            MALWAREBAZAAR_CIRCUIT_BREAKER.record_failure()
+            logger.error(f"MalwareBazaar transient failure: {type(e).__name__}: {e}")
+            raise
+        except requests.exceptions.HTTPError as e:
+            if is_auth_or_access_denied(e):
+                logger.warning(f"MalwareBazaar: auth/access denied — skipping (optional): {e}")
+                MALWAREBAZAAR_CIRCUIT_BREAKER.record_success()
+                if push_to_misp:
+                    return make_skipped_optional_source(
+                        MALWAREBAZAAR_SOURCE_ID,
+                        skip_reason=str(e),
+                        skip_reason_class="malwarebazaar_auth_denied",
+                    )
+                return []
+            # Other 4xx / unexpected code: permanent for this URL (layout change) — needs an operator.
+            MALWAREBAZAAR_CIRCUIT_BREAKER.record_failure()
+            logger.error(f"MalwareBazaar HTTP error: {e}")
+            if push_to_misp:
+                return make_status(MALWAREBAZAAR_SOURCE_ID, False, count=0, error=str(e))
+            raise
+
+        MALWAREBAZAAR_CIRCUIT_BREAKER.record_success()
+        rows = self.parse_export(raw_text)
+
+        items: List[Dict[str, Any]] = []
+        seen: set = set()
+        malformed = 0
+        for row in rows:
+            item = self.build_item(row)
+            if item is None:
+                malformed += 1
+                continue
+            if item["value"] in seen:
+                continue
+            seen.add(item["value"])
+            items.append(item)
+
+        labelled_count = sum(1 for item in items if item["malware_family"])
+        selected = self.select_items(items, limit, cap)
+        logger.info(
+            f"[OK] MalwareBazaar: {len(rows)} rows → {len(items)} samples "
+            f"({labelled_count} labelled, {len(items) - labelled_count} unlabelled, {malformed} malformed); "
+            f"{len(selected)} selected (limit={limit}, max_per_run={cap})"
+        )
+        if not items:
+            logger.warning("MalwareBazaar returned 0 samples — check feed availability")
+
+        if not push_to_misp:
+            return selected
+        if not selected:
+            return make_status(MALWAREBAZAAR_SOURCE_ID, True, count=0, failed=0)
+        success, failed = self.misp_writer.push_indicators(selected, self.source_name)
+        logger.info(f"[PUSH] MalwareBazaar: Pushed {success} to MISP ({failed} failed)")
+        return status_after_misp_push(MALWAREBAZAAR_SOURCE_ID, len(selected), success, failed)
 
 
 def collect_all_global_feeds(

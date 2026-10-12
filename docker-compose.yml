@@ -86,6 +86,9 @@ x-common-env: &common-env
   EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_ICS_INCREMENTAL_DAYS:-30}
   EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN: ${EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN:-}
   EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES: ${EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES:-}
+  # MalwareBazaar (abuse.ch) source (2026-10): flag-guarded, default off; per-run cap mirrors src/config.py.
+  EDGEGUARD_ENABLE_MALWAREBAZAAR: ${EDGEGUARD_ENABLE_MALWAREBAZAAR:-false}
+  EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN: ${EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN:-500}
   EDGEGUARD_CISA_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_INCREMENTAL_DAYS:-30}
   # VirusTotal free-tier budget (src/collectors/virustotal_budget.py): daily lookups, per-run cap,
   # MISP candidate window. The ledger lives in the ./state bind mount.

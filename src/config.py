@@ -1165,6 +1165,22 @@ CISA_ICS_MAX_ADVISORIES_PER_RUN = _env_int("EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PE
 CISA_ICS_MIN_EXPECTED_ADVISORIES = _env_int("EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES", 50)
 
 # ---------------------------------------------------------------------------
+# MalwareBazaar (abuse.ch) collector (2026-10)
+# ---------------------------------------------------------------------------
+# ``MalwareBazaarCollector`` in ``src/collectors/global_feed_collector.py`` —
+# one ``sha256`` indicator per sample from the public "recent" CSV export
+# (the last 48 hours, about 1,000 samples, no API key required). The
+# ``signature`` column is the malware family and links the hash to ``Malware``
+# nodes through the same TF_META path as ThreatFox. Flag-guarded and OFF by
+# default: the daily and baseline DAG tasks return a skipped status (success,
+# 0 items) until an operator sets ``EDGEGUARD_ENABLE_MALWAREBAZAAR=true``.
+ENABLE_MALWAREBAZAAR = _env_bool("EDGEGUARD_ENABLE_MALWAREBAZAAR", "false")
+# Per-run cap on samples pushed to MISP. Labelled samples (``signature`` other
+# than "n/a") are kept before unlabelled ones, then the list is cut at the cap.
+# ``0`` disables the cap (only the regular collection limit applies).
+MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
+
+# ---------------------------------------------------------------------------
 # ThreatActor alias-duplicate merge (2026-10, fresh-baseline PR)
 # ---------------------------------------------------------------------------
 # Post-sync enrichment job ``enrichment_jobs.merge_alias_duplicate_actors``

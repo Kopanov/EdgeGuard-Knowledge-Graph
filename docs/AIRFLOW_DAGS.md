@@ -178,7 +178,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | Every 30 min | High-frequency updates | AlienVault OTX |
 | `edgeguard_medium_freq` | Every 4 hours | Medium-frequency sources | CISA KEV, VirusTotal |
 | `edgeguard_low_freq` | Every 8 hours | Low-frequency sources | NVD |
-| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`), ThreatFox, AbuseIPDB, URLhaus, Feodo, SSLBlacklist |
+| `edgeguard_daily` | Daily at 2 AM | Daily feeds | MITRE, CISA ICS Advisories (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`), ThreatFox, AbuseIPDB, URLhaus, Feodo, SSLBlacklist, MalwareBazaar (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) |
 | `edgeguard_neo4j_sync` | `0 3 */3 * *` (every 3 days at 03:00) | MISP → Neo4j sync + `build_relationships` + `run_enrichment_jobs` | All sources |
 
 **Concurrency and timeout guards (all 6 DAGs):**
@@ -188,8 +188,8 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | 1 | 5h 30m | Covers OTX with full retry chain |
 | `edgeguard_medium_freq` | 1 | 5h | CISA + VT parallel with retries |
 | `edgeguard_low_freq` | 1 | 8h 30m | NVD with full retry chain |
-| `edgeguard_daily` | 1 | 8h 30m | 8 parallel collectors with retries (`collect_cisa_ics` is a no-op skip while its flag is off) |
-| `edgeguard_baseline` | — | — | 2026-10: `tier2_feeds` also runs `collect_cisa_ics` (baseline load of the 24-month advisory history; no-op skip while `EDGEGUARD_ENABLE_CISA_ICS` is off) |
+| `edgeguard_daily` | 1 | 8h 30m | 9 parallel collectors with retries (`collect_cisa_ics` and `collect_malwarebazaar` are no-op skips while their flags are off) |
+| `edgeguard_baseline` | — | — | 2026-10: `tier2_feeds` also runs `collect_cisa_ics` (baseline load of the 24-month advisory history; no-op skip while `EDGEGUARD_ENABLE_CISA_ICS` is off) and `collect_malwarebazaar` (recent export only; no-op skip while `EDGEGUARD_ENABLE_MALWAREBAZAAR` is off) |
 | `edgeguard_neo4j_sync` | 1 | 22h | Full sync + relationships + enrichment |
 | `edgeguard_baseline` | 1 | 32h | Full historical collection + sync |
 
@@ -283,6 +283,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | URLhaus | `edgeguard_daily` | No limit | 100 URLs |
 | Feodo Tracker | `edgeguard_daily` | No limit | 10 IPs |
 | SSL Blacklist | `edgeguard_daily` | No limit | 100 certs |
+| MalwareBazaar (`collect_malwarebazaar`, 2026-10) | `edgeguard_daily` | One export download per run (about 450 KB) | Up to `EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN` (500) sha256 hashes of the last 48 hours, labelled samples first; **task is skipped with success unless `EDGEGUARD_ENABLE_MALWAREBAZAAR=true`** |
 
 ---
 
@@ -303,6 +304,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | Feodo | `FeodoCollector` | `finance_feed_collector.py` | Hardcoded Finance |
 | SSL Blacklist | `SSLBlacklistCollector` | `finance_feed_collector.py` | Malware family |
 | CISA ICS Advisories | `CISAICSCollector` | `cisa_ics_collector.py` | Source-asserted CISA sector → fixed table (Energy / Healthcare and Public Health / Financial Services); **flag-guarded**: `run_cisa_ics_collection` logs "disabled by flag" and returns a skipped status (success, 0 items) unless `EDGEGUARD_ENABLE_CISA_ICS=true` |
+| MalwareBazaar | `MalwareBazaarCollector` | `global_feed_collector.py` | Malware family label (`signature`); **flag-guarded**: `run_malwarebazaar_collection` / `run_baseline_malwarebazaar` log "disabled by flag" and return a skipped status (success, 0 items) unless `EDGEGUARD_ENABLE_MALWAREBAZAAR=true` |
 
 ### Placeholder Collectors (Not Yet Active)
 
@@ -341,6 +343,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 | URLhaus | `source:URLhaus` |
 | Feodo Tracker | `source:Feodo-Tracker` |
 | SSL Blacklist | `source:SSL-Blacklist` |
+| MalwareBazaar | `source:MalwareBazaar` |
 
 **Zone tags** (per attribute — source of truth for classification): `zone:Global`, `zone:Healthcare`, `zone:Energy`, `zone:Finance` (capitalization as written by `MISPWriter`), plus confidence tags. **`MISPWriter._get_zones_to_tag`** drops redundant `global` when any specific zone is present.
 
@@ -554,6 +557,8 @@ export EDGEGUARD_METRICS_PORT=8001       # Must not conflict with FastAPI (8000)
 export EDGEGUARD_ENABLE_CISA_ICS=true    # CISA ICS advisories (edgeguard_daily → collect_cisa_ics); off → task skipped with success
 # export EDGEGUARD_CISA_ICS_MAX_ADVISORIES_PER_RUN=1200   # per-run file cap (politeness toward GitHub raw)
 # export EDGEGUARD_CISA_ICS_MIN_EXPECTED_ADVISORIES=50    # baseline sanity floor → transient skip + alert
+export EDGEGUARD_ENABLE_MALWAREBAZAAR=true    # MalwareBazaar (edgeguard_daily → collect_malwarebazaar, baseline tier 2); off → task skipped with success
+# export EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN=500   # per-run cap on samples pushed (labelled first; 0 = no cap)
 ```
 
 ---
@@ -695,7 +700,7 @@ After Tier1 succeeds, remove env overrides or restore Variables for production.
 
 Add keys when you want those feeds. Values that are **empty**, **whitespace-only**, or YAML **placeholders** from `credentials/config.example.yaml` are treated as unset. **ThreatFox** requires a free key from **https://auth.abuse.ch/** — without it the task **skips** (success) so the baseline DAG can continue.
 
-**Other optional HTTP feeds** (no API key today, but if the upstream returns **401/403**, the task **skips** instead of failing): **NVD** (`nvd_auth_denied`), **CISA KEV** (`cisa_auth_denied`), **MITRE** (`mitre_auth_denied`, e.g. GitHub), **Feodo** (`feodo_auth_denied`), **SSL Blacklist** (`sslbl_auth_denied`). **URLhaus** usually returns empty success if downloads fail; it is a public CSV endpoint.
+**Other optional HTTP feeds** (no API key today, but if the upstream returns **401/403**, the task **skips** instead of failing): **NVD** (`nvd_auth_denied`), **CISA KEV** (`cisa_auth_denied`), **MITRE** (`mitre_auth_denied`, e.g. GitHub), **Feodo** (`feodo_auth_denied`), **SSL Blacklist** (`sslbl_auth_denied`), **MalwareBazaar** (`malwarebazaar_auth_denied`; `malwarebazaar_disabled_by_flag` while `EDGEGUARD_ENABLE_MALWAREBAZAAR` is off; 429/5xx/timeouts → `transient_external_error`). **URLhaus** usually returns empty success if downloads fail; it is a public CSV endpoint.
 
 **Collector allowlist (`EDGEGUARD_COLLECT_SOURCES`):** Optional comma-separated list of which collectors may run (e.g. `otx,nvd,cisa,mitre`). **Unset or empty** → all collectors run (subject to optional-key skips above). **`none`**, **`-`**, or **`0`** alone → no external collectors run; each collection task **succeeds** with **`skipped: true`** and **`skip_reason_class=collector_disabled_by_config`**. Unknown names are **logged and ignored**; if no valid names remain, behavior matches **unset** (fail-open). Applies to **Airflow** (`run_collector_with_metrics`) and **CLI** [`run_pipeline.py`](../src/run_pipeline.py) Step 2 (same canonical source keys as scheduled tasks, including both `virustotal` and `virustotal_enrich`). Implementation: [`src/collector_allowlist.py`](../src/collector_allowlist.py).
 
@@ -759,7 +764,7 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-12 — documented `EDGEGUARD_SYNC_MIN_EVENTS` and the partial-loss failure semantics of the Neo4j sync (`events_failed`, `relationships_failed`, zero-event WARNING). Prior: 2026-06-11 — PR #125: documented the sync-cadence fix (start-time stamp + EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN + state-derived incremental window) in the edgeguard_neo4j_sync task walkthrough, and added the backup_check_passed_cli / skip_backup_check rows to the baseline conf-key table (DAG-side backup gate). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit:_
+_Last updated: 2026-10-12 (later) — `collect_malwarebazaar` (flag-guarded MalwareBazaar source) in `edgeguard_daily` and baseline `tier2_feeds`. Earlier the same day — documented `EDGEGUARD_SYNC_MIN_EVENTS` and the partial-loss failure semantics of the Neo4j sync (`events_failed`, `relationships_failed`, zero-event WARNING). Prior: 2026-06-11 — PR #125: documented the sync-cadence fix (start-time stamp + EDGEGUARD_SYNC_INTERVAL_TOLERANCE_MIN + state-derived incremental window) in the edgeguard_neo4j_sync task walkthrough, and added the backup_check_passed_cli / skip_backup_check rows to the baseline conf-key table (DAG-side backup gate). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit:_
 - _Baseline task chain corrected (BLOCK):_ `baseline_misp_health` → `misp_health_check`; `tier2_extended` → `tier2_feeds`; removed `tier3_low_freq` (does NOT exist as a baseline TaskGroup at HEAD — daily-tier collectors live in the incremental `edgeguard_daily` DAG); `baseline_full_neo4j_sync` / `baseline_build_relationships` / `baseline_enrichment` → `full_neo4j_sync` / `build_relationships` / `run_enrichment_jobs` (**top-level task IDs do NOT carry a `baseline_` prefix** at HEAD — verified against `dags/edgeguard_pipeline.py`)._
 - _PR-N29 H1 carve-out task names also corrected to drop the `baseline_` prefix._
 

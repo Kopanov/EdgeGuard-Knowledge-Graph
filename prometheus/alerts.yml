@@ -45,6 +45,7 @@ groups:
       #   edgeguard_medium_freq  4 h       -> cisa, virustotal
       #   edgeguard_low_freq     8 h       -> nvd
       #   edgeguard_daily        24 h      -> mitre, cisa_ics, abuseipdb, threatfox, urlhaus, feodo, sslbl
+      #                                       malwarebazaar (2026-10, flag-guarded)
       - record: edgeguard:collector_max_stale_seconds
         expr: |
           label_replace(vector(7200), "source", "otx", "", "")
@@ -58,6 +59,7 @@ groups:
           or label_replace(vector(93600), "source", "urlhaus", "", "")
           or label_replace(vector(93600), "source", "feodo", "", "")
           or label_replace(vector(93600), "source", "sslbl", "", "")
+          or label_replace(vector(93600), "source", "malwarebazaar", "", "")
 
       - alert: EdgeGuardCollectionStale
         expr: |

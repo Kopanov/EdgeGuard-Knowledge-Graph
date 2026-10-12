@@ -92,6 +92,8 @@ callers / tests use the other.
 * ✅ ``feodo_tracker`` / ``feodo`` — ``first_seen`` (when first C2 IP
   sighted by Feodo Tracker)
 * ✅ ``ssl_blacklist`` / ``abusech_ssl`` — CSV ``Listingdate``
+* ✅ ``malwarebazaar`` — ``first_seen_utc`` (when MalwareBazaar first saw
+  the sample; the collector emits it as tz-aware UTC ISO-8601)
 * ❌ ``alienvault_otx`` — pulse.created is the pulse-author-time,
   NOT the IOC first-observed time. Excluded.
 * ❌ ``misp`` — MISP-collector / sector feeds; pipeline metadata only.

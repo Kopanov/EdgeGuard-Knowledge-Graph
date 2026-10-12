@@ -34,6 +34,7 @@ _SCHEDULED_SOURCES = {
     "urlhaus": 93600,
     "feodo": 93600,
     "sslbl": 93600,
+    "malwarebazaar": 93600,  # 2026-10, flag-guarded daily task
 }
 
 

@@ -11,6 +11,7 @@ Available Collectors:
 - URLhausCollector: Malware URLs from URLhaus
 - CISACollector: Known Exploited Vulnerabilities from CISA
 - CISAICSCollector: CISA ICS advisories (CSAF 2.0) with source-asserted sectors (flag-guarded)
+- MalwareBazaarCollector: Malware sample hashes with family labels from MalwareBazaar (flag-guarded)
 - MITRECollector: MITRE ATT&CK framework data
 - NVDCollector: National Vulnerability Database
 - OTXCollector: AlienVault Open Threat Exchange
@@ -48,6 +49,7 @@ from collectors.cisa_ics_collector import CISAICSCollector
 from collectors.energy_feed_collector import EnergyCollector, EnergyPlaceholderCollector
 from collectors.finance_feed_collector import FeodoCollector, SSLBlacklistCollector
 from collectors.global_feed_collector import (
+    MalwareBazaarCollector,
     ThreatFoxCollector,
     URLhausCollector,
     collect_all_global_feeds,
@@ -71,6 +73,7 @@ __all__ = [
     "ThreatFoxCollector",
     "URLhausCollector",
     "collect_all_global_feeds",
+    "MalwareBazaarCollector",
     # Vulnerability/framework
     "CISACollector",
     "CISAICSCollector",

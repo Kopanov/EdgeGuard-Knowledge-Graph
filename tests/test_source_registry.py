@@ -278,7 +278,9 @@ def test_reliable_first_seen_alias_coverage_extension_is_documented():
     # 2026-10: the CISA ICS advisories collector (canonical ``cisa_ics`` +
     # aliases) is a reliable first-seen source — CISA's own
     # initial_release_date / current_release_date.
-    expected_new_keys = {"sslbl", "cisa_ics", "cisa-ics", "ics_advisories"}
+    # 2026-10: MalwareBazaar (canonical ``malwarebazaar`` + aliases) — first_seen_utc is
+    # when MalwareBazaar first saw the sample.
+    expected_new_keys = {"sslbl", "cisa_ics", "cisa-ics", "ics_advisories", "malwarebazaar", "bazaar", "mb"}
     new_keys = _RELIABLE_FIRST_SEEN_SOURCES - _LEGACY_RELIABLE_FIRST_SEEN_SOURCES
     assert new_keys == expected_new_keys, (
         f"Refactor alias-coverage extension drift: expected exactly {expected_new_keys}, got {new_keys}. "
@@ -741,6 +743,8 @@ def test_audit2_to_cli_sources_dict_preserves_legacy_iteration_order():
         # Sources added after the legacy listing are appended in registry
         # order (see ``_LEGACY_CLI_LISTING_ORDER``): CISA ICS advisories (2026-10).
         "cisa_ics",
+        # MalwareBazaar (2026-10), appended after CISA ICS in registry order.
+        "malwarebazaar",
     )
     assert tuple(DEFAULT_SOURCES.keys()) == expected_order, (
         f"DEFAULT_SOURCES iteration order drift: expected {expected_order}, got {tuple(DEFAULT_SOURCES.keys())}"
