@@ -472,9 +472,9 @@ def _detect_zones_from_attributes(self, attrs):
 **File:** `src/collectors/finance_feed_collector.py`
 
 ### What It Does
-Collects finance-specific threat feeds from abuse.ch, including:
-- **Feodo Tracker:** Banking trojan C&C server IPs
-- **SSL Blacklist:** Malicious SSL certificate fingerprints
+Collects two abuse.ch feeds historically associated with banking trojans:
+- **Feodo Tracker:** botnet C&C server IPs (QakBot, Emotet, TrickBot, Dridex, BumbleBee, Pikabot) with the malware family, port and online/offline status
+- **SSL Blacklist:** malicious SSL certificate fingerprints (SHA-1) with the listing reason
 
 ### Sources
 - **Feodo (regular runs):** `https://feodotracker.abuse.ch/downloads/ipblocklist.csv` — C2 servers active in the last 30 days
@@ -493,22 +493,34 @@ zones = detect_zones_from_text(malware.lower())
 zones = detect_zones_from_text(reason)
 ```
 
+The keyword detector deliberately contains no malware family names (families are linked to sectors through graph relationships), so in practice both feeds are tagged `zone:Global`: measured on 2026-10-12, 7,980 of 7,980 Feodo rows and 10,964 of 10,964 SSL Blacklist rows. Neither feed is hard-coded to Finance.
+
+### Feodo Tracker: parsing, family, status
+- **Parsing.** The download is CSV with every field quoted and CRLF line endings; it is read with the `csv` module and the header row is recognised by name.
+- **Malware family → graph.** The item carries `reference` (the Feodo Tracker host page), so `MISPWriter` emits the shared abuse.ch metadata comment (`TF_META`) with `malware_family`, `threat_type=botnet_cc` and the labels `c2_status:<status>`, `port:<port>`, `last_online:<date>`. The sync rehydrates them as `Indicator.malware_family`, `threat_type` and `tf_tags`; `build_relationships` then links the indicator to the matching `Malware` node (`INDICATES`, case-insensitive name or alias match).
+- **Online versus offline.** The complete history loaded by a baseline is almost entirely offline servers (7,979 of 7,980 on 2026-10-12; first seen 2021-01 to 2026-03). abuse.ch states that this list causes false positives when used for blocking. Offline servers are therefore published with `confidence:low` (0.3 in the graph) and the MISP detection flag cleared (`to_ids=false`); servers reported online get `confidence:medium` (0.5) and `to_ids=true`. Consumers that want actionable C2s filter with `min_confidence` or on `tf_tags`.
+- **Status is the status at first collection.** EdgeGuard does not rewrite an attribute MISP already holds, so a server first collected online keeps that label after it goes offline; `last_online` in `tf_tags` shows how recent the observation was.
+
 ### Example Output
 
 ```python
-# Feodo Indicator (Banking Trojan C&C)
+# Feodo Indicator (botnet C&C, offline entry from the complete history)
 {
     'indicator_type': 'ipv4',
-    'value': '185.220.101.42',
-    'zone': ['finance', 'healthcare'],  # Emotet targets both - array only
+    'value': '27.133.154.218',
+    'zone': ['global'],
     'tag': 'feodo_tracker',
-    'sources': ['feodo_tracker'],
-    'first_seen': '2024-01-10',
-    # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
-    'confidence_score': 0.7,
-    'malware_family': 'emotet',
+    'source': ['feodo_tracker'],
+    'first_seen': '2026-03-04 14:28:39',   # first_seen_utc; published to MISP as 2026-03-04T14:28:39+00:00
+    'confidence_score': 0.4,               # 0.7 when c2_status is online
+    'to_ids': False,                       # True when c2_status is online
+    'malware_family': 'QakBot',
     'port': '443',
-    'status': 'online'
+    'status': 'offline',
+    'last_online': '2026-03-05',
+    'reference': 'https://feodotracker.abuse.ch/browse/host/27.133.154.218/',
+    'threat_type': 'botnet_cc',
+    'tags': ['c2_status:offline', 'port:443', 'last_online:2026-03-05']
 }
 
 # SSL Blacklist Indicator

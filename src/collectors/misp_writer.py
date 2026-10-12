@@ -1309,7 +1309,9 @@ class MISPWriter:
             "comment": comment
             if (has_otx_meta or has_tf_meta or comment)
             else f"From {sanitize_value(source, max_length=50)}",
-            "to_ids": True,
+            # Detection flag: set for indicators unless the collector clears it for the item
+            # (for example a Feodo Tracker server reported offline: history, not a blocking candidate).
+            "to_ids": bool(indicator.get("to_ids", True)),
             "Tag": [{"name": tag} for tag in tags],
         }
 
