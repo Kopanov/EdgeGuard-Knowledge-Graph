@@ -16,8 +16,12 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import requests
+
+from collector_failure_alerts import is_transient_external_error
 from collectors.collector_utils import (
     RateLimiter,
+    TransientServerError,
     is_auth_or_access_denied,
     make_skipped_optional_source,
     make_status,
@@ -39,6 +43,55 @@ SSLBL_CIRCUIT_BREAKER = get_circuit_breaker("sslbl", failure_threshold=3, recove
 
 FEODO_RATE_LIMITER = RateLimiter(min_interval=1.0)
 SSLBL_RATE_LIMITER = RateLimiter(min_interval=1.0)
+
+
+class FeedTransientError(TransientServerError):
+    """HTTP 429 / 5xx from an abuse.ch download after the helper's own retries.
+
+    Raised outside the ``retry_with_backoff``-decorated download so the retries are not
+    multiplied, and recognised by ``run_collector_with_metrics`` as a transient external error:
+    the Airflow task is skipped with an alert instead of failing.
+    """
+
+
+def _feed_text(response: requests.Response, context: str) -> str:
+    """Body of a feed download; 429 / 5xx → :class:`FeedTransientError`, other errors → ``HTTPError``."""
+    code = response.status_code
+    if code == 429 or code >= 500:
+        raise FeedTransientError(f"{context} download HTTP {code}", response=response)
+    response.raise_for_status()
+    return response.text
+
+
+def _feed_failure(
+    source: str,
+    breaker: Any,
+    exc: Exception,
+    push_to_misp: bool,
+    auth_skip_class: str,
+) -> Dict[str, Any]:
+    """Shared ``except`` policy of the two feeds; returns a status dict or re-raises.
+
+    * 401 / 403 → skipped (optional public feed), breaker untouched.
+    * Transient upstream failure (timeout, connection error, truncated transfer, 429 / 5xx) →
+      re-raised: ``run_collector_with_metrics`` turns it into a skipped task with an alert, a
+      direct caller sees the error. It used to become ``success=False`` and a failed task.
+    * Anything else → ``success=False`` when pushing to MISP (needs an operator), re-raised
+      otherwise.
+    """
+    if push_to_misp and is_auth_or_access_denied(exc):
+        logger.warning(f"{source}: auth/access denied — skipping (optional public feed): {exc}")
+        breaker.record_success()
+        return make_skipped_optional_source(source, skip_reason=str(exc), skip_reason_class=auth_skip_class)
+    breaker.record_failure()
+    if is_transient_external_error(exc):
+        logger.warning(f"{source}: transient upstream failure — {type(exc).__name__}: {exc}")
+        raise exc
+    logger.error(f"{source} collection error: {type(exc).__name__}: {exc}")
+    if push_to_misp:
+        return make_status(source, False, count=0, error=str(exc))
+    raise exc
+
 
 # Feodo Tracker host page of a C2 address. Setting it as the item ``reference`` also makes
 # ``MISPWriter`` emit the shared abuse.ch metadata comment (``TF_META``), which is what carries
@@ -176,11 +229,11 @@ class FeodoCollector:
         return self.baseline_url if baseline else self.url
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
-    def _fetch_raw(self, url: Optional[str] = None) -> str:
-        """Download a Feodo blocklist CSV (default: the 30-day list) with retry."""
-        response = request_with_rate_limit_retries(
+    def _download(self, url: str) -> requests.Response:
+        """One download with transport-error retry; HTTP 429 / 5xx are retried inside the helper."""
+        return request_with_rate_limit_retries(
             "GET",
-            url or self.url,
+            url,
             session=None,
             timeout=30,
             verify=SSL_VERIFY,
@@ -189,8 +242,10 @@ class FeodoCollector:
             retry_on_403=False,
             context="Feodo",
         )
-        response.raise_for_status()
-        return response.text
+
+    def _fetch_raw(self, url: Optional[str] = None) -> str:
+        """Download a Feodo blocklist CSV (default: the 30-day list)."""
+        return _feed_text(self._download(url or self.url), "Feodo")
 
     def collect(
         self, limit=None, push_to_misp=True, baseline: bool = False, baseline_days: int = 365
@@ -206,9 +261,13 @@ class FeodoCollector:
 
         # Check circuit breaker
         if not FEODO_CIRCUIT_BREAKER.can_execute():
-            logger.warning("Feodo circuit breaker open - skipping")
+            logger.warning("Feodo circuit breaker open after repeated upstream failures - skipping this run")
             if push_to_misp:
-                return make_status("feodo", False, count=0, error="Circuit breaker open")
+                return make_skipped_optional_source(
+                    "feodo",
+                    skip_reason="Feodo circuit breaker open (repeated upstream failures)",
+                    skip_reason_class="feodo_circuit_breaker_open",
+                )
             return []
 
         # Rate limiting
@@ -334,17 +393,10 @@ class FeodoCollector:
             return results
 
         except Exception as e:
-            if push_to_misp and is_auth_or_access_denied(e):
-                logger.warning(f"Feodo: auth/access denied — skipping (optional public feed): {e}")
-                FEODO_CIRCUIT_BREAKER.record_success()
-                return make_skipped_optional_source(
-                    "feodo",
-                    skip_reason=str(e),
-                    skip_reason_class="feodo_auth_denied",
-                )
-            logger.error(f"Feodo collection error: {e}")
-            FEODO_CIRCUIT_BREAKER.record_failure()
-            return make_status("feodo", False, count=0, error=str(e)) if push_to_misp else []
+            status = _feed_failure("feodo", FEODO_CIRCUIT_BREAKER, e, push_to_misp, "feodo_auth_denied")
+            if not push_to_misp:
+                raise
+            return status
 
 
 class SSLBlacklistCollector:
@@ -357,9 +409,9 @@ class SSLBlacklistCollector:
         self.misp_writer = misp_writer or MISPWriter()
 
     @retry_with_backoff(max_retries=3, base_delay=5.0)
-    def _fetch_raw(self) -> str:
-        """Download the SSL Blacklist CSV with retry."""
-        response = request_with_rate_limit_retries(
+    def _download(self) -> requests.Response:
+        """One download with transport-error retry; HTTP 429 / 5xx are retried inside the helper."""
+        return request_with_rate_limit_retries(
             "GET",
             self.url,
             session=None,
@@ -370,8 +422,10 @@ class SSLBlacklistCollector:
             retry_on_403=False,
             context="SSLBL",
         )
-        response.raise_for_status()
-        return response.text
+
+    def _fetch_raw(self) -> str:
+        """Download the SSL Blacklist CSV."""
+        return _feed_text(self._download(), "SSL Blacklist")
 
     def collect(
         self, limit=None, push_to_misp=True, baseline: bool = False, baseline_days: int = 365
@@ -383,9 +437,13 @@ class SSLBlacklistCollector:
 
         # Check circuit breaker
         if not SSLBL_CIRCUIT_BREAKER.can_execute():
-            logger.warning("SSL Blacklist circuit breaker open - skipping")
+            logger.warning("SSL Blacklist circuit breaker open after repeated upstream failures - skipping this run")
             if push_to_misp:
-                return make_status("sslbl", False, count=0, error="Circuit breaker open")
+                return make_skipped_optional_source(
+                    "sslbl",
+                    skip_reason="SSL Blacklist circuit breaker open (repeated upstream failures)",
+                    skip_reason_class="sslbl_circuit_breaker_open",
+                )
             return []
 
         # Rate limiting
@@ -445,17 +503,10 @@ class SSLBlacklistCollector:
             return results
 
         except Exception as e:
-            if push_to_misp and is_auth_or_access_denied(e):
-                logger.warning(f"SSL Blacklist: auth/access denied — skipping (optional public feed): {e}")
-                SSLBL_CIRCUIT_BREAKER.record_success()
-                return make_skipped_optional_source(
-                    "sslbl",
-                    skip_reason=str(e),
-                    skip_reason_class="sslbl_auth_denied",
-                )
-            logger.error(f"SSL Blacklist collection error: {e}")
-            SSLBL_CIRCUIT_BREAKER.record_failure()
-            return make_status("sslbl", False, count=0, error=str(e)) if push_to_misp else []
+            status = _feed_failure("sslbl", SSLBL_CIRCUIT_BREAKER, e, push_to_misp, "sslbl_auth_denied")
+            if not push_to_misp:
+                raise
+            return status
 
 
 def test():

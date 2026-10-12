@@ -70,6 +70,19 @@ def test_get_effective_limit_max_nonzero_overrides(monkeypatch: pytest.MonkeyPat
     assert config.get_effective_limit("nvd") == 777
 
 
+def test_get_effective_limit_negative_override_is_not_a_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``EDGEGUARD_MAX_ENTRIES=-1`` used to be handed to collectors as a limit (``items[:-1]``)."""
+    _reload_config(
+        monkeypatch,
+        EDGEGUARD_MAX_ENTRIES="-1",
+        EDGEGUARD_INCREMENTAL_LIMIT="200",
+    )
+    import config
+
+    importlib.reload(config)
+    assert config.get_effective_limit("nvd") == 200
+
+
 def test_misp_spt_passes_none_when_global_max_zero(
     monkeypatch: pytest.MonkeyPatch,
     stub_run_misp_to_neo4j,
