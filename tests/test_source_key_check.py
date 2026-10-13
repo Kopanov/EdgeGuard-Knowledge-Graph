@@ -446,6 +446,22 @@ def test_virustotal_checks_are_spaced_twenty_seconds_apart(http, monkeypatch, tm
     assert len(http.calls) == 2 and _ledger(tmp_path)["used"] == 2
 
 
+def test_virustotal_check_is_in_the_ledger_before_the_request_leaves(http, monkeypatch, tmp_path) -> None:
+    """A collector run that starts, or is answered 429, during the round trip must find the check."""
+    _set_key(monkeypatch, "virustotal")
+    at_request_time: List[Dict[str, Any]] = []
+
+    def get(url: str, **_kwargs: Any) -> Any:
+        at_request_time.append(_ledger(tmp_path))
+        raise requests.exceptions.ReadTimeout("no answer")
+
+    monkeypatch.setattr(skc.requests, "get", get)
+    assert _one("virustotal").status == skc.UNVERIFIED
+    (seen,) = at_request_time
+    assert seen["used"] == 1 and seen["updated_by"] == "key_check" and seen["key_check_at"]
+    assert _ledger(tmp_path)["used"] == 1, "a request that may have reached VirusTotal stays counted"
+
+
 def test_virustotal_is_not_probed_when_the_daily_budget_is_used(http, monkeypatch) -> None:
     _set_key(monkeypatch, "virustotal")
     monkeypatch.setenv("EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET", "0")

@@ -163,7 +163,8 @@ def _probe_virustotal(key: str) -> ProbeResult:
     limiter, and VirusTotal answers HTTP 429 for the per-minute limit as well as for the daily
     quota. So the request is not sent while a collector run is writing the ledger, nor within
     :data:`KEY_CHECK_MIN_INTERVAL_SEC` of the previous check, and a 429 on this request is never
-    recorded as the end of the collector's day (the collector's own lookups decide that).
+    recorded as the end of the collector's day (the collector's own lookups decide that, and the
+    collector does not end its day on a 429 that follows a key check within two minutes).
     """
     from collectors.virustotal_budget import COLLECTOR_ACTIVITY_WINDOW_SEC, WRITER_KEY_CHECK, VirusTotalBudget
 
@@ -182,12 +183,14 @@ def _probe_virustotal(key: str) -> ProbeResult:
             f"the key was checked {age:.0f} s ago; not probed again, to stay inside the limit of 4 lookups a minute"
         )
 
-    response = requests.get(
-        VIRUSTOTAL_PROBE_URL, headers={"x-apikey": key}, timeout=PROBE_TIMEOUT, verify=_ssl_verify()
-    )
+    # Counted and announced before the request leaves: a collector run that starts, or that is
+    # answered 429, during this round trip reads the ledger and finds the check.
     budget.consume(1)
     budget.note_key_check()
     budget.save(writer=WRITER_KEY_CHECK)  # logs and continues when the ledger cannot be written
+    response = requests.get(
+        VIRUSTOTAL_PROBE_URL, headers={"x-apikey": key}, timeout=PROBE_TIMEOUT, verify=_ssl_verify()
+    )
     if response.status_code == 404:
         # "Not found" is an authenticated answer: the key was accepted.
         return VALID, "HTTP 404 (authenticated answer)"

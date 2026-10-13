@@ -48,8 +48,14 @@ LOOKED_UP_MAX = 20000
 #     its first lookup and then every 10 lookups (150 s at full pace); a run that writes less
 #     often than this window is far below 4 lookups a minute, so one more request fits;
 #   * a collector run that starts within a minute after a key check waits for the rest of it.
+#   * the two processes cannot lock each other out completely, so the collector reads the ledger
+#     again when VirusTotal answers HTTP 429: within KEY_CHECK_OVERLAP_SEC of a key check that
+#     answer may be the shared per-minute limit, and the day is not marked exhausted.
+# The key check writes its time to the ledger before it sends its request, and every write of
+# the ledger first takes over what the other process wrote (:meth:`VirusTotalBudget.sync_from_disk`).
 COLLECTOR_ACTIVITY_WINDOW_SEC = 300
 KEY_CHECK_SPACING_SEC = 60
+KEY_CHECK_OVERLAP_SEC = 120
 WRITER_COLLECTOR = "collector"
 WRITER_KEY_CHECK = "key_check"
 
@@ -196,8 +202,38 @@ class VirusTotalBudget:
         self.exhausted_at = data.get("exhausted_at")
         self.exhausted_reason = data.get("exhausted_reason")
 
+    def sync_from_disk(self) -> None:
+        """Take over what another process wrote to the ledger since this object was loaded.
+
+        The key check and a collector run are different processes. The newest key-check time is
+        kept; for the same UTC day the higher counter wins and an exhausted day stays exhausted.
+        A missing or unreadable file changes nothing.
+        """
+        try:
+            data = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        stamp = data.get("key_check_at")
+        if isinstance(stamp, str):
+            theirs, ours = self._age(stamp), self.key_check_age()
+            if theirs is not None and (ours is None or theirs < ours):
+                self.key_check_at = stamp
+        if data.get("date") != self.date:
+            return
+        try:
+            self.used = max(self.used, int(data.get("used", 0)))
+        except (TypeError, ValueError):
+            pass
+        if data.get("exhausted") and not self.exhausted:
+            self.exhausted = True
+            self.exhausted_at = data.get("exhausted_at")
+            self.exhausted_reason = data.get("exhausted_reason")
+
     def save(self, writer: str = WRITER_COLLECTOR) -> None:
         """Write the ledger atomically; failures are logged, never raised."""
+        self.sync_from_disk()
         self._trim()
         payload: Dict[str, Any] = {
             "date": self.date,

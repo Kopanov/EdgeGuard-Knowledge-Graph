@@ -54,6 +54,7 @@ from collectors.collector_utils import (
 # Import MISP writer
 from collectors.misp_writer import MISPWriter
 from collectors.virustotal_budget import (
+    KEY_CHECK_OVERLAP_SEC,
     QUOTA_LOG_PREFIX,
     VirusTotalBudget,
     candidate_days,
@@ -491,6 +492,7 @@ class VTCollector:
             # A key check (source_key_check.py) spends one lookup outside this process's rate
             # limiter. Keep its minute and this run's first lookups apart, then write the ledger
             # before the first lookup: the key check reads it to see that a run is in progress.
+            budget.sync_from_disk()  # a check may have run while MISP was listing the candidates
             wait = budget.seconds_until_key_check_clear()
             if wait > 0:
                 logger.info(
@@ -540,7 +542,21 @@ class VTCollector:
                 continue
             code = response.status_code
             if code == 429:
-                budget.mark_exhausted(f"HTTP 429 after {summary['lookups']} lookups this run")
+                # VirusTotal answers 429 for the per-minute limit as well as for the daily quota, and
+                # a key check in another process shares the minute. Read the ledger again: this soon
+                # after a check the answer says nothing about the day. The run stops either way.
+                budget.sync_from_disk()
+                check_age = budget.key_check_age()
+                if check_age is not None and check_age < KEY_CHECK_OVERLAP_SEC:
+                    budget.consume(1)
+                    logger.warning(
+                        "%s HTTP 429 %.0f s after a key check spent a lookup — the per-minute limit is shared "
+                        "with the check; this run stops, the day is not marked exhausted and the next run continues",
+                        QUOTA_LOG_PREFIX,
+                        check_age,
+                    )
+                else:
+                    budget.mark_exhausted(f"HTTP 429 after {summary['lookups']} lookups this run")
                 budget.save()
                 summary["stopped"] = "rate_limited"
                 break
