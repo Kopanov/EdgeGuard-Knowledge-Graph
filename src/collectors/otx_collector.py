@@ -862,6 +862,7 @@ class OTXCollector:
             "FileHash-MD5": "hash",
             "FileHash-SHA1": "hash",
             "Email": "email",
+            "email": "email",
             "CVE": "cve",
         }
 
@@ -882,6 +883,11 @@ class OTXCollector:
                         return "ipv4"
                 except (ValueError, TypeError):
                     pass
+
+            # Email before domain: "user@host.tld" also contains a dot, and typed as a domain MISP
+            # rejects it ("Domain has an invalid format") while answering a batch push with 200.
+            if "@" in value and "." in value.split("@")[-1]:
+                return "email"
 
             # Domain patterns
             if "." in val_lower and not val_lower.startswith("http"):
