@@ -121,6 +121,34 @@ groups:
           summary: "No indicators collected from {{ $labels.source }}"
           description: "{{ $labels.source }} has not collected any indicators in the last hour."
 
+      - alert: EdgeGuardSourceAccessDenied
+        # A collector whose provider refuses the request (HTTP 401/403: a rejected or revoked
+        # API key, or a blocked client) returns a skipped task, which Airflow shows as
+        # successful. Without this rule the source stops delivering and the only signal is
+        # EdgeGuardCollectionStale hours later, without the cause.
+        #
+        # Second clause: increase() is 0 for a series that has just been created, and the
+        # first denied run of a source creates the series. "Present now, absent 25 hours
+        # ago" covers that first run; a daily collector would otherwise alert a day late.
+        # The 25-hour window keeps the alert steady between two runs of a daily collector.
+        expr: |
+          sum by (source, reason_class) (
+            increase(edgeguard_collector_skips_total{reason_class=~".+_auth_denied"}[25h])
+          ) > 0
+          or
+          (
+            sum by (source, reason_class) (edgeguard_collector_skips_total{reason_class=~".+_auth_denied"})
+              unless
+            sum by (source, reason_class) (edgeguard_collector_skips_total{reason_class=~".+_auth_denied"} offset 25h)
+          )
+        for: 0m
+        labels:
+          severity: warning
+          component: collector
+        annotations:
+          summary: "{{ $labels.source }} is not collected: the provider denies access"
+          description: "{{ $labels.source }} was skipped with {{ $labels.reason_class }} (HTTP 401/403) in the last 25 hours. The task is green, nothing is collected. Check the source's API key with `python src/source_key_check.py`, or whether the provider blocks this client."
+
   # ================================================================================
   # Circuit Breaker Alerts
   # ================================================================================

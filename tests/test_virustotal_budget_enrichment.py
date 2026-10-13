@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
@@ -602,3 +602,215 @@ def test_ledger_default_path_follows_the_state_directory(monkeypatch: pytest.Mon
     assert vb.ledger_path() == os.path.join(str(tmp_path), "virustotal_daily_budget.json")
     monkeypatch.delenv("EDGEGUARD_STATE_DIR")
     assert vb.ledger_path().endswith(os.path.join("state", "virustotal_daily_budget.json"))
+
+
+# ---------------------------------------------------------------------------
+# Coordination with the source key check (one lookup spent in another process)
+# ---------------------------------------------------------------------------
+
+
+def _first_lookup_ledger(collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
+    """Record what the ledger file holds at the moment each VirusTotal request is sent."""
+    from collectors import vt_collector as mod
+
+    seen: List[Dict[str, Any]] = []
+    inner = mod.request_with_rate_limit_retries
+
+    def recording(method: str, url: str, **kwargs: Any) -> FakeResponse:
+        seen.append(json.loads(ledger_path.read_text()) if ledger_path.exists() else {})
+        return inner(method, url, **kwargs)
+
+    monkeypatch.setattr(mod, "request_with_rate_limit_retries", recording)
+    return seen
+
+
+def test_run_waits_out_the_minute_of_a_recent_key_check_and_writes_the_ledger_first(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key check spends its lookup outside this process's rate limiter."""
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    checked = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    _write_ledger(ledger_path, used=1, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+    seen = _first_lookup_ledger(collector, ledger_path, monkeypatch)
+
+    collector._lookup_hashes([H1, H2], VirusTotalBudget())
+
+    assert len(sleeps) == 1 and 13 <= sleeps[0] <= 15, "the rest of the key check's minute"
+    assert len(seen) == 2
+    assert seen[0]["updated_by"] == "collector", "written before the first lookup, so the key check sees the run"
+    assert seen[0]["key_check_at"] == checked and seen[0]["used"] == 1
+
+
+@pytest.mark.parametrize("seconds_ago", [None, 61, 3600])
+def test_run_does_not_wait_without_a_recent_key_check(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch, seconds_ago
+) -> None:
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    if seconds_ago is not None:
+        checked = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+        _write_ledger(ledger_path, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+    seen = _first_lookup_ledger(collector, ledger_path, monkeypatch)
+
+    collector._lookup_hashes([H1], VirusTotalBudget())
+
+    assert sleeps == [] and seen[0]["updated_by"] == "collector"
+
+
+def test_no_candidates_means_no_wait_and_no_ledger_write(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    checked = datetime.now(timezone.utc).isoformat()
+    _write_ledger(ledger_path, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    before = ledger_path.read_text()
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+
+    collector._lookup_hashes([], VirusTotalBudget())
+
+    assert sleeps == [] and ledger_path.read_text() == before
+
+
+def test_ledger_timestamps_that_cannot_be_read_never_delay_or_block(ledger_path: Path) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    for stamp in ("not a time", future, 12345, None):
+        _write_ledger(ledger_path, updated_at=stamp, updated_by="collector", key_check_at=stamp)
+        budget = VirusTotalBudget()
+        assert budget.collector_write_age() is None and budget.key_check_age() is None
+        assert budget.seconds_until_key_check_clear() == 0.0
+
+
+def test_key_check_made_after_the_ledger_was_loaded_is_still_seen(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``collect()`` loads the ledger, then lists the candidates in MISP; a check can run in between."""
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    budget = VirusTotalBudget()  # loaded: no key check yet
+    checked = (datetime.now(timezone.utc) - timedelta(seconds=50)).isoformat()
+    _write_ledger(ledger_path, used=1, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+
+    collector._lookup_hashes([H1], budget)
+    budget.save()
+
+    assert len(sleeps) == 1 and 8 <= sleeps[0] <= 10
+    on_disk = json.loads(ledger_path.read_text())
+    assert on_disk["key_check_at"] == checked, "the collector's writes keep the key check's time"
+    assert on_disk["used"] == 2, "the check's lookup and this run's lookup"
+
+
+def _announce_key_check_during_request(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch, seconds_ago: float
+):
+    """Another process writes a key check to the ledger while the collector's request is under way."""
+    from collectors import vt_collector as mod
+
+    inner = mod.request_with_rate_limit_retries
+    stamp = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+
+    def with_check(method: str, url: str, **kwargs: Any) -> FakeResponse:
+        data = json.loads(ledger_path.read_text())
+        data.update(key_check_at=stamp, updated_at=stamp, updated_by="key_check", used=data["used"] + 1)
+        ledger_path.write_text(json.dumps(data))
+        return inner(method, url, **kwargs)
+
+    monkeypatch.setattr(mod, "request_with_rate_limit_retries", with_check)
+    return stamp
+
+
+def test_rate_limit_answer_right_after_a_key_check_does_not_end_the_day(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """VirusTotal answers 429 for the per-minute limit too, and the check shares the minute."""
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    budget = VirusTotalBudget()
+    collector._test_responses[H1] = FakeResponse(429, {})
+    stamp = _announce_key_check_during_request(collector, ledger_path, monkeypatch, seconds_ago=2)
+
+    _items, summary = collector._lookup_hashes([H1, H2], budget)
+
+    assert summary["stopped"] == "rate_limited" and collector._test_calls == [H1], "the run stops"
+    assert budget.is_exhausted() is False
+    on_disk = json.loads(ledger_path.read_text())
+    assert on_disk["exhausted"] is False and on_disk["key_check_at"] == stamp
+    assert on_disk["used"] == 2, "the check's lookup and the refused request are both counted"
+    assert VirusTotalBudget().remaining == 398, "the next run continues"
+
+
+def test_rate_limit_answer_long_after_a_key_check_still_ends_the_day(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    budget = VirusTotalBudget()
+    collector._test_responses[H1] = FakeResponse(429, {})
+    _announce_key_check_during_request(collector, ledger_path, monkeypatch, seconds_ago=121)
+
+    _items, summary = collector._lookup_hashes([H1, H2], budget)
+
+    assert summary["stopped"] == "rate_limited" and budget.is_exhausted() is True
+    assert json.loads(ledger_path.read_text())["exhausted"] is True
+
+
+def test_save_takes_over_what_the_other_process_wrote(ledger_path: Path) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    mine = VirusTotalBudget()
+    mine.consume(3)
+    stamp = datetime.now(timezone.utc).isoformat()
+    _write_ledger(ledger_path, used=5, updated_at=stamp, updated_by="key_check", key_check_at=stamp)
+    mine.save()
+    on_disk = json.loads(ledger_path.read_text())
+    assert (on_disk["used"], on_disk["key_check_at"], on_disk["updated_by"]) == (5, stamp, "collector")
+
+    # An exhausted day stays exhausted, whoever writes last.
+    early = VirusTotalBudget()
+    other = VirusTotalBudget()
+    other.mark_exhausted("HTTP 429")
+    other.save()
+    early.save()
+    assert json.loads(ledger_path.read_text())["exhausted"] is True
+
+    # Yesterday's counter is not taken over; an unreadable file changes nothing.
+    _write_ledger(ledger_path, date="2000-01-01", used=399, exhausted=True)
+    fresh = VirusTotalBudget()
+    fresh.consume(1)
+    fresh.save()
+    on_disk = json.loads(ledger_path.read_text())
+    assert (on_disk["used"], on_disk["exhausted"]) == (1, False)
+    ledger_path.write_text("{ not json")
+    fresh.sync_from_disk()
+    assert fresh.used == 1 and fresh.exhausted is False
+
+
+def test_the_newest_key_check_time_is_the_one_kept(ledger_path: Path) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    older = (datetime.now(timezone.utc) - timedelta(seconds=100)).isoformat()
+    newer = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+
+    _write_ledger(ledger_path, key_check_at=older)
+    budget = VirusTotalBudget()
+    _write_ledger(ledger_path, key_check_at=newer)
+    budget.sync_from_disk()
+    assert budget.key_check_at == newer, "a later check by the other process replaces the one loaded"
+
+    _write_ledger(ledger_path, key_check_at=older)
+    budget.sync_from_disk()
+    assert budget.key_check_at == newer, "an older time on disk does not replace a newer one"

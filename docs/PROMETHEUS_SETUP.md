@@ -456,6 +456,7 @@ list (including disk / inode / Bravo-ops alerts), grep
 |-------|-----------|----------|
 | `EdgeGuardCollectionHighFailureRate` | >20% failure rate | warning |
 | `EdgeGuardCollectionStale` | No success for longer than twice the collector's cadence (OTX 2 h; CISA, VirusTotal 9 h; NVD 17 h; daily sources 26 h — recording rule `edgeguard:collector_max_stale_seconds`) | critical |
+| `EdgeGuardSourceAccessDenied` | A collector was skipped with `reason_class=*_auth_denied` in the last 25 hours: the provider refuses the request (rejected or revoked API key, blocked client). The task is green and nothing is collected; check with `python src/source_key_check.py` | warning |
 | `EdgeGuardCircuitBreakerOpen` | Circuit open | critical |
 | `EdgeGuardServiceDown` | Health check fail | critical |
 | `EdgeGuardDAGRunFailures` | >3 failures/hour | warning |

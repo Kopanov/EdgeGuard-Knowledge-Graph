@@ -38,7 +38,7 @@ short-cut on a discovery.
 
 ### [1] Live preflight run — `scripts/preflight_baseline.sh`
 
-**What:** run the 11-check preflight in strict mode against the actual
+**What:** run the 12-check preflight in strict mode against the actual
 prod environment. This is the single most important check — it
 exercises every PR-N29 invariant (sentinel class, retries=0, lock
 max-age, alert wiring) in addition to the original 8 sanity checks.
@@ -49,7 +49,7 @@ max-age, alert wiring) in addition to the original 8 sanity checks.
 EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
 ```
 
-**Pass criteria:** exit code 0, all 11 checks green. Specifically:
+**Pass criteria:** exit code 0, all 12 checks green. Specifically:
 
 * `[1] required env vars present` — NEO4J_PASSWORD, MISP_API_KEY, MISP_URL
 * `[2] Neo4j reachable + APOC + indexes`
@@ -62,6 +62,12 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
 * `[9..10]` (existing checks)
 * `[11] PR-N29 invariants` — sentinel class, retries=0, 48h lock
   max-age, fallback metric wiring
+* `[12] source API keys` — each configured key (OTX, NVD, VirusTotal,
+  ThreatFox, AbuseIPDB) is accepted by its provider. A rejected key is
+  a warning (the source would be skipped for the whole baseline), a
+  rejected NVD key is a failure (the NVD task would fail after the
+  wipe). A source without a key is listed as information: decide
+  before the launch whether the baseline should run without it
 
 **If it fails:** the failing check tells you the exact remediation. Do
 **NOT** override `STRICT=1` to skip a fail — every fail in this script

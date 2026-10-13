@@ -203,6 +203,7 @@ class NVDCollector:
     def __init__(self, misp_writer: MISPWriter = None):
         self.base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
         self.api_key = NVD_API_KEY
+        self._api_key_rejected = False  # set by health_check() when NVD answers "Invalid apiKey."
         self.tag = SOURCE_TAGS["nvd"]
         self.misp_writer = misp_writer or MISPWriter()
         self.source_name = "nvd"
@@ -217,6 +218,7 @@ class NVDCollector:
         Returns:
             Dict with health status
         """
+        self._api_key_rejected = False
         try:
             start_time = time.time()
             headers = {}
@@ -239,9 +241,15 @@ class NVDCollector:
                     "status_code": response.status_code,
                 }
             else:
+                # NVD answers a key it does not know with HTTP 404 and the header
+                # ``message: Invalid apiKey.`` — the service is up, the key is wrong.
+                message = (response.headers.get("message") or "").strip()[:80]
+                self._api_key_rejected = bool(
+                    self.api_key and response.status_code == 404 and "apikey" in message.lower()
+                )
                 return {
                     "healthy": False,
-                    "error": f"HTTP {response.status_code}",
+                    "error": f"HTTP {response.status_code}" + (f" ({message})" if message else ""),
                     "response_time_ms": round(response_time * 1000, 2),
                 }
         except requests.exceptions.Timeout as e:
@@ -573,7 +581,14 @@ class NVDCollector:
 
         # Check if service is available before attempting collection
         if not self.check_service_available():
-            error_msg = f"NVD service unavailable (circuit breaker: {self.circuit_breaker.state.name})"
+            if self._api_key_rejected:
+                error_msg = (
+                    "NVD rejected NVD_API_KEY (HTTP 404 Invalid apiKey.) — the service is up, the key is wrong. "
+                    "Correct the key, or remove it: NVD also answers without a key, at a lower rate"
+                )
+                logger.error(error_msg)
+            else:
+                error_msg = f"NVD service unavailable (circuit breaker: {self.circuit_breaker.state.name})"
             record_collection_failure(self.source_name, error_msg)
             return self._return_status(False, 0, error_msg)
 

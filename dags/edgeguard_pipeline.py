@@ -899,7 +899,17 @@ def run_collector_with_metrics(
                         result.get("skip_reason_class", "optional_source"),
                     )
 
-            if skipped:
+            if skipped and str(result.get("skip_reason_class", "")).endswith("_auth_denied"):
+                # The provider refused the request (HTTP 401/403): a rejected or revoked API key, or a
+                # blocked client. The task stays green so the pipeline continues, but nothing from this
+                # source is collected until it is corrected — say so at ERROR, not as a routine skip.
+                logger.error(
+                    f"[SOURCE-ACCESS] {collector_name.upper()} NOT collected — the provider denied access "
+                    f"({result.get('skip_reason_class')}): {skip_reason}. A rejected or revoked API key, or a "
+                    f"blocked client; for a keyed source run `python src/source_key_check.py`. "
+                    f"The task is marked skipped and downstream continues"
+                )
+            elif skipped:
                 logger.warning(
                     f"{collector_name.upper()} skipped in {duration:.2f}s — {skip_reason} "
                     f"(task success; downstream continues)"
@@ -2806,6 +2816,40 @@ baseline_misp_health = PythonOperator(
 )
 
 
+def _baseline_source_key_check(**context) -> None:
+    """Report which keyed sources will deliver, before anything is locked or wiped.
+
+    A key the provider rejects otherwise shows up hours into the run as one skipped task
+    (OTX, VirusTotal, ThreatFox, AbuseIPDB) or as a failed NVD task after ``baseline_clean``
+    wiped the stores. The report is one line per source in the task log. The run stops here
+    only for a key state that would stop it later anyway (a rejected NVD key) or for a
+    source the operator declared mandatory (``EDGEGUARD_BASELINE_REQUIRED_SOURCES``); a
+    missing or rejected key of an optional source never blocks, and neither does a provider
+    that cannot be reached.
+    """
+    from source_key_check import LOG_PREFIX, baseline_blockers, check_source_keys, log_report
+
+    statuses = check_source_keys()
+    log_report(statuses, logger)
+    blockers = baseline_blockers(statuses)
+    if blockers:
+        for blocker in blockers:
+            logger.error("%s BLOCKER %s", LOG_PREFIX, blocker)
+        raise AirflowException(
+            f"{len(blockers)} source API key problem(s) would stop or hollow this baseline; nothing was locked or "
+            "wiped. Correct the key(s) listed above and trigger the baseline again."
+        )
+
+
+baseline_source_keys = PythonOperator(
+    task_id="source_key_check",
+    python_callable=_baseline_source_key_check,
+    execution_timeout=timedelta(minutes=5),
+    retries=0,
+    dag=baseline_dag,
+)
+
+
 def _baseline_run_holder(context) -> dict:
     """``{"dag_id", "run_id"}`` of the current DAG run, for the baseline lock."""
     dag_run = context.get("dag_run")
@@ -3567,11 +3611,13 @@ baseline_complete = BashOperator(
 
 # Dependency chain (PR-C audit fix Cross-Checker HIGH H3,
 # updated PR-F4 — tier1 is now sequential, see TaskGroup comment above):
-# health → clean (no-op unless fresh_baseline=true conf) → start → tier1
+# health → source keys (report; stops only on a blocker) → lock → clean (no-op unless
+# fresh_baseline=true conf) → start → tier1
 # (cisa→mitre→otx→nvd serial) → tier2 (parallel) → full_sync → build_rels
 # → enrich → done
 (
     baseline_misp_health
+    >> baseline_source_keys
     >> baseline_acquire_lock_task
     >> baseline_clean_task
     >> baseline_start
