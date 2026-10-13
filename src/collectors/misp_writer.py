@@ -477,6 +477,47 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     return (str(attr_type).strip().lower(), value_norm)
 
 
+def _strip_non_bmp(text: str) -> str:
+    """Drop characters outside the Basic Multilingual Plane (4-byte UTF-8, e.g. emoji).
+
+    MISP's MySQL/MariaDB text columns use 3-byte ``utf8``; one emoji in an attribute comment or
+    tag name makes the INSERT fail (``1366 Incorrect string value``) and MISP answers the whole
+    batch with HTTP 500 (2026-10-12 fresh baseline, OTX pulse names with flag emoji).
+    """
+    return "".join(ch for ch in text if ord(ch) <= 0xFFFF)
+
+
+def _make_attributes_storable(attributes: List[Dict]) -> List[Dict]:
+    """Strip 4-byte characters from descriptive fields; drop attributes whose value needs them.
+
+    ``comment`` and tag names are descriptive, so stripping keeps the indicator. A ``value`` is
+    the indicator itself: rewriting it would store a different IOC, so such an attribute is
+    skipped with a warning instead of failing its whole batch.
+    """
+    storable: List[Dict] = []
+    for attr in attributes:
+        value = attr.get("value")
+        if isinstance(value, str) and any(ord(ch) > 0xFFFF for ch in value):
+            logger.warning(
+                "[SKIP] attribute value contains 4-byte characters MISP cannot store: type=%s value=%r",
+                attr.get("type"),
+                value[:80],
+            )
+            continue
+        clean = dict(attr)
+        if isinstance(clean.get("comment"), str):
+            clean["comment"] = _strip_non_bmp(clean["comment"])
+        if isinstance(clean.get("Tag"), list):
+            clean["Tag"] = [
+                {**tag, "name": _strip_non_bmp(tag["name"])}
+                if isinstance(tag, dict) and isinstance(tag.get("name"), str)
+                else tag
+                for tag in clean["Tag"]
+            ]
+        storable.append(clean)
+    return storable
+
+
 def _strict_push_accounting() -> bool:
     """``EDGEGUARD_MISP_STRICT_PUSH_ACCOUNTING`` truthy: attributes absent from the returned event
     count as failed pushes (they then feed ``EDGEGUARD_MISP_MIN_SUCCESS_RATE``). Off by default:
@@ -2564,6 +2605,11 @@ class MISPWriter:
         event_id = sanitize_value(event_id, max_length=20)
         if not event_id or not attributes:
             return 0, 0
+        storable = _make_attributes_storable(attributes)
+        skipped_unstorable = len(attributes) - len(storable)
+        attributes = storable
+        if not attributes:
+            return 0, skipped_unstorable
 
         try:
             # Prepare payload
@@ -2638,7 +2684,7 @@ class MISPWriter:
                     f"[OK] Added {success_count} attributes to event {event_id} (total in event: {stored_total})"
                 )
 
-                return success_count, failed_count
+                return success_count, failed_count + skipped_unstorable
             else:
                 # 400 responses usually include a JSON error body — log enough to debug MISP validation.
                 detail = (response.text or "")[:4000]
