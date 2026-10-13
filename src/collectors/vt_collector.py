@@ -487,6 +487,19 @@ class VTCollector:
         summary: Dict[str, Any] = {"lookups": 0, "found": 0, "not_found": 0, "errors": 0, "stopped": None}
         consecutive_errors = 0
         saved_at = 0
+        if candidates:
+            # A key check (source_key_check.py) spends one lookup outside this process's rate
+            # limiter. Keep its minute and this run's first lookups apart, then write the ledger
+            # before the first lookup: the key check reads it to see that a run is in progress.
+            wait = budget.seconds_until_key_check_clear()
+            if wait > 0:
+                logger.info(
+                    "%s a key check spent one lookup less than a minute ago — waiting %.0f s before the first lookup",
+                    QUOTA_LOG_PREFIX,
+                    wait,
+                )
+                time.sleep(wait)
+            budget.save()
         for sha256 in candidates:
             # Periodic save at the top of the loop, so the outcome of the previous lookup
             # (counter and "unknown to VirusTotal" memory) is part of what is written.

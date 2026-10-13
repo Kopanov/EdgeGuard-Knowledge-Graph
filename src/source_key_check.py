@@ -25,7 +25,9 @@ Rules
   unexpected status gives ``unverified``. A network problem is never turned into a verdict
   on the key, and never stops a run.
 * Cost per check: OTX and NVD probes are outside any quota. VirusTotal: one file lookup,
-  counted in the collector's daily ledger and not sent when that ledger is exhausted.
+  counted in the collector's daily ledger; not sent when that ledger is exhausted, while a
+  collector run is in progress, or within 20 seconds of the previous check (the limit is 4
+  lookups a minute, shared with the collector).
   AbuseIPDB: one ``check`` request (1,000 a day on the free plan); the ``blacklist``
   endpoint the collector uses (5 a day) is not touched. ThreatFox: one query whose body
   is not downloaded.
@@ -55,6 +57,8 @@ DISABLED = "disabled"  # the source is switched off by EDGEGUARD_COLLECT_SOURCES
 
 LOG_PREFIX = "[SOURCE-KEYS]"
 PROBE_TIMEOUT = (5, 20)
+# At most three key checks a minute reach VirusTotal (its limit is 4 lookups a minute).
+KEY_CHECK_MIN_INTERVAL_SEC = 20
 
 OTX_PROBE_URL = "https://otx.alienvault.com/api/v1/user/me"
 NVD_PROBE_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -153,29 +157,37 @@ def _probe_nvd(key: str) -> ProbeResult:
 
 
 def _probe_virustotal(key: str) -> ProbeResult:
-    """One file lookup, counted in the collector's ledger so the daily budget stays exact."""
-    from collectors.virustotal_budget import VirusTotalBudget
+    """One file lookup, counted in the collector's ledger and kept apart from collector runs.
 
-    budget: Optional[VirusTotalBudget]
-    try:
-        budget = VirusTotalBudget()
-    except (OSError, ValueError) as exc:
-        logger.debug("VirusTotal ledger not readable for the key check: %s", exc)
-        budget = None
-    if budget is not None and budget.is_exhausted():
+    The lookup is made in another process than the collector, outside its 4-per-minute rate
+    limiter, and VirusTotal answers HTTP 429 for the per-minute limit as well as for the daily
+    quota. So the request is not sent while a collector run is writing the ledger, nor within
+    :data:`KEY_CHECK_MIN_INTERVAL_SEC` of the previous check, and a 429 on this request is never
+    recorded as the end of the collector's day (the collector's own lookups decide that).
+    """
+    from collectors.virustotal_budget import COLLECTOR_ACTIVITY_WINDOW_SEC, WRITER_KEY_CHECK, VirusTotalBudget
+
+    budget = VirusTotalBudget()
+    if budget.is_exhausted():
         return UNVERIFIED, "the daily VirusTotal lookup budget is used; the key was not probed"
+    age = budget.collector_write_age()
+    if age is not None and age < COLLECTOR_ACTIVITY_WINDOW_SEC:
+        return UNVERIFIED, (
+            f"a VirusTotal collector run wrote its ledger {age:.0f} s ago and may be in progress; the key was not "
+            "probed, to stay inside the limit of 4 lookups a minute. Run the check again in a few minutes"
+        )
+    age = budget.key_check_age()
+    if age is not None and age < KEY_CHECK_MIN_INTERVAL_SEC:
+        return UNVERIFIED, (
+            f"the key was checked {age:.0f} s ago; not probed again, to stay inside the limit of 4 lookups a minute"
+        )
 
     response = requests.get(
         VIRUSTOTAL_PROBE_URL, headers={"x-apikey": key}, timeout=PROBE_TIMEOUT, verify=_ssl_verify()
     )
-    if budget is not None:
-        budget.consume(1)
-        if response.status_code == 429:
-            budget.mark_exhausted("HTTP 429 on the key check")
-        try:
-            budget.save()
-        except OSError as exc:
-            logger.debug("VirusTotal ledger not writable after the key check: %s", exc)
+    budget.consume(1)
+    budget.note_key_check()
+    budget.save(writer=WRITER_KEY_CHECK)  # logs and continues when the ledger cannot be written
     if response.status_code == 404:
         # "Not found" is an authenticated answer: the key was accepted.
         return VALID, "HTTP 404 (authenticated answer)"

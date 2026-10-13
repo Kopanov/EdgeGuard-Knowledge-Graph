@@ -42,6 +42,17 @@ MAX_LOOKUPS_PER_RUN_CEILING = 200
 CANDIDATE_DAYS_DEFAULT = 30
 LOOKED_UP_MAX = 20000
 
+# The key check (``source_key_check.py``) spends one lookup in another process, outside the
+# collector's in-process rate limiter. Two rules keep every minute inside VirusTotal's 4 lookups:
+#   * the check is not sent while a collector run is writing the ledger. A run writes it before
+#     its first lookup and then every 10 lookups (150 s at full pace); a run that writes less
+#     often than this window is far below 4 lookups a minute, so one more request fits;
+#   * a collector run that starts within a minute after a key check waits for the rest of it.
+COLLECTOR_ACTIVITY_WINDOW_SEC = 300
+KEY_CHECK_SPACING_SEC = 60
+WRITER_COLLECTOR = "collector"
+WRITER_KEY_CHECK = "key_check"
+
 _DAILY_BUDGET_ENV = "EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET"
 _PER_RUN_ENV = "EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN"
 _CANDIDATE_DAYS_ENV = "EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS"
@@ -135,6 +146,10 @@ class VirusTotalBudget:
         self.exhausted_at: Optional[str] = None
         self.exhausted_reason: Optional[str] = None
         self.looked_up: Dict[str, str] = {}
+        # As read from the ledger: when it was last written and by whom, and the last key check.
+        self.updated_at: Optional[str] = None
+        self.updated_by: Optional[str] = None
+        self.key_check_at: Optional[str] = None
         self._load()
 
     # ------------------------------------------------------------------ persistence
@@ -156,6 +171,12 @@ class VirusTotalBudget:
         looked_up = data.get("looked_up")
         if isinstance(looked_up, dict):
             self.looked_up = {str(k): str(v) for k, v in looked_up.items()}
+        if isinstance(data.get("updated_at"), str):
+            self.updated_at = data["updated_at"]
+            # A ledger written before the key check existed has no writer: it was a collector run.
+            self.updated_by = str(data.get("updated_by") or WRITER_COLLECTOR)
+        if isinstance(data.get("key_check_at"), str):
+            self.key_check_at = data["key_check_at"]
         if data.get("date") != self.date:
             # New UTC day: the quota resets; the lookup memory is kept.
             previous_used = data.get("used", 0)
@@ -175,7 +196,7 @@ class VirusTotalBudget:
         self.exhausted_at = data.get("exhausted_at")
         self.exhausted_reason = data.get("exhausted_reason")
 
-    def save(self) -> None:
+    def save(self, writer: str = WRITER_COLLECTOR) -> None:
         """Write the ledger atomically; failures are logged, never raised."""
         self._trim()
         payload: Dict[str, Any] = {
@@ -187,6 +208,8 @@ class VirusTotalBudget:
             "exhausted_reason": self.exhausted_reason,
             "looked_up": self.looked_up,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": writer,
+            "key_check_at": self.key_check_at,
         }
         tmp = self.path.with_suffix(".tmp")
         try:
@@ -239,6 +262,39 @@ class VirusTotalBudget:
             QUOTA_LOG_PREFIX,
             reason,
         )
+
+    # ------------------------------------------------------------------ key check coordination
+    @staticmethod
+    def _age(stamp: Optional[str]) -> Optional[float]:
+        """Seconds since a ledger timestamp; None when absent, unreadable or in the future."""
+        if not stamp:
+            return None
+        try:
+            then = datetime.fromisoformat(stamp)
+        except ValueError:
+            return None
+        if then.tzinfo is None:
+            then = then.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - then).total_seconds()
+        return age if age >= 0 else None
+
+    def collector_write_age(self) -> Optional[float]:
+        """Seconds since a collector run last wrote the ledger; None when a key check wrote it last."""
+        if self.updated_by != WRITER_COLLECTOR:
+            return None
+        return self._age(self.updated_at)
+
+    def key_check_age(self) -> Optional[float]:
+        """Seconds since the last key check spent a lookup; None when there was none."""
+        return self._age(self.key_check_at)
+
+    def note_key_check(self) -> None:
+        self.key_check_at = datetime.now(timezone.utc).isoformat()
+
+    def seconds_until_key_check_clear(self) -> float:
+        """How long a collector run waits so that a recent key check and its own lookups share no minute."""
+        age = self.key_check_age()
+        return 0.0 if age is None else max(0.0, KEY_CHECK_SPACING_SEC - age)
 
     # ------------------------------------------------------------------ lookup memory
     def already_looked_up(self, sha256: str) -> bool:

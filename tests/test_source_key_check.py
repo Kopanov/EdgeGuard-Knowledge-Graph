@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -368,21 +369,81 @@ def _ledger(tmp_path) -> Dict[str, Any]:
     return json.loads((tmp_path / "vt_ledger.json").read_text())
 
 
-def test_virustotal_probe_is_counted_in_the_collectors_ledger(http, monkeypatch, tmp_path) -> None:
+def _age_ledger(tmp_path, seconds: float, *fields: str) -> None:
+    """Move ledger timestamps into the past, as if that much time had gone by."""
+    data = _ledger(tmp_path)
+    for field in fields:
+        then = datetime.fromisoformat(data[field]) - timedelta(seconds=seconds)
+        data[field] = then.isoformat()
+    (tmp_path / "vt_ledger.json").write_text(json.dumps(data))
+
+
+def test_virustotal_probe_is_counted_and_recorded_as_a_key_check(http, monkeypatch, tmp_path) -> None:
     _set_key(monkeypatch, "virustotal")
     http.answers[URLS["virustotal"]] = _Response(200, {"data": {}})
-    _one("virustotal")
-    _one("virustotal")
-    assert _ledger(tmp_path)["used"] == 2 and len(http.calls) == 2
+    assert _one("virustotal").status == skc.VALID
+    ledger = _ledger(tmp_path)
+    assert ledger["used"] == 1 and ledger["updated_by"] == "key_check"
+    assert ledger["key_check_at"] and ledger["exhausted"] is False
 
 
-def test_virustotal_quota_answer_ends_the_day_for_the_collector_too(http, monkeypatch, tmp_path) -> None:
+def test_a_rate_limit_answer_to_the_probe_does_not_end_the_collectors_day(http, monkeypatch, tmp_path) -> None:
+    """VirusTotal answers 429 for the per-minute limit too; only the collector's own lookups end its day."""
     from collectors.virustotal_budget import VirusTotalBudget
 
     _set_key(monkeypatch, "virustotal")
     http.answers[URLS["virustotal"]] = _Response(429, {"error": {"code": "QuotaExceededError"}})
-    assert _one("virustotal").status == skc.UNVERIFIED
-    assert VirusTotalBudget().is_exhausted() is True
+    status = _one("virustotal")
+    assert status.status == skc.UNVERIFIED and "HTTP 429 QuotaExceededError" in status.detail
+    budget = VirusTotalBudget()
+    assert budget.is_exhausted() is False and budget.used == 1 and budget.remaining == 399
+
+
+@pytest.mark.parametrize("old_format", [False, True], ids=["current ledger", "ledger without a writer field"])
+def test_virustotal_is_not_probed_while_a_collector_run_writes_the_ledger(
+    http, monkeypatch, tmp_path, old_format
+) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    _set_key(monkeypatch, "virustotal")
+    running = VirusTotalBudget()
+    running.consume(7)
+    running.save()  # what a collector run does before its first lookup and every 10 lookups
+    if old_format:
+        data = _ledger(tmp_path)
+        del data["updated_by"], data["key_check_at"]
+        (tmp_path / "vt_ledger.json").write_text(json.dumps(data))
+    _age_ledger(tmp_path, 299, "updated_at")
+    status = _one("virustotal")
+    assert status.status == skc.UNVERIFIED and "collector run wrote its ledger" in status.detail
+    assert http.calls == [] and _ledger(tmp_path)["used"] == 7, "nothing sent, nothing counted"
+
+
+def test_virustotal_is_probed_once_the_collector_has_been_quiet(http, monkeypatch, tmp_path) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    _set_key(monkeypatch, "virustotal")
+    http.answers[URLS["virustotal"]] = _Response(200, {"data": {}})
+    finished = VirusTotalBudget()
+    finished.consume(7)
+    finished.save()
+    _age_ledger(tmp_path, 301, "updated_at")
+    assert _one("virustotal").status == skc.VALID
+    assert len(http.calls) == 1 and _ledger(tmp_path)["used"] == 8
+
+
+def test_virustotal_checks_are_spaced_twenty_seconds_apart(http, monkeypatch, tmp_path) -> None:
+    _set_key(monkeypatch, "virustotal")
+    http.answers[URLS["virustotal"]] = _Response(401, {"error": {"code": "WrongCredentialsError"}})
+    assert _one("virustotal").status == skc.REJECTED
+    again = _one("virustotal")
+    assert again.status == skc.UNVERIFIED and "the key was checked" in again.detail
+    assert len(http.calls) == 1 and _ledger(tmp_path)["used"] == 1
+    # The operator corrects the key and checks again a little later: the request is sent.
+    _age_ledger(tmp_path, 21, "updated_at", "key_check_at")
+    http.answers[URLS["virustotal"]] = _Response(200, {"data": {}})
+    assert _one("virustotal").status == skc.VALID
+    assert len(http.calls) == 2 and _ledger(tmp_path)["used"] == 2
 
 
 def test_virustotal_is_not_probed_when_the_daily_budget_is_used(http, monkeypatch) -> None:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock
@@ -602,3 +602,91 @@ def test_ledger_default_path_follows_the_state_directory(monkeypatch: pytest.Mon
     assert vb.ledger_path() == os.path.join(str(tmp_path), "virustotal_daily_budget.json")
     monkeypatch.delenv("EDGEGUARD_STATE_DIR")
     assert vb.ledger_path().endswith(os.path.join("state", "virustotal_daily_budget.json"))
+
+
+# ---------------------------------------------------------------------------
+# Coordination with the source key check (one lookup spent in another process)
+# ---------------------------------------------------------------------------
+
+
+def _first_lookup_ledger(collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch) -> List[Dict[str, Any]]:
+    """Record what the ledger file holds at the moment each VirusTotal request is sent."""
+    from collectors import vt_collector as mod
+
+    seen: List[Dict[str, Any]] = []
+    inner = mod.request_with_rate_limit_retries
+
+    def recording(method: str, url: str, **kwargs: Any) -> FakeResponse:
+        seen.append(json.loads(ledger_path.read_text()) if ledger_path.exists() else {})
+        return inner(method, url, **kwargs)
+
+    monkeypatch.setattr(mod, "request_with_rate_limit_retries", recording)
+    return seen
+
+
+def test_run_waits_out_the_minute_of_a_recent_key_check_and_writes_the_ledger_first(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key check spends its lookup outside this process's rate limiter."""
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    checked = (datetime.now(timezone.utc) - timedelta(seconds=45)).isoformat()
+    _write_ledger(ledger_path, used=1, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+    seen = _first_lookup_ledger(collector, ledger_path, monkeypatch)
+
+    collector._lookup_hashes([H1, H2], VirusTotalBudget())
+
+    assert len(sleeps) == 1 and 13 <= sleeps[0] <= 15, "the rest of the key check's minute"
+    assert len(seen) == 2
+    assert seen[0]["updated_by"] == "collector", "written before the first lookup, so the key check sees the run"
+    assert seen[0]["key_check_at"] == checked and seen[0]["used"] == 1
+
+
+@pytest.mark.parametrize("seconds_ago", [None, 61, 3600])
+def test_run_does_not_wait_without_a_recent_key_check(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch, seconds_ago
+) -> None:
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    if seconds_ago is not None:
+        checked = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+        _write_ledger(ledger_path, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+    seen = _first_lookup_ledger(collector, ledger_path, monkeypatch)
+
+    collector._lookup_hashes([H1], VirusTotalBudget())
+
+    assert sleeps == [] and seen[0]["updated_by"] == "collector"
+
+
+def test_no_candidates_means_no_wait_and_no_ledger_write(
+    collector, ledger_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collectors import vt_collector as mod
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    checked = datetime.now(timezone.utc).isoformat()
+    _write_ledger(ledger_path, updated_at=checked, updated_by="key_check", key_check_at=checked)
+    before = ledger_path.read_text()
+    sleeps: List[float] = []
+    monkeypatch.setattr(mod.time, "sleep", sleeps.append)
+
+    collector._lookup_hashes([], VirusTotalBudget())
+
+    assert sleeps == [] and ledger_path.read_text() == before
+
+
+def test_ledger_timestamps_that_cannot_be_read_never_delay_or_block(ledger_path: Path) -> None:
+    from collectors.virustotal_budget import VirusTotalBudget
+
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    for stamp in ("not a time", future, 12345, None):
+        _write_ledger(ledger_path, updated_at=stamp, updated_by="collector", key_check_at=stamp)
+        budget = VirusTotalBudget()
+        assert budget.collector_write_age() is None and budget.key_check_age() is None
+        assert budget.seconds_until_key_check_clear() == 0.0
