@@ -25,6 +25,9 @@
 #   [8] no stale baseline_lock sentinel from a previous aborted run
 #   [9] kill-switch env vars set to safe defaults (none unexpectedly forced-on)
 #   [10] coverage gate: last full pytest run was green
+#   [11] baseline hardening invariants still present in the source
+#   [12] source API keys accepted by their providers (live check; a rejected key
+#        is a warning, a key state that would stop the baseline is a failure)
 #
 # Usage:
 #   ./scripts/preflight_baseline.sh [--launch-path cli|dag]
@@ -437,6 +440,32 @@ if grep -q 'record_misp_fetch_fallback("pymisp", "hard_error")' src/run_misp_to_
   pass "_MispFallbackHardError raises increment edgeguard_misp_fetch_fallback_active_total{outcome=hard_error} (PR-N31)"
 else
   warn "PR-N31 fallback metric not wired in both branches — operator alerts may be silent on hard-error path"
+fi
+
+# -----------------------------------------------------------------------------
+# [12] source API keys accepted by their providers
+# -----------------------------------------------------------------------------
+# "The variable is set" does not say whether a source will deliver. A key the
+# provider rejects shows up only inside the run: as a skipped task that Airflow
+# shows green (OTX, VirusTotal, ThreatFox, AbuseIPDB), or as a failed NVD task
+# after the wipe. src/source_key_check.py asks each provider once (cost: one
+# VirusTotal lookup and one AbuseIPDB check; key values are never printed).
+hdr "[12] source API keys (live check)"
+KEY_PY=".venv/bin/python"
+[[ -x "$KEY_PY" ]] || KEY_PY="python3"
+KEY_OUT=$("$KEY_PY" src/source_key_check.py 2>/dev/null)
+KEY_RC=$?
+if [[ -z "$KEY_OUT" ]]; then
+  warn "source key check gave no output (exit $KEY_RC) — run: $KEY_PY src/source_key_check.py"
+else
+  while IFS= read -r key_line; do
+    case "$key_line" in
+      "OK "*)       pass "${key_line#OK }" ;;
+      "REJECTED "*) warn "${key_line#REJECTED }" ;;
+      "BLOCKER "*)  fail "${key_line#BLOCKER }" ;;
+      *)            printf '  - %s\n' "$key_line" ;;
+    esac
+  done <<< "$KEY_OUT"
 fi
 
 # -----------------------------------------------------------------------------

@@ -2679,18 +2679,30 @@ def cmd_preflight(args) -> int:
         else:
             err(f"{name}: NOT SET (required)")
             errors += 1
-    optional = {
-        "OTX_API_KEY": OTX_API_KEY,
-        "NVD_API_KEY": NVD_API_KEY,
-        "VIRUSTOTAL_API_KEY": os.getenv("VIRUSTOTAL_API_KEY"),
-        "ABUSEIPDB_API_KEY": os.getenv("ABUSEIPDB_API_KEY"),
-    }
-    for name, val in optional.items():
-        if val:
-            ok(f"{name}: set ({len(val)} chars)")
-        else:
-            info(f"{name}: not set (optional — source will be skipped)")
     checks["env_vars"] = {"errors": errors}
+
+    # Source API keys: ask each provider whether it accepts the key. "The variable is set" does not
+    # say whether the source will deliver — a rejected key only shows inside a run, as a skipped
+    # task (or, for NVD, as a failed one).
+    from source_key_check import REJECTED, VALID, check_source_keys, required_sources
+
+    key_statuses = check_source_keys()
+    required_keyed_sources = required_sources()
+    for key_status in key_statuses:
+        if key_status.status == VALID:
+            ok(key_status.message())
+        elif key_status.status == REJECTED and key_status.task_fails:
+            err(key_status.message())
+            errors += 1
+        elif key_status.source in required_keyed_sources and key_status.will_collect is False:
+            err(f"{key_status.message()} [named in EDGEGUARD_BASELINE_REQUIRED_SOURCES]")
+            errors += 1
+        elif key_status.status == REJECTED:
+            warn(key_status.message())
+            warnings += 1
+        else:
+            info(key_status.message())
+    checks["source_keys"] = [key_status.as_dict() for key_status in key_statuses]
 
     # 2. Neo4j
     section("2. Neo4j")

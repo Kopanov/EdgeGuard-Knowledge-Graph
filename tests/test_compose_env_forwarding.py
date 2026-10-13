@@ -34,6 +34,8 @@ FORWARDED = [
     ("EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET", "400"),
     ("EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN", "60"),
     ("EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS", "30"),
+    ("EDGEGUARD_SOURCE_KEY_CHECK", "true"),  # live source key check (source_key_check.py)
+    ("EDGEGUARD_BASELINE_REQUIRED_SOURCES", None),  # empty = no keyed source is mandatory
     ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # int(os.environ.get(...))
     ("EDGEGUARD_DEFAULT_TLP", "white"),
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),

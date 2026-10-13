@@ -521,6 +521,10 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    incremental schedulers (see PR-N35 callout — there is no CLI
    baseline subcommand at HEAD).
 2. **Preflight green.** `./scripts/preflight_baseline.sh` returns exit 0.
+   Check `[12]` asks every provider whether it accepts the configured API
+   key; a rejected key means that source is skipped for the whole baseline
+   (a rejected NVD key stops it). The baseline DAG repeats the check in its
+   `source_key_check` task, before the lock and the wipe.
 3. **Smoke test.** Run a 7-day window first (`baseline=True, baseline_days=7`
    in the baseline DAG config). Success criteria: no ERROR lines, all
    6 pre-baseline alerts green, spot-check 10 random Indicators via
