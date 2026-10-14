@@ -301,7 +301,7 @@ class MISPCollector:
                             "first_seen": (event.get("date") or None),
                             "confidence_score": 0.5,
                             "severity": "UNKNOWN",
-                            "cvss_score": 0.0,
+                            "cvss_score": None,  # unscored (0.0 was a placeholder)
                             "attack_vector": "NETWORK",
                             "misp_event_id": str(event_id),
                         }
@@ -348,7 +348,7 @@ class MISPCollector:
                                     "first_seen": (event.get("date") or None),
                                     "confidence_score": 0.6,
                                     "severity": "UNKNOWN",
-                                    "cvss_score": 0.0,
+                                    "cvss_score": None,  # unscored (0.0 was a placeholder)
                                     "attack_vector": "NETWORK",
                                     "misp_event_id": str(event_id),
                                 }
@@ -542,7 +542,7 @@ class MISPCollector:
                                 "first_seen": (event.get("date") or None),
                                 "confidence_score": 0.5,
                                 "severity": "UNKNOWN",
-                                "cvss_score": 0.0,
+                                "cvss_score": None,  # unscored (0.0 was a placeholder)
                                 "attack_vector": "NETWORK",
                                 "misp_event_id": str(event_id),
                             }

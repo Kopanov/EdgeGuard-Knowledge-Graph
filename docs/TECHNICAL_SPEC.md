@@ -22,8 +22,12 @@ Auth:    Configured via environment variables
 ```cypher
 (:Vulnerability {
   cve_id: STRING,           // CVE identifier (e.g., "CVE-2023-1234")
-  cvss_score: FLOAT,        // CVSS score (0-10)
-  severity: STRING,         // Critical/High/Medium/Low
+  // Score (2026-10): base score / rating of the CVE's first CVSS in the order v3.1 → v3.0 → v2 → v4.0.
+  // On :CVE nodes merge_cve sets all three from the CVSS sub-nodes; no CVSS → cvss_score and
+  // cvss_version null, severity UNKNOWN (never a 0.0 placeholder, a cvss: tag band or a KEV/ICS default).
+  cvss_score: FLOAT,        // CVSS base score (0-10), null without CVSS
+  cvss_version: STRING,     // "3.1", "3.0", "2.0" or "4.0" — which CVSS cvss_score is
+  severity: STRING,         // NONE/LOW/MEDIUM/HIGH/CRITICAL, UNKNOWN without CVSS
   attack_vector: STRING,    // Network/Adjacent/Local/Physical
   description: STRING,      // Vulnerability description (up to 1000 chars)
   zone: LIST,               // Zone(s): ['finance'], ['energy', 'global'] — always a list
@@ -43,7 +47,8 @@ Auth:    Configured via environment variables
   cisa_exploit_add: STRING,        // Date added to CISA KEV
   cisa_action_due: STRING,         // Federal remediation deadline
   cisa_required_action: STRING,    // Required mitigation action
-  cisa_vulnerability_name: STRING  // CISA-assigned vulnerability name
+  cisa_vulnerability_name: STRING, // CISA-assigned vulnerability name
+  known_ransomware_use: STRING     // CISA knownRansomwareCampaignUse: "Known" / "Unknown" (KEV records, 2026-10)
 })
 // Source provenance is on the SOURCED_FROM relationship, not a node property.
 // CVSS sub-nodes (CVSSv40, CVSSv31, CVSSv30, CVSSv2) linked via HAS_CVSS_* relationships.
@@ -882,4 +887,4 @@ together so they cannot drift.
 
 ---
 
-_Last updated: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-14 — CVE score fields: `cvss_score` / `severity` come from the CVE's first CVSS (v3.1 → v3.0 → v2 → v4.0), new `cvss_version` and `known_ransomware_use`; no CVSS → null score, severity UNKNOWN; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._

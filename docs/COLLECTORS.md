@@ -165,7 +165,7 @@ def detect_sectors(self, text: str) -> List[str]:
     # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.5,
     'severity': 'UNKNOWN',
-    'cvss_score': 0.0,
+    'cvss_score': None,  # a pulse reference carries no CVSS (2026-10; was 0.0, tagged cvss:low)
     'attack_vector': 'NETWORK',
 }
 
@@ -195,6 +195,7 @@ def detect_sectors(self, text: str) -> List[str]:
 Collects CVE records from the National Vulnerability Database, including:
 - CVE IDs and descriptions (up to 1000 chars)
 - CVSS scores (v4.0, v3.1, v3.0, v2) with full component data
+- `cvss_score` / `severity`: the record's first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`src/cvss_selection.py`); `None` / `UNKNOWN` when the record has none — rejected CVEs, CVEs awaiting NVD analysis without a CNA score. Until 2026-10 such a record carried 0.0, was tagged `cvss:low` and showed as 3.0 / LOW in Neo4j (14,451 CVEs on the hosted 730-day baseline). The CVSS 2 rating is read from the metric object, where NVD API 2.0 puts it.
 - Affected products (CPE matching)
 - Attack vectors
 - CWE identifiers
@@ -286,8 +287,8 @@ def detect_sectors(self, text: str) -> list:
     'first_seen': '2024-01-15',
     # 'last_updated' REMOVED in PR-M2 — set server-side by Cypher MERGE; collectors must NOT emit.
     'confidence_score': 0.9,  # High confidence - confirmed exploited
-    'severity': 'CRITICAL',
-    'cvss_score': 9.0,
+    'severity': 'UNKNOWN',
+    'cvss_score': None,
     'attack_vector': 'NETWORK',
     'vendor': 'SCADA Systems Inc',
     'product': 'Grid Manager Pro',
@@ -295,9 +296,12 @@ def detect_sectors(self, text: str) -> list:
     'due_date': '2024-02-01',
     'known_ransomware_use': 'Known'
 }
-# Note: severity and cvss_score are derived from the CISA KEV `knownRansomwareCampaignUse`
-# field (Known=CRITICAL/9.0, Unknown=HIGH/7.0), not from NVD CVSS data. For actual CVSS
-# scores, cross-reference with the NVD collector via CVE ID.
+# Note (2026-10): the KEV catalogue carries no CVSS, so a KEV record has no score; the CVE's CVSS
+# comes from the NVD collector, and the CVE node takes it from its CVSS sub-nodes whatever record
+# arrives last. Until 2026-10 the score was derived from `knownRansomwareCampaignUse`
+# (Known = CRITICAL / 9.0, Unknown = HIGH / 7.0, read back as 7.5) and could replace NVD's CVSS.
+# `known_ransomware_use` ("Known" / "Unknown") travels in NVD_META (and as the `ransomware:known`
+# MISP tag) to the CVE node property of the same name.
 ```
 
 ---
@@ -824,7 +828,8 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
     'reference_urls': ['https://www.cisa.gov/news-events/ics-advisories/icsa-26-281-01'],
     'ref_tags': [], 'cpe_type': [], 'result_impacts': ['HIGH', 'HIGH', 'NONE'],
 }
-# No CVSS block in the advisory → KEV-consistent defaults: severity HIGH, cvss_score 7.0, attack_vector NETWORK.
+# No CVSS block in the advisory → no score: severity UNKNOWN, cvss_score None, attack_vector NETWORK
+# (2026-10; was 7.0 / HIGH, copied from the KEV collector's ransomware-derived values).
 # Dates absent → the four timestamp keys are omitted (honest-NULL), never wall-clock.
 # MISP: tagged source:CISA-ICS + zone:<Zone>; NOT tagged CISA-KEV. Same CVE in two advisories → MISP dedups the
 # second attribute (type, value); the first advisory's metadata wins.
@@ -1090,4 +1095,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
+_Last updated: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._

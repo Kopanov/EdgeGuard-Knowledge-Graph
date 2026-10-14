@@ -1,0 +1,1092 @@
+{
+ "_about": "Real payloads for tests/test_cvss_scores_without_cvss.py. 'nvd': NVD CVE API 2.0 records fetched 2026-10-14 (field set trimmed to what NVDCollector reads: configurations emptied, references cut to two; values unchanged, timestamps zone-less as NVD sends them). 'misp': vulnerability attributes of the hosted EdgeGuard MISP read on 2026-10-14 (fields parse_attribute reads; tags by name).",
+ "nvd": {
+  "CVE-2008-4250": {
+   "cve": {
+    "id": "CVE-2008-4250",
+    "published": "2008-10-23T22:00:01.357",
+    "lastModified": "2026-06-16T22:57:29.393",
+    "vulnStatus": "Analyzed",
+    "cisaExploitAdd": "2026-05-20",
+    "cisaActionDue": "2026-06-03",
+    "cisaRequiredAction": "Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.",
+    "cisaVulnerabilityName": "Microsoft Windows Buffer Overflow Vulnerability",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "The Server service in Microsoft Windows 2000 SP4, XP SP2 and SP3, Server 2003 SP1 and SP2, Vista Gold and SP1, Server 2008, and 7 Pre-Beta allows remote attackers to execute arbitrary code via a crafted RPC request that triggers the overflow during path canonicalization, as exploited in the wild by Gimmiv.A in October 2008, aka \"Server Service Vulnerability.\""
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 9.8,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 5.9
+      }
+     ],
+     "cvssMetricV2": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "2.0",
+        "vectorString": "AV:N/AC:L/Au:N/C:C/I:C/A:C",
+        "baseScore": 10.0,
+        "accessVector": "NETWORK",
+        "accessComplexity": "LOW",
+        "authentication": "NONE",
+        "confidentialityImpact": "COMPLETE",
+        "integrityImpact": "COMPLETE",
+        "availabilityImpact": "COMPLETE"
+       },
+       "baseSeverity": "HIGH",
+       "exploitabilityScore": 10.0,
+       "impactScore": 10.0,
+       "acInsufInfo": false,
+       "obtainAllPrivilege": true,
+       "obtainUserPrivilege": false,
+       "obtainOtherPrivilege": false,
+       "userInteractionRequired": false
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "nvd@nist.gov",
+      "type": "Primary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-94"
+       }
+      ]
+     },
+     {
+      "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-119"
+       }
+      ]
+     }
+    ],
+    "configurations": [],
+    "references": [
+     {
+      "url": "http://blogs.securiteam.com/index.php/archives/1150",
+      "source": "secure@microsoft.com",
+      "tags": [
+       "Permissions Required"
+      ]
+     },
+     {
+      "url": "http://marc.info/?l=bugtraq&m=122703006921213&w=2",
+      "source": "secure@microsoft.com",
+      "tags": [
+       "Issue Tracking",
+       "Mailing List",
+       "Third Party Advisory"
+      ]
+     }
+    ]
+   }
+  },
+  "CVE-2014-9323": {
+   "cve": {
+    "id": "CVE-2014-9323",
+    "published": "2014-12-16T18:59:14.357",
+    "lastModified": "2026-10-14T17:17:33.437",
+    "vulnStatus": "Modified",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "The xdr_status_vector function in Firebird before 2.1.7 and 2.5.x before 2.5.3 SU1 allows remote attackers to cause a denial of service (NULL pointer dereference, segmentation fault, and crash) via an op_response action with a non-empty status."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV2": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "2.0",
+        "vectorString": "AV:N/AC:L/Au:N/C:N/I:N/A:P",
+        "baseScore": 5.0,
+        "accessVector": "NETWORK",
+        "accessComplexity": "LOW",
+        "authentication": "NONE",
+        "confidentialityImpact": "NONE",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "PARTIAL"
+       },
+       "baseSeverity": "MEDIUM",
+       "exploitabilityScore": 10.0,
+       "impactScore": 2.9,
+       "acInsufInfo": false,
+       "obtainAllPrivilege": false,
+       "obtainUserPrivilege": false,
+       "obtainOtherPrivilege": false,
+       "userInteractionRequired": false
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "nvd@nist.gov",
+      "type": "Primary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-476"
+       }
+      ]
+     }
+    ],
+    "configurations": [],
+    "references": [
+     {
+      "url": "http://advisories.mageia.org/MGASA-2014-0523.html",
+      "source": "cve@mitre.org",
+      "tags": [
+       "Third Party Advisory"
+      ]
+     },
+     {
+      "url": "http://lists.opensuse.org/opensuse-security-announce/2014-12/msg00012.html",
+      "source": "cve@mitre.org",
+      "tags": [
+       "Mailing List",
+       "Third Party Advisory"
+      ]
+     }
+    ]
+   }
+  },
+  "CVE-2025-12843": {
+   "cve": {
+    "id": "CVE-2025-12843",
+    "published": "2025-12-12T16:15:42.350",
+    "lastModified": "2026-10-14T17:10:00.210",
+    "vulnStatus": "Analyzed",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Code Injection using Electron Fuses in waveterm on MacOS allows TCC Bypass.\nThis issue affects waveterm: 0.12.2."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV40": [
+      {
+       "source": "help@fluidattacks.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "4.0",
+        "vectorString": "CVSS:4.0/AV:L/AC:L/AT:N/PR:L/UI:N/VC:H/VI:L/VA:N/SC:L/SI:L/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+        "baseScore": 6.9,
+        "baseSeverity": "MEDIUM",
+        "attackVector": "LOCAL",
+        "attackComplexity": "LOW",
+        "attackRequirements": "NONE",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "vulnConfidentialityImpact": "HIGH",
+        "vulnIntegrityImpact": "LOW",
+        "vulnAvailabilityImpact": "NONE",
+        "subConfidentialityImpact": "LOW",
+        "subIntegrityImpact": "LOW",
+        "subAvailabilityImpact": "NONE",
+        "exploitMaturity": "NOT_DEFINED",
+        "confidentialityRequirement": "NOT_DEFINED",
+        "integrityRequirement": "NOT_DEFINED",
+        "availabilityRequirement": "NOT_DEFINED",
+        "modifiedAttackVector": "NOT_DEFINED",
+        "modifiedAttackComplexity": "NOT_DEFINED",
+        "modifiedAttackRequirements": "NOT_DEFINED",
+        "modifiedPrivilegesRequired": "NOT_DEFINED",
+        "modifiedUserInteraction": "NOT_DEFINED",
+        "modifiedVulnConfidentialityImpact": "NOT_DEFINED",
+        "modifiedVulnIntegrityImpact": "NOT_DEFINED",
+        "modifiedVulnAvailabilityImpact": "NOT_DEFINED",
+        "modifiedSubConfidentialityImpact": "NOT_DEFINED",
+        "modifiedSubIntegrityImpact": "NOT_DEFINED",
+        "modifiedSubAvailabilityImpact": "NOT_DEFINED",
+        "Safety": "NOT_DEFINED",
+        "Automatable": "NOT_DEFINED",
+        "Recovery": "NOT_DEFINED",
+        "valueDensity": "NOT_DEFINED",
+        "vulnerabilityResponseEffort": "NOT_DEFINED",
+        "providerUrgency": "NOT_DEFINED"
+       }
+      }
+     ],
+     "cvssMetricV31": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",
+        "baseScore": 5.5,
+        "baseSeverity": "MEDIUM",
+        "attackVector": "LOCAL",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "NONE"
+       },
+       "exploitabilityScore": 1.8,
+       "impactScore": 3.6
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "help@fluidattacks.com",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-94"
+       }
+      ]
+     }
+    ],
+    "configurations": [],
+    "references": [
+     {
+      "url": "https://fluidattacks.com/advisories/minutos",
+      "source": "help@fluidattacks.com",
+      "tags": [
+       "Exploit",
+       "Third Party Advisory"
+      ]
+     },
+     {
+      "url": "https://github.com/wavetermdev/waveterm",
+      "source": "help@fluidattacks.com",
+      "tags": [
+       "Product"
+      ]
+     }
+    ]
+   }
+  },
+  "CVE-2025-59823": {
+   "cve": {
+    "id": "CVE-2025-59823",
+    "published": "2025-09-25T15:16:13.560",
+    "lastModified": "2026-10-11T20:10:00.200",
+    "vulnStatus": "Deferred",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Project Gardener implements the automated management and operation of Kubernetes clusters as a service. Code injection may be possible in Gardener Extensions for AWS providers prior to version 1.64.0, Azure providers prior to version 1.55.0, OpenStack providers prior to version 1.49.0, and GCP providers prior to version 1.46.0. This vulnerability could allow a user with administrative privileges for a Gardener project to obtain control over the seed cluster where the shoot cluster is managed. This affects all Gardener installations where Terraformer is used/can be enabled for infrastructure provisioning with any of the affected components. This issue has been patched in Gardener Extensions for AWS providers version 1.64.0, Azure providers version 1.55.0, OpenStack providers version 1.49.0, and GCP providers version 1.46.0."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV30": [
+      {
+       "source": "security-advisories@github.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.0",
+        "vectorString": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+        "baseScore": 9.9,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "CHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.1,
+       "impactScore": 6.0
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "security-advisories@github.com",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-94"
+       }
+      ]
+     }
+    ],
+    "configurations": [],
+    "references": [
+     {
+      "url": "https://github.com/gardener/gardener-extension-provider-aws/releases/tag/v1.64.0",
+      "source": "security-advisories@github.com"
+     },
+     {
+      "url": "https://github.com/gardener/gardener-extension-provider-aws/security/advisories/GHSA-227x-7mh8-3cf6",
+      "source": "security-advisories@github.com"
+     }
+    ]
+   }
+  },
+  "CVE-2026-102699": {
+   "cve": {
+    "id": "CVE-2026-102699",
+    "published": "2026-10-13T16:17:09.510",
+    "lastModified": "2026-10-14T16:10:14.750",
+    "vulnStatus": "Awaiting Analysis",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "[This CNA information record relates to multiple CVEs; the\ntext explains which aspects/vulnerabilities correspond to which CVE.]\n\n1) XSA-437 (CVE-2023-34321) addressed issues with overflows in\n   calculations involved in guests flushing caches through\n   GNTTABOP_cache_flush.  Unfortunately the fix there introduced a\n   calculation which may underflow, resulting in a loop which would - at\n   least on 64-bit Arm - take excessively long, and which would likely\n   eventually crash the hypervisor.\n\n   This is CVE-2026-102699.\n\n2) GNTTABOP_cache_flush may be issued on memory mapped from another\n   domain using the grant table interface.  However there was no\n   restriction to disallow the use of invalidate-without-clean against\n   read-only grant mappings, which may corrupt the granted memory.\n\n   This is CVE-2026-102702."
+     }
+    ],
+    "metrics": {},
+    "weaknesses": [],
+    "configurations": [],
+    "references": [
+     {
+      "url": "https://xenbits.xenproject.org/xsa/advisory-519.html",
+      "source": "security@xen.org"
+     }
+    ]
+   }
+  },
+  "CVE-2026-105151": {
+   "cve": {
+    "id": "CVE-2026-105151",
+    "published": "2026-10-13T23:17:26.400",
+    "lastModified": "2026-10-13T23:17:26.400",
+    "vulnStatus": "Rejected",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Rejected reason: This CVE ID has been rejected or withdrawn by its CVE Numbering Authority."
+     }
+    ],
+    "metrics": {},
+    "weaknesses": [],
+    "configurations": [],
+    "references": []
+   }
+  },
+  "CVE-2026-107153": {
+   "cve": {
+    "id": "CVE-2026-107153",
+    "published": "2026-10-14T06:17:05.390",
+    "lastModified": "2026-10-14T17:18:17.330",
+    "vulnStatus": "Received",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Multiple smartphones provided by Rakuten Mobile, Inc. utilize AOSP test keys for their Android Verified Boot (AVB) functionality. With physical access to the affected device, a crafted system image may be installed."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV40": [
+      {
+       "source": "vultures@jpcert.or.jp",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "4.0",
+        "vectorString": "CVSS:4.0/AV:P/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+        "baseScore": 7.0,
+        "baseSeverity": "HIGH",
+        "attackVector": "PHYSICAL",
+        "attackComplexity": "LOW",
+        "attackRequirements": "NONE",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "vulnConfidentialityImpact": "HIGH",
+        "vulnIntegrityImpact": "HIGH",
+        "vulnAvailabilityImpact": "HIGH",
+        "subConfidentialityImpact": "NONE",
+        "subIntegrityImpact": "NONE",
+        "subAvailabilityImpact": "NONE",
+        "exploitMaturity": "NOT_DEFINED",
+        "confidentialityRequirement": "NOT_DEFINED",
+        "integrityRequirement": "NOT_DEFINED",
+        "availabilityRequirement": "NOT_DEFINED",
+        "modifiedAttackVector": "NOT_DEFINED",
+        "modifiedAttackComplexity": "NOT_DEFINED",
+        "modifiedAttackRequirements": "NOT_DEFINED",
+        "modifiedPrivilegesRequired": "NOT_DEFINED",
+        "modifiedUserInteraction": "NOT_DEFINED",
+        "modifiedVulnConfidentialityImpact": "NOT_DEFINED",
+        "modifiedVulnIntegrityImpact": "NOT_DEFINED",
+        "modifiedVulnAvailabilityImpact": "NOT_DEFINED",
+        "modifiedSubConfidentialityImpact": "NOT_DEFINED",
+        "modifiedSubIntegrityImpact": "NOT_DEFINED",
+        "modifiedSubAvailabilityImpact": "NOT_DEFINED",
+        "Safety": "NOT_DEFINED",
+        "Automatable": "NOT_DEFINED",
+        "Recovery": "NOT_DEFINED",
+        "valueDensity": "NOT_DEFINED",
+        "vulnerabilityResponseEffort": "NOT_DEFINED",
+        "providerUrgency": "NOT_DEFINED"
+       }
+      }
+     ],
+     "cvssMetricV30": [
+      {
+       "source": "vultures@jpcert.or.jp",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.0",
+        "vectorString": "CVSS:3.0/AV:P/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 6.6,
+        "baseSeverity": "MEDIUM",
+        "attackVector": "PHYSICAL",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 0.7,
+       "impactScore": 5.9
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "vultures@jpcert.or.jp",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-1391"
+       }
+      ]
+     }
+    ],
+    "configurations": [],
+    "references": [
+     {
+      "url": "https://jvn.jp/en/jp/JVN47427200/",
+      "source": "vultures@jpcert.or.jp"
+     },
+     {
+      "url": "https://network.mobile.rakuten.co.jp/product/smartphone/rakuten-big-s/support/index.html",
+      "source": "vultures@jpcert.or.jp"
+     }
+    ]
+   }
+  },
+  "CVE-2026-84994": {
+   "cve": {
+    "id": "CVE-2026-84994",
+    "published": "2026-10-13T19:20:52.743",
+    "lastModified": "2026-10-14T17:19:46.043",
+    "vulnStatus": "Awaiting Analysis",
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Qwik is a performance-focused JavaScript framework. Prior to @builder.io/qwik 1.20.0 and @qwik.dev/core 2.0.0-beta.37, default server-side qwik-json deserialization causes ResourceSerializer.$fill$ to pass resource._resolved to Promise.resolve without first rejecting attacker-controlled thenables. An unauthenticated request can provide a plain object whose then property is a QRL for an unregistered symbol, causing an orphaned asynchronous rejection that terminates Node.js under its default unhandled-rejection policy. A single request can crash a server, and repeated requests can keep replicas unavailable. This issue is fixed in @builder.io/qwik 1.20.0 and @qwik.dev/core 2.0.0-beta.37."
+     }
+    ],
+    "metrics": {
+     "cvssMetricV40": [
+      {
+       "source": "security-advisories@github.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "4.0",
+        "vectorString": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+        "baseScore": 8.7,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "attackRequirements": "NONE",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "vulnConfidentialityImpact": "NONE",
+        "vulnIntegrityImpact": "NONE",
+        "vulnAvailabilityImpact": "HIGH",
+        "subConfidentialityImpact": "NONE",
+        "subIntegrityImpact": "NONE",
+        "subAvailabilityImpact": "NONE",
+        "exploitMaturity": "NOT_DEFINED",
+        "confidentialityRequirement": "NOT_DEFINED",
+        "integrityRequirement": "NOT_DEFINED",
+        "availabilityRequirement": "NOT_DEFINED",
+        "modifiedAttackVector": "NOT_DEFINED",
+        "modifiedAttackComplexity": "NOT_DEFINED",
+        "modifiedAttackRequirements": "NOT_DEFINED",
+        "modifiedPrivilegesRequired": "NOT_DEFINED",
+        "modifiedUserInteraction": "NOT_DEFINED",
+        "modifiedVulnConfidentialityImpact": "NOT_DEFINED",
+        "modifiedVulnIntegrityImpact": "NOT_DEFINED",
+        "modifiedVulnAvailabilityImpact": "NOT_DEFINED",
+        "modifiedSubConfidentialityImpact": "NOT_DEFINED",
+        "modifiedSubIntegrityImpact": "NOT_DEFINED",
+        "modifiedSubAvailabilityImpact": "NOT_DEFINED",
+        "Safety": "NOT_DEFINED",
+        "Automatable": "NOT_DEFINED",
+        "Recovery": "NOT_DEFINED",
+        "valueDensity": "NOT_DEFINED",
+        "vulnerabilityResponseEffort": "NOT_DEFINED",
+        "providerUrgency": "NOT_DEFINED"
+       }
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "security-advisories@github.com",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-248"
+       }
+      ]
+     }
+    ],
+    "configurations": [],
+    "references": [
+     {
+      "url": "https://github.com/QwikDev/qwik/commit/c1e7444402f9592b5cf9096e10bf303ab4640511",
+      "source": "security-advisories@github.com"
+     },
+     {
+      "url": "https://github.com/QwikDev/qwik/pull/8655",
+      "source": "security-advisories@github.com"
+     }
+    ]
+   }
+  }
+ },
+ "misp": {
+  "CVE-2026-6039__source:NVD": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "840fd960-b670-4227-9351-1a67da1509cc",
+   "event_id": "138",
+   "timestamp": "1791900894",
+   "comment": "NVD_META:{\"published\": \"2026-06-15T18:16:36.740000+00:00\", \"last_modified\": \"2026-06-17T11:00:13.307000+00:00\", \"cwe\": [\"CWE-197\", \"CWE-787\"], \"ref_tags\": [], \"reference_urls\": [\"https://www.libreoffice.org/about-us/security/advisories/cve-2026-6039\"], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"UNKNOWN\", \"cvss_v40_data\": {\"vector_string\": \"CVSS:4.0/AV:L/AC:L/AT:N/PR:N/UI:P/VC:L/VI:L/VA:H/SC:N/SI:N/SA:N/E:P/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X\", \"base_score\": 5.4, \"base_severity\": \"MEDIUM\"}, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"LibreOffice can import drawings in the DXF format used by CAD software. A heap buffer overflow existed when importing a DXF polyline. The point count taken from the file was truncated to a 16-bit value when the point buffer was sized, while the full count was used to fill it, so a polyline whose point count exceeded the 16-bit range was written past the end of the buffer. In fixed versions such oversized polylines are rejected.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"active\"]}",
+   "value": "CVE-2026-6039",
+   "first_seen": "2026-06-15T18:16:36.740000+00:00",
+   "last_seen": "2026-06-17T11:00:13.307000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:unknown"
+    },
+    {
+     "name": "cvss:low"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2025-7223__source:NVD": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "de24db6e-e15a-4cbd-beaa-f27bb2fc3a53",
+   "event_id": "138",
+   "timestamp": "1791907729",
+   "comment": "NVD_META:{\"published\": \"2025-07-21T20:15:42.510000+00:00\", \"last_modified\": \"2026-06-17T10:04:33.190000+00:00\", \"cwe\": [\"CWE-787\"], \"ref_tags\": [\"Third Party Advisory\"], \"reference_urls\": [\"https://www.zerodayinitiative.com/advisories/ZDI-25-474/\"], \"cpe_type\": [\"a\"], \"result_impacts\": [\"HIGH\", \"HIGH\", \"HIGH\"], \"affected_products\": [\"cpe:2.3:a:invt:hmitool:7.1.011:*:*:*:*:*:*:*\"], \"attack_vector\": \"L\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": {\"vector_string\": \"CVSS:3.0/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\", \"attack_vector\": \"LOCAL\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"NONE\", \"user_interaction\": \"REQUIRED\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"HIGH\", \"integrity_impact\": \"HIGH\", \"availability_impact\": \"HIGH\", \"base_score\": 7.8, \"base_severity\": \"HIGH\", \"impact_score\": 5.9, \"exploitability_score\": 1.8}, \"cvss_v2_data\": null, \"description\": \"INVT HMITool VPM File Parsing Out-Of-Bounds Write Remote Code Execution Vulnerability. This vulnerability allows remote attackers to execute arbitrary code on affected installations of INVT HMITool. User interaction is required to exploit this vulnerability in that the target must visit a malicious page or open a malicious file.\\n\\nThe specific flaw exists within the parsing of VPM files. The issue results from the lack of proper validation of user-supplied data, which can result in a write past the end of an allocated buffer. An attacker can leverage this vulnerability to execute code in the context of the current process. Was ZDI-CAN-25044.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [{\"cpe\": \"cpe:2.3:a:invt:hmitool:7.1.011:*:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}], \"status\": [\"active\"]}",
+   "value": "CVE-2025-7223",
+   "first_seen": "2025-07-21T20:15:42.510000+00:00",
+   "last_seen": "2026-06-17T10:04:33.190000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2025-7223__source:CISA-ICS": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "af6407fc-0436-4769-b0d8-387025a12116",
+   "event_id": "145",
+   "timestamp": "1791962104",
+   "comment": "NVD_META:{\"published\": \"2025-08-26T06:00:00+00:00\", \"last_modified\": \"2025-08-26T06:00:00+00:00\", \"cwe\": [\"CWE-787\"], \"ref_tags\": [], \"reference_urls\": [\"https://www.cisa.gov/news-events/ics-advisories/icsa-25-238-01\"], \"cpe_type\": [], \"result_impacts\": [\"HIGH\", \"HIGH\", \"HIGH\"], \"affected_products\": [\"INVT VT-Designer\", \"INVT HMITool\"], \"attack_vector\": \"LOCAL\", \"cvss_v40_data\": null, \"cvss_v31_data\": {\"vector_string\": \"CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\", \"attack_vector\": \"LOCAL\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"NONE\", \"user_interaction\": \"REQUIRED\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"HIGH\", \"integrity_impact\": \"HIGH\", \"availability_impact\": \"HIGH\", \"base_score\": 7.8, \"base_severity\": \"HIGH\", \"impact_score\": 0.0, \"exploitability_score\": 0.0}, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"ICSA-25-238-01: INVT VT-Designer and HMITool \\u2014 HMITool is vulnerable to remote attackers who can execute arbitrary code on affected installations. User interaction is required to exploit this vulnerability in that the target must visit a malicious page or open a malicious file. The specific flaw exists within the parsing of VPM files. The issue results from the lack of proper validation of user-supplied data, which can result in a write past the end of an allocated buffer. An attacker can leverage this vulnerability to execute code in the context of the current process.\", \"vendor\": \"INVT\", \"product\": \"VT-Designer\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": []}",
+   "value": "CVE-2025-7223",
+   "first_seen": "2025-08-26T06:00:00.000000+00:00",
+   "last_seen": "2025-08-26T06:00:00.000000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Energy"
+    },
+    {
+     "name": "source:CISA-ICS"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    }
+   ],
+   "_event": {
+    "id": "145",
+    "info": "EdgeGuard-cisa_ics-2026-10-14"
+   }
+  },
+  "CVE-2026-44956__source:NVD": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "0cee4fe0-d4bb-4732-ae39-82ac0eab9fd6",
+   "event_id": "138",
+   "timestamp": "1791901018",
+   "comment": "NVD_META:{\"published\": \"2026-06-23T17:16:59.797000+00:00\", \"last_modified\": \"2026-06-25T19:52:36.573000+00:00\", \"cwe\": [\"CWE-79\"], \"ref_tags\": [], \"reference_urls\": [\"https://hackerone.com/reports/3669623\"], \"cpe_type\": [], \"result_impacts\": [\"NONE\", \"NONE\", \"NONE\"], \"affected_products\": [], \"attack_vector\": \"N\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": {\"vector_string\": \"CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N\", \"attack_vector\": \"NETWORK\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"NONE\", \"user_interaction\": \"NONE\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"NONE\", \"integrity_impact\": \"NONE\", \"availability_impact\": \"NONE\", \"base_score\": 0.0, \"base_severity\": \"NONE\", \"impact_score\": 0.0, \"exploitability_score\": 3.9}, \"cvss_v2_data\": null, \"description\": \"Low\\u2011privileged users could use their Full Name as a vector for a stored XSS attack. The name is included in system\\u2011generated emails, whose content is stored in the details field of the userlog table. An admin user viewing the email content through userlog-details.php would have any malicious JavaScript payload executed due to missing output sanitisation. Proper escaping has been added to the userlog details output.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"active\"]}",
+   "value": "CVE-2026-44956",
+   "first_seen": "2026-06-23T17:16:59.797000+00:00",
+   "last_seen": "2026-06-25T19:52:36.573000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:none"
+    },
+    {
+     "name": "cvss:low"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2015-5477__source:AlienVault-OTX": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": true,
+   "uuid": "746f061d-8eae-45f2-a53e-d3af4667768b",
+   "event_id": "137",
+   "timestamp": "1791888607",
+   "comment": "OTX_META:{\"attack_ids\": [\"T1133\", \"T1071\", \"T1005\", \"T1190\", \"T1583.001\", \"T1036\", \"T1560\", \"T1595.002\", \"T1595\", \"T1110.003\", \"T1090\", \"T1059\", \"T1041\", \"T1566\", \"T1110\", \"T1078\", \"T1027\", \"T1584.004\", \"T1105\", \"T1588.005\"], \"targeted_countries\": [\"United States of America\", \"Japan\", \"Poland\", \"Taiwan\"], \"pulse_tags\": [\"microscan\", \"integrity technology group\", \"vulnerability scanning\", \"flax typhoon\", \"fishhub\"], \"pulse_references\": [\"https://www.theregister.com/security/2026/10/08/us-disrupts-chinese-hacking-tools-as-7-govts-warn-of-prc-spies-stealing-sensitive-data-worldwide/5302107\"], \"pulse_author\": \"AlienVault\", \"pulse_tlp\": \"\", \"otx_industries\": [\"Energy\", \"Education\", \"Government\", \"NGO\", \"Transportation\"], \"description\": \"\", \"pulse_name\": \"US disrupts Chinese hacking tools as 7 govts warn of PRC spies stealing sensitive data worldwide\", \"malware_family\": \"\", \"attributed_to\": \"\", \"pulse_id\": \"6ac84a155bb626a3710179b9\", \"report_ids\": [], \"indicator_role\": null, \"is_active\": 1, \"mf\": [\"Mirai\", \"FishHub\"], \"pa\": [\"Mirai::Flax Typhoon\", \"FishHub::Flax Typhoon\"]}",
+   "value": "CVE-2015-5477",
+   "first_seen": "2026-10-09T01:57:42.000000+00:00",
+   "last_seen": "2026-10-09T08:39:51.160000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Energy"
+    },
+    {
+     "name": "source:AlienVault-OTX"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "confidence:medium"
+    }
+   ],
+   "_event": {
+    "id": "137",
+    "info": "EdgeGuard-alienvault_otx-2026-10-13"
+   }
+  },
+  "CVE-2015-5477__source:CISA-KEV": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "ee3639bb-0185-451f-bf52-2c0cf2d89883",
+   "event_id": "135",
+   "timestamp": "1791887478",
+   "comment": "NVD_META:{\"published\": \"\", \"last_modified\": \"\", \"cwe\": [], \"ref_tags\": [], \"reference_urls\": [], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"NETWORK\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"ISC BIND contains a data processing errors vulnerability that could allow remote attackers to cause a denial of service via TKEY queries.\", \"vendor\": \"ISC\", \"product\": \"BIND\", \"cisa_exploit_add\": \"2026-10-08\", \"cisa_action_due\": \"2026-10-11\", \"cisa_required_action\": \"Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA\\u2019s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA\\u2019s \\u201cForensics Triage Requirements\\u201d (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.\", \"cisa_vulnerability_name\": \" ISC BIND Data Processing Errors Vulnerability\", \"version_constraints\": [], \"status\": [], \"cisa_known_ransomware_use\": \"Unknown\"}",
+   "value": "CVE-2015-5477",
+   "first_seen": "2026-10-08T00:00:00.000000+00:00",
+   "last_seen": null,
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:CISA-KEV"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    },
+    {
+     "name": "CISA-KEV"
+    }
+   ],
+   "_event": {
+    "id": "135",
+    "info": "EdgeGuard-cisa_kev-2026-10-13"
+   }
+  },
+  "CVE-2025-21042__source:AlienVault-OTX": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": true,
+   "uuid": "cac8a26f-6e46-480d-9133-083f25598a8d",
+   "event_id": "137",
+   "timestamp": "1791888568",
+   "comment": "OTX_META:{\"attack_ids\": [\"T1132.001\", \"T1003\", \"T1036.005\", \"T1140\", \"T1190\", \"T1070.006\", \"T1505.003\", \"T1574.006\", \"T1548.001\", \"T1083\", \"T1098\", \"T1059.004\", \"T1562.001\", \"T1078\", \"T1027\", \"T1059.006\", \"T1071.001\", \"T1136\", \"T1046\", \"T1564.001\"], \"targeted_countries\": [], \"pulse_tags\": [\"netscaler\", \"command injection\", \"cve-2026-88771\", \"zero-day exploitation\", \"remote code execution\", \"dtls vulnerability\", \"webshell\", \"cve-2026-88772\"], \"pulse_references\": [\"https://unit42.paloaltonetworks.com/ja/netscaler-zero-days-exploited/\"], \"pulse_author\": \"AlienVault\", \"pulse_tlp\": \"\", \"otx_industries\": [], \"description\": \"\", \"pulse_name\": \"Threat Overview: NetScaler Zero Days CVE-2026-88771 and CVE-2026-88772 Being Exploited in Production\", \"malware_family\": \"\", \"attributed_to\": \"\", \"pulse_id\": \"6ac9eef4bcc05a59cd402770\", \"report_ids\": [\"6ac4b1c8431cd87d87aa1784\", \"6a71a6ac7bd8297ea6d2093f\", \"6a71aa488c89bfcbd2814692\", \"69e1f0ddb1aa33b71576ca92\", \"6935407b67495bca10fca81f\"], \"indicator_role\": null, \"is_active\": 1, \"mf\": [\"LunexLoader\", \"LunexStealer\", \"PDFWKRNL.sys\", \"Starland RAT\", \"WLDR\", \"CastleStealer\", \"Remcos RAT\", \"NightLedger\", \"BridgeHead\", \"ArcBridge\", \"TWOSTROKE\", \"Mirai\", \"Condi\"], \"pa\": [\"Starland RAT::UAT-11795\", \"WLDR::UAT-11795\", \"CastleStealer::UAT-11795\", \"Remcos RAT::UAT-11795\", \"NightLedger::Mirage Kitten\", \"BridgeHead::Mirage Kitten\", \"ArcBridge::Mirage Kitten\", \"TWOSTROKE::Mirage Kitten\"]}",
+   "value": "CVE-2025-21042",
+   "first_seen": "2026-10-10T07:53:24.000000+00:00",
+   "last_seen": "2026-10-12T23:22:02.758000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:AlienVault-OTX"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "confidence:medium"
+    }
+   ],
+   "_event": {
+    "id": "137",
+    "info": "EdgeGuard-alienvault_otx-2026-10-13"
+   }
+  },
+  "CVE-2025-21042__source:NVD": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "e2b0f2a0-f2a5-4808-b97b-5def2abbba08",
+   "event_id": "138",
+   "timestamp": "1791908321",
+   "comment": "NVD_META:{\"published\": \"2025-09-12T08:15:44.743000+00:00\", \"last_modified\": \"2026-10-08T10:35:13.083000+00:00\", \"cwe\": [\"CWE-787\"], \"ref_tags\": [\"Technical Description\", \"Third Party Advisory\", \"US Government Resource\", \"Vendor Advisory\"], \"reference_urls\": [\"https://security.samsungmobile.com/securityUpdate.smsb?year=2025&month=04\", \"https://unit42.paloaltonetworks.com/landfall-is-new-commercial-grade-android-spyware/\", \"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2025-21042\"], \"cpe_type\": [\"o\"], \"result_impacts\": [\"HIGH\", \"HIGH\", \"HIGH\"], \"affected_products\": [\"cpe:2.3:o:samsung:android:14.0:smr-may-2023-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:13.0:smr-oct-2024-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:14.0:smr-feb-2025-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:14.0:smr-oct-2023-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:14.0:smr-mar-2022-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:13.0:smr-aug-2023-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:13.0:smr-oct-2023-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:13.0:smr-jul-2023-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:14.0:smr-feb-2024-r1:*:*:*:*:*:*\", \"cpe:2.3:o:samsung:android:13.0:-:*:*:*:*:*:*\"], \"attack_vector\": \"N\", \"cvss_v40_data\": null, \"cvss_v31_data\": {\"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H\", \"attack_vector\": \"NETWORK\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"NONE\", \"user_interaction\": \"REQUIRED\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"HIGH\", \"integrity_impact\": \"HIGH\", \"availability_impact\": \"HIGH\", \"base_score\": 8.8, \"base_severity\": \"HIGH\", \"impact_score\": 5.9, \"exploitability_score\": 2.8}, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Out-of-bounds write in libimagecodec.quram.so prior to SMR Apr-2025 Release 1 allows remote attackers to execute arbitrary code.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"2025-11-10\", \"cisa_action_due\": \"2025-12-01\", \"cisa_required_action\": \"Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.\", \"cisa_vulnerability_name\": \"Samsung Mobile Devices Out-of-Bounds Write Vulnerability\", \"version_constraints\": [{\"cpe\": \"cpe:2.3:o:samsung:android:13.0:-:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-apr-2022-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-apr-2023-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-apr-2024-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-aug-2022-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-aug-2023-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-aug-2024-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-dec-2021-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-dec-2022-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:o:samsung:android:13.0:smr-dec-2023-r1:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"\", \"vulnerable\": true}], \"status\": [\"active\"]}",
+   "value": "CVE-2025-21042",
+   "first_seen": "2025-09-12T08:15:44.743000+00:00",
+   "last_seen": "2026-10-08T10:35:13.083000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    },
+    {
+     "name": "CISA-KEV"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2025-21042__source:CISA-KEV": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "18871a8a-4450-4215-8305-8727722e2e44",
+   "event_id": "135",
+   "timestamp": "1791887497",
+   "comment": "NVD_META:{\"published\": \"\", \"last_modified\": \"\", \"cwe\": [], \"ref_tags\": [], \"reference_urls\": [], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"NETWORK\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Samsung mobile devices contain an out-of-bounds write vulnerability in libimagecodec.quram.so. This vulnerability could allow remote attackers to execute arbitrary code.\", \"vendor\": \"Samsung\", \"product\": \"Mobile Devices\", \"cisa_exploit_add\": \"2025-11-10\", \"cisa_action_due\": \"2025-12-01\", \"cisa_required_action\": \"Apply mitigations per vendor instructions, follow applicable BOD 22-01 guidance for cloud services, or discontinue use of the product if mitigations are unavailable.\", \"cisa_vulnerability_name\": \"Samsung Mobile Devices Out-of-Bounds Write Vulnerability\", \"version_constraints\": [], \"status\": [], \"cisa_known_ransomware_use\": \"Unknown\"}",
+   "value": "CVE-2025-21042",
+   "first_seen": "2025-11-10T00:00:00.000000+00:00",
+   "last_seen": null,
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:CISA-KEV"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    },
+    {
+     "name": "CISA-KEV"
+    }
+   ],
+   "_event": {
+    "id": "135",
+    "info": "EdgeGuard-cisa_kev-2026-10-13"
+   }
+  },
+  "CVE-2025-14272__source:NVD": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "6f938396-c662-4a2f-8a5d-664075a767b6",
+   "event_id": "138",
+   "timestamp": "1791900914",
+   "comment": "NVD_META:{\"published\": \"2026-06-16T15:16:33+00:00\", \"last_modified\": \"2026-10-07T08:10:00.200000+00:00\", \"cwe\": [\"CWE-862\"], \"ref_tags\": [], \"reference_urls\": [\"https://www.rockwellautomation.com/en-us/trust-center/security-advisories/advisory.SD1777.html\"], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"UNKNOWN\", \"cvss_v40_data\": {\"vector_string\": \"CVSS:4.0/AV:N/AC:H/AT:N/PR:N/UI:N/VC:H/VI:L/VA:L/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X\", \"base_score\": 8.3, \"base_severity\": \"HIGH\"}, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"A security issue was\\u00a0identified\\u00a0in Pavilion due to improper\\u00a0authorization\\u00a0enforcement in API endpoints.\\u00a0This vulnerability can\\u00a0allow an unauthorized actor to execute privileged operations, including user/role management and other administrative actions.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"active\"]}",
+   "value": "CVE-2025-14272",
+   "first_seen": "2026-06-16T15:16:33.000000+00:00",
+   "last_seen": "2026-10-07T08:10:00.200000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:unknown"
+    },
+    {
+     "name": "cvss:low"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2025-14272__source:CISA-ICS": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "2157ec58-d474-4c36-8158-f091fb6b8040",
+   "event_id": "145",
+   "timestamp": "1791962022",
+   "comment": "NVD_META:{\"published\": \"2026-06-16T06:00:00+00:00\", \"last_modified\": \"2026-06-16T06:00:00+00:00\", \"cwe\": [\"CWE-862\"], \"ref_tags\": [], \"reference_urls\": [\"https://www.cisa.gov/news-events/ics-advisories/icsa-26-167-01\"], \"cpe_type\": [], \"result_impacts\": [\"HIGH\", \"LOW\", \"LOW\"], \"affected_products\": [\"Rockwell Automation FactoryTalk Analytics PavilionX\"], \"attack_vector\": \"NETWORK\", \"cvss_v40_data\": null, \"cvss_v31_data\": {\"vector_string\": \"CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:L/A:L\", \"attack_vector\": \"NETWORK\", \"attack_complexity\": \"HIGH\", \"privileges_required\": \"NONE\", \"user_interaction\": \"NONE\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"HIGH\", \"integrity_impact\": \"LOW\", \"availability_impact\": \"LOW\", \"base_score\": 7.0, \"base_severity\": \"HIGH\", \"impact_score\": 0.0, \"exploitability_score\": 0.0}, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"ICSA-26-167-01: Rockwell Automation FactoryTalk Analytics PavilionX \\u2014 A security issue was identified in Pavilion due to improper authorization enforcement in API endpoints. This vulnerability can allow an unauthorized actor to execute privileged operations, including user/role management and other administrative actions.\", \"vendor\": \"Rockwell Automation\", \"product\": \"FactoryTalk Analytics PavilionX\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": []}",
+   "value": "CVE-2025-14272",
+   "first_seen": "2026-06-16T06:00:00.000000+00:00",
+   "last_seen": "2026-06-16T06:00:00.000000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:CISA-ICS"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    }
+   ],
+   "_event": {
+    "id": "145",
+    "info": "EdgeGuard-cisa_ics-2026-10-14"
+   }
+  },
+  "CVE-2026-54292__nvd_rejected": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "41be8b87-8557-4590-bc1c-dd70f0e56fa2",
+   "event_id": "138",
+   "timestamp": "1791900898",
+   "comment": "NVD_META:{\"published\": \"2026-06-15T20:16:34.210000+00:00\", \"last_modified\": \"2026-06-15T20:16:34.210000+00:00\", \"cwe\": [], \"ref_tags\": [], \"reference_urls\": [], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"UNKNOWN\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Rejected reason: ** REJECT ** DO NOT USE THIS CANDIDATE NUMBER. ConsultIDs: CVE-2026-12074. Reason: This candidate is a duplicate of CVE-2026-12074. Notes: All CVE users should reference CVE-2026-12074 instead of this candidate.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"rejected\"]}",
+   "value": "CVE-2026-54292",
+   "first_seen": "2026-06-15T20:16:34.210000+00:00",
+   "last_seen": "2026-06-15T20:16:34.210000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:unknown"
+    },
+    {
+     "name": "cvss:low"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2026-64019__nvd_no_cvss_active": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "428c65f9-eeb4-4719-9761-ad8b26ca88ca",
+   "event_id": "138",
+   "timestamp": "1791901483",
+   "comment": "NVD_META:{\"published\": \"2026-07-19T16:17:41.907000+00:00\", \"last_modified\": \"2026-07-30T14:59:47.950000+00:00\", \"cwe\": [], \"ref_tags\": [], \"reference_urls\": [\"https://git.kernel.org/stable/c/1bf86336e4b6cf40873fda47a7fe191446864937\", \"https://git.kernel.org/stable/c/e50db059ec8e63bc50b1cc039e2502cb5ea75a70\"], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"UNKNOWN\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"In the Linux kernel, the following vulnerability has been resolved:\\n\\nnvme-pci: fix dma mapping leak on data setup error\\n\\nWe're leaking the initial DMA mapping during iteration if we fail to\\nallocate the tracking descriptor for both PRP and SGL. Unmap the\\niterator directly; we can't use the existing unmap helper because it\\ndepends on the tracking descriptor being successfully allocated, so a\\nnew one for an in-use iterator is provided.\\n\\nThe mappings were also leaking when the driver detects an invalid\\nbio_vec when mapping PRPs, so fix that too.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"active\"]}",
+   "value": "CVE-2026-64019",
+   "first_seen": "2026-07-19T16:17:41.907000+00:00",
+   "last_seen": "2026-07-30T14:59:47.950000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:NVD"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:unknown"
+    },
+    {
+     "name": "cvss:low"
+    }
+   ],
+   "_event": {
+    "id": "138",
+    "info": "EdgeGuard-nvd-2026-10-13"
+   }
+  },
+  "CVE-2026-59310__kev_known": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "385b851a-b1bb-4817-b96e-344b57c6df85",
+   "event_id": "135",
+   "timestamp": "1791887483",
+   "comment": "NVD_META:{\"published\": \"\", \"last_modified\": \"\", \"cwe\": [], \"ref_tags\": [], \"reference_urls\": [], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"NETWORK\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Broadcom VMware vCenter contains a path traversal vulnerability which could allow a threat actor with network access to vCenter to execute arbitrary code.\", \"vendor\": \"Broadcom\", \"product\": \"VMware vCenter\", \"cisa_exploit_add\": \"2026-08-18\", \"cisa_action_due\": \"2026-08-21\", \"cisa_required_action\": \"Apply mitigations in accordance with vendor instructions, ensuring compliance with CISA\\u2019s BOD 26-04 Prioritizing Security Updates Based on Risk (see URL in Notes) guidance and CISA\\u2019s \\u201cForensics Triage Requirements\\u201d (see URL in Notes). Follow applicable BOD 26-04 guidance for cloud services or discontinue use of the product if mitigations are unavailable. Stakeholders are responsible for evaluating each asset's internet exposure and ensuring adherence to BOD 26-04 patching guidelines.\", \"cisa_vulnerability_name\": \"Broadcom VMware vCenter Path Traversal Vulnerability\", \"version_constraints\": [], \"status\": [], \"cisa_known_ransomware_use\": \"Known\"}",
+   "value": "CVE-2026-59310",
+   "first_seen": "2026-08-18T00:00:00.000000+00:00",
+   "last_seen": null,
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:CISA-KEV"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:critical"
+    },
+    {
+     "name": "cvss:critical"
+    },
+    {
+     "name": "CISA-KEV"
+    },
+    {
+     "name": "ransomware:known"
+    }
+   ],
+   "_event": {
+    "id": "135",
+    "info": "EdgeGuard-cisa_kev-2026-10-13"
+   }
+  },
+  "CVE-2026-7891__ics_no_cvss": {
+   "type": "vulnerability",
+   "category": "External analysis",
+   "to_ids": false,
+   "uuid": "4eb8703d-27fc-446d-9434-e6a5965dba02",
+   "event_id": "145",
+   "timestamp": "1791962008",
+   "comment": "NVD_META:{\"published\": \"2026-07-14T00:00:00+00:00\", \"last_modified\": \"2026-09-24T06:00:00+00:00\", \"cwe\": [\"CWE-277\"], \"ref_tags\": [], \"reference_urls\": [\"https://www.cisa.gov/news-events/ics-advisories/icsa-26-209-02\"], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [\"Siemens Mendix Runtime\"], \"attack_vector\": \"NETWORK\", \"cvss_v40_data\": null, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"ICSA-26-209-02: Siemens Mendix Runtime \\u2014 This CVE has been retracted. Re-investigation confirmed the reported behavior is expected platform configuration and does not expose the protected application-specific attribute.\", \"vendor\": \"Siemens\", \"product\": \"Mendix Runtime\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": []}",
+   "value": "CVE-2026-7891",
+   "first_seen": "2026-07-14T00:00:00.000000+00:00",
+   "last_seen": "2026-09-24T06:00:00.000000+00:00",
+   "Tag": [
+    {
+     "name": "zone:Global"
+    },
+    {
+     "name": "source:CISA-ICS"
+    },
+    {
+     "name": "tlp:white"
+    },
+    {
+     "name": "severity:high"
+    },
+    {
+     "name": "cvss:high"
+    }
+   ],
+   "_event": {
+    "id": "145",
+    "info": "EdgeGuard-cisa_ics-2026-10-14"
+   }
+  }
+ }
+}

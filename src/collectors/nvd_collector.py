@@ -60,6 +60,7 @@ from config import (
     nvd_extra_cve_ids,
     resolve_collection_limit,
 )
+from cvss_selection import select_cvss
 
 # Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
@@ -946,26 +947,7 @@ class NVDCollector:
                         description = desc.get("value", "")
                         break
 
-                # Get CVSS score
-                cvss_score = 0.0
-                severity = "UNKNOWN"
-                _cvss_vector = ""
                 metrics = cve_data.get("metrics", {})
-
-                if metrics.get("cvssMetricV31"):
-                    cvss_data = metrics["cvssMetricV31"][0].get("cvssData", {})
-                    cvss_score = cvss_data.get("baseScore", 0.0)
-                    severity = cvss_data.get("baseSeverity", "UNKNOWN")
-                    _cvss_vector = cvss_data.get("vectorString", "")
-                elif metrics.get("cvssMetricV30"):
-                    cvss_data = metrics["cvssMetricV30"][0].get("cvssData", {})
-                    cvss_score = cvss_data.get("baseScore", 0.0)
-                    severity = cvss_data.get("baseSeverity", "UNKNOWN")
-                    _cvss_vector = cvss_data.get("vectorString", "")
-                elif metrics.get("cvssMetricV2"):
-                    cvss_data = metrics["cvssMetricV2"][0].get("cvssData", {})
-                    cvss_score = cvss_data.get("baseScore", 0.0)
-                    severity = cvss_data.get("baseSeverity", "UNKNOWN")
 
                 # Get attack vector and full CVSS component data
                 attack_vector = "UNKNOWN"
@@ -1052,7 +1034,8 @@ class NVDCollector:
                         "integrity_impact": d2.get("integrityImpact", ""),
                         "availability_impact": d2.get("availabilityImpact", ""),
                         "base_score": d2.get("baseScore", 0.0),
-                        "base_severity": d2.get("baseSeverity", ""),
+                        # NVD API 2.0 puts the CVSS 2 rating on the metric, not in cvssData.
+                        "base_severity": m2.get("baseSeverity") or d2.get("baseSeverity", ""),
                         "impact_score": m2.get("impactScore", 0.0),
                         "exploitability_score": m2.get("exploitabilityScore", 0.0),
                         "obtain_all_privilege": m2.get("obtainAllPrivilege", False),
@@ -1061,6 +1044,18 @@ class NVDCollector:
                         "user_interaction_required": m2.get("userInteractionRequired", False),
                         "ac_insuf_info": m2.get("acInsufInfo", False),
                     }
+
+                # 2026-10: the record's score is its first CVSS in the order v3.1 → v3.0 → v2 → v4.0
+                # (``cvss_selection``); without any CVSS it is None and the severity UNKNOWN. It used
+                # to be 0.0, which MISPWriter tagged ``cvss:low`` and the sync read back as 3.0 / LOW.
+                cvss_score, severity, _ = select_cvss(
+                    {
+                        "cvss_v31_data": cvss_v31_data,
+                        "cvss_v30_data": cvss_v30_data,
+                        "cvss_v2_data": cvss_v2_data,
+                        "cvss_v40_data": cvss_v40_data,
+                    }
+                )
 
                 # CWE identifiers (ResilMesh: cwe LIST OF STRING)
                 cwe_list = []

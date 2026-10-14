@@ -511,7 +511,8 @@ Flag any `SET n.active = true` in merge paths (`merge_node_with_source`, `merge_
 Every merge function (`merge_cve`, `merge_vulnerability`, `merge_malware`, `merge_actor`, `merge_technique`, `merge_tactic`, `merge_tool`) must promote analyst-relevant fields to `extra_props` so they become queryable Neo4j node properties. Fields NOT in `key_props` or `extra_props` go to `raw_data` on the SOURCED_FROM edge (a JSON blob invisible to Cypher queries).
 
 Required promotions by node type:
-- **CVE / Vulnerability**: `description`, `cvss_score`, `severity`, `attack_vector`
+- **CVE**: `description`, `attack_vector`, `known_ransomware_use`. `cvss_score`, `severity` and `cvss_version` are NOT promoted from the record: `merge_cve` sets them from the CVSS sub-nodes (`_set_cve_score_from_cvss`, 2026-10). Flag any code that writes a CVE score from the record, from a `cvss:` tag, from a 0.0 placeholder or from another field (CISA KEV ransomware use, a collector default) — that is how 14,451 unscored CVEs showed as 3.0 / LOW.
+- **Vulnerability**: `description`, `cvss_score`, `severity`, `attack_vector`
 - **Technique / Tactic**: `name`, `description`
 - **Tool**: `name`, `description`, `aliases`
 - **Malware**: `description`, `malware_types`, `aliases`, `uses_techniques`

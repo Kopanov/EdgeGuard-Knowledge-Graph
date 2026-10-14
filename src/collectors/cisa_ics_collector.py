@@ -75,6 +75,7 @@ from config import (
     VALID_ZONES,
     resolve_collection_limit,
 )
+from cvss_selection import QUALITATIVE_SEVERITIES, UNKNOWN_SEVERITY, clamp_cvss_score, severity_from_score
 from resilience import get_circuit_breaker
 from source_truthful_timestamps import coerce_iso
 
@@ -137,10 +138,11 @@ _CVSS_NLH = {"N": "NONE", "L": "LOW", "H": "HIGH"}
 _CVSS_UI = {"N": "NONE", "R": "REQUIRED"}
 _CVSS_SCOPE = {"U": "UNCHANGED", "C": "CHANGED"}
 
-# Defaults when an advisory carries no CVSS block — same values the KEV
-# collector uses for a known-exploited CVE of unknown ransomware status.
-DEFAULT_SEVERITY = "HIGH"
-DEFAULT_CVSS_SCORE = 7.0
+# Values when an advisory carries no CVSS block (2026-10): no score and severity UNKNOWN. They
+# used to be 7.0 / HIGH, copied from the KEV collector's ransomware-derived values, and were
+# stored as if they were CVSS (246 CVEs on the hosted 730-day baseline).
+DEFAULT_SEVERITY = UNKNOWN_SEVERITY
+DEFAULT_CVSS_SCORE: Optional[float] = None
 DEFAULT_ATTACK_VECTOR = "NETWORK"
 
 DESCRIPTION_MAX_CHARS = 1000
@@ -240,18 +242,6 @@ def _to_float(value: Any) -> float:
         return 0.0
 
 
-def _severity_from_score(score: float) -> str:
-    if score >= 9.0:
-        return "CRITICAL"
-    if score >= 7.0:
-        return "HIGH"
-    if score >= 4.0:
-        return "MEDIUM"
-    if score > 0.0:
-        return "LOW"
-    return DEFAULT_SEVERITY
-
-
 def _parse_cvss_v3_vector(vector: str) -> Dict[str, str]:
     """Expand a CVSS v3.x vector string into NVD-style component names."""
     out: Dict[str, str] = {}
@@ -283,6 +273,7 @@ def extract_cvss(vuln: Dict[str, Any]) -> Dict[str, Any]:
 
     Returns a dict with ``cvss_v31_data`` / ``cvss_v30_data`` (one populated, or
     both None), ``cvss_score``, ``severity``, ``attack_vector``, ``result_impacts``.
+    A block without a valid base score is not a CVSS (2026-10: it used to become 0.0 / HIGH).
     """
     for entry in vuln.get("scores") or []:
         if not isinstance(entry, dict):
@@ -290,10 +281,14 @@ def extract_cvss(vuln: Dict[str, Any]) -> Dict[str, Any]:
         v3 = entry.get("cvss_v3")
         if not isinstance(v3, dict):
             continue
+        base_score = clamp_cvss_score(v3.get("baseScore"))
+        if base_score is None:
+            continue
         vector = str(v3.get("vectorString") or "")
         comps = _parse_cvss_v3_vector(vector)
-        base_score = _to_float(v3.get("baseScore"))
-        base_severity = str(v3.get("baseSeverity") or "").upper() or _severity_from_score(base_score)
+        base_severity = str(v3.get("baseSeverity") or "").upper()
+        if base_severity not in QUALITATIVE_SEVERITIES:
+            base_severity = severity_from_score(base_score, "3.1")
         payload = {
             "vector_string": vector,
             "attack_vector": str(v3.get("attackVector") or comps.get("attack_vector", "")).upper(),
