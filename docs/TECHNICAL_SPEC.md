@@ -458,6 +458,7 @@ Auth:    Configured via environment variables
 | `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path, the pulse in `source_refs[]`); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
 | `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. The `misp_cooccurrence` level (0.5) is no longer written (2026-10); `calibrate_cooccurrence_confidence` only touches legacy edges |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` |
+| `EXPLOITS` | ThreatActor / Malware | `CVE` | 2026-10, curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
 

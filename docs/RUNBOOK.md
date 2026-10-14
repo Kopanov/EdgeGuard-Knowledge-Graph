@@ -604,6 +604,17 @@ Any non-zero on #1–#4 = regression; file issue.
 
 ---
 
+## Importing a curated package (2026-10)
+
+A curated package (JSON, e.g. `2026-10-20_EdgeGuard_CoreIdeas_package.json`) adds claims about existing actors and malware as one MISP event; the next MISP→Neo4j sync turns them into relationships (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages"). Import it after the baseline, since its claims attach only to nodes that exist.
+
+```bash
+python scripts/import_curated_package.py PACKAGE.json          # validate: summary, warnings, errors
+python scripts/import_curated_package.py PACKAGE.json --push   # create the MISP event (MISP_URL / MISP_API_KEY)
+```
+
+The event is unpublished and visible to the creating organisation only. A fresh baseline removes it with the other EdgeGuard events: import it again afterwards. To take the layer out without a re-feed, delete the event in MISP and remove the links whose `r.sources` hold only the package's sources.
+
 ## Retrieving raw MISP data from a Neo4j node
 
 Three complementary retrieval paths exist for every MISP-sourced node

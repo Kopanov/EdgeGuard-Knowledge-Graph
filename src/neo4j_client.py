@@ -4448,6 +4448,11 @@ class Neo4jClient:
         tgt_ind_rows: List[Dict[str, Any]] = []
         tgt_vuln_rows: List[Dict[str, Any]] = []
         expl_rows: List[Dict[str, Any]] = []
+        # 2026-10 (curated packages): MITRE-style claims of a curated source
+        uses_malware_rows: List[Dict[str, Any]] = []
+        uses_tool_rows: List[Dict[str, Any]] = []
+        actor_exploits_rows: List[Dict[str, Any]] = []
+        malware_exploits_rows: List[Dict[str, Any]] = []
 
         _dropped_rels = 0
         for rel in relationships:
@@ -4694,6 +4699,34 @@ class Neo4jClient:
                     )
                 else:
                     _dropped_rels += 1
+            elif rt in ("USES_MALWARE", "USES_TOOL") or (
+                rt == "EXPLOITS" and rel.get("from_type") in ("ThreatActor", "Malware")
+            ):
+                # 2026-10 (curated packages): actor → malware / tool, actor or malware → CVE.
+                # Exact canonical names (canonicalised above); objects are MATCHed, never created.
+                subject = nonempty_graph_string(fk.get("name"))
+                if rt == "USES_MALWARE":
+                    obj, rows_out, obj_field = nonempty_graph_string(tk.get("name")), uses_malware_rows, "malware"
+                elif rt == "USES_TOOL":
+                    obj, rows_out, obj_field = nonempty_graph_string(tk.get("mitre_id")), uses_tool_rows, "tool"
+                else:
+                    obj = normalize_cve_id_for_graph(tk.get("cve_id"))
+                    rows_out = actor_exploits_rows if rel.get("from_type") == "ThreatActor" else malware_exploits_rows
+                    obj_field = "cve_id"
+                if subject and obj:
+                    rows_out.append(
+                        {
+                            "subject": subject,
+                            obj_field: obj,
+                            "source": row_source,
+                            "source_refs": row_refs,
+                            "confidence": conf,
+                            "misp_event_id": mev,
+                            "match_type": rel.get("match_type"),
+                        }
+                    )
+                else:
+                    _dropped_rels += 1
             elif rt == "EXPLOITS":
                 iv = nonempty_graph_string(fk.get("value"))
                 cid = normalize_cve_id_for_graph(tk.get("cve_id"))
@@ -4910,6 +4943,38 @@ class Neo4jClient:
         {_set_clause("i", "v", extra_set="r.match_type = 'cve_tag'")}
         """
 
+        # 2026-10 (curated packages): exact canonical names on both ends — never aliases (aliases
+        # are rehydrated from MISP tags; matching on them under a curated label would be the
+        # forgery vector build_relationships Q2 branch 3 was removed for).
+        q_actor_uses_malware = f"""
+        UNWIND $rows AS row
+        MATCH (a:ThreatActor {{name: row.subject}})
+        MATCH (m:Malware {{name: row.malware}})
+        MERGE (a)-[r:USES_MALWARE]->(m)
+        {_set_clause("a", "m")}
+        """
+        q_actor_uses_tool = f"""
+        UNWIND $rows AS row
+        MATCH (a:ThreatActor {{name: row.subject}})
+        MATCH (t:Tool {{mitre_id: row.tool}})
+        MERGE (a)-[r:USES_TOOL]->(t)
+        {_set_clause("a", "t")}
+        """
+        q_actor_exploits = f"""
+        UNWIND $rows AS row
+        MATCH (a:ThreatActor {{name: row.subject}})
+        MATCH (c:CVE {{cve_id: row.cve_id}})
+        MERGE (a)-[r:EXPLOITS]->(c)
+        {_set_clause("a", "c")}
+        """
+        q_malware_exploits = f"""
+        UNWIND $rows AS row
+        MATCH (m:Malware {{name: row.subject}})
+        MATCH (c:CVE {{cve_id: row.cve_id}})
+        MERGE (m)-[r:EXPLOITS]->(c)
+        {_set_clause("m", "c")}
+        """
+
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
             nonlocal total, failed
             if not rows:
@@ -5018,6 +5083,15 @@ class Neo4jClient:
                 _run_rows(session, "EXPLOITS_vulnerability", q_expl_vuln, expl_rows)
                 query_pause()
                 _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
+            for _label, _query, _rows in (
+                ("USES_MALWARE_curated", q_actor_uses_malware, uses_malware_rows),
+                ("USES_TOOL_curated", q_actor_uses_tool, uses_tool_rows),
+                ("EXPLOITS_actor_cve", q_actor_exploits, actor_exploits_rows),
+                ("EXPLOITS_malware_cve", q_malware_exploits, malware_exploits_rows),
+            ):
+                if _rows:
+                    query_pause()
+                    _run_rows(session, _label, _query, _rows)
 
         if failed:
             logger.warning(
