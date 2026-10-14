@@ -802,7 +802,13 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                     # per batch — raw entity references from the outer query (``r``)
                     # cannot safely be used as bound entities in the inner. Pattern:
                     # outer returns ``id(r) AS rid`` (primitive long), inner re-MATCHes
-                    # ``MATCH ()-[r]->() WHERE id(r) = $rid`` to bind a fresh handle.
+                    # ``MATCH ()-[r]->() WHERE id(r) = rid`` to bind a fresh handle. In the
+                    # default batch mode apoc.periodic.iterate exposes the outer columns to
+                    # the inner statement as *variables* (it prepends
+                    # ``UNWIND $_batch AS _batch WITH _batch.rid AS rid``), not as
+                    # parameters: ``$rid`` fails with "Expected parameter(s): rid", which
+                    # every run before 2026-10-12 swallowed (the tier was logged FAILED and
+                    # the job ended "complete"). Only ``params`` entries are ``$``-parameters.
                     # PR-M3c: same array-or-scalar filter as the small path
                     # (see ``update_cypher`` above).  Must be expressed inside
                     # the apoc.periodic.iterate OUTER matcher; a single line
@@ -813,7 +819,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
                         '  WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"] '
                         "  RETURN id(r) AS rid', "
-                        "  'MATCH ()-[r]->() WHERE id(r) = $rid "
+                        "  'MATCH ()-[r]->() WHERE id(r) = rid "
                         "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
                         "  {batchSize: 5000, parallel: false, params: {eid: $eid, conf: $conf}}"
                         ") YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated, "

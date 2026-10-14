@@ -1990,7 +1990,10 @@ def test_calibrate_large_event_uses_id_based_rebinding():
     # Outer must return id(r) AS rid (primitive, transaction-safe).
     assert "RETURN id(r) AS rid" in src, "outer must RETURN id(r) AS rid — raw entity refs not safe across apoc batches"
     # Inner must re-MATCH by id.
-    assert "id(r) = $rid" in src, "inner must re-MATCH the relationship by id() in the new transaction"
+    assert "id(r) = rid" in src and "id(r) = $rid" not in src, (
+        "inner must re-MATCH the relationship by the batch variable rid, not the parameter $rid "
+        "(apoc.periodic.iterate exposes outer columns as variables; 2026-10-12)"
+    )
     # Negative: the round-13 unsafe `WITH $r AS r` alias must be gone.
     assert "WITH $r AS r" not in src, (
         "round-19 dropped the unsafe `WITH $r AS r` cross-tx rebind in calibrate_cooccurrence_confidence"
