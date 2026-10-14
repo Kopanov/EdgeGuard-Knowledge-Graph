@@ -101,6 +101,9 @@ x-common-env: &common-env
   EDGEGUARD_BASELINE_REQUIRED_SOURCES: ${EDGEGUARD_BASELINE_REQUIRED_SOURCES:-}
   EDGEGUARD_NVD_INCREMENTAL_DAYS: ${EDGEGUARD_NVD_INCREMENTAL_DAYS:-14}
   EDGEGUARD_DEFAULT_TLP: ${EDGEGUARD_DEFAULT_TLP:-white}
+  # Incremental MISP -> Neo4j sync writes only attributes changed in the window
+  # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
+  EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}
   EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE: ${EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE:-true}
   # 2026-10 configuration forwarding (production-readiness check): variables read by the code
   # that never reached the containers. Set-but-empty keeps the code default in every case below.

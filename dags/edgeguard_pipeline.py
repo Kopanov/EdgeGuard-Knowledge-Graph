@@ -1284,7 +1284,18 @@ def get_state_file() -> str:
     return os.path.join(state_dir, "edgeguard_last_neo4j_sync.json")
 
 
-def should_run_neo4j_sync():
+def _force_sync_requested(context: dict) -> bool:
+    """True when a manual trigger passed ``dag_run.conf={"force_sync": true}``.
+
+    A forced run skips the interval check and the ``SKIP_NEXT_NEO4J_SYNC`` flag (left
+    unconsumed); the baseline mutex still applies. ``conf`` can be None in Airflow 3.
+    """
+    dag_run = context.get("dag_run")
+    conf = getattr(dag_run, "conf", None) or {}
+    return isinstance(conf, dict) and _is_truthy_conf_value(conf.get("force_sync"))
+
+
+def should_run_neo4j_sync(**context):
     """Determine if Neo4j sync should run based on interval."""
     import json
 
@@ -1305,6 +1316,10 @@ def should_run_neo4j_sync():
     if _baseline_skip is not None:
         logger.warning("Neo4j sync ShortCircuit: %s", _baseline_skip)
         return False
+
+    if _force_sync_requested(context):
+        logger.info("force_sync=true — interval/skip guards bypassed")
+        return True
 
     state_file = get_state_file()
 
@@ -1362,7 +1377,7 @@ def should_run_neo4j_sync():
     return True
 
 
-def run_neo4j_sync():
+def run_neo4j_sync(**context):
     """Run the Neo4j sync pipeline."""
     import json
 
@@ -1398,10 +1413,11 @@ def run_neo4j_sync():
 
         incremental = not (is_first_run or force_full)
 
-        # Sync conflict guard: after a full/baseline sync, skip the next
-        # incremental run to avoid immediately re-processing the same data.
+        # Operator-set skip flag: the next incremental run skips once. A full sync no
+        # longer sets it (incremental runs write only changed attributes), and a manual
+        # ``force_sync`` run neither honours nor consumes it.
         # Variable is imported at module scope (with 2.x/3.x compat shim).
-        if incremental:
+        if incremental and not _force_sync_requested(context):
             try:
                 skip = Variable.get("SKIP_NEXT_NEO4J_SYNC", "false").lower() == "true"
                 if skip:
@@ -1465,15 +1481,6 @@ def run_neo4j_sync():
                     duration=duration,
                 )
                 record_task_duration("run_neo4j_sync", "edgeguard_pipeline", time.time() - task_start)
-
-            # After a full/baseline sync, tell the next incremental run to skip
-            # (Variable is imported at module scope).
-            if not incremental:
-                try:
-                    Variable.set("SKIP_NEXT_NEO4J_SYNC", "true")
-                    logger.info("Set SKIP_NEXT_NEO4J_SYNC=true after full sync")
-                except Exception as e:
-                    logger.debug("Could not set SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
             try:
                 with open(state_file, "w") as f:

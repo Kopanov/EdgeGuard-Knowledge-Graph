@@ -38,6 +38,7 @@ FORWARDED = [
     ("EDGEGUARD_BASELINE_REQUIRED_SOURCES", None),  # empty = no keyed source is mandatory
     ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # int(os.environ.get(...))
     ("EDGEGUARD_DEFAULT_TLP", "white"),
+    ("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true"),  # incremental sync writes only changed attributes
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
 ]
 

@@ -232,6 +232,30 @@ def _event_covers_since(ev: Dict[str, Any], since: Optional[datetime]) -> bool:
     return True
 
 
+def _attribute_changed_since(attr: Dict[str, Any], since: datetime) -> bool:
+    """Incremental sync: True when the attribute was written to MISP on/after ``since``.
+
+    ``Attribute.timestamp`` is MISP's write-time epoch; an edit bumps it. A missing or
+    unparsable timestamp counts as changed, so such rows keep the whole-event behaviour.
+    """
+    ts = attr.get("timestamp")
+    if isinstance(ts, datetime):  # PyMISP ``to_dict()`` returns datetimes, raw JSON returns epochs
+        ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).timestamp()
+    try:
+        return float(ts) >= since.timestamp()
+    except (TypeError, ValueError):
+        return True
+
+
+def _item_report_ids(item: Dict[str, Any]) -> set:
+    """Report ids an item belongs to, normalised like ``_build_cross_item_relationships``."""
+    ids = set()
+    for report_id in [item.get("pulse_id")] + list(item.get("report_ids") or []):
+        if isinstance(report_id, str) and report_id.strip():
+            ids.add(report_id.strip())
+    return ids
+
+
 # Outcome of the last index listing (read by ``fetch_edgeguard_events`` to record it in the run
 # stats): ``truncated`` is True when the listing stopped at ``EDGEGUARD_MISP_MAX_PAGES`` with a
 # full last page, i.e. events beyond the cap were not listed.
@@ -1023,6 +1047,8 @@ class MISPToNeo4jSync:
         # Set when ``run()`` returns False so callers (e.g. baseline DAG) can surface a short reason.
         self._last_sync_failure_reason: Optional[str] = None
         self._consecutive_conn_failures: int = 0
+        # Incremental window for the per-attribute filter (``_attribute_filter_since``); set by ``run()``.
+        self._attr_since: Optional[datetime] = None
 
     def health_check_misp(self) -> Dict[str, Any]:
         """
@@ -4149,6 +4175,29 @@ class MISPToNeo4jSync:
                 "Event %s has %s MISP Object(s); only top-level Attribute rows are synced", event_id, obj_count
             )
 
+        # Incremental run: write only the attributes changed since the window start. The
+        # event index keeps whole events modified in the window; right after a baseline that
+        # is every baseline event, and re-merging all of them made the "incremental" run as
+        # long as a full sync. Unchanged attributes are kept only as report-scoped context.
+        context_attrs: List = []
+        since = self._attribute_filter_since()
+        if since is not None:
+            changed: List = []
+            for attr in attributes:
+                (changed if _attribute_changed_since(attr, since) else context_attrs).append(attr)
+            logger.info(
+                "Event %s: %s of %s attributes changed since %s",
+                event_id,
+                len(changed),
+                attr_count,
+                since.isoformat(),
+            )
+            if not changed:
+                self.stats["events_processed"] += 1
+                return 0, 0, 0
+            attributes = changed
+            attr_count = len(changed)
+
         # For large events: stream attributes in pages to avoid OOM
         if attr_count > self._ATTR_PAGE_SIZE:
             logger.info(
@@ -4157,13 +4206,48 @@ class MISPToNeo4jSync:
                 attr_count,
                 self._ATTR_PAGE_SIZE,
             )
-            return self._process_large_event_paged(event_id, full_event, attributes)
+            return self._process_large_event_paged(event_id, full_event, attributes, context_attrs)
 
         # Normal path: process all attributes in memory (small/medium events)
-        return self._process_event_attributes(event_id, full_event, attributes)
+        return self._process_event_attributes(event_id, full_event, attributes, context_attrs)
 
-    def _process_event_attributes(self, event_id: str, full_event: Dict, attributes: List) -> Tuple[int, int, int]:
-        """Process a list of attributes: parse → dedup → sync → relationships."""
+    def _attribute_filter_since(self) -> Optional[datetime]:
+        """Window start for the per-attribute filter, or None for whole-event processing.
+
+        None on a full sync, on a sector sync, and when ``EDGEGUARD_SYNC_ATTRIBUTE_FILTER``
+        is false. Limitation: an edit that changes only event-level tags bumps no attribute
+        timestamp, so it is not re-synced incrementally; ``NEO4J_FULL_SYNC=true`` covers it.
+        """
+        since = getattr(self, "_attr_since", None)
+        if since is None:
+            return None
+        if os.getenv("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true").strip().lower() in ("0", "false", "no", "off"):
+            return None
+        return since
+
+    def _same_report_context(self, context_attrs: List, full_event: Dict, report_ids: set) -> List[Dict]:
+        """Parse unchanged attributes that share a report (OTX pulse) with a changed item.
+
+        They feed only the report-scoped cross-item build, so a new indicator still links to
+        older malware of the same pulse; they are not written to Neo4j again.
+        """
+        if not context_attrs or not report_ids:
+            return []
+        context: List[Dict] = []
+        for attr in context_attrs:
+            item, _rels = self.parse_attribute(attr, full_event)
+            if item and _item_report_ids(item) & report_ids:
+                context.append(item)
+        return context
+
+    def _process_event_attributes(
+        self, event_id: str, full_event: Dict, attributes: List, context_attrs: Optional[List] = None
+    ) -> Tuple[int, int, int]:
+        """Process a list of attributes: parse → dedup → sync → relationships.
+
+        ``context_attrs`` (incremental runs) are unchanged attributes of the same event; the
+        ones sharing a report with a written item join only the cross-item build.
+        """
         event_items: List[Dict] = []
         event_embedded_rels: List[Dict] = []
 
@@ -4185,7 +4269,13 @@ class MISPToNeo4jSync:
         unique_event_items = _dedupe_parsed_items(event_items)
 
         # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
-        cross_rels = self._build_cross_item_relationships(unique_event_items)
+        cross_input = unique_event_items
+        context = self._same_report_context(
+            context_attrs, full_event, set().union(*map(_item_report_ids, unique_event_items))
+        )
+        if context:
+            cross_input = _dedupe_parsed_items(unique_event_items + context)
+        cross_rels = self._build_cross_item_relationships(cross_input)
 
         logger.info(
             "Event %s: %s parsed -> %s unique items; %s embedded rel defs; %s cross-item rel defs",
@@ -4216,7 +4306,9 @@ class MISPToNeo4jSync:
 
         return len(event_items), len(cross_rels), ev_errors
 
-    def _process_large_event_paged(self, event_id: str, full_event: Dict, all_attributes: List) -> Tuple[int, int, int]:
+    def _process_large_event_paged(
+        self, event_id: str, full_event: Dict, all_attributes: List, context_attrs: Optional[List] = None
+    ) -> Tuple[int, int, int]:
         """Process a large event by chunking its attributes into pages.
 
         Each page of attributes is parsed, synced to Neo4j, and then discarded
@@ -4311,6 +4403,12 @@ class MISPToNeo4jSync:
         del all_attributes
         gc.collect()
 
+        # Incremental run: unchanged items of the same reports join the cross-item build only.
+        for _item in self._same_report_context(
+            context_attrs, full_event, set().union(*map(_item_report_ids, _rel_items))
+        ):
+            _rel_items.append({k: _item.get(k) for k in _REL_KEYS if _item.get(k) is not None})
+
         # Build cross-item relationships across ALL pages (now that all nodes are in Neo4j).
         # Uses the lightweight accumulator, not the full parsed items.
         # Type-based sampling inside _build_cross_item_relationships handles O(n²) risk.
@@ -4360,6 +4458,7 @@ class MISPToNeo4jSync:
         self.stats["start_time"] = datetime.now(timezone.utc).isoformat()
 
         # Determine sync window
+        self._attr_since = None
         if since:
             logger.info(f"Syncing events since: {since}")
         elif sector:
@@ -4378,6 +4477,9 @@ class MISPToNeo4jSync:
         else:
             since = None
             logger.info("Full sync: all events")
+        if not sector:
+            # A sector cutoff is about data age, not write time, so it never filters attributes.
+            self._attr_since = since
 
         # Check service availability before connecting
         available, msg = self.check_services_available()

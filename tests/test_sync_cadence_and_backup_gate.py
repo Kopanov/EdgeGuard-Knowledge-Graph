@@ -260,6 +260,79 @@ class TestRunNeo4jSyncWindowAndStamp:
 
 
 # ---------------------------------------------------------------------------
+# Fix 1c — manual ``force_sync`` past the guards; no SKIP_NEXT after a full sync
+# ---------------------------------------------------------------------------
+
+
+class _RecordingVariable:
+    """Airflow Variable stand-in backed by a dict."""
+
+    store: dict = {}
+
+    @classmethod
+    def get(cls, key, default=None):
+        return cls.store.get(key, default)
+
+    @classmethod
+    def set(cls, key, value):
+        cls.store[key] = value
+
+
+def _forced(value=True):
+    return {"dag_run": SimpleNamespace(conf={"force_sync": value})}
+
+
+class TestForceSyncAndSkipNext:
+    @pytest.fixture()
+    def variables(self, dag_module, isolated_state, monkeypatch):
+        _RecordingVariable.store = {}
+        monkeypatch.setattr(dag_module, "Variable", _RecordingVariable)
+        return _RecordingVariable.store
+
+    def _run(self, dag_module, monkeypatch, **context):
+        monkeypatch.setattr(dag_module, "ensure_metrics_server", lambda: None)
+        monkeypatch.setattr(dag_module, "record_neo4j_sync_duration", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "record_dag_run", lambda *_a, **_k: None)
+        monkeypatch.setattr(dag_module, "METRICS_SERVER_AVAILABLE", False)
+        dag_module.run_neo4j_sync(**context)
+
+    def test_force_sync_bypasses_the_interval(self, dag_module, isolated_state, variables):
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=1))
+        assert dag_module.should_run_neo4j_sync() is False
+        assert dag_module.should_run_neo4j_sync(**_forced()) is True
+        assert dag_module.should_run_neo4j_sync(**_forced("false")) is False
+        assert dag_module.should_run_neo4j_sync(dag_run=SimpleNamespace(conf=None)) is False
+
+    def test_force_sync_ignores_and_keeps_skip_next(
+        self, dag_module, isolated_state, variables, fake_sync_module, monkeypatch
+    ):
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=1))
+        variables["SKIP_NEXT_NEO4J_SYNC"] = "true"
+        self._run(dag_module, monkeypatch, **_forced())
+        assert _FakeSync.captured["incremental"] is True, "forced run must sync"
+        assert variables["SKIP_NEXT_NEO4J_SYNC"] == "true", "forced run must not consume the operator flag"
+
+    def test_skip_next_is_still_consumed_without_force(
+        self, dag_module, isolated_state, variables, fake_sync_module, monkeypatch
+    ):
+        _write_state(isolated_state, datetime.now(timezone.utc) - timedelta(hours=1))
+        variables["SKIP_NEXT_NEO4J_SYNC"] = "true"
+        self._run(dag_module, monkeypatch)
+        assert _FakeSync.captured == {}, "flagged run must skip the sync"
+        assert variables["SKIP_NEXT_NEO4J_SYNC"] == "false"
+
+    def test_full_sync_no_longer_sets_skip_next(
+        self, dag_module, isolated_state, variables, fake_sync_module, monkeypatch
+    ):
+        # No state file → first run → full sync.
+        self._run(dag_module, monkeypatch)
+        assert _FakeSync.captured["incremental"] is False
+        assert "SKIP_NEXT_NEO4J_SYNC" not in variables, (
+            "incremental runs write only changed attributes now, so the post-full-sync skip only delays data"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Fix 2 — backup gate enforced on the DAG wipe path
 # ---------------------------------------------------------------------------
 
