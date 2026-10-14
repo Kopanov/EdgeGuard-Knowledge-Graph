@@ -36,6 +36,7 @@ from collectors.virustotal_collector import VirusTotalCollector
 from collectors.vt_collector import VTCollector
 from config import baseline_collection_limit_from_env, get_effective_limit
 from neo4j_client import Neo4jClient
+from relationship_provenance import node_feeds, prov_set, prov_with
 
 
 # PR #35 commit 2: surface CLI-path collector failures to Prometheus + Slack
@@ -337,17 +338,23 @@ class EdgeGuardPipeline:
             CALL apoc.periodic.iterate(
                 'MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND i.cve_id <> "" RETURN i',
                 'WITH $i AS i
-                 MATCH (c:CVE {cve_id: i.cve_id})
+                 __PROV_WITH__MATCH (c:CVE {cve_id: i.cve_id})
                  MERGE (i)-[r:EXPLOITS]->(c)
-                 ON CREATE SET r.created_at = datetime(), r.source_id = "cve_tag_match", r.confidence_score = 0.9, r.src_uuid = i.uuid, r.trg_uuid = c.uuid
+                 ON CREATE SET r.created_at = datetime(), r.match_type = "cve_tag", r.confidence_score = 0.9, r.src_uuid = i.uuid, r.trg_uuid = c.uuid
                  SET r.updated_at = datetime(),
                      r.src_uuid = coalesce(r.src_uuid, i.uuid),
-                     r.trg_uuid = coalesce(r.trg_uuid, c.uuid)',
+                     r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
+                     __PROV_SET__',
                 {batchSize: 5000, parallel: false}
             )
             YIELD total
             RETURN total AS created
-            """
+            """.replace(
+                # 2026-10 (relationship provenance): same contract as build_relationships Q3b —
+                # the indicator's own feeds, record ids and MISP events; ``cve_tag`` evidence.
+                "__PROV_WITH__",
+                prov_with("i", node_feeds("i")),
+            ).replace("__PROV_SET__", prov_set())
             results = self.neo4j.run(exploits_query)
             record = results[0] if results else None
             exploits_count = record.get("created", 0) if record else 0

@@ -78,6 +78,18 @@ _PLACEHOLDER_NAMES_CYPHER_LIST = (
 # ``CRITICAL_MAX_EVENT_IDS_PER_EDGE`` to find both sites.
 CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 
+# Relationship provenance (2026-10): every link built here names the feed(s) whose data it
+# was built from (``r.sources``), their record ids (``r.source_refs``) and the MISP events
+# that carried them (``r.misp_event_ids``), read from the subject node's per-source
+# ``SOURCED_FROM`` edges. Contract and fragments: ``relationship_provenance``.
+from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
+from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
+from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
+from relationship_provenance import family_feeds as _family_feeds  # noqa: E402
+from relationship_provenance import node_feeds as _node_feeds  # noqa: E402
+from relationship_provenance import prov_set as _prov_set  # noqa: E402
+from relationship_provenance import prov_with as _prov_with  # noqa: E402
+
 try:
     from metrics_server import record_neo4j_relationships
 
@@ -458,7 +470,13 @@ def build_relationships():
         # ICS techniques (T08xx) to Enterprise tactic nodes.
         logger.info("[LINK] 1/20 Technique → Tactic (kill-chain phase match)...")
         _outer = "MATCH (t:Technique) WHERE size(coalesce(t.tactic_phases, [])) > 0 RETURN t"
-        _inner = 'WITH $t AS t MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND coalesce(tc.attack_domain, "enterprise") = coalesce(t.attack_domain, "enterprise") AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = "kill_chain_phase", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, t.uuid), r.trg_uuid = coalesce(r.trg_uuid, tc.uuid)'
+        _inner = (
+            "WITH $t AS t "
+            + _prov_with("t", _MITRE_FEEDS)
+            + 'MATCH (tc:Tactic) WHERE tc.shortname IS NOT NULL AND coalesce(tc.attack_domain, "enterprise") = coalesce(t.attack_domain, "enterprise") AND any(phase IN [p IN coalesce(t.tactic_phases, []) WHERE p IS NOT NULL] WHERE toLower(phase) = toLower(tc.shortname)) MERGE (t)-[r:IN_TACTIC]->(tc) ON CREATE SET r.confidence_score = 1.0, r.match_type = "kill_chain_phase", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, t.uuid), r.trg_uuid = coalesce(r.trg_uuid, tc.uuid)"
+        )
         if not _safe_run_batched(client, "Technique → Tactic", _outer, _inner, stats, "in_tactic"):
             failures += 1
         query_pause()
@@ -474,14 +492,19 @@ def build_relationships():
         logger.info("[LINK] 1b/20 Technique → Technique (SUBTECHNIQUE_OF)...")
         _q1b_outer = 'MATCH (s:Technique) WHERE s.mitre_id CONTAINS "." RETURN s'
         _q1b_inner = (
-            'WITH $s AS s WITH s, split(s.mitre_id, ".")[0] AS parent_id '
+            "WITH $s AS s "
+            + _prov_with("s", _MITRE_FEEDS)
+            + "WITH s, "
+            + _PROV_VARS
+            + ', split(s.mitre_id, ".")[0] AS parent_id '
             "MATCH (p:Technique {mitre_id: parent_id}) "
             'WHERE coalesce(p.attack_domain, "enterprise") = coalesce(s.attack_domain, "enterprise") '
             "MERGE (s)-[r:SUBTECHNIQUE_OF]->(p) "
             "ON CREATE SET r.created_at = datetime() "
             'SET r.confidence_score = 1.0, r.match_type = "mitre_explicit", r.updated_at = datetime(), '
             "    r.edgeguard_managed = true, "
-            "    r.src_uuid = coalesce(r.src_uuid, s.uuid), r.trg_uuid = coalesce(r.trg_uuid, p.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, s.uuid), r.trg_uuid = coalesce(r.trg_uuid, p.uuid)"
         )
         if not _safe_run_batched(
             client, "Technique → Technique (SUBTECHNIQUE_OF)", _q1b_outer, _q1b_inner, stats, "subtechnique_of"
@@ -561,7 +584,7 @@ def build_relationships():
         # else. Alias comprehensions on both sides additionally drop
         # placeholder entries as defense-in-depth.
         _inner = (
-            "WITH $m AS m MATCH (a:ThreatActor) "
+            "WITH $m AS m " + _prov_with("m", _node_feeds("m")) + "MATCH (a:ThreatActor) "
             # PR-N10: reject placeholder actor names at the inner.
             f"WHERE NOT toLower(trim(a.name)) IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "AND ("
@@ -601,7 +624,9 @@ def build_relationships():
             ") "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
             'ON CREATE SET r.confidence_score = 1.0, r.match_type = "exact", r.created_at = datetime() '
-            "SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
+            "SET r.updated_at = datetime(), r.edgeguard_managed = true, "
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
         )
         if not _safe_run_batched(client, "Malware → ThreatActor", _outer, _inner, stats, "attributed_to"):
             failures += 1
@@ -615,7 +640,11 @@ def build_relationships():
         logger.info("[LINK] 2b/20 ThreatActor → Malware (USES_MALWARE, MITRE explicit)...")
         _q2b_outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_malware, [])) > 0 RETURN a"
         _q2b_inner = (
-            "WITH $a AS a UNWIND a.uses_malware AS mname WITH a, mname "
+            "WITH $a AS a "
+            + _prov_with("a", _MITRE_FEEDS)
+            + "UNWIND a.uses_malware AS mname WITH a, mname, "
+            + _PROV_VARS
+            + " "
             # Name only, canonical lower-case (PR #37 keys Malware on the canonicalised name) —
             # never m.aliases: they are rehydrated from untrusted MISP alias tags, and alias
             # matching under a mitre_explicit label is exactly the forgery vector Q2 branch 3
@@ -625,7 +654,8 @@ def build_relationships():
             "ON CREATE SET r.created_at = datetime() "
             'SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), '
             "    r.edgeguard_managed = true, "
-            "    r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
         _q2b_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_malware, [])) > 0 "
@@ -648,13 +678,18 @@ def build_relationships():
         logger.info("[LINK] 2c/20 ThreatActor → Tool (USES_TOOL, MITRE explicit)...")
         _q2c_outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_tools, [])) > 0 RETURN a"
         _q2c_inner = (
-            "WITH $a AS a UNWIND a.uses_tools AS tid WITH a, tid "
+            "WITH $a AS a "
+            + _prov_with("a", _MITRE_FEEDS)
+            + "UNWIND a.uses_tools AS tid WITH a, tid, "
+            + _PROV_VARS
+            + " "
             "MATCH (t:Tool {mitre_id: tid}) "
             "MERGE (a)-[r:USES_TOOL]->(t) "
             "ON CREATE SET r.created_at = datetime() "
             'SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), '
             "    r.edgeguard_managed = true, "
-            "    r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q2c_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_tools, [])) > 0 "
@@ -686,10 +721,24 @@ def build_relationships():
             f'WHERE fname <> "" AND aname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             f"AND NOT aname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "MATCH (m:Malware {name: fname}) MATCH (a:ThreatActor {name: aname}) "
+            # Provenance: the OTX pulses (and MISP events) that listed BOTH ends — the
+            # intersection of the two nodes' OTX ``SOURCED_FROM`` records. Empty when a later
+            # pulse's malware / actor attributes were de-duplicated away; the link still
+            # names the feed.
+            'WITH m, a, [(m)-[_msf:SOURCED_FROM]->(:Source {source_id: "alienvault_otx"}) | _msf] AS _msfs, '
+            '     [(a)-[_asf:SOURCED_FROM]->(:Source {source_id: "alienvault_otx"}) | _asf] AS _asfs '
+            "WITH m, a, "
+            "     reduce(_acc = [], _x IN _msfs | _acc + coalesce(_x.source_refs, [])) AS _mrefs, "
+            "     reduce(_acc = [], _x IN _asfs | _acc + coalesce(_x.source_refs, [])) AS _arefs, "
+            "     reduce(_acc = [], _x IN _msfs | _acc + coalesce(_x.misp_event_ids, [])) AS _mevents, "
+            "     reduce(_acc = [], _x IN _asfs | _acc + coalesce(_x.misp_event_ids, [])) AS _aevents "
+            "WITH m, a, " + _OTX_FEEDS + " AS _feeds, [_x IN _mrefs WHERE _x IN _arefs] AS _prov_refs, "
+            f"     [_x IN _mevents WHERE _x IN _aevents][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}] AS _prov_events "
             "MERGE (m)-[r:ATTRIBUTED_TO]->(a) "
             'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() '
             "SET r.updated_at = datetime(), r.edgeguard_managed = true, "
-            "    r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
         )
         if not _safe_run_batched(
             client, "Malware → ThreatActor (same pulse)", _q2d_outer, _q2d_inner, stats, "attributed_to_pulse"
@@ -709,12 +758,12 @@ def build_relationships():
         # preserves every source tag that has ever applied to the edge; the
         # calibrator can then match on ANY() over the array.
         _q3a_inner = (
-            "WITH $i AS i MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", '
-            '   r.source_id = "cve_tag_match", r.created_at = datetime() '
+            "WITH $i AS i "
+            + _prov_with("i", _node_feeds("i"))
+            + "MATCH (v:Vulnerability {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(v) "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
             "    r.edgeguard_managed = true, "
-            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"]), '
             # PR-N26 (cloud-Neo4j audit 2026-04-23): propagate the originating
             # MISP event ids from the indicator onto the EXPLOITS edge so
             # backwards-traceability ("which MISP event(s) led EdgeGuard to
@@ -734,11 +783,7 @@ def build_relationships():
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
             # semantics between forward-write and the backfill script.
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)"
+             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, v.uuid)"
         )
         # PR #34 round 20: count Indicator orphans (cve_id set but no
         # matching Vulnerability) — directly the skip count, no comparison.
@@ -765,12 +810,12 @@ def build_relationships():
         # PR-M3c: see Q3a above for rationale — same accumulate-source_ids
         # pattern applied uniformly to every site that sets ``r.source_id``.
         _q3b_inner = (
-            "WITH $i AS i MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) "
-            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", '
-            '   r.source_id = "cve_tag_match", r.created_at = datetime() '
+            "WITH $i AS i "
+            + _prov_with("i", _node_feeds("i"))
+            + "MATCH (c:CVE {cve_id: i.cve_id}) MERGE (i)-[r:EXPLOITS]->(c) "
+            'ON CREATE SET r.confidence_score = 1.0, r.match_type = "cve_tag", r.created_at = datetime() '
             "SET r.updated_at = datetime(), "
             "    r.edgeguard_managed = true, "
-            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"]), '
             # PR-N26 (cloud-Neo4j audit 2026-04-23): see Q3a above — same fix
             # for the CVE-typed EXPLOITS edge variant. Q3a/Q3b share semantics
             # (Indicator's cve_tag → either Vulnerability or CVE node), so the
@@ -780,11 +825,7 @@ def build_relationships():
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
             # semantics between forward-write and the backfill script.
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
+             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, c.uuid)"
         )
         _q3b_skip = (
             "MATCH (i:Indicator) WHERE i.cve_id IS NOT NULL AND size(i.cve_id) > 0 "
@@ -828,7 +869,15 @@ def build_relationships():
         # only, so they can never downgrade a MITRE-asserted edge.
         logger.info("[LINK] 5/20 ThreatActor → Technique (ATT&CK explicit)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 RETURN a"
-        _inner = 'WITH $a AS a UNWIND a.uses_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = (
+            "WITH $a AS a "
+            + _prov_with("a", _MITRE_FEEDS)
+            + "UNWIND a.uses_techniques AS tid WITH a, tid, "
+            + _PROV_VARS
+            + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+        )
         _q5_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 "
             "UNWIND a.uses_techniques AS tid "
@@ -856,7 +905,15 @@ def build_relationships():
         # pair MITRE also asserts keeps the ``mitre_explicit`` stamp (ON CREATE).
         logger.info("[LINK] 5b/20 ThreatActor → Technique (reported by source report)...")
         _outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.reported_techniques, [])) > 0 RETURN a"
-        _inner = 'WITH $a AS a UNWIND a.reported_techniques AS tid WITH a, tid MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = (
+            "WITH $a AS a "
+            + _prov_with("a", _OTX_FEEDS)
+            + "UNWIND a.reported_techniques AS tid WITH a, tid, "
+            + _PROV_VARS
+            + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+        )
         _q5b_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.reported_techniques, [])) > 0 "
             "UNWIND a.reported_techniques AS tid "
@@ -881,7 +938,15 @@ def build_relationships():
         # pairs whose Technique node does NOT exist — direct skip count.
         logger.info("[LINK] 6/20 Malware → Technique (MITRE explicit)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m UNWIND m.uses_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = (
+            "WITH $m AS m "
+            + _prov_with("m", _MITRE_FEEDS)
+            + "UNWIND m.uses_techniques AS tid WITH m, tid, "
+            + _PROV_VARS
+            + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+        )
         _q6_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 "
             "UNWIND m.uses_techniques AS tid "
@@ -905,7 +970,15 @@ def build_relationships():
         # before this split.
         logger.info("[LINK] 6b/20 Malware → Technique (reported by source report)...")
         _outer = "MATCH (m:Malware) WHERE size(coalesce(m.reported_techniques, [])) > 0 RETURN m"
-        _inner = 'WITH $m AS m UNWIND m.reported_techniques AS tid WITH m, tid MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = (
+            "WITH $m AS m "
+            + _prov_with("m", _OTX_FEEDS)
+            + "UNWIND m.reported_techniques AS tid WITH m, tid, "
+            + _PROV_VARS
+            + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+        )
         _q6b_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.reported_techniques, [])) > 0 "
             "UNWIND m.reported_techniques AS tid "
@@ -937,7 +1010,11 @@ def build_relationships():
         # single quotes terminate the outer string early. Same convention used
         # in run_pipeline.py's working co-occurrence query.
         _q7a_inner = (
-            "WITH $i AS i UNWIND i.zone AS zone_name WITH i, zone_name "
+            "WITH $i AS i "
+            + _prov_with("i", _node_feeds("i"))
+            + "UNWIND i.zone AS zone_name WITH i, zone_name, "
+            + _PROV_VARS
+            + " "
             # 2026-10 audit: `global` is the "no sector" marker, not a sector — never an edge target
             # (Q7c/Q7d and the sync already skip it; the old graph carried 270k such edges).
             'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
@@ -979,11 +1056,7 @@ def build_relationships():
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
             # semantics between forward-write and the backfill script.
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
         if not _safe_run_batched(
             client, "Indicator -> Sector (TARGETS)", _q7a_outer, _q7a_inner, stats, "indicator_targets_sector"
@@ -997,7 +1070,11 @@ def build_relationships():
         _q7b_outer = "MATCH (v) WHERE (v:Vulnerability OR v:CVE) AND size(coalesce(v.zone, [])) > 0 RETURN v"
         # See 7a above: double quotes for inner string literals.
         _q7b_inner = (
-            "WITH $v AS v UNWIND v.zone AS zone_name WITH v, zone_name "
+            "WITH $v AS v "
+            + _prov_with("v", _node_feeds("v"))
+            + "UNWIND v.zone AS zone_name WITH v, zone_name, "
+            + _PROV_VARS
+            + " "
             'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
@@ -1025,11 +1102,7 @@ def build_relationships():
             # PR-N30 Cross-Checker H-2 + M-1 (2026-04-24): same filter +
             # cap as the i.* sites above — Q7b uses v (Vulnerability/CVE)
             # as the source endpoint for AFFECTS edges.
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(v.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, v.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
         if not _safe_run_batched(
             client, "Vulnerability/CVE -> Sector (AFFECTS)", _q7b_outer, _q7b_inner, stats, "vuln_affects_sector"
@@ -1045,7 +1118,11 @@ def build_relationships():
         logger.info("[LINK] 7c/20 ThreatActor → Sector (TARGETS)...")
         _q7c_outer = "MATCH (a:ThreatActor) WHERE size(coalesce(a.zone, [])) > 0 RETURN a"
         _q7c_inner = (
-            "WITH $a AS a UNWIND a.zone AS zone_name WITH a, zone_name "
+            "WITH $a AS a "
+            + _prov_with("a", _node_feeds("a"))
+            + "UNWIND a.zone AS zone_name WITH a, zone_name, "
+            + _PROV_VARS
+            + " "
             'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
@@ -1061,11 +1138,8 @@ def build_relationships():
             "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
             '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(a.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
         if not _safe_run_batched(
             client, "ThreatActor -> Sector (TARGETS)", _q7c_outer, _q7c_inner, stats, "actor_targets_sector"
@@ -1076,7 +1150,11 @@ def build_relationships():
         logger.info("[LINK] 7d/20 Malware → Sector (TARGETS)...")
         _q7d_outer = "MATCH (m:Malware) WHERE size(coalesce(m.zone, [])) > 0 RETURN m"
         _q7d_inner = (
-            "WITH $m AS m UNWIND m.zone AS zone_name WITH m, zone_name "
+            "WITH $m AS m "
+            + _prov_with("m", _node_feeds("m"))
+            + "UNWIND m.zone AS zone_name WITH m, zone_name, "
+            + _PROV_VARS
+            + " "
             'WHERE zone_name IS NOT NULL AND zone_name <> "" AND zone_name <> "global" '
             f"AND zone_name IN {_SECTOR_IN_LIST} "
             "MERGE (sec:Sector {name: zone_name}) "
@@ -1092,11 +1170,8 @@ def build_relationships():
             "SET r.updated_at = datetime(), r.confidence_score = 0.5, "
             '    r.match_type = coalesce(r.match_type, "zone_classification"), '
             "    r.edgeguard_managed = true, "
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(m.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, sec.uuid)"
         )
         if not _safe_run_batched(
             client, "Malware -> Sector (TARGETS)", _q7d_outer, _q7d_inner, stats, "malware_targets_sector"
@@ -1109,7 +1184,15 @@ def build_relationships():
         # pairs whose Technique node does NOT exist — direct skip count.
         logger.info("[LINK] 8/20 Indicator → Technique (OTX attack_ids)...")
         _q8_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 RETURN i"
-        _q8_inner = 'WITH $i AS i UNWIND i.attack_ids AS tech_id WITH i, tech_id MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _q8_inner = (
+            "WITH $i AS i "
+            + _prov_with("i", _OTX_FEEDS)
+            + "UNWIND i.attack_ids AS tech_id WITH i, tech_id, "
+            + _PROV_VARS
+            + ' MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+        )
         _q8_skip = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 "
             "UNWIND i.attack_ids AS tech_id "
@@ -1223,7 +1306,7 @@ def build_relationships():
         # ``toLower`` and ``=`` → universally falsy. Safe. Outer filter
         # hardened to ``size(trim(...)) > 0`` as belt-and-suspenders.
         _q9_inner = (
-            "WITH $i AS i MATCH (m:Malware) "
+            "WITH $i AS i " + _prov_with("i", _family_feeds("i")) + "MATCH (m:Malware) "
             # PR-N10 defense-in-depth: skip Malware nodes whose canonical
             # name is a placeholder — the merge-time reject at
             # neo4j_client.merge_malware blocks new creation, but legacy
@@ -1248,8 +1331,6 @@ def build_relationships():
             "       ELSE r.confidence_score "
             "    END, "
             '    r.match_type = "malware_family", '
-            '    r.source_id = "malware_family_match", '
-            '    r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["malware_family_match"]), '
             "    r.updated_at = datetime(), "
             "    r.edgeguard_managed = true, "
             # PR-N26 (cloud-Neo4j audit 2026-04-23): same fix shape as Q4 but
@@ -1263,11 +1344,7 @@ def build_relationships():
             # in neo4j_client.create_misp_relationships_batch) AND cap
             # fan-out via CRITICAL_MAX_EVENT_IDS_PER_EDGE for symmetric
             # semantics between forward-write and the backfill script.
-            "    r.misp_event_ids = apoc.coll.toSet("
-            "        coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0][0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-            "    ), "
-            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), "
+             + _prov_set() + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), "
             "    r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
         # PR-N8 HIGH + R1 Bugbot LOW: same trim()+toLower() parity as
@@ -1315,15 +1392,18 @@ def build_relationships():
         logger.info("[LINK] 9b/20 Indicator → Malware (named in the same OTX pulse)...")
         _q9b_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 RETURN i"
         _q9b_inner = (
-            "WITH $i AS i UNWIND i.pulse_malware_families AS fam WITH i, toLower(trim(fam)) AS fname "
+            "WITH $i AS i "
+            + _prov_with("i", _OTX_FEEDS)
+            + "UNWIND i.pulse_malware_families AS fam WITH i, "
+            + _PROV_VARS
+            + ", toLower(trim(fam)) AS fname "
             f'WHERE fname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             "MATCH (m:Malware {name: fname}) "
             "MERGE (i)-[r:INDICATES]->(m) "
             'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() '
             "SET r.updated_at = datetime(), r.edgeguard_managed = true, "
-            "    r.misp_event_ids = apoc.coll.toSet(coalesce(r.misp_event_ids, []) + "
-            f"        [x IN coalesce(i.misp_event_ids, []) WHERE x IS NOT NULL AND size(x) > 0])[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}], "
-            "    r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, m.uuid)"
         )
         _q9b_skip = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 "
@@ -1348,7 +1428,15 @@ def build_relationships():
         # (tool, technique-id) pairs whose Technique node does NOT exist.
         logger.info("[LINK] 10/20 Tool → Technique (MITRE explicit)...")
         _outer = "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 RETURN tool"
-        _inner = 'WITH $tool AS tool UNWIND tool.uses_techniques AS tid WITH tool, tid MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)'
+        _inner = (
+            "WITH $tool AS tool "
+            + _prov_with("tool", _MITRE_FEEDS)
+            + "UNWIND tool.uses_techniques AS tid WITH tool, tid, "
+            + _PROV_VARS
+            + ' MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
+            + _prov_set()
+            + ", r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
+        )
         _q10_skip = (
             "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 "
             "UNWIND tool.uses_techniques AS tid "

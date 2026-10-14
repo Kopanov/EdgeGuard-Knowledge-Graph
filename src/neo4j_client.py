@@ -2399,6 +2399,8 @@ class Neo4jClient:
                 confidence,
                 source_reported_first_at=first_seen_at_source,
                 source_reported_last_at=last_seen_at_source,
+                misp_event_id=misp_event_id,
+                source_refs=data.get("source_refs"),
             )
 
         except (
@@ -2478,9 +2480,17 @@ class Neo4jClient:
         confidence: float,
         source_reported_first_at: Optional[str] = None,
         source_reported_last_at: Optional[str] = None,
+        misp_event_id: Optional[str] = None,
+        source_refs: Optional[List[str]] = None,
     ) -> bool:
         """Create or update SOURCED_FROM relationship with raw data + per-source
         timestamps on the edge.
+
+        2026-10 (relationship provenance): the edge also accumulates, per source, the
+        MISP events that carried this entity (``r.misp_event_ids``) and the source's own
+        record ids for it (``r.source_refs``, ``"<feed>:<id>"``). ``build_relationships``
+        copies both onto the links it derives from this node, so a built link traces
+        back to the feed record and the MISP event like a link the sync writes directly.
 
         PR (S5) (architecture redesign — user-driven): source-
         reported timestamps live HERE, on the per-source edge, NOT on the
@@ -2550,6 +2560,8 @@ class Neo4jClient:
             r.source_reported_last_at = CASE WHEN $source_reported_last_at IS NULL THEN NULL ELSE datetime($source_reported_last_at) END
         SET r.confidence = $confidence,
             r.source = $source_id,
+            r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "$misp_event_id", require_nonempty_string=True)},
+            r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce($source_refs, [])")},
             r.updated_at = datetime(),
             r.edgeguard_managed = true,
             r.src_uuid = coalesce(r.src_uuid, $src_uuid),
@@ -2590,6 +2602,8 @@ class Neo4jClient:
                     "trg_uuid": trg_uuid,
                     "source_reported_first_at": source_reported_first_at,
                     "source_reported_last_at": source_reported_last_at,
+                    "misp_event_id": str(misp_event_id) if misp_event_id else None,
+                    "source_refs": [str(x) for x in (source_refs or []) if x],
                 }
                 session.run(query, **params, timeout=NEO4J_READ_TIMEOUT)
             return True
@@ -2801,16 +2815,32 @@ class Neo4jClient:
         # Create CVSS sub-nodes (ResilMesh schema)
         tag = data.get("tag", "default")
         if data.get("cvss_v40_data"):
-            self._merge_cvss_node(cve_id, tag, "CVSSv40", "HAS_CVSS_v40", data["cvss_v40_data"])
+            self._merge_cvss_node(
+                cve_id, tag, "CVSSv40", "HAS_CVSS_v40", data["cvss_v40_data"], misp_event_id=data.get("misp_event_id")
+            )
         if data.get("cvss_v31_data"):
-            self._merge_cvss_node(cve_id, tag, "CVSSv31", "HAS_CVSS_v31", data["cvss_v31_data"])
+            self._merge_cvss_node(
+                cve_id, tag, "CVSSv31", "HAS_CVSS_v31", data["cvss_v31_data"], misp_event_id=data.get("misp_event_id")
+            )
         if data.get("cvss_v30_data"):
-            self._merge_cvss_node(cve_id, tag, "CVSSv30", "HAS_CVSS_v30", data["cvss_v30_data"])
+            self._merge_cvss_node(
+                cve_id, tag, "CVSSv30", "HAS_CVSS_v30", data["cvss_v30_data"], misp_event_id=data.get("misp_event_id")
+            )
         if data.get("cvss_v2_data"):
-            self._merge_cvss_node(cve_id, tag, "CVSSv2", "HAS_CVSS_v2", data["cvss_v2_data"])
+            self._merge_cvss_node(
+                cve_id, tag, "CVSSv2", "HAS_CVSS_v2", data["cvss_v2_data"], misp_event_id=data.get("misp_event_id")
+            )
         return True
 
-    def _merge_cvss_node(self, cve_id: str, tag: str, label: str, rel_type: str, cvss_data: Dict) -> bool:
+    def _merge_cvss_node(
+        self,
+        cve_id: str,
+        tag: str,
+        label: str,
+        rel_type: str,
+        cvss_data: Dict,
+        misp_event_id: Optional[str] = None,
+    ) -> bool:
         """
         MERGE a CVSS sub-node (v2 / v3.0 / v3.1 / v4.0) and link it to its parent CVE.
 
@@ -2822,6 +2852,10 @@ class Neo4jClient:
         Both HAS_CVSS_v* edges are stamped with src_uuid/trg_uuid (the CVE's
         and the CVSS sub-node's deterministic uuids) for cross-environment
         traceability and self-describing edge serialization.
+
+        2026-10 (relationship provenance): both edges also name the feed that
+        delivered the score (``r.sources``, the CVE's source tag, normally ``nvd``)
+        and the MISP event that carried it (``r.misp_event_ids``).
         """
         if not self.driver or not cve_id:
             return False
@@ -2854,12 +2888,16 @@ class Neo4jClient:
                 ON CREATE SET r1.src_uuid = $cve_uuid, r1.trg_uuid = $cvss_uuid
             SET r1.src_uuid = coalesce(r1.src_uuid, $cve_uuid),
                 r1.trg_uuid = coalesce(r1.trg_uuid, $cvss_uuid),
-                r1.edgeguard_managed = true
+                r1.edgeguard_managed = true,
+                r1.sources = {_dedup_concat_clause("r1.sources", "[$feed]")},
+                r1.misp_event_ids = {_dedup_concat_optional_clause("r1.misp_event_ids", "$misp_event_id", require_nonempty_string=True)}
             MERGE (n)-[r2:{rel_type}]->(cve)
                 ON CREATE SET r2.src_uuid = $cvss_uuid, r2.trg_uuid = $cve_uuid
             SET r2.src_uuid = coalesce(r2.src_uuid, $cvss_uuid),
                 r2.trg_uuid = coalesce(r2.trg_uuid, $cve_uuid),
-                r2.edgeguard_managed = true
+                r2.edgeguard_managed = true,
+                r2.sources = {_dedup_concat_clause("r2.sources", "[$feed]")},
+                r2.misp_event_ids = {_dedup_concat_optional_clause("r2.misp_event_ids", "$misp_event_id", require_nonempty_string=True)}
             """
             # NB (PR #33 round 8, bugbot MED): spread filtered_cvss FIRST so the
             # explicit cve_uuid / cvss_uuid / cve_id / tag entries below always
@@ -2873,6 +2911,9 @@ class Neo4jClient:
                 "tag": tag,
                 "cve_uuid": cve_uuid,
                 "cvss_uuid": cvss_uuid,
+                # ``tag`` falls back to "default" upstream when an item carries none.
+                "feed": (source_registry.canonical_source_id(tag) if tag != "default" else None) or "misp",
+                "misp_event_id": str(misp_event_id) if misp_event_id else None,
             }
             dropped = len(cvss_data) - len(filtered_cvss)
             with self.driver.session() as session:
@@ -3431,6 +3472,8 @@ class Neo4jClient:
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
                         batch_item["misp_event_id"] = item.get("misp_event_id")
+                    if item.get("source_refs"):
+                        batch_item["source_refs"] = [str(x) for x in item["source_refs"] if x]
                     if item.get("misp_attribute_id"):
                         batch_item["misp_attribute_id"] = item.get("misp_attribute_id")
 
@@ -3549,6 +3592,10 @@ class Neo4jClient:
                     r.source_reported_last_at = CASE WHEN item.last_seen_at_source IS NULL THEN NULL ELSE datetime(item.last_seen_at_source) END
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
+                    // 2026-10 (relationship provenance): per source, the MISP events and the
+                    // source's own record ids; build_relationships copies both onto built links.
+                    r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "item.misp_event_id", require_nonempty_string=True)},
+                    r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce(item.source_refs, [])")},
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true,
                     r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
@@ -3712,6 +3759,8 @@ class Neo4jClient:
                     # Add MISP IDs if present
                     if item.get("misp_event_id"):
                         batch_item["misp_event_id"] = item.get("misp_event_id")
+                    if item.get("source_refs"):
+                        batch_item["source_refs"] = [str(x) for x in item["source_refs"] if x]
                     if item.get("misp_attribute_id"):
                         batch_item["misp_attribute_id"] = item.get("misp_attribute_id")
                     # ResilMesh requires status (LIST OF STRING)
@@ -3867,6 +3916,10 @@ class Neo4jClient:
                     r.source_reported_last_at = CASE WHEN item.last_seen_at_source IS NULL THEN NULL ELSE datetime(item.last_seen_at_source) END
                 SET r.confidence = item.confidence,
                     r.source = item.source_id,
+                    // 2026-10 (relationship provenance): per source, the MISP events and the
+                    // source's own record ids; build_relationships copies both onto built links.
+                    r.misp_event_ids = {_dedup_concat_optional_clause("r.misp_event_ids", "item.misp_event_id", require_nonempty_string=True)},
+                    r.source_refs = {_dedup_concat_clause("r.source_refs", "coalesce(item.source_refs, [])")},
                     r.updated_at = datetime(),
                     r.edgeguard_managed = true,
                     r.src_uuid = coalesce(r.src_uuid, item.node_uuid),
@@ -3960,6 +4013,8 @@ class Neo4jClient:
         """
         if not self.driver:
             return False
+        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
+        source_id = source_registry.canonical_source_id(source_id) or "misp"
 
         an = nonempty_graph_string(actor_name)
         tid = nonempty_graph_string(technique_mitre_id)
@@ -3975,7 +4030,6 @@ class Neo4jClient:
         MATCH (t:Technique {{mitre_id: $technique_mitre_id}})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.confidence_score = {_confidence_respect_calibrator(0.7)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -4032,6 +4086,10 @@ class Neo4jClient:
 
         if match_type is None:
             match_type = {"mitre_attck": "mitre_explicit", "mitre_derived": "mitre_derived"}.get(source_id)
+        # 2026-10 (relationship provenance): ``mitre_derived`` names how the link was made, not a
+        # feed; the feed is MITRE ATT&CK. ``r.sources`` carries the canonical registry id.
+        source_id = "mitre_attck" if source_id == "mitre_derived" else source_id
+        source_id = source_registry.canonical_source_id(source_id) or "misp"
         logger.debug(f"Creating malware-actor relationship: {mn} -> {an}")
 
         query = f"""
@@ -4041,7 +4099,6 @@ class Neo4jClient:
         WHERE (a.name = $actor_name OR $actor_name IN coalesce(a.aliases, []))
         MERGE (m)-[r:ATTRIBUTED_TO]->(a)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.match_type = coalesce(r.match_type, $match_type),
             r.edgeguard_managed = true,
             r.confidence_score = {_confidence_respect_calibrator(0.7)},
@@ -4089,6 +4146,8 @@ class Neo4jClient:
         """
         if not self.driver:
             return False
+        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
+        source_id = source_registry.canonical_source_id(source_id) or "misp"
 
         ind = nonempty_graph_string(indicator_value)
         if ind and indicator_type:
@@ -4107,7 +4166,6 @@ class Neo4jClient:
         MATCH (v:Vulnerability {{cve_id: $cve_id}})
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -4120,7 +4178,6 @@ class Neo4jClient:
         MATCH (v:CVE {{cve_id: $cve_id}})
         MERGE (i)-[r:INDICATES]->(v)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -4156,6 +4213,8 @@ class Neo4jClient:
         """
         if not self.driver:
             return False
+        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
+        source_id = source_registry.canonical_source_id(source_id) or "misp"
 
         iv = nonempty_graph_string(indicator_value)
         if iv and indicator_type:
@@ -4175,7 +4234,6 @@ class Neo4jClient:
         WHERE (m.name = $malware_name OR $malware_name IN coalesce(m.aliases, []))
         MERGE (i)-[r:INDICATES]->(m)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.confidence_score = {_confidence_respect_calibrator(0.6)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -4212,6 +4270,8 @@ class Neo4jClient:
         """
         if not self.driver:
             return False
+        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
+        source_id = source_registry.canonical_source_id(source_id) or "misp"
 
         iv = nonempty_graph_string(indicator_value)
         if iv and indicator_type:
@@ -4243,7 +4303,6 @@ class Neo4jClient:
         MATCH (s:Sector {{name: $sector_name}})
         MERGE (i)-[r:TARGETS]->(s)
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -4285,6 +4344,8 @@ class Neo4jClient:
         """
         if not self.driver:
             return False
+        # 2026-10 (relationship provenance): ``r.sources`` names the feed (canonical registry id).
+        source_id = source_registry.canonical_source_id(source_id) or "misp"
 
         cve = normalize_cve_id_for_graph(cve_id)
         sec = nonempty_graph_string(sector_name)
@@ -4309,7 +4370,6 @@ class Neo4jClient:
 
         rel_props = f"""
         SET r.sources = {_dedup_concat_clause("r.sources", "[$source_id]")},
-            r.source_id = $source_id,
             r.confidence_score = {_confidence_respect_calibrator(0.5)},
             r.imported_at = coalesce(r.imported_at, datetime()),
             r.updated_at = datetime(),
@@ -4421,6 +4481,12 @@ class Neo4jClient:
             # Cypher MERGE can accumulate it on r.misp_event_ids[]. Empty/None →
             # the SET clause skips the array append (CASE expression).
             mev = str(rel.get("misp_event_id", "") or "")
+            # 2026-10 (relationship provenance): the feed that asserts this row (canonical
+            # registry id; a row without one falls back to the batch's ``source_id``) and
+            # that feed's own record ids (``"<feed>:<id>"``), accumulated on the edge as
+            # ``r.sources`` / ``r.source_refs``.
+            row_source = source_registry.canonical_source_id(rel.get("source") or source_id) or "misp"
+            row_refs = [str(x) for x in (rel.get("source_refs") or []) if x is not None and str(x).strip()]
             # NOTE: edge src_uuid / trg_uuid are NO LONGER pre-computed in the
             # dispatch loop. Each Cypher template SETs them directly from the
             # MATCHed node's bound-variable .uuid (Mechanism B), e.g. for
@@ -4465,7 +4531,8 @@ class Neo4jClient:
                             {
                                 "actor": an,
                                 "mitre_id": mid,
-                                "source_id": source_id,
+                                "source": row_source,
+                                "source_refs": row_refs,
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
@@ -4480,7 +4547,8 @@ class Neo4jClient:
                             {
                                 "campaign": cn,
                                 "mitre_id": mid,
-                                "source_id": source_id,
+                                "source": row_source,
+                                "source_refs": row_refs,
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
@@ -4497,7 +4565,8 @@ class Neo4jClient:
                                 "entity": nm,
                                 "entity_label": "Malware",
                                 "mitre_id": mid,
-                                "source_id": source_id,
+                                "source": row_source,
+                                "source_refs": row_refs,
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
@@ -4519,7 +4588,8 @@ class Neo4jClient:
                                 "entity": tool_mid,
                                 "entity_label": "Tool",
                                 "mitre_id": mid,
-                                "source_id": source_id,
+                                "source": row_source,
+                                "source_refs": row_refs,
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
@@ -4537,12 +4607,12 @@ class Neo4jClient:
                         {
                             "malware": mn,
                             "actor": an,
-                            "source_id": source_id,
+                            "source": row_source,
+                            "source_refs": row_refs,
                             "confidence": conf,
                             "misp_event_id": mev,
                             # 2026-10: report-scoped edges say what asserted them.
                             "match_type": rel.get("match_type"),
-                            "report_id": nonempty_graph_string(rel.get("report_id")),
                         }
                     )
                 else:
@@ -4555,12 +4625,12 @@ class Neo4jClient:
                         {
                             "value": iv,
                             "malware": mn,
-                            "source_id": source_id,
+                            "source": row_source,
+                            "source_refs": row_refs,
                             "confidence": conf,
                             "misp_event_id": mev,
                             # 2026-10: report-scoped edges say what asserted them.
                             "match_type": rel.get("match_type"),
-                            "report_id": nonempty_graph_string(rel.get("report_id")),
                         }
                     )
                 else:
@@ -4583,7 +4653,8 @@ class Neo4jClient:
                             {
                                 "value": iv,
                                 "sector": sec,
-                                "source_id": source_id,
+                                "source": row_source,
+                                "source_refs": row_refs,
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
@@ -4613,7 +4684,8 @@ class Neo4jClient:
                         {
                             "cve_id": cid,
                             "sector": sec,
-                            "source_id": source_id,
+                            "source": row_source,
+                            "source_refs": row_refs,
                             "confidence": conf,
                             "misp_event_id": mev,
                             "match_type": rel.get("match_type"),
@@ -4633,7 +4705,8 @@ class Neo4jClient:
                         {
                             "value": iv,
                             "cve_id": cid,
-                            "source_id": source_id,
+                            "source": row_source,
+                            "source_refs": row_refs,
                             "confidence": conf,
                             "misp_event_id": mev,
                             "match_type": rel.get("match_type"),
@@ -4669,7 +4742,8 @@ class Neo4jClient:
         # _dedup_concat_clause / _dedup_concat_optional_clause so the eventual
         # native-Cypher migration changes those two functions only.
         def _set_clause(src_var: str, trg_var: str, extra_set: str = "") -> str:
-            sources_dedup = _dedup_concat_clause("r.sources", "[row.source_id]")
+            sources_dedup = _dedup_concat_clause("r.sources", "[row.source]")
+            refs_dedup = _dedup_concat_clause("r.source_refs", "coalesce(row.source_refs, [])")
             misp_dedup = _dedup_concat_optional_clause(
                 "r.misp_event_ids", "row.misp_event_id", require_nonempty_string=True
             )
@@ -4683,15 +4757,19 @@ class Neo4jClient:
             # any value written after ``r.calibrated_at`` was stamped.
             confidence_expr = _confidence_respect_calibrator("row.confidence")
             # 2026-10 (fresh-baseline PR): every EdgeGuard edge carries the
-            # ownership marker (shared-database contract with ResilMesh), the
+            # ownership marker (shared-database contract with ResilMesh) and the
             # kind of evidence behind it (``match_type``, when the producer
             # states one — a constant ``extra_set`` such as ``cve_tag`` still
-            # wins because it is applied after this line) and the source
-            # report ids that asserted it (``report_ids``, OTX pulse ids).
-            report_dedup = _dedup_concat_optional_clause("r.report_ids", "row.report_id", require_nonempty_string=True)
+            # wins because it is applied after this line).
+            # 2026-10 (relationship provenance): who asserts it and where to find
+            # it — ``r.sources`` (feed names), ``r.source_refs`` (the feeds' own
+            # record ids, which replaced the OTX-only ``r.report_ids``) and
+            # ``r.misp_event_ids`` (the MISP events that carried it). Each write
+            # adds to the lists and never replaces them; the single
+            # ``r.source_id`` (last writer wins) was dropped.
             return (
                 f"SET r.sources = {sources_dedup},\n"
-                f"            r.source_id = row.source_id,\n"
+                f"            r.source_refs = {refs_dedup},\n"
                 # 2026-10 (aging logic check): a weaker later row never lowers an edge — the label follows
                 # the stronger evidence and the confidence keeps the maximum (same rule as the TLP ladder
                 # on nodes). ``match_type`` is evaluated first so it still sees the previous confidence.
@@ -4699,8 +4777,7 @@ class Neo4jClient:
                 f"THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END,\n"
                 f"            r.confidence_score = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} > r.confidence_score "
                 f"THEN {confidence_expr} ELSE r.confidence_score END,\n"
-                f"            r.edgeguard_managed = true,\n"
-                f"            r.report_ids = {report_dedup},{extra}\n"
+                f"            r.edgeguard_managed = true,{extra}\n"
                 f"            r.misp_event_ids = {misp_dedup},\n"
                 f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
                 f"            r.updated_at = datetime(),\n"

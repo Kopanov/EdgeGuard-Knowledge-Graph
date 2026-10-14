@@ -336,12 +336,18 @@ class TestFix2Step4Removed:
         assert _link(src, "5b") >= 0 and _link(src, "6b") >= 0
         assert '"employs_technique_reported"' in src
         assert '"malware_implements_technique_reported"' in src
+        # 2026-10 (relationship provenance): the step queries are assembled from shared
+        # fragments, so they are checked as they run (evaluated), not line by line.
+        from build_rel_queries import assigned_queries
+
+        inners = assigned_queries("_inner")
         for list_prop in ("a.reported_techniques", "m.reported_techniques"):
-            idx = src.find(f"UNWIND {list_prop} AS tid")
-            assert idx != -1, f"missing reported-technique UNWIND on {list_prop}"
-            inner = src[idx : src.find("\n", idx)]
+            matching = [q for q in inners if f"UNWIND {list_prop} AS tid" in q]
+            assert len(matching) == 1, f"missing reported-technique UNWIND on {list_prop}"
+            inner = matching[0]
             assert 'r.match_type = "otx_pulse"' in inner, f"{list_prop} query must stamp otx_pulse"
             assert "r.confidence_score = 0.6" in inner, f"{list_prop} query must use confidence 0.6"
+            assert '["alienvault_otx"] AS _feeds' in inner, f"{list_prop} query must name OTX as the source"
 
     @staticmethod
     def _extract_string_constant(tree, var_name: str):

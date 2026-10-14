@@ -143,8 +143,10 @@ class TestPartOfEdgesDeterministic:
         )
         # Ensure the ORDER BY comes BEFORE the collect
         order_idx = link_block.find("ORDER BY i.first_imported_at")
-        collect_idx = link_block.find("collect(i)[0..100]")
-        assert order_idx < collect_idx, "ORDER BY must precede collect(i)[0..100]"
+        # 2026-10 (relationship provenance): the slice collects the whole path (indicator plus the
+        # INDICATES / ATTRIBUTED_TO links the PART_OF edge inherits its provenance from).
+        collect_idx = link_block.find("collect({i: i, at: _at, ind: _ind})[0..100]")
+        assert 0 <= order_idx < collect_idx, "ORDER BY must precede the 100-path slice"
 
     def test_step3a_stamps_r_updated_at(self, source: str) -> None:
         """Every PART_OF MERGE MUST stamp ``r.updated_at = datetime()``

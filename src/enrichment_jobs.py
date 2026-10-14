@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause, apoc_iterate_failures  # noqa: E402
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
+from relationship_provenance import aggregated_prov_set, inherited_prov_set, node_feeds, prov_set, prov_with  # noqa: E402
 
 try:
     from metrics_server import record_enrichment_duration
@@ -382,7 +383,11 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             SET r_runs.src_uuid = coalesce(r_runs.src_uuid, a.uuid),
                 r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid),
                 r_runs.updated_at = datetime(),
-                r_runs.edgeguard_managed = true
+                r_runs.edgeguard_managed = true,
+                // 2026-10 (relationship provenance): the campaign is built from the
+                // actor's ATTRIBUTED_TO links, so RUNS carries their feeds, record ids
+                // and MISP events.
+                {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at")}
             RETURN count(DISTINCT c) AS campaigns
             """
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
@@ -411,9 +416,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # Step 2: Link malware to their campaigns. Both endpoints have
             # n.uuid by now (Malware via merge_node_with_source, Campaign via
             # step 1 above) so the edge SET reads bound .uuid directly.
-            link_malware = """
-            MATCH (a:ThreatActor)<-[:ATTRIBUTED_TO]-(m:Malware)
-            MATCH (c:Campaign {actor_name: a.name})
+            link_malware = f"""
+            MATCH (a:ThreatActor)<-[_at:ATTRIBUTED_TO]-(m:Malware)
+            MATCH (c:Campaign {{actor_name: a.name}})
             MERGE (m)-[r:PART_OF]->(c)
             // PR-N8 HIGH (audit Cross-Checker): stamp created_at /
             // updated_at so PART_OF(malware) edges are visible to
@@ -423,7 +428,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             SET r.src_uuid = coalesce(r.src_uuid, m.uuid),
                 r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
                 r.updated_at = datetime(),
-                r.edgeguard_managed = true
+                r.edgeguard_managed = true,
+                // 2026-10 (relationship provenance): inherited from the ATTRIBUTED_TO link.
+                {inherited_prov_set("r", ["_at"])}
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -477,12 +484,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             link_indicators_batched = """
             CALL apoc.periodic.iterate(
               "MATCH (c:Campaign) RETURN c",
-              "MATCH (a:ThreatActor {name: c.actor_name})<-[:ATTRIBUTED_TO]-(m:Malware)<-[:INDICATES]-(i:Indicator)
+              "MATCH (a:ThreatActor {name: c.actor_name})<-[_at:ATTRIBUTED_TO]-(m:Malware)<-[_ind:INDICATES]-(i:Indicator)
                WHERE i.active = true
-               WITH c, i
+               WITH c, i, _at, _ind
                ORDER BY i.first_imported_at DESC, i.value ASC
-               WITH c, collect(i)[0..100] AS indicators
-               UNWIND indicators AS i
+               WITH c, collect({i: i, at: _at, ind: _ind})[0..100] AS _paths
+               UNWIND _paths AS _p
+               WITH c, _p.i AS i, _p.at AS _at, _p.ind AS _ind
                MERGE (i)-[r:PART_OF]->(c)
                ON CREATE SET r.created_at = datetime(),
                              r.src_uuid = i.uuid,
@@ -490,14 +498,20 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                SET r.src_uuid = coalesce(r.src_uuid, i.uuid),
                    r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
                    r.updated_at = datetime(),
-                   r.edgeguard_managed = true",
+                   r.edgeguard_managed = true,
+                   __INHERITED_PROV__",
               {batchSize: 25, parallel: false, retries: 2}
             )
             YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
                   batch, operations, updateStatistics
             RETURN batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
                    batch, operations, updateStatistics
-            """
+            """.replace(
+                # 2026-10 (relationship provenance): inherited from the INDICATES and
+                # ATTRIBUTED_TO links of the path that put the indicator in the campaign.
+                "__INHERITED_PROV__",
+                inherited_prov_set("r", ["_ind", "_at"]),
+            )
             result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             if record:
@@ -665,22 +679,17 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
       ≤ 500 → 0.35  (large feed)
       > 500 → 0.30  (bulk dump — weak signal)
 
-    Only edges with ``'misp_cooccurrence'`` or ``'misp_correlation'`` in
-    ``r.source_ids`` (set-valued, populated by every source-tagged MERGE
-    in ``build_relationships.py``) are modified.  For edges that predate
-    PR-M3c and only have the scalar ``r.source_id``, that legacy field
-    is also consulted (fallback path).  Explicit-only matches
-    (``cve_tag_match``, ``mitre_explicit``) and manually curated edges
-    are untouched.
+    Only edges whose evidence label (``r.match_type``) is
+    ``misp_cooccurrence`` or ``misp_correlation`` are modified. Explicit
+    matches (``cve_tag``, ``mitre_explicit``, ``malware_family``) and
+    manually curated edges are untouched.
 
-    PR-M3c §8-RI-S3-Q9: this filter used to be ``r.source_id IN [...]``
-    (scalar) but Q9 (malware_family match) in build_relationships.py
-    OVERWROTE ``r.source_id`` on edges that ALSO came from Q4 co-occurrence,
-    hiding the co-occurrence tag and silently exempting ~30-50% of
-    INDICATES edges on a 730d baseline from calibration.  The
-    ``r.source_ids`` set accumulates every source tag that has ever
-    applied to the edge, so co-occurrence provenance cannot be erased
-    by a later MERGE.
+    2026-10: no producer writes event co-occurrence edges any more (removed
+    with the fresh-baseline PR — EdgeGuard MISP events are per-source,
+    per-day buckets, so sharing one asserted nothing), so on a fresh graph
+    this job finds nothing to calibrate. The filter moved from the dropped
+    ``r.source_id`` / ``r.source_ids`` fields (which mixed feed names with
+    evidence names) to ``r.match_type``, where the kind of evidence lives.
     """
     if not neo4j_client.driver:
         logger.error("calibrate_cooccurrence_confidence: no Neo4j connection")
@@ -744,26 +753,15 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
 
                     # Match indicators that have this event id in misp_event_ids[].
                     # PR #33 round 10: dropped legacy scalar misp_event_id leg.
-                    # PR-M3c §8-RI-S3-Q9: match on ``r.source_ids`` (set-
-                    # valued accumulator, populated by every source-tagged
-                    # MERGE in build_relationships.py as of this PR) OR fall
-                    # back to scalar ``r.source_id`` for legacy edges that
-                    # predate PR-M3c and have no array yet. Before this fix,
-                    # Q9's MERGE overwrote ``r.source_id = "malware_family_match"``
-                    # on edges that ALSO came from Q4 co-occurrence, and the
-                    # scalar filter silently exempted them from size-based
-                    # calibration → confidence frozen at 0.8 instead of the
-                    # bulk-dump tier's 0.30. Matching on ANY() over the
-                    # accumulated array restores the co-occurrence tag's
-                    # visibility.
+                    # 2026-10 (relationship provenance): the kind of evidence lives in
+                    # ``r.match_type``; ``r.source_id`` / ``r.source_ids`` were dropped
+                    # (they mixed feed names with evidence names). See the docstring.
                     update_cypher = """
                     UNWIND $eids AS eid
                     MATCH (i:Indicator)
                     WHERE i.misp_event_ids IS NOT NULL AND eid IN i.misp_event_ids
                     MATCH (i)-[r:INDICATES|EXPLOITS]->(target)
-                    WHERE (r.source_ids IS NOT NULL
-                           AND any(s IN r.source_ids WHERE s IN ["misp_cooccurrence", "misp_correlation"]))
-                       OR r.source_id IN ["misp_cooccurrence", "misp_correlation"]
+                    WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"]
                     SET r.confidence_score = $conf,
                         r.calibrated_at = datetime()
                     RETURN count(r) AS updated
@@ -809,9 +807,7 @@ def calibrate_cooccurrence_confidence(neo4j_client) -> Dict:
                         "CALL apoc.periodic.iterate("
                         "  'MATCH (i:Indicator) WHERE i.misp_event_ids IS NOT NULL AND $eid IN i.misp_event_ids "
                         "  MATCH (i)-[r:INDICATES|EXPLOITS]->(target) "
-                        "  WHERE (r.source_ids IS NOT NULL "
-                        '         AND any(s IN r.source_ids WHERE s IN ["misp_cooccurrence", "misp_correlation"])) '
-                        '     OR r.source_id IN ["misp_cooccurrence", "misp_correlation"] '
+                        '  WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"] '
                         "  RETURN id(r) AS rid', "
                         "  'MATCH ()-[r]->() WHERE id(r) = $rid "
                         "  SET r.confidence_score = $conf, r.calibrated_at = datetime()', "
@@ -913,17 +909,26 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     # STIX incremental export (both filter by ``r.updated_at >= cutoff``).
     # Same omission was patched on RUNS + PART_OF(malware) in
     # build_campaign_nodes above.
-    query = """
+    query = (
+        """
     CALL apoc.periodic.iterate(
         'MATCH (v:Vulnerability) WHERE v.cve_id IS NOT NULL RETURN v',
-        'WITH $v AS v MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) ON CREATE SET r1.created_at = datetime() SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid), r1.updated_at = datetime(), r1.edgeguard_managed = true MERGE (c)-[r2:REFERS_TO]->(v) ON CREATE SET r2.created_at = datetime() SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid), r2.updated_at = datetime(), r2.edgeguard_managed = true',
+        'WITH $v AS v __PROV_WITH__MATCH (c:CVE {cve_id: v.cve_id}) MERGE (v)-[r1:REFERS_TO]->(c) ON CREATE SET r1.created_at = datetime() SET r1.src_uuid = coalesce(r1.src_uuid, v.uuid), r1.trg_uuid = coalesce(r1.trg_uuid, c.uuid), r1.updated_at = datetime(), r1.edgeguard_managed = true, __PROV_SET_R1__ MERGE (c)-[r2:REFERS_TO]->(v) ON CREATE SET r2.created_at = datetime() SET r2.src_uuid = coalesce(r2.src_uuid, c.uuid), r2.trg_uuid = coalesce(r2.trg_uuid, v.uuid), r2.updated_at = datetime(), r2.edgeguard_managed = true, __PROV_SET_R2__',
         {batchSize: 5000, parallel: false}
     )
     YIELD batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
           batch, operations, updateStatistics
     RETURN total AS linked, batches, errorMessages, failedBatches, failedOperations, wasTerminated,
            batch, operations, updateStatistics
-    """
+    """.replace(
+            # 2026-10 (relationship provenance): the link is asserted by the vulnerability record
+            # itself (its cve_id), so both directions carry that record's feeds, ids and events.
+            "__PROV_WITH__",
+            prov_with("v", node_feeds("v")),
+        )
+        .replace("__PROV_SET_R1__", prov_set("r1"))
+        .replace("__PROV_SET_R2__", prov_set("r2"))
+    )
 
     # PR #34 round 20: count Vulnerability orphans directly with NOT EXISTS.
     # Replaces the broken round-18 ``expected_query`` design — that compared
@@ -1038,9 +1043,10 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "misp_event_ids": "combine",
     "misp_attribute_ids": "combine",
     "pulse_ids": "combine",
-    # edge lists (only relevant when mergeRels collapses parallel edges)
+    # edge lists (only relevant when mergeRels collapses parallel edges);
+    # ``misp_event_ids`` above covers edges too
     "sources": "combine",
-    "source_ids": "combine",
+    "source_refs": "combine",
     # everything else: keep the canonical's value, never listify
     ".*": "discard",
 }
@@ -1103,6 +1109,37 @@ SET node.aliases = apoc.coll.toSet(coalesce(node.aliases, [])),
     node.last_updated = datetime()
 RETURN sum(n_dups) AS merged, count(node) AS canonicals
 """
+
+# APOC's ``combine`` keeps a list only when the merged values differ: when the canonical
+# and a duplicate hold the same value (``zone = ["global"]`` on both, or
+# ``r.sources = ["alienvault_otx"]`` on two parallel edges) it stores that one value as a
+# plain string. Found on the 730-day graph (2026-10-14): the 11 MITRE actors that had
+# absorbed an OTX duplicate held ``zone`` as a string, and 21 of their ATTRIBUTED_TO edges
+# held ``r.sources`` as a string. Every ``combine`` property is a list by contract, so the
+# canonical node and all of its edges are wrapped back into lists after each merge batch.
+_ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
+    sorted(k for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items() if v == "combine")
+)
+
+
+def _list_or_wrapped(ref: str) -> str:
+    """Cypher: ``ref`` as a de-duplicated list (``[x]`` for a scalar, null stays null)."""
+    return (
+        f"CASE WHEN {ref} IS NULL THEN NULL "
+        f'WHEN apoc.meta.cypher.type({ref}) STARTS WITH "LIST" THEN apoc.coll.toSet({ref}) '
+        f"ELSE [{ref}] END"
+    )
+
+
+_ACTOR_ALIAS_MERGE_NORMALISE_CYPHER = (
+    "UNWIND $canonicals AS cname\n"
+    "MATCH (c:ThreatActor {name: cname})\n"
+    "SET " + ",\n    ".join(f"c.{p} = {_list_or_wrapped('c.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS) + "\n"
+    "WITH c\n"
+    "MATCH (c)-[r]-()\n"
+    "SET " + ",\n    ".join(f"r.{p} = {_list_or_wrapped('r.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS) + "\n"
+    "RETURN count(r) AS normalised_edges"
+)
 
 # Edges moved over from a duplicate still carry the DUPLICATE's uuid in
 # ``r.src_uuid`` / ``r.trg_uuid`` (cross-environment traceability contract,
@@ -1287,6 +1324,10 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
                             restamp_cypher, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT
                         ).single()
                         results["restamped_edges"] += int((rs["restamped"] if rs else 0) or 0)
+                    # Lists stay lists (see _ACTOR_ALIAS_MERGE_LIST_PROPS).
+                    session.run(
+                        _ACTOR_ALIAS_MERGE_NORMALISE_CYPHER, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT
+                    )
                     logger.info(
                         "[ACTOR-ALIAS-MERGE] batch %d/%d: merged %d duplicate(s) into %d canonical actor(s)",
                         batch_no,

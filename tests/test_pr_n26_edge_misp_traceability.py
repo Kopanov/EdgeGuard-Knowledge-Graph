@@ -109,8 +109,12 @@ def _string_literal_value(src_path: Path, var_name: str) -> str:
                 try:
                     return str(ast.literal_eval(node.value))
                 except (ValueError, SyntaxError):
-                    # f-string / call expressions — fall back to unparsed source
-                    # which still contains every literal we care to grep for.
+                    # 2026-10 (relationship provenance): the build_relationships queries are
+                    # assembled from shared fragments — evaluate them (the text that runs).
+                    if src_path.name == "build_relationships.py":
+                        from build_rel_queries import assigned_query
+
+                        return assigned_query(var_name)
                     return ast.unparse(node.value)
     raise AssertionError(f"variable {var_name!r} not found in {src_path}")
 
@@ -123,6 +127,13 @@ def _string_literal_value(src_path: Path, var_name: str) -> str:
 _BUILD_RELATIONSHIPS = SRC / "build_relationships.py"
 
 
+def _br_namespace() -> dict:
+    """``build_relationships``'s module namespace, to evaluate its assembled queries."""
+    import build_relationships
+
+    return vars(build_relationships)
+
+
 class TestBuildRelationshipsHasMispEventIdsSetClause:
     """Each of the remaining fixed inner-query constants must contain the
     ``r.misp_event_ids = apoc.coll.toSet(coalesce(r.misp_event_ids, []) + …)``
@@ -133,15 +144,17 @@ class TestBuildRelationshipsHasMispEventIdsSetClause:
     def test_q3a_exploits_vuln_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q3a_inner")
         assert "r.misp_event_ids" in body, "Q3a must SET r.misp_event_ids (PR-N26)"
-        assert "coalesce(i.misp_event_ids, [])" in body, (
-            "Q3a must propagate the indicator's misp_event_ids onto the EXPLOITS edge"
+        assert "[(i)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+            "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
         )
         assert "apoc.coll.toSet" in body, "Q3a must use apoc.coll.toSet for idempotent dedup"
 
     def test_q3b_exploits_cve_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q3b_inner")
         assert "r.misp_event_ids" in body, "Q3b must SET r.misp_event_ids (PR-N26)"
-        assert "coalesce(i.misp_event_ids, [])" in body
+        assert "[(i)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+            "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
+        )
         assert "apoc.coll.toSet" in body
 
     def test_q4_indicates_cooccurrence_query_is_gone(self):
@@ -168,8 +181,8 @@ class TestBuildRelationshipsHasMispEventIdsSetClause:
     def test_q7a_targets_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q7a_inner")
         assert "r.misp_event_ids" in body, "Q7a must SET r.misp_event_ids (PR-N26)"
-        assert "coalesce(i.misp_event_ids, [])" in body, (
-            "Q7a must propagate the indicator's misp_event_ids onto the TARGETS edge"
+        assert "[(i)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+            "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
         )
         assert "apoc.coll.toSet" in body
 
@@ -177,16 +190,16 @@ class TestBuildRelationshipsHasMispEventIdsSetClause:
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q7b_inner")
         assert "r.misp_event_ids" in body, "Q7b must SET r.misp_event_ids (PR-N26)"
         # Q7b uses ``v`` for the Vulnerability/CVE node, not ``i``.
-        assert "coalesce(v.misp_event_ids, [])" in body, (
-            "Q7b must propagate the Vulnerability/CVE's misp_event_ids onto the AFFECTS edge"
+        assert "[(v)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+            "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
         )
         assert "apoc.coll.toSet" in body
 
     def test_q9_indicates_family_propagates_indicator_events(self):
         body = _string_literal_value(_BUILD_RELATIONSHIPS, "_q9_inner")
         assert "r.misp_event_ids" in body, "Q9 must SET r.misp_event_ids (PR-N26)"
-        assert "coalesce(i.misp_event_ids, [])" in body, (
-            "Q9 must propagate the indicator's misp_event_ids onto the family-match INDICATES edge"
+        assert "[(i)-[_sf:SOURCED_FROM]->(_src:Source)" in body and "coalesce(_x.misp_event_ids, [])" in body, (
+            "events come from the subject's per-source SOURCED_FROM edges (2026-10 relationship provenance)"
         )
         assert "apoc.coll.toSet" in body
 
@@ -226,7 +239,8 @@ class TestNoNewQueryForgetsToWireMispEventIds:
                 try:
                     body = str(ast.literal_eval(node.value))
                 except (ValueError, SyntaxError):
-                    body = ast.unparse(node.value)
+                    # 2026-10: evaluate the assembled query (see _string_literal_value).
+                    body = eval(compile(ast.Expression(node.value), str(_BUILD_RELATIONSHIPS), "eval"), _br_namespace())  # noqa: S307
 
                 # Does this query MERGE one of the affected edge types?
                 # Look for ``[r:INDICATES]``, ``[r:TARGETS]``, etc.

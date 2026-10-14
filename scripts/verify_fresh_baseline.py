@@ -105,6 +105,11 @@ EDGEGUARD_REL_TYPES = (
     # alerts flow.
     "INVOLVES",
 )
+# Relationships built from the sources, which must say who asserts them (2026-10 relationship
+# provenance: ``r.sources`` / ``r.source_refs`` / ``r.misp_event_ids``). Not SOURCED_FROM (the
+# per-source node edge, ``r.source``) and not INVOLVES (alert edges carry no source claim);
+# PART_OF only towards EdgeGuard's Campaign nodes (ResilMesh uses PART_OF too).
+PROVENANCE_REL_TYPES = tuple(t for t in EDGEGUARD_REL_TYPES if t not in ("SOURCED_FROM", "INVOLVES"))
 # Labels parsed from MISP attributes — the only nodes that carry ``tlp`` (the tag travels
 # with the attribute). Source/Sector/Campaign/CVSS* and the ResilMesh-model nodes written
 # on alert ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but
@@ -390,6 +395,39 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         "RETURN label, total, bidirectional"
     )
     rep.add("cvss_bidirectional", all(x["total"] == x["bidirectional"] for x in cvss), cvss)
+
+    # 12. Relationship provenance (2026-10): every relationship built from the sources names
+    #     them, and the provenance lists are lists. A list stored as a plain string (APOC's
+    #     ``combine`` does that for equal values in the actor alias merge) breaks ``IN`` and
+    #     ``size()`` for every consumer.
+    unsourced = _post(
+        "MATCH ()-[r]->() WHERE type(r) IN $types AND r.edgeguard_managed = true "
+        "AND (type(r) <> 'PART_OF' OR 'Campaign' IN labels(endNode(r))) "
+        "AND size(coalesce(r.sources, [])) = 0 "
+        "RETURN type(r) AS type, count(*) AS c ORDER BY c DESC",
+        {"types": list(PROVENANCE_REL_TYPES)},
+    )
+    rep.add("relationships_name_their_source", not unsourced, {"without_sources_by_type": unsourced})
+    scalar_edges = _one(
+        "MATCH ()-[r]->() WHERE "
+        "(r.sources IS NOT NULL AND NOT apoc.meta.cypher.type(r.sources) STARTS WITH 'LIST') "
+        "OR (r.source_refs IS NOT NULL AND NOT apoc.meta.cypher.type(r.source_refs) STARTS WITH 'LIST') "
+        "OR (r.misp_event_ids IS NOT NULL AND NOT apoc.meta.cypher.type(r.misp_event_ids) STARTS WITH 'LIST') "
+        "RETURN count(r) AS edges"
+    )
+    scalar_nodes = _one(
+        "MATCH (n) WHERE "
+        "(n.zone IS NOT NULL AND NOT apoc.meta.cypher.type(n.zone) STARTS WITH 'LIST') "
+        "OR (n.source IS NOT NULL AND NOT apoc.meta.cypher.type(n.source) STARTS WITH 'LIST') "
+        "RETURN count(n) AS nodes"
+    )
+    scalars = {"edges": scalar_edges.get("edges"), "nodes": scalar_nodes.get("nodes")}
+    rep.add("provenance_lists_are_lists", scalars["edges"] == 0 and scalars["nodes"] == 0, scalars)
+    by_source = _post(
+        "MATCH ()-[r]->() WHERE r.sources IS NOT NULL AND type(r) <> 'SOURCED_FROM' "
+        "UNWIND r.sources AS s RETURN type(r) AS type, s AS source, count(*) AS c ORDER BY type, c DESC"
+    )
+    rep.add("relationship_sources_breakdown", None, by_source)
     return rep
 
 

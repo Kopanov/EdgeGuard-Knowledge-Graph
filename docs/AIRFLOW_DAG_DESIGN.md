@@ -269,8 +269,8 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 
 | Relationship | Method | Confidence / properties |
 |-------------|--------|-------------------------|
-| `(Indicator)-[:INDICATES]->(Malware)` | 2026-10: same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, `r.report_ids[]`), or `malware_family` name match in `build_relationships.py` Q9. The whole-event `misp_event_ids[]` co-occurrence query was removed | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
-| `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'`, `source_id='cve_tag_match'` (not bulk-calibrated like co-occurrence) |
+| `(Indicator)-[:INDICATES]->(Malware)` | 2026-10: same OTX pulse (`pulse_id`) in the MISP→Neo4j sync (`match_type='otx_pulse'`, the pulse in `r.source_refs[]`), or `malware_family` name match in `build_relationships.py` Q9. The whole-event `misp_event_ids[]` co-occurrence query was removed | **0.6** (`otx_pulse`) / **0.8** (`malware_family`) |
+| `(Indicator)-[:EXPLOITS]->(CVE\|Vulnerability)` | Indicator `cve_id` matches node `cve_id` | **1.0**, `match_type='cve_tag'` (not bulk-calibrated like co-occurrence) |
 | `(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)` | `t.mitre_id IN a.uses_techniques` — **explicit STIX from MITRE bundle** (Q5); 2026-10: also `a.reported_techniques` from OTX pulse `attack_ids` (Q5b) | **0.95** (`match_type='mitre_explicit'`) / **0.6** (`match_type='otx_pulse'`) |
 | `(Malware)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN m.uses_techniques` — **same STIX `uses` rows** (malware → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
 | `(Tool)-[:IMPLEMENTS_TECHNIQUE]->(Technique)` | `t.mitre_id IN tool.uses_techniques` — **same STIX `uses` rows** (tool → attack-pattern) | **0.95** (`match_type='mitre_explicit'`) |
@@ -330,7 +330,7 @@ Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `i
 
 #### Co-occurrence Confidence Calibration
 
-Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.source_id IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. (CVE-tag `EXPLOITS` edges use `source_id='cve_tag_match'` and are not tuned by this pass.)
+Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN ('misp_cooccurrence', 'misp_correlation')`, using the number of indicators in the same MISP event. No producer writes such edges since 2026-10, so the pass is a no-op on a fresh baseline. (CVE-tag `EXPLOITS` edges carry `match_type='cve_tag'` and are not tuned by this pass.)
 
 | Event size (indicators in same event) | Confidence set to |
 |--------------------------------------|-------------------|
@@ -520,4 +520,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._
+_Last updated: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._

@@ -1,6 +1,11 @@
 """
 PR-M3c — §8-RI-S3-Q9: Co-occurrence ``r.source_ids`` accumulation.
 
+Superseded 2026-10 (relationship provenance): ``r.source_id`` / ``r.source_ids`` were dropped
+in favour of the accumulating ``r.sources`` / ``r.source_refs`` / ``r.misp_event_ids`` lists
+(``src/relationship_provenance.py``), with the kind of evidence in ``r.match_type``. The
+tests below pin the successor contract for the same sites; the history is kept for context.
+
 ## The bug
 
 ``src/build_relationships.py`` Q4 (Indicator→Malware co-occurrence)
@@ -52,35 +57,29 @@ if str(SRC) not in sys.path:
 # ===========================================================================
 
 
-class TestBuildRelationshipsAccumulatesSourceIds:
-    """Every MERGE site that sets ``r.source_id = "<X>"`` MUST also set
-    ``r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["<X>"])``
-    so the SAME edge MERGEd by a later query (the bug: Q9 overwriting Q4's
-    scalar) cannot erase earlier provenance."""
+class TestBuildRelationshipsAccumulatesProvenance:
+    """No MERGE site may erase earlier provenance (the bug: Q9 overwriting Q4's scalar).
+    Since 2026-10 the provenance is the accumulating ``r.sources`` / ``r.source_refs`` /
+    ``r.misp_event_ids`` lists, so nothing writes a last-writer-wins source field."""
 
     @pytest.fixture(scope="class")
     def source(self) -> str:
         return (SRC / "build_relationships.py").read_text()
 
-    def test_q3a_exploits_vuln_accumulates_cve_tag_match(self, source: str) -> None:
-        """Q3a Indicator→Vulnerability EXPLOITS must accumulate
-        ``"cve_tag_match"`` into ``r.source_ids``."""
-        assert "_q3a_inner" in source
-        q3a_idx = source.find("_q3a_inner")
-        block = source[q3a_idx : q3a_idx + 1500]
-        assert 'r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"])' in block, (
-            "Q3a must accumulate cve_tag_match into r.source_ids (set-valued provenance)"
-        )
+    def test_q3a_exploits_vuln_accumulates_provenance(self, source: str) -> None:
+        """2026-10 (relationship provenance) superseded ``r.source_ids``: Q3a accumulates the
+        indicator's feeds, record ids and MISP events (``_prov_with`` / ``_prov_set``) and the
+        evidence label stays ``cve_tag``; no scalar or set of evidence names is written."""
+        block = source[source.find("_q3a_inner") : source.find("_q3a_skip")]
+        assert '_prov_with("i", _node_feeds("i"))' in block and "_prov_set()" in block
+        assert 'r.match_type = "cve_tag"' in block
+        assert "source_id" not in block and "source_ids" not in block
 
-    def test_q3b_exploits_cve_accumulates_cve_tag_match(self, source: str) -> None:
-        """Q3b Indicator→CVE EXPLOITS must accumulate
-        ``"cve_tag_match"`` into ``r.source_ids``."""
-        assert "_q3b_inner" in source
-        q3b_idx = source.find("_q3b_inner")
-        block = source[q3b_idx : q3b_idx + 1500]
-        assert 'r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["cve_tag_match"])' in block, (
-            "Q3b must accumulate cve_tag_match into r.source_ids (set-valued provenance)"
-        )
+    def test_q3b_exploits_cve_accumulates_provenance(self, source: str) -> None:
+        block = source[source.find("_q3b_inner") : source.find("_q3b_skip")]
+        assert '_prov_with("i", _node_feeds("i"))' in block and "_prov_set()" in block
+        assert 'r.match_type = "cve_tag"' in block
+        assert "source_id" not in block and "source_ids" not in block
 
     def test_q4_cooccurrence_query_removed(self, source: str) -> None:
         """2026-10 (fresh-baseline PR): Q4 — the whole-event
@@ -111,30 +110,15 @@ class TestBuildRelationshipsAccumulatesSourceIds:
         assert '"employs_technique_reported"' in source, "5b (ThreatActor reported_techniques) must exist"
         assert '"malware_implements_technique_reported"' in source, "6b (Malware reported_techniques) must exist"
 
-    def test_q9_malware_family_accumulates_malware_family_match(self, source: str) -> None:
-        """Q9 (the OVERWRITE site — the bug origin) must accumulate
-        ``"malware_family_match"`` into ``r.source_ids`` rather than
-        ONLY writing the scalar ``r.source_id``."""
-        assert "_q9_inner" in source
-        q9_idx = source.find("_q9_inner")
-        block = source[q9_idx : q9_idx + 2500]
-        assert 'r.source_ids = apoc.coll.toSet(coalesce(r.source_ids, []) + ["malware_family_match"])' in block, (
-            "Q9 MUST accumulate malware_family_match into r.source_ids. "
-            "The scalar r.source_id write is kept (last-writer-wins legacy), "
-            "but the set-valued r.source_ids is what the calibrator now uses."
-        )
-
-    def test_q9_sets_scalar_source_id_too(self, source: str) -> None:
-        """Backwards compat: the scalar ``r.source_id`` write MUST remain on
-        Q9 so legacy readers (and the calibrator's fallback branch) still
-        work for edges stamped before the array rollout. (Q4 used to be
-        pinned here too — it was removed in 2026-10, see the test above.)"""
-        assert "_q9_inner" in source
-        q9_idx = source.find("_q9_inner")
-        q9_block = source[q9_idx : q9_idx + 2500]
-        assert 'r.source_id = "malware_family_match"' in q9_block, (
-            "Q9 MUST still set scalar r.source_id (legacy/fallback compat)"
-        )
+    def test_q9_malware_family_accumulates_provenance(self, source: str) -> None:
+        """Q9 (the overwrite site this file was written for) can no longer erase anything:
+        the feeds, record ids and MISP events only accumulate (``_prov_set``), and the evidence
+        label ``malware_family`` lives in ``r.match_type``. The feeds are the indicator's
+        family-label sources (``_family_feeds``)."""
+        block = source[source.find("_q9_inner") : source.find("_q9_skip")]
+        assert '_prov_with("i", _family_feeds("i"))' in block and "_prov_set()" in block
+        assert 'r.match_type = "malware_family"' in block
+        assert "source_id" not in block and "source_ids" not in block
 
 
 # ===========================================================================
@@ -142,60 +126,32 @@ class TestBuildRelationshipsAccumulatesSourceIds:
 # ===========================================================================
 
 
-class TestCalibratorFiltersOnSourceIdsArray:
-    """The calibrator (``calibrate_cooccurrence_confidence``) MUST filter
-    on ``r.source_ids`` (array) with a fallback to ``r.source_id`` (scalar,
-    legacy edges) — NOT on the scalar alone."""
+class TestCalibratorFiltersOnTheEvidenceLabel:
+    """The calibrator (``calibrate_cooccurrence_confidence``) filters on the
+    evidence label ``r.match_type`` (2026-10; it used ``r.source_ids`` / ``r.source_id``)."""
 
     @pytest.fixture(scope="class")
     def source(self) -> str:
         return (SRC / "enrichment_jobs.py").read_text()
 
-    def test_small_event_path_uses_source_ids_array(self, source: str) -> None:
-        """The small-event ``update_cypher`` inside the tier loop must
-        filter on ``any(s IN r.source_ids WHERE s IN [...])`` (with the
-        NULL-safe guard) and fall back to the scalar for legacy edges."""
+    def _body(self, source: str) -> str:
         start = source.find("def calibrate_cooccurrence_confidence")
-        end = source.find("\ndef ", start + 1)
-        body = source[start:end]
-        assert "update_cypher = " in body
-        uc_idx = body.find("update_cypher = ")
-        # Triple-quoted block <1500 chars
-        block = body[uc_idx : uc_idx + 1500]
-        # Must have the array match (with NULL guard) for post-fix edges
-        assert "r.source_ids IS NOT NULL" in block, (
-            "calibrator small-event path must guard r.source_ids IS NOT NULL before any()"
-        )
-        assert 'any(s IN r.source_ids WHERE s IN ["misp_cooccurrence", "misp_correlation"])' in block, (
-            "calibrator small-event path must match on any(s IN r.source_ids WHERE s IN [...])"
-        )
-        # Must have scalar fallback for legacy edges
-        assert 'r.source_id IN ["misp_cooccurrence", "misp_correlation"]' in block, (
-            "calibrator must retain scalar r.source_id branch as a fallback for legacy edges"
-        )
+        return source[start : source.find("\ndef ", start + 1)]
 
-    def test_large_event_path_uses_source_ids_array(self, source: str) -> None:
-        """The ``apoc.periodic.iterate`` batch for large (>1000-indicator)
-        events must apply the same array-or-scalar filter inside the
-        OUTER matcher."""
-        start = source.find("def calibrate_cooccurrence_confidence")
-        end = source.find("\ndef ", start + 1)
-        body = source[start:end]
+    def test_small_event_path_filters_on_match_type(self, source: str) -> None:
+        """2026-10 (relationship provenance): ``r.source_id`` / ``r.source_ids`` were dropped
+        (they mixed feed names with evidence names); the kind of evidence is ``r.match_type``."""
+        body = self._body(source)
+        block = body[body.find("update_cypher = ") :][:1500]
+        assert 'WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"]' in block
+        assert "r.source_ids" not in block and "r.source_id IN" not in block
+
+    def test_large_event_path_filters_on_match_type(self, source: str) -> None:
+        body = self._body(source)
         assert "large_batch_query = " in body, "large-event apoc.periodic.iterate query must exist"
-        lbq_idx = body.find("large_batch_query = ")
-        # Python-string-concat block <1500 chars
-        block = body[lbq_idx : lbq_idx + 1500]
-        # Array-match branch
-        assert "r.source_ids IS NOT NULL" in block, (
-            "calibrator large-event path must guard r.source_ids IS NOT NULL before any()"
-        )
-        assert 'any(s IN r.source_ids WHERE s IN ["misp_cooccurrence", "misp_correlation"])' in block, (
-            "calibrator large-event path must match on any(s IN r.source_ids WHERE s IN [...])"
-        )
-        # Scalar fallback
-        assert 'r.source_id IN ["misp_cooccurrence", "misp_correlation"]' in block, (
-            "calibrator large-event path must retain scalar r.source_id branch (legacy fallback)"
-        )
+        block = body[body.find("large_batch_query = ") :][:1500]
+        assert 'WHERE r.match_type IN ["misp_cooccurrence", "misp_correlation"]' in block
+        assert "r.source_ids" not in block and "r.source_id IN" not in block
 
 
 # ===========================================================================

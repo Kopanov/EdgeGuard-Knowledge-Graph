@@ -8,7 +8,6 @@ sub-techniques on the September graph, every parent present, zero edges before t
 
 from __future__ import annotations
 
-import ast
 import re
 import sys
 from pathlib import Path
@@ -17,18 +16,16 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from build_rel_queries import assigned_query  # noqa: E402
+
 _BUILD_REL = _SRC / "build_relationships.py"
 _ACCEPT = _SRC.parent / "scripts" / "verify_fresh_baseline.py"
 
 
 def _assigned_string(name: str) -> str:
-    tree = ast.parse(_BUILD_REL.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            return "".join(
-                c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
-            )
-    raise AssertionError(f"{name} not found")
+    # 2026-10 (relationship provenance): the queries are assembled from shared fragments, so the
+    # helper evaluates the assignment (the text that runs) instead of joining its literals.
+    return assigned_query(name)
 
 
 class TestSubtechniqueOfStep:

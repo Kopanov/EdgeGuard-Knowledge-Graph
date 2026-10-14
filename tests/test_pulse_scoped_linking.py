@@ -12,7 +12,6 @@ INDICATES / ATTRIBUTED_TO. Path: collector ``pulse_malware_families`` / ``pulse_
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import sys
@@ -24,6 +23,8 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from build_rel_queries import assigned_query  # noqa: E402
+
 from collectors import otx_collector as oc  # noqa: E402
 from collectors.misp_writer import MISPWriter  # noqa: E402
 from neo4j_client import Neo4jClient  # noqa: E402
@@ -34,12 +35,9 @@ _EVENT = {"id": 7, "info": "EdgeGuard-alienvault_otx-2026-10-10", "date": "2026-
 
 
 def _assigned_string(name: str) -> str:
-    for node in ast.walk(ast.parse(_BUILD_REL)):
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            return "".join(
-                c.value for c in ast.walk(node.value) if isinstance(c, ast.Constant) and isinstance(c.value, str)
-            )
-    raise AssertionError(name)
+    # 2026-10 (relationship provenance): the queries are assembled from shared fragments, so the
+    # helper evaluates the assignment (the text that runs) instead of joining its literals.
+    return assigned_query(name)
 
 
 # --------------------------------------------------------------------------- collector

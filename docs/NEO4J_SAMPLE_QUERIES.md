@@ -192,6 +192,30 @@ RETURN b.value, m.name, rb.misp_event_ids
 LIMIT 50
 ```
 
+### Who asserts a link, and where is the record (2026-10)
+
+Every relationship built from the sources carries `r.sources[]` (who asserts it), `r.source_refs[]`
+(the sources' own record ids, `"<source>:<id>"`) and `r.misp_event_ids[]`
+(`docs/KNOWLEDGE_GRAPH.md`, "Relationship provenance").
+
+```cypher
+// The evidence behind one actor's techniques, strongest first
+MATCH (a:ThreatActor {name: $actor})-[r:EMPLOYS_TECHNIQUE]->(t:Technique)
+RETURN t.mitre_id, t.name, r.match_type, r.confidence_score,
+       r.sources, r.source_refs[0..5] AS records, r.misp_event_ids[0..5] AS misp_events
+ORDER BY r.confidence_score DESC, size(r.sources) DESC
+LIMIT 50
+```
+
+```cypher
+// Corroboration: links that two or more independent sources state
+MATCH (x)-[r]->(y)
+WHERE size(coalesce(r.sources, [])) >= 2
+RETURN type(r) AS rel, r.sources AS sources, count(*) AS links
+ORDER BY links DESC
+LIMIT 25
+```
+
 ### Backfill candidates — edges WITHOUT misp_event_ids
 
 ```cypher
@@ -205,6 +229,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+_Last updated: 2026-10-14 — added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*

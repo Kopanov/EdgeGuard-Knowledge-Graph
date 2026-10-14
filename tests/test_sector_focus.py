@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import ast
 import re
 import sys
 from pathlib import Path
@@ -21,6 +20,8 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from build_rel_queries import assigned_query  # noqa: E402
+
 from collectors.nvd_collector import configurations_to_zone_text  # noqa: E402
 from config import SECTOR_KEYWORDS, VALID_ZONES, detect_zones_from_item  # noqa: E402
 
@@ -28,16 +29,10 @@ _BUILD_REL = _SRC / "build_relationships.py"
 
 
 def _inner(name: str) -> str:
-    """Concatenated string constants of the ``<name> = (...)`` assignment in build_relationships."""
-    tree = ast.parse(_BUILD_REL.read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
-            parts = []
-            for sub in ast.walk(node.value):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                    parts.append(sub.value)
-            return "".join(parts)
-    raise AssertionError(f"{name} not found")
+    """The ``<name> = (...)`` query of build_relationships as it runs."""
+    # 2026-10 (relationship provenance): the queries are assembled from shared fragments, so the
+    # helper evaluates the assignment (the text that runs) instead of joining its literals.
+    return assigned_query(name)
 
 
 # --------------------------------------------------------------------------- L3: actor / malware → Sector
@@ -45,7 +40,11 @@ class TestActorAndMalwareTargetSector:
     @pytest.mark.parametrize("name, var, label", [("_q7c_inner", "a", "ThreatActor"), ("_q7d_inner", "m", "Malware")])
     def test_inner_query_shape(self, name, var, label):
         body = _inner(name)
-        assert f"WITH ${var} AS {var} UNWIND {var}.zone AS zone_name" in body
+        assert body.startswith(f"WITH ${var} AS {var} ")
+        # 2026-10 (relationship provenance): the node's own feeds, records and events are bound
+        # before the UNWIND and carried through to the SET.
+        assert f"UNWIND {var}.zone AS zone_name WITH {var}, zone_name, _feeds, _prov_refs, _prov_events" in body
+        assert f"{var}.source" in body and "r.sources = apoc.coll.toSet(coalesce(r.sources, []) + _feeds)" in body
         assert f"MERGE ({var})-[r:TARGETS]->(sec)" in body
         assert 'zone_name <> "global"' in body, "no (actor)-[:TARGETS]->(global) edges"
         assert (
