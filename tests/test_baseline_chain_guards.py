@@ -1,9 +1,9 @@
 """Guards found missing by the 2026-10-12 fresh-baseline smoke run.
 
-1. The ``edgeguard_baseline`` DAG holds the baseline lock for its whole run, so its own
-   collector tasks must not skip under it. Before the fix every tier task returned a
-   "skipped optional source" result and ended ``success`` having collected nothing.
-2. A failed ``baseline_clean`` must stop the chain. The tier groups and ``full_neo4j_sync``
+The own-lock skip found by the same run is fixed upstream (#169, ``baseline_holder``) and
+tested there. Kept here:
+
+1. A failed ``baseline_clean`` must stop the chain. The tier groups and ``full_neo4j_sync``
    run with ``trigger_rule=ALL_DONE`` (per-source resilience), which also fires on
    ``upstream_failed``; ``baseline_start`` now publishes an XCom marker and the collectors
    and the full sync refuse to run without it.
@@ -44,55 +44,6 @@ class _Collector:
 
     def collect(self, *_a, **_kw):
         return {"success": True, "count": 1}
-
-
-def _patched(ep, lock_reason):
-    return (
-        patch.object(ep, "ensure_metrics_server", lambda: None),
-        patch.object(ep, "log_circuit_breaker_status", lambda: None),
-        patch.object(ep, "is_collector_enabled_by_allowlist", lambda _: True),
-        patch.object(ep, "send_slack_alert", lambda *_a, **_kw: None),
-        patch.object(ep, "set_source_health", MagicMock()),
-        patch.object(ep, "record_dag_run", MagicMock()),
-        patch.object(ep, "record_collection", MagicMock()),
-        patch.object(ep, "record_collection_duration", MagicMock()),
-        patch.object(ep, "record_collector_skip", MagicMock()),
-        patch.object(ep, "record_pipeline_error", MagicMock()),
-        patch.object(ep, "record_error", MagicMock()),
-        patch("baseline_lock.baseline_skip_reason", lambda: lock_reason, create=True),
-    )
-
-
-class TestOwnLockDoesNotSkipTheBaselineCollectors:
-    LOCK = "EdgeGuard baseline is running (Airflow DAG run edgeguard_baseline/manual__x) — skipping"
-
-    def test_scheduled_run_still_yields_to_the_lock(self):
-        ep = _import_dag_module()
-        patches = _patched(ep, self.LOCK)
-        for p in patches:
-            p.start()
-        try:
-            result = ep.run_collector_with_metrics("cisa", _Collector, MagicMock(), limit=10)
-        finally:
-            for p in patches:
-                p.stop()
-        assert result.get("skipped") is True
-        assert result.get("skip_reason_class") == "baseline_in_progress"
-
-    def test_baseline_run_collects_under_its_own_lock(self):
-        ep = _import_dag_module()
-        patches = _patched(ep, self.LOCK)
-        for p in patches:
-            p.start()
-        try:
-            result = ep.run_collector_with_metrics(
-                "cisa", _Collector, MagicMock(), limit=0, baseline=True, baseline_days=7
-            )
-        finally:
-            for p in patches:
-                p.stop()
-        assert result.get("skipped") is not True, result
-        assert result.get("skip_reason_class") != "baseline_in_progress", result
 
 
 class TestChainStopsAfterAFailedClean:
