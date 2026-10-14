@@ -86,6 +86,7 @@ class FakeNvd:
         self.before_request = None  # hook(request_number) to change ``records`` between requests
         self.status = 200  # HTTP status of every answer (503: NVD unavailable)
         self.empty_pages: set = set()  # startIndex values answered with no record before totalResults is reached
+        self.overcount = 0  # added to totalResults (an answer that counts records it does not return)
 
     def __call__(self, method, url, *, params=None, **_kwargs):
         params = dict(params or {})
@@ -96,15 +97,24 @@ class FakeNvd:
             return _Response(self.status, {"message": "Service unavailable"})
         start, end = _ts(params["lastModStartDate"]), _ts(params["lastModEndDate"])
         rows = sorted(
-            (r for r in self.records if start <= _ts(r["cve"]["lastModified"]) <= end),
-            key=lambda r: (_ts(r["cve"].get("published") or r["cve"]["lastModified"]), r["cve"]["id"]),
+            (
+                r
+                for r in self.records
+                if "lastModified" not in r["cve"] or start <= _ts(r["cve"]["lastModified"]) <= end
+            ),
+            key=lambda r: (
+                _ts(r["cve"].get("published") or r["cve"].get("lastModified") or "1970-01-01T00:00:00"),
+                r["cve"]["id"],
+            ),
         )
         first, count = int(params.get("startIndex", 0)), int(params.get("resultsPerPage", 2000))
         page = rows[first : first + count]
         if first in self.empty_pages:
             page = []
         body = dict(FIXTURES["nvd_page_envelope"])
-        body.update(resultsPerPage=len(page), startIndex=first, totalResults=len(rows), vulnerabilities=page)
+        body.update(
+            resultsPerPage=len(page), startIndex=first, totalResults=len(rows) + self.overcount, vulnerabilities=page
+        )
         return _Response(200, body)
 
 
@@ -171,6 +181,9 @@ class FakeMisp:
                 if set(body.get("tags") or []) <= {t["name"] for t in a.get("Tag", [])}
                 and a["type"] == body.get("type", a["type"])
             ]
+        if "value" in body:
+            wanted = set(body["value"]) if isinstance(body["value"], list) else {body["value"]}
+            rows = [a for a in rows if a["value"] in wanted]
         page, limit = int(body.get("page", 1)), int(body.get("limit", 5000))
         return _Response(200, {"response": {"Attribute": rows[(page - 1) * limit : page * limit]}})
 
@@ -378,6 +391,24 @@ class TestReadingTheWindow:
         _records, complete = self._read(env, nvd)
         assert complete is False
 
+    def test_an_answer_that_counts_records_it_does_not_return_is_not_split(self, env):
+        # NVD says 5 more records than it returns although the answer had room: splitting would turn
+        # this into thousands of requests (an empty answer counting records splits down to 2 s).
+        nvd = FakeNvd(_many(30))
+        nvd.overcount = 5
+        records, complete = self._read(env, nvd)
+        assert complete is False and len(records) == 30 and len(nvd.requests) == 1
+
+    def test_a_record_read_twice_counts_once(self, env):
+        c = NVDCollector.__new__(NVDCollector)
+        c.api_key = None
+        record = nvd_record(NEW)
+        env.setattr(
+            NVDCollector, "_iter_lastmod_slices", lambda self, s, e, b: iter([([record], True), ([record], True)])
+        )
+        records, _ = c._fetch_modified_cves(NOW - timedelta(days=1), NOW)
+        assert [r["cve"]["id"] for r in records] == [NEW]
+
     def test_a_page_that_ends_early_makes_the_read_incomplete(self, env):
         nvd = FakeNvd(_many(2500, same_second=True))
         nvd.empty_pages = {2000}
@@ -539,6 +570,7 @@ class TestIncrementalRun:
         misp, store = FakeMisp(), CursorStore("2026-10-14T05:00:00+00:00")
         status = run(env, nvd, misp, store)
         assert status["nvd_incremental"]["read_complete"] is False and store.writes == []
+        assert status["success"] is False, "a cursor that cannot move fails the task"
 
     def test_the_run_limit_lowers_the_cap(self, env):
         nvd, misp, store = FakeNvd([nvd_record(NEW), nvd_record(KEV_OLD)]), FakeMisp(), CursorStore()
@@ -565,11 +597,83 @@ class TestIncrementalRun:
         run(env, nvd, misp, store)
         assert NEW in {a["value"] for a in misp.attributes} and store.data[NVD_CURSOR_KEY] == NOW.isoformat()
 
-    def test_an_addition_misp_answers_without_a_list_keeps_the_cursor(self, env):
+    def test_an_answer_without_a_list_is_confirmed_by_value(self, env):
+        # MISP answered the batch without the event's attribute list but stored the attribute.
         nvd, misp, store = FakeNvd([nvd_record(NEW)]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
         misp.adds_without_list = True
         status = run(env, nvd, misp, store)
-        assert status["nvd_incremental"]["unverified_batches"] == 1 and store.writes == []
+        assert status["success"] is True and status["nvd_incremental"]["added"] == 1
+        assert store.data[NVD_CURSOR_KEY] == NOW.isoformat()
+
+    def test_additions_misp_drops_on_an_empty_event_fail_the_run_and_keep_the_cursor(self, env):
+        # MISP 2.5 answers an event edit with HTTP 200 even when every attribute fails validation;
+        # on the day's empty event the answer then has no attribute list to check against.
+        other = nvd_record(NEW, id="CVE-2026-93640")
+        nvd, misp, store = FakeNvd([nvd_record(NEW), other]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        misp.adds_not_stored.update({NEW, "CVE-2026-93640"})
+        misp.adds_without_list = True
+        status = run(env, nvd, misp, store)
+        detail = status["nvd_incremental"]
+        assert (detail["added"], detail["failed"]) == (0, 2)
+        assert detail["not_written"] == ["CVE-2026-93637", "CVE-2026-93640"]
+        assert status["success"] is False and "CVE-2026-93637" in status["error"]
+        assert store.writes == []
+
+    def test_slices_are_handled_oldest_first_so_the_cap_loses_nothing(self, env):
+        # 3,000 records over three hours make several slices. Newest first, a run that stops at the
+        # cap would store the cursor past the older slices it never handled.
+        env.setenv("EDGEGUARD_NVD_MAX_PER_RUN", "1000")
+        records = []
+        for n in range(3000):
+            stamp = (datetime(2026, 10, 14, 12, tzinfo=timezone.utc) + timedelta(seconds=3.6 * n)).strftime(
+                "%Y-%m-%dT%H:%M:%S.%f"
+            )[:-3]
+            records.append(nvd_record(NEW, id=f"CVE-2026-{800000 + n}", published=stamp, lastModified=stamp))
+        nvd, misp, store = FakeNvd(records), FakeMisp(), CursorStore("2026-10-14T11:00:00+00:00")
+        starts = []
+        for _ in range(6):
+            first_request = len(nvd.requests)
+            status = run(env, nvd, misp, store)
+            starts.append([r["lastModStartDate"] for r in nvd.requests[first_request:]])
+            if not status["nvd_incremental"]["stopped_at_cap"]:
+                break
+        assert len(set(misp.added_values())) == 3000
+        leaf_starts = starts[0][1:]
+        assert leaf_starts == sorted(leaf_starts), "slices are requested oldest first"
+
+    def test_spans_of_a_window_longer_than_120_days_are_handled_oldest_first(self, env):
+        # A 250-day lookback is read in three spans. Newest first, a cap reached inside the newest span
+        # would store a recent cursor and the record of an older span would never be read.
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "250")
+        env.setenv("EDGEGUARD_NVD_MAX_PER_RUN", "1")
+        records = []
+        for cve_id, days_ago in (("CVE-2026-70001", 200), ("CVE-2026-70002", 10), ("CVE-2026-70003", 9)):
+            stamp = (NOW - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+            records.append(nvd_record(NEW, id=cve_id, published=stamp, lastModified=stamp))
+        nvd, misp, store = FakeNvd(records), FakeMisp(), CursorStore()
+        for _ in range(5):
+            if not run(env, nvd, misp, store)["nvd_incremental"]["stopped_at_cap"]:
+                break
+        assert sorted(misp.added_values()) == ["CVE-2026-70001", "CVE-2026-70002", "CVE-2026-70003"]
+
+    def test_a_cap_stop_on_a_record_without_last_modified_keeps_the_cursor_at_the_window_start(self, env):
+        env.setenv("EDGEGUARD_NVD_MAX_PER_RUN", "1")
+        undated = [nvd_record(NEW, id=f"CVE-2026-9365{n}") for n in (1, 2)]
+        for record in undated:
+            del record["cve"]["lastModified"]
+        nvd, misp, store = FakeNvd(undated), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        status = run(env, nvd, misp, store)
+        assert status["nvd_incremental"]["stopped_at_cap"] is True
+        assert store.data[NVD_CURSOR_KEY] == "2026-10-14T11:00:00+00:00", "the window start, not 1970"
+
+    def test_a_record_in_two_slices_is_written_once(self, env):
+        record = nvd_record(NEW)
+        env.setattr(
+            NVDCollector, "_iter_lastmod_slices", lambda self, s, e, b: iter([([record], True), ([record], True)])
+        )
+        nvd, misp, store = FakeNvd([]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        status = run(env, nvd, misp, store)
+        assert misp.added_values() == [NEW] and status["nvd_incremental"]["records_read"] == 1
 
     def test_nvd_unavailable_is_transient_writes_nothing_and_keeps_the_cursor(self, env):
         from collector_failure_alerts import is_transient_external_error
@@ -661,7 +765,7 @@ def test_nvd_applies_its_own_per_run_cap_not_the_incremental_limit(monkeypatch):
     [
         ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "0", "nvd_incremental_days", 1),
         ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "x", "nvd_incremental_days", 14),
-        ("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", "-5", "nvd_cursor_overlap_seconds", 0),
+        ("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", "0", "nvd_cursor_overlap_seconds", 60),
         ("EDGEGUARD_NVD_MAX_PER_RUN", "0", "nvd_max_per_run", 1),
         ("EDGEGUARD_NVD_UPDATE_EXISTING", "no", "nvd_update_existing", False),
     ],

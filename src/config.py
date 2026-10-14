@@ -614,10 +614,10 @@ def nvd_incremental_days() -> int:
 
 
 def nvd_cursor_overlap_seconds() -> int:
-    """``EDGEGUARD_NVD_CURSOR_OVERLAP_SEC`` (default 3600): how much earlier than the stored cursor
-    a run starts reading, so a record NVD lists late is still read. Records read twice compare as
-    unchanged and cost no MISP write."""
-    return max(0, _env_int("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", 3600))
+    """``EDGEGUARD_NVD_CURSOR_OVERLAP_SEC`` (default 3600, at least 60): how much earlier than the
+    stored cursor a run starts reading, so a record NVD lists late, or stamps with a clock behind the
+    worker's, is still read. Records read twice compare as unchanged and cost no MISP write."""
+    return max(60, _env_int("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", 3600))
 
 
 def nvd_max_per_run() -> int:

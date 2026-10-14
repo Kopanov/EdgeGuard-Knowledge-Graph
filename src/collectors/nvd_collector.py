@@ -62,7 +62,7 @@ from collectors.collector_utils import (
 )
 
 # Import MISP writer
-from collectors.misp_writer import MispLookupError, MispTransientError, MISPWriter, _strict_push_accounting
+from collectors.misp_writer import MispLookupError, MispTransientError, MISPWriter
 from config import (
     NVD_API_KEY,
     SOURCE_TAGS,
@@ -473,6 +473,19 @@ class NVDCollector:
             if total <= len(batch):
                 yield batch, True
                 continue
+            if len(batch) < NVD_PAGE_SIZE:
+                # NVD counted more records than it returned although the answer had room for them.
+                # Splitting would not help (an empty answer that counts records would split the slice
+                # into thousands of requests); the slice is read as incomplete and the cursor stays.
+                logger.warning(
+                    "NVD incremental: NVD counted %d records but returned %d for %s .. %s — slice incomplete",
+                    total,
+                    len(batch),
+                    params["lastModStartDate"],
+                    params["lastModEndDate"],
+                )
+                yield batch, False
+                continue
             seconds = (slice_end - slice_start).total_seconds()
             parts = min(max(2, math.ceil(total / NVD_SLICE_TARGET)), int(seconds // NVD_MIN_SLICE_SECONDS))
             if parts < 2:
@@ -837,7 +850,7 @@ class NVDCollector:
         known: Optional[Dict[str, List[Any]]] = None  # listed once the first record has been read
         seen: set = set()
         to_add: List[Dict[str, Any]] = []
-        edits: List[Tuple[Any, Dict[str, Any]]] = []
+        edits: List[Tuple[str, Any, Dict[str, Any]]] = []  # (CVE id, stored copy, changes)
         records_read = unchanged = known_kept = out_of_scope = 0
         complete = True
         stopped_at: Optional[datetime] = None
@@ -874,7 +887,7 @@ class NVDCollector:
                         stopped_at = max(_record_last_modified(vuln), start)
                         break
                     if planned:
-                        edits.extend(planned)
+                        edits.extend((cve_id, stored_copy, changes) for stored_copy, changes in planned)
                     else:
                         to_add.append(item)
                 if stopped_at is not None:
@@ -894,7 +907,8 @@ class NVDCollector:
         self.circuit_breaker.record_success()
         record_collection_success(self.source_name)
 
-        added = add_failed = unconfirmed = unverified = 0
+        added = add_failed = 0
+        not_written: List[str] = []  # CVE ids whose addition or edit MISP did not confirm
         if to_add:
             stats = self.misp_writer.stats if isinstance(getattr(self.misp_writer, "stats", None), dict) else {}
             unconfirmed_before = int(stats.get("attributes_unconfirmed", 0) or 0)
@@ -903,35 +917,48 @@ class NVDCollector:
             added, add_failed = self.misp_writer.push_items(to_add, known_source_keys={source_tag: known_keys})
             unconfirmed = int(stats.get("attributes_unconfirmed", 0) or 0) - unconfirmed_before
             unverified = int(stats.get("batches_unverified", 0) or 0) - unverified_before
-            if unconfirmed > 0 and not _strict_push_accounting():
-                # MISP answered HTTP 200 without storing these; push_items counted them as pushed.
-                added -= unconfirmed
-                add_failed += unconfirmed
+            if add_failed or unconfirmed or unverified:
+                # MISP's answers did not confirm every addition (a failed batch, attributes missing from
+                # the returned event, or an answer without an attribute list, as MISP 2.5 gives when
+                # every attribute of a batch on an empty event fails validation): ask MISP by value.
+                values = [str(item.get("cve_id") or "").upper() for item in to_add]
+                try:
+                    present = self.misp_writer.existing_values(source_tag, "vulnerability", values)
+                except (MispTransientError, MispLookupError) as e:
+                    logger.error("NVD incremental: could not confirm the additions in MISP (%s)", e)
+                    present = set()
+                missing = [value for value in values if value not in present]
+                added, add_failed = len(values) - len(missing), len(missing)
+                not_written.extend(missing)
         updated = update_failed = 0
-        for stored_copy, changes in edits:
+        for cve_id, stored_copy, changes in edits:
             if self.misp_writer.update_attribute(stored_copy.uuid, changes):
                 updated += 1
             else:
                 update_failed += 1
+                not_written.append(cve_id)
         failed = add_failed + update_failed
 
         new_cursor = stopped_at or now
         cursor_moved = False
-        if failed == 0 and unverified == 0 and complete:
+        cursor_stuck = ""
+        if failed == 0 and complete:
             cursor_moved = self._store_incremental_cursor(new_cursor)
         else:
             reasons = []
             if failed:
-                reasons.append(f"{failed} MISP write(s) failed or were not stored")
-            if unverified:
-                reasons.append(f"MISP answered {unverified} batch(es) without an attribute list to check")
+                shown = ", ".join(sorted(set(not_written))[:20])
+                more = len(set(not_written)) - 20
+                reasons.append(
+                    f"{failed} MISP write(s) not confirmed ({shown}{f' and {more} more' if more > 0 else ''})"
+                )
             if not complete:
                 reasons.append("a slice of the window could not be read completely")
-            logger.warning(
-                "NVD incremental: %s — the cursor stays at %s and the next run reads these changes again",
-                "; ".join(reasons),
-                cursor.isoformat() if cursor else "(none)",
+            cursor_stuck = (
+                f"NVD incremental: {'; '.join(reasons)} — the cursor stays at "
+                f"{cursor.isoformat() if cursor else '(none)'} and the next run reads these changes again"
             )
+            logger.error(cursor_stuck)
         if stopped_at is not None:
             logger.info(
                 "NVD incremental: per-run cap of %d MISP writes reached (EDGEGUARD_NVD_MAX_PER_RUN, or the run's "
@@ -952,6 +979,11 @@ class NVDCollector:
             new_cursor.isoformat() if cursor_moved else "unchanged",
         )
         st = status_after_misp_push("nvd", len(to_add) + len(edits), added + updated, failed)
+        if cursor_stuck:
+            # A cursor that cannot move must be seen: the task fails until the cause is fixed, even
+            # when the success rate of the run's writes clears EDGEGUARD_MISP_MIN_SUCCESS_RATE.
+            st["success"] = False
+            st["error"] = cursor_stuck
         st["circuit_breaker_state"] = self.circuit_breaker.state.name
         st["nvd_incremental"] = {
             "window_start": start.isoformat(),
@@ -964,7 +996,7 @@ class NVDCollector:
             "stored_not_updated": known_kept,
             "out_of_scope": out_of_scope,
             "failed": failed,
-            "unverified_batches": unverified,
+            "not_written": sorted(set(not_written))[:100],
             "stopped_at_cap": stopped_at is not None,
             "cursor": new_cursor.isoformat() if cursor_moved else (cursor.isoformat() if cursor else None),
         }

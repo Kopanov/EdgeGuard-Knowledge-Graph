@@ -819,7 +819,7 @@ def clamp_cvss_score(value: Any) -> Optional[float]:
     return f
 
 
-# 2026-10: what only NVD's record supplies on a CVE node (``Neo4jClient._replace_nvd_owned_cve_data``):
+# 2026-10: what NVD's record supplies on a CVE node (``Neo4jClient._replace_nvd_owned_cve_data``):
 # its list properties, and its CVSS sub-nodes by relationship type and NVD_META key.
 _NVD_OWNED_CVE_LISTS = ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products")
 _NVD_CVSS_VERSIONS = (
@@ -2858,20 +2858,24 @@ class Neo4jClient:
         return True
 
     def _replace_nvd_owned_cve_data(self, cve_id: str, data: Dict) -> bool:
-        """Set what only NVD's record supplies from that record, also where it is now empty (2026-10).
+        """Remove from the node what NVD's record no longer has (2026-10).
 
         For an NVD record read from MISP (``nvd_record``, set by the sync when the attribute carries
-        ``NVD_META``): the lists ``cwe``, ``ref_tags``, ``cpe_type``, ``result_impacts``,
-        ``reference_urls`` and ``affected_products`` are set even when empty (an empty list removes
-        the property, as on a first load without it), and a CVSS sub-node of a version the record no
-        longer has is removed. Otherwise data NVD withdrew (a rejection, a removed CWE, CVSS or CPE)
-        would stay on the node from an earlier record, since ``merge_cve`` never overwrites a list
-        with an empty one and never removes a sub-node.
+        ``NVD_META``). ``merge_cve`` never overwrites a list with an empty one and never removes a CVSS
+        sub-node, so data NVD withdrew (a rejection, a removed CWE, CVSS or CPE) would otherwise stay
+        from an earlier record:
 
-        A sub-node is removed only when EdgeGuard manages it (``edgeguard_managed``) and NVD is the
-        only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the node's ``tag``
-        where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too. Failure is logged
-        and leaves the node as it was, like ``_merge_cvss_node``.
+        - the lists ``cwe``, ``ref_tags``, ``cpe_type``, ``result_impacts``, ``reference_urls`` and
+          ``affected_products`` are set from the record even when empty (an empty list removes the
+          property), but only on a node EdgeGuard manages whose only source is NVD. CISA ICS, the KEV
+          and OTX records and partner writes supply these lists as well, and on such a node an empty
+          NVD list leaves them as they are (on the hosted graph of 2026-10-14, 126,669 of the CVE
+          nodes with ``cwe`` had NVD as their only source);
+        - a CVSS sub-node of a version the record no longer has is removed when EdgeGuard manages it
+          and NVD is the only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the
+          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too.
+
+        Failure is logged and leaves the node as it was, like ``_merge_cvss_node``.
         """
         if not self.driver or not cve_id:
             return False
@@ -2881,9 +2885,12 @@ class Neo4jClient:
             clean = [str(x) for x in value if x is not None and str(x) != ""] if isinstance(value, list) else []
             lists[prop] = clean or None
         absent = [rel_type for rel_type, key in _NVD_CVSS_VERSIONS if not data.get(key)]
-        set_clause = ", ".join(f"c.{prop} = ${prop}" for prop in _NVD_OWNED_CVE_LISTS)
+        set_clause = ", ".join(
+            f"c.{prop} = CASE WHEN nvd_only THEN ${prop} ELSE c.{prop} END" for prop in _NVD_OWNED_CVE_LISTS
+        )
         query = f"""
         MATCH (c:CVE {{cve_id: $cve_id}})
+        WITH c, (c.edgeguard_managed = true AND coalesce(c.source, []) = ['nvd']) AS nvd_only
         SET {set_clause}
         WITH c
         OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]->(s)

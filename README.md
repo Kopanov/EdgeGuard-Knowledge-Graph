@@ -905,7 +905,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_NVD_BASELINE_KEV_SWEEP` | Baseline also fetches the NVD record of every KEV CVE (NVD `hasKev`), whatever its publication date — CVSS, CWE and references for the KEV CVE nodes | `true` |
 | `EDGEGUARD_NVD_EXTRA_CVE_IDS` | CVE ids a baseline fetches from NVD by id, whatever their publication date (separated by commas or spaces; at most 2,000, one request each) — e.g. CVEs a curated package or an analyst question names | *(empty)* |
 | `EDGEGUARD_NVD_INCREMENTAL_DAYS` | How far back an NVD incremental run reads when no cursor is stored (after a wipe, or the first run after an upgrade). See [docs/COLLECTORS.md § 2](docs/COLLECTORS.md) | `14` |
-| `EDGEGUARD_NVD_CURSOR_OVERLAP_SEC` | NVD incremental runs start reading this much before the stored cursor, so a record NVD lists late is still read | `3600` |
+| `EDGEGUARD_NVD_CURSOR_OVERLAP_SEC` | NVD incremental runs start reading this much before the stored cursor (at least 60), so a record NVD lists late is still read | `3600` |
 | `EDGEGUARD_NVD_MAX_PER_RUN` | MISP writes (new CVEs added plus stored CVEs edited) per NVD incremental run; replaces `EDGEGUARD_INCREMENTAL_LIMIT` for NVD. A run that reaches it stops there and the next run continues | `5000` |
 | `EDGEGUARD_NVD_UPDATE_EXISTING` | NVD incremental runs edit the MISP attribute of a CVE MISP already holds when NVD's data for it changed (CVSS, CPE, CWE, KEV fields, rejection); `false` only adds new CVEs | `true` |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB API key (free tier: 1 000 req/day) | *(optional)* |

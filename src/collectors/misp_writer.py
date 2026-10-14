@@ -1174,6 +1174,46 @@ class MISPWriter:
         logger.info("MISP: %d %s attribute(s) under %s (%d distinct values)", listed, attr_type, tag, len(index))
         return index
 
+    def existing_values(self, source_tag: str, attr_type: str, values: Sequence[str]) -> set:
+        """Which of *values* MISP holds as ``attr_type`` attributes under ``source_tag`` (upper-case).
+
+        Asked by value, 500 at a time (2026-10, to confirm NVD additions MISP's answers did not
+        confirm). Raises ``MispTransientError`` / ``MispLookupError`` like ``index_source_attributes``.
+        """
+        found: set = set()
+        wanted = [str(v) for v in values if str(v or "").strip()]
+        for i in range(0, len(wanted), 500):
+            chunk = wanted[i : i + 500]
+            page = 1
+            while True:
+                response = self._post_with_retries(
+                    f"{self.url}/attributes/restSearch",
+                    {
+                        "returnFormat": "json",
+                        "tags": [source_tag],
+                        "type": attr_type,
+                        "value": chunk,
+                        "page": page,
+                        "limit": 2000,
+                    },
+                    context=f"lookup of {len(chunk)} {attr_type} value(s)",
+                )
+                if response.status_code != 200:
+                    raise MispLookupError(f"MISP attributes/restSearch by value answered HTTP {response.status_code}")
+                try:
+                    data = response.json()
+                except ValueError as e:
+                    raise MispLookupError("MISP attributes/restSearch by value is not JSON") from e
+                resp = data.get("response", data) if isinstance(data, dict) else data
+                rows = resp.get("Attribute", []) if isinstance(resp, dict) else resp
+                rows = rows if isinstance(rows, list) else [rows]
+                found.update(str(r.get("value") or "").strip().upper() for r in rows if isinstance(r, dict))
+                if len(rows) < 2000:
+                    break
+                page += 1
+        found.discard("")
+        return found
+
     def _post_with_retries(self, url: str, payload: Dict[str, Any], *, context: str, attempts: int = 3):
         """POST *payload*; a timeout, connection error, HTTP 429 or 5xx is retried (5 s, then 10 s).
 
