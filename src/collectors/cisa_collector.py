@@ -35,7 +35,13 @@ from collectors.collector_utils import (
 
 # Import MISP writer
 from collectors.misp_writer import MISPWriter
-from config import SOURCE_TAGS, SSL_VERIFY, detect_zones_from_text, resolve_collection_limit
+from config import (
+    SOURCE_TAGS,
+    SSL_VERIFY,
+    detect_zones_from_text,
+    kev_baseline_whole_catalogue,
+    resolve_collection_limit,
+)
 from resilience import get_circuit_breaker
 
 # Incremental window: only process entries added within the last N days (non-baseline runs).
@@ -205,8 +211,13 @@ class CISACollector:
             # Time-window filtering
             total_count = len(vulnerabilities)
             if baseline:
-                # Baseline mode: optionally filter by baseline_days
-                if baseline_days:
+                # 2026-10: the whole catalogue by default — a KEV entry is a CVE known to be
+                # exploited, so its age is no reason to leave it out (Log4Shell, added 2021-12,
+                # fell outside a 730-day window). EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false
+                # restores the dateAdded window of the baseline length.
+                if kev_baseline_whole_catalogue():
+                    logger.info(f"CISA KEV: whole catalogue in baseline mode, processing {total_count} entries")
+                elif baseline_days:
                     cutoff_date = (datetime.now(timezone.utc) - timedelta(days=baseline_days)).strftime("%Y-%m-%d")
                     vulnerabilities = [v for v in vulnerabilities if v.get("dateAdded", "") >= cutoff_date]
                     logger.info(

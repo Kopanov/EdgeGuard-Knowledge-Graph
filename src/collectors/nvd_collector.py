@@ -57,6 +57,8 @@ from config import (
     SOURCE_TAGS,
     SSL_VERIFY,
     detect_zones_from_item,
+    nvd_baseline_kev_sweep,
+    nvd_extra_cve_ids,
     resolve_collection_limit,
 )
 
@@ -441,9 +443,13 @@ class NVDCollector:
         pub_end_iso: Optional[str] = None,
         start_index: int = 0,
         limit: int = 2000,
+        extra_params: Optional[Dict[str, str]] = None,
     ) -> List[Dict]:
         """
         Fetch a batch of CVEs from NVD API.
+
+        ``extra_params`` adds NVD filters that need no date range (2026-10): ``{"hasKev": ""}``
+        (every CVE on CISA's KEV list) or ``{"cveId": "CVE-…"}`` (one CVE).
 
         Args:
             pub_start_iso: Publication window start (UTC ISO, NVD format)
@@ -468,6 +474,8 @@ class NVDCollector:
             else:
                 params["pubStartDate"] = pub_start_iso
                 params["pubEndDate"] = pub_end_iso
+        if extra_params:
+            params.update(extra_params)
 
         # PR-N17 Fix #1 (BLOCK, 2026-04-22 pre-baseline collection audit):
         # Pre-PR-N17 this method returned ``[]`` on ANY exception, and
@@ -561,6 +569,48 @@ class NVDCollector:
             )
         return vulnerabilities
 
+    def _fetch_supplementary_cves(self, batch_sleep: float) -> List[Dict]:
+        """Baseline records outside the publication windows (2026-10).
+
+        Every CVE on CISA's KEV list (NVD ``hasKev``, about 1,700 records in one or two pages;
+        ``EDGEGUARD_NVD_BASELINE_KEV_SWEEP``) and the CVE ids in ``EDGEGUARD_NVD_EXTRA_CVE_IDS``
+        (one request each). Known-exploited CVEs stay relevant whatever their age, and CVE
+        nodes are what exploitation claims attach to. Supplementary: a failed request is
+        logged and skipped, never fails the baseline (the windows are the baseline proper).
+        """
+        records: List[Dict] = []
+        if nvd_baseline_kev_sweep():
+            idx = 0
+            while True:
+                try:
+                    batch = self._fetch_cves_batch(start_index=idx, limit=2000, extra_params={"hasKev": ""})
+                except NvdBatchFetchError as e:
+                    logger.warning("[NVD-KEV-SWEEP] stopped at startIndex %d: %s — KEV records so far kept", idx, e)
+                    break
+                records.extend(batch)
+                if len(batch) < 2000:
+                    break
+                idx += 2000
+                time.sleep(batch_sleep)
+            logger.info("  NVD KEV sweep: %d KEV CVE record(s) (any publication date)", len(records))
+        extra_ids = nvd_extra_cve_ids()
+        fetched_extra = 0
+        for cve_id in extra_ids:
+            time.sleep(batch_sleep)
+            try:
+                batch = self._fetch_cves_batch(limit=1, extra_params={"cveId": cve_id})
+            except NvdBatchFetchError as e:
+                logger.warning("[NVD-EXTRA-CVE] %s not fetched: %s", cve_id, e)
+                continue
+            if not batch:
+                logger.warning("[NVD-EXTRA-CVE] %s: NVD has no record", cve_id)
+                continue
+            records.extend(batch)
+            fetched_extra += 1
+        if extra_ids:
+            logger.info("  NVD extra CVE ids: %d of %d fetched", fetched_extra, len(extra_ids))
+        return records
+
     def collect(
         self, limit: int = None, push_to_misp: bool = True, baseline: bool = False, baseline_days: int = 365
     ) -> Dict[str, Any]:
@@ -593,6 +643,8 @@ class NVDCollector:
             return self._return_status(False, 0, error_msg)
 
         try:
+            # CVE ids the sector time range must not drop (baseline KEV sweep / named ids).
+            time_range_exempt: set = set()
             if baseline:
                 logger.info(f"Baseline mode: Collecting NVD CVEs from the last {baseline_days} days...")
                 all_cves: List[Dict] = []
@@ -829,6 +881,17 @@ class NVDCollector:
                         baseline_days,
                         len(all_cves),
                     )
+                # 2026-10: KEV CVEs and named CVE ids outside the publication windows. They are
+                # exempt from the sector time range below (a known-exploited CVE stays relevant
+                # whatever its age); records already collected by a window are not duplicated.
+                for _rec in self._fetch_supplementary_cves(batch_sleep):
+                    _sup_id = (_rec.get("cve") or {}).get("id", "")
+                    if not _sup_id:
+                        continue
+                    time_range_exempt.add(_sup_id)
+                    if _sup_id not in seen_cve_ids:
+                        seen_cve_ids.add(_sup_id)
+                        all_cves.append(_rec)
                 vulnerabilities = all_cves
                 if not vulnerabilities:
                     logger.warning(
@@ -1059,8 +1122,8 @@ class NVDCollector:
                     except (ValueError, TypeError):
                         pub_date = None
 
-                # Only filter if we have a valid pub_date
-                if pub_date is not None:
+                # Only filter if we have a valid pub_date (and the CVE is not a KEV / named record)
+                if pub_date is not None and cve_id not in time_range_exempt:
                     try:
                         months_range = max(SECTOR_TIME_RANGES.get(s, SECTOR_TIME_RANGES["global"]) for s in sectors)
                         cutoff = datetime.now(timezone.utc) - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6

@@ -4,7 +4,7 @@ import math
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, MutableMapping, Optional, Protocol
+from typing import Dict, List, MutableMapping, Optional, Protocol
 
 # Module-level logger for config-time diagnostics (env parsing warnings,
 # bad-credentials path, etc.). Previously this module only used ad-hoc
@@ -533,6 +533,66 @@ IS_PROD = is_production_env()
 def _env_bool(name: str, default: str = "true") -> bool:
     raw = os.getenv(name, default)
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# Known-exploited CVEs outside the baseline window (2026-10)
+# ---------------------------------------------------------------------------
+# A CISA KEV entry is a CVE known to be exploited, so its age is no reason to leave it out.
+# Windowing KEV by ``dateAdded`` and NVD by publication date dropped CVEs such as Log4Shell
+# (published and added 2021-12) from a 730-day baseline, and with them the CVE nodes that
+# exploitation claims attach to: on the 730-day graph of 2026-10-14, 90 of the 162 CVEs named
+# in curated or observed exploitation claims had a node, 144 of the 162 are on KEV. Read per
+# call so Airflow tasks and tests pick up the environment at run time.
+_CVE_ID_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
+NVD_EXTRA_CVE_IDS_MAX = 2000
+
+
+def kev_baseline_whole_catalogue() -> bool:
+    """``EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE`` (default true): baseline KEV takes every entry.
+
+    ``false`` restores the ``dateAdded`` window of the baseline length.
+    """
+    return _env_bool("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true")
+
+
+def nvd_baseline_kev_sweep() -> bool:
+    """``EDGEGUARD_NVD_BASELINE_KEV_SWEEP`` (default true): a baseline also fetches the NVD record
+    of every KEV CVE (NVD ``hasKev``), whatever its publication date — CVSS, CWE and references
+    for the KEV CVE nodes."""
+    return _env_bool("EDGEGUARD_NVD_BASELINE_KEV_SWEEP", "true")
+
+
+def nvd_extra_cve_ids() -> List[str]:
+    """``EDGEGUARD_NVD_EXTRA_CVE_IDS``: CVE ids a baseline fetches from NVD by id, whatever their
+    publication date (separated by commas, semicolons or whitespace).
+
+    For CVEs a curated package or an analyst question names that are neither on KEV nor inside
+    the baseline window. Invalid tokens are reported and skipped; duplicates are dropped; at most
+    ``NVD_EXTRA_CVE_IDS_MAX`` ids are taken (one NVD request each).
+    """
+    raw = (os.getenv("EDGEGUARD_NVD_EXTRA_CVE_IDS") or "").strip()
+    ids: List[str] = []
+    rejected: List[str] = []
+    for token in re.split(r"[\s,;]+", raw):
+        if not token:
+            continue
+        cve_id = token.strip().upper()
+        if _CVE_ID_RE.match(cve_id):
+            if cve_id not in ids:
+                ids.append(cve_id)
+        else:
+            rejected.append(token)
+    if rejected:
+        logger.warning(
+            "EDGEGUARD_NVD_EXTRA_CVE_IDS: %d token(s) are not CVE ids and were skipped: %s",
+            len(rejected),
+            ", ".join(rejected[:10]),
+        )
+    if len(ids) > NVD_EXTRA_CVE_IDS_MAX:
+        logger.warning("EDGEGUARD_NVD_EXTRA_CVE_IDS: %d ids, taking the first %d", len(ids), NVD_EXTRA_CVE_IDS_MAX)
+        ids = ids[:NVD_EXTRA_CVE_IDS_MAX]
+    return ids
 
 
 # MISP push: prefetch existing (type, value) per target event to skip duplicates (reruns + overlap).

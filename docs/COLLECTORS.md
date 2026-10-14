@@ -203,6 +203,10 @@ Collects CVE records from the National Vulnerability Database, including:
 
 **NIST notice:** This product uses data from the NVD API but is not endorsed or certified by the NVD ([Start Here](https://nvd.nist.gov/developers/start-here)).
 
+
+### Known-exploited CVEs outside the baseline window (2026-10)
+A baseline also fetches, after its publication windows, the NVD record of every CVE on CISA's KEV list (NVD `hasKev`; `EDGEGUARD_NVD_BASELINE_KEV_SWEEP`, default on) and of the CVE ids in `EDGEGUARD_NVD_EXTRA_CVE_IDS`, whatever their publication date (`_fetch_supplementary_cves`). These records are exempt from the sector time range, are not duplicated when a window already collected them, and a failed request is logged (`[NVD-KEV-SWEEP]`, `[NVD-EXTRA-CVE]`) and skipped. The KEV collector likewise takes the whole catalogue in baseline mode (`EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE`).
+
 ### Source
 - **URL:** `https://services.nvd.nist.gov/rest/json/cves/2.0`
 - **API Key:** Optional (strongly recommended — higher throughput). Sent as HTTP header `apiKey` with the key value (per [NVD Developers — Start Here](https://nvd.nist.gov/developers/start-here)).
