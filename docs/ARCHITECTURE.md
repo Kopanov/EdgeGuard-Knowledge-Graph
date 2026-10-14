@@ -357,7 +357,7 @@ script ships; a fresh baseline rerun stamps every uuid at write time. See
 |------|-----------|------|------------------|
 | alienvault_otx | AlienVault OTX | Threat Intel | otx_collector.py |
 | nvd | NVD | Vulnerability DB | nvd_collector.py |
-| cisa | CISA KEV | Advisory | cisa_collector.py |
+| cisa_kev | CISA KEV | Advisory | cisa_collector.py |
 | mitre_attck | MITRE ATT&CK | Framework | mitre_collector.py |
 | virustotal | VirusTotal | Threat Intel | `vt_collector.py` (scheduled); `virustotal_collector.py` (enrichment task) |
 | abuseipdb | AbuseIPDB | IP Reputation | abuseipdb_collector.py |
@@ -365,6 +365,8 @@ script ships; a fresh baseline rerun stamps every uuid at write time. See
 | ssl_blacklist | SSL Blacklist | Threat Intel | finance_feed_collector.py |
 | urlhaus | URLhaus | Threat Intel | global_feed_collector.py |
 | threatfox | ThreatFox | Threat Intel | global_feed_collector.py |
+| malwarebazaar | MalwareBazaar | Threat Intel | global_feed_collector.py (flag-guarded, `EDGEGUARD_ENABLE_MALWAREBAZAAR`) |
+| cisa_ics | CISA ICS Advisories | Advisory | cisa_ics_collector.py (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`) |
 | healthcare | Healthcare Feeds | Threat Intel | healthcare_feed_collector.py (placeholder) |
 | energy | Energy Feeds | Threat Intel | energy_feed_collector.py (placeholder) |
 
@@ -389,7 +391,10 @@ See [COLLECTION_AND_SYNC_LIMITS.md](COLLECTION_AND_SYNC_LIMITS.md) for detailed 
 | `src/collectors/vt_collector.py` | VirusTotal — primary `VTCollector` used by medium-freq DAG |
 | `src/collectors/virustotal_collector.py` | VirusTotal — `VirusTotalCollector` enrichment DAG path |
 | `src/collectors/finance_feed_collector.py` | Feodo, SSL Blacklist collectors |
-| `src/collectors/global_feed_collector.py` | URLhaus, ThreatFox collectors |
+| `src/collectors/global_feed_collector.py` | URLhaus, ThreatFox, MalwareBazaar collectors |
+| `src/collectors/cisa_ics_collector.py` | CISA ICS advisories (CSAF 2.0), flag-guarded |
+| `src/collectors/virustotal_budget.py` | VirusTotal free-tier daily ledger (budget, per-run cap, lookup memory) |
+| `src/source_key_check.py` | Live check of the source API keys (preflight, baseline task `source_key_check`) |
 | `src/collectors/healthcare_feed_collector.py` | Healthcare placeholder |
 | `src/collectors/energy_feed_collector.py` | Energy placeholder |
 | `src/collectors/misp_collector.py` | Fetch/normalize events from MISP API (ingest) — **not** used in default baseline collector tier |

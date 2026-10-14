@@ -79,6 +79,13 @@ Auth:    Configured via environment variables
   // VT enrichment fields
   yara_rules: LIST,                  // Crowdsourced YARA rule names
   sigma_rules: LIST,                 // Sigma detection rule titles
+  threat_label: STRING,              // VirusTotal popular_threat_classification.suggested_threat_label (2026-10)
+  // URLhaus / Feodo Tracker fields (2026-10, carried in the TF_META comment)
+  url_status: STRING,                // URLhaus online / offline status
+  last_online: STRING,               // URLhaus and Feodo: last date the source saw it online
+  // OTX report-scoped linking (names reported by the same pulse; build_relationships steps 2d and 9b)
+  pulse_malware_families: LIST,      // malware families named by the OTX pulse(s) that listed the IOC
+  pulse_malware_actor_pairs: LIST,   // "family::adversary" pairs named by the same pulse
   // AbuseIPDB enrichment
   abuse_categories: LIST,            // Abuse category IDs
   // OTX enrichment

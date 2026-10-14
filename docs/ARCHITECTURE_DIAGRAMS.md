@@ -25,10 +25,12 @@ graph TB
         UH[URLhaus]
         FD[Feodo Tracker]
         SSL[SSL Blacklist]
+        MB[MalwareBazaar<br/>flag-guarded]
+        ICS[CISA ICS advisories<br/>flag-guarded]
     end
 
     subgraph EdgeGuard Pipeline
-        COLL[Collectors<br/>10 sources]
+        COLL[Collectors<br/>10 sources + 2 flag-guarded]
         MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
@@ -54,6 +56,7 @@ graph TB
 
     OTX & NVD & CISA & MITRE & VT & AIPDB --> COLL
     TF & UH & FD & SSL --> COLL
+    MB & ICS -.->|when enabled| COLL
     COLL -->|push indicators| MISP
     MISP -->|paginated fetch| SYNC
     SYNC -->|MERGE nodes| NEO4J

@@ -40,6 +40,8 @@ Check the **`baseline_start`** task log: it prints the effective **Item limit** 
 
 Remove or comment out the two lines in **`.env`**, restart Airflow again, and use **Admin → Variables** (`BASELINE_DAYS`, `BASELINE_COLLECTION_LIMIT`) for production, **or** leave defaults (730 days, unlimited cap).
 
+Starting the real run with `edgeguard fresh-baseline --days 730 --wipe-all`: the stores now hold the test data, so the command asks for a recent backup (`EDGEGUARD_LAST_BACKUP_AT`, at most 240 hours old) and stops with `BACKUP GATE FAILED` without it. Record a backup (see [BACKUP.md](BACKUP.md)), or, when the stores hold nothing but the test data, add `--skip-backup-check`. On empty stores the check is skipped. The baseline's first task, `source_key_check`, then reports which keyed sources will deliver; `python src/source_key_check.py` gives the same answer beforehand.
+
 ---
 
 ## Option B — Airflow Variables only (no `.env`)
