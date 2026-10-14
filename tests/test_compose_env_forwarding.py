@@ -37,6 +37,9 @@ FORWARDED = [
     ("EDGEGUARD_SOURCE_KEY_CHECK", "true"),  # live source key check (source_key_check.py)
     ("EDGEGUARD_BASELINE_REQUIRED_SOURCES", None),  # empty = no keyed source is mandatory
     ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # int(os.environ.get(...))
+    ("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true"),  # 2026-10 whole KEV catalogue in baseline mode
+    ("EDGEGUARD_NVD_BASELINE_KEV_SWEEP", "true"),  # 2026-10 NVD records of every KEV CVE in baseline mode
+    ("EDGEGUARD_NVD_EXTRA_CVE_IDS", None),  # 2026-10 CVE ids fetched by id; empty = none
     ("EDGEGUARD_DEFAULT_TLP", "white"),
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
 ]

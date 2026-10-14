@@ -905,6 +905,9 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `EDGEGUARD_VIRUSTOTAL_DAILY_BUDGET` | VirusTotal lookups per UTC day (free tier allows 500; the ledger lives in the state directory). See [docs/COLLECTORS.md](docs/COLLECTORS.md) | `400` |
 | `EDGEGUARD_VIRUSTOTAL_MAX_LOOKUPS_PER_RUN` | VirusTotal lookups per run (six runs a day; capped at 200 so a run fits the task timeout) | `60` |
 | `EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS` | Age window of the SHA-256 hashes in MISP that VirusTotal enriches | `30` |
+| `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE` | Baseline takes the whole CISA KEV catalogue (about 1,500 known-exploited CVEs, whatever their `dateAdded`); `false` restores the baseline-length window. See [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md) | `true` |
+| `EDGEGUARD_NVD_BASELINE_KEV_SWEEP` | Baseline also fetches the NVD record of every KEV CVE (NVD `hasKev`), whatever its publication date — CVSS, CWE and references for the KEV CVE nodes | `true` |
+| `EDGEGUARD_NVD_EXTRA_CVE_IDS` | CVE ids a baseline fetches from NVD by id, whatever their publication date (separated by commas or spaces; at most 2,000, one request each) — e.g. CVEs a curated package or an analyst question names | *(empty)* |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB API key (free tier: 1 000 req/day) | *(optional)* |
 | `THREATFOX_API_KEY` | Abuse.ch ThreatFox API key ([auth.abuse.ch](https://auth.abuse.ch/)). Without it, **`collect_threatfox`** skips (HTTP 401 if the task is forced to call the API without a key). | *(optional)* |
 | `EDGEGUARD_COLLECT_SOURCES` | Optional comma-separated allowlist of collectors (e.g. `otx,nvd,cisa,mitre`). Unset = all enabled (subject to optional-key skips). See [docs/AIRFLOW_DAGS.md](docs/AIRFLOW_DAGS.md). | *(unset)* |

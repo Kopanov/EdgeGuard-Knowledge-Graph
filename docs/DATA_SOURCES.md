@@ -126,6 +126,8 @@
 **How classified:**
 - Description text searched for sector keywords
 
+**Baseline scope (2026-10):** a baseline takes the **whole catalogue** (about 1,500 entries), not only the entries added within the baseline window: a KEV entry is a CVE known to be exploited, so its age is no reason to leave it out (Log4Shell, added 2021-12, fell outside a 730-day window). `EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE=false` restores the `dateAdded` window. Incremental runs keep their `EDGEGUARD_CISA_INCREMENTAL_DAYS` window.
+
 ---
 
 ### 4b. CISA ICS Advisories (CSAF 2.0) — flag-guarded, added 2026-10
@@ -209,7 +211,7 @@
 | Update | On-demand |
 | Classification | ⚠️ Description searched |
 
-**API constraints (collector behavior):** NVD CVE 2.0 requires **`pubStartDate` and `pubEndDate` together** when filtering by published date. Each request is limited to **at most 120 consecutive days**. The collector anchors the window on **now (UTC)** and applies sector/baseline lookback; if the implied range is longer than 120 days, **normal (incremental) fetch** clamps to the last **120 days** of that lookback, then **pages** with **`resultsPerPage` ≤ 2000** and **`startIndex`** from the newest slice of the result set (see [CVE API](https://nvd.nist.gov/developers/vulnerabilities), [workflows](https://nvd.nist.gov/developers/api-workflows)). **Baseline** mode **splits** `[now − baseline_days, now]` into multiple ≤120-day windows. **NIST attribution:** This product uses data from the NVD API but is not endorsed or certified by the NVD.
+**API constraints (collector behavior):** NVD CVE 2.0 requires **`pubStartDate` and `pubEndDate` together** when filtering by published date. Each request is limited to **at most 120 consecutive days**. The collector anchors the window on **now (UTC)** and applies sector/baseline lookback; if the implied range is longer than 120 days, **normal (incremental) fetch** clamps to the last **120 days** of that lookback, then **pages** with **`resultsPerPage` ≤ 2000** and **`startIndex`** from the newest slice of the result set (see [CVE API](https://nvd.nist.gov/developers/vulnerabilities), [workflows](https://nvd.nist.gov/developers/api-workflows)). **Baseline** mode **splits** `[now − baseline_days, now]` into multiple ≤120-day windows. **Known-exploited CVEs outside the windows (2026-10):** after the windows, a baseline also fetches the NVD record of every CVE on CISA's KEV list (`hasKev`, about 1,700 records in one page; `EDGEGUARD_NVD_BASELINE_KEV_SWEEP`, default on) and of the CVE ids listed in `EDGEGUARD_NVD_EXTRA_CVE_IDS` (one request each), whatever their publication date; those records are exempt from the sector time range. A failed supplementary request is logged and skipped, never fails the baseline. **NIST attribution:** This product uses data from the NVD API but is not endorsed or certified by the NVD.
 
 **What we get:**
 - CVE IDs
