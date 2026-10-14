@@ -96,6 +96,7 @@ import re
 import unicodedata
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import quote
 
 import stix2
 
@@ -308,7 +309,9 @@ EDGEGUARD_EXTENSION_ID = _deterministic_id("extension-definition", "edgeguard-pr
 # fixed (not wall-clock) so the two objects are byte-stable across exports;
 # ``modified`` and ``version`` are bumped when the definition changes.
 _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
-_EXTENSION_VERSION = "1.0.0"
+# 1.1.0 (2026-10-14): relationship provenance properties on SROs.
+_EXTENSION_MODIFIED = "2026-10-14T00:00:00.000Z"
+_EXTENSION_VERSION = "1.1.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -356,6 +359,10 @@ EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
     "x_edgeguard_zones",
     "x_edgeguard_misp_event_ids",
     "x_edgeguard_misp_attribute_ids",
+    # Relationship provenance on SROs (2026-10): who asserts the link, which records, which kind of evidence
+    "x_edgeguard_match_type",
+    "x_edgeguard_sources",
+    "x_edgeguard_source_refs",
 ) + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
 
 _EXTENSION_PREFIX = "x_edgeguard_"
@@ -508,7 +515,55 @@ _SRO_BY_EDGE: Dict[Tuple[str, str, str], Tuple[str, bool]] = {
     ("IMPLEMENTS_TECHNIQUE", "tool", "attack-pattern"): ("uses", False),
     ("RUNS", "intrusion-set", "campaign"): ("attributed-to", True),
     ("AFFECTS", "vulnerability", "identity"): ("related-to", False),
+    # 2026-10: the rest of the graph's relationships (every one EdgeGuard writes that has a
+    # STIX form; IN_TACTIC is a kill-chain phase on the attack-pattern, not an SRO).
+    # - intrusion-set → malware / tool (USES_MALWARE / USES_TOOL, MITRE's group → software): ``uses``.
+    # - attack-pattern → attack-pattern (SUBTECHNIQUE_OF): ``subtechnique-of``, the relationship
+    #   type MITRE ATT&CK's own STIX uses (not in the 2.1 summary table, which leaves the type open).
+    # - malware → vulnerability (EXPLOITS): ``exploits``; intrusion-set → vulnerability: the table
+    #   has no ``exploits`` for intrusion-set, so ``targets``.
+    # - intrusion-set / malware → identity (TARGETS a sector): ``targets``.
+    # - malware → campaign (PART_OF_CAMPAIGN): the table defines ``campaign uses malware``; reversed.
+    #   indicator → campaign: ``indicates``.
+    ("USES_MALWARE", "intrusion-set", "malware"): ("uses", False),
+    ("USES_TOOL", "intrusion-set", "tool"): ("uses", False),
+    ("SUBTECHNIQUE_OF", "attack-pattern", "attack-pattern"): ("subtechnique-of", False),
+    ("EXPLOITS", "malware", "vulnerability"): ("exploits", False),
+    ("EXPLOITS", "intrusion-set", "vulnerability"): ("targets", False),
+    ("TARGETS", "intrusion-set", "identity"): ("targets", False),
+    ("TARGETS", "malware", "identity"): ("targets", False),
+    ("PART_OF_CAMPAIGN", "malware", "campaign"): ("uses", True),
+    ("PART_OF_CAMPAIGN", "indicator", "campaign"): ("indicates", False),
 }
+
+# Relationship provenance on SROs (2026-10). Graph relationships carry ``sources`` (who
+# asserts them), ``source_refs`` (``"<source>:<record id>"``), ``misp_event_ids`` and
+# ``match_type``; the SRO carries them as ``x_edgeguard_*`` properties, the confidence as the
+# STIX ``confidence`` (0–100), and each record id as an ``external_reference`` — with a link
+# for the sources whose records have a public page.
+_RECORD_URL_TEMPLATES: Dict[str, str] = {
+    "alienvault_otx": "https://otx.alienvault.com/pulse/{id}",
+    "threatfox": "https://threatfox.abuse.ch/ioc/{id}/",
+    "urlhaus": "https://urlhaus.abuse.ch/url/{id}/",
+}
+# ATT&CK id prefix → page (``TA`` before ``T``); sub-technique ``T1566.001`` → ``T1566/001``.
+_ATTACK_URL_PATHS: Tuple[Tuple[str, str], ...] = (
+    ("TA", "tactics"),
+    ("T", "techniques"),
+    ("G", "groups"),
+    ("S", "software"),
+    ("M", "mitigations"),
+    ("C", "campaigns"),
+)
+# Bounds per SRO: an OTX-reported link can name hundreds of pulses.
+_MAX_EXTERNAL_REFERENCES = 20
+_MAX_SOURCE_REFS = 200
+# Relationship property → SRO extension property, with its bound (``None`` = unbounded).
+_SRO_PROVENANCE_LISTS: Tuple[Tuple[str, str, Optional[int]], ...] = (
+    ("sources", "x_edgeguard_sources", None),
+    ("source_refs", "x_edgeguard_source_refs", _MAX_SOURCE_REFS),
+    ("misp_event_ids", "x_edgeguard_misp_event_ids", None),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +725,9 @@ class StixExporter:
         """Bundle one indicator + its 1-hop neighbourhood.
 
         Neighbourhood: INDICATES→Malware, EXPLOITS→CVE/Vulnerability,
-        USES_TECHNIQUE→Technique, TARGETS→Sector.
+        USES_TECHNIQUE→Technique, TARGETS→Sector, PART_OF_CAMPAIGN→Campaign.
+        Every SRO carries the provenance of its graph relationship
+        (``_edge_to_sro``, 2026-10).
 
         ``depth=1`` returns a minimal bundle with only the indicator's
         primary relation type (``INDICATES→Malware``). ``depth=2``
@@ -705,35 +762,41 @@ class StixExporter:
         # nodes sharing one cve_id (and one STIX id); the EXPLOITS stage
         # keeps one node per cve_id — the ``CVE`` twin when present, the
         # same preference as ``export_cve`` — before the bound, so twins
-        # never take two of the ``limit`` slots.
+        # never take two of the ``limit`` slots; the edges to both twins
+        # stay with it and their provenance is merged (``_merge_rel_props``).
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
             WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
             WITH i ORDER BY i.indicator_type LIMIT 1
-            OPTIONAL MATCH (i)-[:INDICATES]->(m:Malware)
+            OPTIONAL MATCH (i)-[r1:INDICATES]->(m:Malware)
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
-            WITH i, m ORDER BY m.name LIMIT $limit
-            WITH i, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (i)-[:EXPLOITS]->(v)
+            WITH i, m, r1 ORDER BY m.name LIMIT $limit
+            WITH i, collect({n: m, r: properties(r1)}) AS malware
+            OPTIONAL MATCH (i)-[r2:EXPLOITS]->(v)
               WHERE (v:CVE OR v:Vulnerability)
                 AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
-            WITH i, malware, v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
-            WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS v
-            WITH i, malware, v ORDER BY v.cve_id LIMIT $limit
-            WITH i, malware, collect(DISTINCT v) AS vulns
-            OPTIONAL MATCH (i)-[:USES_TECHNIQUE]->(t:Technique)
+            WITH i, malware, v, r2 ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
+            WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn, collect(properties(r2)) AS r2s
+            WITH i, malware, {n: vn, r: r2s} AS vr ORDER BY vr.n.cve_id LIMIT $limit
+            WITH i, malware, collect(vr) AS vulns
+            OPTIONAL MATCH (i)-[r3:USES_TECHNIQUE]->(t:Technique)
               WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
-            WITH i, malware, vulns, t ORDER BY t.mitre_id LIMIT $limit
-            WITH i, malware, vulns, collect(DISTINCT t) AS techniques
-            OPTIONAL MATCH (i)-[:TARGETS]->(s:Sector)
+            WITH i, malware, vulns, t, r3 ORDER BY t.mitre_id LIMIT $limit
+            WITH i, malware, vulns, collect({n: t, r: properties(r3)}) AS techniques
+            OPTIONAL MATCH (i)-[r4:TARGETS]->(s:Sector)
               WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
-            WITH i, malware, vulns, techniques, s ORDER BY s.name LIMIT $limit
+            WITH i, malware, vulns, techniques, s, r4 ORDER BY s.name LIMIT $limit
+            WITH i, malware, vulns, techniques, collect({n: s, r: properties(r4)}) AS sectors
+            OPTIONAL MATCH (i)-[r5:PART_OF_CAMPAIGN]->(c:Campaign)
+              WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
+            WITH i, malware, vulns, techniques, sectors, c, r5 ORDER BY c.name LIMIT $limit
             RETURN i AS seed,
                    malware,
                    vulns,
                    techniques,
-                   collect(DISTINCT s) AS sectors
+                   sectors,
+                   collect({n: c, r: properties(r5)}) AS campaigns
             """,
             {"value": value, "limit": limit},
         )
@@ -744,42 +807,48 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
-        malware_nodes = [dict(m) for m in _nonnull(row["malware"])]
-        vuln_nodes = [dict(v) for v in _nonnull(row["vulns"])] if depth >= 2 else []
-        technique_nodes = [dict(t) for t in _nonnull(row["techniques"])] if depth >= 2 else []
-        sector_nodes = [dict(s) for s in _nonnull(row["sectors"])] if depth >= 2 else []
+        malware = _with_rels(row["malware"])
+        vulns = _with_rels(row["vulns"]) if depth >= 2 else []
+        techniques = _with_rels(row["techniques"]) if depth >= 2 else []
+        sectors = _with_rels(row["sectors"]) if depth >= 2 else []
+        campaigns = _with_rels(row.get("campaigns")) if depth >= 2 else []
         self._prefetch_source_aggregates(
             [("Indicator", dict(seed))]
-            + [("Malware", m) for m in malware_nodes]
-            + [("Vulnerability", v) for v in vuln_nodes]
-            + [("Technique", t) for t in technique_nodes]
-            + [("Sector", s) for s in sector_nodes]
+            + [("Malware", m) for m, _ in malware]
+            + [("Vulnerability", v) for v, _ in vulns]
+            + [("Technique", t) for t, _ in techniques]
+            + [("Sector", s) for s, _ in sectors]
+            + [("Campaign", c) for c, _ in campaigns]
         )
 
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("Indicator", dict(seed))
         self._add(objects, seed_sdo)
 
-        for md in malware_nodes:
+        for md, rel in malware:
             m_sdo = self._node_to_sdo("Malware", md)
             self._add(objects, m_sdo)
-            self._add(objects, self._edge_to_sro("INDICATES", seed_sdo["id"], m_sdo["id"]))
+            self._add(objects, self._edge_to_sro("INDICATES", seed_sdo["id"], m_sdo["id"], rel))
         # depth=1 short-circuit: bundle contains only the primary
         # relation type (INDICATES→Malware). See the docstring above.
         if depth < 2:
             return self._bundle(objects.values())
-        for vd in vuln_nodes:
+        for vd, rel in vulns:
             v_sdo = self._node_to_sdo("Vulnerability", vd)
             self._add(objects, v_sdo)
-            self._add(objects, self._edge_to_sro("EXPLOITS", seed_sdo["id"], v_sdo["id"]))
-        for td in technique_nodes:
+            self._add(objects, self._edge_to_sro("EXPLOITS", seed_sdo["id"], v_sdo["id"], rel))
+        for td, rel in techniques:
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
-            self._add(objects, self._edge_to_sro("USES_TECHNIQUE", seed_sdo["id"], t_sdo["id"]))
-        for sd in sector_nodes:
+            self._add(objects, self._edge_to_sro("USES_TECHNIQUE", seed_sdo["id"], t_sdo["id"], rel))
+        for sd, rel in sectors:
             s_sdo = self._node_to_sdo("Sector", sd)
             self._add(objects, s_sdo)
-            self._add(objects, self._edge_to_sro("TARGETS", seed_sdo["id"], s_sdo["id"]))
+            self._add(objects, self._edge_to_sro("TARGETS", seed_sdo["id"], s_sdo["id"], rel))
+        for cd, rel in campaigns:
+            c_sdo = self._node_to_sdo("Campaign", cd)
+            self._add(objects, c_sdo)
+            self._add(objects, self._edge_to_sro("PART_OF_CAMPAIGN", seed_sdo["id"], c_sdo["id"], rel))
 
         return self._bundle(objects.values())
 
@@ -790,7 +859,9 @@ class StixExporter:
 
         ``depth=1`` returns only actor + attributed malware (primary
         relation). ``depth=2`` (default) adds actor techniques, the
-        malware→technique chain, and campaigns. See ``export_indicator``
+        malware→technique chain, campaigns and (2026-10) the actor's
+        ``USES_MALWARE`` / ``USES_TOOL`` software, the CVEs it ``EXPLOITS``
+        and the sectors it ``TARGETS``. See ``export_indicator``
         for the general semantics; ``limit`` bounds each collection
         (malware, actor techniques, malware→technique pairs, campaigns).
 
@@ -835,29 +906,56 @@ class StixExporter:
             ORDER BY _match_rank, a.name
             LIMIT 1
             WITH a
-            OPTIONAL MATCH (m:Malware)-[:ATTRIBUTED_TO]->(a)
+            OPTIONAL MATCH (m:Malware)-[r1:ATTRIBUTED_TO]->(a)
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
-            WITH a, m ORDER BY m.name LIMIT $limit
-            WITH a, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (a)-[:EMPLOYS_TECHNIQUE]->(t:Technique)
+            WITH a, m, r1 ORDER BY m.name LIMIT $limit
+            WITH a, collect({n: m, r: properties(r1)}) AS malware
+            OPTIONAL MATCH (a)-[r2:EMPLOYS_TECHNIQUE]->(t:Technique)
               WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
-            WITH a, malware, t ORDER BY t.mitre_id LIMIT $limit
-            WITH a, malware, collect(DISTINCT t) AS actor_tech
+            WITH a, malware, t, r2 ORDER BY t.mitre_id LIMIT $limit
+            WITH a, malware, collect({n: t, r: properties(r2)}) AS actor_tech
             CALL (malware) {
-                UNWIND malware AS m_each
-                MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
+                UNWIND malware AS m_pair
+                WITH m_pair.n AS m_each
+                WHERE m_each IS NOT NULL
+                MATCH (m_each)-[r3:IMPLEMENTS_TECHNIQUE]->(mt:Technique)
                   WHERE (mt.edgeguard_managed = true OR mt.edgeguard_enriched = true)
-                WITH m_each, mt ORDER BY m_each.name, mt.mitre_id LIMIT $limit
-                RETURN collect(DISTINCT {m: m_each, t: mt}) AS mal_tech
+                WITH m_each, mt, r3 ORDER BY m_each.name, mt.mitre_id LIMIT $limit
+                RETURN collect({m: m_each, t: mt, r: properties(r3)}) AS mal_tech
             }
-            OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)
+            OPTIONAL MATCH (a)-[r4:RUNS]->(c:Campaign)
               WHERE (c.edgeguard_managed = true OR c.edgeguard_enriched = true)
-            WITH a, malware, actor_tech, mal_tech, c ORDER BY c.name LIMIT $limit
+            WITH a, malware, actor_tech, mal_tech, c, r4 ORDER BY c.name LIMIT $limit
+            WITH a, malware, actor_tech, mal_tech, collect({n: c, r: properties(r4)}) AS campaigns
+            OPTIONAL MATCH (a)-[r5:USES_MALWARE]->(um:Malware)
+              WHERE (um.edgeguard_managed = true OR um.edgeguard_enriched = true)
+            WITH a, malware, actor_tech, mal_tech, campaigns, um, r5 ORDER BY um.name LIMIT $limit
+            WITH a, malware, actor_tech, mal_tech, campaigns, collect({n: um, r: properties(r5)}) AS uses_malware
+            OPTIONAL MATCH (a)-[r6:USES_TOOL]->(tool:Tool)
+              WHERE (tool.edgeguard_managed = true OR tool.edgeguard_enriched = true)
+            WITH a, malware, actor_tech, mal_tech, campaigns, uses_malware, tool, r6
+                 ORDER BY tool.mitre_id, tool.name LIMIT $limit
+            WITH a, malware, actor_tech, mal_tech, campaigns, uses_malware,
+                 collect({n: tool, r: properties(r6)}) AS tools
+            OPTIONAL MATCH (a)-[r7:EXPLOITS]->(cve:CVE)
+              WHERE (cve.edgeguard_managed = true OR cve.edgeguard_enriched = true)
+            WITH a, malware, actor_tech, mal_tech, campaigns, uses_malware, tools, cve, r7
+                 ORDER BY cve.cve_id LIMIT $limit
+            WITH a, malware, actor_tech, mal_tech, campaigns, uses_malware, tools,
+                 collect({n: cve, r: properties(r7)}) AS exploits
+            OPTIONAL MATCH (a)-[r8:TARGETS]->(s:Sector)
+              WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
+            WITH a, malware, actor_tech, mal_tech, campaigns, uses_malware, tools, exploits, s, r8
+                 ORDER BY s.name LIMIT $limit
             RETURN a AS seed,
                    malware,
                    actor_tech,
                    mal_tech,
-                   collect(DISTINCT c) AS campaigns
+                   campaigns,
+                   uses_malware,
+                   tools,
+                   exploits,
+                   collect({n: s, r: properties(r8)}) AS sectors
             """,
             {"name": name, "limit": limit},
         )
@@ -868,23 +966,31 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
-        malware_nodes = [dict(m) for m in _nonnull(row["malware"])]
-        actor_tech_nodes = [dict(t) for t in _nonnull(row["actor_tech"])] if depth >= 2 else []
-        mal_tech_pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        malware = _with_rels(row["malware"])
+        actor_tech = _with_rels(row["actor_tech"]) if depth >= 2 else []
+        mal_tech_pairs: List[Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]] = []
         if depth >= 2:
             for pair in row["mal_tech"] or []:
                 m = pair.get("m") if isinstance(pair, dict) else None
                 t = pair.get("t") if isinstance(pair, dict) else None
                 if m and t:
-                    mal_tech_pairs.append((dict(m), dict(t)))
-        campaign_nodes = [dict(c) for c in _nonnull(row["campaigns"])] if depth >= 2 else []
+                    mal_tech_pairs.append((dict(m), dict(t), dict(pair.get("r") or {})))
+        campaigns = _with_rels(row["campaigns"]) if depth >= 2 else []
+        uses_malware = _with_rels(row.get("uses_malware")) if depth >= 2 else []
+        tools = _with_rels(row.get("tools")) if depth >= 2 else []
+        exploits = _with_rels(row.get("exploits")) if depth >= 2 else []
+        sectors = _with_rels(row.get("sectors")) if depth >= 2 else []
         self._prefetch_source_aggregates(
             [("ThreatActor", dict(seed))]
-            + [("Malware", m) for m in malware_nodes]
-            + [("Technique", t) for t in actor_tech_nodes]
-            + [("Malware", m) for m, _ in mal_tech_pairs]
-            + [("Technique", t) for _, t in mal_tech_pairs]
-            + [("Campaign", c) for c in campaign_nodes]
+            + [("Malware", m) for m, _ in malware]
+            + [("Technique", t) for t, _ in actor_tech]
+            + [("Malware", m) for m, _, _ in mal_tech_pairs]
+            + [("Technique", t) for _, t, _ in mal_tech_pairs]
+            + [("Campaign", c) for c, _ in campaigns]
+            + [("Malware", m) for m, _ in uses_malware]
+            + [("Tool", t) for t, _ in tools]
+            + [("Vulnerability", v) for v, _ in exploits]
+            + [("Sector", sd) for sd, _ in sectors]
         )
 
         objects: Dict[str, Dict[str, Any]] = {}
@@ -892,24 +998,24 @@ class StixExporter:
         self._add(objects, seed_sdo)
 
         mal_ids: Dict[str, str] = {}
-        for md in malware_nodes:
+        for md, rel in malware:
             m_sdo = self._node_to_sdo("Malware", md)
             self._add(objects, m_sdo)
             mal_ids[md.get("name", "")] = m_sdo["id"]
             # Graph direction: (Malware)-[:ATTRIBUTED_TO]->(ThreatActor).
             # ``_edge_to_sro`` emits the STIX 2.1 form of this pair,
             # ``intrusion-set uses malware`` (MITRE ATT&CK convention).
-            self._add(objects, self._edge_to_sro("ATTRIBUTED_TO", m_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("ATTRIBUTED_TO", m_sdo["id"], seed_sdo["id"], rel))
 
         # depth=1: primary relation only (actor + attributed malware).
         if depth < 2:
             return self._bundle(objects.values())
 
-        for td in actor_tech_nodes:
+        for td, rel in actor_tech:
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
-            self._add(objects, self._edge_to_sro("EMPLOYS_TECHNIQUE", seed_sdo["id"], t_sdo["id"]))
-        for md, td in mal_tech_pairs:
+            self._add(objects, self._edge_to_sro("EMPLOYS_TECHNIQUE", seed_sdo["id"], t_sdo["id"], rel))
+        for md, td, rel in mal_tech_pairs:
             m_sdo_id = mal_ids.get(md.get("name", "")) or self._add(objects, self._node_to_sdo("Malware", md))
             t_sdo = self._node_to_sdo("Technique", td)
             self._add(objects, t_sdo)
@@ -920,8 +1026,8 @@ class StixExporter:
             # invariant ever drifts.
             if m_sdo_id is None:
                 continue
-            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", m_sdo_id, t_sdo["id"]))
-        for cd in campaign_nodes:
+            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", m_sdo_id, t_sdo["id"], rel))
+        for cd, rel in campaigns:
             c_sdo = self._node_to_sdo("Campaign", cd)
             self._add(objects, c_sdo)
             # The graph edge is (ThreatActor)-[:RUNS]->(Campaign) — the
@@ -930,7 +1036,25 @@ class StixExporter:
             # the campaign and target_ref on the intrusion-set; the
             # reversal is performed by ``_edge_to_sro``. See
             # https://docs.oasis-open.org/cti/stix/v2.1/os/stix-v2.1-os.html#_i4tjv75ce50h
-            self._add(objects, self._edge_to_sro("RUNS", seed_sdo["id"], c_sdo["id"]))
+            self._add(objects, self._edge_to_sro("RUNS", seed_sdo["id"], c_sdo["id"], rel))
+        # 2026-10: the actor's MITRE software, the CVEs it exploits and the sectors it targets
+        # (curated-package claims included — ``x_edgeguard_sources`` says who asserts each).
+        for md, rel in uses_malware:
+            m_sdo = self._node_to_sdo("Malware", md)
+            self._add(objects, m_sdo)
+            self._add(objects, self._edge_to_sro("USES_MALWARE", seed_sdo["id"], m_sdo["id"], rel))
+        for tool_d, rel in tools:
+            tool_sdo = self._node_to_sdo("Tool", tool_d)
+            self._add(objects, tool_sdo)
+            self._add(objects, self._edge_to_sro("USES_TOOL", seed_sdo["id"], tool_sdo["id"], rel))
+        for vd, rel in exploits:
+            v_sdo = self._node_to_sdo("Vulnerability", vd)
+            self._add(objects, v_sdo)
+            self._add(objects, self._edge_to_sro("EXPLOITS", seed_sdo["id"], v_sdo["id"], rel))
+        for sd, rel in sectors:
+            s_sdo = self._node_to_sdo("Sector", sd)
+            self._add(objects, s_sdo)
+            self._add(objects, self._edge_to_sro("TARGETS", seed_sdo["id"], s_sdo["id"], rel))
 
         return self._bundle(objects.values())
 
@@ -941,7 +1065,8 @@ class StixExporter:
 
         ``depth=1`` returns the technique plus only the ThreatActors
         that employ it (primary relation). ``depth=2`` (default) also
-        includes Malware, Tools, and Indicators. See ``export_indicator``
+        includes Malware, Tools, Indicators and (2026-10) the
+        ``SUBTECHNIQUE_OF`` parent and sub-techniques. See ``export_indicator``
         for the general semantics; ``limit`` bounds each of the four
         collections (T1059 is the documented hotspot).
 
@@ -968,26 +1093,36 @@ class StixExporter:
             MATCH (t:Technique {mitre_id: $mid})
             WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
             WITH t
-            OPTIONAL MATCH (a:ThreatActor)-[:EMPLOYS_TECHNIQUE]->(t)
+            OPTIONAL MATCH (a:ThreatActor)-[r1:EMPLOYS_TECHNIQUE]->(t)
               WHERE (a.edgeguard_managed = true OR a.edgeguard_enriched = true)
-            WITH t, a ORDER BY a.name LIMIT $limit
-            WITH t, collect(DISTINCT a) AS actors
-            OPTIONAL MATCH (m:Malware)-[:IMPLEMENTS_TECHNIQUE]->(t)
+            WITH t, a, r1 ORDER BY a.name LIMIT $limit
+            WITH t, collect({n: a, r: properties(r1)}) AS actors
+            OPTIONAL MATCH (m:Malware)-[r2:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
-            WITH t, actors, m ORDER BY m.name LIMIT $limit
-            WITH t, actors, collect(DISTINCT m) AS malware
-            OPTIONAL MATCH (tool:Tool)-[:IMPLEMENTS_TECHNIQUE]->(t)
+            WITH t, actors, m, r2 ORDER BY m.name LIMIT $limit
+            WITH t, actors, collect({n: m, r: properties(r2)}) AS malware
+            OPTIONAL MATCH (tool:Tool)-[r3:IMPLEMENTS_TECHNIQUE]->(t)
               WHERE (tool.edgeguard_managed = true OR tool.edgeguard_enriched = true)
-            WITH t, actors, malware, tool ORDER BY tool.mitre_id, tool.name LIMIT $limit
-            WITH t, actors, malware, collect(DISTINCT tool) AS tools
-            OPTIONAL MATCH (i:Indicator)-[:USES_TECHNIQUE]->(t)
+            WITH t, actors, malware, tool, r3 ORDER BY tool.mitre_id, tool.name LIMIT $limit
+            WITH t, actors, malware, collect({n: tool, r: properties(r3)}) AS tools
+            OPTIONAL MATCH (i:Indicator)-[r4:USES_TECHNIQUE]->(t)
               WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
-            WITH t, actors, malware, tools, i ORDER BY i.value, i.indicator_type LIMIT $limit
+            WITH t, actors, malware, tools, i, r4 ORDER BY i.value, i.indicator_type LIMIT $limit
+            WITH t, actors, malware, tools, collect({n: i, r: properties(r4)}) AS indicators
+            OPTIONAL MATCH (t)-[r5:SUBTECHNIQUE_OF]->(p:Technique)
+              WHERE (p.edgeguard_managed = true OR p.edgeguard_enriched = true)
+            WITH t, actors, malware, tools, indicators, p, r5 ORDER BY p.mitre_id LIMIT $limit
+            WITH t, actors, malware, tools, indicators, collect({n: p, r: properties(r5)}) AS parents
+            OPTIONAL MATCH (sub:Technique)-[r6:SUBTECHNIQUE_OF]->(t)
+              WHERE (sub.edgeguard_managed = true OR sub.edgeguard_enriched = true)
+            WITH t, actors, malware, tools, indicators, parents, sub, r6 ORDER BY sub.mitre_id LIMIT $limit
             RETURN t AS seed,
                    actors,
                    malware,
                    tools,
-                   collect(DISTINCT i) AS indicators
+                   indicators,
+                   parents,
+                   collect({n: sub, r: properties(r6)}) AS subtechniques
             """,
             {"mid": mitre_id, "limit": limit},
         )
@@ -998,41 +1133,55 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
-        actor_nodes = [dict(a) for a in _nonnull(row["actors"])]
-        malware_nodes = [dict(m) for m in _nonnull(row["malware"])] if depth >= 2 else []
-        tool_nodes = [dict(tool) for tool in _nonnull(row["tools"])] if depth >= 2 else []
-        indicator_nodes = [dict(i) for i in _nonnull(row["indicators"])] if depth >= 2 else []
+        actors = _with_rels(row["actors"])
+        malware = _with_rels(row["malware"]) if depth >= 2 else []
+        tools = _with_rels(row["tools"]) if depth >= 2 else []
+        indicators = _with_rels(row["indicators"]) if depth >= 2 else []
+        parents = _with_rels(row.get("parents")) if depth >= 2 else []
+        subtechniques = _with_rels(row.get("subtechniques")) if depth >= 2 else []
         self._prefetch_source_aggregates(
             [("Technique", dict(seed))]
-            + [("ThreatActor", a) for a in actor_nodes]
-            + [("Malware", m) for m in malware_nodes]
-            + [("Tool", tool) for tool in tool_nodes]
-            + [("Indicator", i) for i in indicator_nodes]
+            + [("ThreatActor", a) for a, _ in actors]
+            + [("Malware", m) for m, _ in malware]
+            + [("Tool", tool) for tool, _ in tools]
+            + [("Indicator", i) for i, _ in indicators]
+            + [("Technique", p) for p, _ in parents]
+            + [("Technique", sub) for sub, _ in subtechniques]
         )
 
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("Technique", dict(seed))
         self._add(objects, seed_sdo)
 
-        for ad in actor_nodes:
+        for ad, rel in actors:
             a_sdo = self._node_to_sdo("ThreatActor", ad)
             self._add(objects, a_sdo)
-            self._add(objects, self._edge_to_sro("EMPLOYS_TECHNIQUE", a_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("EMPLOYS_TECHNIQUE", a_sdo["id"], seed_sdo["id"], rel))
         # depth=1: primary relation only (technique + attributed actors).
         if depth < 2:
             return self._bundle(objects.values())
-        for md in malware_nodes:
+        for md, rel in malware:
             m_sdo = self._node_to_sdo("Malware", md)
             self._add(objects, m_sdo)
-            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", m_sdo["id"], seed_sdo["id"]))
-        for tool_d in tool_nodes:
+            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", m_sdo["id"], seed_sdo["id"], rel))
+        for tool_d, rel in tools:
             tool_sdo = self._node_to_sdo("Tool", tool_d)
             self._add(objects, tool_sdo)
-            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", tool_sdo["id"], seed_sdo["id"]))
-        for idn in indicator_nodes:
+            self._add(objects, self._edge_to_sro("IMPLEMENTS_TECHNIQUE", tool_sdo["id"], seed_sdo["id"], rel))
+        for idn, rel in indicators:
             i_sdo = self._node_to_sdo("Indicator", idn)
             self._add(objects, i_sdo)
-            self._add(objects, self._edge_to_sro("USES_TECHNIQUE", i_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("USES_TECHNIQUE", i_sdo["id"], seed_sdo["id"], rel))
+        # 2026-10: the ATT&CK hierarchy — the parent of a sub-technique and the sub-techniques
+        # of a technique (``subtechnique-of``, MITRE's own relationship type).
+        for pd, rel in parents:
+            p_sdo = self._node_to_sdo("Technique", pd)
+            self._add(objects, p_sdo)
+            self._add(objects, self._edge_to_sro("SUBTECHNIQUE_OF", seed_sdo["id"], p_sdo["id"], rel))
+        for sd, rel in subtechniques:
+            sub_sdo = self._node_to_sdo("Technique", sd)
+            self._add(objects, sub_sdo)
+            self._add(objects, self._edge_to_sro("SUBTECHNIQUE_OF", sub_sdo["id"], seed_sdo["id"], rel))
 
         return self._bundle(objects.values())
 
@@ -1041,7 +1190,7 @@ class StixExporter:
 
         ``depth=1`` returns the CVE plus only the exploiting Indicators
         (primary relation). ``depth=2`` (default) also includes affected
-        sectors. See ``export_indicator`` for the general semantics;
+        sectors and (2026-10) the ThreatActors and Malware that exploit it. See ``export_indicator`` for the general semantics;
         ``limit`` bounds the indicator and sector collections.
 
         A CVE may exist as two twin nodes (``CVE`` — NVD canonical — and
@@ -1050,9 +1199,11 @@ class StixExporter:
         node when present, because it carries the NVD enrichment promoted
         by ``_vulnerability_sdo`` — while the EXPLOITS and AFFECTS
         relationships are walked from every twin, so edges that exist
-        only on the other twin still enter the bundle. Rows are
-        de-duplicated before each bound and rows without a match sort
-        last, so they never displace real neighbours.
+        only on the other twin still enter the bundle. Each neighbour is
+        one row before each bound — a neighbour linked to both twins is
+        one SRO, whose provenance merges both edges (``_merge_rel_props``)
+        — and rows without a match sort last, so they never displace real
+        neighbours.
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
@@ -1068,17 +1219,29 @@ class StixExporter:
             WITH v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
             WITH head(collect(v)) AS seed, collect(v) AS twins
             UNWIND twins AS tw
-            OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(tw)
+            OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(tw)
               WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
-            WITH DISTINCT seed, twins, i ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit
-            WITH seed, twins, collect(DISTINCT i) AS indicators
+            WITH seed, twins, i, collect(properties(r1)) AS r1s
+                 ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit
+            WITH seed, twins, collect({n: i, r: r1s}) AS indicators
             UNWIND twins AS tw
-            OPTIONAL MATCH (tw)-[:AFFECTS]->(s:Sector)
+            OPTIONAL MATCH (x)-[r2:EXPLOITS]->(tw)
+              WHERE (x:ThreatActor OR x:Malware)
+                AND (x.edgeguard_managed = true OR x.edgeguard_enriched = true)
+            WITH seed, twins, indicators, x, collect(properties(r2)) AS r2s
+                 ORDER BY (CASE WHEN x IS NULL THEN 1 ELSE 0 END), x.name LIMIT $limit
+            WITH seed, twins, indicators,
+                 collect({n: x, r: r2s, kind: CASE WHEN x:ThreatActor THEN "ThreatActor" ELSE "Malware" END})
+                     AS threats
+            UNWIND twins AS tw
+            OPTIONAL MATCH (tw)-[r3:AFFECTS]->(s:Sector)
               WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
-            WITH DISTINCT seed, indicators, s ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit
+            WITH seed, indicators, threats, s, collect(properties(r3)) AS r3s
+                 ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit
             RETURN seed,
                    indicators,
-                   collect(DISTINCT s) AS sectors
+                   threats,
+                   collect({n: s, r: r3s}) AS sectors
             """,
             {"cve_id": cve_id, "limit": limit},
         )
@@ -1089,29 +1252,42 @@ class StixExporter:
         if seed is None:
             return self._empty_bundle()
 
-        indicator_nodes = [dict(i) for i in _nonnull(row["indicators"])]
-        sector_nodes = [dict(s) for s in _nonnull(row["sectors"])] if depth >= 2 else []
+        indicators = _with_rels(row["indicators"])
+        sectors = _with_rels(row["sectors"]) if depth >= 2 else []
+        threats: List[Tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        if depth >= 2:
+            for item in row.get("threats") or []:
+                if isinstance(item, dict) and item.get("n") is not None:
+                    kind = "ThreatActor" if item.get("kind") == "ThreatActor" else "Malware"
+                    threats.append((kind, dict(item["n"]), _merge_rel_props(item.get("r"))))
         self._prefetch_source_aggregates(
             [("Vulnerability", dict(seed))]
-            + [("Indicator", i) for i in indicator_nodes]
-            + [("Sector", s) for s in sector_nodes]
+            + [("Indicator", i) for i, _ in indicators]
+            + [(kind, x) for kind, x, _ in threats]
+            + [("Sector", s) for s, _ in sectors]
         )
 
         objects: Dict[str, Dict[str, Any]] = {}
         seed_sdo = self._node_to_sdo("Vulnerability", dict(seed))
         self._add(objects, seed_sdo)
 
-        for idn in indicator_nodes:
+        for idn, rel in indicators:
             i_sdo = self._node_to_sdo("Indicator", idn)
             self._add(objects, i_sdo)
-            self._add(objects, self._edge_to_sro("EXPLOITS", i_sdo["id"], seed_sdo["id"]))
+            self._add(objects, self._edge_to_sro("EXPLOITS", i_sdo["id"], seed_sdo["id"], rel))
         # depth=1: primary relation only (CVE + exploiting indicators).
         if depth < 2:
             return self._bundle(objects.values())
-        for sd in sector_nodes:
+        # 2026-10: the actors and malware that exploit the CVE (curated-package claims
+        # included; ``x_edgeguard_sources`` says who asserts each link).
+        for kind, xd, rel in threats:
+            x_sdo = self._node_to_sdo(kind, xd)
+            self._add(objects, x_sdo)
+            self._add(objects, self._edge_to_sro("EXPLOITS", x_sdo["id"], seed_sdo["id"], rel))
+        for sd, rel in sectors:
             s_sdo = self._node_to_sdo("Sector", sd)
             self._add(objects, s_sdo)
-            self._add(objects, self._edge_to_sro("AFFECTS", seed_sdo["id"], s_sdo["id"]))
+            self._add(objects, self._edge_to_sro("AFFECTS", seed_sdo["id"], s_sdo["id"], rel))
 
         return self._bundle(objects.values())
 
@@ -1783,7 +1959,9 @@ class StixExporter:
     # Edge → SRO
     # ------------------------------------------------------------------
 
-    def _edge_to_sro(self, edge_type: str, source_ref: str, target_ref: str) -> Dict[str, Any]:
+    def _edge_to_sro(
+        self, edge_type: str, source_ref: str, target_ref: str, rel_props: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """Build a deterministic Relationship SRO for a graph edge.
 
         ``edge_type`` is the EdgeGuard relationship type in graph
@@ -1794,6 +1972,12 @@ class StixExporter:
         pairs absent from the table are emitted as ``related-to`` in graph
         direction. The SRO carries ``created_by_ref`` and the most
         restrictive ``object_marking_refs`` of its two endpoints.
+
+        ``rel_props`` (2026-10) are the graph relationship's properties: the SRO
+        then also carries its ``confidence`` (0–100), its record ids as
+        ``external_references`` and ``x_edgeguard_match_type`` /
+        ``x_edgeguard_sources`` / ``x_edgeguard_source_refs`` /
+        ``x_edgeguard_misp_event_ids`` (``_attach_relationship_provenance``).
         """
         source_type = source_ref.split("--", 1)[0]
         target_type = target_ref.split("--", 1)[0]
@@ -1813,6 +1997,14 @@ class StixExporter:
         marking_by_id = getattr(self, "_marking_by_id", {})
         marking = _most_restrictive_marking(marking_by_id.get(source_ref), marking_by_id.get(target_ref))
         stix_id = _deterministic_id("relationship", f"{source_ref}|{relationship_type}|{target_ref}")
+        rel = rel_props or {}
+        optional: Dict[str, Any] = {}
+        confidence = rel.get("confidence_score")
+        if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and 0 <= confidence <= 1:
+            optional["confidence"] = int(round(confidence * 100))
+        external_references = _external_references(rel.get("source_refs"))
+        if external_references:
+            optional["external_references"] = external_references
         obj = stix2.Relationship(
             id=stix_id,
             relationship_type=relationship_type,
@@ -1821,18 +2013,28 @@ class StixExporter:
             created_by_ref=EDGEGUARD_IDENTITY_ID,
             object_marking_refs=[marking],
             allow_custom=True,
+            **optional,
         )
-        return _to_dict(obj)
+        sro = _to_dict(obj)
+        _attach_relationship_provenance(sro, rel)
+        return sro
 
     # ------------------------------------------------------------------
     # Bundle assembly
     # ------------------------------------------------------------------
 
     def _add(self, objects: Dict[str, Dict[str, Any]], sdo: Optional[Dict[str, Any]]) -> Optional[str]:
-        """Insert a SDO/SRO into the bundle dict, keyed by its STIX id."""
+        """Insert a SDO/SRO into the bundle dict, keyed by its STIX id.
+
+        The first SDO with an id is kept. A second SRO with the same id (two graph edges that
+        express one STIX relationship, e.g. ``ATTRIBUTED_TO`` and ``USES_MALWARE``) adds its
+        provenance to the first (``_merge_relationship``, 2026-10).
+        """
         if not sdo:
             return None
-        objects.setdefault(sdo["id"], sdo)
+        existing = objects.setdefault(sdo["id"], sdo)
+        if existing is not sdo and existing.get("type") == "relationship" and sdo.get("type") == "relationship":
+            _merge_relationship(existing, sdo)
         return sdo["id"]
 
     def _bundle(self, objects: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1931,9 +2133,157 @@ def _listify(value: Any) -> Optional[List[str]]:
     return [str(value)]
 
 
-def _nonnull(items: Any) -> List[Any]:
-    """Drop None entries from a collect() result."""
-    return [x for x in (items or []) if x is not None]
+def _unit_confidence(value: Any) -> float:
+    """A ``confidence_score`` in [0, 1], or ``-1.0`` when absent or not a unit-interval number."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1:
+        return float(value)
+    return -1.0
+
+
+def _merge_rel_props(rels: Any) -> Dict[str, Any]:
+    """One provenance map from the property maps of the graph edges behind one SRO (2026-10).
+
+    A single map is returned unchanged. Several maps arise when edges share an SRO: the twin
+    ``CVE`` / ``Vulnerability`` nodes share one STIX id, and ``ATTRIBUTED_TO`` and
+    ``USES_MALWARE`` both become ``intrusion-set uses malware``. The merged map carries the
+    union of ``sources`` / ``source_refs`` / ``misp_event_ids``, the highest
+    ``confidence_score`` and the ``match_type`` of the strongest edge (on a tie, the
+    alphabetically first), so the result does not depend on row order.
+    """
+    if isinstance(rels, dict):
+        return dict(rels)
+    maps = [dict(r) for r in rels or [] if isinstance(r, dict) and r]
+    if len(maps) <= 1:
+        return maps[0] if maps else {}
+    merged: Dict[str, Any] = {}
+    for prop in ("sources", "source_refs", "misp_event_ids"):
+        values = sorted({v for r in maps for v in (_listify(r.get(prop)) or [])})
+        if values:
+            merged[prop] = values
+    best = max(_unit_confidence(r.get("confidence_score")) for r in maps)
+    if best >= 0:
+        merged["confidence_score"] = best
+
+    def _match_types(candidates: List[Dict[str, Any]]) -> List[str]:
+        return sorted({r["match_type"] for r in candidates if isinstance(r.get("match_type"), str) and r["match_type"]})
+
+    strongest = [r for r in maps if _unit_confidence(r.get("confidence_score")) == best]
+    match_types = _match_types(strongest) or _match_types(maps)
+    if match_types:
+        merged["match_type"] = match_types[0]
+    return merged
+
+
+def _with_rels(items: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """``[(node, relationship)]`` property pairs from a collected export list (2026-10).
+
+    The export queries collect ``{n: node, r: properties(rel)}`` maps so each SRO can carry
+    the provenance of its graph relationship; where one neighbour is reached over several
+    edges (CVE twins), ``r`` is the list of their property maps, merged by
+    ``_merge_rel_props``. Entries without a node (an OPTIONAL MATCH that found nothing) are
+    dropped; a plain node (no map) yields an empty relationship.
+    """
+    out: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    for item in items or []:
+        if item is None:
+            continue
+        if isinstance(item, dict) and "n" in item and set(item) <= {"n", "r", "kind"}:
+            node = item.get("n")
+            if node is None:
+                continue
+            out.append((dict(node), _merge_rel_props(item.get("r"))))
+        else:
+            out.append((dict(item), {}))
+    return out
+
+
+def _record_url(source: str, record_id: str) -> Optional[str]:
+    """Public page of a source record (``_RECORD_URL_TEMPLATES``, ATT&CK by id prefix); ``None`` if none."""
+    if source == "mitre_attck":
+        for prefix, path in _ATTACK_URL_PATHS:
+            rest = record_id[len(prefix) :]
+            if record_id.startswith(prefix) and rest[:1].isdigit():
+                return f"https://attack.mitre.org/{path}/{record_id.replace('.', '/')}/"
+        return None
+    template = _RECORD_URL_TEMPLATES.get(source)
+    return template.format(id=quote(record_id, safe="")) if template else None
+
+
+def _external_references(source_refs: Any) -> List[Dict[str, str]]:
+    """STIX ``external_references`` from ``"<source>:<record id>"`` strings (deduplicated, bounded).
+
+    Sorted before the bound, in the order of ``x_edgeguard_source_refs``: a long list cites the
+    same records on every export, and they are the first ones of that property.
+    """
+    out: List[Dict[str, str]] = []
+    raws = source_refs if isinstance(source_refs, (list, tuple)) else []
+    for raw in sorted({r for r in raws if isinstance(r, str)}):
+        source, sep, record_id = raw.partition(":")
+        if not sep or not source or not record_id:
+            continue
+        ref = {"source_name": source, "external_id": record_id}
+        url = _record_url(source, record_id)
+        if url:
+            ref["url"] = url
+        out.append(ref)
+        if len(out) >= _MAX_EXTERNAL_REFERENCES:
+            break
+    return out
+
+
+def _attach_relationship_provenance(sro: Dict[str, Any], rel: Dict[str, Any]) -> None:
+    """Attach the graph relationship's provenance to an SRO dict (omitted when absent).
+
+    ``x_edgeguard_match_type`` (kind of evidence), ``x_edgeguard_sources`` (who asserts the
+    link — e.g. ``mitre_attck``, ``alienvault_otx``, ``coreideas``), ``x_edgeguard_source_refs``
+    (their record ids, bounded) and ``x_edgeguard_misp_event_ids``. Set after the stix2 SDK
+    serialisation, like ``_attach_misp_provenance``.
+    """
+    if not isinstance(sro, dict) or not rel:
+        return
+    match_type = rel.get("match_type")
+    if isinstance(match_type, str) and match_type:
+        sro["x_edgeguard_match_type"] = match_type
+    for prop, key, cap in _SRO_PROVENANCE_LISTS:
+        values = _listify(rel.get(prop))
+        if values:
+            sro[key] = sorted(dict.fromkeys(values))[:cap] if cap else sorted(dict.fromkeys(values))
+
+
+def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> None:
+    """Fold the provenance of a second SRO with the same id into the first (2026-10).
+
+    Both SROs are read back into relationship-property form and merged by ``_merge_rel_props``;
+    ``confidence``, ``external_references`` and the ``x_edgeguard_*`` provenance of ``existing``
+    are then rebuilt from the merged map, so the result does not depend on which edge came
+    first. The capped lists stay exact: each SRO holds the first entries of its sorted list, and
+    the first entries of the merged list are among them.
+    """
+
+    def _as_rel_props(sro: Dict[str, Any]) -> Dict[str, Any]:
+        props: Dict[str, Any] = {}
+        confidence = sro.get("confidence")
+        if isinstance(confidence, int) and not isinstance(confidence, bool):
+            props["confidence_score"] = confidence / 100
+        if sro.get("x_edgeguard_match_type"):
+            props["match_type"] = sro["x_edgeguard_match_type"]
+        for prop, key, _cap in _SRO_PROVENANCE_LISTS:
+            if sro.get(key):
+                props[prop] = sro[key]
+        return props
+
+    merged = _merge_rel_props([_as_rel_props(existing), _as_rel_props(incoming)])
+    for key in ("confidence", "external_references", "x_edgeguard_match_type") + tuple(
+        key for _prop, key, _cap in _SRO_PROVENANCE_LISTS
+    ):
+        existing.pop(key, None)
+    confidence = _unit_confidence(merged.get("confidence_score"))
+    if confidence >= 0:
+        existing["confidence"] = int(round(confidence * 100))
+    external_references = _external_references(merged.get("source_refs"))
+    if external_references:
+        existing["external_references"] = external_references
+    _attach_relationship_provenance(existing, merged)
 
 
 def _extract_zones(props: Dict[str, Any]) -> List[str]:
@@ -2051,13 +2401,14 @@ def _extension_definition() -> Dict[str, Any]:
     obj = stix2.ExtensionDefinition(
         id=EDGEGUARD_EXTENSION_ID,
         created=_PROVENANCE_OBJECTS_CREATED,
-        modified=_PROVENANCE_OBJECTS_CREATED,
+        modified=_EXTENSION_MODIFIED,
         created_by_ref=EDGEGUARD_IDENTITY_ID,
         name="EdgeGuard provenance and enrichment properties",
         description=(
             "Top-level properties prefixed x_edgeguard_ carrying EdgeGuard provenance "
             "(source-truthful and import timestamps, zones, MISP traceability, NVD and CISA KEV "
-            "enrichment, exporter build information)."
+            "enrichment, exporter build information) and, on relationships, who asserts the link "
+            "(sources, their record ids, the kind of evidence)."
         ),
         schema=_EXTENSION_SCHEMA_URL,
         version=_EXTENSION_VERSION,
