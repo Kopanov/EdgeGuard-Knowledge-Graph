@@ -463,7 +463,7 @@ Auth:    Configured via environment variables
 
 Every relationship in this table also carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events; 2026-10, see `docs/KNOWLEDGE_GRAPH.md` "Relationship provenance").
 | `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()` |
-| `PART_OF` | Malware, Indicator | Campaign | `build_campaign_nodes()` |
+| `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()` (named `PART_OF` until 2026-10) |
 | `INVOLVES` | Alert | Indicator | `created_at`, `source` (`neo4j_client`) |
 
 ### ResilMesh Topology Relationships

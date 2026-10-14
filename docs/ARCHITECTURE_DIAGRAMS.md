@@ -119,13 +119,13 @@ graph TB
     TA -->|RUNS| CAMP[Campaign]
     M[Malware] -->|IMPLEMENTS_TECHNIQUE| T
     M -->|ATTRIBUTED_TO| TA
-    M -->|PART_OF| CAMP
+    M -->|PART_OF_CAMPAIGN| CAMP
     I[Indicator] -->|INDICATES| M
     I -->|EXPLOITS| V[Vulnerability]
     I -->|EXPLOITS| CVE[CVE]
     I -->|TARGETS| S[Sector]
     I -->|USES_TECHNIQUE| T
-    I -->|PART_OF| CAMP
+    I -->|PART_OF_CAMPAIGN| CAMP
     V -->|AFFECTS| S
     V -->|REFERS_TO| CVE
     CVE -->|REFERS_TO| V
@@ -292,7 +292,7 @@ flowchart LR
     subgraph "Job 2/4: Campaign Builder"
         CB1[ThreatActor] --> CB2{Has ATTRIBUTED_TO<br/>Malware with active<br/>INDICATES Indicator?}
         CB2 -->|Yes| CB3[Create/reactivate Campaign]
-        CB3 --> CB4[Link: RUNS + PART_OF<br/>Deactivate empty campaigns]
+        CB3 --> CB4[Link: RUNS + PART_OF_CAMPAIGN<br/>Deactivate empty campaigns]
     end
 
     subgraph "Job 3/4: Calibration (pre-computed event sizes)"

@@ -672,7 +672,7 @@ Set the flags in `.env`; `docker-compose.yml` forwards them into the `airflow` c
 
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Campaign`
-- Relationships: `INDICATES` *(IOC-level `malware_family` 0.8, or same-pulse `otx_pulse` 0.6 — the latter also on regular updates since 2026-10)*, `EXPLOITS`, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `USES_MALWARE` / `USES_TOOL` *(ThreatActor → Malware / Tool, MITRE explicit, 2026-10)*, `SUBTECHNIQUE_OF` *(sub-technique → parent Technique, 2026-10)*, `IN_TACTIC`, `REFERS_TO`, `PART_OF`, `RUNS`, `HAS_CVSS_*`
+- Relationships: `INDICATES` *(IOC-level `malware_family` 0.8, or same-pulse `otx_pulse` 0.6 — the latter also on regular updates since 2026-10)*, `EXPLOITS`, `EMPLOYS_TECHNIQUE` *(Actor/Campaign → Technique, attribution)*, `IMPLEMENTS_TECHNIQUE` *(Malware/Tool → Technique, capability)*, `USES_TECHNIQUE` *(Indicator → Technique, observation)*, `ATTRIBUTED_TO`, `TARGETS`, `AFFECTS`, `USES_MALWARE` / `USES_TOOL` *(ThreatActor → Malware / Tool, MITRE explicit, 2026-10)*, `SUBTECHNIQUE_OF` *(sub-technique → parent Technique, 2026-10)*, `IN_TACTIC`, `REFERS_TO`, `PART_OF_CAMPAIGN`, `RUNS`, `HAS_CVSS_*`
 - Edges carry `confidence_score` plus provenance fields — `sources[]`/`imported_at` on sync-created edges, `match_type` on relationship-builder edges
 - See [docs/KNOWLEDGE_GRAPH.md](docs/KNOWLEDGE_GRAPH.md) for full relationship schema with confidence scores.
 

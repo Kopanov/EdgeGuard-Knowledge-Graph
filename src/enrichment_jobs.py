@@ -189,8 +189,12 @@ def build_campaign_nodes(neo4j_client) -> Dict:
     For each ThreatActor that has at least one attributed malware and one
     related indicator, we create a Campaign node and link:
       ThreatActor -[:RUNS]-> Campaign
-      Malware     -[:PART_OF]-> Campaign
-      Indicator   -[:PART_OF]-> Campaign  (sampled — up to 100 per campaign)
+      Malware     -[:PART_OF_CAMPAIGN]-> Campaign
+      Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign)
+
+    ``PART_OF_CAMPAIGN`` was ``PART_OF`` until 2026-10: ResilMesh uses ``PART_OF`` for its own
+    asset model (IP → Subnet, the OrganizationUnit hierarchy), and in the shared database one
+    relationship name must have one meaning.
 
     Campaign properties:
       name            — "{actor_name} Campaign"
@@ -377,7 +381,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             // r.updated_at >= cutoff — see docs/CLOUD_SYNC.md). Pre-fix
             // the RUNS edge was missing both timestamps, so every
             // re-run was invisible to delta consumers. Same omission
-            // existed on PART_OF(malware) and REFERS_TO — fixed below.
+            // existed on PART_OF_CAMPAIGN(malware) and REFERS_TO — fixed below.
             ON CREATE SET r_runs.src_uuid = a.uuid, r_runs.trg_uuid = c.uuid,
                           r_runs.created_at = datetime()
             SET r_runs.src_uuid = coalesce(r_runs.src_uuid, a.uuid),
@@ -419,9 +423,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             link_malware = f"""
             MATCH (a:ThreatActor)<-[_at:ATTRIBUTED_TO]-(m:Malware)
             MATCH (c:Campaign {{actor_name: a.name}})
-            MERGE (m)-[r:PART_OF]->(c)
+            MERGE (m)-[r:PART_OF_CAMPAIGN]->(c)
             // PR-N8 HIGH (audit Cross-Checker): stamp created_at /
-            // updated_at so PART_OF(malware) edges are visible to
+            // updated_at so PART_OF_CAMPAIGN(malware) edges are visible to
             // cloud delta-sync. See RUNS comment above for rationale.
             ON CREATE SET r.src_uuid = m.uuid, r.trg_uuid = c.uuid,
                           r.created_at = datetime()
@@ -444,13 +448,13 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # PR-M3d §8-RI-S3-Camp (CRITICAL): the old implementation used
             # ``collect(i)[0..100]`` which returns the first 100 in Neo4j's
             # internal iteration order — NOT a stable order across runs.
-            # Combined with MERGE's no-delete semantic, PART_OF edges
+            # Combined with MERGE's no-delete semantic, PART_OF_CAMPAIGN edges
             # accumulated monotonically: run N attached {i1..i100}, run N+1
             # attached {i17..i116}, old 16 kept their edges forever. After
             # 730 daily runs, a ThreatActor with 10k active indicators had
-            # EVERY single one wired via PART_OF — defeating the 100-cap's
+            # EVERY single one wired via PART_OF_CAMPAIGN — defeating the 100-cap's
             # purpose and producing a non-deterministic graph where "is
-            # indicator X PART_OF campaign C?" depended on history, not
+            # indicator X PART_OF_CAMPAIGN campaign C?" depended on history, not
             # current state.
             #
             # Fix:
@@ -464,7 +468,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             #     of the top 100 since the last run).
             # (c) ``r.created_at`` on ON CREATE for audit-trail.
             #
-            # Net: PART_OF edges for each Campaign always equal the current
+            # Net: PART_OF_CAMPAIGN edges for each Campaign always equal the current
             # top-100 of active indicators. Reproducible, bounded, matches
             # the documented "sample: up to 100 per campaign" contract.
             #
@@ -491,7 +495,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                WITH c, collect({i: i, at: _at, ind: _ind})[0..100] AS _paths
                UNWIND _paths AS _p
                WITH c, _p.i AS i, _p.at AS _at, _p.ind AS _ind
-               MERGE (i)-[r:PART_OF]->(c)
+               MERGE (i)-[r:PART_OF_CAMPAIGN]->(c)
                ON CREATE SET r.created_at = datetime(),
                              r.src_uuid = i.uuid,
                              r.trg_uuid = c.uuid
@@ -526,7 +530,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             query_pause()
 
             # Bugbot round 1 (PR #105, MEDIUM): the pre-fix code used
-            # ``record.get("committedOperations")`` as the PART_OF link
+            # ``record.get("committedOperations")`` as the PART_OF_CAMPAIGN link
             # count. Per APOC docs ``committedOperations`` is the number
             # of SUCCESSFUL INNER-STATEMENT EXECUTIONS — one per outer row
             # (i.e. one per Campaign) — NOT the number of MERGE rows
@@ -538,10 +542,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             #
             # Fix: run a follow-up count query keyed on
             # ``r.updated_at >= $run_start_at`` — this gives the true
-            # count of PART_OF edges touched by THIS run's Step 3a
+            # count of PART_OF_CAMPAIGN edges touched by THIS run's Step 3a
             # (same freshness marker Step 3b uses to prune).
             links_count_query = """
-            MATCH (:Indicator)-[r:PART_OF]->(:Campaign)
+            MATCH (:Indicator)-[r:PART_OF_CAMPAIGN]->(:Campaign)
             WHERE r.updated_at >= datetime($run_start_at)
             RETURN count(r) AS links
             """
@@ -550,7 +554,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             ).single()
             results["links_created"] += int((links_result["links"] if links_result else 0) or 0)
 
-            # Step 3b: Prune stale PART_OF edges — indicators that WERE in a
+            # Step 3b: Prune stale PART_OF_CAMPAIGN edges — indicators that WERE in a
             # prior run's top-100 but aren't in THIS run's (aged out, retired,
             # or displaced by newer active indicators).
             #
@@ -558,7 +562,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # still accumulates across runs (MERGE never removes). We use
             # ``r.updated_at`` as the freshness marker: every edge touched
             # by Step 3a above gets ``r.updated_at = datetime()`` (which is
-            # always >= ``$run_start_at`` captured below). Any PART_OF edge
+            # always >= ``$run_start_at`` captured below). Any PART_OF_CAMPAIGN edge
             # with ``r.updated_at < $run_start_at`` OR ``r.updated_at IS
             # NULL`` (from pre-fix edges) is stale and gets deleted.
             #
@@ -572,7 +576,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # edges may have stale timestamps. Idempotent — next successful
             # run reconciles.
             prune_indicators = """
-            MATCH (i:Indicator)-[r:PART_OF]->(c:Campaign)
+            MATCH (i:Indicator)-[r:PART_OF_CAMPAIGN]->(c:Campaign)
             WHERE r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)
             DELETE r
             RETURN count(r) AS pruned
@@ -586,7 +590,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             pruned = prune_record["pruned"] if prune_record else 0
             if pruned:
                 logger.info(
-                    "[CAMPAIGN] pruned %d stale PART_OF edges (aged out of top-100 or pre-fix residue)",
+                    "[CAMPAIGN] pruned %d stale PART_OF_CAMPAIGN edges (aged out of top-100 or pre-fix residue)",
                     pruned,
                 )
             results["links_pruned"] = pruned
@@ -595,21 +599,21 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             # Step 4: Deactivate campaigns whose indicators are all retired.
             #
             # PR-M3d: must use OPTIONAL MATCH. The old inner-MATCH
-            # (``MATCH (c:Campaign)<-[:PART_OF]-(i:Indicator)``) relied on
-            # stale PART_OF edges to now-retired indicators to detect
+            # (``MATCH (c:Campaign)<-[:PART_OF_CAMPAIGN]-(i:Indicator)``) relied on
+            # stale PART_OF_CAMPAIGN edges to now-retired indicators to detect
             # all-retired campaigns. After Step 3b prunes those stale
             # edges, a campaign whose indicators have ALL become inactive
-            # ends up with ZERO PART_OF edges (Step 3a only (re)creates
+            # ends up with ZERO PART_OF_CAMPAIGN edges (Step 3a only (re)creates
             # edges for ``i.active = true``) — the inner MATCH would miss
             # it entirely and the campaign would remain ``active = true``
             # as a zombie. OPTIONAL MATCH includes campaigns with no
-            # PART_OF edges, and the explicit check on ``c.active`` avoids
+            # PART_OF_CAMPAIGN edges, and the explicit check on ``c.active`` avoids
             # re-setting campaigns already marked inactive.
             logger.info("[DECAY] Deactivating campaigns with no active indicators...")
             cleanup_query = """
                 MATCH (c:Campaign)
                 WHERE c.active IS NULL OR c.active = true
-                OPTIONAL MATCH (c)<-[:PART_OF]-(i:Indicator {active: true})
+                OPTIONAL MATCH (c)<-[:PART_OF_CAMPAIGN]-(i:Indicator {active: true})
                 WITH c, count(i) AS active_links
                 WHERE active_links = 0
                 SET c.active = false
@@ -907,7 +911,7 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
     # the bidirectional REFERS_TO. Pre-fix these edges had neither,
     # so every bridge-job re-run was invisible to cloud delta-sync +
     # STIX incremental export (both filter by ``r.updated_at >= cutoff``).
-    # Same omission was patched on RUNS + PART_OF(malware) in
+    # Same omission was patched on RUNS + PART_OF_CAMPAIGN(malware) in
     # build_campaign_nodes above.
     query = (
         """
@@ -1216,7 +1220,7 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 
     Campaigns: a stale ``"<duplicate> Campaign"`` node (if any) is NOT
     touched here. ``build_campaign_nodes`` runs right after this job: its
-    Step 3b prunes the stale PART_OF edges and Step 4 marks the campaign
+    Step 3b prunes the stale PART_OF_CAMPAIGN edges and Step 4 marks the campaign
     ``active = false`` (the repo's retire-don't-delete rule), while the
     canonical's own campaign is (re)built with the merged aliases.
 

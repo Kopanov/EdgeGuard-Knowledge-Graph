@@ -688,14 +688,14 @@ def test_build_campaign_nodes_stamps_campaign_uuid_and_edges():
     assert "r_runs.trg_uuid = c.uuid" in block, "RUNS edge must stamp trg_uuid from c.uuid"
 
     # PART_OF (Malware → Campaign) — step 2.
-    pof_malware_idx = block.find("MERGE (m)-[r:PART_OF]->(c)")
+    pof_malware_idx = block.find("MERGE (m)-[r:PART_OF_CAMPAIGN]->(c)")  # PART_OF until 2026-10
     assert pof_malware_idx > 0, "Malware PART_OF edge not found"
     pof_malware_chunk = block[pof_malware_idx : pof_malware_idx + 400]
     assert "r.src_uuid = m.uuid" in pof_malware_chunk, "Malware PART_OF edge must stamp src_uuid from m.uuid"
     assert "r.trg_uuid = c.uuid" in pof_malware_chunk, "Malware PART_OF edge must stamp trg_uuid from c.uuid"
 
     # PART_OF (Indicator → Campaign) — step 3.
-    pof_indicator_idx = block.find("MERGE (i)-[r:PART_OF]->(c)")
+    pof_indicator_idx = block.find("MERGE (i)-[r:PART_OF_CAMPAIGN]->(c)")
     assert pof_indicator_idx > 0, "Indicator PART_OF edge not found"
     pof_indicator_chunk = block[pof_indicator_idx : pof_indicator_idx + 400]
     assert "r.src_uuid = i.uuid" in pof_indicator_chunk, "Indicator PART_OF edge must stamp src_uuid from i.uuid"

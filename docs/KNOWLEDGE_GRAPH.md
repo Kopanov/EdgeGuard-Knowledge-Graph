@@ -58,7 +58,7 @@ EdgeGuard partitions the knowledge graph by **three sectors** plus a **central O
 | `EXPLOITS` | Indicator → Vulnerability/CVE | CVE tag on the indicator, exact match (`match_type='cve_tag'`, 1.0). Not produced from event co-membership since 2026-10. |
 | `REFERS_TO` | Vulnerability ↔ CVE | `bridge_vulnerability_cve()` |
 | `RUNS` | ThreatActor → Campaign | `build_campaign_nodes()` |
-| `PART_OF` | Malware, Indicator → Campaign | `build_campaign_nodes()` |
+| `PART_OF_CAMPAIGN` | Malware, Indicator → Campaign | `build_campaign_nodes()` (named `PART_OF` until 2026-10: ResilMesh uses `PART_OF` for its asset hierarchy, and one name must have one meaning in the shared database) |
 | `INVOLVES` | Alert → Indicator | `neo4j_client` alert path (`alert_processor`, NATS) — not part of the collector pipeline; excluded from the acceptance script's policed types |
 | `USES_TECHNIQUE` | Indicator → Technique | OTX pulse `attack_ids` exact MITRE ID match (confidence 0.85) |
 | `AFFECTS` | Vulnerability/CVE → Sector | Zone list unwind; `zone_classification`, 0.5 (inferred sector; `global` never linked — 2026-10 audit) |
@@ -414,7 +414,7 @@ ORDER BY c.cvss_score DESC
 ### Query all indicators in a Campaign
 
 ```cypher
-MATCH (a:ThreatActor)-[:RUNS]->(c:Campaign)<-[:PART_OF]-(i:Indicator)
+MATCH (a:ThreatActor)-[:RUNS]->(c:Campaign)<-[:PART_OF_CAMPAIGN]-(i:Indicator)
 WHERE a.name = 'APT28'
   AND i.active = true
 RETURN c.name, c.first_seen, c.last_seen, i.value, i.indicator_type, i.confidence_score
@@ -442,7 +442,7 @@ _Last updated: 2026-10-14 — relationship provenance: every relationship built 
   attack_ids), INDICATES family-match = 0.8 (9/20), INDICATES same-pulse = 0.6 (9b/20),
   ATTRIBUTED_TO same-pulse = 0.6 (2d/20); the co-occurrence
   INDICATES step was removed in 2026-10 (report-scoped linking replaces it)._
-- _Verified relationships exist in code: `RUNS` and `PART_OF` in
+- _Verified relationships exist in code: `RUNS` and `PART_OF_CAMPAIGN` in
   `src/enrichment_jobs.py:184-186` (build_campaign_nodes); `INVOLVES`
   in `src/neo4j_client.py:6142`; `HAS_CVSS_v2/v30/v31/v40`
   bidirectional in `src/neo4j_client.py:2470` (\_merge_cvss_node

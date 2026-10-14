@@ -62,7 +62,7 @@ EdgeGuard is a **Graph-Augmented xAI Threat Intelligence System** for edge infra
 │     (EMPLOYS/IMPLEMENTS_TECHNIQUE, otx_pulse 0.6),          │
 │     malware_family name match → Malware (INDICATES, 0.8),   │
 │     CVE-tag EXPLOITS, sector edges — no event co-occurrence │
-│  2. enrichment_jobs — campaigns (RUNS/PART_OF),            │
+│  2. enrichment_jobs — campaigns (RUNS/PART_OF_CAMPAIGN),   │
 │     confidence calibration, IOC decay (order inside module) │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -255,7 +255,7 @@ When data is pushed to MISP, it gets tagged with:
 | `TARGETS` | Indicator → Sector | Node `zone` list → `build_relationships.py` |
 | `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → `build_relationships.py` |
 | `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` |
-| `PART_OF` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` |
+| `PART_OF_CAMPAIGN` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` (named `PART_OF` until 2026-10; `PART_OF` is ResilMesh's asset hierarchy) |
 
 All relationship `sources` arrays are accumulated as sets — no duplicates on re-sync.
 `imported_at` is set once on first creation (`ON CREATE SET`) and never overwritten.
