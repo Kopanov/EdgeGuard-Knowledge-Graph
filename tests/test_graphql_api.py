@@ -450,7 +450,7 @@ def test_indicator_provenance_fields(graphql_client, monkeypatch):
     query = """
     {
       indicators {
-        value mispEventIds mispAttributeIds mispEventUrls
+        value mispEventIds mispAttributeIds mispEventUrls mispAttributeUrls
         firstImportedAt lastImportedFrom
       }
     }
@@ -465,6 +465,11 @@ def test_indicator_provenance_fields(graphql_client, monkeypatch):
     assert ind["mispEventUrls"] == [
         "https://misp.example.com/events/view/42",
         "https://misp.example.com/events/view/43",
+    ]
+    # Numeric attribute ids from an older sync still produce a working link.
+    assert ind["mispAttributeUrls"] == [
+        "https://misp.example.com/attributes/view/1337",
+        "https://misp.example.com/attributes/view/1338",
     ]
     assert ind["firstImportedAt"] == "2025-01-15T10:00:00"
     assert ind["lastImportedFrom"] == "alienvault_otx"
@@ -498,7 +503,7 @@ def test_indicator_misp_urls_absent_when_no_misp_url_env(graphql_client, monkeyp
     record.__getitem__ = MagicMock(side_effect=lambda k: node)
     session_ctx.run.return_value.__iter__ = MagicMock(return_value=iter([record]))
 
-    query = "{ indicators { value mispEventIds mispEventUrls } }"
+    query = "{ indicators { value mispEventIds mispEventUrls mispAttributeUrls } }"
     resp = client.post("/graphql", json={"query": query})
     assert resp.status_code == 200
     data = resp.json()
@@ -506,6 +511,69 @@ def test_indicator_misp_urls_absent_when_no_misp_url_env(graphql_client, monkeyp
     ind = data["data"]["indicators"][0]
     assert ind["mispEventIds"] == ["99"]
     assert ind["mispEventUrls"] is None  # no MISP_URL → no URLs
+    assert ind["mispAttributeUrls"] is None
+
+
+def _one_indicator(session_ctx, **props) -> None:
+    base = {"value": "evil.example", "indicator_type": "domain", "zone": ["global"], "source": ["alienvault_otx"]}
+    base.update(props)
+    node = MagicMock()
+    node.get = MagicMock(side_effect=lambda k, d=None: base.get(k, d))
+    node.__getitem__ = MagicMock(side_effect=lambda k: base[k])
+    record = MagicMock()
+    record.__getitem__ = MagicMock(side_effect=lambda k: node)
+    session_ctx.run.return_value.__iter__ = MagicMock(return_value=iter([record]))
+
+
+def test_indicator_attribute_urls_from_stored_uuids(graphql_client, monkeypatch):
+    """One link per stored MISP attribute UUID, in stored order, to /attributes/view/<uuid>."""
+    client, session_ctx = graphql_client
+    import graphql_api as gapi  # noqa: E402
+
+    monkeypatch.setattr(gapi, "MISP_URL", "https://misp.example.com")
+    uuids = ["8814f87d-508e-4e63-8c56-637bb35f80af", "0B2E4C1A-9F3D-4E5B-8A7C-1D2E3F405162"]
+    _one_indicator(session_ctx, misp_event_ids=["137", "141"], misp_attribute_ids=uuids)
+
+    resp = client.post(
+        "/graphql", json={"query": "{ indicators { mispAttributeIds mispAttributeUrls mispEventUrls } }"}
+    )
+    data = resp.json()
+    assert "errors" not in data, data.get("errors")
+    ind = data["data"]["indicators"][0]
+    assert ind["mispAttributeIds"] == uuids
+    assert ind["mispAttributeUrls"] == [f"https://misp.example.com/attributes/view/{u}" for u in uuids]
+    assert ind["mispEventUrls"] == [
+        "https://misp.example.com/events/view/137",
+        "https://misp.example.com/events/view/141",
+    ]
+
+
+@pytest.mark.parametrize(
+    "stored, expected",
+    [
+        (None, None),
+        ([], None),
+        (["", "  "], None),
+        (["../../users/admin", "8814f87d-508e-4e63-8c56-637bb35f80af"], ["8814f87d-508e-4e63-8c56-637bb35f80af"]),
+        (["8814f87d-508e-4e63-8c56-637bb35f80af?x=1"], None),
+        (["not-a-uuid", "42"], ["42"]),
+    ],
+)
+def test_indicator_attribute_urls_skip_values_that_are_not_attribute_references(
+    graphql_client, monkeypatch, stored, expected
+):
+    """A stored value that is not a UUID or numeric id never becomes a link; nothing usable gives null."""
+    client, session_ctx = graphql_client
+    import graphql_api as gapi  # noqa: E402
+
+    monkeypatch.setattr(gapi, "MISP_URL", "https://misp.example.com")
+    _one_indicator(session_ctx, misp_attribute_ids=stored)
+
+    resp = client.post("/graphql", json={"query": "{ indicators { mispAttributeUrls } }"})
+    data = resp.json()
+    assert "errors" not in data, data.get("errors")
+    urls = data["data"]["indicators"][0]["mispAttributeUrls"]
+    assert urls == (None if expected is None else [f"https://misp.example.com/attributes/view/{v}" for v in expected])
 
 
 def test_vulnerability_provenance_fields(graphql_client):

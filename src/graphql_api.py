@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -62,6 +63,12 @@ logger = logging.getLogger(__name__)
 
 # Used to construct back-links to the originating MISP event (e.g. misp_event_url field)
 MISP_URL = os.getenv("MISP_URL", "").rstrip("/")
+
+# A MISP attribute reference as the graph stores it: the attribute UUID (``attr.uuid``, stable across
+# MISP instances), or a numeric attribute id from an older sync. Anything else is not turned into a link.
+_MISP_ATTRIBUTE_REF = re.compile(
+    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$"
+)
 
 # ---------------------------------------------------------------------------
 # Auth helper
@@ -169,6 +176,20 @@ def _neo4j_list(val) -> Optional[List[str]]:
     if isinstance(val, (list, tuple)):
         return [str(v) for v in val]
     return [str(val)]
+
+
+def _misp_attribute_urls(attribute_ids: List[str]) -> Optional[List[str]]:
+    """``<MISP_URL>/attributes/view/<uuid>`` for each stored MISP attribute reference, in stored order.
+
+    The event-level links (``misp_event_urls``) open a whole source event, which for OTX or NVD holds
+    100,000+ attributes; this link names the one attribute. None when ``MISP_URL`` is unset or nothing
+    usable is stored; a value that is neither a UUID nor a numeric id is skipped.
+    """
+    if not MISP_URL or not attribute_ids:
+        return None
+    refs = (str(ref).strip() for ref in attribute_ids)
+    urls = [f"{MISP_URL}/attributes/view/{ref}" for ref in refs if _MISP_ATTRIBUTE_REF.fullmatch(ref)]
+    return urls or None
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +424,7 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
             event_urls: Optional[List[str]] = (
                 [f"{MISP_URL}/events/view/{eid}" for eid in event_ids if eid] if (MISP_URL and event_ids) else None
             )
+            attribute_ids = _neo4j_list(n.get("misp_attribute_ids")) or []
             results.append(
                 Indicator(
                     value=n.get("value", ""),
@@ -424,6 +446,7 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     # ``misp_attribute_ids: []`` in the same response.
                     misp_attribute_ids=_neo4j_list(n.get("misp_attribute_ids")) or None,
                     misp_event_urls=event_urls,
+                    misp_attribute_urls=_misp_attribute_urls(attribute_ids),
                     first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                     last_imported_from=n.get("last_imported_from"),
                     yara_rules=n.get("yara_rules"),
