@@ -281,7 +281,7 @@ Each entry: symptom → detection signal → remediation.
   leaf counts as success; before 2026-10 such a run could end `success`
   with `run_enrichment_jobs` failed. Triage the task named in the message.
 
-**7c. Postcheck skipped on Airflow 2 (PR-N27).**
+**7c. Baseline postcheck skipped due to upstream failure — Airflow 2 (PR-N27).**
 
 - **Symptom.** Airflow `baseline_postcheck` task log contains a
   `[BASELINE-POSTCHECK-SKIPPED]` ERROR line; postcheck task state =
