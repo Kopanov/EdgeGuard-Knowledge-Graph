@@ -32,8 +32,11 @@ MAX_EVENT_IDS_PER_EDGE = 200
 
 MITRE_FEEDS = '["mitre_attck"]'
 OTX_FEEDS = '["alienvault_otx"]'
-# Feeds whose records carry a malware family label (``Indicator.malware_family``).
-FAMILY_LABEL_FEEDS = '["threatfox", "urlhaus", "malwarebazaar", "feodo_tracker", "ssl_blacklist", "alienvault_otx"]'
+# Feeds whose records set ``Indicator.malware_family`` (what Q9 matches): ThreatFox
+# (``malware_printable``), MalwareBazaar (``signature``), Feodo Tracker (``malware``) and OTX
+# (``OTX_META.malware_family``). URLhaus, SSL Blacklist and VirusTotal set none (VirusTotal's
+# sandbox family and popular threat label feed zone detection and ``threat_label`` only).
+FAMILY_LABEL_FEEDS = '["threatfox", "malwarebazaar", "feodo_tracker", "alienvault_otx"]'
 # Variables bound by ``prov_with``; a later ``WITH`` must carry them through to the ``SET``.
 PROV_VARS = "_feeds, _prov_refs, _prov_events"
 

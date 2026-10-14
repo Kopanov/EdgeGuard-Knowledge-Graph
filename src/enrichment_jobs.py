@@ -1117,8 +1117,16 @@ RETURN sum(n_dups) AS merged, count(node) AS canonicals
 # absorbed an OTX duplicate held ``zone`` as a string, and 21 of their ATTRIBUTED_TO edges
 # held ``r.sources`` as a string. Every ``combine`` property is a list by contract, so the
 # canonical node and all of its edges are wrapped back into lists after each merge batch.
+# On edges only the provenance lists are lists: ``source`` on a SOURCED_FROM edge is the
+# scalar source id (``combine`` of two parallel edges to the same Source keeps it scalar) and
+# must stay one; the node keys (``zone``, ``aliases`` …) do not exist on edges.
+_ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = ("misp_event_ids", "source_refs", "sources")
 _ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
-    sorted(k for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items() if v == "combine")
+    sorted(
+        k
+        for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items()
+        if v == "combine" and k not in ("sources", "source_refs")
+    )
 )
 
 
@@ -1137,7 +1145,7 @@ _ACTOR_ALIAS_MERGE_NORMALISE_CYPHER = (
     "SET " + ",\n    ".join(f"c.{p} = {_list_or_wrapped('c.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS) + "\n"
     "WITH c\n"
     "MATCH (c)-[r]-()\n"
-    "SET " + ",\n    ".join(f"r.{p} = {_list_or_wrapped('r.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS) + "\n"
+    "SET " + ",\n    ".join(f"r.{p} = {_list_or_wrapped('r.' + p)}" for p in _ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS) + "\n"
     "RETURN count(r) AS normalised_edges"
 )
 

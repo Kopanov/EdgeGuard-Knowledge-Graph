@@ -364,11 +364,30 @@ class TestEnrichment:
         assert "r.source_ids IS NOT NULL" not in body and "r.source_id IN" not in body
 
     def test_alias_merge_keeps_lists_as_lists(self):
-        props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
-        assert {"zone", "source", "sources", "source_refs", "misp_event_ids", "aliases"} <= set(props)
+        node_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
+        edge_props = enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
+        assert {"zone", "source", "misp_event_ids", "aliases"} <= set(node_props)
+        assert set(edge_props) == {"sources", "source_refs", "misp_event_ids"}
         assert "source_ids" not in enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY
         cypher = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER
-        for p in props:
-            assert f"c.{p} = CASE WHEN c.{p} IS NULL THEN NULL" in cypher
-            assert f"r.{p} = CASE WHEN r.{p} IS NULL THEN NULL" in cypher
+        node_part, edge_part = cypher.split("MATCH (c)-[r]-()")
+        for p in node_props:
+            assert f"c.{p} = CASE WHEN c.{p} IS NULL THEN NULL" in node_part
+        for p in edge_props:
+            assert f"r.{p} = CASE WHEN r.{p} IS NULL THEN NULL" in edge_part
         assert 'STARTS WITH "LIST"' in cypher and "ELSE [c.zone] END" in cypher
+
+    def test_alias_merge_leaves_the_scalar_sourced_from_source_alone(self):
+        # ``r.source`` on a SOURCED_FROM edge is the scalar source id; wrapping it into a list
+        # would make every ``r.source = 'nvd'`` reader miss the edge (review finding on #175).
+        edge_part = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER.split("MATCH (c)-[r]-()")[1]
+        assert "r.source =" not in edge_part and "r.source IS" not in edge_part
+        assert "r.zone" not in edge_part and "r.aliases" not in edge_part
+
+    def test_family_label_feeds_are_the_feeds_that_set_malware_family(self):
+        # ThreatFox, MalwareBazaar, Feodo Tracker and OTX write ``malware_family``; URLhaus,
+        # SSL Blacklist and VirusTotal do not, so crediting them would over-attribute the link.
+        import ast as _ast
+
+        feeds = set(_ast.literal_eval(rp.FAMILY_LABEL_FEEDS))
+        assert feeds == {"threatfox", "malwarebazaar", "feodo_tracker", "alienvault_otx"}
