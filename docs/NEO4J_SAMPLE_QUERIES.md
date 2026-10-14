@@ -184,10 +184,12 @@ LIMIT 10
 
 ---
 
-## Edge provenance (PR-N26 — `r.misp_event_ids[]`)
+## Edge provenance (`r.misp_event_ids[]`, `r.sources[]`, `r.source_refs[]`)
 
 PR-N26 wired `r.misp_event_ids[]` onto edges from `build_relationships.py`
-for 4 edge types: `INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`.
+for 4 edge types: `INDICATES`, `EXPLOITS`, `TARGETS`, `AFFECTS`. Since
+2026-10 every relationship built from the sources carries it, together with
+`r.sources[]` and `r.source_refs[]` (see "Who asserts a link" below).
 
 ### Indicators with their MISP-event provenance edges
 
@@ -204,12 +206,25 @@ LIMIT 25
 ### Find INDICATES edges that share MISP events with a known indicator
 
 ```cypher
-// Use case: pivoting from one IoC to others co-mentioned in the same MISP event(s)
+// Use case: pivoting from one IoC to others pushed in the same MISP event(s).
+// EdgeGuard's MISP events are per-source, per-day buckets (EdgeGuard-{source}-{date}),
+// so a shared event means "same source, same day", not "same report".
 MATCH (a:Indicator {value: $known_value})-[ra:INDICATES]->(:Malware)
 WITH ra.misp_event_ids AS shared_events
 MATCH (b:Indicator)-[rb:INDICATES]->(m:Malware)
 WHERE any(eid IN rb.misp_event_ids WHERE eid IN shared_events)
 RETURN b.value, m.name, rb.misp_event_ids
+LIMIT 50
+```
+
+```cypher
+// Report-level pivot (2026-10): other IoCs whose INDICATES link cites the same source
+// record, e.g. the same OTX pulse ("alienvault_otx:<pulse id>" in r.source_refs).
+MATCH (a:Indicator {value: $known_value})-[ra:INDICATES]->(:Malware)
+UNWIND coalesce(ra.source_refs, []) AS ref
+MATCH (b:Indicator)-[rb:INDICATES]->(m:Malware)
+WHERE b <> a AND ref IN coalesce(rb.source_refs, [])
+RETURN ref, b.value, m.name
 LIMIT 50
 ```
 
@@ -250,6 +265,6 @@ RETURN type(r) AS edge_type, count(r) AS gap
 
 ---
 
-_Last updated: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
+_Last updated: 2026-10-15 — attack-vector note (`c.attack_vector` from the CVSS that gives the score, NVD's words, null without CVSS) and the network-exploitable CVE sample; edge-provenance section: `r.misp_event_ids[]` is on every relationship built from the sources (no longer only the four PR-N26 types); the MISP-event pivot states that events are per-source, per-day buckets, and a report-level pivot on `r.source_refs[]` was added. Prior: 2026-10-14 — score note (`cvss_version`; unscored CVEs have a null score, not 3.0 / LOW) and the sample for CVEs without a CVSS 3.x / 2 score; added the relationship-provenance samples (`r.sources[]`, `r.source_refs[]`). Prior: 2026-06-12 — added the CISA-KEV sample (`cisa_exploit_add`, range-indexed since PR #126), the alias-aware actor-resolve sample, and the header pointer to the test-pinned `_TI_GRAPHRAG` catalog (19 analyst-question shapes). Prior: 2026-05-25 — Cypher-catalog verification against the live graph: switched the Vulnerabilities sample queries from the legacy `:Vulnerability` label (empty on current baselines) to `:CVE` (the label the sync actually writes) and added the label note in the Vulnerabilities section. Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the "stored on `zone` property, not as extra labels" claim — sectors are stored on BOTH (`zone` property at MERGE time, plus secondary labels like `:Healthcare` after `apply_sector_labels()` runs post-sync). Recommend `zone` property for portable queries that work pre or post the label-apply step. Prior: 2026-04-26 PR-N33 docs audit (replaced broken `t.platforms` query with `t.tactic_phases`; added Edge provenance section)._
 
 *Save queries to test the prototype*
