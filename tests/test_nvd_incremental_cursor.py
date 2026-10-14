@@ -1,0 +1,557 @@
+"""NVD incremental runs read every CVE modified since a stored cursor and keep MISP in step (2026-10).
+
+Before, an incremental run took the newest N records of the 14-day lastMod window by publication
+date (N = ``EDGEGUARD_INCREMENTAL_LIMIT``, 200). Measured on 2026-10-14: a 30-day replay of the
+8-hourly schedule missed 37% of new CVEs; on the hosted instance 1,930 of the 2,130 CVEs published
+after the 730-day baseline were never collected; and MISPWriter dropped every update to a CVE MISP
+already held (cross-event duplicate check), so all 1,500 baseline CVEs NVD changed afterwards kept
+their old version in MISP and Neo4j.
+
+The tests drive the real ``NVDCollector`` and the real ``MISPWriter`` against two fakes fed with
+real payloads (``tests/fixtures/nvd_incremental_2026_10_14.json``, see its ``_provenance``):
+
+- ``FakeNvd`` answers lastMod requests as NVD CVE API 2.0 does: zone-less timestamps, results in
+  publication order and evaluated again for every page, the envelope of a real page;
+- ``FakeMisp`` answers MISPWriter as MISP 2.5 does: the attribute listing by tag, event lookup and
+  creation, the event edit that adds attributes, and the attribute edit
+  (``AttributesController::edit``: new comment and timestamps; tags attached, or detached when
+  marked ``deleted``).
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import sys
+import uuid
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from collectors import misp_writer, nvd_collector  # noqa: E402
+from collectors.misp_writer import MISPWriter  # noqa: E402
+from collectors.nvd_collector import NVD_CURSOR_KEY, NVDCollector, iter_nvd_lastmod_spans  # noqa: E402
+
+FIXTURES = json.loads((Path(__file__).resolve().parent / "fixtures" / "nvd_incremental_2026_10_14.json").read_text())
+NOW = datetime(2026, 10, 14, 18, 30, tzinfo=timezone.utc)
+
+# The real records (published, lastModified, status as NVD returned them on 2026-10-14).
+REJECTED = "CVE-2026-22314"  # in MISP as active (high), rejected by NVD on 2026-10-13 14:17 UTC
+ANALYSED = "CVE-2026-83540"  # in MISP with CVSS 4.0 only; NVD added CVSS 3.1 and CPE on 2026-10-13 17:33
+UNCHANGED = ("CVE-2025-0237", "CVE-2025-0238")  # in MISP exactly as NVD has them now
+NEW = "CVE-2026-93637"  # published 2026-10-14 17:20, not in MISP
+OLD = "CVE-1999-0024"  # published 1997, modified 2026-10-09, not on KEV, not in MISP
+KEV_OLD = "CVE-2021-44228"  # published 2021, on KEV, modified 2026-08-11, not in MISP
+
+
+def _ts(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def nvd_record(cve_id: str, **cve_changes) -> dict:
+    record = copy.deepcopy(FIXTURES["nvd"][cve_id])
+    record["cve"].update(cve_changes)
+    return record
+
+
+def stored_attribute(cve_id: str) -> dict:
+    return copy.deepcopy(FIXTURES["misp"][cve_id])
+
+
+class _Response:
+    def __init__(self, status_code: int, body):
+        self.status_code = status_code
+        self._body = body
+        self.headers: dict = {}
+        self.text = json.dumps(body)[:300]
+        self.content = self.text.encode()
+
+    def json(self):
+        return copy.deepcopy(self._body)
+
+
+class FakeNvd:
+    """lastMod requests answered from a list of real NVD records (see the module docstring)."""
+
+    def __init__(self, records):
+        self.records = [copy.deepcopy(r) for r in records]
+        self.requests: list = []
+        self.before_request = None  # hook(request_number) to change ``records`` between requests
+
+    def __call__(self, method, url, *, params=None, **_kwargs):
+        params = dict(params or {})
+        self.requests.append(params)
+        if self.before_request is not None:
+            self.before_request(len(self.requests))
+        start, end = _ts(params["lastModStartDate"]), _ts(params["lastModEndDate"])
+        rows = sorted(
+            (r for r in self.records if start <= _ts(r["cve"]["lastModified"]) <= end),
+            key=lambda r: (_ts(r["cve"]["published"]), r["cve"]["id"]),
+        )
+        first, count = int(params.get("startIndex", 0)), int(params.get("resultsPerPage", 2000))
+        page = rows[first : first + count]
+        body = dict(FIXTURES["nvd_page_envelope"])
+        body.update(resultsPerPage=len(page), startIndex=first, totalResults=len(rows), vulnerabilities=page)
+        return _Response(200, body)
+
+
+class FakeMisp:
+    """MISP 2.5 REST answers over an in-memory attribute store (see the module docstring)."""
+
+    def __init__(self, attributes=()):
+        self.attributes = [copy.deepcopy(a) for a in attributes]
+        self.events = {a["event_id"]: "EdgeGuard-nvd-2026-10-13" for a in self.attributes}
+        self.posts: list = []
+        self.headers: dict = {}
+        self.edit_status: dict = {}  # uuid -> HTTP status MISP answers to its edit
+        self.edits_not_stored: set = set()  # uuids MISP answers 200 for without storing the edit
+        self.listing_status = None  # HTTP status of every attribute listing request
+
+    def post(self, url, json=None, **_kwargs):
+        path = url.split("misp.test", 1)[1]
+        self.posts.append((path, copy.deepcopy(json)))
+        if path == "/attributes/restSearch":
+            return self._rest_search(json or {})
+        if path == "/events/restSearch":
+            info = (json or {}).get("info")
+            return _Response(
+                200, {"response": [{"Event": {"id": i, "info": n}} for i, n in self.events.items() if n == info]}
+            )
+        if path == "/events":
+            event_id = str(200 + len(self.events))
+            self.events[event_id] = json["Event"]["info"]
+            return _Response(200, {"Event": {"id": event_id, "info": json["Event"]["info"]}})
+        if path.startswith("/attributes/edit/"):
+            return self._edit(path.rsplit("/", 1)[1], (json or {}).get("Attribute") or {})
+        if path.startswith("/events/"):
+            return self._add(path.rsplit("/", 1)[1], (json or {}).get("Attribute") or [])
+        return _Response(404, {})
+
+    def get(self, url, **_kwargs):
+        return _Response(404, {})
+
+    def edits(self) -> list:
+        return [(p.rsplit("/", 1)[1], body["Attribute"]) for p, body in self.posts if p.startswith("/attributes/edit/")]
+
+    def added_values(self) -> list:
+        return [
+            a["value"]
+            for p, body in self.posts
+            if p.startswith("/events/") and p != "/events/restSearch"
+            for a in (body or {}).get("Attribute", [])
+        ]
+
+    def by_value(self, value: str) -> dict:
+        return next(a for a in self.attributes if a["value"] == value)
+
+    def _rest_search(self, body: dict):
+        if self.listing_status is not None:
+            return _Response(self.listing_status, {"errors": "listing failed"})
+        if "eventid" in body:
+            rows = [a for a in self.attributes if a["event_id"] == str(body["eventid"])]
+        else:
+            rows = [
+                a
+                for a in self.attributes
+                if set(body.get("tags") or []) <= {t["name"] for t in a.get("Tag", [])}
+                and a["type"] == body.get("type", a["type"])
+            ]
+        page, limit = int(body.get("page", 1)), int(body.get("limit", 5000))
+        return _Response(200, {"response": {"Attribute": rows[(page - 1) * limit : page * limit]}})
+
+    def _add(self, event_id: str, attributes: list):
+        for attr in attributes:
+            stored = copy.deepcopy(attr)
+            stored.update(id=str(3000000 + len(self.attributes)), uuid=str(uuid.uuid4()), event_id=event_id)
+            stored["Tag"] = [{"id": "0", "name": t["name"]} for t in attr.get("Tag", [])]
+            self.attributes.append(stored)
+        return _Response(
+            200, {"Event": {"id": event_id, "Attribute": [a for a in self.attributes if a["event_id"] == event_id]}}
+        )
+
+    def _edit(self, attr_uuid: str, changes: dict):
+        if attr_uuid in self.edit_status:
+            return _Response(self.edit_status[attr_uuid], {"name": "Could not edit Attribute", "errors": {}})
+        attr = next((a for a in self.attributes if a["uuid"] == attr_uuid), None)
+        if attr is None:
+            return _Response(404, {"name": "Invalid attribute"})
+        if attr_uuid not in self.edits_not_stored:
+            for key in ("comment", "first_seen", "last_seen"):
+                if key in changes:
+                    attr[key] = changes[key]
+            for tag in changes.get("Tag", []):
+                names = [t["name"] for t in attr["Tag"]]
+                if tag.get("deleted"):
+                    attr["Tag"] = [t for t in attr["Tag"] if t["name"] != tag["name"]]
+                elif tag["name"] not in names:
+                    attr["Tag"].append({"id": "0", "name": tag["name"]})
+            attr["timestamp"] = str(int(NOW.timestamp()))
+        return _Response(200, {"Attribute": copy.deepcopy(attr)})
+
+
+class CursorStore:
+    """In-memory ``checkpoints[nvd].incremental``."""
+
+    def __init__(self, cursor: str | None = None):
+        self.data = {} if cursor is None else {NVD_CURSOR_KEY: cursor}
+        self.writes: list = []
+
+    def get(self, source: str) -> dict:
+        assert source == "nvd"
+        return dict(self.data)
+
+    def update(self, source: str, **values) -> None:
+        assert source == "nvd"
+        self.writes.append(values)
+        self.data.update(values)
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path):
+    for name in (
+        "EDGEGUARD_NVD_INCREMENTAL_DAYS",
+        "EDGEGUARD_NVD_CURSOR_OVERLAP_SEC",
+        "EDGEGUARD_NVD_MAX_PER_RUN",
+        "EDGEGUARD_NVD_UPDATE_EXISTING",
+        "EDGEGUARD_NVD_EXTRA_CVE_IDS",
+        "EDGEGUARD_BASELINE_DAYS",
+        "EDGEGUARD_MISP_PUSH_BATCH_SIZE",
+        "EDGEGUARD_MAX_ENTRIES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "0")
+    monkeypatch.setenv("EDGEGUARD_MISP_EVENT_LOCK_PATH", str(tmp_path / "event.lock"))
+    monkeypatch.setattr(nvd_collector, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(nvd_collector.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(misp_writer.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(misp_writer, "MISP_PREFETCH_EXISTING_ATTRS", True)
+    monkeypatch.setattr(misp_writer, "MISP_CROSS_EVENT_DEDUP", True)
+    import config
+
+    # Other test modules reload ``config`` with their own EDGEGUARD_MAX_ENTRIES; the global override
+    # would lower NVD's per-run cap here.
+    monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 0)
+    return monkeypatch
+
+
+def run(env, nvd: FakeNvd, misp: FakeMisp, store: CursorStore, *, limit=None, push_to_misp=True):
+    env.setattr(nvd_collector, "request_with_rate_limit_retries", nvd)
+    env.setattr(nvd_collector, "get_source_incremental", store.get)
+    env.setattr(nvd_collector, "update_source_incremental", store.update)
+    writer = MISPWriter(url="https://misp.test", api_key="test", verify_ssl=True)
+    writer.session = misp
+    collector = NVDCollector(misp_writer=writer)
+    collector.check_service_available = lambda: True
+    collector.circuit_breaker = MagicMock()
+    return collector.collect(limit=limit, push_to_misp=push_to_misp, baseline=False)
+
+
+ALL = (REJECTED, ANALYSED, *UNCHANGED, NEW, OLD, KEV_OLD)
+KNOWN = (REJECTED, ANALYSED, *UNCHANGED)
+
+
+# --------------------------------------------------------------------------- window and cursor
+class TestWindow:
+    def _start(self, env, cursor):
+        store = CursorStore(cursor)
+        env.setattr(nvd_collector, "get_source_incremental", store.get)
+        c = NVDCollector.__new__(NVDCollector)
+        return c._incremental_start(NOW)
+
+    def test_cursor_minus_overlap(self, env):
+        start, cursor = self._start(env, "2026-10-14T10:00:00+00:00")
+        assert cursor == datetime(2026, 10, 14, 10, tzinfo=timezone.utc)
+        assert start == cursor - timedelta(hours=1), "default overlap 3600 s"
+
+    def test_without_cursor_reads_the_lookback(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "20")
+        assert self._start(env, None) == (NOW - timedelta(days=20), None)
+
+    @pytest.mark.parametrize("bad", ["not a time", "2026-10-15T00:00:00+00:00"], ids=["unreadable", "in-the-future"])
+    def test_unusable_cursor_falls_back_to_the_lookback(self, env, bad):
+        assert self._start(env, bad) == (NOW - timedelta(days=14), None)
+
+    def test_zone_less_nvd_and_zoned_misp_times_are_the_same_instant(self):
+        assert nvd_collector._parse_nvd_time("2026-10-13T17:33:17.707") == nvd_collector._parse_nvd_time(
+            "2026-10-13T17:33:17.707000+00:00"
+        )
+        assert nvd_collector._parse_nvd_time("garbage") is None and nvd_collector._parse_nvd_time(None) is None
+
+    def test_spans_are_contiguous_oldest_first_and_at_most_120_days(self):
+        spans = iter_nvd_lastmod_spans(NOW - timedelta(days=250), NOW)
+        assert spans[0][0] == NOW - timedelta(days=250) and spans[-1][1] == NOW
+        assert all(a[1] == b[0] for a, b in zip(spans, spans[1:], strict=False))
+        assert all(timedelta(0) < e - s <= timedelta(days=120) for s, e in spans)
+
+
+# --------------------------------------------------------------------------- reading the window
+def _many(count: int) -> list:
+    """*count* copies of the real new record, published one second apart, all modified in the window."""
+    base = FIXTURES["nvd"][NEW]
+    out = []
+    for n in range(count):
+        record = copy.deepcopy(base)
+        stamp = (datetime(2026, 10, 14, 6, tzinfo=timezone.utc) + timedelta(seconds=n)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3]
+        record["cve"].update(id=f"CVE-2026-{900000 + n}", published=stamp, lastModified=stamp)
+        out.append(record)
+    return out
+
+
+class TestReadingTheWindow:
+    def _read(self, env, nvd):
+        env.setattr(nvd_collector, "request_with_rate_limit_retries", nvd)
+        c = NVDCollector.__new__(NVDCollector)
+        c.api_key = None
+        c.base_url = "https://nvd.test"
+        return c._fetch_modified_cves(NOW - timedelta(days=1), NOW)
+
+    def test_every_page_is_read(self, env):
+        nvd = FakeNvd(_many(4100))
+        records, complete = self._read(env, nvd)
+        assert complete and len(records) == 4100
+        assert [r["startIndex"] for r in nvd.requests] == [0, 2000, 4000]
+
+    def test_records_that_moved_down_are_read_again(self, env):
+        # Before the second page, NVD modifies seven records of the first page again (their new
+        # lastModified is after the window): they leave the result and the records behind them move
+        # down seven places. A plain startIndex walk would never read records 2000..2006.
+        nvd = FakeNvd(_many(4100))
+        moved_down = [r["cve"]["id"] for r in nvd.records[2000:2007]]
+
+        def modify_again(request_number):
+            if request_number == 2:
+                for record in nvd.records[100:107]:
+                    record["cve"]["lastModified"] = "2026-10-14T19:00:00.000"
+
+        nvd.before_request = modify_again
+        records, complete = self._read(env, nvd)
+        ids = {r["cve"]["id"] for r in records}
+        assert complete
+        assert set(moved_down) <= ids, "the records that moved below startIndex 2000 were not read"
+        still_in_window = {r["cve"]["id"] for r in nvd.records if _ts(r["cve"]["lastModified"]) <= NOW}
+        assert still_in_window <= ids
+        assert {"startIndex": "1993", "resultsPerPage": "7"} == {
+            k: str(v) for k, v in nvd.requests[2].items() if k in ("startIndex", "resultsPerPage")
+        }
+
+    def test_a_second_departure_while_re_reading_marks_the_read_incomplete(self, env):
+        nvd = FakeNvd(_many(4100))
+
+        def modify_again(request_number):
+            if request_number in (2, 3):
+                for record in nvd.records[100 + 10 * request_number : 103 + 10 * request_number]:
+                    record["cve"]["lastModified"] = "2026-10-14T19:00:00.000"
+
+        nvd.before_request = modify_again
+        _records, complete = self._read(env, nvd)
+        assert complete is False
+
+
+# --------------------------------------------------------------------------- one run, end to end
+class TestIncrementalRun:
+    def _fakes(self, cursor=None):
+        nvd = FakeNvd([nvd_record(c) for c in ALL])
+        misp = FakeMisp([stored_attribute(c) for c in KNOWN])
+        return nvd, misp, CursorStore(cursor)
+
+    def test_new_changed_unchanged_and_out_of_scope_cves(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")  # first run without a cursor; reaches Log4Shell
+        nvd, misp, store = self._fakes()
+        status = run(env, nvd, misp, store)
+
+        edits = dict(misp.edits())
+        assert set(edits) == {stored_attribute(REJECTED)["uuid"], stored_attribute(ANALYSED)["uuid"]}
+        assert sorted(misp.added_values()) == [KEV_OLD, NEW], "new in-scope CVEs added; 1997 non-KEV CVE left out"
+
+        rejected = edits[stored_attribute(REJECTED)["uuid"]]
+        meta = json.loads(rejected["comment"][len("NVD_META:") :])
+        assert meta["status"] == ["rejected"] and meta["cvss_v31_data"] is None
+        assert rejected["last_seen"] == "2026-10-13T14:17:38.270000+00:00", "NVD's zone-less lastModified, as UTC"
+        assert {t["name"] for t in rejected["Tag"] if t.get("deleted")} == {"severity:high", "cvss:high"}
+        assert {t["name"] for t in rejected["Tag"] if not t.get("deleted")} == {"severity:unknown", "cvss:low"}
+
+        analysed = json.loads(edits[stored_attribute(ANALYSED)["uuid"]]["comment"][len("NVD_META:") :])
+        assert analysed["cvss_v31_data"]["base_score"] == 8.8, "NVD's CVSS 3.1 score from its analysis"
+        assert analysed["affected_products"], "NVD's CPE configuration reaches MISP"
+
+        stored = json.loads(misp.by_value(REJECTED)["comment"][len("NVD_META:") :])
+        assert stored["status"] == ["rejected"], "MISP holds NVD's current record after the run"
+        assert store.data[NVD_CURSOR_KEY] == NOW.isoformat()
+        assert status["success"] is True
+        assert {k: status["nvd_incremental"][k] for k in ("added", "updated", "unchanged", "out_of_scope")} == {
+            "added": 2,
+            "updated": 2,
+            "unchanged": 2,
+            "out_of_scope": 1,
+        }
+
+    def test_a_second_run_over_the_same_changes_writes_nothing(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        nvd, misp, store = self._fakes()
+        run(env, nvd, misp, store)
+        store.data.clear()  # read the same window again
+        posts_before = len(misp.posts)
+        status = run(env, nvd, misp, store)
+        writes = [
+            p for p, _ in misp.posts[posts_before:] if p.startswith("/attributes/edit/") or p.startswith("/events/2")
+        ]
+        assert writes == [] and status["nvd_incremental"]["unchanged"] == 6
+
+    def test_a_failed_edit_keeps_the_cursor_and_the_next_run_repeats_only_that_edit(self, env):
+        nvd, misp, store = self._fakes(cursor="2026-10-13T12:00:00+00:00")
+        misp.edit_status[stored_attribute(ANALYSED)["uuid"]] = 403
+        status = run(env, nvd, misp, store)
+        assert status["success"] is False and status["nvd_incremental"]["failed"] == 1
+        assert store.writes == [], "cursor kept after a failed write"
+
+        del misp.edit_status[stored_attribute(ANALYSED)["uuid"]]
+        posts_before = len(misp.posts)
+        status = run(env, nvd, misp, store)
+        edited = [p.rsplit("/", 1)[1] for p, _ in misp.posts[posts_before:] if p.startswith("/attributes/edit/")]
+        assert edited == [stored_attribute(ANALYSED)["uuid"]], "the edit that succeeded is not repeated"
+        assert status["success"] is True and store.data[NVD_CURSOR_KEY] == NOW.isoformat()
+
+    def test_an_edit_misp_does_not_store_counts_as_failed(self, env):
+        nvd, misp, store = self._fakes(cursor="2026-10-13T12:00:00+00:00")
+        misp.edits_not_stored.add(stored_attribute(REJECTED)["uuid"])
+        status = run(env, nvd, misp, store)
+        assert status["nvd_incremental"]["failed"] == 1 and store.writes == []
+
+    def test_listing_failure_writes_nothing_and_keeps_the_cursor(self, env):
+        nvd, misp, store = self._fakes(cursor="2026-10-13T12:00:00+00:00")
+        misp.listing_status = 503
+        status = run(env, nvd, misp, store)
+        assert status["success"] is False
+        assert [p for p, _ in misp.posts if p != "/attributes/restSearch"] == []
+        assert store.writes == []
+
+    def test_per_run_cap_stops_at_a_record_and_later_runs_continue_without_gaps(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        env.setenv("EDGEGUARD_NVD_MAX_PER_RUN", "1")
+        nvd, misp, store = self._fakes()
+        runs = 0
+        while runs < 10:
+            runs += 1
+            status = run(env, nvd, misp, store)
+            assert status["success"] is True
+            if not status["nvd_incremental"]["stopped_at_cap"]:
+                break
+        assert runs == 4, "four writes, one per run; unchanged and out-of-scope records cost none"
+        assert sorted(misp.added_values()) == [KEV_OLD, NEW]
+        assert sorted(uid for uid, _ in misp.edits()) == sorted(
+            {stored_attribute(REJECTED)["uuid"], stored_attribute(ANALYSED)["uuid"]}
+        ), "each change written once"
+        assert store.data[NVD_CURSOR_KEY] == NOW.isoformat()
+
+    def test_update_switch_off_leaves_stored_cves(self, env):
+        env.setenv("EDGEGUARD_NVD_UPDATE_EXISTING", "false")
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        nvd, misp, store = self._fakes()
+        status = run(env, nvd, misp, store)
+        assert misp.edits() == [] and sorted(misp.added_values()) == [KEV_OLD, NEW]
+        assert status["nvd_incremental"]["stored_not_updated"] == 4
+
+    def test_named_ids_and_the_baseline_days_set_the_scope(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        env.setenv("EDGEGUARD_NVD_EXTRA_CVE_IDS", OLD)
+        env.setenv("EDGEGUARD_BASELINE_DAYS", "7")
+        week_old = nvd_record(NEW, id="CVE-2026-93638", published="2026-10-06T09:00:00.000")
+        nvd = FakeNvd([nvd_record(c) for c in (NEW, OLD, KEV_OLD)] + [week_old])
+        misp, store = FakeMisp(), CursorStore()
+        run(env, nvd, misp, store)
+        assert sorted(misp.added_values()) == sorted([NEW, OLD, KEV_OLD]), "8 days old with a 7-day scope: left out"
+
+    def test_without_push_every_record_read_is_returned_and_the_cursor_stays(self, env):
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        nvd, misp, store = self._fakes()
+        items = run(env, nvd, misp, store, push_to_misp=False)
+        assert sorted(i["cve_id"] for i in items) == sorted(ALL)
+        assert misp.posts == [] and store.writes == []
+
+    def test_a_burst_beyond_the_old_limit_is_taken_whole(self, env):
+        # 1,465 CVEs were published in one hour on 2026-10-13; the old selection took 200 per run.
+        nvd = FakeNvd(_many(2500))
+        misp, store = FakeMisp(), CursorStore("2026-10-14T05:00:00+00:00")
+        status = run(env, nvd, misp, store, limit=None)
+        assert len(misp.added_values()) == 2500 and status["nvd_incremental"]["added"] == 2500
+
+
+# --------------------------------------------------------------------------- baseline and cursor
+class TestBaselineSeedsTheCursor:
+    def _baseline(self, env, misp, store, checkpoint=None):
+        env.setenv("EDGEGUARD_NVD_BASELINE_KEV_SWEEP", "false")
+        env.setattr(nvd_collector, "get_source_incremental", store.get)
+        env.setattr(nvd_collector, "update_source_incremental", store.update)
+        env.setattr(nvd_collector, "get_source_checkpoint", lambda _s: dict(checkpoint or {}))
+        env.setattr(nvd_collector, "update_source_checkpoint", lambda *_a, **_k: None)
+
+        def windows(self, pub_start_iso=None, pub_end_iso=None, start_index=0, limit=2000, extra_params=None):
+            return (
+                [nvd_record(NEW)] if start_index == 0 and pub_end_iso and pub_end_iso.startswith("2026-10-14") else []
+            )
+
+        env.setattr(NVDCollector, "_fetch_cves_batch", windows)
+        writer = MISPWriter(url="https://misp.test", api_key="test", verify_ssl=True)
+        writer.session = misp
+        collector = NVDCollector(misp_writer=writer)
+        collector.check_service_available = lambda: True
+        collector.circuit_breaker = MagicMock()
+        return collector.collect(push_to_misp=True, baseline=True, baseline_days=30)
+
+    def test_a_clean_baseline_starts_the_cursor_at_its_own_start(self, env):
+        store = CursorStore()
+        status = self._baseline(env, FakeMisp(), store)
+        assert status["success"] is True and store.data == {NVD_CURSOR_KEY: NOW.isoformat()}
+
+    def test_a_resumed_baseline_starts_the_cursor_where_the_first_attempt_began(self, env):
+        store = CursorStore()
+        self._baseline(
+            env, FakeMisp(), store, checkpoint={"completed": False, "started_at": "2026-10-13T09:00:00+00:00"}
+        )
+        assert store.data == {NVD_CURSOR_KEY: "2026-10-13T09:00:00+00:00"}
+
+    def test_a_stored_cursor_is_kept(self, env):
+        store = CursorStore("2026-10-01T00:00:00+00:00")
+        self._baseline(env, FakeMisp(), store)
+        assert store.writes == []
+
+    def test_a_failed_push_seeds_nothing(self, env):
+        misp, store = FakeMisp(), CursorStore()
+        with patch.object(MISPWriter, "push_items", return_value=(0, 1)):
+            self._baseline(env, misp, store)
+        assert store.writes == []
+
+
+def test_nvd_applies_its_own_per_run_cap_not_the_incremental_limit(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 0)
+    assert config.get_effective_limit("nvd") is None
+    monkeypatch.setattr(config, "MAX_ENTRIES_PER_SOURCE", 50)
+    assert config.get_effective_limit("nvd") == 50, "EDGEGUARD_MAX_ENTRIES still applies"
+
+
+@pytest.mark.parametrize(
+    "name, raw, function, expected",
+    [
+        ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "0", "nvd_incremental_days", 1),
+        ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "x", "nvd_incremental_days", 14),
+        ("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", "-5", "nvd_cursor_overlap_seconds", 0),
+        ("EDGEGUARD_NVD_MAX_PER_RUN", "0", "nvd_max_per_run", 1),
+        ("EDGEGUARD_NVD_UPDATE_EXISTING", "no", "nvd_update_existing", False),
+    ],
+)
+def test_settings_are_bounded(monkeypatch, name, raw, function, expected):
+    import config
+
+    monkeypatch.setenv(name, raw)
+    assert getattr(config, function)() == expected

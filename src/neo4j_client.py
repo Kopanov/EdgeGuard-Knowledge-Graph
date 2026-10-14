@@ -2810,6 +2810,16 @@ class Neo4jClient:
                 _clean = [str(x) for x in _val if x is not None and str(x) != ""]
                 if _clean:  # never overwrite an existing list with an empty one
                     extra_props[_list_prop] = _clean
+        # 2026-10: NVD's record status (``["rejected"]`` or ``["active"]``, from ``NVD_META``) on the
+        # node, replaced on every write so a rejection that arrives with an update reaches the graph.
+        # Before, it stayed in ``SOURCED_FROM.raw_data`` only (0 of 141,730 CVE nodes had it on
+        # 2026-10-14; 3,963 were rejected). Written only when the item carries one: CISA and OTX CVE
+        # items do not, so they cannot reset it.
+        _status = data.get("status")
+        if isinstance(_status, list):
+            _status_clean = [str(x) for x in _status if x is not None and str(x) != ""]
+            if _status_clean:
+                extra_props["status"] = _status_clean
 
         ok = self.merge_node_with_source("CVE", key_props, data, source_id, extra_props=extra_props or None)
         if not ok:

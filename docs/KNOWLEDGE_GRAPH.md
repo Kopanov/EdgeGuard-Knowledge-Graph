@@ -123,7 +123,7 @@ A curated package is a set of claims about entities already in the graph (actor 
 - `n.tlp` on every EdgeGuard node (from the `tlp:<level>` MISP tag; default `white`).
 - `n.attack_domain` (`enterprise` | `ics`) on `Technique` and `Tactic` (from the `attack-domain:<domain>` MISP tag); `IN_TACTIC` is created only within the same domain. ATT&CK for ICS is ingested when `EDGEGUARD_ENABLE_MITRE_ICS=true` (97 techniques T08xx, 12 tactics TA0100–TA0111, shared groups/malware keep one node with unioned technique lists).
 - `edgeguard_managed = true` on every EdgeGuard edge and on every node EdgeGuard **creates** (stamped on the MERGE create path only since 2026-10; a node a partner created first that EdgeGuard writes to gets `edgeguard_enriched = true` instead) — so `edgeguard clear neo4j --edgeguard-only` removes exactly the nodes EdgeGuard created from a shared database, and the APIs / STIX export expose nodes it created or enriched.
-- `CVE` nodes carry `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]`, `reference_urls[]`, `affected_products[]` from NVD (ResilMesh CVE properties).
+- `CVE` nodes carry `cwe[]`, `ref_tags[]`, `cpe_type[]`, `result_impacts[]`, `reference_urls[]`, `affected_products[]` from NVD (ResilMesh CVE properties), and `status[]` (2026-10): NVD's record status, `["active"]` or `["rejected"]`, replaced when NVD changes it.
 
 ### Technique edges: attribution vs capability vs observation
 

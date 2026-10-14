@@ -423,6 +423,7 @@ This answers: *"Log4Shell affects which of our hosts, and what missions depend o
 | `ref_tags` | LIST OF STRING | ✅ `ref_tags` (e.g. `["Vendor Advisory"]`) | Aligned |
 | `cpe_type` | LIST OF STRING | ✅ `cpe_type` (e.g. `["a", "o"]`) | Aligned |
 | `result_impacts` | LIST OF STRING | ✅ `result_impacts` (CIA values) | Aligned |
+| `status` | — (on `Vulnerability`: LIST OF STRING) | ✅ `status` (`["active"]` / `["rejected"]`, NVD's record status) | EdgeGuard extension (2026-10) |
 
 > **2026-10:** `cwe`, `ref_tags`, `cpe_type` and `result_impacts` (plus `reference_urls`, `affected_products`) are written on the `CVE` node by `merge_cve` whenever NVD provides them. On the 2026-09 baseline they existed only inside `SOURCED_FROM.raw_data` (0 of 139,410 CVE nodes carried `c.cwe`), so a ResilMesh consumer reading `c.cwe` got nothing; the conformance check of 2026-10-09 caught it.
 

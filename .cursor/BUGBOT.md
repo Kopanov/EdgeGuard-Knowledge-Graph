@@ -145,6 +145,10 @@ Flag any collector that uses a hardcoded absolute date instead of a relative off
 Flag any comparison of a timestamp parsed from a source payload with a timezone-aware datetime when the parsed value is not normalised first (`tzinfo is None` → UTC). NVD and OTX send timestamps without a zone; the comparison raises `TypeError`, and inside a broad `except` the check silently never runs (the former NVD/OTX sector time-range filter, removed 2026-10).
 Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`).
 
+### Incremental cursor moved past work that did not reach MISP
+A collector with an incremental cursor advances it only over work whose MISP writes succeeded: OTX to the last pulse it pushed, CISA ICS and NVD only after a run without a failed write. NVD (2026-10) also requires the lastMod window to have been read completely, and moves the cursor at most to the record where `EDGEGUARD_NVD_MAX_PER_RUN` stopped the run.
+Flag a cursor update that runs before, or regardless of, the result of the push or the edits. Flag an NVD change that brings back a newest-N selection by publication date (37% of new CVEs lost in a 30-day replay, 2026-10-14), or that re-adds a changed CVE as a new attribute instead of editing the stored one (`MISPWriter.update_attribute`).
+
 ### Collector missing status return
 Every `collect()` method must return a status dict using `make_status()` from `src/collectors/collector_utils.py`.
 Flag collectors that return `None`, `{}`, or ad-hoc dicts that don't match the standard schema.

@@ -10,6 +10,7 @@ import sys
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import hashlib
 import json
 import logging
 import math
@@ -18,7 +19,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import requests
 import urllib3
@@ -458,6 +459,96 @@ _TRANSIENT_HTTP_ERRORS = (
 )
 
 
+class KnownAttribute(NamedTuple):
+    """An attribute MISP already holds (``MISPWriter.index_source_attributes``)."""
+
+    uuid: str
+    event_id: str
+    # Digest of the ``NVD_META`` comment (``nvd_meta_digest``); None when the comment has none.
+    meta_digest: Optional[str]
+    tags: Tuple[str, ...]
+
+
+_NVD_META_PREFIX = "NVD_META:"
+# ``NVD_META`` lists whose order carries no meaning. They are compared sorted: before 2026-10 the
+# NVD collector built them from sets, so a stored copy can list the same values in another order.
+_NVD_META_UNORDERED_KEYS = ("cwe", "ref_tags", "cpe_type", "affected_products")
+# Tag families that describe NVD's current score: an update replaces them.
+_REPLACED_VULNERABILITY_TAG_PREFIXES = ("severity:", "cvss:")
+
+
+def nvd_meta_digest(meta: Dict[str, Any]) -> str:
+    """Digest of an ``NVD_META`` payload, for telling a changed CVE from an unchanged one.
+
+    ``last_modified`` is left out: NVD moves it for changes to data EdgeGuard does not store
+    (translations, SSVC, CNA product data), and such a change needs no MISP edit.
+    """
+    data = json.loads(json.dumps(meta, default=str))
+    data.pop("last_modified", None)
+    for key in _NVD_META_UNORDERED_KEYS:
+        value = data.get(key)
+        if isinstance(value, list):
+            data[key] = sorted(value, key=lambda v: json.dumps(v, sort_keys=True))
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _nvd_meta_digest_of_comment(comment: Any) -> Optional[str]:
+    """``nvd_meta_digest`` of an attribute comment, or None when it carries no readable ``NVD_META``."""
+    if not isinstance(comment, str) or not comment.startswith(_NVD_META_PREFIX):
+        return None
+    try:
+        meta = json.loads(comment[len(_NVD_META_PREFIX) :])
+    except ValueError:
+        return None
+    return nvd_meta_digest(meta) if isinstance(meta, dict) else None
+
+
+def _bmp_only(text: str) -> str:
+    """*text* without characters outside the Basic Multilingual Plane.
+
+    MISP's MySQL/MariaDB text columns are 3-byte utf8: an edit whose comment holds a 4-byte
+    character (an emoji, say) fails with HTTP 500 on every attempt.
+    """
+    return "".join(ch for ch in text if ord(ch) <= 0xFFFF)
+
+
+def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """Tags to attach and to detach so a stored CVE attribute matches a rebuilt one.
+
+    ``severity:`` and ``cvss:`` tags describe NVD's current score and are replaced. Zone, KEV,
+    ransomware and source tags are only added: zones accumulate on the graph node, so detaching a
+    zone tag would not remove the zone there. ``zone:Global`` is added only to an attribute with no
+    zone tag (a sector tag already says more). A ``tlp:`` tag is added only when the attribute has
+    none (someone may have raised it in MISP). Tags of any other family are left alone.
+    """
+    current_set = set(current)
+    has_tlp = any(tag.startswith("tlp:") for tag in current_set)
+    has_zone = any(tag.startswith("zone:") for tag in current_set)
+    attach: List[str] = []
+    for tag in desired:
+        if tag in current_set or tag in attach:
+            continue
+        if (has_tlp and tag.startswith("tlp:")) or (has_zone and tag.lower() == "zone:global"):
+            continue
+        attach.append(tag)
+    desired_set = set(desired)
+    detach = sorted(
+        tag for tag in current_set if tag.startswith(_REPLACED_VULNERABILITY_TAG_PREFIXES) and tag not in desired_set
+    )
+    return attach, detach
+
+
+def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any]) -> bool:
+    """Whether MISP's answer to an attribute edit shows the comment and the tag changes."""
+    if "comment" in changes and stored.get("comment") != changes["comment"]:
+        return False
+    names = {str(tag.get("name")) for tag in stored.get("Tag") or [] if isinstance(tag, dict)}
+    for tag in changes.get("Tag") or []:
+        if bool(tag.get("deleted")) == (tag.get("name") in names):
+            return False
+    return True
+
+
 def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     """``(type, value)`` key used to recognise a pushed attribute in a MISP event response.
 
@@ -733,6 +824,8 @@ class MISPWriter:
             "batches_sent": 0,
             "errors": 0,
             "attrs_skipped_existing": 0,
+            # Attributes edited in place (NVD incremental runs, 2026-10).
+            "attributes_updated": 0,
             # Batches MISP answered with HTTP 200 but without an attribute list, so the
             # attempted count could not be verified against the stored event.
             "batches_unverified": 0,
@@ -996,6 +1089,106 @@ class MISPWriter:
         if keys:
             logger.debug("MISP event %s: prefetched %s existing attribute keys", eid, len(keys))
         return keys
+
+    def index_source_attributes(self, source_tag: str, attr_type: str) -> Dict[str, List[KnownAttribute]]:
+        """Every ``attr_type`` attribute MISP holds under ``source_tag``, by upper-case value.
+
+        NVD incremental runs (2026-10) use it to tell a new CVE from a known one and to compare a
+        known CVE with NVD's current record. Each attribute keeps its uuid, event, tag names and a
+        digest of its ``NVD_META`` comment; the comments themselves are not kept (the 140,000 NVD
+        attributes of the 730-day baseline carry about 0.5 GB of them).
+
+        Unlike the duplicate prefetch, which degrades to a partial key set, this listing is complete
+        or the call fails: a CVE missing from a partial listing would be pushed again as new.
+        Raises ``MispTransientError`` (timeout, connection error, HTTP 429 or 5xx after retries) or
+        ``MispLookupError`` (any other unusable answer).
+        """
+        tag = (source_tag or "").strip()
+        if not tag:
+            raise MispLookupError("index_source_attributes needs a source tag")
+        index: Dict[str, List[KnownAttribute]] = {}
+        page = 1
+        page_limit = 5000
+        max_pages = 400
+        listed = 0
+        while True:
+            if page > max_pages:
+                raise MispLookupError(
+                    f"MISP lists more than {max_pages * page_limit} {attr_type} attributes under {tag}; listing stopped"
+                )
+            response = self._post_with_retries(
+                f"{self.url}/attributes/restSearch",
+                {"returnFormat": "json", "tags": [tag], "type": attr_type, "page": page, "limit": page_limit},
+                context=f"attribute listing {tag} page {page}",
+            )
+            if response.status_code != 200:
+                raise MispLookupError(
+                    f"MISP attributes/restSearch for {tag} page {page} answered HTTP {response.status_code}"
+                )
+            try:
+                data = response.json()
+            except ValueError as e:
+                raise MispLookupError(f"MISP attributes/restSearch for {tag} page {page} is not JSON") from e
+            resp = data.get("response", data) if isinstance(data, dict) else data
+            attrs: List = []
+            if isinstance(resp, list):
+                attrs = resp
+            elif isinstance(resp, dict):
+                raw = resp.get("Attribute")
+                if isinstance(raw, list):
+                    attrs = raw
+                elif isinstance(raw, dict):
+                    attrs = [raw]
+            for attr in attrs:
+                if not isinstance(attr, dict):
+                    continue
+                value = str(attr.get("value") or "").strip().upper()
+                uuid = str(attr.get("uuid") or "").strip()
+                if not value or not uuid:
+                    continue
+                tags = tuple(
+                    sorted(str(t.get("name")) for t in attr.get("Tag") or [] if isinstance(t, dict) and t.get("name"))
+                )
+                index.setdefault(value, []).append(
+                    KnownAttribute(
+                        uuid=uuid,
+                        event_id=str(attr.get("event_id") or ""),
+                        meta_digest=_nvd_meta_digest_of_comment(attr.get("comment")),
+                        tags=tags,
+                    )
+                )
+                listed += 1
+            if len(attrs) < page_limit:
+                break
+            page += 1
+        logger.info("MISP: %d %s attribute(s) under %s (%d distinct values)", listed, attr_type, tag, len(index))
+        return index
+
+    def _post_with_retries(self, url: str, payload: Dict[str, Any], *, context: str, attempts: int = 3):
+        """POST *payload*; a timeout, connection error, HTTP 429 or 5xx is retried (5 s, then 10 s).
+
+        Returns the response of the first attempt that is not transient. Raises
+        ``MispTransientError`` when every attempt was.
+        """
+        last_problem = ""
+        for attempt in range(attempts):
+            try:
+                response = self.session.post(
+                    url,
+                    json=payload,
+                    verify=self.verify_ssl,
+                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT * 2),
+                )
+            except _TRANSIENT_HTTP_ERRORS as e:
+                last_problem = f"{type(e).__name__}: {e}"
+            else:
+                if response.status_code != 429 and response.status_code < 500:
+                    return response
+                last_problem = f"HTTP {response.status_code}"
+            logger.warning("MISP %s: %s (attempt %d of %d)", context, last_problem, attempt + 1, attempts)
+            if attempt + 1 < attempts:
+                time.sleep(5.0 * (2**attempt))
+        raise MispTransientError(f"MISP {context} failed after {attempts} attempts: {last_problem}")
 
     @retry_with_backoff(max_retries=4, base_delay=10.0)
     def _get_or_create_event(self, source: str, date: str = None, **_kwargs) -> Optional[str]:
@@ -1525,6 +1718,80 @@ class MISPWriter:
         _apply_source_truthful_timestamps(attribute, vuln)
         return attribute
 
+    def plan_vulnerability_update(
+        self, vuln: Dict, known: Sequence[KnownAttribute]
+    ) -> List[Tuple[KnownAttribute, Dict[str, Any]]]:
+        """The edits that bring MISP's stored copies of a CVE in line with the vulnerability item.
+
+        The item is turned into the attribute a new push would write (``create_vulnerability_attribute``)
+        and compared with each stored copy: ``NVD_META`` by digest (``nvd_meta_digest``, so a change
+        only to ``last_modified`` needs no edit) and the tags by family (``_vulnerability_tag_changes``).
+        Each copy that differs gets one edit: the new comment, ``first_seen`` / ``last_seen``, and the
+        tags to attach or detach. Empty when every copy matches.
+        """
+        attribute = self.create_vulnerability_attribute(vuln)
+        if not attribute:
+            return []
+        comment = _bmp_only(str(attribute.get("comment") or ""))
+        digest = _nvd_meta_digest_of_comment(comment)
+        desired_tags = [
+            str(tag["name"]) for tag in attribute.get("Tag", []) if isinstance(tag, dict) and tag.get("name")
+        ]
+        plans: List[Tuple[KnownAttribute, Dict[str, Any]]] = []
+        for stored in known:
+            attach, detach = _vulnerability_tag_changes(stored.tags, desired_tags)
+            if stored.meta_digest == digest and not attach and not detach:
+                continue
+            changes: Dict[str, Any] = {"comment": comment}
+            for key in ("first_seen", "last_seen"):
+                if attribute.get(key):
+                    changes[key] = attribute[key]
+            tag_changes = [{"name": tag} for tag in attach] + [{"name": tag, "deleted": True} for tag in detach]
+            if tag_changes:
+                changes["Tag"] = tag_changes
+            plans.append((stored, changes))
+        return plans
+
+    def update_attribute(self, uuid: str, changes: Dict[str, Any]) -> bool:
+        """Edit one attribute in place (``POST /attributes/edit/{uuid}``); True when MISP shows the edit.
+
+        MISP 2.5 saves the attribute with a new timestamp and moves its event's timestamp
+        (``AttributesController::edit`` → ``unpublishEvent``), so the incremental MISP → Neo4j sync
+        picks the change up. Tags in ``changes["Tag"]`` are attached, those marked ``deleted``
+        detached. A timeout, connection error, HTTP 429 or 5xx is retried twice; MISP's answer must
+        then show the new comment and the tag changes, or the edit counts as failed.
+        """
+        uid = sanitize_value(str(uuid), max_length=64)
+        if not uid:
+            return False
+        try:
+            response = self._post_with_retries(
+                f"{self.url}/attributes/edit/{uid}", {"Attribute": changes}, context=f"edit of attribute {uid}"
+            )
+        except MispTransientError as e:
+            self.stats["errors"] += 1
+            logger.error("[UPDATE-FAILED] attribute %s: %s", uid, e)
+            return False
+        if response.status_code != 200:
+            self.stats["errors"] += 1
+            logger.error(
+                "[UPDATE-FAILED] attribute %s: HTTP %s — %s", uid, response.status_code, (response.text or "")[:300]
+            )
+            return False
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        stored = body.get("Attribute") if isinstance(body, dict) else None
+        if not isinstance(stored, dict) or not _edit_confirmed(stored, changes):
+            self.stats["attributes_unconfirmed"] = self.stats.get("attributes_unconfirmed", 0) + 1
+            logger.error(
+                "[UNCONFIRMED-EDIT] attribute %s: MISP answered HTTP 200 but its answer does not show the edit", uid
+            )
+            return False
+        self.stats["attributes_updated"] = self.stats.get("attributes_updated", 0) + 1
+        return True
+
     def create_malware_attribute(self, malware: Dict) -> Optional[Dict]:
         """
         Create a MISP attribute from an EdgeGuard malware entry.
@@ -1890,7 +2157,13 @@ class MISPWriter:
         _apply_source_truthful_timestamps(attribute, tool)
         return attribute
 
-    def push_items(self, items: List[Dict], batch_size: int = 500) -> Tuple[int, int]:
+    def push_items(
+        self,
+        items: List[Dict],
+        batch_size: int = 500,
+        *,
+        known_source_keys: Optional[Dict[str, set]] = None,
+    ) -> Tuple[int, int]:
         """
         Push a list of items to MISP in batches.
 
@@ -1901,6 +2174,9 @@ class MISPWriter:
                 dial the batch size down without a code change if MISP is
                 choking on large pushes (e.g. the 22% HTTP 500 failure rate
                 observed on the 730-day NVD baseline).
+            known_source_keys: ``{source_tag: {(type, value), ...}}`` the caller has already
+                listed (2026-10, NVD incremental runs via ``index_source_attributes``); used in
+                place of the cross-event prefetch for that tag, so MISP is not listed twice.
 
         Returns:
             Tuple of (successful_count, failed_count)
@@ -2068,7 +2344,10 @@ class MISPWriter:
             # one cache entry, which is what the prefetch cost model expects.
             source_tag = self.SOURCE_TAGS.get(source, f"source:{source}")
             if source_tag not in cross_event_cache:
-                cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(source_tag)
+                if known_source_keys is not None and source_tag in known_source_keys:
+                    cross_event_cache[source_tag] = set(known_source_keys[source_tag])
+                else:
+                    cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(source_tag)
             cross_event_keys = cross_event_cache[source_tag]
 
             before_ct = len(unique_attrs)
@@ -2705,6 +2984,7 @@ class MISPWriter:
             "batches_sent": 0,
             "errors": 0,
             "attrs_skipped_existing": 0,
+            "attributes_updated": 0,
             "batches_unverified": 0,
             "attributes_unconfirmed": 0,
         }

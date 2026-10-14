@@ -80,7 +80,8 @@ def test_get_effective_limit_negative_override_is_not_a_limit(monkeypatch: pytes
     import config
 
     importlib.reload(config)
-    assert config.get_effective_limit("nvd") == 200
+    # otx: a source under the generic incremental limit (NVD applies its own per-run cap, 2026-10)
+    assert config.get_effective_limit("otx") == 200
 
 
 def test_misp_spt_passes_none_when_global_max_zero(
