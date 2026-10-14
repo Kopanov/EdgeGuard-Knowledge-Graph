@@ -420,7 +420,9 @@ def _confidence_respect_calibrator(value) -> str:
 
 # Configuration constants
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
-NEO4J_READ_TIMEOUT = 300  # seconds (5 min; 120s was too low for 441K-node graph)
+# seconds; 120 s was too low for a 441K-node graph and 300 s for the 730-day "Indicator -> Malware
+# (family match)" link query (289 s on 2026-10-13, 316 s with MalwareBazaar and ATT&CK for ICS added).
+NEO4J_READ_TIMEOUT = int(os.getenv("EDGEGUARD_NEO4J_READ_TIMEOUT", "900"))
 _REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
 
 # Every column ``apoc.periodic.iterate`` yields that a caller needs to judge a batched step.

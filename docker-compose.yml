@@ -106,6 +106,12 @@ x-common-env: &common-env
   EDGEGUARD_NVD_BASELINE_KEV_SWEEP: ${EDGEGUARD_NVD_BASELINE_KEV_SWEEP:-true}
   EDGEGUARD_NVD_EXTRA_CVE_IDS: ${EDGEGUARD_NVD_EXTRA_CVE_IDS:-}
   EDGEGUARD_DEFAULT_TLP: ${EDGEGUARD_DEFAULT_TLP:-white}
+  # Incremental MISP -> Neo4j sync writes only attributes changed in the window
+  # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
+  EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}
+  # Client-side timeout (seconds) for Neo4j read/relationship queries (src/neo4j_client.py).
+  # int() of the value, so compose carries the code default rather than an empty string.
+  EDGEGUARD_NEO4J_READ_TIMEOUT: ${EDGEGUARD_NEO4J_READ_TIMEOUT:-900}
   EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE: ${EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE:-true}
   # 2026-10 configuration forwarding (production-readiness check): variables read by the code
   # that never reached the containers. Set-but-empty keeps the code default in every case below.
