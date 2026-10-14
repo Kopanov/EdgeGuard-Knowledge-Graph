@@ -2845,6 +2845,8 @@ class Neo4jClient:
             self._merge_cvss_node(
                 cve_id, tag, "CVSSv2", "HAS_CVSS_v2", data["cvss_v2_data"], misp_event_id=data.get("misp_event_id")
             )
+        # Last step: any code that adds or removes CVSS sub-nodes of this CVE must run before it,
+        # or the node keeps a score derived from sub-nodes that no longer apply.
         self._set_cve_score_from_cvss(cve_id)
         return True
 
