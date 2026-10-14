@@ -488,6 +488,26 @@ class TestIncrementalRun:
         status = run(env, nvd, misp, store)
         assert status["nvd_incremental"]["failed"] == 1 and store.writes == []
 
+    @pytest.mark.parametrize(
+        "throttle, pauses", [("2.5", [2.5, 2.5]), ("0", []), ("not a number", [5.0, 5.0])], ids=["set", "off", "bad"]
+    )
+    def test_edits_pause_like_push_items_batches(self, env, throttle, pauses):
+        # 120 stored CVEs NVD changed: EDGEGUARD_MISP_BATCH_THROTTLE_SEC after every 50 edits, not
+        # after the last (Bugbot on #186: the edits had no pause, push_items' batches have one).
+        env.setenv("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", throttle)
+        sleeps: list = []
+        env.setattr(nvd_collector.time, "sleep", sleeps.append)
+        records, attributes = [], []
+        for n in range(120):
+            cve_id = f"CVE-2026-9{n:04d}"
+            records.append(nvd_record(REJECTED, id=cve_id))
+            attr = stored_attribute(REJECTED)
+            attr.update(value=cve_id, uuid=str(uuid.UUID(int=n + 1)), id=str(4000000 + n))
+            attributes.append(attr)
+        status = run(env, FakeNvd(records), FakeMisp(attributes), CursorStore("2026-10-13T13:00:00+00:00"))
+        assert status["nvd_incremental"]["updated"] == 120 and status["success"] is True
+        assert sleeps == pauses
+
     def test_listing_failure_writes_nothing_and_keeps_the_cursor(self, env):
         nvd, misp, store = self._fakes(cursor="2026-10-13T12:00:00+00:00")
         misp.listing_status = 503

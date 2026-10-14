@@ -539,6 +539,24 @@ def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -
     return attach, detach
 
 
+# 2026-10: attribute edits pause like ``push_items`` batches: ``EDGEGUARD_MISP_BATCH_THROTTLE_SEC``
+# after every ``EDITS_PER_THROTTLE`` edits. 50 is the batch size ``push_items`` uses on events above
+# 100,000 attributes, where the copies of the NVD baseline are.
+EDITS_PER_THROTTLE = 50
+
+
+def misp_batch_throttle_seconds() -> float:
+    """``EDGEGUARD_MISP_BATCH_THROTTLE_SEC`` as ``push_items`` reads it (default 5.0, also for a value
+    that is not a number); negative means no pause, a non-finite value the default."""
+    try:
+        value = float(os.environ.get("EDGEGUARD_MISP_BATCH_THROTTLE_SEC", "5.0"))
+    except (TypeError, ValueError):
+        return 5.0
+    if not math.isfinite(value):
+        return 5.0
+    return max(0.0, value)
+
+
 def _edited_attribute(body: Any) -> Optional[Dict[str, Any]]:
     """The attribute in MISP's answer to ``POST /attributes/edit/{uuid}``, with its tags under ``Tag``.
 

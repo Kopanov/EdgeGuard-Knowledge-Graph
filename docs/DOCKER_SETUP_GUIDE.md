@@ -204,7 +204,7 @@ The pipeline includes built-in throttling to pace writes to MISP:
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Seconds to pause between each batch of 500 attributes pushed to MISP. Prevents rapid-fire POSTs from overwhelming Apache. |
+| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Seconds to pause between each batch of 500 attributes pushed to MISP, and after every 50 attribute edits of an NVD incremental run. Prevents rapid-fire POSTs from overwhelming Apache. |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Seconds to pause between fetching consecutive MISP events during sync. Gives MISP time to free memory after serving large events. |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Events exceeding this attribute count are deferred to the end of sync. Smaller events (MITRE, CISA) process first so critical data lands even if a large event OOM-kills the worker. |
 

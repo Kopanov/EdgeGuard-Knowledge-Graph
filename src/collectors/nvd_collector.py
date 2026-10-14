@@ -62,7 +62,13 @@ from collectors.collector_utils import (
 )
 
 # Import MISP writer
-from collectors.misp_writer import MispLookupError, MispTransientError, MISPWriter
+from collectors.misp_writer import (
+    EDITS_PER_THROTTLE,
+    MispLookupError,
+    MispTransientError,
+    MISPWriter,
+    misp_batch_throttle_seconds,
+)
 from config import (
     NVD_API_KEY,
     SOURCE_TAGS,
@@ -933,12 +939,16 @@ class NVDCollector:
                 added, add_failed = len(values) - len(missing), len(missing)
                 not_written.extend(missing)
         updated = update_failed = 0
-        for cve_id, stored_copy, changes in edits:
+        pause = misp_batch_throttle_seconds()
+        for done, (cve_id, stored_copy, changes) in enumerate(edits, 1):
             if self.misp_writer.update_attribute(stored_copy.uuid, changes):
                 updated += 1
             else:
                 update_failed += 1
                 not_written.append(cve_id)
+            if pause and done % EDITS_PER_THROTTLE == 0 and done < len(edits):
+                # Paced like push_items' batches: EDGEGUARD_MISP_BATCH_THROTTLE_SEC after every 50 edits.
+                time.sleep(pause)
         failed = add_failed + update_failed
 
         new_cursor = stopped_at or now

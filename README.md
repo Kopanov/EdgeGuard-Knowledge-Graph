@@ -941,7 +941,7 @@ Use this when **`200`** or **`500`** in docs/code look contradictory.
 | `AIRFLOW_POSTGRES_PASSWORD` | **Docker Compose only** — password for that role (use a strong value in production) | `airflow` |
 | `AIRFLOW_POSTGRES_DB` | **Docker Compose only** — database name | `airflow` |
 | `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` | Bare-metal / custom Airflow: SQLAlchemy URI for metadata (PostgreSQL or MySQL). Compose sets this automatically. | *(Compose: set by `docker-compose.yml`)* |
-| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | Pause (seconds) between each batch of 500 attributes pushed to MISP. Prevents memory exhaustion on large events. | `5.0` |
+| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | Pause (seconds) between each batch of 500 attributes pushed to MISP, and after every 50 attribute edits of an NVD incremental run. Prevents memory exhaustion on large events. | `5.0` |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | Pause (seconds) between fetching consecutive MISP events during sync. | `2.0` |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | MISP→Neo4j sync: events exceeding this attribute count are **deferred** to the end of the sync run (smaller events process first). Prevents large events from OOM-killing the worker before critical data lands. Set to `0` to disable. | `50000` |
 | `EDGEGUARD_DEV_MODE` | Enable console trace output (dev only) | *(unset)* |
