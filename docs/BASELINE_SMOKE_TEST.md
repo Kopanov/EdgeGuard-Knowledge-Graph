@@ -38,7 +38,7 @@ Check the **`baseline_start`** task log: it prints the effective **Item limit** 
 
 ### 4. After the test
 
-Remove or comment out the two lines in **`.env`**, restart Airflow again, and use **Admin → Variables** (`BASELINE_DAYS`, `BASELINE_COLLECTION_LIMIT`) for production, **or** leave defaults (730 days, unlimited cap).
+Remove or comment out the two lines in **`.env`**, restart Airflow again, and use **Admin → Variables** (`BASELINE_DAYS`, `BASELINE_COLLECTION_LIMIT`) for production, **or** leave defaults (730 days, unlimited cap). A test value of `EDGEGUARD_BASELINE_DAYS` left in place also narrows the scheduled NVD runs (2026-10): they add only CVEs published within that many days, on KEV, or named in `EDGEGUARD_NVD_EXTRA_CVE_IDS` ([COLLECTORS.md § 2](COLLECTORS.md#2-nvd-collector)).
 
 Starting the real run with `edgeguard fresh-baseline --days 730 --wipe-all`: the stores now hold the test data, so the command asks for a recent backup (`EDGEGUARD_LAST_BACKUP_AT`, at most 240 hours old) and stops with `BACKUP GATE FAILED` without it. Record a backup (see [BACKUP.md](BACKUP.md)), or, when the stores hold nothing but the test data, add `--skip-backup-check`. On empty stores the check is skipped. The baseline's first task, `source_key_check`, then reports which keyed sources will deliver; `python src/source_key_check.py` gives the same answer beforehand.
 
