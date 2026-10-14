@@ -734,8 +734,8 @@ _TI_GRAPHRAG = [
     CatalogQuery(
         "ti-campaign-graph",
         "threat_intel",
-        "Campaign membership: actor RUNS campaign, members PART_OF it",
-        "MATCH (a:ThreatActor)-[:RUNS]->(c:Campaign)<-[:PART_OF]-(x) "
+        "Campaign membership: actor RUNS campaign, members PART_OF_CAMPAIGN it",
+        "MATCH (a:ThreatActor)-[:RUNS]->(c:Campaign)<-[:PART_OF_CAMPAIGN]-(x) "
         "RETURN c.name AS campaign, a.name AS actor, labels(x)[0] AS member_label, "
         "count(*) AS members ORDER BY members DESC LIMIT 15",
         expect_keys=("campaign", "actor", "member_label", "members"),

@@ -149,7 +149,7 @@ Used by every MISP-derived edge MERGE in the codebase, including:
 - All 20 link steps in `src/build_relationships.py`
 - The REFERS_TO bridge in `src/enrichment_jobs.py`
 - The HAS_CVSS_v* edges in `Neo4jClient._merge_cvss_node`
-- The RUNS / PART_OF edges in `enrichment_jobs.build_campaign_nodes`
+- The RUNS / PART_OF_CAMPAIGN edges in `enrichment_jobs.build_campaign_nodes`
 
 The pattern: every endpoint has been MERGEd (and stamped with `n.uuid`)
 upstream by the time the edge MERGE runs, so the SET reads the live value

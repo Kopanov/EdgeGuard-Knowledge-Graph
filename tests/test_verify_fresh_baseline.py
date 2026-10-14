@@ -362,7 +362,9 @@ class TestRealBreakageStillFails:
         _run(vfb, monkeypatch, override=capture)
         assert "SOURCED_FROM" not in vfb.PROVENANCE_REL_TYPES and "INVOLVES" not in vfb.PROVENANCE_REL_TYPES
         assert "USES_TECHNIQUE" in vfb.PROVENANCE_REL_TYPES and "HAS_CVSS_v31" in vfb.PROVENANCE_REL_TYPES
-        assert "'Campaign' IN labels(endNode(r))" in seen["st"], "ResilMesh's own PART_OF edges are not ours"
+        # 2026-10: campaign membership is PART_OF_CAMPAIGN; PART_OF is ResilMesh's asset hierarchy.
+        assert "PART_OF_CAMPAIGN" in vfb.PROVENANCE_REL_TYPES and "PART_OF" not in vfb.PROVENANCE_REL_TYPES
+        assert "$types" in seen["st"]
 
     def test_scalar_provenance_lists_fail(self, vfb, monkeypatch):
         # The 730-day graph of 2026-10-14: 21 ATTRIBUTED_TO edges with ``sources`` as a string

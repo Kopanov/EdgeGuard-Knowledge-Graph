@@ -94,6 +94,9 @@ EDGEGUARD_REL_TYPES = (
     "USES_MALWARE",
     "USES_TOOL",
     "RUNS",
+    "PART_OF_CAMPAIGN",  # 2026-10: was PART_OF, ResilMesh's name for its asset hierarchy
+    # PART_OF (IP → Subnet, OrganizationUnit hierarchy) is ResilMesh's; EdgeGuard writes it only
+    # for the asset model on alert ingestion, so none exist on a baseline.
     "PART_OF",
     "REFERS_TO",
     "HAS_CVSS_v2",
@@ -107,9 +110,9 @@ EDGEGUARD_REL_TYPES = (
 )
 # Relationships built from the sources, which must say who asserts them (2026-10 relationship
 # provenance: ``r.sources`` / ``r.source_refs`` / ``r.misp_event_ids``). Not SOURCED_FROM (the
-# per-source node edge, ``r.source``) and not INVOLVES (alert edges carry no source claim);
-# PART_OF only towards EdgeGuard's Campaign nodes (ResilMesh uses PART_OF too).
-PROVENANCE_REL_TYPES = tuple(t for t in EDGEGUARD_REL_TYPES if t not in ("SOURCED_FROM", "INVOLVES"))
+# per-source node edge, ``r.source``), not INVOLVES (alert edges carry no source claim) and not
+# PART_OF (ResilMesh's asset hierarchy).
+PROVENANCE_REL_TYPES = tuple(t for t in EDGEGUARD_REL_TYPES if t not in ("SOURCED_FROM", "INVOLVES", "PART_OF"))
 # Labels parsed from MISP attributes — the only nodes that carry ``tlp`` (the tag travels
 # with the attribute). Source/Sector/Campaign/CVSS* and the ResilMesh-model nodes written
 # on alert ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but
@@ -402,7 +405,6 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     #     ``size()`` for every consumer.
     unsourced = _post(
         "MATCH ()-[r]->() WHERE type(r) IN $types AND r.edgeguard_managed = true "
-        "AND (type(r) <> 'PART_OF' OR 'Campaign' IN labels(endNode(r))) "
         "AND size(coalesce(r.sources, [])) = 0 "
         "RETURN type(r) AS type, count(*) AS c ORDER BY c DESC",
         {"types": list(PROVENANCE_REL_TYPES)},

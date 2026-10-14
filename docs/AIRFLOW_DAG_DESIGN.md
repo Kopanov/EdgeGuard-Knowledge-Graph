@@ -323,7 +323,7 @@ Materialises `Campaign` nodes from the existing graph structure. A Campaign is c
 ```
 ThreatActor -[:ATTRIBUTED_TO]<- Malware -[:INDICATES]<- Indicator
     ↓                                ↓                       ↓
- [:RUNS]→ Campaign ←───────── [:PART_OF] ←──────── [:PART_OF]
+ [:RUNS]→ Campaign ←── [:PART_OF_CAMPAIGN] ←── [:PART_OF_CAMPAIGN]
 ```
 
 Campaign properties: `name`, `actor_name`, `first_seen`, `last_seen`, `zone`, `indicator_count`, `malware_count`.
