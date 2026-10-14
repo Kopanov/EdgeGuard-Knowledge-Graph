@@ -78,6 +78,11 @@ RETRY_DELAY_BASE = 2  # seconds
 # to 120 consecutive calendar days per request (NIST documented constraint).
 NVD_MAX_PUBLISHED_DATE_RANGE_DAYS = 120
 
+# 2026-10: the baseline's fetch by id (EDGEGUARD_NVD_EXTRA_CVE_IDS) stops after this many failed
+# requests in a row — each failure has already spent its rate-limit back-off, so a long list
+# during an NVD outage would otherwise hold the baseline (and its lock) for hours.
+NVD_EXTRA_MAX_CONSECUTIVE_FAILURES = 3
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -595,13 +600,26 @@ class NVDCollector:
             logger.info("  NVD KEV sweep: %d KEV CVE record(s) (any publication date)", len(records))
         extra_ids = nvd_extra_cve_ids()
         fetched_extra = 0
-        for cve_id in extra_ids:
+        consecutive_failures = 0
+        for position, cve_id in enumerate(extra_ids):
             time.sleep(batch_sleep)
             try:
                 batch = self._fetch_cves_batch(limit=1, extra_params={"cveId": cve_id})
             except NvdBatchFetchError as e:
                 logger.warning("[NVD-EXTRA-CVE] %s not fetched: %s", cve_id, e)
+                consecutive_failures += 1
+                # Each failed request has already spent its rate-limit back-off (minutes on
+                # 429 / 5xx); during an outage a long list would hold the baseline for hours.
+                if consecutive_failures >= NVD_EXTRA_MAX_CONSECUTIVE_FAILURES:
+                    logger.error(
+                        "[NVD-EXTRA-CVE] %d failures in a row — NVD looks unavailable; "
+                        "the remaining %d CVE id(s) are skipped this run",
+                        consecutive_failures,
+                        len(extra_ids) - position - 1,
+                    )
+                    break
                 continue
+            consecutive_failures = 0
             if not batch:
                 logger.warning("[NVD-EXTRA-CVE] %s: NVD has no record", cve_id)
                 continue
