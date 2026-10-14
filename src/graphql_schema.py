@@ -180,9 +180,11 @@ class Vulnerability:
         "Threat Indicator (IP, domain, hash, URL). "
         "Not yet in ISIM GraphQL schema — EdgeGuard extension. "
         "confidence_score decays over time via enrichment jobs. "
-        "misp_event_ids[] / misp_attribute_ids[] / misp_event_urls[] let analysts "
-        "retrieve the full raw MISP context for every event/attribute that contributed "
-        "to this indicator (original attributes, comments, attachments)."
+        "misp_event_ids[] / misp_attribute_ids[] / misp_event_urls[] / misp_attribute_urls[] "
+        "let analysts retrieve the full raw MISP context for every event/attribute that "
+        "contributed to this indicator (original attributes, comments, attachments). "
+        "misp_attribute_urls[] point at the single MISP attribute behind the indicator; "
+        "misp_event_urls[] at the whole event, which for a large source holds 100,000+ attributes."
     )
 )
 class Indicator:
@@ -206,6 +208,10 @@ class Indicator:
     misp_attribute_ids: Optional[List[str]] = None
     # Computed from MISP_URL env + each id in misp_event_ids[]; one URL per event.
     misp_event_urls: Optional[List[str]] = None
+    # Computed from MISP_URL env + each UUID in misp_attribute_ids[]: <MISP_URL>/attributes/view/<uuid>.
+    # A client sending a MISP API key receives exactly that attribute as JSON (value, type, category,
+    # comment metadata, tags, first/last seen); a browser needs a MISP login. Null when MISP_URL is unset.
+    misp_attribute_urls: Optional[List[str]] = None
     # Import audit trail
     first_imported_at: Optional[str] = None
     last_imported_from: Optional[str] = None

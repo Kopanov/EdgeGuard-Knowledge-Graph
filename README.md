@@ -550,6 +550,7 @@ Every MISP-sourced node carries three back-pointers, so analysts can always trac
 | **Attribute-level** (most granular) | `n.misp_attribute_ids[]` — real MISP attribute UUIDs | `GET /attributes/<uuid>` on the MISP API |
 | **Event-level** (coarser, per-event) | `n.misp_event_ids[]` — stringified MISP event IDs | `GET /events/<id>` on the MISP API |
 | **Raw JSON on edge** (no network call) | `(n)-[r:SOURCED_FROM]->(:Source)` with `r.raw_data` | Full pickled MISP-attribute JSON, per-source |
+| **GraphQL, ready-made links** (Indicator) | `mispAttributeUrls[]`, `mispEventUrls[]` | `<MISP_URL>/attributes/view/<uuid>` names the one attribute behind the indicator; `<MISP_URL>/events/view/<id>` opens the whole source event (100,000+ attributes for OTX or NVD). A client sending a MISP API key gets the attribute as JSON; a browser needs a MISP login. Built from the API container's `MISP_URL`, so that address must be one the reader can reach; null when it is unset |
 
 Example — fetch raw MISP data for an Indicator seen in Neo4j:
 
