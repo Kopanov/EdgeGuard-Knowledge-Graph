@@ -36,7 +36,10 @@ FORWARDED = [
     ("EDGEGUARD_VIRUSTOTAL_CANDIDATE_DAYS", "30"),
     ("EDGEGUARD_SOURCE_KEY_CHECK", "true"),  # live source key check (source_key_check.py)
     ("EDGEGUARD_BASELINE_REQUIRED_SOURCES", None),  # empty = no keyed source is mandatory
-    ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # int(os.environ.get(...))
+    ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # lookback of an NVD incremental run without a cursor
+    ("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", "3600"),  # 2026-10 NVD incremental cursor
+    ("EDGEGUARD_NVD_MAX_PER_RUN", "5000"),
+    ("EDGEGUARD_NVD_UPDATE_EXISTING", "true"),
     ("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true"),  # 2026-10 whole KEV catalogue in baseline mode
     ("EDGEGUARD_NVD_BASELINE_KEV_SWEEP", "true"),  # 2026-10 NVD records of every KEV CVE in baseline mode
     ("EDGEGUARD_NVD_EXTRA_CVE_IDS", None),  # 2026-10 CVE ids fetched by id; empty = none

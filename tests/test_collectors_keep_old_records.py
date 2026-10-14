@@ -10,7 +10,7 @@ written with a ``Z``.
 
 The filter is removed, not repaired. What a run collects is decided by its request: a baseline's
 publication windows of ``baseline_days`` (plus the NVD KEV sweep and named ids, whatever their
-age), NVD's lastMod window with newest-first selection, OTX's ``modified_since``. A working filter
+age), NVD's lastMod window since the run's cursor, OTX's ``modified_since``. A working filter
 would have cut the oldest hours of every baseline and any baseline longer than 24 months, dropped
 the older records of the NVD KEV sweep unless exempted, and dropped OTX pulses created long ago
 that are still updated, such as the real pulse below (created 2023-01-25, modified 2026-10-13; 42
@@ -147,13 +147,18 @@ def _nvd_collector() -> NVDCollector:
 class TestNvdKeepsOldCves:
     @_ZONE
     def test_incremental_run_keeps_an_old_cve_whose_record_changed(self, zone):
-        # An incremental run asks NVD for the CVEs modified in its lastMod window; Log4Shell
+        # An incremental run asks NVD for every CVE modified since its cursor; Log4Shell
         # (published 2021-12, last modified 2026-08) is in NVD's answer whenever NVD updates it.
-        # Whether the newest-first selection reaches it is a separate question (at today's volumes
-        # it does not, docs/COLLECTORS.md § 2); once a record is fetched, its age must not drop it.
+        # Once a record is read, its age must not drop it (whether a run adds a CVE MISP does not
+        # hold yet is the scope rule of tests/test_nvd_incremental_cursor.py; Log4Shell is on KEV).
         with (
             patch.object(NVDCollector, "check_service_available", return_value=True),
-            patch.object(NVDCollector, "_fetch_cves", return_value=[_nvd_record("2021-12-10T10:15:09.143" + zone)]),
+            patch.object(nvd_collector, "get_source_incremental", return_value={}),
+            patch.object(
+                NVDCollector,
+                "_fetch_modified_cves",
+                return_value=([_nvd_record("2021-12-10T10:15:09.143" + zone)], True),
+            ),
         ):
             items = _nvd_collector().collect(limit=10, push_to_misp=False, baseline=False)
 

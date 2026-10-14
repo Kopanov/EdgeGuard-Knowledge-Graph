@@ -145,6 +145,10 @@ Flag any collector that uses a hardcoded absolute date instead of a relative off
 Flag any comparison of a timestamp parsed from a source payload with a timezone-aware datetime when the parsed value is not normalised first (`tzinfo is None` → UTC). NVD and OTX send timestamps without a zone; the comparison raises `TypeError`, and inside a broad `except` the check silently never runs (the former NVD/OTX sector time-range filter, removed 2026-10).
 Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`).
 
+### Incremental cursor moved past work that did not reach MISP
+A collector with an incremental cursor advances it only over work whose MISP writes succeeded: OTX to the last pulse it pushed, CISA ICS and NVD only after a run without a failed write. NVD (2026-10) also requires the lastMod window to have been read completely, counts an addition as written only when MISP's answer or a lookup by value (`MISPWriter.existing_values`) shows it stored, fails the task while the cursor cannot move, and moves the cursor at most to the record where `EDGEGUARD_NVD_MAX_PER_RUN` stopped the run. NVD's lastMod results must be read one answer per time slice (`_iter_lastmod_slices`), not paged across a window that changes while it is read.
+Flag a cursor update that runs before, or regardless of, the result of the push or the edits. Flag an NVD change that brings back a newest-N selection by publication date (37% of new CVEs lost in a 30-day replay, 2026-10-14), or that re-adds a changed CVE as a new attribute instead of editing the stored one (`MISPWriter.update_attribute`). Flag a change to `Neo4jClient._replace_nvd_owned_cve_data` that clears list properties on a CVE node with a source other than NVD, or removes a CVSS sub-node another feed asserted.
+
 ### Collector missing status return
 Every `collect()` method must return a status dict using `make_status()` from `src/collectors/collector_utils.py`.
 Flag collectors that return `None`, `{}`, or ad-hoc dicts that don't match the standard schema.

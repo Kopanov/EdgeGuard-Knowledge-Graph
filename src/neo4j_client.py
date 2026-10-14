@@ -828,6 +828,17 @@ _CVE_SCORE_FROM_CVSS_QUERY = (
 )
 
 
+# 2026-10: what NVD's record supplies on a CVE node (``Neo4jClient._replace_nvd_owned_cve_data``):
+# its list properties, and its CVSS sub-nodes by relationship type and NVD_META key.
+_NVD_OWNED_CVE_LISTS = ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products")
+_NVD_CVSS_VERSIONS = (
+    ("HAS_CVSS_v40", "cvss_v40_data"),
+    ("HAS_CVSS_v31", "cvss_v31_data"),
+    ("HAS_CVSS_v30", "cvss_v30_data"),
+    ("HAS_CVSS_v2", "cvss_v2_data"),
+)
+
+
 def clamp_confidence_score(value: Any) -> Optional[float]:
     """PR-N14 (pre-baseline audit Fix #2, 2026-04-21): clamp
     confidence_score to [0.0, 1.0] + reject non-finite.
@@ -2858,6 +2869,16 @@ class Neo4jClient:
                 _clean = [str(x) for x in _val if x is not None and str(x) != ""]
                 if _clean:  # never overwrite an existing list with an empty one
                     extra_props[_list_prop] = _clean
+        # 2026-10: NVD's record status (``["rejected"]`` or ``["active"]``, from ``NVD_META``) on the
+        # node, replaced on every write so a rejection that arrives with an update reaches the graph.
+        # Before, it stayed in ``SOURCED_FROM.raw_data`` only (0 of 141,730 CVE nodes had it on
+        # 2026-10-14; 3,963 were rejected). Written only when the item carries one: CISA and OTX CVE
+        # items do not, so they cannot reset it.
+        _status = data.get("status")
+        if isinstance(_status, list):
+            _status_clean = [str(x) for x in _status if x is not None and str(x) != ""]
+            if _status_clean:
+                extra_props["status"] = _status_clean
 
         ok = self.merge_node_with_source("CVE", key_props, data, source_id, extra_props=extra_props or None)
         if not ok:
@@ -2880,10 +2901,61 @@ class Neo4jClient:
             self._merge_cvss_node(
                 cve_id, tag, "CVSSv2", "HAS_CVSS_v2", data["cvss_v2_data"], misp_event_id=data.get("misp_event_id")
             )
+        if data.get("nvd_record"):
+            self._replace_nvd_owned_cve_data(cve_id, data)
         # Last step: any code that adds or removes CVSS sub-nodes of this CVE must run before it,
         # or the node keeps a score derived from sub-nodes that no longer apply.
         self._set_cve_score_from_cvss(cve_id)
         return True
+
+    def _replace_nvd_owned_cve_data(self, cve_id: str, data: Dict) -> bool:
+        """Remove from the node what NVD's record no longer has (2026-10).
+
+        For an NVD record read from MISP (``nvd_record``, set by the sync when the attribute carries
+        ``NVD_META``). ``merge_cve`` never overwrites a list with an empty one and never removes a CVSS
+        sub-node, so data NVD withdrew (a rejection, a removed CWE, CVSS or CPE) would otherwise stay
+        from an earlier record:
+
+        - the lists ``cwe``, ``ref_tags``, ``cpe_type``, ``result_impacts``, ``reference_urls`` and
+          ``affected_products`` are set from the record even when empty (an empty list removes the
+          property), but only on a node EdgeGuard manages whose only source is NVD. CISA ICS, the KEV
+          and OTX records and partner writes supply these lists as well, and on such a node an empty
+          NVD list leaves them as they are (on the hosted graph of 2026-10-14, 126,669 of the CVE
+          nodes with ``cwe`` had NVD as their only source);
+        - a CVSS sub-node of a version the record no longer has is removed when EdgeGuard manages it
+          and NVD is the only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the
+          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too.
+
+        Failure is logged and leaves the node as it was, like ``_merge_cvss_node``.
+        """
+        if not self.driver or not cve_id:
+            return False
+        lists: Dict[str, Optional[List[str]]] = {}
+        for prop in _NVD_OWNED_CVE_LISTS:
+            value = data.get(prop)
+            clean = [str(x) for x in value if x is not None and str(x) != ""] if isinstance(value, list) else []
+            lists[prop] = clean or None
+        absent = [rel_type for rel_type, key in _NVD_CVSS_VERSIONS if not data.get(key)]
+        set_clause = ", ".join(
+            f"c.{prop} = CASE WHEN nvd_only THEN ${prop} ELSE c.{prop} END" for prop in _NVD_OWNED_CVE_LISTS
+        )
+        query = f"""
+        MATCH (c:CVE {{cve_id: $cve_id}})
+        WITH c, (c.edgeguard_managed = true AND coalesce(c.source, []) = ['nvd']) AS nvd_only
+        SET {set_clause}
+        WITH c
+        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]->(s)
+        WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id AND s.edgeguard_managed = true
+          AND coalesce(r.sources, [s.tag]) = ['nvd']
+        DETACH DELETE s
+        """
+        try:
+            with self.driver.session() as session:
+                session.run(query, cve_id=cve_id, absent_rel_types=absent, **lists, timeout=NEO4J_READ_TIMEOUT)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to replace the NVD data of CVE {cve_id}: {e}")
+            return False
 
     def _set_cve_score_from_cvss(self, cve_id: str) -> bool:
         """Set the CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` from its CVSS

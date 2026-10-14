@@ -1,0 +1,1391 @@
+{
+ "_provenance": "Real payloads captured read-only on 2026-10-14. 'nvd': NVD CVE API 2.0 records ({'cve': {...}}) as returned by cveId requests (CVE-2021-44228 trimmed to one configuration node with three CPE matches, three references and the English description). 'misp': the attribute of each CVE in the hosted EdgeGuard MISP (attributes/restSearch, written by the 730-day baseline of 2026-10-13; event and organisation details removed, tags reduced to id and name). 'nvd_page_envelope': the keys of a real lastMod page around its 'vulnerabilities' list.",
+ "nvd_page_envelope": {
+  "resultsPerPage": 2,
+  "startIndex": 0,
+  "totalResults": 740,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "timestamp": "2026-10-14T19:11:49.605"
+ },
+ "nvd": {
+  "CVE-2026-22314": {
+   "cve": {
+    "id": "CVE-2026-22314",
+    "sourceIdentifier": "a6d3dc9e-0591-4a13-bce7-0f5b31ff6158",
+    "published": "2026-05-20T11:16:26.057",
+    "lastModified": "2026-10-13T14:17:38.270",
+    "vulnStatus": "Rejected",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Rejected reason: This CVE ID has been rejected or withdrawn by its CVE Numbering Authority based on the reported functionality projecting intended administrative\nfunctionality."
+     }
+    ],
+    "metrics": {},
+    "references": []
+   }
+  },
+  "CVE-2026-93637": {
+   "cve": {
+    "id": "CVE-2026-93637",
+    "sourceIdentifier": "cve@rapid7.com",
+    "published": "2026-10-14T17:20:21.430",
+    "lastModified": "2026-10-14T17:20:21.430",
+    "vulnStatus": "Received",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "An authentication rate-limit bypass in Zimbra Collaboration Suite 10.1.0 through 10.1.21 allows unauthenticated attackers to make repeated password guesses through GraphQL without incrementing Zimbra\u2019s source-IP failure counter. GraphQL aliases allow multiple authentication attempts in one HTTP request."
+     }
+    ],
+    "affected": [
+     {
+      "source": "cve@rapid7.com",
+      "affectedData": [
+       {
+        "vendor": "Zimbra",
+        "product": "Zimbra Collaboration Suite",
+        "defaultStatus": "unaffected",
+        "versions": [
+         {
+          "version": "0",
+          "lessThanOrEqual": "10.1.21",
+          "versionType": "semver",
+          "status": "affected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "cve@rapid7.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        "baseScore": 3.7,
+        "baseSeverity": "LOW",
+        "attackVector": "NETWORK",
+        "attackComplexity": "HIGH",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "LOW",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "NONE"
+       },
+       "exploitabilityScore": 2.2,
+       "impactScore": 1.4
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "cve@rapid7.com",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-307"
+       }
+      ]
+     }
+    ],
+    "references": [
+     {
+      "url": "https://www.rapid7.com/blog/post/ve-breaking-zimbra-identity-boundaries-part-1",
+      "source": "cve@rapid7.com"
+     }
+    ]
+   }
+  },
+  "CVE-1999-0024": {
+   "cve": {
+    "id": "CVE-1999-0024",
+    "sourceIdentifier": "cve@mitre.org",
+    "published": "1997-08-13T04:00:00.000",
+    "lastModified": "2026-10-09T19:16:39.027",
+    "vulnStatus": "Modified",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "DNS cache poisoning via BIND, by predictable query IDs."
+     }
+    ],
+    "affected": [
+     {
+      "source": "cve@mitre.org",
+      "affectedData": [
+       {
+        "vendor": "n/a",
+        "product": "n/a",
+        "versions": [
+         {
+          "version": "n/a",
+          "status": "affected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV2": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "2.0",
+        "vectorString": "AV:N/AC:L/Au:N/C:N/I:P/A:N",
+        "baseScore": 5.0,
+        "accessVector": "NETWORK",
+        "accessComplexity": "LOW",
+        "authentication": "NONE",
+        "confidentialityImpact": "NONE",
+        "integrityImpact": "PARTIAL",
+        "availabilityImpact": "NONE"
+       },
+       "baseSeverity": "MEDIUM",
+       "exploitabilityScore": 10.0,
+       "impactScore": 2.9,
+       "acInsufInfo": false,
+       "obtainAllPrivilege": false,
+       "obtainUserPrivilege": false,
+       "obtainOtherPrivilege": false,
+       "userInteractionRequired": false
+      }
+     ],
+     "ssvcV203": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "ssvcData": {
+        "timestamp": "2025-07-10T16:10:34.895998Z",
+        "id": "CVE-1999-0024",
+        "options": [
+         {
+          "exploitation": "none"
+         },
+         {
+          "automatable": "no"
+         },
+         {
+          "technicalImpact": "partial"
+         }
+        ],
+        "role": "CISA Coordinator",
+        "version": "2.0.3"
+       }
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "nvd@nist.gov",
+      "type": "Primary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "NVD-CWE-Other"
+       }
+      ]
+     }
+    ],
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:isc:bind:4.9.5:*:*:*:*:*:*:*",
+          "matchCriteriaId": "AB7F1274-7E0E-40C8-8006-ACFDBE757D35"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:isc:bind:8.1:*:*:*:*:*:*:*",
+          "matchCriteriaId": "BB79EDA4-9B2C-4C4C-A5DE-CB8C6EB00BDC"
+         }
+        ]
+       }
+      ]
+     },
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:bsdi:bsd_os:2.1:*:*:*:*:*:*:*",
+          "matchCriteriaId": "766851E2-134A-4A89-931B-6F1753525684"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:bsdi:bsd_os:3.0:*:*:*:*:*:*:*",
+          "matchCriteriaId": "99235B00-0050-42BF-99EF-FCDD72D8627D"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:ibm:aix:4.1:*:*:*:*:*:*:*",
+          "matchCriteriaId": "FBF25306-E7C2-4F9A-A809-4779A6C0A079"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:ibm:aix:4.2:*:*:*:*:*:*:*",
+          "matchCriteriaId": "05F20EC2-ADE6-4F96-A2E7-1DCCA819D657"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:nec:asl_ux_4800:64:*:*:*:*:*:*:*",
+          "matchCriteriaId": "BF1C22CE-FF69-44CF-82C3-EBFDA9E7EC0E"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:nec:ews-ux_v:4.2:*:*:*:*:*:*:*",
+          "matchCriteriaId": "EFDDBA47-A0E3-4EB2-868A-A9B998B0154E"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:nec:ews-ux_v:4.2mp:*:*:*:*:*:*:*",
+          "matchCriteriaId": "6CF54267-A293-44B1-BD9A-14CD39F732C2"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:nec:up-ux_v:4.2mp:*:*:*:*:*:*:*",
+          "matchCriteriaId": "875BE14D-96DC-4973-B077-40C7DFC75B02"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sco:open_desktop:3.0:*:*:*:*:*:*:*",
+          "matchCriteriaId": "0AD2701A-E930-4F4D-85F7-02F80135E34E"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sco:openserver:5.0:*:*:*:*:*:*:*",
+          "matchCriteriaId": "2C19F7B3-9043-4E53-90DE-92A4387858A7"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sco:unix:3.2v4:*:*:*:*:*:*:*",
+          "matchCriteriaId": "51756048-EB32-4A72-9ED4-937AF2B9DE37"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sco:unixware:2.1:*:*:*:*:*:*:*",
+          "matchCriteriaId": "168248AC-E4F6-4C8F-9A21-0E6ABE029DFC"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:solaris:2.4:*:x86:*:*:*:*:*",
+          "matchCriteriaId": "1F881110-7B54-49DA-B23A-710273430C44"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:solaris:2.5:*:x86:*:*:*:*:*",
+          "matchCriteriaId": "200D8CB2-0D52-40A8-9CD9-6E4513605201"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:solaris:2.5.1:*:x86:*:*:*:*:*",
+          "matchCriteriaId": "F66BAF35-A8B9-4E95-B270-444206FDD35B"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:solaris:2.6:*:*:*:*:*:*:*",
+          "matchCriteriaId": "34EBF074-78C8-41AF-88F1-DA6726E56F8B"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:sunos:-:*:*:*:*:*:*:*",
+          "matchCriteriaId": "369207B4-96FA-4324-9445-98FAE8ECF5DB"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:sunos:5.3:*:*:*:*:*:*:*",
+          "matchCriteriaId": "C7A22D21-E0A9-4B56-86C7-805AD1A610D6"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:sunos:5.4:*:*:*:*:*:*:*",
+          "matchCriteriaId": "7AAC8954-74A8-4FE3-ABE7-57DA041D9D8F"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:sunos:5.5:*:*:*:*:*:*:*",
+          "matchCriteriaId": "5B72953B-E873-4E44-A3CF-12D770A0D416"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:sun:sunos:5.5.1:*:*:*:*:*:*:*",
+          "matchCriteriaId": "39F847DB-65A9-47DA-BCFA-A179E5E2301A"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "references": [
+     {
+      "url": "https://exchange.xforce.ibmcloud.com/vulnerabilities/CVE-1999-0024",
+      "source": "cve@mitre.org"
+     },
+     {
+      "url": "https://exchange.xforce.ibmcloud.com/vulnerabilities/CVE-1999-0024",
+      "source": "af854a3a-2127-422b-91ae-364da2661108"
+     }
+    ]
+   }
+  },
+  "CVE-2025-0237": {
+   "cve": {
+    "id": "CVE-2025-0237",
+    "sourceIdentifier": "security@mozilla.org",
+    "published": "2025-01-07T16:15:38.323",
+    "lastModified": "2026-10-05T15:10:00.590",
+    "vulnStatus": "Modified",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "The WebChannel API, which is used to transport various information across processes, did not check the sending principal but rather accepted the principal being sent. This could have led to privilege escalation attacks. This vulnerability was fixed in Firefox 134, Firefox ESR 128.6, Thunderbird 134, and Thunderbird 128.6."
+     },
+     {
+      "lang": "es",
+      "value": "La WebChannel API, que se utiliza para transportar informaci\u00f3n diversa entre procesos, no comprob\u00f3 el principal de env\u00edo, sino que acept\u00f3 el principal enviado. Esto podr\u00eda haber provocado ataques de escalada de privilegios. Esta vulnerabilidad afecta a Firefox menor que 134 y Firefox ESR menor que 128.6."
+     }
+    ],
+    "affected": [
+     {
+      "source": "security@mozilla.org",
+      "affectedData": [
+       {
+        "vendor": "Mozilla",
+        "product": "Firefox",
+        "versions": [
+         {
+          "version": "128.6",
+          "lessThanOrEqual": "128.*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         },
+         {
+          "version": "134",
+          "lessThanOrEqual": "*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         }
+        ]
+       },
+       {
+        "vendor": "Mozilla",
+        "product": "Thunderbird",
+        "versions": [
+         {
+          "version": "128.6",
+          "lessThanOrEqual": "128.*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         },
+         {
+          "version": "134",
+          "lessThanOrEqual": "*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N",
+        "baseScore": 5.4,
+        "baseSeverity": "MEDIUM",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "LOW",
+        "integrityImpact": "LOW",
+        "availabilityImpact": "NONE"
+       },
+       "exploitabilityScore": 2.8,
+       "impactScore": 2.5
+      }
+     ],
+     "ssvcV203": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "ssvcData": {
+        "timestamp": "2025-01-08T15:57:56.339970Z",
+        "id": "CVE-2025-0237",
+        "options": [
+         {
+          "exploitation": "none"
+         },
+         {
+          "automatable": "no"
+         },
+         {
+          "technicalImpact": "total"
+         }
+        ],
+        "role": "CISA Coordinator",
+        "version": "2.0.3"
+       }
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-863"
+       }
+      ]
+     }
+    ],
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*",
+          "versionEndExcluding": "128.6.0",
+          "matchCriteriaId": "AEBB7F43-496D-4A67-8E9E-EEE29913B6DE"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:firefox:*:*:*:*:*:*:*:*",
+          "versionEndExcluding": "134.0",
+          "matchCriteriaId": "4FDCA935-A68D-404E-A749-CA3845C709F0"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*",
+          "versionEndExcluding": "128.6.0",
+          "matchCriteriaId": "C92D62DE-A681-4B9D-9640-D12D04392A1B"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "129.0",
+          "versionEndExcluding": "134.0",
+          "matchCriteriaId": "A633E231-80F8-4A92-BA69-B9BE5BE45D00"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "references": [
+     {
+      "url": "https://bugzilla.mozilla.org/show_bug.cgi?id=1915257",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Issue Tracking",
+       "Permissions Required"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-01/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-02/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-04/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-05/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://lists.debian.org/debian-lts-announce/2025/01/msg00004.html",
+      "source": "af854a3a-2127-422b-91ae-364da2661108"
+     }
+    ]
+   }
+  },
+  "CVE-2025-0238": {
+   "cve": {
+    "id": "CVE-2025-0238",
+    "sourceIdentifier": "security@mozilla.org",
+    "published": "2025-01-07T16:15:38.470",
+    "lastModified": "2026-10-05T15:10:00.590",
+    "vulnStatus": "Modified",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Assuming a controlled failed memory allocation, an attacker could have caused a use-after-free, leading to a potentially exploitable crash. This vulnerability was fixed in Firefox 134, Firefox ESR 128.6, Firefox ESR 115.19, Thunderbird 134, and Thunderbird 128.6."
+     },
+     {
+      "lang": "es",
+      "value": "Suponiendo que se haya producido una asignaci\u00f3n de memoria fallida y controlada, un atacante podr\u00eda haber provocado un error de use-after-free, lo que habr\u00eda provocado un bloqueo potencialmente explotable. Esta vulnerabilidad afecta a Firefox menor que 134, Firefox ESR menor que 128.6 y Firefox ESR menor que 115.19."
+     }
+    ],
+    "affected": [
+     {
+      "source": "security@mozilla.org",
+      "affectedData": [
+       {
+        "vendor": "Mozilla",
+        "product": "Firefox",
+        "versions": [
+         {
+          "version": "115.19",
+          "lessThanOrEqual": "115.*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         },
+         {
+          "version": "128.6",
+          "lessThanOrEqual": "128.*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         },
+         {
+          "version": "134",
+          "lessThanOrEqual": "*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         }
+        ]
+       },
+       {
+        "vendor": "Mozilla",
+        "product": "Thunderbird",
+        "versions": [
+         {
+          "version": "128.6",
+          "lessThanOrEqual": "128.*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         },
+         {
+          "version": "134",
+          "lessThanOrEqual": "*",
+          "versionType": "rpm",
+          "status": "unaffected"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        "baseScore": 5.3,
+        "baseSeverity": "MEDIUM",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "LOW",
+        "integrityImpact": "NONE",
+        "availabilityImpact": "NONE"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 1.4
+      }
+     ],
+     "ssvcV203": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "ssvcData": {
+        "timestamp": "2025-01-08T16:24:00.630744Z",
+        "id": "CVE-2025-0238",
+        "options": [
+         {
+          "exploitation": "none"
+         },
+         {
+          "automatable": "no"
+         },
+         {
+          "technicalImpact": "partial"
+         }
+        ],
+        "role": "CISA Coordinator",
+        "version": "2.0.3"
+       }
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-416"
+       }
+      ]
+     }
+    ],
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*",
+          "versionEndExcluding": "115.19.0",
+          "matchCriteriaId": "63BD953C-5063-4296-B4F6-35F6DC90B863"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:firefox:*:*:*:*:*:*:*:*",
+          "versionEndExcluding": "134.0",
+          "matchCriteriaId": "4FDCA935-A68D-404E-A749-CA3845C709F0"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*",
+          "versionStartIncluding": "116.0",
+          "versionEndExcluding": "128.6.0",
+          "matchCriteriaId": "D7C3860F-7C9C-4B27-979F-FD69389125B1"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*",
+          "versionEndExcluding": "128.6",
+          "matchCriteriaId": "11C41E6A-9B50-4F96-A44C-15E78978C13F"
+         },
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "129.0",
+          "versionEndExcluding": "134.0",
+          "matchCriteriaId": "A633E231-80F8-4A92-BA69-B9BE5BE45D00"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "references": [
+     {
+      "url": "https://bugzilla.mozilla.org/show_bug.cgi?id=1915535",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Issue Tracking",
+       "Permissions Required"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-01/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-02/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-03/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-04/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://www.mozilla.org/security/advisories/mfsa2025-05/",
+      "source": "security@mozilla.org",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     },
+     {
+      "url": "https://lists.debian.org/debian-lts-announce/2025/01/msg00004.html",
+      "source": "af854a3a-2127-422b-91ae-364da2661108"
+     }
+    ]
+   }
+  },
+  "CVE-2026-83540": {
+   "cve": {
+    "id": "CVE-2026-83540",
+    "sourceIdentifier": "facts@wolfssl.com",
+    "published": "2026-10-07T03:16:59.730",
+    "lastModified": "2026-10-13T17:33:17.707",
+    "vulnStatus": "Analyzed",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "When password or public key authentication is used with the Windows port of wolfSSHd, the Windows logon token acquired for one authenticated connection is not released before a token is acquired for a subsequent connection, resulting in user login poisoning between connections. A less privileged user with a valid account on the server can exploit this to force a login as a more privileged user. The vulnerability was introduced with the initial Windows port of wolfSSHd in wolfSSH version 1.4.15 and affects all versions through 1.5.0. Non-Windows builds of wolfSSHd are not affected."
+     }
+    ],
+    "affected": [
+     {
+      "source": "facts@wolfssl.com",
+      "affectedData": [
+       {
+        "vendor": "wolfSSL",
+        "product": "wolfSSH",
+        "defaultStatus": "unaffected",
+        "collectionURL": "https://github.com/wolfSSL/wolfssh",
+        "modules": [
+         "wolfSSHd"
+        ],
+        "platforms": [
+         "Windows"
+        ],
+        "programFiles": [
+         "apps/wolfsshd/auth.c"
+        ],
+        "programRoutines": [
+         {
+          "name": "SetupUserTokenWin"
+         },
+         {
+          "name": "CheckPasswordWIN"
+         }
+        ],
+        "repo": "https://github.com/wolfSSL/wolfssh",
+        "versions": [
+         {
+          "version": "1.4.15",
+          "lessThanOrEqual": "1.5.0",
+          "versionType": "semver",
+          "status": "affected",
+          "changes": [
+           {
+            "at": "1.6.0",
+            "status": "unaffected"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV40": [
+      {
+       "source": "facts@wolfssl.com",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "4.0",
+        "vectorString": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+        "baseScore": 7.7,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "attackRequirements": "PRESENT",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "vulnConfidentialityImpact": "HIGH",
+        "vulnIntegrityImpact": "HIGH",
+        "vulnAvailabilityImpact": "HIGH",
+        "subConfidentialityImpact": "NONE",
+        "subIntegrityImpact": "NONE",
+        "subAvailabilityImpact": "NONE",
+        "exploitMaturity": "NOT_DEFINED",
+        "confidentialityRequirement": "NOT_DEFINED",
+        "integrityRequirement": "NOT_DEFINED",
+        "availabilityRequirement": "NOT_DEFINED",
+        "modifiedAttackVector": "NOT_DEFINED",
+        "modifiedAttackComplexity": "NOT_DEFINED",
+        "modifiedAttackRequirements": "NOT_DEFINED",
+        "modifiedPrivilegesRequired": "NOT_DEFINED",
+        "modifiedUserInteraction": "NOT_DEFINED",
+        "modifiedVulnConfidentialityImpact": "NOT_DEFINED",
+        "modifiedVulnIntegrityImpact": "NOT_DEFINED",
+        "modifiedVulnAvailabilityImpact": "NOT_DEFINED",
+        "modifiedSubConfidentialityImpact": "NOT_DEFINED",
+        "modifiedSubIntegrityImpact": "NOT_DEFINED",
+        "modifiedSubAvailabilityImpact": "NOT_DEFINED",
+        "Safety": "NOT_DEFINED",
+        "Automatable": "NOT_DEFINED",
+        "Recovery": "NOT_DEFINED",
+        "valueDensity": "NOT_DEFINED",
+        "vulnerabilityResponseEffort": "NOT_DEFINED",
+        "providerUrgency": "NOT_DEFINED"
+       }
+      }
+     ],
+     "cvssMetricV31": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+        "baseScore": 8.8,
+        "baseSeverity": "HIGH",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "LOW",
+        "userInteraction": "NONE",
+        "scope": "UNCHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 2.8,
+       "impactScore": 5.9
+      }
+     ],
+     "ssvcV203": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "ssvcData": {
+        "timestamp": "2026-10-07T11:28:54.655733Z",
+        "id": "CVE-2026-83540",
+        "options": [
+         {
+          "exploitation": "none"
+         },
+         {
+          "automatable": "no"
+         },
+         {
+          "technicalImpact": "total"
+         }
+        ],
+        "role": "CISA Coordinator",
+        "version": "2.0.3"
+       }
+      }
+     ]
+    },
+    "weaknesses": [
+     {
+      "source": "facts@wolfssl.com",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-287"
+       },
+       {
+        "lang": "en",
+        "value": "CWE-613"
+       }
+      ]
+     }
+    ],
+    "configurations": [
+     {
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:a:wolfssh:wolfssh:*:*:*:*:*:*:*:*",
+          "versionStartIncluding": "1.4.15",
+          "versionEndExcluding": "1.6.0",
+          "matchCriteriaId": "A06C75AE-F502-4F48-AA16-DCD3E53EC9E3"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "references": [
+     {
+      "url": "https://github.com/wolfSSL/wolfssh",
+      "source": "facts@wolfssl.com",
+      "tags": [
+       "Product"
+      ]
+     },
+     {
+      "url": "https://github.com/wolfSSL/wolfssh/commit/9777bc5ce810d6c418a1473e9e8c40cdb0026e5a",
+      "source": "facts@wolfssl.com",
+      "tags": [
+       "Patch"
+      ]
+     },
+     {
+      "url": "https://github.com/wolfSSL/wolfssh/commit/b6bd975ccfac6aadf29b98e35e09114bef3840a9",
+      "source": "facts@wolfssl.com",
+      "tags": [
+       "Patch"
+      ]
+     },
+     {
+      "url": "https://www.wolfssl.com/docs/security-vulnerabilities/",
+      "source": "facts@wolfssl.com",
+      "tags": [
+       "Vendor Advisory"
+      ]
+     }
+    ]
+   }
+  },
+  "CVE-2021-44228": {
+   "cve": {
+    "id": "CVE-2021-44228",
+    "sourceIdentifier": "security@apache.org",
+    "published": "2021-12-10T10:15:09.143",
+    "lastModified": "2026-08-11T19:33:44.513",
+    "vulnStatus": "Analyzed",
+    "cveTags": [],
+    "descriptions": [
+     {
+      "lang": "en",
+      "value": "Apache Log4j2 2.0-beta9 through 2.15.0 (excluding security releases 2.12.2, 2.12.3, and 2.3.1) JNDI features used in configuration, log messages, and parameters do not protect against attacker controlled LDAP and other JNDI related endpoints. An attacker who can control log messages or log message parameters can execute arbitrary code loaded from LDAP servers when message lookup substitution is enabled. From log4j 2.15.0, this behavior has been disabled by default. From version 2.16.0 (along with 2.12.2, 2.12.3, and 2.3.1), this functionality has been completely removed. Note that this vulnerability is specific to log4j-core and does not affect log4net, log4cxx, or other Apache Logging Services projects."
+     }
+    ],
+    "affected": [
+     {
+      "source": "security@apache.org",
+      "affectedData": [
+       {
+        "vendor": "Apache Software Foundation",
+        "product": "Apache Log4j2",
+        "versions": [
+         {
+          "version": "2.0-beta9",
+          "lessThan": "log4j-core*",
+          "versionType": "custom",
+          "status": "affected",
+          "changes": [
+           {
+            "at": "2.3.1",
+            "status": "unaffected"
+           },
+           {
+            "at": "2.4",
+            "status": "affected"
+           },
+           {
+            "at": "2.12.2",
+            "status": "unaffected"
+           },
+           {
+            "at": "2.13.0",
+            "status": "affected"
+           },
+           {
+            "at": "2.15.0",
+            "status": "unaffected"
+           }
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "metrics": {
+     "cvssMetricV31": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "baseScore": 10.0,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "CHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 6.0
+      },
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "type": "Secondary",
+       "cvssData": {
+        "version": "3.1",
+        "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+        "baseScore": 10.0,
+        "baseSeverity": "CRITICAL",
+        "attackVector": "NETWORK",
+        "attackComplexity": "LOW",
+        "privilegesRequired": "NONE",
+        "userInteraction": "NONE",
+        "scope": "CHANGED",
+        "confidentialityImpact": "HIGH",
+        "integrityImpact": "HIGH",
+        "availabilityImpact": "HIGH"
+       },
+       "exploitabilityScore": 3.9,
+       "impactScore": 6.0
+      }
+     ],
+     "cvssMetricV2": [
+      {
+       "source": "nvd@nist.gov",
+       "type": "Primary",
+       "cvssData": {
+        "version": "2.0",
+        "vectorString": "AV:N/AC:M/Au:N/C:C/I:C/A:C",
+        "baseScore": 9.3,
+        "accessVector": "NETWORK",
+        "accessComplexity": "MEDIUM",
+        "authentication": "NONE",
+        "confidentialityImpact": "COMPLETE",
+        "integrityImpact": "COMPLETE",
+        "availabilityImpact": "COMPLETE"
+       },
+       "baseSeverity": "HIGH",
+       "exploitabilityScore": 8.6,
+       "impactScore": 10.0,
+       "acInsufInfo": false,
+       "obtainAllPrivilege": false,
+       "obtainUserPrivilege": false,
+       "obtainOtherPrivilege": false,
+       "userInteractionRequired": false
+      }
+     ],
+     "ssvcV203": [
+      {
+       "source": "134c704f-9b21-4f2e-91b3-4a467353bcc0",
+       "ssvcData": {
+        "timestamp": "2025-02-04T14:25:34.416117Z",
+        "id": "CVE-2021-44228",
+        "options": [
+         {
+          "exploitation": "active"
+         },
+         {
+          "automatable": "yes"
+         },
+         {
+          "technicalImpact": "total"
+         }
+        ],
+        "role": "CISA Coordinator",
+        "version": "2.0.3"
+       }
+      }
+     ]
+    },
+    "cisaExploitAdd": "2021-12-10",
+    "cisaActionDue": "2021-12-24",
+    "cisaRequiredAction": "For all affected software assets for which updates exist, the only acceptable remediation actions are: 1) Apply updates; OR 2) remove affected assets from agency networks. Temporary mitigations using one of the measures provided at https://www.cisa.gov/uscert/ed-22-02-apache-log4j-recommended-mitigation-measures are only acceptable until updates are available.",
+    "cisaVulnerabilityName": "Apache Log4j2 Remote Code Execution Vulnerability",
+    "weaknesses": [
+     {
+      "source": "security@apache.org",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-20"
+       },
+       {
+        "lang": "en",
+        "value": "CWE-400"
+       },
+       {
+        "lang": "en",
+        "value": "CWE-502"
+       }
+      ]
+     },
+     {
+      "source": "nvd@nist.gov",
+      "type": "Secondary",
+      "description": [
+       {
+        "lang": "en",
+        "value": "CWE-917"
+       }
+      ]
+     }
+    ],
+    "configurations": [
+     {
+      "operator": "AND",
+      "nodes": [
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": true,
+          "criteria": "cpe:2.3:o:siemens:6bk1602-0aa12-0tp0_firmware:*:*:*:*:*:*:*:*",
+          "versionEndExcluding": "2.7.0",
+          "matchCriteriaId": "BD64FC36-CC7B-4FD7-9845-7EA1DDB0E627"
+         }
+        ]
+       },
+       {
+        "operator": "OR",
+        "negate": false,
+        "cpeMatch": [
+         {
+          "vulnerable": false,
+          "criteria": "cpe:2.3:h:siemens:6bk1602-0aa12-0tp0:-:*:*:*:*:*:*:*",
+          "matchCriteriaId": "CF99FE8F-40D0-48A8-9A40-43119B259535"
+         }
+        ]
+       }
+      ]
+     }
+    ],
+    "references": [
+     {
+      "url": "http://packetstormsecurity.com/files/165225/Apache-Log4j2-2.14.1-Remote-Code-Execution.html",
+      "source": "security@apache.org",
+      "tags": [
+       "Third Party Advisory",
+       "VDB Entry"
+      ]
+     },
+     {
+      "url": "http://packetstormsecurity.com/files/165260/VMware-Security-Advisory-2021-0028.html",
+      "source": "security@apache.org",
+      "tags": [
+       "Third Party Advisory",
+       "VDB Entry"
+      ]
+     },
+     {
+      "url": "http://packetstormsecurity.com/files/165261/Apache-Log4j2-2.14.1-Information-Disclosure.html",
+      "source": "security@apache.org",
+      "tags": [
+       "Exploit",
+       "Third Party Advisory",
+       "VDB Entry"
+      ]
+     }
+    ]
+   }
+  }
+ },
+ "misp": {
+  "CVE-2026-22314": {
+   "id": "1116113",
+   "event_id": "138",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "External analysis",
+   "type": "vulnerability",
+   "to_ids": false,
+   "uuid": "56907653-f95d-483d-963d-36170a9fbe54",
+   "timestamp": "1791905447",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "NVD_META:{\"published\": \"2026-05-20T11:16:26.057000+00:00\", \"last_modified\": \"2026-10-01T20:17:24.427000+00:00\", \"cwe\": [\"CWE-94\"], \"ref_tags\": [], \"reference_urls\": [\"https://mesalvo.com/en/vdp/advisories/msa-2026-003.pdf\"], \"cpe_type\": [], \"result_impacts\": [\"HIGH\", \"HIGH\", \"HIGH\"], \"affected_products\": [], \"attack_vector\": \"A\", \"cvss_v40_data\": null, \"cvss_v31_data\": {\"vector_string\": \"CVSS:3.1/AV:A/AC:L/PR:H/UI:R/S:C/C:H/I:H/A:H\", \"attack_vector\": \"ADJACENT_NETWORK\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"HIGH\", \"user_interaction\": \"REQUIRED\", \"scope\": \"CHANGED\", \"confidentiality_impact\": \"HIGH\", \"integrity_impact\": \"HIGH\", \"availability_impact\": \"HIGH\", \"base_score\": 7.9, \"base_severity\": \"HIGH\", \"impact_score\": 6.0, \"exploitability_score\": 1.2}, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Vendor disputed record. The reported behaviour is documented \\nadministrative functionality restricted to dedicated administrative \\npermissions assigned by the operating hospital; its use by a permission \\nholder is not a vulnerability. Unauthorised access to the functions is \\naddressed under CVE-2026-0856.\\n\\nImproper Control of Generation of Code ('Code Injection') vulnerability in Mesalvo Meona Client Launcher Component, Mesalvo Meona Server Component enables code execution on other users' systems.\\u00a0This issue affects Meona Client Launcher Component: through 19.06.2020 15:11:49; Meona Server Component: through 2025.04 5+323020.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"active\"]}",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2026-05-20T11:16:26.057000+00:00",
+   "last_seen": "2026-10-01T20:17:24.427000+00:00",
+   "value": "CVE-2026-22314",
+   "Tag": [
+    {
+     "id": "17",
+     "name": "zone:Healthcare"
+    },
+    {
+     "id": "3166",
+     "name": "source:NVD"
+    },
+    {
+     "id": "8791",
+     "name": "tlp:white"
+    },
+    {
+     "id": "11",
+     "name": "severity:high"
+    },
+    {
+     "id": "12",
+     "name": "cvss:high"
+    }
+   ]
+  },
+  "CVE-2025-0237": {
+   "id": "1182523",
+   "event_id": "138",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "External analysis",
+   "type": "vulnerability",
+   "to_ids": false,
+   "uuid": "90d25ece-4537-4387-98f1-563a1d633d99",
+   "timestamp": "1791911197",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "NVD_META:{\"published\": \"2025-01-07T16:15:38.323000+00:00\", \"last_modified\": \"2026-10-05T15:10:00.590000+00:00\", \"cwe\": [\"CWE-863\"], \"ref_tags\": [\"Permissions Required\", \"Issue Tracking\", \"Vendor Advisory\"], \"reference_urls\": [\"https://bugzilla.mozilla.org/show_bug.cgi?id=1915257\", \"https://www.mozilla.org/security/advisories/mfsa2025-01/\", \"https://www.mozilla.org/security/advisories/mfsa2025-02/\", \"https://www.mozilla.org/security/advisories/mfsa2025-04/\", \"https://www.mozilla.org/security/advisories/mfsa2025-05/\", \"https://lists.debian.org/debian-lts-announce/2025/01/msg00004.html\"], \"cpe_type\": [\"a\"], \"result_impacts\": [\"LOW\", \"LOW\", \"NONE\"], \"affected_products\": [\"cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*\", \"cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*\", \"cpe:2.3:a:mozilla:firefox:*:*:*:*:*:*:*:*\"], \"attack_vector\": \"N\", \"cvss_v40_data\": null, \"cvss_v31_data\": {\"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:N\", \"attack_vector\": \"NETWORK\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"LOW\", \"user_interaction\": \"NONE\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"LOW\", \"integrity_impact\": \"LOW\", \"availability_impact\": \"NONE\", \"base_score\": 5.4, \"base_severity\": \"MEDIUM\", \"impact_score\": 2.5, \"exploitability_score\": 2.8}, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"The WebChannel API, which is used to transport various information across processes, did not check the sending principal but rather accepted the principal being sent. This could have led to privilege escalation attacks. This vulnerability was fixed in Firefox 134, Firefox ESR 128.6, Thunderbird 134, and Thunderbird 128.6.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [{\"cpe\": \"cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*\", \"version_start\": \"\", \"version_end\": \"128.6.0\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:firefox:*:*:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"134.0\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"128.6.0\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*\", \"version_start\": \"129.0\", \"version_end\": \"134.0\", \"vulnerable\": true}], \"status\": [\"active\"]}",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2025-01-07T16:15:38.323000+00:00",
+   "last_seen": "2026-10-05T15:10:00.590000+00:00",
+   "value": "CVE-2025-0237",
+   "Tag": [
+    {
+     "id": "7",
+     "name": "zone:Global"
+    },
+    {
+     "id": "3166",
+     "name": "source:NVD"
+    },
+    {
+     "id": "8791",
+     "name": "tlp:white"
+    },
+    {
+     "id": "3167",
+     "name": "severity:medium"
+    },
+    {
+     "id": "3168",
+     "name": "cvss:medium"
+    }
+   ]
+  },
+  "CVE-2025-0238": {
+   "id": "1182524",
+   "event_id": "138",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "External analysis",
+   "type": "vulnerability",
+   "to_ids": false,
+   "uuid": "d7b4368c-5f99-4248-b6e7-a8d2b2948f72",
+   "timestamp": "1791911197",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "NVD_META:{\"published\": \"2025-01-07T16:15:38.470000+00:00\", \"last_modified\": \"2026-10-05T15:10:00.590000+00:00\", \"cwe\": [\"CWE-416\"], \"ref_tags\": [\"Permissions Required\", \"Issue Tracking\", \"Vendor Advisory\"], \"reference_urls\": [\"https://bugzilla.mozilla.org/show_bug.cgi?id=1915535\", \"https://www.mozilla.org/security/advisories/mfsa2025-01/\", \"https://www.mozilla.org/security/advisories/mfsa2025-02/\", \"https://www.mozilla.org/security/advisories/mfsa2025-03/\", \"https://www.mozilla.org/security/advisories/mfsa2025-04/\", \"https://www.mozilla.org/security/advisories/mfsa2025-05/\", \"https://lists.debian.org/debian-lts-announce/2025/01/msg00004.html\"], \"cpe_type\": [\"a\"], \"result_impacts\": [\"LOW\", \"NONE\", \"NONE\"], \"affected_products\": [\"cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*\", \"cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*\", \"cpe:2.3:a:mozilla:firefox:*:*:*:*:*:*:*:*\"], \"attack_vector\": \"N\", \"cvss_v40_data\": null, \"cvss_v31_data\": {\"vector_string\": \"CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N\", \"attack_vector\": \"NETWORK\", \"attack_complexity\": \"LOW\", \"privileges_required\": \"NONE\", \"user_interaction\": \"NONE\", \"scope\": \"UNCHANGED\", \"confidentiality_impact\": \"LOW\", \"integrity_impact\": \"NONE\", \"availability_impact\": \"NONE\", \"base_score\": 5.3, \"base_severity\": \"MEDIUM\", \"impact_score\": 1.4, \"exploitability_score\": 3.9}, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"Assuming a controlled failed memory allocation, an attacker could have caused a use-after-free, leading to a potentially exploitable crash. This vulnerability was fixed in Firefox 134, Firefox ESR 128.6, Firefox ESR 115.19, Thunderbird 134, and Thunderbird 128.6.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [{\"cpe\": \"cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*\", \"version_start\": \"\", \"version_end\": \"115.19.0\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:firefox:*:*:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"134.0\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:firefox:*:*:*:*:esr:*:*:*\", \"version_start\": \"116.0\", \"version_end\": \"128.6.0\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*\", \"version_start\": \"\", \"version_end\": \"128.6\", \"vulnerable\": true}, {\"cpe\": \"cpe:2.3:a:mozilla:thunderbird:*:*:*:*:*:*:*:*\", \"version_start\": \"129.0\", \"version_end\": \"134.0\", \"vulnerable\": true}], \"status\": [\"active\"]}",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2025-01-07T16:15:38.470000+00:00",
+   "last_seen": "2026-10-05T15:10:00.590000+00:00",
+   "value": "CVE-2025-0238",
+   "Tag": [
+    {
+     "id": "7",
+     "name": "zone:Global"
+    },
+    {
+     "id": "3166",
+     "name": "source:NVD"
+    },
+    {
+     "id": "8791",
+     "name": "tlp:white"
+    },
+    {
+     "id": "3167",
+     "name": "severity:medium"
+    },
+    {
+     "id": "3168",
+     "name": "cvss:medium"
+    }
+   ]
+  },
+  "CVE-2026-83540": {
+   "id": "1094508",
+   "event_id": "138",
+   "object_id": "0",
+   "object_relation": null,
+   "category": "External analysis",
+   "type": "vulnerability",
+   "to_ids": false,
+   "uuid": "5b7c63a3-dde0-4c6e-9dbf-66bb6fcd31f1",
+   "timestamp": "1791903840",
+   "distribution": "5",
+   "sharing_group_id": "0",
+   "comment": "NVD_META:{\"published\": \"2026-10-07T03:16:59.730000+00:00\", \"last_modified\": \"2026-10-07T16:02:27.613000+00:00\", \"cwe\": [\"CWE-287\", \"CWE-613\"], \"ref_tags\": [], \"reference_urls\": [\"https://github.com/wolfSSL/wolfssh\", \"https://github.com/wolfSSL/wolfssh/commit/9777bc5ce810d6c418a1473e9e8c40cdb0026e5a\", \"https://github.com/wolfSSL/wolfssh/commit/b6bd975ccfac6aadf29b98e35e09114bef3840a9\", \"https://www.wolfssl.com/docs/security-vulnerabilities/\"], \"cpe_type\": [], \"result_impacts\": [], \"affected_products\": [], \"attack_vector\": \"UNKNOWN\", \"cvss_v40_data\": {\"vector_string\": \"CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X\", \"base_score\": 7.7, \"base_severity\": \"HIGH\"}, \"cvss_v31_data\": null, \"cvss_v30_data\": null, \"cvss_v2_data\": null, \"description\": \"When password or public key authentication is used with the Windows port of wolfSSHd, the Windows logon token acquired for one authenticated connection is not released before a token is acquired for a subsequent connection, resulting in user login poisoning between connections. A less privileged user with a valid account on the server can exploit this to force a login as a more privileged user. The vulnerability was introduced with the initial Windows port of wolfSSHd in wolfSSH version 1.4.15 and affects all versions through 1.5.0. Non-Windows builds of wolfSSHd are not affected.\", \"vendor\": \"\", \"product\": \"\", \"cisa_exploit_add\": \"\", \"cisa_action_due\": \"\", \"cisa_required_action\": \"\", \"cisa_vulnerability_name\": \"\", \"version_constraints\": [], \"status\": [\"active\"]}",
+   "deleted": false,
+   "disable_correlation": false,
+   "first_seen": "2026-10-07T03:16:59.730000+00:00",
+   "last_seen": "2026-10-07T16:02:27.613000+00:00",
+   "value": "CVE-2026-83540",
+   "Tag": [
+    {
+     "id": "7",
+     "name": "zone:Global"
+    },
+    {
+     "id": "3166",
+     "name": "source:NVD"
+    },
+    {
+     "id": "8791",
+     "name": "tlp:white"
+    },
+    {
+     "id": "3169",
+     "name": "severity:unknown"
+    },
+    {
+     "id": "3170",
+     "name": "cvss:low"
+    }
+   ]
+  }
+ }
+}

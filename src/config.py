@@ -595,6 +595,45 @@ def nvd_extra_cve_ids() -> List[str]:
     return ids
 
 
+# ---------------------------------------------------------------------------
+# NVD incremental runs (2026-10)
+# ---------------------------------------------------------------------------
+# An incremental NVD run reads every CVE NVD modified since a stored cursor (``lastModified``),
+# adds the CVEs MISP does not hold yet and edits the MISP attribute of a CVE it holds when NVD's
+# data for it changed. Before, a run took the newest N records by publication date (N =
+# EDGEGUARD_INCREMENTAL_LIMIT, 200): over the 30 days to 2026-10-14 that missed 37% of new CVEs,
+# and no NVD update to a CVE already in MISP reached MISP. Read per call so Airflow tasks and tests
+# pick up the environment at run time.
+
+
+def nvd_incremental_days() -> int:
+    """``EDGEGUARD_NVD_INCREMENTAL_DAYS`` (default 14): how far back an incremental run reads when
+    no cursor is stored (after a wipe, or on a deployment that never stored one). 1 to 3,650; a
+    reach beyond 120 days is read in spans of at most 120 days."""
+    return max(1, min(3650, _env_int("EDGEGUARD_NVD_INCREMENTAL_DAYS", 14)))
+
+
+def nvd_cursor_overlap_seconds() -> int:
+    """``EDGEGUARD_NVD_CURSOR_OVERLAP_SEC`` (default 3600, at least 60): how much earlier than the
+    stored cursor a run starts reading, so a record NVD lists late, or stamps with a clock behind the
+    worker's, is still read. Records read twice compare as unchanged and cost no MISP write."""
+    return max(60, _env_int("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", 3600))
+
+
+def nvd_max_per_run() -> int:
+    """``EDGEGUARD_NVD_MAX_PER_RUN`` (default 5000): MISP writes (new CVEs added plus stored CVEs
+    edited) one incremental run makes at most. A run that reaches it stops at that record and moves
+    the cursor only that far; the next run continues there."""
+    return max(1, _env_int("EDGEGUARD_NVD_MAX_PER_RUN", 5000))
+
+
+def nvd_update_existing() -> bool:
+    """``EDGEGUARD_NVD_UPDATE_EXISTING`` (default true): an incremental run edits the MISP attribute
+    of a CVE MISP already holds when NVD's data for it changed. ``false`` leaves stored CVEs as they
+    are; new CVEs are still added."""
+    return _env_bool("EDGEGUARD_NVD_UPDATE_EXISTING", "true")
+
+
 # MISP push: prefetch existing (type, value) per target event to skip duplicates (reruns + overlap).
 MISP_PREFETCH_EXISTING_ATTRS = _env_bool("EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS", "true")
 
@@ -703,7 +742,9 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   malwarebazaar (2026-10): one 48-hour export holds about 1,000 samples. A daily run cut at
 #   the incremental default (200) would let most of them age out of the export window for good;
 #   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN (default 500) is the per-run limit for this source.
-OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar"})
+#   nvd (2026-10): a run reads every CVE modified since its cursor and caps its MISP writes with
+#   EDGEGUARD_NVD_MAX_PER_RUN (default 5000); a cut at 200 lost 37% of new CVEs (30-day replay).
+OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd"})
 
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:

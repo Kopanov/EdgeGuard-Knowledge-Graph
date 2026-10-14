@@ -99,7 +99,12 @@ x-common-env: &common-env
   # sources a baseline must not start without (comma-separated; empty = none).
   EDGEGUARD_SOURCE_KEY_CHECK: ${EDGEGUARD_SOURCE_KEY_CHECK:-true}
   EDGEGUARD_BASELINE_REQUIRED_SOURCES: ${EDGEGUARD_BASELINE_REQUIRED_SOURCES:-}
+  # NVD incremental runs (2026-10): lookback without a stored cursor, overlap before the cursor,
+  # MISP writes per run, and whether CVEs MISP already holds are edited when NVD changes them.
   EDGEGUARD_NVD_INCREMENTAL_DAYS: ${EDGEGUARD_NVD_INCREMENTAL_DAYS:-14}
+  EDGEGUARD_NVD_CURSOR_OVERLAP_SEC: ${EDGEGUARD_NVD_CURSOR_OVERLAP_SEC:-3600}
+  EDGEGUARD_NVD_MAX_PER_RUN: ${EDGEGUARD_NVD_MAX_PER_RUN:-5000}
+  EDGEGUARD_NVD_UPDATE_EXISTING: ${EDGEGUARD_NVD_UPDATE_EXISTING:-true}
   # 2026-10: known-exploited CVEs outside the baseline window (whole KEV catalogue, NVD KEV sweep,
   # CVE ids fetched by id) — see README "Settings".
   EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE: ${EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE:-true}

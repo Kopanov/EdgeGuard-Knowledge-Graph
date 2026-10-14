@@ -271,7 +271,7 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 #### Low Frequency (Every 8 hours)
 | Source | DAG | Rate Limit | Items/Run |
 |--------|-----|------------|-----------|
-| NVD | `edgeguard_low_freq` | 50 req/30sec (with key) | Up to configured limit (paginated, ≤2000 CVEs/request) |
+| NVD | `edgeguard_low_freq` | 50 req/30sec (with key) | Every CVE modified since the stored cursor (≤2,000 per request): new CVEs added, stored CVEs NVD changed edited in MISP; at most `EDGEGUARD_NVD_MAX_PER_RUN` (5,000) MISP writes per run |
 
 #### Daily (Once per day)
 | Source | DAG | Rate Limit | Items/Run |

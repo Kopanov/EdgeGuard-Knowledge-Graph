@@ -55,9 +55,10 @@ def _nvd_collector() -> NVDCollector:
 
 
 def _collect(records: list) -> dict:
-    """NVDCollector.collect() (incremental, no MISP push) over real NVD API records."""
+    """NVDCollector.collect() (incremental, no MISP push) over real NVD API records: the lastMod read
+    returns them and each becomes an item through ``_vulnerability_item``."""
     with (
-        patch.object(NVDCollector, "_fetch_cves", return_value=records),
+        patch.object(NVDCollector, "_fetch_modified_cves", return_value=(records, True)),
         patch.object(NVDCollector, "check_service_available", return_value=True),
     ):
         items = _nvd_collector().collect(limit=None, push_to_misp=False, baseline=False)

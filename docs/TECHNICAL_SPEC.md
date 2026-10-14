@@ -855,7 +855,7 @@ together so they cannot drift.
 | `EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC` | `300` | **OTX**: overlap added to last cursor time (clock skew / API timing). |
 | `EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES` | `25` | **OTX**: max API pages per scheduled run. |
 | `EDGEGUARD_MITRE_CONDITIONAL_GET` | `true` | **MITRE** scheduled runs: **`If-None-Match`** / **ETag**; **304** skips download. Baseline still fetches full bundle. |
-| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Pause (seconds) between each batch of 500 attributes pushed to MISP. Prevents memory exhaustion on large events. |
+| `EDGEGUARD_MISP_BATCH_THROTTLE_SEC` | `5.0` | Pause (seconds) between each batch of 500 attributes pushed to MISP, and after every 50 attribute edits of an NVD incremental run. Prevents memory exhaustion on large events. |
 | `EDGEGUARD_MISP_EVENT_FETCH_THROTTLE_SEC` | `2.0` | Pause (seconds) between fetching consecutive MISP events during sync. |
 | `EDGEGUARD_MAX_EVENT_ATTRIBUTES` | `50000` | Events exceeding this attribute count are deferred to end of sync (small events first). `0` = disable. |
 | `EDGEGUARD_MISP_PAGE_SIZE` | `500` | MISP `/events/index` page size used by the **primary** index path in `run_misp_to_neo4j._fetch_edgeguard_events_via_requests_index`. |
