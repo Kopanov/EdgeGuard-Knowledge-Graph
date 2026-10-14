@@ -200,21 +200,23 @@ def _misp_attribute_urls(attribute_ids: List[str]) -> Optional[List[str]]:
 def _cve_effective_score_severity(c, cv40_node, cv31_node, cv30_node, cv2_node):
     """
     Use CVE node properties when set; otherwise derive from linked CVSS sub-nodes
-    (same priority as MISP→Neo4j NVD_META: v3.1 → v3.0 → v2 → v4.0).
-    Uses ``is not None`` so a score of 0.0 is preserved.
+    (same order as ``cvss_selection.CVSS_VERSIONS``: v3.1 → v3.0 → v2 → v4.0).
+    Uses ``is not None`` so a score of 0.0 is preserved. Returns (score, severity, version);
+    since 2026-10 ``merge_cve`` sets the node values from the sub-nodes, so the fallback only
+    serves nodes written before.
     """
     score = c.get("cvss_score")
     if score is None:
         score = c.get("base_score")
     severity = c.get("severity") or c.get("base_severity")
     if score is not None:
-        return score, severity
-    for node in (cv31_node, cv30_node, cv2_node, cv40_node):
+        return score, severity, c.get("cvss_version")
+    for node, version in ((cv31_node, "3.1"), (cv30_node, "3.0"), (cv2_node, "2.0"), (cv40_node, "4.0")):
         if node is not None:
             bs = node.get("base_score")
             if bs is not None:
-                return bs, node.get("base_severity") or severity
-    return None, severity
+                return bs, node.get("base_severity") or severity, version
+    return None, severity, None
 
 
 def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
@@ -238,7 +240,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
     cv30_node = record["cv30"] if record["cv30"] else None
     cv2_node = record["cv2"] if record["cv2"] else None
 
-    eff_score, eff_severity = _cve_effective_score_severity(c, cv40_node, cv31_node, cv30_node, cv2_node)
+    eff_score, eff_severity, eff_version = _cve_effective_score_severity(c, cv40_node, cv31_node, cv30_node, cv2_node)
 
     return CVE(
         cve_id=c.get("cve_id", ""),
@@ -251,6 +253,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
         cwe=_neo4j_list(c.get("cwe")),
         base_score=eff_score,
         base_severity=eff_severity,
+        cvss_version=eff_version,
         edgeguard_managed=c.get("edgeguard_managed"),
         uuid=c.get("uuid"),
         source=_neo4j_list(c.get("source")),

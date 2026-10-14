@@ -106,9 +106,12 @@ class CVE:
     result_impacts: Optional[List[str]] = None
     ref_tags: Optional[List[str]] = None
     cwe: Optional[List[str]] = None
-    # Scoring
+    # Scoring — base_score / base_severity come from one CVSS version, in the order
+    # v3.1 → v3.0 → v2 → v4.0, named by cvss_version; without any CVSS the score and version
+    # are null and the severity UNKNOWN (2026-10).
     base_score: Optional[float] = None
     base_severity: Optional[str] = None
+    cvss_version: Optional[str] = None
     # Provenance — who wrote this node and when
     edgeguard_managed: Optional[bool] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j

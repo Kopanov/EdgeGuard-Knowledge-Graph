@@ -16,6 +16,12 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
+def neo4j_client_module():
+    import neo4j_client
+
+    return neo4j_client
+
+
 @pytest.fixture
 def mock_neo4j_client():
     """Create a Neo4jClient with mocked driver."""
@@ -93,7 +99,8 @@ class TestTacticPropertyPromotion:
 
 
 class TestCVEPropertyPromotion:
-    """CVE nodes must have description, cvss_score, severity, attack_vector."""
+    """CVE nodes must have description and attack_vector; cvss_score / severity / cvss_version
+    come from the CVSS sub-nodes (2026-10), not from the record."""
 
     def test_cve_promotes_description(self, mock_neo4j_client):
         client, session = mock_neo4j_client
@@ -111,8 +118,14 @@ class TestCVEPropertyPromotion:
         cypher_call = session.run.call_args_list[1]
         cypher_text = cypher_call[0][0]
         assert "n.description = $description" in cypher_text, "CVE.description must be promoted"
-        assert "n.cvss_score = $cvss_score" in cypher_text, "CVE.cvss_score must be promoted"
-        assert "n.severity = $severity" in cypher_text, "CVE.severity must be promoted"
+        assert "n.attack_vector = $attack_vector" in cypher_text
+        assert "cvss_score" not in cypher_text and "severity" not in cypher_text, (
+            "the record's score must not be written: a 0.0 placeholder, a KEV value or OTX's UNKNOWN "
+            "used to overwrite the CVSS of another source"
+        )
+        derive = session.run.call_args_list[-1]
+        assert derive[0][0] == neo4j_client_module()._CVE_SCORE_FROM_CVSS_QUERY
+        assert derive[1]["cve_id"] == "CVE-2024-1234"
 
 
 class TestToolPropertyPromotion:
@@ -303,20 +316,22 @@ class TestNegativeCases:
         cypher_text = cypher_call[0][0]
         assert "cvss_score" not in cypher_text, "None cvss_score must NOT be promoted"
 
-    def test_cve_zero_cvss_score_is_promoted(self, mock_neo4j_client):
-        """cvss_score=0.0 is valid and must appear in Cypher SET."""
+    def test_cve_zero_cvss_score_is_kept_by_the_sub_node_derivation(self, mock_neo4j_client):
+        """0.0 is a valid CVSS score (rating NONE): the derivation from the sub-nodes accepts it.
+        (Since 2026-10 the node score comes from the sub-nodes, not from the record.)"""
         client, session = mock_neo4j_client
         data = {
             "cve_id": "CVE-2024-0000",
             "cvss_score": 0.0,
+            "cvss_v31_data": {"base_score": 0.0, "base_severity": "NONE"},
             "source": ["nvd"],
             "zone": ["global"],
             "confidence_score": 0.5,
         }
         client.merge_cve(data, source_id="nvd")
-        cypher_call = session.run.call_args_list[1]
-        cypher_text = cypher_call[0][0]
-        assert "n.cvss_score = $cvss_score" in cypher_text, "0.0 is a valid CVSS score and must be promoted"
+        query = session.run.call_args_list[-1][0][0]
+        assert "x.base_score >= 0.0 AND x.base_score <= 10.0" in query, "0.0 must pass, inf / 1e309 must not"
+        assert "WHEN best[0].base_score = 0.0 THEN 'NONE'" in query
 
     def test_cve_no_description_not_promoted(self, mock_neo4j_client):
         """CVE without description must not have description in SET."""

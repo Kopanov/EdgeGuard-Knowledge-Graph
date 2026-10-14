@@ -331,6 +331,10 @@ _VULNERABILITY_PROMOTED_FIELDS: Tuple[Tuple[str, str], ...] = (
     ("ref_tags", "x_edgeguard_ref_tags"),
     ("reference_urls", "x_edgeguard_reference_urls"),
     ("affected_products", "x_edgeguard_affected_products"),
+    # 2026-10: which CVSS version ``x_edgeguard_cvss_score`` is (3.1, 3.0, 2.0 or 4.0), and CISA
+    # KEV's knownRansomwareCampaignUse ("Known" / "Unknown").
+    ("cvss_version", "x_edgeguard_cvss_version"),
+    ("known_ransomware_use", "x_edgeguard_known_ransomware_use"),
 )
 
 # Every top-level ``x_edgeguard_*`` property the exporter can emit. The
