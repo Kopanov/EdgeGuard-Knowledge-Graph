@@ -222,7 +222,7 @@ def test_actor_campaign_query_uses_runs_direction():
     # The query must match (a:ThreatActor)-[:RUNS]->(c:Campaign), not
     # the reverse. Match on the full pattern so a future refactor that
     # accidentally flips direction fails loudly here.
-    assert "(a)-[:RUNS]->(c:Campaign)" in q
+    assert "(a)-[r4:RUNS]->(c:Campaign)" in q
     assert "(c:Campaign)-[:ATTRIBUTED_TO]->(a)" not in q
 
 
@@ -246,9 +246,10 @@ def test_export_technique_uses_with_aggregation_to_avoid_cartesian():
     StixExporter(client).export_technique("T1059")
     q = client.driver._session.main_cypher
     # Must see the aggregation step between OPTIONAL MATCH clauses.
-    assert "collect(DISTINCT a) AS actors" in q
-    assert "collect(DISTINCT m) AS malware" in q
-    assert "collect(DISTINCT tool) AS tools" in q
+    # 2026-10: each collection carries its relationship's properties (SRO provenance)
+    assert "collect({n: a, r: properties(r1)}) AS actors" in q
+    assert "collect({n: m, r: properties(r2)}) AS malware" in q
+    assert "collect({n: tool, r: properties(r3)}) AS tools" in q
     # And the first WITH must be between the seed match and the first
     # OPTIONAL MATCH so actors don't multiply the seed row.
     assert "WITH t\n" in q or "WITH t " in q
@@ -273,11 +274,11 @@ def test_export_indicator_uses_with_aggregation_to_avoid_cartesian():
     StixExporter(client).export_indicator("1.2.3.4")
     q = client.driver._session.main_cypher
     # Each collection must be folded into a WITH before the next OPTIONAL MATCH.
-    assert "collect(DISTINCT m) AS malware" in q
-    assert "collect(DISTINCT v) AS vulns" in q
-    assert "collect(DISTINCT t) AS techniques" in q
+    assert "collect({n: m, r: properties(r1)}) AS malware" in q
+    assert "collect(vr) AS vulns" in q
+    assert "collect({n: t, r: properties(r3)}) AS techniques" in q
     # First WITH must be between the seed match and the first OPTIONAL MATCH.
-    assert "WITH i, collect(DISTINCT m) AS malware" in q
+    assert "WITH i, collect({n: m, r: properties(r1)}) AS malware" in q
 
 
 def test_export_cve_uses_with_aggregation_to_avoid_cartesian():
@@ -299,9 +300,9 @@ def test_export_cve_uses_with_aggregation_to_avoid_cartesian():
     StixExporter(client).export_cve("CVE-2021-44228")
     q = client.driver._session.main_cypher
     # Aggregation step between the two OPTIONAL MATCHes.
-    assert "WITH seed, twins, collect(DISTINCT i) AS indicators" in q
+    assert "WITH seed, twins, collect({n: i, r: properties(r1)}) AS indicators" in q
     # Sectors still collected at RETURN time.
-    assert "collect(DISTINCT s) AS sectors" in q
+    assert "collect({n: s, r: properties(r3)}) AS sectors" in q
 
 
 def test_stix_exporter_passes_query_timeout():
@@ -546,8 +547,8 @@ def test_cve_export_uses_affects_not_targets_for_sectors():
     client = _mk_client(rows)
     StixExporter(client).export_cve("CVE-2021-44228")
     q = client.driver._session.main_cypher
-    assert "[:AFFECTS]->(s:Sector)" in q
-    assert "[:TARGETS]->(s:Sector)" not in q
+    assert "[r3:AFFECTS]->(s:Sector)" in q
+    assert ":TARGETS]->(s:Sector)" not in q
 
 
 def test_cve_export_bundle_contains_vulnerability_and_indicator_related_to_rel():
@@ -803,10 +804,13 @@ _TECHNIQUE_ROW = {
 _CVE_ROW = {"seed": {"cve_id": "CVE-2021-44228"}, "indicators": [], "sectors": []}
 
 _EXPORTS = [
-    ("export_indicator", "1.2.3.4", _INDICATOR_ROW, 4),
-    ("export_threat_actor", "APT28", _ACTOR_ROW, 4),
-    ("export_technique", "T1059", _TECHNIQUE_ROW, 4),
-    ("export_cve", "CVE-2021-44228", _CVE_ROW, 2),
+    # 2026-10: + campaign membership (indicator); + USES_MALWARE / USES_TOOL / EXPLOITS /
+    # TARGETS (actor); + SUBTECHNIQUE_OF parent and children (technique); + actors and
+    # malware exploiting the CVE (cve).
+    ("export_indicator", "1.2.3.4", _INDICATOR_ROW, 5),
+    ("export_threat_actor", "APT28", _ACTOR_ROW, 8),
+    ("export_technique", "T1059", _TECHNIQUE_ROW, 6),
+    ("export_cve", "CVE-2021-44228", _CVE_ROW, 3),
 ]
 
 
@@ -828,7 +832,8 @@ def test_every_collection_is_ordered_and_limited_by_parameter(method, identifier
         assert "ORDER BY" in line, f"LIMIT without ORDER BY is non-deterministic: {line.strip()}"
     # No unbounded collect() of related nodes remains: every collect() is
     # preceded by a limited stage, so the counts agree.
-    assert q.count("collect(DISTINCT") == collections
+    # Collections, not the CVE-twin folds (``head(collect(...))`` / ``collect(v) AS twins``).
+    assert q.count("collect(") - q.count("head(collect(") - q.count("collect(v) AS twins") == collections
 
 
 @pytest.mark.parametrize("method, identifier, row, _collections", _EXPORTS)
@@ -1006,16 +1011,17 @@ def test_actor_malware_technique_pairs_bounded_without_null_rows():
     bundle = StixExporter(client).export_threat_actor("APT28", limit=1)
     q = client.driver._session.main_cypher
     start = q.index("CALL (malware) {")
-    end = q.index("OPTIONAL MATCH (a)-[:RUNS]->(c:Campaign)", start)
+    end = q.index("OPTIONAL MATCH (a)-[r4:RUNS]->(c:Campaign)", start)
     subquery = q[start:end]
     assert subquery.rstrip().endswith("}"), subquery
-    assert "UNWIND malware AS m_each" in subquery
-    assert "MATCH (m_each)-[:IMPLEMENTS_TECHNIQUE]->(mt:Technique)" in subquery
+    assert "UNWIND malware AS m_pair" in subquery and "WITH m_pair.n AS m_each" in subquery
+    assert "WHERE m_each IS NOT NULL" in subquery
+    assert "MATCH (m_each)-[r3:IMPLEMENTS_TECHNIQUE]->(mt:Technique)" in subquery
     assert "OPTIONAL MATCH (m_each)" not in q
     assert "[null]" not in q
     limited = [line for line in subquery.splitlines() if "LIMIT $limit" in line]
     assert len(limited) == 1 and "ORDER BY m_each.name, mt.mitre_id" in limited[0]
-    assert "RETURN collect(DISTINCT {m: m_each, t: mt}) AS mal_tech" in subquery
+    assert "RETURN collect({m: m_each, t: mt, r: properties(r3)}) AS mal_tech" in subquery
     # The pair that survives the bound is exported as malware uses attack-pattern.
     rels = _by_type(bundle, "relationship")
     pair = [
@@ -1043,10 +1049,10 @@ def test_indicator_export_dedupes_cve_twins_before_limit():
     client = _mk_client(rows)
     bundle = StixExporter(client).export_indicator("1.2.3.4")
     q = client.driver._session.main_cypher
-    prefer = q.index("WITH i, malware, v ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)")
-    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS v")
-    bound = q.index("WITH i, malware, v ORDER BY v.cve_id LIMIT $limit")
-    collect = q.index("WITH i, malware, collect(DISTINCT v) AS vulns")
+    prefer = q.index("WITH i, malware, v, r2 ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)")
+    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect({n: v, r: properties(r2)})) AS vr")
+    bound = q.index("WITH i, malware, vr ORDER BY vr.n.cve_id LIMIT $limit")
+    collect = q.index("WITH i, malware, collect(vr) AS vulns")
     assert prefer < dedupe < bound < collect
     # Twins returned by the driver still collapse to one vulnerability SDO.
     vulns = _by_type(bundle, "vulnerability")
@@ -1083,17 +1089,19 @@ def test_cve_export_walks_both_twins_and_aggregates_either_label():
     # Seed folding: one row, CVE-preferred head, every twin kept.
     assert "LIMIT 1" not in q
     fold = q.index("WITH head(collect(v)) AS seed, collect(v) AS twins")
-    exploits = q.index("OPTIONAL MATCH (i:Indicator)-[:EXPLOITS]->(tw)")
-    affects = q.index("OPTIONAL MATCH (tw)-[:AFFECTS]->(s:Sector)")
-    assert fold < exploits < affects
-    assert q.count("UNWIND twins AS tw") == 2
+    exploits = q.index("OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(tw)")
+    threats = q.index("OPTIONAL MATCH (x)-[r2:EXPLOITS]->(tw)")
+    affects = q.index("OPTIONAL MATCH (tw)-[r3:AFFECTS]->(s:Sector)")
+    assert fold < exploits < threats < affects
+    assert q.count("UNWIND twins AS tw") == 3
     # Neighbours are de-duplicated across twins before each bound, nulls last.
     assert (
-        "WITH DISTINCT seed, twins, i ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit"
+        "WITH DISTINCT seed, twins, i, r1 ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit"
         in q
     )
     assert (
-        "WITH DISTINCT seed, indicators, s ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit" in q
+        "WITH DISTINCT seed, indicators, threats, s, r3 ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit"
+        in q
     )
     assert "RETURN seed," in q
     # Aggregate prefetch for the seed matches either twin label.

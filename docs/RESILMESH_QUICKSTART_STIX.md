@@ -141,6 +141,38 @@ MISP provenance also carries:
 Both fields are omitted entirely when the source node has no MISP
 references — bundles do not grow empty fields on every object.
 
+**Relationship provenance (2026-10):** every relationship (SRO) carries
+the provenance of the graph relationship it comes from:
+
+- `confidence` — 0–100, from the relationship's `confidence_score`;
+- `external_references` — one per source record (`source_name` = the
+  source, `external_id` = its record id), with a `url` where the record has
+  a public page (OTX pulse, ThreatFox IOC, URLhaus entry, ATT&CK object);
+- `x_edgeguard_match_type` — the kind of evidence (`mitre_explicit`,
+  `otx_pulse`, `malware_family`, `cve_tag`, `coreideas_curated`, …);
+- `x_edgeguard_sources` — the sources that assert the link (`mitre_attck`,
+  `alienvault_otx`, `threatfox`, `coreideas`, …);
+- `x_edgeguard_source_refs` — their record ids, `"<source>:<id>"`;
+- `x_edgeguard_misp_event_ids` — the MISP events that carried the link.
+
+```json
+{
+  "type": "relationship",
+  "relationship_type": "uses",
+  "source_ref": "intrusion-set--…",
+  "target_ref": "attack-pattern--…",
+  "confidence": 95,
+  "external_references": [
+    {"source_name": "mitre_attck", "external_id": "G0016", "url": "https://attack.mitre.org/groups/G0016/"},
+    {"source_name": "alienvault_otx", "external_id": "5f3c…", "url": "https://otx.alienvault.com/pulse/5f3c…"}
+  ],
+  "x_edgeguard_match_type": "mitre_explicit",
+  "x_edgeguard_sources": ["alienvault_otx", "mitre_attck"],
+  "x_edgeguard_source_refs": ["alienvault_otx:5f3c…", "mitre_attck:G0016"],
+  "x_edgeguard_misp_event_ids": ["135", "140"]
+}
+```
+
 ### Provenance — the producer `identity`
 
 STIX 2.1 permits only `type`, `id` and `objects` on a bundle, so the
@@ -169,7 +201,8 @@ the API pod at deploy time and is omitted if unset.
 
 All `x_edgeguard_*` properties (source-truthful and import timestamps,
 `x_edgeguard_zones`, MISP traceability, NVD / CISA KEV enrichment on
-`vulnerability`, the identity provenance above) are **top-level
+`vulnerability`, the relationship provenance on SROs, the identity
+provenance above) are **top-level
 extension properties** of the STIX 2.1 extension
 `extension-definition--a9516685-381e-5b4f-9bd4-5cad8c3b1511`
 (`extension_types: ["toplevel-property-extension"]`). The definition
@@ -198,10 +231,10 @@ for enrichment and analyst UIs.
 
 | Object type | depth=1 returns                                | depth=2 adds                              |
 |-------------|------------------------------------------------|-------------------------------------------|
-| `indicator` | seed + `INDICATES→Malware`                     | CVE, technique, sector edges              |
-| `actor`     | seed + attributed Malware                      | actor techniques, mal→tech chain, campaigns |
-| `technique` | seed + ThreatActors that employ it             | Malware, Tools, Indicators                |
-| `cve`       | seed + exploiting Indicators                   | affected Sectors                          |
+| `indicator` | seed + `INDICATES→Malware`                     | CVE, technique, sector, campaign edges    |
+| `actor`     | seed + attributed Malware                      | actor techniques, mal→tech chain, campaigns, `USES_MALWARE` / `USES_TOOL` software, exploited CVEs, targeted sectors |
+| `technique` | seed + ThreatActors that employ it             | Malware, Tools, Indicators, parent and sub-techniques |
+| `cve`       | seed + exploiting Indicators                   | exploiting ThreatActors and Malware, affected Sectors |
 
 Today `depth` is a Python-side filter — the Cypher always fetches the
 full neighborhood and the exporter drops the non-primary groups when
