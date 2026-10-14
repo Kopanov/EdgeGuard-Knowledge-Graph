@@ -241,19 +241,19 @@ When data is pushed to MISP, it gets tagged with:
 
 | Relationship | From → To | How it is created |
 |---|---|---|
-| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
-| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor (`match_type='mitre_explicit'`, 0.95); OTX pulse `attack_ids` → `reported_techniques` (`match_type='otx_pulse'`, 0.6, 2026-10) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
-| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` (`mitre_explicit`, 0.95); OTX pulse ids → `reported_techniques` (`otx_pulse`, 0.6, 2026-10). MISP round-trip via **`MITRE_USES_TECHNIQUES:`** (`t` / `rt` / `pid`) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
+| `SOURCED_FROM` | Node → Source | Every merge; carries `raw_data`, `confidence`, `imported_at`, `updated_at`, `source_reported_first_at`, `source_reported_last_at`, `src_uuid`, `trg_uuid`, `edgeguard_managed`, and (2026-10) that source's `misp_event_ids[]` and `source_refs[]`, which the links derived after the sync copy. **One edge per (entity, source) pair** — multi-source IOCs preserve full per-source provenance. See [KNOWLEDGE_GRAPH.md → SOURCED_FROM edge schema](KNOWLEDGE_GRAPH.md#sourced_from-edge-schema). |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign → Technique | Attribution — MITRE STIX **`uses`** → `uses_techniques` on actor (`match_type='mitre_explicit'`, 0.95); OTX pulse `attack_ids` → `reported_techniques` (`match_type='otx_pulse'`, 0.6, 2026-10) → `build_relationships.py`; a curated package's claim (the package's curated label, 0.85, written by the sync, 2026-10). *(Split from a generic `USES` in 2026-04.)* |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool → Technique | Capability — MITRE STIX **`uses`** → `uses_techniques` (`mitre_explicit`, 0.95); OTX pulse ids → `reported_techniques` (`otx_pulse`, 0.6, 2026-10); a malware's curated-package claim (curated label, 0.85, 2026-10). MISP round-trip via **`MITRE_USES_TECHNIQUES:`** (`t` / `rt` / `pid`) → `build_relationships.py`. *(Split from a generic `USES` in 2026-04.)* |
 | `USES_TECHNIQUE` | Indicator → Technique | Observation — OTX `attack_ids` on indicator → `build_relationships.py` (confidence 0.85). |
 | `ATTRIBUTED_TO` | Malware → ThreatActor | `build_relationships.py` exact match on the malware's own `attributed_to` claim against the actor's `name` OR the actor's `aliases` (`match_type='exact'`, 1.0; the "Cozy Bear → APT29" path), plus — 2026-10 — same-OTX-pulse links from the sync (`match_type='otx_pulse'`, 0.6). Whole-event co-occurrence attribution removed 2026-10. Actor/malware `aliases` survive the MISP round-trip via `alias:` tags (2026-06). |
 | `INDICATES` | Indicator → Malware | Same-OTX-pulse link from the sync (`match_type='otx_pulse'`, 0.6, 2026-10) and source-asserted `malware_family` match (`build_relationships.py` Q9, 0.8). The whole-event `misp_event_ids[]` co-occurrence query was removed in 2026-10. |
-| `EXPLOITS` | Indicator → CVE/Vulnerability | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0). Not derived from event co-membership since 2026-10. |
+| `EXPLOITS` | Indicator → CVE/Vulnerability; ThreatActor / Malware → CVE | Indicator tagged with matching `cve_id` (`match_type='cve_tag'`, 1.0). Not derived from event co-membership since 2026-10. Actor and malware links (2026-10) come only from curated packages (the package's curated label, 0.85; MATCH on existing nodes). |
 | `IN_TACTIC` | Technique → Tactic | MITRE ATT&CK tactic phases |
 | `SUBTECHNIQUE_OF` | Technique → Technique | Sub-technique → parent technique (MITRE dotted id; 2026-10) |
-| `USES_MALWARE` | ThreatActor → Malware | MITRE explicit group → malware `uses` (2026-10, R6) |
-| `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses` (2026-10, R6) |
-| `TARGETS` | Indicator → Sector | Node `zone` list → `build_relationships.py` |
-| `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → `build_relationships.py` |
+| `USES_MALWARE` | ThreatActor → Malware | MITRE explicit group → malware `uses` (2026-10, R6); also a curated package's claim (curated label, 0.85) |
+| `USES_TOOL` | ThreatActor → Tool | MITRE explicit group → tool `uses` (2026-10, R6); also a curated package's claim (curated label, 0.85) |
+| `TARGETS` | Indicator / ThreatActor / Malware → Sector | Node `zone` list → the sync (indicators) and `build_relationships.py` (`zone_classification`, 0.5; actor and malware edges since 2026-10; never to `global`) |
+| `AFFECTS` | Vulnerability/CVE → Sector | Node `zone` list → the sync and `build_relationships.py` (`zone_classification`, 0.5) |
 | `RUNS` | ThreatActor → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` |
 | `PART_OF_CAMPAIGN` | Malware / Indicator → Campaign | Built by `enrichment_jobs.build_campaign_nodes()` (named `PART_OF` until 2026-10; `PART_OF` is ResilMesh's asset hierarchy) |
 
@@ -294,11 +294,15 @@ n.misp_event_ids`).
 Edges built BEFORE PR-N26 have no array set; backfill via
 [`scripts/backfill_edge_misp_event_ids.py`](../scripts/backfill_edge_misp_event_ids.py)
 + the [`migrations/2026_05_edge_misp_event_ids_backfill_runbook.md`](../migrations/2026_05_edge_misp_event_ids_backfill_runbook.md)
-runbook. The other edge types created via
-`Neo4jClient.create_misp_relationships_batch` (`EMPLOYS_TECHNIQUE`,
-`IMPLEMENTS_TECHNIQUE`, `ATTRIBUTED_TO`) do **not** carry
-`r.misp_event_ids[]` today — those edges are derived from STIX
-relationships and the provenance flows through the endpoint nodes.
+runbook (those four types only). **Since 2026-10 every relationship built
+from the sources carries `r.misp_event_ids[]`**, together with `r.sources[]`
+(who asserts it) and `r.source_refs[]` (the sources' own record ids): the
+sync writes the three lists from the MISP attribute, and the links derived
+afterwards (`build_relationships.py`, the campaign and Vulnerability↔CVE
+links of `enrichment_jobs.py`) copy them from the subject node's
+per-source `SOURCED_FROM` edge or inherit them from the links they are
+built on (`src/relationship_provenance.py`; [KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md),
+"Relationship provenance").
 
 Per-attribute IDs are deliberately **not** stored on edges (cardinality
 blowup for marginal benefit) — attribute UUIDs live on the Indicator
@@ -369,6 +373,8 @@ script ships; a fresh baseline rerun stamps every uuid at write time. See
 | cisa_ics | CISA ICS Advisories | Advisory | cisa_ics_collector.py (flag-guarded, `EDGEGUARD_ENABLE_CISA_ICS`) |
 | healthcare | Healthcare Feeds | Threat Intel | healthcare_feed_collector.py (placeholder) |
 | energy | Energy Feeds | Threat Intel | energy_feed_collector.py (placeholder) |
+
+The registry also holds the MISP hub (`misp`, the fallback for an attribute without a known source tag) and, since 2026-10, two curated sources with no collector: `coreideas` (Core Ideas) and `misp_galaxy`. Their packages are imported once into MISP with `scripts/import_curated_package.py`, and the sync writes their claims as relationships of existing types without creating nodes ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Curated packages").
 
 ---
 
@@ -489,4 +495,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-10-14 — MISP tag table: `cvss:` only for a CVE with a CVSS score (`cvss:none` for 0.0), `severity:unknown` without; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-06-11 — PR #126: ATTRIBUTED_TO row now documents the alias round-trip (actor/malware aliases survive the MISP round-trip via `alias:` tags) and the removal of the alias attribution-forgery branch (Q2 Branch 3). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._
+_Last updated: 2026-10-15 — relationship table: per-source `misp_event_ids[]` / `source_refs[]` on `SOURCED_FROM`, curated-package claims on the technique, `USES_MALWARE` / `USES_TOOL` and `EXPLOITS` rows, `TARGETS` from actors and malware; the edge-traceability paragraph no longer says the technique and attribution edges lack `r.misp_event_ids[]`; the curated sources and the `misp` hub named under the source inventory. Prior: 2026-10-14 — MISP tag table: `cvss:` only for a CVE with a CVSS score (`cvss:none` for 0.0), `severity:unknown` without; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-06-11 — PR #126: ATTRIBUTED_TO row now documents the alias round-trip (actor/malware aliases survive the MISP round-trip via `alias:` tags) and the removal of the alias attribution-forgery branch (Q2 Branch 3). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._

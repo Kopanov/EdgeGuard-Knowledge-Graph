@@ -289,6 +289,11 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    The baseline DAG holds the baseline lock for the whole run (Issue #57, 2026-10); pausing the
    scheduled DAGs before triggering remains the recommended extra step for a destructive run
    ([RUNBOOK § Baseline day protocol](RUNBOOK.md#baseline-day-protocol)).
+   The `baseline_clean` step may take up to 60 minutes on a 730-day store: it deletes Neo4j
+   relationships in batches before the nodes, and each MISP event delete may wait up to
+   `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` (900 s; not forwarded by `docker-compose.yml`, so the
+   default applies). If the clean fails, the collectors and `full_neo4j_sync` refuse to run
+   instead of writing into a half-wiped store ([RUNBOOK § 7](RUNBOOK.md#7-baseline-chain-stopped-after-a-failed-step-postcheck-pr-n27-2026-10)).
 5. **Hand back.** Return the acceptance JSON
    (`python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json`),
    the two snapshot paths and the `edgeguard_baseline` DAG run id. The informational
@@ -297,7 +302,16 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    after this re-feed — `SUBTECHNIQUE_OF`, `USES_MALWARE`, `USES_TOOL` (definitions in
    [RESILMESH_INTEROPERABILITY.md § 3.2](RESILMESH_INTEROPERABILITY.md)) — and
    `TARGETS` now also runs from actors and malware to sectors, so the Cypher model's
-   training set needs examples for them.
+   training set needs examples for them. The graph of the next re-feed also changes what
+   consumers query (2026-10): campaign membership is `PART_OF_CAMPAIGN` (`PART_OF` is
+   ResilMesh's asset hierarchy alone); every relationship built from the sources carries
+   `sources[]`, `source_refs[]` and `misp_event_ids[]`, and the relationship properties
+   `source_id`, `source_ids` and `report_ids` no longer exist; `CVE.cvss_score` is null and
+   `severity` is `UNKNOWN` for a CVE without any CVSS (no more 3.0 / LOW), with
+   `cvss_version`, `status` and `known_ransomware_use` alongside; the STIX bundles export every
+   relationship with its provenance (extension 1.1.0). A curated package, once imported
+   ([RUNBOOK § Importing a curated package](RUNBOOK.md#importing-a-curated-package-2026-10)),
+   adds `EXPLOITS` from actors and malware to CVEs.
 6. **Enable the optional sources one at a time** (each followed by the acceptance script
    with `--require-cisa-ics` / `--require-ics` / `--require-malwarebazaar`):
    - `EDGEGUARD_ENABLE_CISA_ICS=true`, `docker compose up -d airflow`, then one **additive**
@@ -403,7 +417,7 @@ It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: 
 
 | Check | Expected |
 |---|---|
-| Edges with `source_id = 'misp_cooccurrence'` | 0 |
+| Edges labelled `misp_cooccurrence` (`match_type`, or the legacy `source_id` / `source_ids` on a graph built before 2026-10) | 0 |
 | `match_type = 'mitre_explicit'` edges whose source node has no MITRE source | 0 |
 | `ATTRIBUTED_TO` edges without a `match_type` | 0; median actors per malware in single digits |
 | NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | judged only on CVEs published > 45 days ago (NVD assigns reference tags and CPE configurations during analysis, weeks after publication — day-old CVEs have neither); thresholds 50 / 20 / 20 / 50 %; measured 2026-10-10 on the 730-day event: 93 / 57 / 58 / 91 %. Informational when fewer than 100 analysed CVEs are present (short smoke baselines) |
@@ -473,7 +487,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-15 — acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log). Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log); the co-occurrence row checks `match_type` (and the legacy `source_id` / `source_ids`); § [7] step 4: the clean step's 60 minutes, batched relationship deletion, `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the refusal of the collectors after a failed clean; step 5: what changes for consumers (`PART_OF_CAMPAIGN`, relationship provenance, CVE scores, STIX provenance, curated `EXPLOITS`). Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._

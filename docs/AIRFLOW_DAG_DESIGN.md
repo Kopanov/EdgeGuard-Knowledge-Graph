@@ -82,6 +82,7 @@ All tasks have explicit `execution_timeout` values to prevent hung workers from 
 | Slow collectors (MITRE, AbuseIPDB, ThreatFox, etc.) | 2 hours |
 | Baseline collectors OTX / NVD (unlimited)            | 5 hours each |
 | Baseline collectors CISA / MITRE / Tier 2 feeds      | 2 hours each |
+| Baseline wipe (`baseline_clean`, 2026-10; was 20 minutes) | 60 minutes |
 | Neo4j sync (incremental) | 4 hours |
 | Neo4j full sync (baseline) | 6 hours |
 | build_relationships | 5 hours |
@@ -209,7 +210,7 @@ The incremental DAGs (`edgeguard_pipeline`, `edgeguard_medium_freq`, etc.) are a
 
 | Source | Baseline mode | Note |
 |--------|--------------|------|
-| NVD | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back | Resumes from checkpoint on restart |
+| NVD | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back; then the records of every KEV CVE and of `EDGEGUARD_NVD_EXTRA_CVE_IDS`, whatever their age (2026-10) | Resumes from checkpoint on restart |
 | OTX | `baseline=True` — date-range paged, up to `BASELINE_DAYS` back | Resumes from checkpoint on restart |
 | CISA / MITRE | Full catalog fetch | Already returns complete list |
 | ThreatFox / URLhaus / Feodo / etc. | Full current feed | Flat feeds, no history API |
@@ -242,15 +243,18 @@ This is a **per-source** limit. With **11** active external collectors in the in
 ```
 1. NO_LIMIT_SOURCES (per-source bypass in config.py)   → None (unlimited)
 2. EDGEGUARD_MAX_ENTRIES ≠ 0 (hard global override)    → that value
-3. EDGEGUARD_INCREMENTAL_LIMIT > 0 (default: 200)      → 200
-4. EDGEGUARD_INCREMENTAL_LIMIT = 0                     → None (unlimited)
+3. OWN_RUN_CAP_SOURCES (nvd, malwarebazaar; 2026-10)   → None here; the collector applies
+                                                         its own cap (EDGEGUARD_NVD_MAX_PER_RUN,
+                                                         EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN)
+4. EDGEGUARD_INCREMENTAL_LIMIT > 0 (default: 200)      → 200
+5. EDGEGUARD_INCREMENTAL_LIMIT = 0                     → None (unlimited)
 ```
 
 ### Baseline vs Incremental — quick reference
 
 | | Baseline | Incremental |
 |--|----------|-------------|
-| Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source) |
+| Item cap | `BASELINE_COLLECTION_LIMIT` (Airflow Variable, default unlimited) | `EDGEGUARD_INCREMENTAL_LIMIT` (env var, default 200/source); NVD and MalwareBazaar use their own per-run caps |
 | Lookback | `BASELINE_DAYS` (Airflow Variable, default 730 days) | Last 72 hours |
 | Trigger | Manual (once before production) | Automatic (cron schedules) |
 | Scope | Full historical load | New / updated data only |
@@ -340,7 +344,7 @@ Adjusts **INDICATES** and **EXPLOITS** edge confidence **when** `r.match_type IN
 | 101–500 (large feed) | 0.35 |
 | > 500 (bulk dump, e.g. Feodo) | 0.30 |
 
-Only edges with `source_id IN ['misp_cooccurrence', 'misp_correlation']` are modified. Manually curated edges are untouched. **2026-10:** this version writes no such edges (report-scoped linking, `source_id='otx_pulse'`), so the job finds nothing on a fresh baseline; it is kept for graphs built before the change.
+Only edges with `match_type IN ['misp_cooccurrence', 'misp_correlation']` are modified (2026-10: the filter moved from the dropped `r.source_id` / `r.source_ids` to `r.match_type`). Other edges, curated-package claims included, are untouched. **2026-10:** this version writes no such edges (report-scoped linking, `match_type='otx_pulse'`), so the job finds nothing on a fresh baseline; it is kept for graphs built before the change. Its large-event path (`apoc.periodic.iterate`) binds the batch column `rid` as a variable in the inner statement (2026-10; the former `$rid` parameter failed every batch).
 
 > **Multi-event event sizing (array-only):** the event-size pre-compute
 > UNWINDs `misp_event_ids[]` and counts distinct Indicators per event id,
@@ -520,4 +524,4 @@ EdgeGuard-Knowledge-Graph/
 
 ---
 
-_Last updated: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._
+_Last updated: 2026-10-15 — co-occurrence calibration: the filter is `r.match_type` (the text still named the dropped `r.source_id`); the large-event batch statement binds `rid` as a variable (#182); `baseline_clean` timeout (60 minutes) in the timeout table; `get_effective_limit` priority includes `OWN_RUN_CAP_SOURCES` (NVD, MalwareBazaar); the NVD baseline row names the KEV sweep and the named CVE ids. Prior: 2026-10-14 — relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected baseline task chain — task IDs do **not** carry a `baseline_` prefix at HEAD; reverted the PR-N33 false-positive `tier3_low_freq` addition (no such TaskGroup exists in the baseline DAG; the daily-tier collectors live in the incremental `edgeguard_daily` DAG); fixed `tier2_extended` → `tier2_feeds`; added `baseline_postcheck` to the chain. Verified against `dags/edgeguard_pipeline.py` task_id grep. Prior: 2026-04-26 PR-N33 docs audit; 2026-04-18 PR #41 cleanup pass + Airflow 2→3 upgrade._
