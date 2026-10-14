@@ -1,6 +1,6 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-10-12 (MalwareBazaar row 14 added)  
+**Last Updated:** 2026-10-14 (measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
 **Total Sources:** 14 (10 active + 2 placeholders + 2 flag-guarded, off by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
@@ -26,7 +26,9 @@
 | 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
 | 14 | MalwareBazaar | ~1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label), ≤ 500 pushed per run | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) — added 2026-10 |
 
-**Note:** Energy and Healthcare collectors are placeholders requiring ISAC membership (ENTSO-E, H-ISAC/EHFC). CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
+**Note:** Energy and Healthcare collectors are placeholders. Member-only ISAC feeds (EE-ISAC, Health-ISAC, HC3) are not planned and no membership is budgeted (decision 2026-10). CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
+
+**Measured on the hosted instance after the first 730-day baseline (13–14 October 2026), MISP attributes per source:** AlienVault OTX 149,270; NVD 139,862; URLhaus 34,003; SSL Blacklist 10,967; AbuseIPDB 10,000; Feodo Tracker 7,607; ThreatFox 7,398 (the API serves at most 7 days); MITRE ATT&CK 1,892; CISA KEV 547; 361,546 in total. VirusTotal, MalwareBazaar and CISA ICS were not part of that run. The Items column above lists the earlier per-run estimates.
 
 ## Removed sources
 

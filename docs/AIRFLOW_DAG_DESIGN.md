@@ -13,12 +13,15 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  edgeguard_baseline  (MANUAL TRIGGER ONLY — run once)               │    │
-│  │  misp_health → baseline_start                                        │    │
+│  │  misp_health → source_key_check → baseline_acquire_lock              │    │
+│  │    → baseline_clean (wipe only for fresh_baseline) → baseline_start  │    │
 │  │    → tier1 cisa → mitre → otx → nvd  (SEQUENTIAL, PR-F4)             │    │
-│  │    → tier2 [abuseipdb, threatfox, urlhaus, feodo, sslbl]             │    │
+│  │    → tier2 [abuseipdb, threatfox, urlhaus, feodo, sslbl,             │    │
+│  │             cisa_ics*, malwarebazaar*]                               │    │
 │  │             (parallel)                                               │    │
 │  │    → full_neo4j_sync → build_relationships                           │    │
-│  │    → run_enrichment_jobs → baseline_complete                         │    │
+│  │    → run_enrichment_jobs → baseline_postcheck → baseline_complete    │    │
+│  │    → baseline_release_lock        (* flag-guarded, off by default)   │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
@@ -38,13 +41,13 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  edgeguard_daily  (daily at 2 AM)                                    │    │
-│  │  misp_health → [mitre, abuseipdb, threatfox, urlhaus,                │    │
-│  │               feodo, sslblacklist] → log_summary                     │    │
+│  │  misp_health → [mitre, cisa_ics*, abuseipdb, threatfox, urlhaus,     │    │
+│  │                 feodo, sslblacklist, malwarebazaar*] → log_summary   │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
 │  │  edgeguard_neo4j_sync  (every 3 days at 3 AM)                        │    │
-│  │  check_sync_needed → run_neo4j_sync                                  │    │
+│  │  check_sync_needed → neo4j_health_check → run_neo4j_sync             │    │
 │  │    → build_relationships → run_enrichment_jobs                       │    │
 │  │    → check_neo4j_quality                                             │    │
 │  │  (ShortCircuitOperator skips entire chain when nothing new)          │    │
@@ -62,12 +65,12 @@ EdgeGuard runs **6 specialized DAGs** — each source group has its own schedule
 
 | DAG | Schedule | Tasks |
 |-----|----------|-------|
-| `edgeguard_baseline` | **None (manual only)** | `misp_health_check` → `baseline_start` → `baseline_clean` (gated on `dag_run.conf={"fresh_baseline": true}` — PR-C) → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete`. **Top-level task IDs do NOT carry a `baseline_` prefix** at HEAD (verified against `dags/edgeguard_pipeline.py`). **PR-N29 H1: the four critical-chain tasks (`baseline_clean`, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`) override `retries=0`** — see [`AIRFLOW_DAGS.md § Built-in Features`](AIRFLOW_DAGS.md). The baseline DAG has only 2 TaskGroups (`tier1_core`, `tier2_feeds`); there is no `tier3_low_freq` here — the daily-tier collectors live in the *incremental* `edgeguard_daily` DAG. |
+| `edgeguard_baseline` | **None (manual only)** | `misp_health_check` → `source_key_check` → `baseline_acquire_lock` → `baseline_clean` (gated on `dag_run.conf={"fresh_baseline": true}` — PR-C) → `baseline_start` → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete` → `baseline_release_lock`. **Top-level task IDs do NOT carry a `baseline_` prefix** at HEAD (verified against `dags/edgeguard_pipeline.py`). **PR-N29 H1: the four critical-chain tasks (`baseline_clean`, `full_neo4j_sync`, `build_relationships`, `run_enrichment_jobs`) override `retries=0`** — see [`AIRFLOW_DAGS.md § Built-in Features`](AIRFLOW_DAGS.md). The baseline DAG has only 2 TaskGroups (`tier1_core`, `tier2_feeds`); there is no `tier3_low_freq` here — the daily-tier collectors live in the *incremental* `edgeguard_daily` DAG. |
 | `edgeguard_pipeline` | Every 30 min | `check_containers` → `misp_health_check` → `high_frequency_collectors.collect_otx` → `log_summary` |
 | `edgeguard_medium_freq` | Every 4 hours | `misp_health_check` → `collect_cisa`, `collect_virustotal` → `log_summary` |
 | `edgeguard_low_freq` | Every 8 hours | `misp_health_check` → `collect_nvd` → `log_summary` |
-| `edgeguard_daily` | Daily 2 AM | `misp_health_check` → 7 collectors (parallel) → `log_summary` |
-| `edgeguard_neo4j_sync` | Every 3 days 3 AM | `check_sync_needed` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
+| `edgeguard_daily` | Daily 2 AM | `misp_health_check` → 8 collectors (parallel; `collect_cisa_ics` and `collect_malwarebazaar` skip while their flags are off) → `log_summary` |
+| `edgeguard_neo4j_sync` | Every 3 days 3 AM | `check_sync_needed` → `neo4j_health_check` → `run_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `check_neo4j_quality` |
 
 ### Execution Timeouts
 

@@ -13,11 +13,13 @@
 | NVD | ✅ Yes (free) | 50 requests/30 sec (with key) | Free | JSON |
 | CISA KEV | ❌ No | No limit (CSV download) | Free | JSON |
 | MITRE ATT&CK | ❌ No | No limit (STIX download) | Free | STIX 2.1 |
-| VirusTotal | ✅ Yes | 4 requests/min (free) | $200+/month | JSON |
+| VirusTotal | ✅ Yes | 4 requests/min, 500/day (free) | Free tier used; paid plans from $50/month | JSON |
 | AbuseIPDB | ✅ Yes | 1,000 requests/day (free) | $50+/month | JSON |
 | URLhaus | ❌ No | No limit (CSV) | Free | CSV |
 | Feodo Tracker | ❌ No | No limit (CSV) | Free | CSV |
 | SSL Blacklist | ❌ No | No limit (CSV) | Free | CSV |
+| MalwareBazaar (flag-guarded) | ❌ No (export) | One export download per run (about 450 KB) | Free | CSV |
+| CISA ICS advisories (flag-guarded) | ❌ No | GitHub raw files (`cisagov/CSAF`) | Free | CSAF 2.0 JSON |
 | ThreatFox | ✅ Yes | Varies by key | Free tier | JSON |
 | MISP | ✅ Yes | Varies (self-hosted) | Free (self-hosted) | JSON |
 
@@ -208,7 +210,7 @@
 | **Rate Limit** | None (CSV download) |
 | **Data Provided** | Banking trojan C&C IPs, malware family |
 | **Format** | CSV |
-| **Update Frequency** | Daily |
+| **Update Frequency** | Daily by design; abuse.ch has not updated the feed since 2026-03-04 |
 
 **Download URLs:**
 - IP blocklist (last 30 days, regular runs): https://feodotracker.abuse.ch/downloads/ipblocklist.csv

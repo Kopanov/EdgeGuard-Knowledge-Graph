@@ -188,7 +188,7 @@ EdgeGuard defines **6** primary DAGs in `dags/edgeguard_pipeline.py` (baseline +
 | `edgeguard_pipeline` | 1 | 5h 30m | Covers OTX with full retry chain |
 | `edgeguard_medium_freq` | 1 | 5h | CISA + VT parallel with retries |
 | `edgeguard_low_freq` | 1 | 8h 30m | NVD with full retry chain |
-| `edgeguard_daily` | 1 | 8h 30m | 9 parallel collectors with retries (`collect_cisa_ics` and `collect_malwarebazaar` are no-op skips while their flags are off) |
+| `edgeguard_daily` | 1 | 8h 30m | 8 parallel collectors with retries (`collect_cisa_ics` and `collect_malwarebazaar` are no-op skips while their flags are off) |
 | `edgeguard_baseline` | — | — | 2026-10: `tier2_feeds` also runs `collect_cisa_ics` (baseline load of the 24-month advisory history; no-op skip while `EDGEGUARD_ENABLE_CISA_ICS` is off) and `collect_malwarebazaar` (recent export only; no-op skip while `EDGEGUARD_ENABLE_MALWAREBAZAAR` is off) |
 | `edgeguard_neo4j_sync` | 1 | 22h | Full sync + relationships + enrichment |
 | `edgeguard_baseline` | 1 | 32h | Full historical collection + sync |
@@ -210,7 +210,7 @@ the `dag_run.conf` JSON when triggered:
 | **Destructive (fresh-baseline)** | `airflow dags trigger edgeguard_baseline --conf '{"fresh_baseline": true, "baseline_days": 730}'` OR Airflow UI Trigger DAG with config `{"fresh_baseline": true}` | `baseline_clean` task **wipes Neo4j + MISP EdgeGuard events + checkpoints** before collectors run | Schema migration; recovering from a corrupted baseline; clean-slate re-collection |
 
 **Task chain (verified against `dags/edgeguard_pipeline.py` at HEAD):**
-`misp_health_check` → `baseline_start` → `baseline_clean` (no-op or wipe — gated on `dag_run.conf`) → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete`. **There is no `tier3_low_freq` TaskGroup** in the baseline DAG (PR-N35 docs audit correction); the daily-tier collectors live in the `edgeguard_daily` *incremental* DAG, not the baseline. **Top-level task IDs do not carry a `baseline_` prefix** — `airflow tasks state edgeguard_baseline full_neo4j_sync` is the right shape (NOT `baseline_full_neo4j_sync`).
+`misp_health_check` → `source_key_check` → `baseline_acquire_lock` → `baseline_clean` (no-op or wipe — gated on `dag_run.conf`) → `baseline_start` → `tier1_core` (TaskGroup) → `tier2_feeds` (TaskGroup) → `full_neo4j_sync` → `build_relationships` → `run_enrichment_jobs` → `baseline_postcheck` → `baseline_complete` → `baseline_release_lock` (only after a successful run). **There is no `tier3_low_freq` TaskGroup** in the baseline DAG (PR-N35 docs audit correction); the daily-tier collectors live in the `edgeguard_daily` *incremental* DAG, not the baseline. **Top-level task IDs do not carry a `baseline_` prefix** — `airflow tasks state edgeguard_baseline full_neo4j_sync` is the right shape (NOT `baseline_full_neo4j_sync`).
 
 > **Note (PR-F4, 2026-04-20):** the four tier-1 collectors inside
 > `tier1_core` run **sequentially** (`cisa → mitre → otx → nvd`),
@@ -310,8 +310,8 @@ The baseline DAG accepts the following keys in `dag_run.conf`:
 
 | Collector | Source File | Notes |
 |-----------|-------------|-------|
-| Energy | `energy_feed_collector.py` | Needs ENTSO-E/EU-CERT membership |
-| Healthcare | `healthcare_feed_collector.py` | Needs H-ISAC/EHFC membership |
+| Energy | `energy_feed_collector.py` | Placeholder; member-only feeds (EE-ISAC) not planned, no membership budgeted (decision 2026-10) |
+| Healthcare | `healthcare_feed_collector.py` | Placeholder; member-only feeds (Health-ISAC, HC3) not planned, no membership budgeted (decision 2026-10) |
 
 ---
 
