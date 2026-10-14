@@ -272,14 +272,7 @@ A consumer reading this gets a clear picture: the underlying CVE was published i
 - **`zone`** — `LIST[STRING]` on merged threat-intel nodes (`global`, `healthcare`, `energy`, `finance`, …), populated from classification + MISP→Neo4j resolution (attribute-level `zone:` tags prioritized over event name / legacy event tags). Enables sector-scoped queries.
 - **TLP** (2026-10) — `MISPWriter` stamps one **`tlp:<level>`** tag on **every attribute** (`_tlp_tag`): the source's own level when it states one (OTX `pulse_tlp`), otherwise `EDGEGUARD_DEFAULT_TLP` (`white` — every current source is an open feed). The MISP→Neo4j sync rehydrates it as **`n.tlp`** on every EdgeGuard node label, keeping the **most restrictive** level a source ever stated for the node (`red` > `amber+strict` > `amber` > `green` > `white`/`clear`), so `WHERE n.tlp IN ['white','clear','green']` is a valid filter. Events are still tagged only with `EdgeGuard` at event level.
 
-**Historical collection windows (hard limits):**
-
-| Sector | Lookback | Rationale |
-|--------|----------|-----------|
-| `global` | 24 months | Aligned with sector feeds (`SECTOR_TIME_RANGES` in `config.py`); avoids dropping NVD/OTX items tagged only `global` in the 12–24 month band |
-| `healthcare` | 24 months | Sector threats persist longer |
-| `energy` | 24 months | ICS/SCADA vulnerabilities lag in patching |
-| `finance` | 24 months | Regulatory and fraud patterns |
+**Historical collection window:** the same for every sector. How far back a baseline reaches is set per source: NVD and OTX by `baseline_days` (default 730 days = 24 months; `BASELINE_DAYS` / `--days`) in the request, CISA ICS by `baseline_days` on the advisories it downloads, CISA KEV and the NVD records of KEV CVEs whatever their age (2026-10), the other sources by what their API offers ([DATA_SOURCES.md](DATA_SOURCES.md)). No collector filters by sector or on `SECTOR_TIME_RANGES` (2026-10): the former NVD/OTX sector time-range filter compared the sources' zone-less timestamps with a timezone-aware cutoff, had not dropped a record since v2026.3.28, and was removed. `SECTOR_TIME_RANGES` in `config.py` (24 months for every sector) now only sets the start date of `run_misp_to_neo4j --sector` (now − 24 months); that option does not filter events by sector.
 
 ### 3.4 Node Identity Marking (`edgeguard_managed`, `edgeguard_enriched`)
 
