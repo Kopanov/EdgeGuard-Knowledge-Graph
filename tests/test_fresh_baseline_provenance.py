@@ -807,13 +807,16 @@ class TestExtractTlpTag:
     def test_first_tlp_tag_wins(self):
         assert _extract_tlp_tag([{"name": "tlp:green"}, {"name": "tlp:red"}]) == "green"
 
-    def test_no_tlp_tag_returns_empty(self):
-        assert _extract_tlp_tag([{"name": "source:otx"}, {"name": "zone:Energy"}]) == ""
-        assert _extract_tlp_tag([]) == ""
+    def test_no_tlp_tag_returns_the_configured_default(self):
+        # 2026-10-12: an attribute whose tags were lost to an interrupted push synced without tlp.
+        assert config.EDGEGUARD_DEFAULT_TLP
+        assert _extract_tlp_tag([{"name": "source:otx"}, {"name": "zone:Energy"}]) == config.EDGEGUARD_DEFAULT_TLP
+        assert _extract_tlp_tag([]) == config.EDGEGUARD_DEFAULT_TLP
+        assert _extract_tlp_tag([]) == config.EDGEGUARD_DEFAULT_TLP
 
     def test_empty_level_is_skipped(self):
         assert _extract_tlp_tag([{"name": "tlp:"}, {"name": "tlp:white"}]) == "white"
-        assert _extract_tlp_tag([{"name": "tlp:  "}]) == ""
+        assert _extract_tlp_tag([{"name": "tlp:  "}]) == config.EDGEGUARD_DEFAULT_TLP
 
     def test_non_string_names_ignored(self):
         assert _extract_tlp_tag([{"name": None}, {}, {"name": "tlp:clear"}]) == "clear"
@@ -876,11 +879,15 @@ class TestParseAttributeTlp:
         assert item["tlp"] == "amber"
 
     @pytest.mark.parametrize("attr_type,value,kind", _SEVEN_ATTRIBUTE_KINDS)
-    def test_untagged_attribute_yields_empty_tlp(self, syncer, attr_type, value, kind):
+    def test_untagged_attribute_yields_the_default_tlp(self, syncer, attr_type, value, kind, monkeypatch):
+        # 2026-10-12: an attribute whose tags were lost to an interrupted push must still carry a level.
+        import config
+
+        monkeypatch.setattr(config, "EDGEGUARD_DEFAULT_TLP", "white")
         item, _ = syncer.parse_attribute(_attr(attr_type, value), _EVENT)
         assert item is not None
         assert _kind(item) == kind
-        assert item["tlp"] == ""
+        assert item["tlp"] == "white"
 
     def test_tlp_tag_is_case_normalised_and_other_tags_do_not_interfere(self, syncer):
         item, _ = syncer.parse_attribute(
