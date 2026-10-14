@@ -2414,16 +2414,57 @@ def get_baseline_config(context=None) -> tuple:
     return effective_limit, baseline_days
 
 
+def _live_task_states(context, task_ids) -> Optional[dict[str, Optional[str]]]:
+    """Current states of *task_ids* in this DAG run, as Airflow holds them (2026-10); None when unavailable.
+
+    Airflow 3's Task SDK answers ``RuntimeTaskInstance.get_task_states`` with
+    ``{run_id: {task_id: state}}``. The chain guards read these states first: an XCom marker
+    alone can be stale, because clearing a task leaves its XComs in place until the task runs
+    again. After an operator clears ``baseline_clean`` and the clean fails again,
+    ``baseline_start`` is ``upstream_failed`` but still holds the marker of its earlier success.
+    None without the API (Airflow 2, unit tests) or when the call fails; the callers then read
+    the XCom markers.
+    """
+    ti = (context or {}).get("ti") or (context or {}).get("task_instance")
+    get_states = getattr(ti, "get_task_states", None)
+    dag_id, run_id = getattr(ti, "dag_id", None), getattr(ti, "run_id", None)
+    if not callable(get_states) or not isinstance(dag_id, str) or not isinstance(run_id, str):
+        return None
+    try:
+        result = get_states(dag_id=dag_id, task_ids=list(task_ids), run_ids=[run_id])
+    except Exception as e:  # API drift must not turn into a false refusal
+        logger.warning("[BASELINE] task states unavailable (%s: %s); reading the XCom markers", type(e).__name__, e)
+        return None
+    per_run = result.get(run_id) if isinstance(result, dict) else None
+    if not isinstance(per_run, dict):
+        return None
+    states: dict[str, Optional[str]] = {}
+    for task_id in task_ids:
+        state = getattr(per_run.get(task_id), "value", per_run.get(task_id))
+        states[task_id] = str(state) if state is not None else None
+    return states
+
+
 def _require_baseline_start(context, step: str) -> None:
     """Refuse to run a baseline step whose ``baseline_start`` did not succeed (2026-10-12).
 
     The tier groups and ``full_neo4j_sync`` use ``trigger_rule=ALL_DONE`` so that one failed
     source does not skip the others, but ALL_DONE also fires on ``upstream_failed``: on the
     2026-10-12 smoke run a failed ``baseline_clean`` was followed by every collector and by
-    ``full_neo4j_sync`` on the un-wiped graph. ``baseline_start`` publishes an XCom only when it
-    ran to completion, which only happens after ``baseline_clean`` succeeded; no XCom means the
-    chain is broken above this step.
+    ``full_neo4j_sync`` on the un-wiped graph. ``baseline_start`` runs only after
+    ``baseline_clean`` succeeded. Its state in this run decides (``_live_task_states``); where
+    Airflow does not report states, its XCom marker does: the marker exists only when it ran to
+    completion.
     """
+    states = _live_task_states(context, ["baseline_start"])
+    if states is not None:
+        state = states.get("baseline_start")
+        if state == "success":
+            return
+        raise AirflowException(
+            f"[BASELINE] {step}: baseline_start is {state or 'not run'} in this run — refusing to run after a "
+            "failed baseline_clean / baseline_start; clear the failed task to resume the run"
+        )
     ti = (context or {}).get("ti")
     if ti is None:
         return
@@ -2759,17 +2800,25 @@ def assert_baseline_postconditions(**context):
             # would have run anyway.
             # Airflow 3's RuntimeTaskInstance has no get_dagrun(): on the 2026-10-12 smoke run
             # this branch logged "running invariants anyway", the invariants passed on the synced
-            # graph and the run ended success with run_enrichment_jobs failed. Fall back to the
-            # XCom markers the chain tasks return on success and FAIL (not skip) when one is
-            # missing: Airflow derives the run state from the leaf tasks, and a skipped leaf
-            # counts as success.
+            # graph and the run ended success with run_enrichment_jobs failed. The chain tasks'
+            # states in this run decide (``_live_task_states``); without them, the XCom markers the
+            # chain tasks return on success. FAIL (not skip) when one did not succeed: Airflow
+            # derives the run state from the leaf tasks, and a skipped leaf counts as success.
             logger.warning(
-                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); checking the chain's XCom markers instead.",
+                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); checking the chain's task states instead.",
                 type(_ctx_err).__name__,
                 _ctx_err,
             )
+            chain_states = _live_task_states(context, sorted(_BASELINE_CRITICAL_CHAIN))
+            if chain_states is not None:
+                not_succeeded = {task: state for task, state in chain_states.items() if state != "success"}
+                if not_succeeded:
+                    raise AirflowException(
+                        f"[BASELINE-POSTCHECK] upstream task(s) did not succeed: {not_succeeded} — "
+                        "the baseline is incomplete; fix the failed task and clear it to resume the run"
+                    )
             missing: list[str] = []
-            for upstream_task_id in sorted(_BASELINE_CRITICAL_CHAIN):
+            for upstream_task_id in sorted(_BASELINE_CRITICAL_CHAIN) if chain_states is None else []:
                 try:
                     marker = ti.xcom_pull(task_ids=upstream_task_id)
                 except Exception as _xcom_err:
@@ -3342,9 +3391,12 @@ baseline_clean_task = PythonOperator(
     task_id="baseline_clean",
     python_callable=_baseline_clean,
     # Generous timeout: a 730-day baseline can have ~8K MISP events; deletes
-    # are paginated 500/round at ~50ms/delete → ~7-10 min worst case + ~1 min
-    # Neo4j clear_all + ~1 min verify-poll = ~12-15 min ceiling.
-    execution_timeout=timedelta(minutes=20),
+    # are paginated 500/round at ~50ms/delete, but MISP deletes an event's
+    # attributes inside the request, and the OTX and NVD events of a 730-day
+    # baseline hold ~150K attributes each (one delete may wait
+    # EDGEGUARD_MISP_DELETE_TIMEOUT_SEC, 900 s); the batched Neo4j wipe of
+    # ~2.7M relationships takes ~5 min, plus the verify poll (2026-10).
+    execution_timeout=timedelta(minutes=60),
     # PR-C v2 audit fix (Prod Readiness F1, comprehensive 7-agent audit):
     # baseline_dag's default_args set retries=1, which would re-execute the
     # destructive wipe on a verify-poll timeout. The wipe is idempotent
