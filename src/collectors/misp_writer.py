@@ -538,6 +538,28 @@ def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -
     return attach, detach
 
 
+def _edited_attribute(body: Any) -> Optional[Dict[str, Any]]:
+    """The attribute in MISP's answer to ``POST /attributes/edit/{uuid}``, with its tags under ``Tag``.
+
+    MISP 2.5 answers ``{"Attribute": {..., "Tag": [...]}}``: ``JSONConverterTool::convertAttribute``
+    moves the attribute's tags into it. An answer wrapped in ``response``, or one with the tags beside
+    ``Attribute`` (a ``Tag`` list, or CakePHP's ``AttributeTag`` rows), is read the same way, so a
+    stored edit is not taken for a failed one. None when the answer holds no attribute.
+    """
+    if isinstance(body, dict) and isinstance(body.get("response"), dict):
+        body = body["response"]
+    if not isinstance(body, dict) or not isinstance(body.get("Attribute"), dict):
+        return None
+    attribute = dict(body["Attribute"])
+    if "Tag" not in attribute:
+        tags = body.get("Tag")
+        if not isinstance(tags, list):
+            rows = attribute.get("AttributeTag") or body.get("AttributeTag") or []
+            tags = [row["Tag"] for row in rows if isinstance(row, dict) and isinstance(row.get("Tag"), dict)]
+        attribute["Tag"] = tags
+    return attribute
+
+
 def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any]) -> bool:
     """Whether MISP's answer to an attribute edit shows the comment and the tag changes (tag names
     compared without case, as MISP resolves them)."""
@@ -1832,8 +1854,8 @@ class MISPWriter:
             body = response.json()
         except ValueError:
             body = None
-        stored = body.get("Attribute") if isinstance(body, dict) else None
-        if not isinstance(stored, dict) or not _edit_confirmed(stored, changes):
+        stored = _edited_attribute(body)
+        if stored is None or not _edit_confirmed(stored, changes):
             self.stats["attributes_unconfirmed"] = self.stats.get("attributes_unconfirmed", 0) + 1
             logger.error(
                 "[UNCONFIRMED-EDIT] attribute %s: MISP answered HTTP 200 but its answer does not show the edit", uid
