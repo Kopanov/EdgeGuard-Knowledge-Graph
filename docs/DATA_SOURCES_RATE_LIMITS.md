@@ -344,7 +344,6 @@ For production use, implement these delays:
 |--------|------|------|-------|
 | **FS-ISAC** | Financial sector | Membership | Best for finance IOCs |
 | **Mandiant Advantage** | Threat intel | Enterprise | Industry standard |
-| **Recorded Future** | Threat intel | Enterprise | Large coverage |
 | **Flashpoint** | Threat intel | Enterprise | Dark web intelligence |
 | **DomainTools** | WHOIS/ DNS | $300+/month | Infrastructure |
 | **GreyNoise** | Internet scan | $200+/month | Background noise |
@@ -353,4 +352,4 @@ For production use, implement these delays:
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._
+_Last updated: 2026-10-15 — "Alternative/Premium Sources (Not Yet Integrated)": one entry removed. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV data-feed URL (was the non-existent `/known-exploited-vulnerabilities-catalog/json` page; actual is the `feeds/known_exploited_vulnerabilities.json` static file the collector hits); flipped the MITRE ATT&CK "canonical / legacy" labels to match what `src/collectors/mitre_collector.py` ACTUALLY pulls at HEAD (the legacy `mitre/cti` repo) — `attack-stix-data` is a planned future migration, not the current data source. Prior: 2026-03-27._
