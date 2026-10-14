@@ -214,6 +214,36 @@ class TestWriter:
             assert all(r["match_type"] == "coreideas_curated" and r["source"] == "coreideas" for r in batch)
         assert by_merge["(a)-[r:EXPLOITS]->(c)"][0]["source_refs"] == ["coreideas:c"]
 
+    def test_curated_technique_claims_match_exact_names_only(self):
+        """Review finding on #179: the MISP-tag technique templates match aliases too, so a curated
+        claim must take its own exact-name template (aliases come from untrusted MISP tags)."""
+        rows = _curated_claim_rows(
+            [{"p": "uses_technique", "o": "T1566", "id": "a"}], "ThreatActor", {"name": "APT29"}, "coreideas", "5"
+        )
+        rows += _curated_claim_rows(
+            [{"p": "implements_technique", "o": "T1486", "id": "b"}], "Malware", {"name": "LockBit"}, "coreideas", "5"
+        )
+        _, captured = _client_and_run(rows)
+        merges = {q.split("MERGE ")[1].split("\n")[0].strip(): (q, r) for q, r in captured}
+        assert set(merges) == {"(a)-[r:EMPLOYS_TECHNIQUE]->(t)", "(m)-[r:IMPLEMENTS_TECHNIQUE]->(t)"}
+        for query, _batch in merges.values():
+            assert "aliases" not in query
+            assert "{name: row.actor}" in query or "{name: row.entity}" in query
+        assert merges["(a)-[r:EMPLOYS_TECHNIQUE]->(t)"][1][0]["actor"] == "apt29"
+        assert merges["(m)-[r:IMPLEMENTS_TECHNIQUE]->(t)"][1][0]["entity"] == "lockbit"
+
+    def test_misp_tag_technique_rows_keep_the_alias_template(self):
+        rel = {
+            "rel_type": "EMPLOYS_TECHNIQUE",
+            "from_type": "ThreatActor",
+            "from_key": {"name": "Cozy Bear"},
+            "to_type": "Technique",
+            "to_key": {"mitre_id": "T1566"},
+            "match_type": "misp_attribute_tag",
+        }
+        _, captured = _client_and_run([rel])
+        assert len(captured) == 1 and "row.actor IN coalesce(a.aliases, [])" in captured[0][0]
+
     def test_indicator_exploits_rows_keep_the_cve_tag_path(self):
         rel = {
             "rel_type": "EXPLOITS",
@@ -306,7 +336,10 @@ class TestImportScript:
         assert (actor["type"], actor["value"], actor["to_ids"]) == ("threat-actor", "apt29", False)
         assert actor["Tag"] == [{"name": "source:CoreIdeas"}]
         assert actor["comment"].startswith(CURATED_CLAIMS_PREFIX)
-        assert _parse_curated_claims(actor["comment"]) == [{"p": "uses_technique", "o": "T1566", "id": "c1"}]
+        # every claim names its source (the package's when the claim gives none)
+        assert _parse_curated_claims(actor["comment"]) == [
+            {"p": "uses_technique", "o": "T1566", "src": "coreideas", "id": "c1"}
+        ]
         assert malware["type"] == "malware-type"
         assert _parse_curated_claims(malware["comment"]) == [
             {"p": "exploits", "o": "CVE-2023-4966", "src": "misp_galaxy", "id": "g1"}
@@ -321,6 +354,35 @@ class TestImportScript:
         assert [(r["rel_type"], r["to_key"], r["source_refs"]) for r in rels] == [
             ("EMPLOYS_TECHNIQUE", {"mitre_id": "T1566"}, ["coreideas:c1"])
         ]
+
+    def test_unregistered_package_keeps_its_name_in_r_sources(self, importer):
+        """The sync maps an unknown ``source:*`` tag to ``misp``; the claims carry the name."""
+        package = _package(source="partner_pkg")
+        attr = dict(importer.build_event(package)["Event"]["Attribute"][0], uuid="u-2")
+        assert attr["Tag"] == [{"name": "source:partner_pkg"}]
+        event = {"id": "8", "info": package["name"], "Tag": [{"name": "EdgeGuard"}]}
+        item, rels = _syncer().parse_attribute(attr, event)
+        assert item["tag"] == "misp", "unknown source tags still map to misp at the attribute level"
+        assert [(r["source"], r["match_type"], r["source_refs"]) for r in rels] == [
+            ("partner_pkg", "curated_other", ["partner_pkg:c1"])
+        ]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            [{"id": "1", "info": "2026-10-20_EdgeGuard_CoreIdeas_package"}],
+            {"response": [{"id": "1", "info": "2026-10-20_EdgeGuard_CoreIdeas_package"}]},
+            [{"Event": {"id": "1", "info": "2026-10-20_EdgeGuard_CoreIdeas_package"}}],
+            {"response": [{"Event": {"id": "1", "info": "2026-10-20_EdgeGuard_CoreIdeas_package"}}]},
+        ],
+        ids=["flat", "response", "wrapped", "response-wrapped"],
+    )
+    def test_duplicate_check_reads_every_index_shape(self, importer, payload):
+        assert importer._index_infos(payload) == ["2026-10-20_EdgeGuard_CoreIdeas_package"]
+
+    def test_duplicate_check_tolerates_junk(self, importer):
+        assert importer._index_infos(None) == [] and importer._index_infos({"errors": "x"}) == []
+        assert importer._index_infos([1, "x", {"Event": "not a dict"}]) == []
 
     def test_dry_run_writes_nothing(self, importer, tmp_path, capsys):
         path = tmp_path / "pkg.json"

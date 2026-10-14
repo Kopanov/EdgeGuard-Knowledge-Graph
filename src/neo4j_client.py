@@ -4450,6 +4450,9 @@ class Neo4jClient:
         expl_rows: List[Dict[str, Any]] = []
         # 2026-10 (curated packages): MITRE-style claims of a curated source
         uses_malware_rows: List[Dict[str, Any]] = []
+        # technique claims of a curated source: exact canonical names, never alias matching
+        actor_employs_exact_rows: List[Dict[str, Any]] = []
+        malware_implements_exact_rows: List[Dict[str, Any]] = []
         uses_tool_rows: List[Dict[str, Any]] = []
         actor_exploits_rows: List[Dict[str, Any]] = []
         malware_exploits_rows: List[Dict[str, Any]] = []
@@ -4532,7 +4535,8 @@ class Neo4jClient:
                 if from_type == "ThreatActor":
                     an = nonempty_graph_string(fk.get("name"))
                     if an and mid:
-                        actor_employs_rows.append(
+                        # 2026-10: a curated claim (``exact_names``) matches the canonical name only.
+                        (actor_employs_exact_rows if rel.get("exact_names") else actor_employs_rows).append(
                             {
                                 "actor": an,
                                 "mitre_id": mid,
@@ -4565,7 +4569,7 @@ class Neo4jClient:
                     # Malware natural key is `name` — used by the Cypher MATCH.
                     nm = nonempty_graph_string(fk.get("name"))
                     if nm and mid:
-                        implements_rows.append(
+                        (malware_implements_exact_rows if rel.get("exact_names") else implements_rows).append(
                             {
                                 "entity": nm,
                                 "entity_label": "Malware",
@@ -4946,6 +4950,20 @@ class Neo4jClient:
         # 2026-10 (curated packages): exact canonical names on both ends — never aliases (aliases
         # are rehydrated from MISP tags; matching on them under a curated label would be the
         # forgery vector build_relationships Q2 branch 3 was removed for).
+        q_actor_employs_exact = f"""
+        UNWIND $rows AS row
+        MATCH (a:ThreatActor {{name: row.actor}})
+        MATCH (t:Technique {{mitre_id: row.mitre_id}})
+        MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
+        {_set_clause("a", "t")}
+        """
+        q_malware_implements_exact = f"""
+        UNWIND $rows AS row
+        MATCH (m:Malware {{name: row.entity}})
+        MATCH (t:Technique {{mitre_id: row.mitre_id}})
+        MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)
+        {_set_clause("m", "t")}
+        """
         q_actor_uses_malware = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor {{name: row.subject}})
@@ -5084,6 +5102,8 @@ class Neo4jClient:
                 query_pause()
                 _run_rows(session, "EXPLOITS_cve", q_expl_cve, expl_rows)
             for _label, _query, _rows in (
+                ("EMPLOYS_TECHNIQUE_curated", q_actor_employs_exact, actor_employs_exact_rows),
+                ("IMPLEMENTS_TECHNIQUE_curated", q_malware_implements_exact, malware_implements_exact_rows),
                 ("USES_MALWARE_curated", q_actor_uses_malware, uses_malware_rows),
                 ("USES_TOOL_curated", q_actor_uses_tool, uses_tool_rows),
                 ("EXPLOITS_actor_cve", q_actor_exploits, actor_exploits_rows),

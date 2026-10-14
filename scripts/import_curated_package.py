@@ -133,7 +133,7 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
             by_predicate[str(claim.get("p")).strip().lower()] += 1
             by_source[canonical_source_id(claim.get("src")) or source or "?"] += 1
         kept += len(good)
-        if len(_comment(good)) > COMMENT_BUDGET:
+        if len(_comment(good, source)) > COMMENT_BUDGET:
             errors.append(f"{where}: {len(good)} claims exceed the {COMMENT_BUDGET}-character comment budget")
         if not good:
             warnings.append(f"{where}: {kind} {subject!r} has no valid claim and is not imported")
@@ -150,13 +150,39 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
     return errors, warnings, summary
 
 
-def _comment(claims: List[Dict[str, Any]]) -> str:
-    compact = [
-        {k: claim[k] for k in ("p", "o", "src", "id") if claim.get(k) not in (None, "")}
-        for claim in claims
-        if isinstance(claim, dict)
-    ]
+def _comment(claims: List[Dict[str, Any]], default_src: str | None = None) -> str:
+    """``CURATED_CLAIMS:{"c": [...]}`` with every claim naming its source.
+
+    A claim without ``src`` gets the package's source written out: the sync maps a
+    ``source:*`` tag it does not know to ``misp``, so an unregistered package's own name
+    would otherwise be lost from ``r.sources``.
+    """
+    compact = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        entry = {k: claim[k] for k in ("p", "o", "src", "id") if claim.get(k) not in (None, "")}
+        if "src" not in entry and default_src:
+            entry["src"] = default_src
+        compact.append(entry)
     return CURATED_CLAIMS_PREFIX + json.dumps({"c": compact}, separators=(",", ":"), ensure_ascii=False)
+
+
+def _index_infos(payload: Any) -> List[str]:
+    """Event titles in a ``search_index`` answer: a list of events, ``{"response": [...]}``, or
+    entries wrapped as ``{"Event": {...}}`` (MISP versions differ)."""
+    if isinstance(payload, dict):
+        payload = payload.get("response", [payload])
+    infos: List[str] = []
+    for entry in payload if isinstance(payload, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        wrapped = entry.get("Event")
+        event: Dict[str, Any] = wrapped if isinstance(wrapped, dict) else entry
+        info = event.get("info")
+        if isinstance(info, str):
+            infos.append(info)
+    return infos
 
 
 def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
@@ -179,7 +205,7 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "type": KINDS[kind][1],
                 "value": str(entity["name"]).strip(),
-                "comment": _comment(good),
+                "comment": _comment(good, source),
                 "to_ids": False,
                 "Tag": [{"name": source_tag}],
             }
@@ -208,7 +234,7 @@ def _push(event: Dict[str, Any]) -> int:
     misp = PyMISP(url, key, ssl=verify)
     info = event["Event"]["info"]
     existing = misp.search_index(eventinfo=info, pythonify=False)
-    if any((e.get("info") or "") == info for e in (existing or []) if isinstance(e, dict)):
+    if info in _index_infos(existing):
         print(f"an event named {info!r} already exists — delete it first or rename the package", file=sys.stderr)
         return 1
     misp_event = MISPEvent()

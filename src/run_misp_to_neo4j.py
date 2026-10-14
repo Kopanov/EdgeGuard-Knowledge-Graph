@@ -546,6 +546,8 @@ def _curated_claim_rows(
                 "source": source,
                 "source_refs": [ref] if ref else [],
                 "misp_event_id": evt_id,
+                # exact canonical names on both ends — never alias matching (see the writer)
+                "exact_names": True,
             }
         )
     if skipped:
