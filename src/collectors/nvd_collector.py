@@ -1397,16 +1397,19 @@ class NVDCollector:
                         or (max(checkpoint.get("pages") or [0]) if checkpoint.get("pages") else 0)
                         or 0
                     )
+                # 2026-10: every attempt reads all windows. The records of the windows read are pushed
+                # to MISP only after the last window, so an attempt that resumed at the window where
+                # an earlier one stopped would push only the windows from there on; the windows run
+                # newest first, and the newest CVEs never reached MISP while the attempt ended in
+                # success. The checkpoint position stays for ``edgeguard baseline status``.
                 if not checkpoint.get("completed") and checkpoint.get("nvd_window_idx") is not None:
-                    start_wi = int(checkpoint["nvd_window_idx"])
-                    resume_index = int(checkpoint.get("nvd_start_index", 0))
-                    if start_wi >= len(windows):
-                        start_wi, resume_index = 0, 0
-                        total_batches_done = 0
-                    else:
-                        logger.info(
-                            f"  Resuming baseline at window {start_wi + 1}/{len(windows)}, startIndex={resume_index}"
-                        )
+                    logger.info(
+                        "  An earlier attempt stopped at window %s/%s; its records were not pushed, so this "
+                        "attempt reads every window again",
+                        int(checkpoint["nvd_window_idx"]) + 1,
+                        len(windows),
+                    )
+                    total_batches_done = 0
 
                 # PR-N17 Fix #2 (BLOCK, 2026-04-22): track whether any
                 # window aborted due to fetch error so the operator

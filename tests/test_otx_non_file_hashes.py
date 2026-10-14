@@ -102,3 +102,27 @@ def test_the_skip_is_counted_in_the_log(caplog):
     with caplog.at_level("INFO", logger=otx_collector.logger.name):
         _collect()
     assert any("[SKIP] OTX: 4 indicators of a non-file hash type" in r.getMessage() for r in caplog.records)
+
+
+def test_a_baseline_that_stops_at_its_page_ceiling_says_so(caplog):
+    """The last page was full, so pulses older than it were not read (2026-10)."""
+    c = OTXCollector.__new__(OTXCollector)
+    c.api_key = "a" * 64
+    c.tag = "alienvault_otx"
+    c.session = MagicMock()
+    c.rate_limiter = MagicMock()
+    c._last_http_status = 200
+    c.circuit_breaker = MagicMock()
+    c.misp_writer = None
+    c.source_name = "otx"
+    with (
+        patch.object(c, "check_service_available", return_value=True),
+        patch.object(c, "_fetch_pulses", side_effect=lambda **_kw: [_PULSE]),
+        patch.object(otx_collector.time, "sleep"),
+        patch.object(otx_collector, "get_source_incremental", return_value={}),
+        patch.object(otx_collector, "update_source_incremental"),
+        patch.object(otx_collector, "OTX_BASELINE_MAX_PAGES", 2),
+        caplog.at_level("WARNING", logger=otx_collector.logger.name),
+    ):
+        c.collect(limit=None, push_to_misp=False, baseline=True, baseline_days=730)
+    assert any("stopped at its page ceiling" in r.getMessage() for r in caplog.records)

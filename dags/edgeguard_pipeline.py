@@ -101,9 +101,9 @@ import pendulum
 from airflow import DAG
 
 try:  # Airflow 3.3+: exceptions moved to the Task SDK; the old path still works but warns on every parse
-    from airflow.sdk.exceptions import AirflowException, AirflowSkipException
+    from airflow.sdk.exceptions import AirflowException, AirflowFailException, AirflowSkipException
 except ImportError:  # pragma: no cover - Airflow 2.x / 3.2 fallback
-    from airflow.exceptions import AirflowException, AirflowSkipException
+    from airflow.exceptions import AirflowException, AirflowFailException, AirflowSkipException
 
 # Airflow 3.x: BashOperator / PythonOperator / ShortCircuitOperator moved
 # from airflow-core into the ``apache-airflow-providers-standard`` package.
@@ -2454,14 +2454,15 @@ def _require_baseline_start(context, step: str) -> None:
     ``full_neo4j_sync`` on the un-wiped graph. ``baseline_start`` runs only after
     ``baseline_clean`` succeeded. Its state in this run decides (``_live_task_states``); where
     Airflow does not report states, its XCom marker does: the marker exists only when it ran to
-    completion.
+    completion. A refusal raises ``AirflowFailException``, so the task fails without its retry
+    (a retry would refuse again).
     """
     states = _live_task_states(context, ["baseline_start"])
     if states is not None:
         state = states.get("baseline_start")
         if state == "success":
             return
-        raise AirflowException(
+        raise AirflowFailException(
             f"[BASELINE] {step}: baseline_start is {state or 'not run'} in this run — refusing to run after a "
             "failed baseline_clean / baseline_start; clear the failed task to resume the run"
         )
@@ -2474,7 +2475,7 @@ def _require_baseline_start(context, step: str) -> None:
         logger.warning("[BASELINE] %s: could not read the baseline_start XCom (%s); proceeding", step, e)
         return
     if not marker:
-        raise AirflowException(
+        raise AirflowFailException(
             f"[BASELINE] {step}: baseline_start did not succeed (no XCom marker) — refusing to run after a "
             "failed baseline_clean / baseline_start; clear the failed task to resume the run"
         )
