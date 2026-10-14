@@ -105,3 +105,79 @@ class TestPostcheckFailsWithoutTheChainMarkers:
             patch("enrichment_jobs.run_all_enrichment_jobs", return_value={}),
         ):
             assert ep.run_baseline_enrichment() == {"enriched": True}
+
+
+class TestLiveTaskStatesDecide:
+    """Airflow 3 reports the chain's task states; they decide before the XCom markers (2026-10).
+
+    Clearing a task leaves its XComs until it runs again (the Task SDK deletes them at the start of
+    the task's next run), so a marker can outlive the success it records.
+    """
+
+    RUN = "manual__2026-10-15T08:00:00+00:00"
+
+    def _ti(self, states, xcom=None):
+        ti = MagicMock()
+        ti.dag_id = "edgeguard_baseline"
+        ti.run_id = self.RUN
+        ti.get_task_states.return_value = {self.RUN: states}
+        ti.xcom_pull.return_value = xcom
+        del ti.get_dagrun  # like RuntimeTaskInstance
+        return ti
+
+    def test_a_stale_marker_does_not_pass_after_a_failed_clean(self):
+        # baseline_clean was cleared and failed again: baseline_start is upstream_failed but keeps
+        # the XCom of its earlier success.
+        ep = _import_dag_module()
+        ti = self._ti({"baseline_start": "upstream_failed"}, xcom={"started": True})
+        with pytest.raises(ep.AirflowException, match=r"cisa: baseline_start is upstream_failed in this run"):
+            ep._require_baseline_start({"ti": ti}, "cisa")
+        with pytest.raises(ep.AirflowException, match=r"full_neo4j_sync: baseline_start is upstream_failed"):
+            ep.run_baseline_full_sync(ti=ti)
+
+    def test_a_start_marked_success_passes_without_a_marker(self):
+        ep = _import_dag_module()
+        ti = self._ti({"baseline_start": "success"}, xcom=None)
+        ep._require_baseline_start({"ti": ti}, "cisa")
+        ti.get_task_states.assert_called_once_with(
+            dag_id="edgeguard_baseline", task_ids=["baseline_start"], run_ids=[self.RUN]
+        )
+
+    def test_a_cleared_start_has_no_state_and_refuses(self):
+        ep = _import_dag_module()
+        with pytest.raises(ep.AirflowException, match=r"baseline_start is not run in this run"):
+            ep._require_baseline_start({"ti": self._ti({"baseline_start": None}, xcom={"started": True})}, "nvd")
+
+    def test_an_unavailable_api_falls_back_to_the_marker(self):
+        ep = _import_dag_module()
+        ti = self._ti({}, xcom={"started": True})
+        ti.get_task_states.side_effect = RuntimeError("supervisor gone")
+        ep._require_baseline_start({"ti": ti}, "cisa")
+        ti.xcom_pull.return_value = None
+        with pytest.raises(ep.AirflowException, match=r"no XCom marker"):
+            ep._require_baseline_start({"ti": ti}, "cisa")
+
+    def test_postcheck_fails_on_a_chain_task_that_did_not_succeed_despite_its_marker(self):
+        ep = _import_dag_module()
+        states = {"full_neo4j_sync": "success", "build_relationships": "success", "run_enrichment_jobs": "failed"}
+        ti = self._ti(states, xcom={"stale": True})
+        with pytest.raises(ep.AirflowException, match=r"did not succeed: \{'run_enrichment_jobs': 'failed'\}"):
+            ep.assert_baseline_postconditions(task_instance=ti)
+
+    def test_postcheck_reads_the_chain_states_of_this_run(self):
+        ep = _import_dag_module()
+        states = {task: "success" for task in ep._BASELINE_CRITICAL_CHAIN}
+        ti = self._ti(states, xcom=None)
+        with patch("neo4j_client.Neo4jClient", side_effect=RuntimeError("past the chain check")):
+            with pytest.raises(RuntimeError, match="past the chain check"):
+                ep.assert_baseline_postconditions(task_instance=ti)
+        ti.xcom_pull.assert_not_called()
+
+
+def test_the_clean_step_outlasts_two_large_event_deletes():
+    # Each MISP delete may wait EDGEGUARD_MISP_DELETE_TIMEOUT_SEC (900 s); the OTX and NVD events of a
+    # 730-day baseline are the large ones.
+    from datetime import timedelta
+
+    ep = _import_dag_module()
+    assert ep.baseline_clean_task.execution_timeout >= timedelta(minutes=60)
