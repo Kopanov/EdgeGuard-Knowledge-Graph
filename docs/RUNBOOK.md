@@ -241,7 +241,8 @@ Each entry: symptom → detection signal → remediation.
 
 **7a. Collectors and `full_neo4j_sync` refuse to run (2026-10).**
 
-- **Symptom.** Every `tier1_core` / `tier2_feeds` collector task and
+- **Symptom.** The `tier1_core` / `tier2_feeds` collector tasks (a
+  flag-guarded source that is switched off still skips) and
   `full_neo4j_sync` fail at start with `[BASELINE] <step>: baseline_start
   is <state> in this run — refusing to run after a failed baseline_clean /
   baseline_start` (or `... did not succeed (no XCom marker) ...`).
