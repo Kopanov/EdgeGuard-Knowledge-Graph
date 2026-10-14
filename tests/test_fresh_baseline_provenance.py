@@ -821,6 +821,14 @@ class TestExtractTlpTag:
     def test_non_string_names_ignored(self):
         assert _extract_tlp_tag([{"name": None}, {}, {"name": "tlp:clear"}]) == "clear"
 
+    def test_the_default_is_logged_with_the_attribute(self, caplog):
+        # The node passes tlp_on_every_node with the default; the sync log names the attribute.
+        with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
+            assert _extract_tlp_tag([], "5f0c1a2e-0000-4000-8000-000000000001") == config.EDGEGUARD_DEFAULT_TLP
+            assert _extract_tlp_tag([{"name": "tlp:green"}], "5f0c1a2e-0000-4000-8000-000000000002") == "green"
+        messages = [r.getMessage() for r in caplog.records if "[TLP]" in r.getMessage()]
+        assert len(messages) == 1 and "5f0c1a2e-0000-4000-8000-000000000001" in messages[0]
+
 
 class TestParseAttributeReportedTechniques:
     @pytest.mark.parametrize(

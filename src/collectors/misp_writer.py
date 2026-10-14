@@ -2720,7 +2720,7 @@ class MISPWriter:
                     )
                 # Other 4xx: permanent validation failure — count once and return.
                 self.stats["errors"] += 1
-                return 0, len(attributes)
+                return 0, len(attributes) + skipped_unstorable
 
         except _TRANSIENT_HTTP_ERRORS as e:
             logger.warning(f"MISP batch transient error (will retry): {e}")
@@ -2728,7 +2728,7 @@ class MISPWriter:
         except Exception as e:
             logger.error(f"Batch push error: {e}")
             self.stats["errors"] += 1
-            return 0, len(attributes)
+            return 0, len(attributes) + skipped_unstorable
 
     def push_indicators(self, indicators: List[Dict], source: str, batch_size: int = 500) -> Tuple[int, int]:
         """
