@@ -253,17 +253,6 @@ class CISACollector:
                 # Detect ALL sectors
                 sectors = self.detect_sectors(f"{vendor} {product} {short_desc}")
 
-                # Map ransomware use to severity
-                if known_ransomware == "Known":
-                    severity = "CRITICAL"
-                    cvss_score = 9.0
-                elif known_ransomware == "Unknown":
-                    severity = "HIGH"
-                    cvss_score = 7.0
-                else:
-                    severity = "MEDIUM"
-                    cvss_score = 5.0
-
                 processed.append(
                     {
                         "type": "vulnerability",
@@ -287,8 +276,12 @@ class CISACollector:
                         "first_seen": date_added or None,
                         "last_updated": datetime.now(timezone.utc).isoformat(),
                         "confidence_score": 0.9,  # High confidence - known exploited
-                        "severity": severity,
-                        "cvss_score": cvss_score,
+                        # 2026-10: the catalogue carries no CVSS. The score and severity used to be
+                        # derived from knownRansomwareCampaignUse (Known 9.0 / CRITICAL, otherwise
+                        # 7.0 / HIGH) and were stored and exported as if they were CVSS; the CVE's
+                        # CVSS now comes from NVD only, and ransomware use travels as its own field.
+                        "severity": "UNKNOWN",
+                        "cvss_score": None,
                         "attack_vector": "NETWORK",
                         "vendor": vendor,
                         "product": product,

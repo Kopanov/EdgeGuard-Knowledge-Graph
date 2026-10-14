@@ -34,6 +34,8 @@ except ImportError:
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
 import source_registry  # noqa: E402  — single-source-of-truth for SOURCES dict (chip 5a refactor)
+from cvss_selection import CVSS_VERSIONS, QUALITATIVE_SEVERITIES, UNKNOWN_SEVERITY  # noqa: E402
+from cvss_selection import clamp_cvss_score as clamp_cvss_score  # noqa: E402  — re-export (moved 2026-10)
 from ioc_normalize import (
     canonicalize_lookup,  # noqa: E402  — alert-path (type, value) parity with the sync vocabulary (post-#126 hardening)
 )
@@ -784,39 +786,46 @@ def nonempty_graph_string(value: Any) -> Optional[str]:
     return s if s else None
 
 
-def clamp_cvss_score(value: Any) -> Optional[float]:
-    """PR-N14 (pre-baseline audit Fix #1, 2026-04-21): clamp a CVSS
-    base_score to the valid [0.0, 10.0] range + reject non-finite.
+def _cve_cvss_selection_cypher(var: str = "c") -> str:
+    """Cypher binding ``best`` to ``[sub-node, version]`` for the CVE in ``var``: its first CVSS
+    sub-node, in the order of ``cvss_selection.CVSS_VERSIONS``, whose ``base_score`` is a number
+    in [0, 10] (non-numeric or out-of-range values are skipped, like ``clamp_cvss_score``);
+    ``best`` is null when the CVE has none."""
+    candidates = ",\n            ".join(
+        f"[head([({var})-[:{v.rel_type}]->(x:{v.label}) WHERE x.base_score >= 0.0 AND x.base_score <= 10.0 | x]), "
+        f"'{v.version}']"
+        for v in CVSS_VERSIONS
+    )
+    return f"WITH {var}, head([p IN [\n            {candidates}\n        ] WHERE p[0] IS NOT NULL]) AS best"
 
-    Pre-PR-N14, an attacker-controlled NVD_META with ``base_score:
-    "1e309"`` reached ``float(...)`` → Python ``inf`` → landed on the
-    CVE node as ``n.cvss_score = Infinity``. Two consequences:
 
-      * GraphQL ``vulnerabilities(min_cvss: 9.0) ORDER BY n.cvss_score
-        DESC`` permanently placed the forged CVE at the top of the
-        triage queue, masking real P1s.
-      * STIX export emitted `"cvss_score": Infinity` which is NOT valid
-        JSON — downstream parsers crashed.
+def _cve_severity_from_best_cypher() -> str:
+    """Cypher expression for the rating of ``best`` (see ``_cve_cvss_selection_cypher``); mirrors
+    ``cvss_selection.select_cvss``: the sub-node's own ``base_severity`` when it is a CVSS rating,
+    else the rating of the score (NVD's CVSS 2 scale for version 2.0), ``UNKNOWN`` without CVSS."""
+    ratings = ", ".join(f"'{s}'" for s in QUALITATIVE_SEVERITIES)
+    stated = "toUpper(coalesce(toStringOrNull(best[0].base_severity), ''))"
+    score = "best[0].base_score"
+    return (
+        f"CASE WHEN best IS NULL THEN '{UNKNOWN_SEVERITY}' "
+        f"WHEN {stated} IN [{ratings}] THEN {stated} "
+        f"WHEN best[1] = '2.0' THEN CASE WHEN {score} >= 7.0 THEN 'HIGH' WHEN {score} >= 4.0 THEN 'MEDIUM' ELSE 'LOW' END "
+        f"WHEN {score} = 0.0 THEN 'NONE' WHEN {score} >= 9.0 THEN 'CRITICAL' WHEN {score} >= 7.0 THEN 'HIGH' "
+        f"WHEN {score} >= 4.0 THEN 'MEDIUM' ELSE 'LOW' END"
+    )
 
-    Returns None for unparseable / non-finite / out-of-range values so
-    callers can propagate NULL (honest-NULL per PR-N5 C7). Valid inputs
-    pass through as floats.
-    """
-    import math
 
-    if value is None:
-        return None
-    try:
-        f = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(f):
-        # inf / -inf / NaN — reject (honest-NULL).
-        return None
-    if f < 0.0 or f > 10.0:
-        # Outside the NIST-defined CVSS range.
-        return None
-    return f
+# 2026-10: a CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` come from its CVSS
+# sub-nodes, never from the record being merged (see ``cvss_selection``). Derived after every
+# ``merge_cve``, so the result does not depend on which source's record arrives last, and a CVE
+# without CVSS loses any score an older run stored (null score, severity UNKNOWN).
+_CVE_SCORE_FROM_CVSS_QUERY = (
+    "MATCH (c:CVE {cve_id: $cve_id})\n"
+    f"{_cve_cvss_selection_cypher('c')}\n"
+    "SET c.cvss_score = best[0].base_score,\n"
+    "    c.cvss_version = best[1],\n"
+    f"    c.severity = {_cve_severity_from_best_cypher()}"
+)
 
 
 # 2026-10: what NVD's record supplies on a CVE node (``Neo4jClient._replace_nvd_owned_cve_data``):
@@ -2755,7 +2764,9 @@ class Neo4jClient:
 
         After merging the CVE, creates CVSS sub-nodes (v4.0 / v3.1 / v3.0 / v2) when
         ``cvss_v40_data`` / ``cvss_v31_data`` / ``cvss_v30_data`` / ``cvss_v2_data`` are present,
-        with matching ``HAS_CVSS_*`` relationships (ResilMesh schema).
+        with matching ``HAS_CVSS_*`` relationships (ResilMesh schema), then sets the node's
+        ``cvss_score`` / ``severity`` / ``cvss_version`` from those sub-nodes (2026-10; the
+        record's own ``cvss_score`` / ``severity`` are not written).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -2782,12 +2793,16 @@ class Neo4jClient:
             extra_props["cisa_required_action"] = data["cisa_required_action"]
         if data.get("cisa_vulnerability_name"):
             extra_props["cisa_vulnerability_name"] = data["cisa_vulnerability_name"]
+        # 2026-10: CISA's ``knownRansomwareCampaignUse`` ("Known" / "Unknown"), carried by the KEV
+        # collector's records only, so an NVD record never overwrites it.
+        if data.get("known_ransomware_use"):
+            extra_props["known_ransomware_use"] = str(data["known_ransomware_use"])
         if data.get("description"):
             extra_props["description"] = data["description"]
-        if data.get("cvss_score") is not None:
-            extra_props["cvss_score"] = data["cvss_score"]
-        if data.get("severity"):
-            extra_props["severity"] = data["severity"]
+        # 2026-10: ``cvss_score`` and ``severity`` are not taken from the record — they are derived
+        # from the CVSS sub-nodes below (``_set_cve_score_from_cvss``). The record's values were
+        # whatever its source sent: a 0.0 placeholder read back as 3.0 / LOW, a ransomware-derived
+        # KEV value, or "UNKNOWN" from a source without scores, and the last record merged won.
         if data.get("attack_vector"):
             extra_props["attack_vector"] = data["attack_vector"]
         # PR-N19 Fix #1 (post-baseline 2026-04-22, from Bravo's
@@ -2855,6 +2870,9 @@ class Neo4jClient:
             )
         if data.get("nvd_record"):
             self._replace_nvd_owned_cve_data(cve_id, data)
+        # Last step: any code that adds or removes CVSS sub-nodes of this CVE must run before it,
+        # or the node keeps a score derived from sub-nodes that no longer apply.
+        self._set_cve_score_from_cvss(cve_id)
         return True
 
     def _replace_nvd_owned_cve_data(self, cve_id: str, data: Dict) -> bool:
@@ -2904,6 +2922,25 @@ class Neo4jClient:
             return True
         except Exception as e:
             logger.warning(f"Failed to replace the NVD data of CVE {cve_id}: {e}")
+            return False
+
+    def _set_cve_score_from_cvss(self, cve_id: str) -> bool:
+        """Set the CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` from its CVSS
+        sub-nodes (v3.1 → v3.0 → v2 → v4.0); no CVSS → null score and version, severity UNKNOWN.
+
+        Runs after every ``merge_cve`` (2026-10), whichever source the record came from, so a
+        record without CVSS (OTX, KEV, an NVD record awaiting analysis) cannot erase another
+        source's score and a CVSS 3.1 from CISA ICS outranks NVD's CVSS 4.0. Failure is logged
+        and leaves the previous values, like ``_merge_cvss_node``.
+        """
+        if not self.driver or not cve_id:
+            return False
+        try:
+            with self.driver.session() as session:
+                session.run(_CVE_SCORE_FROM_CVSS_QUERY, cve_id=cve_id, timeout=NEO4J_READ_TIMEOUT)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to set the CVSS score of CVE {cve_id}: {e}")
             return False
 
     def _merge_cvss_node(

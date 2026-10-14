@@ -35,6 +35,7 @@ from config import (
     SSL_VERIFY,
     apply_misp_http_host_header,
 )
+from cvss_selection import cvss_rating_tag
 
 # PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
 # backoff trigger. Optional import so MISPWriter can run in environments
@@ -1680,16 +1681,12 @@ class MISPWriter:
         if severity:
             tags.append(f"severity:{severity.lower()}")
 
-        # Add CVSS score tag if available
-        cvss = vuln.get("cvss_score", 0)
-        if cvss >= 9.0:
-            tags.append("cvss:critical")
-        elif cvss >= 7.0:
-            tags.append("cvss:high")
-        elif cvss >= 4.0:
-            tags.append("cvss:medium")
-        else:
-            tags.append("cvss:low")
+        # CVSS rating tag, only when the item carries a CVSS score (2026-10). Every score below
+        # 4.0 used to be tagged ``cvss:low``, including the 0 an unscored CVE carried, which the
+        # sync read back as 3.0 / LOW; a real 0.0 is now ``cvss:none``.
+        cvss_tag = cvss_rating_tag(vuln.get("cvss_score"), severity)
+        if cvss_tag:
+            tags.append(cvss_tag)
 
         # Add CISA KEV tag if from CISA source or if NVD entry has CISA KEV data
         if source in ["cisa", "cisa_kev"] or vuln.get("cisa_exploit_add"):
@@ -1729,6 +1726,9 @@ class MISPWriter:
             "cisa_action_due": vuln.get("cisa_action_due", ""),
             "cisa_required_action": vuln.get("cisa_required_action", ""),
             "cisa_vulnerability_name": vuln.get("cisa_vulnerability_name", ""),
+            # 2026-10: CISA's knownRansomwareCampaignUse ("Known" / "Unknown"), KEV records only.
+            # It used to become a 9.0 / 7.0 score; the ``ransomware:known`` tag never reached Neo4j.
+            "known_ransomware_use": vuln.get("known_ransomware_use", ""),
             # PR-N13 (2026-04-21 pre-baseline audit Fix #3): preserve
             # ``version_constraints`` (up to 10 per-CPE range entries)
             # and ``status`` (active / rejected list) through the MISP

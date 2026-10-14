@@ -650,7 +650,7 @@ class OTXCollector:
                         "source": [self.tag],
                         "confidence_score": 0.5,
                         "severity": "UNKNOWN",
-                        "cvss_score": 0.0,
+                        "cvss_score": None,  # a pulse reference carries no CVSS (0.0 was tagged cvss:low)
                         "attack_vector": "NETWORK",
                         **pulse_meta,
                     }

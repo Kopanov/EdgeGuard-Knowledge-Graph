@@ -437,7 +437,9 @@ class TestIncrementalRun:
         assert meta["status"] == ["rejected"] and meta["cvss_v31_data"] is None
         assert rejected["last_seen"] == "2026-10-13T14:17:38.270000+00:00", "NVD's zone-less lastModified, as UTC"
         assert {t["name"] for t in rejected["Tag"] if t.get("deleted")} == {"severity:high", "cvss:high"}
-        assert {t["name"] for t in rejected["Tag"] if not t.get("deleted")} == {"severity:unknown", "cvss:low"}
+        assert {t["name"] for t in rejected["Tag"] if not t.get("deleted")} == {"severity:unknown"}, (
+            "no CVSS, no cvss: tag"
+        )
 
         analysed = json.loads(edits[stored_attribute(ANALYSED)["uuid"]]["comment"][len("NVD_META:") :])
         assert analysed["cvss_v31_data"]["base_score"] == 8.8, "NVD's CVSS 3.1 score from its analysis"

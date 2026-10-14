@@ -47,6 +47,7 @@ from config import (
     get_sector_cutoff_date,
     misp_http_headers_for_pymisp,
 )
+from cvss_selection import CVSS_VERSIONS, select_cvss
 from misp_health import MISPHealthCheck
 from neo4j_client import (
     Neo4jClient,
@@ -2958,26 +2959,6 @@ class MISPToNeo4jSync:
 
         # Handle CVE/vulnerability
         if attr_type == "vulnerability":
-            severity = "UNKNOWN"
-            cvss_score = None  # None = unscored; 0.0 is a valid CVSS score
-
-            for tag in tags:
-                tag_name = tag.get("name", "")
-                if tag_name.startswith("severity:"):
-                    severity = tag_name.replace("severity:", "").upper()
-                elif tag_name == "cvss:critical":
-                    cvss_score = 9.0
-                    severity = "CRITICAL"
-                elif tag_name == "cvss:high":
-                    cvss_score = 7.5
-                    severity = "HIGH"
-                elif tag_name == "cvss:medium":
-                    cvss_score = 5.5
-                    severity = "MEDIUM"
-                elif tag_name == "cvss:low":
-                    cvss_score = 3.0
-                    severity = "LOW"
-
             cve_id = value.upper()
 
             # Parse NVD_META JSON from comment (written by MISPWriter for NVD-sourced CVEs).
@@ -2989,52 +2970,45 @@ class MISPToNeo4jSync:
                 try:
                     nvd_meta = json.loads(raw_comment[len("NVD_META:") :])
                 except ValueError:
-                    logger.warning(f"Failed to parse NVD_META for {cve_id}, falling back to tag-based data")
+                    logger.warning(f"Failed to parse NVD_META for {cve_id}; reading the CVE without it")
+                if not isinstance(nvd_meta, dict):
+                    nvd_meta = {}
 
-            # Prefer the precise values stored in NVD_META over tag-derived approximations
+            # 2026-10: score and severity come only from the CVSS payloads in NVD_META, in the
+            # order v3.1 → v3.0 → v2 → v4.0 (``cvss_selection.select_cvss``, which applies the
+            # PR-N14 clamp). The ``cvss:`` / ``severity:`` tags are not read: MISPWriter tagged an
+            # unscored CVE ``cvss:low`` (read back as 3.0 / LOW on 14,451 CVEs of the hosted
+            # 730-day baseline), the CISA KEV and ICS records carried values derived from
+            # ransomware use or a collector default, and CVSS 3.0 was never read. The CVE node's
+            # own values are set by ``Neo4jClient.merge_cve`` from its CVSS sub-nodes; these item
+            # values serve the ``:Vulnerability`` paths.
+            cvss_score, severity, cvss_version = select_cvss(nvd_meta)
+            _rejected_scores = {
+                v.payload_key: nvd_meta[v.payload_key].get("base_score")
+                for v in CVSS_VERSIONS
+                if isinstance(nvd_meta.get(v.payload_key), dict)
+                and nvd_meta[v.payload_key].get("base_score") not in (None, "")
+                and clamp_cvss_score(nvd_meta[v.payload_key].get("base_score")) is None
+            }
+            if _rejected_scores:
+                # PR-N14: a source claimed a non-finite or out-of-range score (``"1e309"`` from a
+                # compromised MISP peer); it is skipped, never stored.
+                logger.warning(
+                    "CVSS base_score rejected by clamp for %s (%r) — skipped. Compromised feed?",
+                    value,
+                    _rejected_scores,
+                )
             if nvd_meta:
                 description = nvd_meta.get("description", raw_comment)
-                if nvd_meta.get("attack_vector"):
-                    attack_vector = nvd_meta["attack_vector"]
-                else:
-                    attack_vector = "UNKNOWN"
-                # Exact CVSS score from v3.1 or v2 metadata takes priority over tag category.
-                #
-                # PR-N14 (pre-baseline audit Fix #1, 2026-04-21): use
-                # ``clamp_cvss_score`` instead of raw ``float(...)`` to
-                # reject inf / nan / negative / > 10.0. A compromised
-                # federated MISP peer can otherwise ship
-                # ``base_score: "1e309"`` → Python `inf` → forged CVE
-                # permanently tops GraphQL sort + corrupts STIX export.
-                # Returns None on bad input; we then fall through to the
-                # tag-derived score already computed above.
-                v31 = nvd_meta.get("cvss_v31_data") or {}
-                v2 = nvd_meta.get("cvss_v2_data") or {}
-                _v31_score = (
-                    clamp_cvss_score(v31.get("base_score")) if v31.get("base_score") not in (None, "") else None
-                )
-                _v2_score = clamp_cvss_score(v2.get("base_score")) if v2.get("base_score") not in (None, "") else None
-                if _v31_score is not None:
-                    cvss_score = _v31_score
-                    severity = (v31.get("base_severity") or severity or "UNKNOWN").upper()
-                elif _v2_score is not None:
-                    cvss_score = _v2_score
-                    severity = (v2.get("base_severity") or severity or "UNKNOWN").upper()
-                elif v31.get("base_score") not in (None, "") or v2.get("base_score") not in (None, ""):
-                    # Source claimed a score but it was rejected by clamp
-                    # (non-finite / out-of-range). Honest-NULL: fall
-                    # through to tag-derived score + emit WARN so
-                    # operators can investigate the offending feed.
-                    logger.warning(
-                        "CVSS base_score rejected by clamp for %s (v31=%r v2=%r) — "
-                        "falling back to tag-derived score. Compromised feed?",
-                        value,
-                        v31.get("base_score"),
-                        v2.get("base_score"),
-                    )
+                attack_vector = nvd_meta.get("attack_vector") or "UNKNOWN"
             else:
                 description = raw_comment
                 attack_vector = "NETWORK"
+            # CISA's knownRansomwareCampaignUse: in NVD_META of the KEV collector's records since
+            # 2026-10; older KEV attributes carry only the ``ransomware:known`` tag.
+            known_ransomware_use = nvd_meta.get("known_ransomware_use") or (
+                "Known" if any(t.get("name") == "ransomware:known" for t in tags) else None
+            )
 
             # Vulnerability → Sector — canonical AFFECTS (PR #33 round 12).
             canon_cve = normalize_cve_id_for_graph(cve_id)
@@ -3091,6 +3065,8 @@ class MISPToNeo4jSync:
                 "confidence_score": confidence,
                 "severity": severity,
                 "cvss_score": cvss_score,
+                "cvss_version": cvss_version,
+                "known_ransomware_use": known_ransomware_use,
                 "attack_vector": attack_vector,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
