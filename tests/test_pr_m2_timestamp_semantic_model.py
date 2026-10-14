@@ -422,23 +422,14 @@ class TestStixExporterValidFromChain:
 class TestSectorWindowing30437:
     """Sector cutoff windowing must use the average-Gregorian-month
     factor (~30.437) instead of the bare ``30`` that lost ~10 days
-    per 24-month window."""
+    per 24-month window. Only ``get_sector_cutoff_date`` uses it now: the
+    NVD and OTX sector filters and the unused NVD baseline branch of
+    ``_fetch_cves`` were removed in 2026-10
+    (tests/test_collectors_keep_old_records.py)."""
 
     def test_config_uses_30437(self):
         src = (SRC / "config.py").read_text()
         assert "int(months * 30.437)" in src
-
-    def test_nvd_collector_uses_30437(self):
-        src = (SRC / "collectors" / "nvd_collector.py").read_text()
-        assert "int(months_range * 30.437)" in src
-        # Negative pin: the bare ``months_range * 30)`` form must be gone
-        # (we allow ``int(months_range * 30.437)`` to substring-match against
-        # ``months_range * 30`` — we want to ensure no naked ``* 30)`` left)
-        assert "months_range * 30)" not in src or "months_range * 30.437)" in src
-
-    def test_otx_collector_uses_30437(self):
-        src = (SRC / "collectors" / "otx_collector.py").read_text()
-        assert "int(months_range * 30.437)" in src
 
 
 # ===========================================================================

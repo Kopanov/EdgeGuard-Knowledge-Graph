@@ -77,7 +77,7 @@ External sources (10 active feeds + 2 opt-in: CISA ICS advisories, MalwareBazaar
 ```
 
 **Two operating modes:**
-- **Baseline** (run once): Full historical load — up to 24 months per sector, unlimited items **per source** by default (`BASELINE_COLLECTION_LIMIT=0`), triggered manually
+- **Baseline** (run once): Full historical load — up to the last 730 days by default (`BASELINE_DAYS`, the same window for every sector; CISA KEV and the NVD records of KEV CVEs whatever their age), unlimited items **per source** by default (`BASELINE_COLLECTION_LIMIT=0`), triggered manually
 - **Incremental** (cron): 2-3 day window, **200** items per source by default (`EDGEGUARD_INCREMENTAL_LIMIT`), runs on schedule via Airflow
 
 **Limits are stage-specific** (baseline per-source caps ≠ MISP→Neo4j fetch ≠ Neo4j RAM chunking). See **[docs/COLLECTION_AND_SYNC_LIMITS.md](docs/COLLECTION_AND_SYNC_LIMITS.md)** and **§ Collection & sync limits** later in this README.
@@ -664,11 +664,7 @@ Set the flags in `.env`; `docker-compose.yml` forwards them into the `airflow` c
 - *VirusTotal* = "we scanned this file with 70+ tools and here's what they found"
 - *AbuseIPDB* = "this IP has been reported for bad behavior"
 
-**Data Retention by Sector:**
-- Healthcare: 24 months
-- Energy: 24 months
-- Finance: 24 months
-- Global: 24 months
+**History by sector:** the same for every sector — what the baseline window collects (`BASELINE_DAYS`, default 730 days = 24 months), plus every CVE on CISA's KEV list whatever its age. Collectors apply no per-sector age filter.
 
 ### 7. Graph Knowledge Base
 - Nodes: `Indicator`, `CVE`, `Vulnerability`, `Malware`, `ThreatActor`, `Technique`, `Tactic`, `Campaign`

@@ -55,7 +55,6 @@ from config import (
     OTX_INCREMENTAL_MAX_PAGES,
     OTX_INCREMENTAL_OVERLAP_SEC,
     OTX_INDUSTRY_ZONE_ALIASES,
-    SECTOR_TIME_RANGES,
     SOURCE_TAGS,
     SSL_VERIFY,
     detect_zones_from_text,
@@ -475,9 +474,8 @@ class OTXCollector:
                     time.sleep(2)
                 pulses = all_incr
 
-            # Process pulses with date filtering
+            # Process pulses
             processed = []
-            skipped_old = 0
 
             to_process = pulses if limit is None else pulses[:limit]
             for pulse in to_process:
@@ -520,17 +518,15 @@ class OTXCollector:
 
                 # PR-M2 §4-F5: read the source's pulse-level timestamps
                 # ONCE at the top of the per-pulse block and use them for
-                # BOTH the date-filter pass below AND the per-indicator
-                # ``first_seen`` / ``last_seen`` propagation further down.
+                # the per-indicator ``first_seen`` / ``last_seen``
+                # propagation further down.
                 # Bugbot caught (PR-M2 round 1, LOW): the previous code
                 # assigned ``pulse_created = pulse.get("created", "")``
                 # for filtering, then later reassigned
                 # ``pulse_created = pulse.get("created")`` (None default)
                 # for honest-NULL propagation — same name, two semantics,
                 # latent breakage if a future edit moved one assignment.
-                # Single source of truth eliminates the shadowing risk:
-                # ``""`` and ``None`` are both falsy so the ``if
-                # pulse_created:`` filter check works either way, and
+                # Single source of truth eliminates the shadowing risk;
                 # downstream honest-NULL gating (``if indicator_first_seen``)
                 # treats ``""`` as "absent" too.
                 #
@@ -551,21 +547,13 @@ class OTXCollector:
                 pulse_created = pulse.get("created")  # may be None or "" — honest NULL
                 pulse_modified = pulse.get("modified")
 
-                # Filter by each sector's date range (use the widest among
-                # matched zones).  ``pulse_created`` is the source value
-                # read above; ``if pulse_created:`` rejects both None and
-                # empty-string in one check.
-                if pulse_created:
-                    try:
-                        pulse_date = datetime.fromisoformat(pulse_created.replace("Z", "+00:00"))
-                        months_range = max(SECTOR_TIME_RANGES.get(s, SECTOR_TIME_RANGES["global"]) for s in sectors)
-                        cutoff = datetime.now(timezone.utc) - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
-
-                        if pulse_date < cutoff:
-                            skipped_old += 1
-                            continue
-                    except (ValueError, TypeError):
-                        pass
+                # No age filter on the pulse (2026-10): the request bounds it by ``modified_since``
+                # (baseline: ``baseline_days``; incremental: the stored cursor). The former
+                # SECTOR_TIME_RANGES filter here compared OTX's zone-less ``created``
+                # ("2023-01-25T11:11:02.458000") with a timezone-aware cutoff and swallowed the
+                # TypeError, so it had not dropped a pulse since v2026.3.28. Made to work, it would
+                # have dropped pulses created more than 24 months ago that are still being updated,
+                # new IOCs included.
 
                 # Shared metadata dict for all items from this pulse
                 # 2026-10 (regular-update linking): computed once per pulse, stamped on each IOC below.
@@ -707,8 +695,6 @@ class OTXCollector:
             unique = _dedupe_pulse_items(processed)
 
             logger.info(f"[OK] OTX: Processed {len(unique)} unique items")
-            if skipped_old > 0:
-                logger.info(f"⏭️ OTX: Skipped {skipped_old} old pulses outside sector time range")
 
             def _advance_otx_incremental_cursor(successful_pulses: Optional[List[Dict]] = None) -> None:
                 """Advance cursor to the last successfully processed pulse timestamp.

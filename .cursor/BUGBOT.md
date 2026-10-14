@@ -22,7 +22,7 @@ External Sources → Collectors → MISP (single source of truth) → Neo4j Know
 - **Sector zones**: `global`, `healthcare`, `energy`, `finance` — only valid values
 - **Node types**: Indicator, Vulnerability, CVE, Malware, ThreatActor, Technique, Tactic, Campaign, Tool, Sector, Source — `Tool` represents MITRE ATT&CK software tools (distinct from Malware)
 - **MISP/PyMISP version compatibility**: `src/misp_health.py` performs a version detection check; flag any code that assumes a specific PyMISP API without guarding against version differences
-- **Historical windows**: all sectors (global/healthcare/energy/finance)=24 months — never exceed these
+- **Historical windows**: the same for every sector — `baseline_days` (default 730 days = 24 months) for a baseline, the source's incremental window otherwise; CISA KEV and the NVD KEV sweep take the whole catalogue on purpose. No collector filters by sector (see "Historical window / collection limit exceeded")
 - **Resilience**: circuit breakers and retry logic protect all external calls
 - **Provenance invariant**: every Neo4j node carries `first_imported_at`, `source[]`, `edgeguard_managed=true` and a `SOURCED_FROM` edge to its source node. MISP-originated nodes (Indicator, Vulnerability, CVE, Malware, ThreatActor) additionally carry `misp_event_id`
 - **ResilMesh deployment**: EdgeGuard runs on the same server as ResilMesh — port isolation and `edgeguard_managed` tagging are mandatory
@@ -139,10 +139,10 @@ If a `RateLimiter` or sleep interval is changed, verify the new value still resp
 Flag any rate limiter value that is more aggressive (higher frequency) than the source allows.
 
 ### Historical window / collection limit exceeded
-Collectors must respect the sector time ranges:
-- All sectors (`global`, `healthcare`, `energy`, `finance`): maximum 24 months lookback
+How far back a collector reaches comes from the run, not from the collector: `baseline_days` in baseline mode (default 730 days = 24 months, the same for every sector; `BASELINE_DAYS` / `--days`) and the source's incremental window otherwise. No collector filters by sector or on `SECTOR_TIME_RANGES` (2026-10). NVD and OTX apply the window in the request; CISA KEV and CISA ICS download more and filter by `baseline_days` / their incremental days.
 
-Flag any collector that uses a hardcoded absolute date instead of a relative offset from `datetime.now()`, or that sets a lookback period longer than the allowed window.
+Flag any collector that uses a hardcoded absolute date instead of a relative offset from `datetime.now()`, or that hardcodes a lookback instead of taking `baseline_days` / its incremental window. Taking a whole catalogue on purpose (the CISA KEV baseline and the NVD KEV sweep, `docs/DATA_SOURCES.md`) is not a lookback violation.
+Flag any comparison of a timestamp parsed from a source payload with a timezone-aware datetime when the parsed value is not normalised first (`tzinfo is None` → UTC). NVD and OTX send timestamps without a zone; the comparison raises `TypeError`, and inside a broad `except` the check silently never runs (the former NVD/OTX sector time-range filter, removed 2026-10).
 Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`).
 
 ### Collector missing status return

@@ -53,7 +53,6 @@ from collectors.collector_utils import (
 from collectors.misp_writer import MISPWriter
 from config import (
     NVD_API_KEY,
-    SECTOR_TIME_RANGES,
     SOURCE_TAGS,
     SSL_VERIFY,
     detect_zones_from_item,
@@ -291,7 +290,7 @@ class NVDCollector:
         return detect_zones_from_item(item)
 
     @retry_with_backoff(max_retries=MAX_RETRIES)
-    def _fetch_cves(self, limit: Optional[int], baseline: bool = False) -> List[Dict]:
+    def _fetch_cves(self, limit: Optional[int]) -> List[Dict]:
         """
         Fetch CVEs from NVD API with retry logic.
 
@@ -302,7 +301,7 @@ class NVDCollector:
         https://nvd.nist.gov/developers/api-workflows .
 
         Args:
-            limit: Maximum number of CVEs to fetch (None → cap at 2000 newest in window)
+            limit: Maximum number of CVEs to fetch (None → the 15,000 newest in the window)
 
         Returns:
             List of vulnerability dicts
@@ -314,24 +313,18 @@ class NVDCollector:
             headers["apiKey"] = self.api_key
 
         # NVD requires date pairs together; **every** request span ≤ 120 days (NIST).
-        # Incremental mode: use lastModStartDate/lastModEndDate to catch updated CVSS scores.
-        # Baseline mode: use pubStartDate/pubEndDate for historical data.
+        # Incremental runs use lastModStartDate/lastModEndDate: the CVEs modified in the last
+        # EDGEGUARD_NVD_INCREMENTAL_DAYS days. Baselines use the publication windows in collect()
+        # (2026-10: the unused baseline branch here, a SECTOR_TIME_RANGES window, was removed).
         pub_end = _utc_now()
-        _use_mod_dates = not baseline  # incremental uses modification dates
-        if _use_mod_dates:
-            # Incremental: fetch CVEs modified in the last N days (catches CVSS updates)
-            _inc_days = int(os.environ.get("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"))
-            desired_start = pub_end - timedelta(days=_inc_days)
-            logger.info(f"NVD incremental: fetching CVEs modified in last {_inc_days} days")
-        else:
-            # Widest sector window for baseline
-            months_range = max(SECTOR_TIME_RANGES.values())
-            desired_start = pub_end - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
+        _inc_days = int(os.environ.get("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"))
+        desired_start = pub_end - timedelta(days=_inc_days)
+        logger.info(f"NVD incremental: fetching CVEs modified in last {_inc_days} days")
         pub_start, pub_end = clamp_nvd_published_range(desired_start, pub_end)
         pub_start_iso = _to_nvd_pub_iso(pub_start)
         pub_end_iso = _to_nvd_pub_iso(pub_end)
-        _date_key_start = "lastModStartDate" if _use_mod_dates else "pubStartDate"
-        _date_key_end = "lastModEndDate" if _use_mod_dates else "pubEndDate"
+        _date_key_start = "lastModStartDate"
+        _date_key_end = "lastModEndDate"
         logger.info(
             f"NVD: Fetching CVEs ({_date_key_start}) {pub_start.strftime('%Y-%m-%d')} .. "
             f"{pub_end.strftime('%Y-%m-%d')} (≤{NVD_MAX_PUBLISHED_DATE_RANGE_DAYS}d API window)"
@@ -661,8 +654,6 @@ class NVDCollector:
             return self._return_status(False, 0, error_msg)
 
         try:
-            # CVE ids the sector time range must not drop (baseline KEV sweep / named ids).
-            time_range_exempt: set = set()
             if baseline:
                 logger.info(f"Baseline mode: Collecting NVD CVEs from the last {baseline_days} days...")
                 all_cves: List[Dict] = []
@@ -899,14 +890,13 @@ class NVDCollector:
                         baseline_days,
                         len(all_cves),
                     )
-                # 2026-10: KEV CVEs and named CVE ids outside the publication windows. They are
-                # exempt from the sector time range below (a known-exploited CVE stays relevant
-                # whatever its age); records already collected by a window are not duplicated.
+                # 2026-10: KEV CVEs and named CVE ids outside the publication windows (a
+                # known-exploited CVE stays relevant whatever its age); records already collected
+                # by a window are not duplicated.
                 for _rec in self._fetch_supplementary_cves(batch_sleep):
                     _sup_id = (_rec.get("cve") or {}).get("id", "")
                     if not _sup_id:
                         continue
-                    time_range_exempt.add(_sup_id)
                     if _sup_id not in seen_cve_ids:
                         seen_cve_ids.add(_sup_id)
                         all_cves.append(_rec)
@@ -930,14 +920,13 @@ class NVDCollector:
                 )
             else:
                 # Normal mode: fetch recent only
-                vulnerabilities = self._fetch_cves(limit, baseline=False)
+                vulnerabilities = self._fetch_cves(limit)
 
             # Record success in circuit breaker
             self.circuit_breaker.record_success()
 
-            # Process CVEs with date filtering
+            # Process CVEs
             processed = []
-            skipped_old = 0
 
             # PR-M1 §7-H3: same defensive stance as the accumulation-side
             # guard above — in baseline mode the run-level ``limit`` is
@@ -1130,27 +1119,16 @@ class NVDCollector:
                 # Detect ALL sectors
                 sectors = self.detect_sectors(description, configurations)
 
-                # Filter by sector date range: use widest window among matched zones (max).
-                # min() + global=12 dropped CVEs tagged only global in the 12–24 month band.
+                # No age filter after the fetch (2026-10): what a run collects is decided by its
+                # request — a baseline's publication windows of ``baseline_days`` (plus the KEV sweep
+                # and named ids, whatever their age), an incremental run's lastMod window and newest-
+                # first selection. The former SECTOR_TIME_RANGES filter here compared NVD's zone-less
+                # ``published`` ("2021-12-10T10:15:09.143") with a timezone-aware cutoff and swallowed
+                # the TypeError, so it had not dropped a record since v2026.3.28. Made to work, it
+                # would have cut the oldest hours of every baseline (the cutoff is computed after the
+                # windows are fetched), any baseline longer than 24 months, and the KEV sweep's
+                # older records.
                 published_str = cve_data.get("published", "")
-                pub_date = None
-                if published_str:
-                    try:
-                        pub_date = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
-                    except (ValueError, TypeError):
-                        pub_date = None
-
-                # Only filter if we have a valid pub_date (and the CVE is not a KEV / named record)
-                if pub_date is not None and cve_id not in time_range_exempt:
-                    try:
-                        months_range = max(SECTOR_TIME_RANGES.get(s, SECTOR_TIME_RANGES["global"]) for s in sectors)
-                        cutoff = datetime.now(timezone.utc) - timedelta(days=int(months_range * 30.437))  # PR-M2 §4-F6
-
-                        if pub_date < cutoff:
-                            skipped_old += 1
-                            continue
-                    except (ValueError, TypeError, AttributeError):
-                        pass
 
                 # ResilMesh schema: Vulnerability.status is LIST OF STRING
                 vuln_status_raw = cve_data.get("vulnStatus", "")
@@ -1242,8 +1220,6 @@ class NVDCollector:
                 )
 
             logger.info(f"[OK] NVD: Processed {len(processed)} CVEs")
-            if skipped_old > 0:
-                logger.info(f"⏭️ NVD: Skipped {skipped_old} CVEs outside sector time range")
 
             # Push to MISP if requested
             if push_to_misp:

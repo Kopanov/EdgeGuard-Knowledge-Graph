@@ -656,8 +656,11 @@ if not VIRUSTOTAL_API_KEY:
 
 # Collection Limits (see get_effective_limit() below)
 
-# Sector time ranges (months of historical data to fetch)
-# Standardized to 24 months (2 years) for consistency across all sectors
+# Sector time ranges in months, 24 for every sector. Used only by ``run_misp_to_neo4j --sector``
+# (its choices, and ``get_sector_cutoff_date`` for the sync's start date: now − 24 months; events
+# are not filtered by sector). No collector reads it (2026-10): how far back a collector reaches
+# is ``baseline_days`` for a baseline (default 730 days = 24 months) and the source's incremental
+# window otherwise.
 SECTOR_TIME_RANGES = {"healthcare": 24, "energy": 24, "finance": 24, "global": 24}
 
 # Max entries per source per sync run.
@@ -682,7 +685,7 @@ MAX_ENTRIES_PER_SOURCE = _env_int("EDGEGUARD_MAX_ENTRIES", 0)
 # window scan fast and lightweight.  Baseline runs use a separate limit
 # (BASELINE_COLLECTION_LIMIT Airflow Variable) and ignore this setting.
 #
-#   0 → no item cap (only the sector time-range window applies)
+#   0 → no item cap (only the source's own time window applies)
 #   N → collect at most N items per source per run  (e.g. 200, 500)
 #
 # Can also be set as an Airflow Variable "INCREMENTAL_COLLECTION_LIMIT"
@@ -690,7 +693,7 @@ MAX_ENTRIES_PER_SOURCE = _env_int("EDGEGUARD_MAX_ENTRIES", 0)
 INCREMENTAL_COLLECTION_LIMIT = _env_int("EDGEGUARD_INCREMENTAL_LIMIT", 200)
 
 # Sources that bypass the count limit (get all data)
-# These sources will still respect SECTOR_TIME_RANGES (time limit)
+# These sources still keep their own time window (baseline days / incremental window)
 # Add sources here when needed (e.g., {'cisa', 'mitre'})
 NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 
