@@ -36,9 +36,9 @@ Auth:    Configured via environment variables
   description: STRING,      // Vulnerability description (up to 1000 chars)
   zone: LIST,               // Zone(s): ['finance'], ['energy', 'global'] — always a list
   tag: STRING,              // Source tag (provenance — NOT part of UNIQUE constraint)
-  sources: LIST,            // Accumulated source list (deduped)
+  source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   confidence_score: FLOAT,  // 0.0-1.0 (0.9 for CISA KEV entries)
-  first_seen: DATETIME,     // First observed
+  first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
   last_updated: DATETIME,   // Last update
   active: BOOLEAN,          // Active in MISP
   // NVD-enriched fields
@@ -66,9 +66,9 @@ Auth:    Configured via environment variables
   value: STRING,            // The indicator value
   zone: LIST,               // Zone(s): ['finance'] — always a list, never a string
   tag: STRING,              // Source tag (provenance — NOT part of UNIQUE constraint)
-  sources: LIST,            // Accumulated source list (deduped)
+  source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   confidence_score: FLOAT,  // 0.0-1.0
-  first_seen: DATETIME,     // First observed
+  first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
   last_updated: DATETIME,   // Last update
   misp_event_ids: LIST,     // Accumulated MISP event ids (set, deduped)
   misp_attribute_ids: LIST, // Accumulated MISP attribute UUIDs (stable cross-instance, from attr.uuid; set, deduped)
@@ -112,10 +112,10 @@ Auth:    Configured via environment variables
   family: STRING,           // Malware family
   description: STRING,      // Description
   tag: STRING,              // Source tag (provenance — NOT part of UNIQUE constraint)
-  sources: LIST,            // Accumulated source list (deduped)
+  source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   uses_techniques: LIST,    // Optional MITRE IDs from STIX malware→technique **uses** (MISP **MITRE_USES_TECHNIQUES:**)
   confidence_score: FLOAT,  // 0.0-1.0
-  first_seen: DATETIME,     // First observed
+  first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
   last_updated: DATETIME,   // Last update
   misp_event_ids: LIST      // Accumulated MISP event ids (set, deduped)
 })
@@ -127,10 +127,10 @@ Auth:    Configured via environment variables
   name: STRING,             // Actor name
   aliases: LIST,            // Known aliases
   description: STRING,      // Description
-  sources: LIST,            // Data sources
+  source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   uses_techniques: LIST,    // MITRE IDs from STIX actor **uses** technique; drives (Actor)-[:EMPLOYS_TECHNIQUE]->(Technique) edges in build_relationships.py. Property name retained as-is (STIX-side contract).
   confidence_score: FLOAT,  // 0.0-1.0
-  first_seen: DATETIME,     // First observed
+  first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
   last_updated: DATETIME    // Last update
 })
 ```
@@ -142,9 +142,9 @@ Auth:    Configured via environment variables
   name: STRING,             // Technique name
   description: STRING,      // Description
   platforms: LIST,          // Target platforms
-  sources: LIST,            // Data sources
+  source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   confidence_score: FLOAT,  // 0.0-1.0
-  first_seen: DATETIME,     // First observed
+  first_imported_at: DATETIME, // When EdgeGuard first stored the node (DB-local; the source's own claim is on SOURCED_FROM)
   last_updated: DATETIME    // Last update
 })
 ```
@@ -159,7 +159,7 @@ Auth:    Configured via environment variables
   tool_types: LIST,         // Classification labels
   uses_techniques: LIST,    // MITRE IDs from STIX uses relationships
   zone: LIST,               // Detected zones
-  sources: LIST,            // Accumulated sources
+  source: LIST,             // Canonical source ids, accumulated (deduped); relationships carry r.sources
   confidence_score: FLOAT   // 0.0-1.0
 })
 ```
@@ -360,8 +360,17 @@ Auth:    Configured via environment variables
   // cvss_version, severity, and attack_vector (NVD's word for the attack vector of the CVSS that
   // gives the score; null without CVSS). See :Vulnerability above for their rules.
   attack_vector: STRING,    // NETWORK / ADJACENT_NETWORK / LOCAL / PHYSICAL, null without CVSS
+  cvss_score: FLOAT,        // null without CVSS
+  cvss_version: STRING,     // "3.1", "3.0", "2.0" or "4.0"; null without CVSS
+  severity: STRING,         // rating of that score; UNKNOWN without CVSS
+  // Further EdgeGuard properties written by merge_cve (the MISP → Neo4j sync path):
+  status: LIST,             // NVD record status, ["active"] or ["rejected"] (2026-10)
+  reference_urls: LIST,     // NVD reference URLs
+  affected_products: LIST,  // CPE URIs (up to 10)
+  known_ransomware_use: STRING, // CISA KEV knownRansomwareCampaignUse, "Known" / "Unknown" (2026-10)
+  cisa_exploit_add: STRING, // and the other CISA KEV fields (see Vulnerability above); zone, source and tlp as on every EdgeGuard node
   tag: STRING,              // Data provenance tag
-  first_seen: DATETIME,     // First observed
+  first_seen: DATETIME,     // First observed (merge_resilmesh_cve); the MISP sync path writes first_imported_at
   last_updated: DATETIME    // Last update
 })
 ```
@@ -467,19 +476,26 @@ Auth:    Configured via environment variables
 
 | Relationship | From | To | Properties |
 |--------------|------|-----|------------|
-| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` + `match_type` per evidence: `mitre_explicit` (0.95, `uses_techniques`) or `otx_pulse` (0.6, `reported_techniques`, 2026-10); `created_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` (`build_relationships.py` Q5/Q5b). *Split from a generic `USES` in 2026-04.* |
-| `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10). |
+| `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` + `match_type` per evidence: `mitre_explicit` (0.95, `uses_techniques`) or `otx_pulse` (0.6, `reported_techniques`, 2026-10); curated-package claims: see below the table; `created_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` (`build_relationships.py` Q5/Q5b). *Split from a generic `USES` in 2026-04.* |
+| `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10); curated-package claims: see below the table. |
 | `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path, the pulse in `source_refs[]`); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
 | `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. The `misp_cooccurrence` level (0.5) is no longer written (2026-10); `calibrate_cooccurrence_confidence` only touches legacy edges |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` |
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | 2026-10, curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |
 | `USES_TECHNIQUE` | Indicator | Technique | OTX pulse `attack_ids` exact MITRE ID match (`confidence_score` 0.85) |
 | `REFERS_TO` | `Vulnerability` | `CVE` (and reverse) | Created by `bridge_vulnerability_cve()` |
-
-Every relationship in this table also carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events; 2026-10, see `docs/KNOWLEDGE_GRAPH.md` "Relationship provenance").
 | `RUNS` | ThreatActor | Campaign | `build_campaign_nodes()` |
 | `PART_OF_CAMPAIGN` | Malware, Indicator | Campaign | `build_campaign_nodes()` (named `PART_OF` until 2026-10) |
-| `INVOLVES` | Alert | Indicator | `created_at`, `source` (`neo4j_client`) |
+| `USES_MALWARE` | ThreatActor | Malware | `match_type='mitre_explicit'` (0.95, MITRE group → software `uses`, `build_relationships.py` Q2b); curated-package claims: see below the table |
+| `USES_TOOL` | ThreatActor | Tool | As `USES_MALWARE` (Q2c; a curated claim names the tool by its ATT&CK id) |
+| `SUBTECHNIQUE_OF` | Technique | Technique | `match_type='mitre_explicit'`, 1.0 (Q1b, from the dotted ATT&CK id) |
+| `IN_TACTIC` | Technique | Tactic | `match_type='kill_chain_phase'`, 1.0 (Q1; both ends in the same `attack_domain`) |
+| `TARGETS` | Indicator, ThreatActor, Malware | Sector | `match_type='zone_classification'`, 0.5 (sync and Q7a / Q7c / Q7d; never to `global`) |
+| `AFFECTS` | Vulnerability / CVE | Sector | `match_type='zone_classification'`, 0.5 (sync and Q7b; never to `global`) |
+| `SOURCED_FROM` | any EdgeGuard node | Source | Per-source provenance: `raw_data`, `imported_at`, `updated_at`, `confidence`, `source`, `source_reported_first_at`, `source_reported_last_at`, and (2026-10) that source's `misp_event_ids[]` and `source_refs[]` — see `docs/KNOWLEDGE_GRAPH.md` "SOURCED_FROM edge schema" |
+| `INVOLVES` | Alert | Indicator | `created_at`, `updated_at`, `source` (`'resilmesh'`) (`neo4j_client` alert path) |
+
+Every relationship in this table except `SOURCED_FROM` and `INVOLVES` also carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events; 2026-10, see `docs/KNOWLEDGE_GRAPH.md` "Relationship provenance"). The relationship properties `source_id`, `source_ids` and `report_ids` no longer exist; `Source.source_id` stays the key of the `Source` node.
 
 Curated packages (2026-10) also add claims to `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_TECHNIQUE`, `USES_MALWARE` and `USES_TOOL`. A claim sets `match_type` (the package's curated label) and `confidence_score` 0.85 only on a link it creates; on a link that already exists it adds its provenance and leaves the label and confidence as they are. Every link a claim touches carries the package's TLP level in `tlp` (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
 
@@ -524,6 +540,8 @@ Curated packages (2026-10) also add claims to `EMPLOYS_TECHNIQUE`, `IMPLEMENTS_T
 | `RESOLVES_TO` | Indicator | IP | created_at, source, confidence_score |
 | `MAPS_TO` | Vulnerability | CVE | created_at, source, confidence_score |
 | `TARGETS` | Malware | Host | created_at, source, confidence_score |
+
+These three bridges are planned; no pipeline path writes them today. The Vulnerability ↔ CVE link EdgeGuard writes is `REFERS_TO`, and the planned Indicator → IP bridge is named `INDICATOR_RESOLVES_TO` (see [RESILMESH_INTEROPERABILITY.md](RESILMESH_INTEROPERABILITY.md) § 3.2).
 
 ---
 
@@ -657,7 +675,7 @@ Topics* below).
 | GET | `/vulnerabilities` | List CVEs | `severity`, `zone`, `limit` |
 | GET | `/graph/explore` | Cytoscape.js-formatted graph data for the interactive Graph Explorer (4 views) | `view`, `zone`, `limit` |
 | GET | `/stix/types` | Discovery — list supported STIX export object types | - |
-| GET | `/stix/export/{object_type}/{identifier}` | STIX 2.1 bundle centred on a threat-intel object; CVE / technique / indicator identifiers are normalized before lookup; actor lookup is case-insensitive and alias-aware. Every related-node collection is bounded by `limit` (default 100, maximum 500, `422` outside `[1, 500]`; deterministic `ORDER BY` before truncation). Bundles carry the EdgeGuard producer `identity` (`created_by_ref`), the `extension-definition` declaring the `x_edgeguard_*` top-level properties, and the STIX 2.1 TLP `marking-definition` objects referenced by `object_marking_refs` (from `n.tlp`); the bundle parses under strict `stix2.parse` | `object_type`, `identifier` (path), `depth`, `limit` |
+| GET | `/stix/export/{object_type}/{identifier}` | STIX 2.1 bundle centred on a threat-intel object; CVE / technique / indicator identifiers are normalized before lookup; actor lookup is case-insensitive and alias-aware. Every related-node collection is bounded by `limit` (default 100, maximum 500, `422` outside `[1, 500]`; deterministic `ORDER BY` before truncation). Bundles carry the EdgeGuard producer `identity` (`created_by_ref`), the `extension-definition` declaring the `x_edgeguard_*` top-level properties, and the STIX 2.1 TLP `marking-definition` objects referenced by `object_marking_refs` (from `n.tlp`); the bundle parses under strict `stix2.parse`. Since 2026-10 every graph relationship with a STIX form is exported, curated-package claims included, and each SRO carries its provenance (`confidence`, `external_references` from `source_refs`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`; extension definition 1.1.0, now 1.2.0, which adds NVD's record status `x_edgeguard_status` on `vulnerability`) — see [RESILMESH_QUICKSTART_STIX.md](RESILMESH_QUICKSTART_STIX.md) | `object_type`, `identifier` (path), `depth`, `limit` |
 | GET | `/actors/{name}/summary` | SOC-analyst actor summary: profile + attributed malware, employed techniques, indicators. Alias-aware, case-insensitive; deterministic canonical-name-over-alias resolution (PR #126). | `name` (path) |
 | GET | `/export/wazuh/cdb` | Sector IOC/CVE intelligence as a **Wazuh CDB list** (text/plain `key:value` lines; active entries only; sorted; url/ipv6 keys skipped — CDB keys cannot contain `:`). First Wazuh integration deliverable (2026-06). | `list` (`indicators`\|`cves`), `zone`, `indicator_type`, `min_confidence` |
 | POST | `/admin/query` | Raw Cypher (admin-gated: `X-Admin-Token` + admin rate limit) | `query` (body) |
@@ -898,4 +916,4 @@ together so they cannot drift.
 
 ---
 
-_Last updated: 2026-10-15 — `attack_vector`: NVD's word for the attack vector of the CVSS that gives the score (CVSS 3.x `attack_vector`, CVSS 2 `access_vector`, the `AV` metric of a CVSS 4.0 vector), null without CVSS, set on `:CVE` by `merge_cve` from the CVSS sub-nodes; indicator types: MISP `ip-src` / `ip-dst` resolve to `ipv4` or `ipv6` by the address (IPv6 addresses were stored as `ipv4`); SSL Blacklist fingerprints are `x509-fingerprint-sha1` (were file hashes); the Type Mapping table lists the graph types the code stores (`hash` for every file digest). Prior: 2026-10-14 — CVE score fields: `cvss_score` / `severity` come from the CVE's first CVSS (v3.1 → v3.0 → v2 → v4.0), new `cvss_version` and `known_ransomware_use`; no CVSS → null score, severity UNKNOWN; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-15 — `attack_vector`: NVD's word for the attack vector of the CVSS that gives the score (CVSS 3.x `attack_vector`, CVSS 2 `access_vector`, the `AV` metric of a CVSS 4.0 vector), null without CVSS, set on `:CVE` by `merge_cve` from the CVSS sub-nodes; indicator types: MISP `ip-src` / `ip-dst` resolve to `ipv4` or `ipv6` by the address (IPv6 addresses were stored as `ipv4`); SSL Blacklist fingerprints are `x509-fingerprint-sha1` (were file hashes); the Type Mapping table lists the graph types the code stores (`hash` for every file digest); relationship table: the provenance sentence moved below the table (it had split it), `INVOLVES` and `SOURCED_FROM` named as the exceptions, rows added for `USES_MALWARE`, `USES_TOOL`, `SUBTECHNIQUE_OF`, `IN_TACTIC`, `TARGETS`, `AFFECTS` and `SOURCED_FROM`; ThreatIntel node schemas name the node properties `source` (list) and `first_imported_at` as written (relationships carry `sources`); `CVE` schema lists the score fields, `status`, `reference_urls`, `affected_products` and the KEV fields that `merge_cve` writes; STIX export row states the relationship provenance (extension definition 1.1.0; 1.2.0 since #191); the three bridge relationships are marked as planned (no writer exists); the technique and `USES_MALWARE` rows refer to the curated-package paragraph below the table. Prior: 2026-10-14 — CVE score fields: `cvss_score` / `severity` come from the CVE's first CVSS (v3.1 → v3.0 → v2 → v4.0), new `cvss_version` and `known_ransomware_use`; no CVSS → null score, severity UNKNOWN; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-10-10 — sample `edgeguard_version` bumped 2026.6.11 → 2026.10.10 (CalVer release for the October 2026 fresh re-feed). Prior: 2026-06-12 — added `GET /export/wazuh/cdb` to the API Endpoints table (Wazuh CDB export — the agreed first Wazuh integration). Prior: 2026-06-11 — post-#126 docs sync: rewrote the API Endpoints table against the 11 real routes in `src/query_api.py` (removed phantom `GET /stats` + `POST /enrich`; added `/graph/explore`, `/stix/types`, `/stix/export/...`, `/actors/{name}/summary`, `/admin/query`; noted X-API-Key auth), replaced the `/enrich` curl example (enrichment is NATS-based), added the `cve_cvss_score` + `cve_cisa_exploit_add` indexes to the snapshot, and documented the read-side `ioc_normalize.canonicalize_lookup` layer under Type Mapping. Same day, PR #125: sample edgeguard_version bumped 2026.4.28 → 2026.6.11 (CalVer release bump). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: refreshed sample `edgeguard_version` 2026.4.26 → 2026.4.28; verified `HAS_CVSS_v*` edge names + `EDGEGUARD_BASELINE_LOCK_MAX_AGE_SEC` (48h default) + `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` (500 default) all match `src/` at HEAD. Prior: 2026-04-26 PR-N33 docs audit (corrected ResilMesh constraint Cypher, env knobs, edge names); 2026-04-18 PR #41 cleanup pass._
