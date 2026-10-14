@@ -481,10 +481,13 @@ def nvd_meta_digest(meta: Dict[str, Any]) -> str:
     """Digest of an ``NVD_META`` payload, for telling a changed CVE from an unchanged one.
 
     ``last_modified`` is left out: NVD moves it for changes to data EdgeGuard does not store
-    (translations, SSVC, CNA product data), and such a change needs no MISP edit.
+    (translations, SSVC, CNA product data), and such a change needs no MISP edit. A key whose value
+    is empty (``""``, ``None``, ``[]``, ``{}``) counts as absent, so a key a later EdgeGuard
+    version adds with an empty value does not make every stored copy look changed.
     """
     data = json.loads(json.dumps(meta, default=str))
     data.pop("last_modified", None)
+    data = {key: value for key, value in data.items() if value not in ("", None, [], {})}
     for key in _NVD_META_UNORDERED_KEYS:
         value = data.get(key)
         if isinstance(value, list):
@@ -503,15 +506,6 @@ def _nvd_meta_digest_of_comment(comment: Any) -> Optional[str]:
     return nvd_meta_digest(meta) if isinstance(meta, dict) else None
 
 
-def _bmp_only(text: str) -> str:
-    """*text* without characters outside the Basic Multilingual Plane.
-
-    MISP's MySQL/MariaDB text columns are 3-byte utf8: an edit whose comment holds a 4-byte
-    character (an emoji, say) fails with HTTP 500 on every attempt.
-    """
-    return "".join(ch for ch in text if ord(ch) <= 0xFFFF)
-
-
 def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -> Tuple[List[str], List[str]]:
     """Tags to attach and to detach so a stored CVE attribute matches a rebuilt one.
 
@@ -520,31 +514,38 @@ def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -
     zone tag would not remove the zone there. ``zone:Global`` is added only to an attribute with no
     zone tag (a sector tag already says more). A ``tlp:`` tag is added only when the attribute has
     none (someone may have raised it in MISP). Tags of any other family are left alone.
+
+    Names compare without case: MISP resolves a tag name case-insensitively, so ``CVSS:low`` in its
+    tag table stands for ``cvss:low``.
     """
-    current_set = set(current)
-    has_tlp = any(tag.startswith("tlp:") for tag in current_set)
-    has_zone = any(tag.startswith("zone:") for tag in current_set)
+    current_lower = {tag.lower() for tag in current}
+    has_tlp = any(tag.startswith("tlp:") for tag in current_lower)
+    has_zone = any(tag.startswith("zone:") for tag in current_lower)
     attach: List[str] = []
     for tag in desired:
-        if tag in current_set or tag in attach:
+        lower = tag.lower()
+        if lower in current_lower or lower in {t.lower() for t in attach}:
             continue
-        if (has_tlp and tag.startswith("tlp:")) or (has_zone and tag.lower() == "zone:global"):
+        if (has_tlp and lower.startswith("tlp:")) or (has_zone and lower == "zone:global"):
             continue
         attach.append(tag)
-    desired_set = set(desired)
+    desired_lower = {tag.lower() for tag in desired}
     detach = sorted(
-        tag for tag in current_set if tag.startswith(_REPLACED_VULNERABILITY_TAG_PREFIXES) and tag not in desired_set
+        tag
+        for tag in set(current)
+        if tag.lower().startswith(_REPLACED_VULNERABILITY_TAG_PREFIXES) and tag.lower() not in desired_lower
     )
     return attach, detach
 
 
 def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any]) -> bool:
-    """Whether MISP's answer to an attribute edit shows the comment and the tag changes."""
+    """Whether MISP's answer to an attribute edit shows the comment and the tag changes (tag names
+    compared without case, as MISP resolves them)."""
     if "comment" in changes and stored.get("comment") != changes["comment"]:
         return False
-    names = {str(tag.get("name")) for tag in stored.get("Tag") or [] if isinstance(tag, dict)}
+    names = {str(tag.get("name")).lower() for tag in stored.get("Tag") or [] if isinstance(tag, dict)}
     for tag in changes.get("Tag") or []:
-        if bool(tag.get("deleted")) == (tag.get("name") in names):
+        if bool(tag.get("deleted")) == (str(tag.get("name")).lower() in names):
             return False
     return True
 
@@ -1118,7 +1119,16 @@ class MISPWriter:
                 )
             response = self._post_with_retries(
                 f"{self.url}/attributes/restSearch",
-                {"returnFormat": "json", "tags": [tag], "type": attr_type, "page": page, "limit": page_limit},
+                # includeAllTags: a tag marked not exportable in MISP is listed too, so a stored copy
+                # that has it is not taken for one that lacks it.
+                {
+                    "returnFormat": "json",
+                    "tags": [tag],
+                    "type": attr_type,
+                    "page": page,
+                    "limit": page_limit,
+                    "includeAllTags": True,
+                },
                 context=f"attribute listing {tag} page {page}",
             )
             if response.status_code != 200:
@@ -1732,7 +1742,7 @@ class MISPWriter:
         attribute = self.create_vulnerability_attribute(vuln)
         if not attribute:
             return []
-        comment = _bmp_only(str(attribute.get("comment") or ""))
+        comment = str(attribute.get("comment") or "")
         digest = _nvd_meta_digest_of_comment(comment)
         desired_tags = [
             str(tag["name"]) for tag in attribute.get("Tag", []) if isinstance(tag, dict) and tag.get("name")

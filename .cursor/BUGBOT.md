@@ -146,7 +146,7 @@ Flag any comparison of a timestamp parsed from a source payload with a timezone-
 Flag any collector that ignores `resolve_collection_limit` / `get_effective_limit` (env: `EDGEGUARD_MAX_ENTRIES`, `EDGEGUARD_INCREMENTAL_LIMIT`).
 
 ### Incremental cursor moved past work that did not reach MISP
-A collector with an incremental cursor advances it only over work whose MISP writes succeeded: OTX to the last pulse it pushed, CISA ICS and NVD only after a run without a failed write. NVD (2026-10) also requires the lastMod window to have been read completely, and moves the cursor at most to the record where `EDGEGUARD_NVD_MAX_PER_RUN` stopped the run.
+A collector with an incremental cursor advances it only over work whose MISP writes succeeded: OTX to the last pulse it pushed, CISA ICS and NVD only after a run without a failed write. NVD (2026-10) also requires the lastMod window to have been read completely, counts an addition MISP answered without storing (or without an attribute list to check) as not written, and moves the cursor at most to the record where `EDGEGUARD_NVD_MAX_PER_RUN` stopped the run. NVD's lastMod results must be read one answer per time slice (`_iter_lastmod_slices`), not paged across a window that changes while it is read.
 Flag a cursor update that runs before, or regardless of, the result of the push or the edits. Flag an NVD change that brings back a newest-N selection by publication date (37% of new CVEs lost in a 30-day replay, 2026-10-14), or that re-adds a changed CVE as a new attribute instead of editing the stored one (`MISPWriter.update_attribute`).
 
 ### Collector missing status return

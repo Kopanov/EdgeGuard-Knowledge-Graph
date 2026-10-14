@@ -31,6 +31,7 @@ Production-ready features:
 
 import json
 import logging
+import math
 import os
 import sys
 import time
@@ -52,6 +53,7 @@ from baseline_config import resolve_baseline_days
 
 # Shared utilities
 from collectors.collector_utils import (
+    TransientServerError,
     is_auth_or_access_denied,
     make_skipped_optional_source,
     make_status,
@@ -60,7 +62,7 @@ from collectors.collector_utils import (
 )
 
 # Import MISP writer
-from collectors.misp_writer import MispLookupError, MispTransientError, MISPWriter
+from collectors.misp_writer import MispLookupError, MispTransientError, MISPWriter, _strict_push_accounting
 from config import (
     NVD_API_KEY,
     SOURCE_TAGS,
@@ -102,6 +104,11 @@ NVD_PAGE_SIZE = 2000
 # Requests for one page of a lastMod span before an incremental run fails (each request has
 # already spent its rate-limit retries).
 NVD_INCREMENTAL_PAGE_ATTEMPTS = 3
+# A lastMod window that holds more records than one answer is split into time slices of about
+# this many records, each read with one request (``NVDCollector._iter_lastmod_slices``).
+NVD_SLICE_TARGET = 1500
+# A slice narrower than this (in seconds) is paged instead of split further.
+NVD_MIN_SLICE_SECONDS = 2
 
 
 def _utc_now() -> datetime:
@@ -141,6 +148,11 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 def _record_last_modified(vuln: Dict) -> datetime:
     """``lastModified`` of an NVD record (the epoch when it has none, so it sorts first)."""
     return _parse_nvd_time((vuln.get("cve") or {}).get("lastModified")) or _EPOCH
+
+
+def _record_order(vuln: Dict) -> Tuple[datetime, str]:
+    """Sort key of an incremental run: modification time, then CVE id."""
+    return _record_last_modified(vuln), str((vuln.get("cve") or {}).get("id") or "")
 
 
 def clamp_nvd_published_range(
@@ -247,6 +259,15 @@ class NvdBatchFetchError(Exception):
     pass
 
 
+class NvdIncrementalUnavailable(NvdBatchFetchError, TransientServerError):
+    """NVD did not serve an incremental run's window after the retries (2026-10).
+
+    Transient (``TransientServerError``): the DAG task is skipped with an alert rather than failing
+    as a hard error, and since nothing was written and the cursor stays, the next run reads the
+    same changes. A baseline still raises plain ``NvdBatchFetchError``: a partial baseline must fail.
+    """
+
+
 class NVDCollector:
     """
     NVD (National Vulnerability Database) Collector.
@@ -344,15 +365,13 @@ class NVDCollector:
         return detect_zones_from_item(item)
 
     @staticmethod
-    def _keep_latest(records: Dict[str, Dict], batch: List[Dict]) -> None:
-        """Add NVD records to *records* by CVE id; a record read twice keeps its later version."""
+    def _keep_first(records: Dict[str, Dict], batch: List[Dict]) -> None:
+        """Add NVD records to *records* by CVE id. A record read twice in one run is the same version
+        (a change after the window's end moves it out of the window), so the first copy is kept."""
         for vuln in batch:
             cve_id = ((vuln.get("cve") or {}).get("id") or "").upper()
-            if not cve_id:
-                continue
-            seen = records.get(cve_id)
-            if seen is None or _record_last_modified(vuln) >= _record_last_modified(seen):
-                records[cve_id] = vuln
+            if cve_id:
+                records.setdefault(cve_id, vuln)
 
     def _fetch_lastmod_page(self, start_index: int, count: int, lastmod_params: Dict[str, str]) -> Dict[str, Any]:
         """One page of a lastMod span. A page NVD does not serve after its rate-limit retries is
@@ -376,17 +395,15 @@ class NVDCollector:
     def _read_lastmod_span(
         self, span_start: datetime, span_end: datetime, batch_sleep: float
     ) -> Tuple[List[Dict], bool]:
-        """Every record NVD lists as modified in [span_start, span_end], and whether the read is complete.
+        """Every record NVD lists as modified in [span_start, span_end] by paging, and whether the
+        read is complete. Used only for a slice too narrow to split (``_iter_lastmod_slices``).
 
         NVD orders the result by publication date and evaluates it again for every page. A record
-        modified again after ``span_end`` while the span is read leaves it, and every record listed
+        modified again after ``span_end`` while the span is paged leaves it, and every record listed
         after it moves down one place, so a plain ``startIndex`` walk skips one record at the next
-        page boundary (on 2026-10-14, 75 of 19,520 records left a 14-day window while it was read).
-        The record that left is read by the next run, whose window starts before its new
-        ``lastModified``. The records that moved down are read again here: when ``totalResults``
-        drops between two pages, the stretch below the current index is requested once more. A
-        further drop during that request, or a page that ends early, marks the span incomplete; the
-        run then keeps its cursor and the next run reads the span again.
+        page boundary. When ``totalResults`` drops between two pages, the stretch below the current
+        index is requested once more. A further drop during that request, or a page that ends
+        early, marks the span incomplete; the run then keeps its cursor.
         """
         params = {"lastModStartDate": _to_nvd_pub_iso(span_start), "lastModEndDate": _to_nvd_pub_iso(span_end)}
         records: Dict[str, Dict] = {}
@@ -409,11 +426,11 @@ class NVDCollector:
                 )
                 time.sleep(batch_sleep)
                 gap = self._fetch_lastmod_page(gap_start, idx - gap_start, params)
-                self._keep_latest(records, gap["vulnerabilities"])
+                self._keep_first(records, gap["vulnerabilities"])
                 if gap["totalResults"] < page_total:
                     complete = False
                     page_total = gap["totalResults"]
-            self._keep_latest(records, batch)
+            self._keep_first(records, batch)
             idx += len(batch)
             total = page_total
             if not batch:
@@ -425,28 +442,70 @@ class NVDCollector:
             time.sleep(batch_sleep)
         return list(records.values()), complete
 
+    def _iter_lastmod_slices(
+        self, start: datetime, end: datetime, batch_sleep: float
+    ) -> Iterator[Tuple[List[Dict], bool]]:
+        """The records NVD lists as modified in [start, end], one time slice at a time, oldest first;
+        with each slice, whether its read is complete.
+
+        Each slice is read with one request. NVD evaluates the query again for every request, so
+        when a window is paged, a record modified again meanwhile leaves the result and the records
+        behind it move down past a page boundary (75 of 19,520 records left a 14-day window while
+        it was paged on 2026-10-14). One answer has no page boundary: a record modified again
+        during the run only moves after ``end``, and the next run reads it. A window whose
+        ``totalResults`` exceeds one answer (``NVD_PAGE_SIZE``) is therefore split by time into
+        slices of about ``NVD_SLICE_TARGET`` records; spans never exceed 120 days (NVD's limit for
+        ``lastModStartDate`` / ``lastModEndDate`` as for the publication dates). A slice narrower than
+        ``NVD_MIN_SLICE_SECONDS`` that still holds more than one answer is paged
+        (``_read_lastmod_span``). Adjacent slices share their boundary second, so a record can come
+        twice; callers keep the first.
+        """
+        pending = list(reversed(iter_nvd_lastmod_spans(start, end)))
+        requests_made = 0
+        while pending:
+            slice_start, slice_end = pending.pop()
+            if requests_made:
+                time.sleep(batch_sleep)
+            requests_made += 1
+            params = {"lastModStartDate": _to_nvd_pub_iso(slice_start), "lastModEndDate": _to_nvd_pub_iso(slice_end)}
+            page = self._fetch_lastmod_page(0, NVD_PAGE_SIZE, params)
+            batch, total = page["vulnerabilities"], page["totalResults"]
+            if total <= len(batch):
+                yield batch, True
+                continue
+            seconds = (slice_end - slice_start).total_seconds()
+            parts = min(max(2, math.ceil(total / NVD_SLICE_TARGET)), int(seconds // NVD_MIN_SLICE_SECONDS))
+            if parts < 2:
+                logger.warning(
+                    "NVD incremental: %d records modified within %.0f s (%s) — paging that slice",
+                    total,
+                    seconds,
+                    params["lastModStartDate"],
+                )
+                time.sleep(batch_sleep)
+                requests_made += 1
+                yield self._read_lastmod_span(slice_start, slice_end, batch_sleep)
+                continue
+            step = (slice_end - slice_start) / parts
+            bounds = [slice_start + step * i for i in range(parts)] + [slice_end]
+            pending.extend(reversed(list(zip(bounds, bounds[1:], strict=False))))
+
     def _fetch_modified_cves(self, start: datetime, end: datetime) -> Tuple[List[Dict], bool]:
         """Every CVE NVD modified in [start, end], oldest modification first, and whether the read is
-        complete. Spans of at most 120 days (the limit NVD applies to ``lastModStartDate`` /
-        ``lastModEndDate`` as to the publication dates), every page of each (up to 2,000 records)."""
+        complete (``_iter_lastmod_slices``)."""
         batch_sleep = 0.7 if self.api_key else 6.5
         records: Dict[str, Dict] = {}
         complete = True
-        spans = iter_nvd_lastmod_spans(start, end)
-        for number, (span_start, span_end) in enumerate(spans):
-            if number:
-                time.sleep(batch_sleep)
-            span_records, span_complete = self._read_lastmod_span(span_start, span_end, batch_sleep)
-            self._keep_latest(records, span_records)
-            complete = complete and span_complete
-        ordered = sorted(records.values(), key=lambda v: (_record_last_modified(v), (v.get("cve") or {}).get("id", "")))
+        for batch, slice_complete in self._iter_lastmod_slices(start, end, batch_sleep):
+            self._keep_first(records, batch)
+            complete = complete and slice_complete
+        ordered = sorted(records.values(), key=_record_order)
         logger.info(
-            "[FETCH] NVD: %d CVE(s) modified %s .. %s (%d span(s)%s)",
+            "[FETCH] NVD: %d CVE(s) modified %s .. %s%s",
             len(ordered),
             _to_nvd_pub_iso(start),
             _to_nvd_pub_iso(end),
-            len(spans),
-            "" if complete else ", read incomplete",
+            "" if complete else " (read incomplete)",
         )
         return ordered, complete
 
@@ -724,15 +783,22 @@ class NVDCollector:
     def _collect_incremental(self, limit: Optional[int], push_to_misp: bool) -> Any:
         """Incremental run (2026-10): every CVE NVD modified since the stored cursor.
 
-        - Reads the lastMod window from the cursor (``_incremental_start``) to now, every page.
+        - Reads the lastMod window from the cursor (``_incremental_start``) to now, one time slice
+          per request (``_iter_lastmod_slices``), oldest first, and handles each slice before the
+          next is read, records in order of modification.
+        - Lists the CVEs MISP holds under the NVD tag once a record has been read
+          (``MISPWriter.index_source_attributes``; a failed listing writes nothing).
         - Adds a CVE MISP does not hold yet when it is in scope (``_in_incremental_scope``).
         - Edits the stored attribute of a CVE MISP holds when NVD's data for it changed
           (``EDGEGUARD_NVD_UPDATE_EXISTING``; ``MISPWriter.plan_vulnerability_update``). The MISP →
           Neo4j sync then rewrites the CVE node.
-        - Handles records in order of modification and makes at most ``EDGEGUARD_NVD_MAX_PER_RUN``
-          MISP writes; ``limit``, when set, lowers that cap.
-        - Moves the cursor only when every write succeeded and the window was read completely: to
-          the end of the window, or to the record at which the cap stopped the run.
+        - Makes at most ``EDGEGUARD_NVD_MAX_PER_RUN`` MISP writes (``limit``, when set, lowers that
+          cap) and stops reading at the record where the cap is reached.
+        - Moves the cursor only when the read was complete and every write was confirmed: to the end
+          of the window, or to the record at which the cap stopped the run. An addition MISP
+          answered without storing, or without an attribute list to check, keeps it too.
+        - NVD not serving the window raises ``NvdIncrementalUnavailable`` (transient): nothing is
+          written and the cursor stays.
 
         Before, a run took the newest N records by publication date (N = the incremental limit,
         200): 37% of new CVEs were never taken (30-day replay, 2026-10-14), and MISPWriter dropped
@@ -743,22 +809,80 @@ class NVDCollector:
         """
         now = _utc_now()
         start, cursor = self._incremental_start(now)
+        window = f"{_to_nvd_pub_iso(start)} .. {_to_nvd_pub_iso(now)}"
         logger.info(
-            "NVD incremental: reading CVEs modified %s .. %s (%s)",
-            _to_nvd_pub_iso(start),
-            _to_nvd_pub_iso(now),
+            "NVD incremental: reading CVEs modified %s (%s)",
+            window,
             f"cursor {cursor.isoformat()}" if cursor else f"no cursor: last {nvd_incremental_days()} day(s)",
         )
-        records, complete = self._fetch_modified_cves(start, now)
-        self.circuit_breaker.record_success()
+        batch_sleep = 0.7 if self.api_key else 6.5
 
         if not push_to_misp:
+            try:
+                records, _complete = self._fetch_modified_cves(start, now)
+            except NvdBatchFetchError as e:
+                raise NvdIncrementalUnavailable(f"NVD did not serve the window {window}: {e}") from e
+            self.circuit_breaker.record_success()
             record_collection_success(self.source_name)
             return [self._vulnerability_item(vuln) for vuln in records]
 
         source_tag = self.misp_writer.SOURCE_TAGS.get(self.tag, f"source:{self.tag}")
+        cap = nvd_max_per_run()
+        if limit is not None:
+            cap = max(1, min(cap, int(limit)))
+        update_existing = nvd_update_existing()
+        scope_start = now - timedelta(days=resolve_baseline_days())
+        extra_ids = set(nvd_extra_cve_ids())
+
+        known: Optional[Dict[str, List[Any]]] = None  # listed once the first record has been read
+        seen: set = set()
+        to_add: List[Dict[str, Any]] = []
+        edits: List[Tuple[Any, Dict[str, Any]]] = []
+        records_read = unchanged = known_kept = out_of_scope = 0
+        complete = True
+        stopped_at: Optional[datetime] = None
         try:
-            known = self.misp_writer.index_source_attributes(source_tag, "vulnerability")
+            for batch, slice_complete in self._iter_lastmod_slices(start, now, batch_sleep):
+                complete = complete and slice_complete
+                for vuln in sorted(batch, key=_record_order):
+                    cve_id = str((vuln.get("cve") or {}).get("id") or "").upper()
+                    if not cve_id or cve_id in seen:
+                        continue
+                    seen.add(cve_id)
+                    records_read += 1
+                    if known is None:
+                        known = self.misp_writer.index_source_attributes(source_tag, "vulnerability")
+                    item = self._vulnerability_item(vuln)
+                    stored_copies = known.get(cve_id)
+                    planned: List[Tuple[Any, Dict[str, Any]]] = []
+                    if stored_copies:
+                        if not update_existing:
+                            known_kept += 1
+                            continue
+                        planned = self.misp_writer.plan_vulnerability_update(item, stored_copies)
+                        if not planned:
+                            unchanged += 1
+                            continue
+                        writes = len(planned)
+                    elif self._in_incremental_scope(vuln, scope_start, extra_ids):
+                        writes = 1
+                    else:
+                        out_of_scope += 1
+                        continue
+                    if (to_add or edits) and len(to_add) + len(edits) + writes > cap:
+                        # Never earlier than the window start (a record without ``lastModified`` sorts first).
+                        stopped_at = max(_record_last_modified(vuln), start)
+                        break
+                    if planned:
+                        edits.extend(planned)
+                    else:
+                        to_add.append(item)
+                if stopped_at is not None:
+                    break
+        except NvdBatchFetchError as e:
+            raise NvdIncrementalUnavailable(
+                f"NVD did not serve the window {window}: {e}; nothing was written and the cursor stays"
+            ) from e
         except (MispTransientError, MispLookupError) as e:
             error_msg = (
                 f"MISP: the {source_tag} attributes could not be listed ({e}); nothing was written and the "
@@ -767,53 +891,22 @@ class NVDCollector:
             logger.error("NVD incremental: %s", error_msg)
             record_collection_failure(self.source_name, error_msg)
             return self._return_status(False, 0, error_msg)
+        self.circuit_breaker.record_success()
         record_collection_success(self.source_name)
 
-        cap = nvd_max_per_run()
-        if limit is not None:
-            cap = max(1, min(cap, int(limit)))
-        update_existing = nvd_update_existing()
-        scope_start = now - timedelta(days=resolve_baseline_days())
-        extra_ids = set(nvd_extra_cve_ids())
-
-        to_add: List[Dict[str, Any]] = []
-        edits: List[Tuple[Any, Dict[str, Any]]] = []
-        unchanged = known_kept = out_of_scope = 0
-        stopped_at: Optional[datetime] = None
-        for vuln in records:
-            item = self._vulnerability_item(vuln)
-            cve_id = str(item.get("cve_id") or "").upper()
-            if not cve_id:
-                continue
-            stored_copies = known.get(cve_id)
-            planned: List[Tuple[Any, Dict[str, Any]]] = []
-            if stored_copies:
-                if not update_existing:
-                    known_kept += 1
-                    continue
-                planned = self.misp_writer.plan_vulnerability_update(item, stored_copies)
-                if not planned:
-                    unchanged += 1
-                    continue
-                writes = len(planned)
-            elif self._in_incremental_scope(vuln, scope_start, extra_ids):
-                writes = 1
-            else:
-                out_of_scope += 1
-                continue
-            if (to_add or edits) and len(to_add) + len(edits) + writes > cap:
-                # Never earlier than the window start (a record without ``lastModified`` sorts first).
-                stopped_at = max(_record_last_modified(vuln), start)
-                break
-            if planned:
-                edits.extend(planned)
-            else:
-                to_add.append(item)
-
-        added = add_failed = 0
+        added = add_failed = unconfirmed = unverified = 0
         if to_add:
-            known_keys = {("vulnerability", value) for value in known}
+            stats = self.misp_writer.stats if isinstance(getattr(self.misp_writer, "stats", None), dict) else {}
+            unconfirmed_before = int(stats.get("attributes_unconfirmed", 0) or 0)
+            unverified_before = int(stats.get("batches_unverified", 0) or 0)
+            known_keys = {("vulnerability", value) for value in (known or {})}
             added, add_failed = self.misp_writer.push_items(to_add, known_source_keys={source_tag: known_keys})
+            unconfirmed = int(stats.get("attributes_unconfirmed", 0) or 0) - unconfirmed_before
+            unverified = int(stats.get("batches_unverified", 0) or 0) - unverified_before
+            if unconfirmed > 0 and not _strict_push_accounting():
+                # MISP answered HTTP 200 without storing these; push_items counted them as pushed.
+                added -= unconfirmed
+                add_failed += unconfirmed
         updated = update_failed = 0
         for stored_copy, changes in edits:
             if self.misp_writer.update_attribute(stored_copy.uuid, changes):
@@ -824,19 +917,19 @@ class NVDCollector:
 
         new_cursor = stopped_at or now
         cursor_moved = False
-        if failed == 0 and complete:
+        if failed == 0 and unverified == 0 and complete:
             cursor_moved = self._store_incremental_cursor(new_cursor)
-        elif not complete:
-            logger.warning(
-                "NVD incremental: records left the window faster than it could be read again — the cursor "
-                "stays at %s and the next run reads this window again",
-                cursor.isoformat() if cursor else "(none)",
-            )
         else:
+            reasons = []
+            if failed:
+                reasons.append(f"{failed} MISP write(s) failed or were not stored")
+            if unverified:
+                reasons.append(f"MISP answered {unverified} batch(es) without an attribute list to check")
+            if not complete:
+                reasons.append("a slice of the window could not be read completely")
             logger.warning(
-                "NVD incremental: %d MISP write(s) failed — the cursor stays at %s and the next run reads "
-                "these changes again",
-                failed,
+                "NVD incremental: %s — the cursor stays at %s and the next run reads these changes again",
+                "; ".join(reasons),
                 cursor.isoformat() if cursor else "(none)",
             )
         if stopped_at is not None:
@@ -849,7 +942,7 @@ class NVDCollector:
         logger.info(
             "NVD incremental: %d record(s) read; %d added, %d updated, %d unchanged, %d stored and not "
             "updated, %d outside the baseline scope, %d failed; cursor %s",
-            len(records),
+            records_read,
             added,
             updated,
             unchanged,
@@ -863,7 +956,7 @@ class NVDCollector:
         st["nvd_incremental"] = {
             "window_start": start.isoformat(),
             "window_end": now.isoformat(),
-            "records_read": len(records),
+            "records_read": records_read,
             "read_complete": complete,
             "added": added,
             "updated": updated,
@@ -871,6 +964,7 @@ class NVDCollector:
             "stored_not_updated": known_kept,
             "out_of_scope": out_of_scope,
             "failed": failed,
+            "unverified_batches": unverified,
             "stopped_at_cap": stopped_at is not None,
             "cursor": new_cursor.isoformat() if cursor_moved else (cursor.isoformat() if cursor else None),
         }

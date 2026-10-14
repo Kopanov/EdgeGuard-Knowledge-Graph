@@ -819,6 +819,17 @@ def clamp_cvss_score(value: Any) -> Optional[float]:
     return f
 
 
+# 2026-10: what only NVD's record supplies on a CVE node (``Neo4jClient._replace_nvd_owned_cve_data``):
+# its list properties, and its CVSS sub-nodes by relationship type and NVD_META key.
+_NVD_OWNED_CVE_LISTS = ("cwe", "ref_tags", "cpe_type", "result_impacts", "reference_urls", "affected_products")
+_NVD_CVSS_VERSIONS = (
+    ("HAS_CVSS_v40", "cvss_v40_data"),
+    ("HAS_CVSS_v31", "cvss_v31_data"),
+    ("HAS_CVSS_v30", "cvss_v30_data"),
+    ("HAS_CVSS_v2", "cvss_v2_data"),
+)
+
+
 def clamp_confidence_score(value: Any) -> Optional[float]:
     """PR-N14 (pre-baseline audit Fix #2, 2026-04-21): clamp
     confidence_score to [0.0, 1.0] + reject non-finite.
@@ -2842,7 +2853,51 @@ class Neo4jClient:
             self._merge_cvss_node(
                 cve_id, tag, "CVSSv2", "HAS_CVSS_v2", data["cvss_v2_data"], misp_event_id=data.get("misp_event_id")
             )
+        if data.get("nvd_record"):
+            self._replace_nvd_owned_cve_data(cve_id, data)
         return True
+
+    def _replace_nvd_owned_cve_data(self, cve_id: str, data: Dict) -> bool:
+        """Set what only NVD's record supplies from that record, also where it is now empty (2026-10).
+
+        For an NVD record read from MISP (``nvd_record``, set by the sync when the attribute carries
+        ``NVD_META``): the lists ``cwe``, ``ref_tags``, ``cpe_type``, ``result_impacts``,
+        ``reference_urls`` and ``affected_products`` are set even when empty (an empty list removes
+        the property, as on a first load without it), and a CVSS sub-node of a version the record no
+        longer has is removed. Otherwise data NVD withdrew (a rejection, a removed CWE, CVSS or CPE)
+        would stay on the node from an earlier record, since ``merge_cve`` never overwrites a list
+        with an empty one and never removes a sub-node.
+
+        A sub-node is removed only when EdgeGuard manages it (``edgeguard_managed``) and NVD is the
+        only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the node's ``tag``
+        where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too. Failure is logged
+        and leaves the node as it was, like ``_merge_cvss_node``.
+        """
+        if not self.driver or not cve_id:
+            return False
+        lists: Dict[str, Optional[List[str]]] = {}
+        for prop in _NVD_OWNED_CVE_LISTS:
+            value = data.get(prop)
+            clean = [str(x) for x in value if x is not None and str(x) != ""] if isinstance(value, list) else []
+            lists[prop] = clean or None
+        absent = [rel_type for rel_type, key in _NVD_CVSS_VERSIONS if not data.get(key)]
+        set_clause = ", ".join(f"c.{prop} = ${prop}" for prop in _NVD_OWNED_CVE_LISTS)
+        query = f"""
+        MATCH (c:CVE {{cve_id: $cve_id}})
+        SET {set_clause}
+        WITH c
+        OPTIONAL MATCH (c)-[r:HAS_CVSS_v40|HAS_CVSS_v31|HAS_CVSS_v30|HAS_CVSS_v2]->(s)
+        WHERE type(r) IN $absent_rel_types AND s.cve_id = $cve_id AND s.edgeguard_managed = true
+          AND coalesce(r.sources, [s.tag]) = ['nvd']
+        DETACH DELETE s
+        """
+        try:
+            with self.driver.session() as session:
+                session.run(query, cve_id=cve_id, absent_rel_types=absent, **lists, timeout=NEO4J_READ_TIMEOUT)
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to replace the NVD data of CVE {cve_id}: {e}")
+            return False
 
     def _merge_cvss_node(
         self,

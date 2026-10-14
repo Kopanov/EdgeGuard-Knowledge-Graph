@@ -84,19 +84,25 @@ class FakeNvd:
         self.records = [copy.deepcopy(r) for r in records]
         self.requests: list = []
         self.before_request = None  # hook(request_number) to change ``records`` between requests
+        self.status = 200  # HTTP status of every answer (503: NVD unavailable)
+        self.empty_pages: set = set()  # startIndex values answered with no record before totalResults is reached
 
     def __call__(self, method, url, *, params=None, **_kwargs):
         params = dict(params or {})
         self.requests.append(params)
         if self.before_request is not None:
             self.before_request(len(self.requests))
+        if self.status != 200:
+            return _Response(self.status, {"message": "Service unavailable"})
         start, end = _ts(params["lastModStartDate"]), _ts(params["lastModEndDate"])
         rows = sorted(
             (r for r in self.records if start <= _ts(r["cve"]["lastModified"]) <= end),
-            key=lambda r: (_ts(r["cve"]["published"]), r["cve"]["id"]),
+            key=lambda r: (_ts(r["cve"].get("published") or r["cve"]["lastModified"]), r["cve"]["id"]),
         )
         first, count = int(params.get("startIndex", 0)), int(params.get("resultsPerPage", 2000))
         page = rows[first : first + count]
+        if first in self.empty_pages:
+            page = []
         body = dict(FIXTURES["nvd_page_envelope"])
         body.update(resultsPerPage=len(page), startIndex=first, totalResults=len(rows), vulnerabilities=page)
         return _Response(200, body)
@@ -112,6 +118,8 @@ class FakeMisp:
         self.headers: dict = {}
         self.edit_status: dict = {}  # uuid -> HTTP status MISP answers to its edit
         self.edits_not_stored: set = set()  # uuids MISP answers 200 for without storing the edit
+        self.adds_not_stored: set = set()  # values MISP answers 200 for without storing them
+        self.adds_without_list = False  # answer additions without the event's attribute list
         self.listing_status = None  # HTTP status of every attribute listing request
 
     def post(self, url, json=None, **_kwargs):
@@ -168,13 +176,20 @@ class FakeMisp:
 
     def _add(self, event_id: str, attributes: list):
         for attr in attributes:
+            if attr["value"] in self.adds_not_stored:
+                continue
             stored = copy.deepcopy(attr)
             stored.update(id=str(3000000 + len(self.attributes)), uuid=str(uuid.uuid4()), event_id=event_id)
             stored["Tag"] = [{"id": "0", "name": t["name"]} for t in attr.get("Tag", [])]
             self.attributes.append(stored)
+        if self.adds_without_list:
+            return _Response(200, {"Event": {"id": event_id}})
         return _Response(
             200, {"Event": {"id": event_id, "Attribute": [a for a in self.attributes if a["event_id"] == event_id]}}
         )
+
+    def listings(self) -> list:
+        return [body for p, body in self.posts if p == "/attributes/restSearch" and "tags" in (body or {})]
 
     def _edit(self, attr_uuid: str, changes: dict):
         if attr_uuid in self.edit_status:
@@ -292,15 +307,15 @@ class TestWindow:
 
 
 # --------------------------------------------------------------------------- reading the window
-def _many(count: int) -> list:
-    """*count* copies of the real new record, published one second apart, all modified in the window."""
+def _many(count: int, *, same_second: bool = False) -> list:
+    """*count* copies of the real new record, published one second apart (or within one second),
+    all modified in the window."""
     base = FIXTURES["nvd"][NEW]
     out = []
     for n in range(count):
         record = copy.deepcopy(base)
-        stamp = (datetime(2026, 10, 14, 6, tzinfo=timezone.utc) + timedelta(seconds=n)).strftime(
-            "%Y-%m-%dT%H:%M:%S.%f"
-        )[:-3]
+        offset = timedelta(milliseconds=n % 1000) if same_second else timedelta(seconds=n)
+        stamp = (datetime(2026, 10, 14, 6, tzinfo=timezone.utc) + offset).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
         record["cve"].update(id=f"CVE-2026-{900000 + n}", published=stamp, lastModified=stamp)
         out.append(record)
     return out
@@ -314,44 +329,58 @@ class TestReadingTheWindow:
         c.base_url = "https://nvd.test"
         return c._fetch_modified_cves(NOW - timedelta(days=1), NOW)
 
-    def test_every_page_is_read(self, env):
+    def test_a_window_larger_than_one_answer_is_read_in_slices_of_one_request_each(self, env):
         nvd = FakeNvd(_many(4100))
         records, complete = self._read(env, nvd)
         assert complete and len(records) == 4100
-        assert [r["startIndex"] for r in nvd.requests] == [0, 2000, 4000]
+        assert {r["startIndex"] for r in nvd.requests} == {0}, "no paging: each slice is one answer"
+        assert all(r["resultsPerPage"] == 2000 for r in nvd.requests)
 
-    def test_records_that_moved_down_are_read_again(self, env):
-        # Before the second page, NVD modifies seven records of the first page again (their new
-        # lastModified is after the window): they leave the result and the records behind them move
-        # down seven places. A plain startIndex walk would never read records 2000..2006.
+    def test_records_modified_again_while_the_window_is_read_are_not_lost(self, env):
+        # Between requests NVD modifies records again (their new lastModified is after the window):
+        # they leave it, and every record that stays in it is still read.
         nvd = FakeNvd(_many(4100))
-        moved_down = [r["cve"]["id"] for r in nvd.records[2000:2007]]
 
         def modify_again(request_number):
-            if request_number == 2:
+            for record in nvd.records[100 * request_number : 100 * request_number + 7]:
+                record["cve"]["lastModified"] = "2026-10-14T19:00:00.000"
+
+        nvd.before_request = modify_again
+        records, complete = self._read(env, nvd)
+        ids = {r["cve"]["id"] for r in records}
+        still_in_window = {r["cve"]["id"] for r in nvd.records if _ts(r["cve"]["lastModified"]) <= NOW}
+        assert complete and still_in_window <= ids
+
+    def test_a_slice_too_narrow_to_split_is_paged_and_records_that_moved_down_are_read_again(self, env):
+        # 2,500 records modified within one second cannot be split by time; that slice is paged.
+        nvd = FakeNvd(_many(2500, same_second=True))
+        moved_down = [r["cve"]["id"] for r in sorted(nvd.records, key=lambda r: r["cve"]["published"])[2000:2007]]
+
+        def modify_again(request_number):
+            if nvd.requests[-1].get("startIndex") == 2000:
                 for record in nvd.records[100:107]:
                     record["cve"]["lastModified"] = "2026-10-14T19:00:00.000"
 
         nvd.before_request = modify_again
         records, complete = self._read(env, nvd)
-        ids = {r["cve"]["id"] for r in records}
-        assert complete
-        assert set(moved_down) <= ids, "the records that moved below startIndex 2000 were not read"
-        still_in_window = {r["cve"]["id"] for r in nvd.records if _ts(r["cve"]["lastModified"]) <= NOW}
-        assert still_in_window <= ids
-        assert {"startIndex": "1993", "resultsPerPage": "7"} == {
-            k: str(v) for k, v in nvd.requests[2].items() if k in ("startIndex", "resultsPerPage")
-        }
+        assert complete and set(moved_down) <= {r["cve"]["id"] for r in records}
+        assert any(r.get("startIndex") == 1993 and r.get("resultsPerPage") == 7 for r in nvd.requests)
 
-    def test_a_second_departure_while_re_reading_marks_the_read_incomplete(self, env):
-        nvd = FakeNvd(_many(4100))
+    def test_a_paged_slice_that_cannot_be_read_again_completely_is_incomplete(self, env):
+        nvd = FakeNvd(_many(2500, same_second=True))
 
         def modify_again(request_number):
-            if request_number in (2, 3):
-                for record in nvd.records[100 + 10 * request_number : 103 + 10 * request_number]:
+            if nvd.requests[-1].get("startIndex") in (2000, 1997):
+                for record in nvd.records[100 + request_number : 103 + request_number]:
                     record["cve"]["lastModified"] = "2026-10-14T19:00:00.000"
 
         nvd.before_request = modify_again
+        _records, complete = self._read(env, nvd)
+        assert complete is False
+
+    def test_a_page_that_ends_early_makes_the_read_incomplete(self, env):
+        nvd = FakeNvd(_many(2500, same_second=True))
+        nvd.empty_pages = {2000}
         _records, complete = self._read(env, nvd)
         assert complete is False
 
@@ -483,6 +512,93 @@ class TestIncrementalRun:
         misp, store = FakeMisp(), CursorStore("2026-10-14T05:00:00+00:00")
         status = run(env, nvd, misp, store, limit=None)
         assert len(misp.added_values()) == 2500 and status["nvd_incremental"]["added"] == 2500
+
+    def test_records_are_handled_in_order_of_modification_not_of_id(self, env):
+        # Ids sort X < Z < Y < W; modification times W (07:00) < X (10:00) < Y (11:00) < Z (12:00).
+        # Handled by id with a cap of two, a run would write X and Z, stop at Y and store 11:00; the
+        # next run reads from 10:00 (one hour of overlap), so W would never be read again.
+        env.setenv("EDGEGUARD_NVD_MAX_PER_RUN", "2")
+        records = []
+        for cve_id, hour in (
+            ("CVE-2026-90001", 10),
+            ("CVE-2026-90002", 12),
+            ("CVE-2026-90003", 11),
+            ("CVE-2026-90004", 7),
+        ):
+            stamp = f"2026-10-14T{hour:02d}:00:00.000"
+            records.append(nvd_record(NEW, id=cve_id, published=stamp, lastModified=stamp))
+        nvd, misp, store = FakeNvd(records), FakeMisp(), CursorStore("2026-10-14T06:30:00+00:00")
+        for _ in range(4):
+            if not run(env, nvd, misp, store)["nvd_incremental"]["stopped_at_cap"]:
+                break
+        assert sorted(misp.added_values()) == ["CVE-2026-90001", "CVE-2026-90002", "CVE-2026-90003", "CVE-2026-90004"]
+
+    def test_an_incomplete_read_keeps_the_cursor(self, env):
+        nvd = FakeNvd(_many(2500, same_second=True))
+        nvd.empty_pages = {2000}
+        misp, store = FakeMisp(), CursorStore("2026-10-14T05:00:00+00:00")
+        status = run(env, nvd, misp, store)
+        assert status["nvd_incremental"]["read_complete"] is False and store.writes == []
+
+    def test_the_run_limit_lowers_the_cap(self, env):
+        nvd, misp, store = FakeNvd([nvd_record(NEW), nvd_record(KEV_OLD)]), FakeMisp(), CursorStore()
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        status = run(env, nvd, misp, store, limit=1)
+        assert misp.added_values() == [KEV_OLD] and status["nvd_incremental"]["stopped_at_cap"] is True
+
+    def test_a_record_without_a_publication_date_is_added(self, env):
+        undated = nvd_record(NEW, id="CVE-2026-93639")
+        del undated["cve"]["published"]
+        nvd, misp, store = FakeNvd([undated]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        run(env, nvd, misp, store)
+        assert misp.added_values() == ["CVE-2026-93639"]
+
+    def test_an_addition_misp_does_not_store_keeps_the_cursor_and_is_repeated(self, env):
+        # MISP answers the batch with HTTP 200 and the event, which holds one of the two attributes.
+        other = nvd_record(NEW, id="CVE-2026-93640")
+        nvd, misp, store = FakeNvd([nvd_record(NEW), other]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        misp.adds_not_stored.add(NEW)
+        status = run(env, nvd, misp, store)
+        assert status["nvd_incremental"]["failed"] == 1 and status["nvd_incremental"]["added"] == 1
+        assert store.writes == [], "MISP answered HTTP 200 but did not store it"
+        misp.adds_not_stored.clear()
+        run(env, nvd, misp, store)
+        assert NEW in {a["value"] for a in misp.attributes} and store.data[NVD_CURSOR_KEY] == NOW.isoformat()
+
+    def test_an_addition_misp_answers_without_a_list_keeps_the_cursor(self, env):
+        nvd, misp, store = FakeNvd([nvd_record(NEW)]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        misp.adds_without_list = True
+        status = run(env, nvd, misp, store)
+        assert status["nvd_incremental"]["unverified_batches"] == 1 and store.writes == []
+
+    def test_nvd_unavailable_is_transient_writes_nothing_and_keeps_the_cursor(self, env):
+        from collector_failure_alerts import is_transient_external_error
+
+        nvd, misp, store = FakeNvd([nvd_record(NEW)]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        nvd.status = 503
+        with pytest.raises(nvd_collector.NvdIncrementalUnavailable) as raised:
+            run(env, nvd, misp, store)
+        assert is_transient_external_error(raised.value), "the DAG skips the task with an alert"
+        assert misp.posts == [] and store.writes == []
+
+    def test_an_empty_window_does_not_list_misp(self, env):
+        nvd, misp, store = (
+            FakeNvd([]),
+            FakeMisp([stored_attribute(c) for c in KNOWN]),
+            CursorStore("2026-10-14T17:00:00+00:00"),
+        )
+        status = run(env, nvd, misp, store)
+        assert misp.listings() == [] and status["success"] is True and store.data[NVD_CURSOR_KEY] == NOW.isoformat()
+
+    def test_the_listing_asks_for_every_tag(self, env):
+        nvd, misp, store = FakeNvd([nvd_record(NEW)]), FakeMisp(), CursorStore("2026-10-14T12:00:00+00:00")
+        run(env, nvd, misp, store)
+        (listing,) = misp.listings()
+        assert (
+            listing["includeAllTags"] is True
+            and listing["tags"] == ["source:NVD"]
+            and listing["type"] == "vulnerability"
+        )
 
 
 # --------------------------------------------------------------------------- baseline and cursor

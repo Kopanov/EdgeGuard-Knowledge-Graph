@@ -3083,6 +3083,9 @@ class MISPToNeo4jSync:
                 # stamps first_imported_at = datetime() in neo4j_client.
                 "first_seen_at_source": _fs_at_source,
                 "last_seen_at_source": _ls_at_source,
+                # 2026-10: NVD's own record (an NVD attribute with NVD_META): merge_cve then sets the
+                # data only NVD supplies from it even where it is now empty (``_replace_nvd_owned_cve_data``).
+                "nvd_record": source_id == "nvd" and bool(nvd_meta),
                 "published": nvd_meta.get("published", ""),
                 "last_modified": nvd_meta.get("last_modified", ""),
                 "confidence_score": confidence,
