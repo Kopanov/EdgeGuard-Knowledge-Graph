@@ -2346,16 +2346,18 @@ def get_baseline_config(context=None) -> tuple:
         logger.warning("baseline_config import failed (%s) — using local fallbacks 730 / 0", e)
         return (None, 730)
 
-    # Read Airflow Variables; the resolver does the precedence math.
+    # Read Airflow Variables; the resolver does the precedence math. The default is positional:
+    # Airflow 2.x names it ``default_var`` and the 3.x Task SDK ``default``, and the keyword form
+    # raised TypeError on 3.x, so both Variables were ignored (2026-10).
     var_days_raw: object = None
     try:
-        var_days_raw = Variable.get("BASELINE_DAYS", default_var=None)
+        var_days_raw = Variable.get("BASELINE_DAYS", None)
     except Exception as e:
         logger.debug("Could not read BASELINE_DAYS Variable: %s", e)
 
     var_limit_raw: object = None
     try:
-        var_limit_raw = Variable.get("BASELINE_COLLECTION_LIMIT", default_var=None)
+        var_limit_raw = Variable.get("BASELINE_COLLECTION_LIMIT", None)
     except Exception as e:
         logger.debug("Could not read BASELINE_COLLECTION_LIMIT Variable: %s", e)
 
@@ -2664,6 +2666,7 @@ def run_baseline_full_sync(**context):
     from run_misp_to_neo4j import MISPToNeo4jSync
 
     logger.info("[BASELINE] Starting full MISP→Neo4j sync (all history)")
+    sync_started_at = datetime.now(timezone.utc)
     sync = MISPToNeo4jSync()
     success = sync.run(incremental=False)
     if not success:
@@ -2673,6 +2676,20 @@ def run_baseline_full_sync(**context):
         )
         raise AirflowException(f"Baseline full MISP→Neo4j sync failed: {detail}")
     logger.info("[BASELINE] Full sync complete")
+    # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
+    # sync after the baseline (no file) or treated every attribute since the previous baseline as
+    # changed (a stale file), the same work the baseline gets 6 h for, within its own 4 h limit.
+    import json
+
+    state_file = get_state_file()
+    try:
+        with open(state_file, "w") as f:
+            json.dump({"last_sync": sync_started_at.isoformat()}, f)
+        logger.info("[BASELINE] Neo4j sync state persisted to %s", state_file)
+    except OSError as e:
+        logger.error(
+            "[BASELINE] Failed to write sync state file %s: %s — the next scheduled sync runs in full", state_file, e
+        )
     # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
     return {"synced": True}
 
