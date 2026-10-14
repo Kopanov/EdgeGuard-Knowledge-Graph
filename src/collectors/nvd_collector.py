@@ -802,7 +802,8 @@ class NVDCollector:
                 out_of_scope += 1
                 continue
             if (to_add or edits) and len(to_add) + len(edits) + writes > cap:
-                stopped_at = _record_last_modified(vuln)
+                # Never earlier than the window start (a record without ``lastModified`` sorts first).
+                stopped_at = max(_record_last_modified(vuln), start)
                 break
             if planned:
                 edits.extend(planned)
