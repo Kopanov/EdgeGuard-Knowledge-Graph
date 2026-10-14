@@ -19,6 +19,7 @@ import gc
 import json
 import logging
 import os
+import re
 import sys
 import time
 import unicodedata
@@ -56,6 +57,7 @@ from neo4j_client import (
 from node_identity import is_placeholder_name
 from query_pause import query_pause
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
+from source_registry import canonical_source_id, format_source_ref, misp_tag_to_canonical_map
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
 from source_truthful_timestamps import extract_source_truthful_timestamps
 
@@ -432,6 +434,36 @@ def _item_is_vulnerability_sync_bucket(item: Dict) -> bool:
     return cid is not None and bool(str(cid).strip())
 
 
+_URLHAUS_ENTRY_RE = re.compile(r"urlhaus\.abuse\.ch/url/(\d+)", re.IGNORECASE)
+
+
+def _item_source_refs(item: Dict, source: str) -> List[str]:
+    """The feed's own record ids behind ``item``, each as ``"<source>:<id>"`` (2026-10).
+
+    Covers the feeds that give a record id of their own: the OTX pulse (``pulse_id`` plus
+    the other pulses of the run in ``report_ids``), the ThreatFox IOC id, the URLhaus entry
+    and the MITRE ATT&CK id. Feeds keyed by the value itself (NVD and KEV by CVE id,
+    MalwareBazaar and VirusTotal by hash, Feodo Tracker and AbuseIPDB by IP, SSL Blacklist
+    by certificate hash) need none: the node is the record.
+    """
+    record_ids: List[object] = []
+    if source == "alienvault_otx":
+        record_ids = [item.get("pulse_id")] + list(item.get("report_ids") or [])
+    elif source == "threatfox":
+        record_ids = [item.get("ioc_id")]
+    elif source == "urlhaus":
+        match = _URLHAUS_ENTRY_RE.search(str(item.get("reference") or ""))
+        record_ids = [match.group(1)] if match else []
+    elif source == "mitre_attck":
+        record_ids = [item.get("mitre_id")]
+    refs: List[str] = []
+    for record_id in record_ids:
+        ref = format_source_ref(source, record_id)
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
 def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
     """
     Deduplicate parsed items within a single MISP event (keys match former global dedupe).
@@ -484,6 +516,11 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                         extra = kept.setdefault("report_ids", [])
                         if rid not in extra:
                             extra.append(rid)
+                # ... and every feed record id the duplicate carried (``source_refs``)
+                for ref in item.get("source_refs") or []:
+                    kept_refs = kept.setdefault("source_refs", [])
+                    if ref not in kept_refs:
+                        kept_refs.append(ref)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -547,10 +584,12 @@ def _sync_min_events() -> int:
     return value
 
 
-# ``r.source_id`` stamped on relationships built from items that share the same
-# source report (today: the OTX pulse). Replaces the pre-2026-10 whole-event
-# ``misp_cooccurrence`` edges — see ``_build_cross_item_relationships``.
-_REPORT_SCOPED_SOURCE_ID = "otx_pulse"
+# The feed named in ``r.sources`` on relationships built from items that share the same
+# source report (today: the OTX pulse; the evidence label is ``otx_pulse``). Replaces the
+# pre-2026-10 whole-event ``misp_cooccurrence`` edges — see
+# ``_build_cross_item_relationships``. Until 2026-10 this held the label ``otx_pulse``
+# itself, so no relationship named the feed.
+_REPORT_SCOPED_SOURCE_ID = "alienvault_otx"
 
 # Cap how many exception-failed events we retry. Beyond this, MISP is almost
 # certainly broken and retrying more events just burns wall-clock against the
@@ -923,20 +962,9 @@ class MISPToNeo4jSync:
     # rather than two (``cisa`` vs ``cisa_kev``) that won't dedupe via
     # apoc.coll.toSet. Same for any other source whose collector tag
     # differs from a "human" source label here.
-    SOURCE_MAPPING = {
-        "AlienVault-OTX": "alienvault_otx",
-        "NVD": "nvd",
-        "CISA-KEV": "cisa_kev",
-        "CISA-ICS": "cisa_ics",  # 2026-10: CISA ICS advisories collector (source-asserted sectors)
-        "MITRE-ATT&CK": "mitre_attck",
-        "VirusTotal": "virustotal",
-        "AbuseIPDB": "abuseipdb",
-        "Feodo-Tracker": "feodo_tracker",
-        "SSL-Blacklist": "ssl_blacklist",
-        "URLhaus": "urlhaus",
-        "ThreatFox": "threatfox",
-        "MalwareBazaar": "malwarebazaar",  # 2026-10: MalwareBazaar collector (sha256 samples, family label)
-    }
+    # Derived from ``source_registry`` (2026-10): this used to be a hand-kept copy, so a
+    # source registered there but missing here was silently synced as ``misp``.
+    SOURCE_MAPPING = misp_tag_to_canonical_map()
 
     # MISP attribute type to EdgeGuard type mapping
     TYPE_MAPPING = {
@@ -2510,6 +2538,10 @@ class MISPToNeo4jSync:
         - Indicator -> TARGETS -> Sector, Vulnerability -> AFFECTS -> Sector
           (from each item's own ``zone``; unchanged)
 
+        Every row names its feed (``source``) and the feed's record ids (``source_refs``):
+        report rows the OTX pulse (``alienvault_otx:<pulse id>``), zone rows the item's own
+        feed and record ids.
+
         No longer produced here: ThreatActor -> EMPLOYS_TECHNIQUE (comes from the node's
         ``uses_techniques`` / ``reported_techniques`` lists in ``build_relationships``),
         Indicator -> EXPLOITS (only the indicator's own ``cve_id`` tag asserts that; see
@@ -2554,6 +2586,9 @@ class MISPToNeo4jSync:
                     bucket["actors"].append(item)
 
         for report_id, bucket in by_report.items():
+            # The report is the record behind every link of this bucket (``alienvault_otx:<pulse>``).
+            _report_ref = format_source_ref(_REPORT_SCOPED_SOURCE_ID, report_id)
+            report_refs = [_report_ref] if _report_ref else []
             indicators = bucket["indicators"]
             malware_items = bucket["malware"]
             actors = bucket["actors"]
@@ -2591,6 +2626,8 @@ class MISPToNeo4jSync:
                             "confidence": self._REPORT_LINK_CONFIDENCE,
                             "match_type": self._REPORT_LINK_MATCH_TYPE,
                             "report_id": report_id,
+                            "source": _REPORT_SCOPED_SOURCE_ID,
+                            "source_refs": report_refs,
                             "misp_event_id": _evt_id,
                         }
                     )
@@ -2609,6 +2646,8 @@ class MISPToNeo4jSync:
                             "confidence": self._REPORT_LINK_CONFIDENCE,
                             "match_type": self._REPORT_LINK_MATCH_TYPE,
                             "report_id": report_id,
+                            "source": _REPORT_SCOPED_SOURCE_ID,
+                            "source_refs": report_refs,
                             "misp_event_id": _evt_id,
                         }
                     )
@@ -2620,6 +2659,9 @@ class MISPToNeo4jSync:
             zones = item.get("zone", [])
             if isinstance(zones, str):
                 zones = [zones]
+            # The zone tag is the item's own: the link names the item's feed and record ids.
+            _item_source = canonical_source_id(item.get("tag")) or "misp"
+            _item_refs = list(item.get("source_refs") or [])
 
             # Map zones to sector names
             for zone in zones:
@@ -2640,6 +2682,8 @@ class MISPToNeo4jSync:
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
                                     "match_type": "zone_classification",
+                                    "source": _item_source,
+                                    "source_refs": _item_refs,
                                     "misp_event_id": _evt_id,
                                 }
                             )
@@ -2660,11 +2704,32 @@ class MISPToNeo4jSync:
                                     "to_key": {"name": sector_name},
                                     "confidence": 0.5,
                                     "match_type": "zone_classification",
+                                    "source": _item_source,
+                                    "source_refs": _item_refs,
                                     "misp_event_id": _evt_id,
                                 }
                             )
 
         return relationships
+
+    def _with_provenance(self, item: Dict, relationships: List[Dict]) -> Tuple[Dict, List[Dict]]:
+        """Stamp the feed and its record ids on ``item`` and on every relationship it asserts (2026-10).
+
+        ``source`` is the attribute's feed (canonical registry id, from its ``source:*`` tag);
+        ``source_refs`` are that feed's own record ids (``_item_source_refs``). The writer
+        accumulates both on the edge as ``r.sources`` / ``r.source_refs`` and on the
+        node's ``SOURCED_FROM`` edge, so every link traces back to the feed record and,
+        through ``misp_event_ids``, to the MISP event that carried it.
+        """
+        source = canonical_source_id(item.get("tag")) or "misp"
+        refs = _item_source_refs(item, source)
+        if refs:
+            item["source_refs"] = refs
+        for rel in relationships:
+            rel.setdefault("source", source)
+            if refs:
+                rel.setdefault("source_refs", list(refs))
+        return item, relationships
 
     def parse_attribute(self, attr: Dict, event_info: Dict) -> Tuple[Optional[Dict], List[Dict]]:
         """
@@ -2930,7 +2995,7 @@ class MISPToNeo4jSync:
                 "version_constraints": nvd_meta.get("version_constraints", []),
                 "status": nvd_meta.get("status", []),
             }
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
         # Handle threat actor
         elif attr_type == "threat-actor":
@@ -3045,7 +3110,7 @@ class MISPToNeo4jSync:
                 "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
         # Handle malware
         elif attr_type == "malware-type":
@@ -3134,7 +3199,7 @@ class MISPToNeo4jSync:
                 "report_ids": malware_report_ids,
                 "relationships": relationships,
             }
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
         # Handle MITRE technique (text format "T1234: Name") — exclude "TA" (tactics, handled below)
         elif attr_type == "text" and len(value) >= 5 and value[0] == "T" and value[1:5].isdigit():
@@ -3198,7 +3263,7 @@ class MISPToNeo4jSync:
                 "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
         # Handle MITRE tactic (text format "TA0001: Name")
         elif attr_type == "text" and len(value) >= 6 and value.startswith("TA") and value[2:6].isdigit():
@@ -3237,7 +3302,7 @@ class MISPToNeo4jSync:
                 "misp_attribute_id": attr_misp_uuid,
                 "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
             }
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
         # Handle MITRE tool (text format "S0001: Name")
         elif attr_type == "text" and len(value) >= 5 and value[0] == "S" and value[1:5].isdigit():
@@ -3313,7 +3378,7 @@ class MISPToNeo4jSync:
                 "misp_attribute_id": attr_misp_uuid,
                 "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
             }
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
         # Handle indicators (IP, domain, hash, etc.)
         else:
@@ -3490,7 +3555,7 @@ class MISPToNeo4jSync:
                         if _clean:
                             item[_opt] = _clean
 
-            return item, relationships
+            return self._with_provenance(item, relationships)
 
     def _sync_to_neo4j_chunk(self, items: List[Dict]) -> Tuple[int, int]:
         """
@@ -4018,19 +4083,14 @@ class MISPToNeo4jSync:
     def _write_cross_item_relationships(self, cross_rels: List[Dict]) -> int:
         """Write the builder's output with honest provenance (2026-10 review fix).
 
-        Rows that carry a ``report_id`` are report-scoped (same OTX pulse) and get
-        ``source_id = "otx_pulse"``. The zone-derived TARGETS / AFFECTS rows come from
-        the item's own ``zone`` tag, whatever the source, so they are written as
-        ``"misp"`` — stamping them ``otx_pulse`` would claim a pulse that never existed.
+        Every row names its own feed: report-scoped rows (same OTX pulse) carry
+        ``source = "alienvault_otx"`` and the pulse as ``source_refs``; the zone-derived
+        TARGETS / AFFECTS rows carry the item's own feed, since the zone tag is the item's
+        own. ``"misp"`` is only the fallback for a row without a feed.
         """
-        report_rows = [r for r in cross_rels if r.get("report_id")]
-        zone_rows = [r for r in cross_rels if not r.get("report_id")]
-        created = 0
-        if report_rows:
-            created += self._create_relationships(report_rows, _REPORT_SCOPED_SOURCE_ID)
-        if zone_rows:
-            created += self._create_relationships(zone_rows, "misp")
-        return created
+        if not cross_rels:
+            return 0
+        return self._create_relationships(cross_rels, "misp")
 
     def _create_relationships(self, relationships: List[Dict], source_id: str) -> int:
         """
@@ -4209,8 +4269,8 @@ class MISPToNeo4jSync:
             rels_created = self._create_relationships(event_embedded_rels, "misp")
             self.stats["relationships_created"] += rels_created
         if cross_rels:
-            # Report-scoped rels (same OTX pulse) carry their own source_id so
-            # they are distinguishable from attribute-embedded ("misp") edges.
+            # Every row names its own feed and record ids (``source`` / ``source_refs``):
+            # report-scoped rows the OTX pulse, zone rows the item's feed.
             rels_created = self._write_cross_item_relationships(cross_rels)
             self.stats["relationships_created"] += rels_created
 
@@ -4249,6 +4309,7 @@ class MISPToNeo4jSync:
             "cve_id",
             "pulse_id",
             "report_ids",
+            "source_refs",
             "misp_event_id",
         )
         total_attrs = len(all_attributes)

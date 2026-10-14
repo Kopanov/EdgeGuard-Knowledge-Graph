@@ -59,6 +59,10 @@ def _is_restamp_query(q: str) -> bool:
     return "AS restamped" in q
 
 
+def _is_normalise_query(q: str) -> bool:
+    return "AS normalised_edges" in q
+
+
 def _fake_client(candidate_rows, *, apply_exc=None, restamped=0, candidate_exc=None):
     """Build a MagicMock Neo4j client whose session dispatches on query text.
 
@@ -88,6 +92,9 @@ def _fake_client(candidate_rows, *, apply_exc=None, restamped=0, candidate_exc=N
             return result
         if _is_restamp_query(query):
             result.single.return_value = {"restamped": restamped}
+            return result
+        if _is_normalise_query(query):
+            result.single.return_value = {"normalised_edges": 0}
             return result
         raise AssertionError(f"unexpected query: {query[:120]!r}")
 
@@ -215,8 +222,23 @@ class TestMergeBehaviour:
     def test_restamp_queries_follow_each_merge_batch(self):
         client, calls = _fake_client(MUSTANG_PANDA_ROWS, restamped=1)
         enrichment_jobs.merge_alias_duplicate_actors(client)
-        kinds = ["cand" if _is_candidate_query(q) else "apply" if _is_apply_query(q) else "restamp" for q, _ in calls]
-        assert kinds == ["cand", "apply", "restamp", "restamp"]
+        kinds = [
+            "cand"
+            if _is_candidate_query(q)
+            else "apply"
+            if _is_apply_query(q)
+            else "normalise"
+            if _is_normalise_query(q)
+            else "restamp"
+            for q, _ in calls
+        ]
+        # 2026-10: after the uuid re-stamps, every ``combine`` property is wrapped back into a
+        # list (APOC stores equal merged values as one string — 11 actors held ``zone`` as a
+        # string on the 730-day graph).
+        assert kinds == ["cand", "apply", "restamp", "restamp", "normalise"]
+        norm_q, norm_kw = calls[4]
+        assert norm_kw["canonicals"] == ["apt29", "mustang panda"]
+        assert "ELSE [c.zone] END" in norm_q and "ELSE [r.sources] END" in norm_q
         out_q, out_kw = calls[2]
         in_q, in_kw = calls[3]
         assert "-[r]->()" in out_q and "SET r.src_uuid = c.uuid" in out_q

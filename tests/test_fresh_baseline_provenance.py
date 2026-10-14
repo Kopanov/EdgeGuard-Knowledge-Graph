@@ -192,7 +192,8 @@ class TestCrossItemBuilderReportScope:
         assert MISPToNeo4jSync._MAX_REPORT_INDICATORS == 2000
         assert MISPToNeo4jSync._MAX_REPORT_MALWARE == 50
         assert MISPToNeo4jSync._MAX_REPORT_ACTORS == 10
-        assert _REPORT_SCOPED_SOURCE_ID == "otx_pulse"
+        # 2026-10 (relationship provenance): the feed, not the evidence label ``otx_pulse``.
+        assert _REPORT_SCOPED_SOURCE_ID == "alienvault_otx"
 
     def test_same_pulse_emits_indicates_and_attributed_to_with_exact_stamps(self, syncer):
         rels = syncer._build_cross_item_relationships([_ind("203.0.113.5"), _mal("Emotet"), _act("TA542")])
@@ -207,6 +208,8 @@ class TestCrossItemBuilderReportScope:
             "confidence": 0.6,
             "match_type": "otx_pulse",
             "report_id": "pulse-1",
+            "source": "alienvault_otx",
+            "source_refs": ["alienvault_otx:pulse-1"],
             "misp_event_id": "777",
         }
         assert by_type["ATTRIBUTED_TO"] == {
@@ -218,6 +221,8 @@ class TestCrossItemBuilderReportScope:
             "confidence": 0.6,
             "match_type": "otx_pulse",
             "report_id": "pulse-1",
+            "source": "alienvault_otx",
+            "source_refs": ["alienvault_otx:pulse-1"],
             "misp_event_id": "777",
         }
 
@@ -483,18 +488,20 @@ class TestCreateRelationshipsRouting:
         attributes = [{"type": "ip-src", "value": "1.1.1.1"}, {"type": "ip-src", "value": "2.2.2.2"}]
         parsed, cross, errors = syncer._process_event_attributes("1", {"Event": {"id": "1"}}, attributes)
         assert (parsed, cross, errors) == (2, 2, 0)
-        # report-scoped rows → otx_pulse; zone-derived TARGETS/AFFECTS rows → misp (review fix)
-        assert source_ids_used == [("misp", 2), (_REPORT_SCOPED_SOURCE_ID, 1), ("misp", 1)]
-        assert source_ids_used[1][0] == "otx_pulse"
+        # 2026-10 (relationship provenance): every row names its own feed (``source``), so the
+        # cross-item rows go out in one call; ``misp`` is only the fallback for a row without one.
+        assert source_ids_used == [("misp", 2), ("misp", 2)]
         assert syncer.stats["relationships_created"] == 4
 
     def test_no_call_site_uses_misp_cooccurrence_any_more(self):
         text = _RUN_MISP.read_text()
         assert '_create_relationships(cross_rels, "misp_cooccurrence")' not in text
         assert "_write_cross_item_relationships(cross_rels)" in text, (
-            "report-scoped edges must be routed through the helper that stamps the constant source id"
+            "report-scoped edges must be routed through the helper that writes the builder's rows"
         )
-        assert '_REPORT_SCOPED_SOURCE_ID = "otx_pulse"' in text
+        # The report-scoped rows name the feed; ``otx_pulse`` is the evidence label (match_type).
+        assert '_REPORT_SCOPED_SOURCE_ID = "alienvault_otx"' in text
+        assert '"source": _REPORT_SCOPED_SOURCE_ID' in text
 
 
 class TestPagedPathKeepsReportProvenance:
@@ -579,11 +586,23 @@ class TestPagedPathKeepsReportProvenance:
 
         parsed, cross, errors = syncer._process_large_event_paged("99", {"Event": {"id": "99"}}, self._attrs())
         assert (parsed, cross, errors) == (4, 2, 0)
-        assert [source_id for _, source_id in calls] == ["otx_pulse"]
+        # 2026-10 (relationship provenance): the rows carry their own feed and pulse record;
+        # the call-level source id is only the fallback for a row without one.
+        assert [source_id for _, source_id in calls] == ["misp"]
         (rels, _) = calls[0]
-        assert {(r["rel_type"], r["to_key"]["name"], r["report_id"], r["misp_event_id"]) for r in rels} == {
-            ("INDICATES", "MalA", "p1", "99"),
-            ("INDICATES", "MalB", "p2", "99"),
+        assert {
+            (
+                r["rel_type"],
+                r["to_key"]["name"],
+                r["report_id"],
+                r["misp_event_id"],
+                r["source"],
+                tuple(r["source_refs"]),
+            )
+            for r in rels
+        } == {
+            ("INDICATES", "MalA", "p1", "99", "alienvault_otx", ("alienvault_otx:p1",)),
+            ("INDICATES", "MalB", "p2", "99", "alienvault_otx", ("alienvault_otx:p2",)),
         }
         assert syncer.stats["events_processed"] == 1
         assert syncer.stats["relationships_created"] == 2
@@ -1104,6 +1123,8 @@ def _indicates_rel(**overrides):
         "confidence": 0.6,
         "match_type": "otx_pulse",
         "report_id": "pulse-1",
+        "source": "alienvault_otx",
+        "source_refs": ["alienvault_otx:pulse-1"],
         "misp_event_id": "777",
     }
     rel.update(overrides)
@@ -1120,6 +1141,8 @@ def _attributed_rel(**overrides):
         "confidence": 0.6,
         "match_type": "otx_pulse",
         "report_id": "pulse-1",
+        "source": "alienvault_otx",
+        "source_refs": ["alienvault_otx:pulse-1"],
         "misp_event_id": "777",
     }
     rel.update(overrides)
@@ -1127,31 +1150,37 @@ def _attributed_rel(**overrides):
 
 
 class TestBatchRelationshipSetClause:
-    def _run(self, rels, source_id="otx_pulse"):
+    def _run(self, rels, source_id="alienvault_otx"):
         client, captured = _capturing_client()
         client.create_misp_relationships_batch(rels, source_id=source_id)
         assert captured, "expected at least one UNWIND batch"
         return captured
 
-    def test_set_clause_writes_ownership_match_type_and_report_ids(self):
+    def test_set_clause_writes_ownership_match_type_and_provenance(self):
         for query, _rows in self._run([_indicates_rel(), _attributed_rel()]):
             assert "r.edgeguard_managed = true" in query
             assert "THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END" in query, (
                 "label follows the stronger evidence"
             )
-            assert "r.report_ids = " in query and "row.report_id" in query
-            assert "r.source_id = row.source_id" in query
+            # 2026-10 (relationship provenance): feeds, their record ids and the MISP events
+            # accumulate; the single last-writer-wins ``r.source_id`` and ``r.report_ids`` are gone.
+            assert "r.sources = apoc.coll.toSet(coalesce(r.sources, []) + [row.source])" in query
+            assert (
+                "r.source_refs = apoc.coll.toSet(coalesce(r.source_refs, []) + coalesce(row.source_refs, []))" in query
+            )
+            assert "r.source_id" not in query and "r.report_ids" not in query
 
     def test_indicates_rows_carry_match_type_and_report_id(self):
         rows = [r for q, rows in self._run([_indicates_rel()]) if "[r:INDICATES]" in q for r in rows]
         assert len(rows) == 1
         row = rows[0]
         assert row["value"] == "203.0.113.5" and row["malware"] == "emotet"
-        assert row["source_id"] == "otx_pulse"
+        assert row["source"] == "alienvault_otx"
+        assert row["source_refs"] == ["alienvault_otx:pulse-1"]
         assert row["confidence"] == 0.6
         assert row["misp_event_id"] == "777"
         assert row["match_type"] == "otx_pulse"
-        assert row["report_id"] == "pulse-1"
+        assert "source_id" not in row and "report_id" not in row
 
     def test_attributed_to_rows_carry_match_type_and_report_id(self):
         rows = [r for q, rows in self._run([_attributed_rel()]) if "[r:ATTRIBUTED_TO]" in q for r in rows]
@@ -1159,15 +1188,17 @@ class TestBatchRelationshipSetClause:
         row = rows[0]
         assert row["malware"] == "emotet" and row["actor"] == "ta542"
         assert row["match_type"] == "otx_pulse"
-        assert row["report_id"] == "pulse-1"
+        assert row["source"] == "alienvault_otx" and row["source_refs"] == ["alienvault_otx:pulse-1"]
 
-    def test_missing_match_type_and_blank_report_id_become_none(self):
+    def test_missing_match_type_and_blank_refs_are_dropped(self):
         rel = _indicates_rel()
         del rel["match_type"]
-        rel["report_id"] = "   "
+        del rel["source"]
+        rel["source_refs"] = ["   ", None]
         rows = [r for q, rows in self._run([rel], source_id="misp") if "[r:INDICATES]" in q for r in rows]
         assert rows[0]["match_type"] is None, "coalesce(row.match_type, r.match_type) must then keep the old value"
-        assert rows[0]["report_id"] is None, "blank report ids must not be appended to r.report_ids"
+        assert rows[0]["source_refs"] == [], "blank record ids must not be appended to r.source_refs"
+        assert rows[0]["source"] == "misp", "a row without a feed falls back to the batch's source id"
 
     def test_exploits_constant_match_type_still_wins_over_row_match_type(self):
         rel = {

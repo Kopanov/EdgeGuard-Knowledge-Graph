@@ -178,14 +178,20 @@ class TestPRN30CrossCheckerH2EventIdCap:
         sites are now exactly 8 (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9, Q9b). Pin the exact
         count so a re-added event-id pairing query (or a dropped cap) is noticed."""
         text = self.BUILD_RELS.read_text()
-        cap_pattern = "[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]"
-        occurrences = text.count(cap_pattern)
-        assert occurrences == 8, (
-            f"PR-N30 H-2 + Bugbot round 1: f-string cap "
-            f"[0..{{CRITICAL_MAX_EVENT_IDS_PER_EDGE}}] must appear in all 8 "
-            f"forward-write Cypher cap sites (Q3a, Q3b, Q7a, Q7b, Q7c, Q7d, Q9, Q9b — Q4 was removed 2026-10, "
-            f"7c/7d added by the 2026-10 sector-focus build); found {occurrences}"
+        # 2026-10 (relationship provenance): every step reads its MISP events through ONE
+        # fragment, ``relationship_provenance.prov_with`` (19 steps), which caps them with
+        # ``MAX_EVENT_IDS_PER_EDGE``; step 2d intersects two nodes' events and applies the
+        # f-string cap itself. One cap, one constant — the drift this test was written for
+        # cannot come back by editing a single step.
+        import build_relationships
+        import relationship_provenance
+
+        assert relationship_provenance.MAX_EVENT_IDS_PER_EDGE == build_relationships.CRITICAL_MAX_EVENT_IDS_PER_EDGE
+        assert f"][0..{relationship_provenance.MAX_EVENT_IDS_PER_EDGE}] AS _prov_events" in (
+            relationship_provenance.prov_with("i", relationship_provenance.OTX_FEEDS)
         )
+        assert text.count("_prov_with(") == 19, "every step except 2d binds its events via prov_with"
+        assert text.count("[0..{CRITICAL_MAX_EVENT_IDS_PER_EDGE}]") == 1, "step 2d caps its intersection"
         assert "_q4_inner" not in text, "Q4 co-occurrence query must stay removed (2026-10)"
         # Negative pin: no hardcoded ``[0..200]`` should remain in actual
         # code (comments may legitimately reference the literal in
@@ -225,12 +231,13 @@ class TestPRN30CrossCheckerM1EmptyStringFilter:
         failures. ``size(x) > 0`` has identical semantics for strings
         without the quote conflict."""
         text = self.BUILD_RELS.read_text()
-        # Count sites that filter via ``size(x) > 0``
-        count = text.count("x IS NOT NULL AND size(x) > 0")
-        assert count >= 5, (
-            f"PR-N30 M-1: empty-string filter ``x IS NOT NULL AND size(x) > 0`` "
-            f"must appear in at least 5 forward-write SET clauses; found {count}"
-        )
+        # 2026-10 (relationship provenance): the forward-write filter lives in the one shared
+        # fragment every step uses (``relationship_provenance.prov_with``).
+        import relationship_provenance
+
+        fragment = relationship_provenance.prov_with("i", relationship_provenance.OTX_FEEDS)
+        assert "_e IS NOT NULL AND size(_e) > 0" in fragment
+        assert "<> ''" not in fragment and "'" not in fragment
         # Negative pin: the unsafe ``<> ''`` pattern must NOT be present
         # (the PR-N7 module-import guard catches this at runtime, but we
         # also pin it here for clarity).

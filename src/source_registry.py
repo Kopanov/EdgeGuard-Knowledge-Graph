@@ -108,7 +108,9 @@ class Source:
         Human-readable name shown in CLI / docs / Neo4j ``:Source.name``.
     source_type : str
         One of ``threat_intel`` / ``advisory`` / ``framework`` /
-        ``vulnerability_db``. Drives Neo4j ``:Source.type``.
+        ``vulnerability_db`` / ``curated``. Drives Neo4j ``:Source.type``.
+        ``curated`` marks a curated package imported once into MISP rather
+        than a feed polled by a collector.
     reliability : float
         ``[0.0, 1.0]`` confidence base used by the merge layer for
         corroboration scoring. Drives Neo4j ``:Source.reliability``.
@@ -407,6 +409,30 @@ _REGISTRY: Tuple[Source, ...] = (
         # source-truthful first-seen claim (same treatment as URLhaus / ThreatFox).
         reliable_first_seen=True,
     ),
+    # Curated sources (2026-10): packages imported once into MISP as their own event, not
+    # feeds polled by a collector — hence no ``cli_id``. No aliases on purpose: every alias
+    # becomes an extra ``:Source`` node (see ``to_neo4j_sources_dict``).
+    Source(
+        canonical_id="coreideas",
+        display_name="Core Ideas",
+        source_type="curated",
+        reliability=0.85,
+        cli_default_enabled=False,
+        cli_description="Curated threat-intelligence package (one-time import)",
+        misp_tag="source:CoreIdeas",
+        # A curated claim has no first-observed date of its own.
+        reliable_first_seen=False,
+    ),
+    Source(
+        canonical_id="misp_galaxy",
+        display_name="MISP Galaxy",
+        source_type="curated",
+        reliability=0.8,
+        cli_default_enabled=False,
+        cli_description="MISP galaxy clusters (community knowledge base)",
+        misp_tag="source:MISP-Galaxy",
+        reliable_first_seen=False,
+    ),
 )
 
 
@@ -662,6 +688,56 @@ def reliable_first_seen_aliases() -> FrozenSet[str]:
         if src.reliable_first_seen:
             out.update(src.all_keys)
     return frozenset(out)
+
+
+def misp_tag_to_canonical_map() -> Dict[str, str]:
+    """``{misp_tag_name_without_prefix: canonical_id}`` — the reverse of ``source_to_misp_tag_map``.
+
+    Drives ``MISPToNeo4jSync.SOURCE_MAPPING`` (``source:ThreatFox`` → ``threatfox``), which
+    used to be a sixth hand-kept list: a source added here without that list was synced as
+    ``misp``.
+    """
+    out: Dict[str, str] = {}
+    for src in _REGISTRY:
+        name = src.misp_tag[len("source:") :] if src.misp_tag.startswith("source:") else src.misp_tag
+        out[name] = src.canonical_id
+    return out
+
+
+def canonical_source_id(name: Optional[str]) -> Optional[str]:
+    """Return the canonical id for a source name or alias; an unknown name comes back normalised.
+
+    Relationship provenance (``r.sources``) names the feed, never an evidence label. An
+    unknown name is kept (lowercased, stripped) so attribution is never lost; ``get_source``
+    tells a caller whether the name is registered. ``None`` for a missing or blank name.
+    """
+    if name is None:
+        return None
+    needle = str(name).strip().lower()
+    if not needle:
+        return None
+    src = get_source(needle)
+    return src.canonical_id if src else needle
+
+
+SOURCE_REF_SEPARATOR = ":"
+_SOURCE_REF_MAX_RECORD_CHARS = 200
+
+
+def format_source_ref(source: Optional[str], record_id: object) -> Optional[str]:
+    """``"<canonical source>:<record id>"``: a feed's own id for the record behind a claim.
+
+    Examples: ``alienvault_otx:5f3c…`` (OTX pulse), ``threatfox:1234567`` (IOC id),
+    ``mitre_attck:G0016`` (ATT&CK id). ``None`` when either part is missing or blank. The
+    record id is trimmed and capped so a malformed upstream value cannot bloat a property.
+    """
+    src = canonical_source_id(source)
+    if not src or record_id is None:
+        return None
+    rid = str(record_id).strip()
+    if not rid:
+        return None
+    return f"{src}{SOURCE_REF_SEPARATOR}{rid[:_SOURCE_REF_MAX_RECORD_CHARS]}"
 
 
 def source_to_misp_tag_map() -> Dict[str, str]:

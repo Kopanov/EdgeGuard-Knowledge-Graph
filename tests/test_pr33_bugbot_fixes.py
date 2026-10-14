@@ -90,7 +90,9 @@ def test_create_misp_relationships_batch_still_uses_row_vars_for_other_fields():
     batch_block = source[batch_start:batch_end]
 
     # These must remain — they're needed for the UNWIND row contract.
-    assert "row.source_id" in batch_block, "row.source_id removed (regression)"
+    # 2026-10 (relationship provenance): ``row.source`` / ``row.source_refs`` replaced ``row.source_id``.
+    assert "row.source]" in batch_block, "row.source removed (regression)"
+    assert "row.source_refs" in batch_block, "row.source_refs removed (regression)"
     assert "row.confidence" in batch_block, "row.confidence removed (regression)"
     assert "row.misp_event_id" in batch_block, "row.misp_event_id removed (regression)"
 

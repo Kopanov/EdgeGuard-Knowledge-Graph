@@ -87,6 +87,14 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         ]
     if "bidirectional" in s:
         return [{"label": lbl, "total": 7, "bidirectional": 7} for lbl in ("CVSSv30", "CVSSv31", "CVSSv40")]
+    if "size(coalesce(r.sources, [])) = 0" in s:
+        return []
+    if "apoc.meta.cypher.type(r.sources)" in s:
+        return [{"edges": 0}]
+    if "apoc.meta.cypher.type(n.zone)" in s:
+        return [{"nodes": 0}]
+    if "UNWIND r.sources AS s" in s:
+        return [{"type": "INDICATES", "source": "threatfox", "c": 5}]
     raise AssertionError(f"unexpected statement in test dispatcher: {statement[:120]}")
 
 
@@ -330,3 +338,45 @@ class TestRealBreakageStillFails:
         )
         c = _check(rep, "mangled_attack_entries_present")
         assert c["ok"] is False and "Import Regexp" in c["detail"]["hint"]
+
+    def test_relationship_without_sources_fails(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [{"type": "USES_TECHNIQUE", "c": 1520714}] if "size(coalesce(r.sources, [])) = 0" in st else rows
+            ),
+        )
+        assert [c["check"] for c in rep.failed] == ["relationships_name_their_source"]
+        detail = _check(rep, "relationships_name_their_source")["detail"]
+        assert detail["without_sources_by_type"] == [{"type": "USES_TECHNIQUE", "c": 1520714}]
+
+    def test_provenance_scope_excludes_node_and_alert_edges(self, vfb, monkeypatch):
+        seen = {}
+
+        def capture(st, rows):
+            if "size(coalesce(r.sources, [])) = 0" in st:
+                seen["st"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        assert "SOURCED_FROM" not in vfb.PROVENANCE_REL_TYPES and "INVOLVES" not in vfb.PROVENANCE_REL_TYPES
+        assert "USES_TECHNIQUE" in vfb.PROVENANCE_REL_TYPES and "HAS_CVSS_v31" in vfb.PROVENANCE_REL_TYPES
+        assert "'Campaign' IN labels(endNode(r))" in seen["st"], "ResilMesh's own PART_OF edges are not ours"
+
+    def test_scalar_provenance_lists_fail(self, vfb, monkeypatch):
+        # The 730-day graph of 2026-10-14: 21 ATTRIBUTED_TO edges with ``sources`` as a string
+        # and 11 merged actors with ``zone`` as a string (APOC ``combine`` of equal values).
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [{"edges": 21}]
+                if "apoc.meta.cypher.type(r.sources)" in st
+                else [{"nodes": 11}]
+                if "apoc.meta.cypher.type(n.zone)" in st
+                else rows
+            ),
+        )
+        assert [c["check"] for c in rep.failed] == ["provenance_lists_are_lists"]
+        assert _check(rep, "provenance_lists_are_lists")["detail"] == {"edges": 21, "nodes": 11}

@@ -398,14 +398,11 @@ class TestSourceIdRouting:
 
         syncer._process_event_attributes("1", full_event, attributes)
 
-        # Should have 2 _create_relationships calls:
-        # 1st: embedded rels with "misp"
-        # 2nd: cross-item (report-scoped) rels with "otx_pulse"
+        # Should have 2 _create_relationships calls: embedded rels, then cross-item rels. Since
+        # 2026-10 (relationship provenance) every row names its own feed (``source``); the
+        # call-level id is only the fallback ("misp") for a row without one.
         assert len(source_ids_used) == 2, f"Expected 2 _create_relationships calls, got {len(source_ids_used)}"
-        assert source_ids_used[0][0] == "misp", f"Embedded rels should use 'misp', got '{source_ids_used[0][0]}'"
-        assert source_ids_used[1][0] == "otx_pulse", (
-            f"Cross-item rels should use 'otx_pulse', got '{source_ids_used[1][0]}'"
-        )
+        assert [s for s, _ in source_ids_used] == ["misp", "misp"]
 
 
 # ===========================================================================
