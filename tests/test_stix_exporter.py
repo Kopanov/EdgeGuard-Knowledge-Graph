@@ -300,9 +300,9 @@ def test_export_cve_uses_with_aggregation_to_avoid_cartesian():
     StixExporter(client).export_cve("CVE-2021-44228")
     q = client.driver._session.main_cypher
     # Aggregation step between the two OPTIONAL MATCHes.
-    assert "WITH seed, twins, collect({n: i, r: properties(r1)}) AS indicators" in q
+    assert "WITH seed, twins, collect({n: i, r: r1s}) AS indicators" in q
     # Sectors still collected at RETURN time.
-    assert "collect({n: s, r: properties(r3)}) AS sectors" in q
+    assert "collect({n: s, r: r3s}) AS sectors" in q
 
 
 def test_stix_exporter_passes_query_timeout():
@@ -832,8 +832,10 @@ def test_every_collection_is_ordered_and_limited_by_parameter(method, identifier
         assert "ORDER BY" in line, f"LIMIT without ORDER BY is non-deterministic: {line.strip()}"
     # No unbounded collect() of related nodes remains: every collect() is
     # preceded by a limited stage, so the counts agree.
-    # Collections, not the CVE-twin folds (``head(collect(...))`` / ``collect(v) AS twins``).
-    assert q.count("collect(") - q.count("head(collect(") - q.count("collect(v) AS twins") == collections
+    # Collections, not the CVE-twin folds (``head(collect(...))`` / ``collect(v) AS twins``) nor the
+    # per-neighbour relationship folds (``collect(properties(r))``, CVE twins).
+    folds = q.count("head(collect(") + q.count("collect(v) AS twins") + q.count("collect(properties(")
+    assert q.count("collect(") - folds == collections
 
 
 @pytest.mark.parametrize("method, identifier, row, _collections", _EXPORTS)
@@ -1050,8 +1052,8 @@ def test_indicator_export_dedupes_cve_twins_before_limit():
     bundle = StixExporter(client).export_indicator("1.2.3.4")
     q = client.driver._session.main_cypher
     prefer = q.index("WITH i, malware, v, r2 ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)")
-    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect({n: v, r: properties(r2)})) AS vr")
-    bound = q.index("WITH i, malware, vr ORDER BY vr.n.cve_id LIMIT $limit")
+    dedupe = q.index("WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn, collect(properties(r2)) AS r2s")
+    bound = q.index("WITH i, malware, {n: vn, r: r2s} AS vr ORDER BY vr.n.cve_id LIMIT $limit")
     collect = q.index("WITH i, malware, collect(vr) AS vulns")
     assert prefer < dedupe < bound < collect
     # Twins returned by the driver still collapse to one vulnerability SDO.
@@ -1094,15 +1096,13 @@ def test_cve_export_walks_both_twins_and_aggregates_either_label():
     affects = q.index("OPTIONAL MATCH (tw)-[r3:AFFECTS]->(s:Sector)")
     assert fold < exploits < threats < affects
     assert q.count("UNWIND twins AS tw") == 3
-    # Neighbours are de-duplicated across twins before each bound, nulls last.
-    assert (
-        "WITH DISTINCT seed, twins, i, r1 ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit"
-        in q
-    )
-    assert (
-        "WITH DISTINCT seed, indicators, threats, s, r3 ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit"
-        in q
-    )
+    # One row per neighbour before each bound (its edges to both twins folded), nulls last.
+    assert "WITH seed, twins, i, collect(properties(r1)) AS r1s\n" in q
+    assert "ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit" in q
+    assert "WITH seed, twins, indicators, x, collect(properties(r2)) AS r2s\n" in q
+    assert "WITH seed, indicators, threats, s, collect(properties(r3)) AS r3s\n" in q
+    assert "ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit" in q
+    assert "WITH DISTINCT" not in q
     assert "RETURN seed," in q
     # Aggregate prefetch for the seed matches either twin label.
     vuln_aggregate = next(

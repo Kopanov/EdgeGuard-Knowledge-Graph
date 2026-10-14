@@ -117,6 +117,90 @@ class TestRecordLinks:
         many = sx._external_references([f"alienvault_otx:p{n}" for n in range(50)])
         assert len(many) == sx._MAX_EXTERNAL_REFERENCES
 
+    def test_bounded_references_are_the_sorted_prefix_of_the_source_refs(self):
+        refs = [f"alienvault_otx:p{n:03d}" for n in range(50)]
+        cited = sx._external_references(list(reversed(refs)))
+        assert [r["external_id"] for r in cited] == [f"p{n:03d}" for n in range(sx._MAX_EXTERNAL_REFERENCES)]
+        actor = sx._deterministic_id("intrusion-set", "apt29")
+        technique = sx._deterministic_id("attack-pattern", "T1566")
+        sro = _exporter({})._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, {"source_refs": refs[::-1]})
+        cited_refs = [f"{r['source_name']}:{r['external_id']}" for r in sro["external_references"]]
+        assert cited_refs == sro["x_edgeguard_source_refs"][: sx._MAX_EXTERNAL_REFERENCES]
+
+
+# --------------------------------------------------------------------------- merging edges into one SRO
+OTX_ATTRIBUTION = {
+    "match_type": "otx_pulse",
+    "confidence_score": 0.6,
+    "sources": ["alienvault_otx"],
+    "source_refs": ["alienvault_otx:77aa01"],
+    "misp_event_ids": ["152"],
+}
+
+
+class TestMerge:
+    def test_merge_is_independent_of_order(self):
+        one = sx._merge_rel_props([CURATED, MITRE])
+        assert one == sx._merge_rel_props([MITRE, CURATED])
+        assert one == {
+            "sources": ["alienvault_otx", "coreideas", "mitre_attck"],
+            "source_refs": ["alienvault_otx:5f3c9e", "coreideas:claim:4b6d411b", "mitre_attck:G0016"],
+            "misp_event_ids": ["135", "140", "412"],
+            "confidence_score": 0.95,
+            "match_type": "mitre_explicit",
+        }
+
+    def test_tie_takes_the_alphabetically_first_match_type(self):
+        a = {"match_type": "zone_classification", "confidence_score": 0.6}
+        b = {"match_type": "otx_pulse", "confidence_score": 0.6}
+        assert sx._merge_rel_props([a, b])["match_type"] == "otx_pulse"
+        assert sx._merge_rel_props([b, a])["match_type"] == "otx_pulse"
+
+    def test_without_confidence_any_match_type_is_kept(self):
+        merged = sx._merge_rel_props([{"sources": ["nvd"]}, {"match_type": "cve_tag", "sources": "misp"}])
+        assert merged == {"sources": ["misp", "nvd"], "match_type": "cve_tag"}
+
+    @pytest.mark.parametrize("value, expected", [(None, {}), ([], {}), ([None, {}], {}), ([MITRE], MITRE)])
+    def test_single_or_empty(self, value, expected):
+        assert sx._merge_rel_props(value) == expected
+
+    def test_duplicate_sro_merges_in_either_order(self):
+        actor = sx._deterministic_id("intrusion-set", "apt29")
+        malware = sx._deterministic_id("malware", "cozycar")
+        results = []
+        for first, second in ((OTX_ATTRIBUTION, MITRE), (MITRE, OTX_ATTRIBUTION)):
+            exporter = _exporter({})
+            objects: Dict[str, Dict[str, Any]] = {}
+            # (Malware)-[:ATTRIBUTED_TO]->(ThreatActor) and (ThreatActor)-[:USES_MALWARE]->(Malware)
+            # are both ``intrusion-set uses malware``: one SRO id.
+            sros = [
+                exporter._edge_to_sro("ATTRIBUTED_TO", malware, actor, first),
+                exporter._edge_to_sro("USES_MALWARE", actor, malware, second),
+            ]
+            assert sros[0]["id"] == sros[1]["id"]
+            for sro in sros:
+                exporter._add(objects, sro)
+            (merged,) = objects.values()
+            results.append({k: v for k, v in merged.items() if k not in ("created", "modified")})
+        assert results[0] == results[1]
+        merged = results[0]
+        assert merged["confidence"] == 95 and merged["x_edgeguard_match_type"] == "mitre_explicit"
+        assert merged["x_edgeguard_sources"] == ["alienvault_otx", "mitre_attck"]
+        assert merged["x_edgeguard_source_refs"] == [
+            "alienvault_otx:5f3c9e",
+            "alienvault_otx:77aa01",
+            "mitre_attck:G0016",
+        ]
+        assert merged["x_edgeguard_misp_event_ids"] == ["135", "140", "152"]
+        assert [r["external_id"] for r in merged["external_references"]] == ["5f3c9e", "77aa01", "G0016"]
+
+    def test_duplicate_sdo_keeps_the_first(self):
+        exporter = _exporter({})
+        objects: Dict[str, Dict[str, Any]] = {}
+        exporter._add(objects, {"type": "malware", "id": "malware--1", "name": "first"})
+        exporter._add(objects, {"type": "malware", "id": "malware--1", "name": "second"})
+        assert objects["malware--1"]["name"] == "first"
+
 
 # --------------------------------------------------------------------------- SRO
 class TestSro:
@@ -224,6 +308,63 @@ class TestBundles:
         kinds = sorted((objects[s["source_ref"]]["type"], s["relationship_type"]) for s in _sros(bundle))
         assert kinds == [("intrusion-set", "targets"), ("malware", "exploits")]
         assert all(s["x_edgeguard_sources"] == ["coreideas"] for s in _sros(bundle))
+
+    def test_actor_bundle_merges_attribution_and_mitre_uses_into_one_sro(self):
+        row = {
+            "seed": {"name": "apt29"},
+            "malware": [_pair({"name": "cozycar"}, OTX_ATTRIBUTION)],
+            "actor_tech": [],
+            "mal_tech": [],
+            "campaigns": [],
+            "uses_malware": [_pair({"name": "cozycar"}, MITRE)],
+            "tools": [],
+            "exploits": [],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_threat_actor("apt29")
+        stix2.parse(json.dumps(bundle), allow_custom=True)
+        (sro,) = _sros(bundle)
+        assert sro["relationship_type"] == "uses"
+        assert sro["confidence"] == 95 and sro["x_edgeguard_match_type"] == "mitre_explicit"
+        assert sro["x_edgeguard_sources"] == ["alienvault_otx", "mitre_attck"]
+
+    def test_cve_bundle_merges_the_edges_to_both_twins(self):
+        tag_otx = {
+            "match_type": "cve_tag",
+            "confidence_score": 1.0,
+            "sources": ["alienvault_otx"],
+            "misp_event_ids": ["135"],
+        }
+        tag_nvd = {"match_type": "cve_tag", "confidence_score": 1.0, "sources": ["nvd"], "misp_event_ids": ["120"]}
+        row = {
+            "seed": {"cve_id": "CVE-2023-4966"},
+            # one row per neighbour, with its edges to the CVE and the Vulnerability twin
+            "indicators": [{"n": {"value": "evil.example", "indicator_type": "domain"}, "r": [tag_otx, tag_nvd]}],
+            "threats": [{"n": {"name": "lockbit"}, "r": [CURATED, OTX_ATTRIBUTION], "kind": "Malware"}],
+            "sectors": [{"n": {"name": "energy"}, "r": []}],
+        }
+        bundle = _exporter(row).export_cve("CVE-2023-4966")
+        stix2.parse(json.dumps(bundle), allow_custom=True)
+        objects = _by_type(bundle)
+        by_source = {objects[s["source_ref"]]["type"]: s for s in _sros(bundle)}
+        assert by_source["indicator"]["x_edgeguard_sources"] == ["alienvault_otx", "nvd"]
+        assert by_source["indicator"]["x_edgeguard_misp_event_ids"] == ["120", "135"]
+        assert by_source["malware"]["x_edgeguard_sources"] == ["alienvault_otx", "coreideas"]
+        assert by_source["malware"]["x_edgeguard_match_type"] == "coreideas_curated"
+        assert "x_edgeguard_sources" not in by_source["vulnerability"]  # AFFECTS without provenance
+
+    def test_indicator_bundle_merges_the_edges_to_both_cve_twins(self):
+        row = {
+            "seed": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "malware": [],
+            "vulns": [
+                {"n": {"cve_id": "CVE-2021-44228"}, "r": [{"sources": ["alienvault_otx"]}, {"sources": ["misp"]}]}
+            ],
+            "techniques": [],
+            "sectors": [],
+        }
+        (sro,) = _sros(_exporter(row).export_indicator("1.2.3.4"))
+        assert sro["x_edgeguard_sources"] == ["alienvault_otx", "misp"]
 
     def test_cve_bundle_depth_1_keeps_only_the_indicators(self):
         row = {

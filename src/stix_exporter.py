@@ -554,6 +554,12 @@ _ATTACK_URL_PATHS: Tuple[Tuple[str, str], ...] = (
 # Bounds per SRO: an OTX-reported link can name hundreds of pulses.
 _MAX_EXTERNAL_REFERENCES = 20
 _MAX_SOURCE_REFS = 200
+# Relationship property → SRO extension property, with its bound (``None`` = unbounded).
+_SRO_PROVENANCE_LISTS: Tuple[Tuple[str, str, Optional[int]], ...] = (
+    ("sources", "x_edgeguard_sources", None),
+    ("source_refs", "x_edgeguard_source_refs", _MAX_SOURCE_REFS),
+    ("misp_event_ids", "x_edgeguard_misp_event_ids", None),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +758,8 @@ class StixExporter:
         # nodes sharing one cve_id (and one STIX id); the EXPLOITS stage
         # keeps one node per cve_id — the ``CVE`` twin when present, the
         # same preference as ``export_cve`` — before the bound, so twins
-        # never take two of the ``limit`` slots.
+        # never take two of the ``limit`` slots; the edges to both twins
+        # stay with it and their provenance is merged (``_merge_rel_props``).
         rows = self._run(
             """
             MATCH (i:Indicator {value: $value})
@@ -766,8 +773,8 @@ class StixExporter:
               WHERE (v:CVE OR v:Vulnerability)
                 AND (v.edgeguard_managed = true OR v.edgeguard_enriched = true)
             WITH i, malware, v, r2 ORDER BY (CASE WHEN v:CVE THEN 0 ELSE 1 END)
-            WITH i, malware, v.cve_id AS cve_key, head(collect({n: v, r: properties(r2)})) AS vr
-            WITH i, malware, vr ORDER BY vr.n.cve_id LIMIT $limit
+            WITH i, malware, v.cve_id AS cve_key, head(collect(v)) AS vn, collect(properties(r2)) AS r2s
+            WITH i, malware, {n: vn, r: r2s} AS vr ORDER BY vr.n.cve_id LIMIT $limit
             WITH i, malware, collect(vr) AS vulns
             OPTIONAL MATCH (i)-[r3:USES_TECHNIQUE]->(t:Technique)
               WHERE (t.edgeguard_managed = true OR t.edgeguard_enriched = true)
@@ -1188,9 +1195,11 @@ class StixExporter:
         node when present, because it carries the NVD enrichment promoted
         by ``_vulnerability_sdo`` — while the EXPLOITS and AFFECTS
         relationships are walked from every twin, so edges that exist
-        only on the other twin still enter the bundle. Rows are
-        de-duplicated before each bound and rows without a match sort
-        last, so they never displace real neighbours.
+        only on the other twin still enter the bundle. Each neighbour is
+        one row before each bound — a neighbour linked to both twins is
+        one SRO, whose provenance merges both edges (``_merge_rel_props``)
+        — and rows without a match sort last, so they never displace real
+        neighbours.
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
@@ -1208,25 +1217,27 @@ class StixExporter:
             UNWIND twins AS tw
             OPTIONAL MATCH (i:Indicator)-[r1:EXPLOITS]->(tw)
               WHERE (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
-            WITH DISTINCT seed, twins, i, r1 ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit
-            WITH seed, twins, collect({n: i, r: properties(r1)}) AS indicators
+            WITH seed, twins, i, collect(properties(r1)) AS r1s
+                 ORDER BY (CASE WHEN i IS NULL THEN 1 ELSE 0 END), i.value, i.indicator_type LIMIT $limit
+            WITH seed, twins, collect({n: i, r: r1s}) AS indicators
             UNWIND twins AS tw
             OPTIONAL MATCH (x)-[r2:EXPLOITS]->(tw)
               WHERE (x:ThreatActor OR x:Malware)
                 AND (x.edgeguard_managed = true OR x.edgeguard_enriched = true)
-            WITH DISTINCT seed, twins, indicators, x, r2
+            WITH seed, twins, indicators, x, collect(properties(r2)) AS r2s
                  ORDER BY (CASE WHEN x IS NULL THEN 1 ELSE 0 END), x.name LIMIT $limit
             WITH seed, twins, indicators,
-                 collect({n: x, r: properties(r2), kind: CASE WHEN x:ThreatActor THEN "ThreatActor" ELSE "Malware" END})
+                 collect({n: x, r: r2s, kind: CASE WHEN x:ThreatActor THEN "ThreatActor" ELSE "Malware" END})
                      AS threats
             UNWIND twins AS tw
             OPTIONAL MATCH (tw)-[r3:AFFECTS]->(s:Sector)
               WHERE (s.edgeguard_managed = true OR s.edgeguard_enriched = true)
-            WITH DISTINCT seed, indicators, threats, s, r3 ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit
+            WITH seed, indicators, threats, s, collect(properties(r3)) AS r3s
+                 ORDER BY (CASE WHEN s IS NULL THEN 1 ELSE 0 END), s.name LIMIT $limit
             RETURN seed,
                    indicators,
                    threats,
-                   collect({n: s, r: properties(r3)}) AS sectors
+                   collect({n: s, r: r3s}) AS sectors
             """,
             {"cve_id": cve_id, "limit": limit},
         )
@@ -1244,7 +1255,7 @@ class StixExporter:
             for item in row.get("threats") or []:
                 if isinstance(item, dict) and item.get("n") is not None:
                     kind = "ThreatActor" if item.get("kind") == "ThreatActor" else "Malware"
-                    threats.append((kind, dict(item["n"]), dict(item.get("r") or {})))
+                    threats.append((kind, dict(item["n"]), _merge_rel_props(item.get("r"))))
         self._prefetch_source_aggregates(
             [("Vulnerability", dict(seed))]
             + [("Indicator", i) for i, _ in indicators]
@@ -2009,10 +2020,17 @@ class StixExporter:
     # ------------------------------------------------------------------
 
     def _add(self, objects: Dict[str, Dict[str, Any]], sdo: Optional[Dict[str, Any]]) -> Optional[str]:
-        """Insert a SDO/SRO into the bundle dict, keyed by its STIX id."""
+        """Insert a SDO/SRO into the bundle dict, keyed by its STIX id.
+
+        The first SDO with an id is kept. A second SRO with the same id (two graph edges that
+        express one STIX relationship, e.g. ``ATTRIBUTED_TO`` and ``USES_MALWARE``) adds its
+        provenance to the first (``_merge_relationship``, 2026-10).
+        """
         if not sdo:
             return None
-        objects.setdefault(sdo["id"], sdo)
+        existing = objects.setdefault(sdo["id"], sdo)
+        if existing is not sdo and existing.get("type") == "relationship" and sdo.get("type") == "relationship":
+            _merge_relationship(existing, sdo)
         return sdo["id"]
 
     def _bundle(self, objects: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -2111,12 +2129,55 @@ def _listify(value: Any) -> Optional[List[str]]:
     return [str(value)]
 
 
+def _unit_confidence(value: Any) -> float:
+    """A ``confidence_score`` in [0, 1], or ``-1.0`` when absent or not a unit-interval number."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 1:
+        return float(value)
+    return -1.0
+
+
+def _merge_rel_props(rels: Any) -> Dict[str, Any]:
+    """One provenance map from the property maps of the graph edges behind one SRO (2026-10).
+
+    A single map is returned unchanged. Several maps arise when edges share an SRO: the twin
+    ``CVE`` / ``Vulnerability`` nodes share one STIX id, and ``ATTRIBUTED_TO`` and
+    ``USES_MALWARE`` both become ``intrusion-set uses malware``. The merged map carries the
+    union of ``sources`` / ``source_refs`` / ``misp_event_ids``, the highest
+    ``confidence_score`` and the ``match_type`` of the strongest edge (on a tie, the
+    alphabetically first), so the result does not depend on row order.
+    """
+    if isinstance(rels, dict):
+        return dict(rels)
+    maps = [dict(r) for r in rels or [] if isinstance(r, dict) and r]
+    if len(maps) <= 1:
+        return maps[0] if maps else {}
+    merged: Dict[str, Any] = {}
+    for prop in ("sources", "source_refs", "misp_event_ids"):
+        values = sorted({v for r in maps for v in (_listify(r.get(prop)) or [])})
+        if values:
+            merged[prop] = values
+    best = max(_unit_confidence(r.get("confidence_score")) for r in maps)
+    if best >= 0:
+        merged["confidence_score"] = best
+
+    def _match_types(candidates: List[Dict[str, Any]]) -> List[str]:
+        return sorted({r["match_type"] for r in candidates if isinstance(r.get("match_type"), str) and r["match_type"]})
+
+    strongest = [r for r in maps if _unit_confidence(r.get("confidence_score")) == best]
+    match_types = _match_types(strongest) or _match_types(maps)
+    if match_types:
+        merged["match_type"] = match_types[0]
+    return merged
+
+
 def _with_rels(items: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """``[(node, relationship)]`` property pairs from a collected export list (2026-10).
 
     The export queries collect ``{n: node, r: properties(rel)}`` maps so each SRO can carry
-    the provenance of its graph relationship. Entries without a node (an OPTIONAL MATCH
-    that found nothing) are dropped; a plain node (no map) yields an empty relationship.
+    the provenance of its graph relationship; where one neighbour is reached over several
+    edges (CVE twins), ``r`` is the list of their property maps, merged by
+    ``_merge_rel_props``. Entries without a node (an OPTIONAL MATCH that found nothing) are
+    dropped; a plain node (no map) yields an empty relationship.
     """
     out: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
     for item in items or []:
@@ -2126,7 +2187,7 @@ def _with_rels(items: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
             node = item.get("n")
             if node is None:
                 continue
-            out.append((dict(node), dict(item.get("r") or {})))
+            out.append((dict(node), _merge_rel_props(item.get("r"))))
         else:
             out.append((dict(item), {}))
     return out
@@ -2145,16 +2206,17 @@ def _record_url(source: str, record_id: str) -> Optional[str]:
 
 
 def _external_references(source_refs: Any) -> List[Dict[str, str]]:
-    """STIX ``external_references`` from ``"<source>:<record id>"`` strings (deduplicated, bounded)."""
+    """STIX ``external_references`` from ``"<source>:<record id>"`` strings (deduplicated, bounded).
+
+    Sorted before the bound, in the order of ``x_edgeguard_source_refs``: a long list cites the
+    same records on every export, and they are the first ones of that property.
+    """
     out: List[Dict[str, str]] = []
-    seen: set = set()
-    for raw in source_refs if isinstance(source_refs, (list, tuple)) else []:
-        if not isinstance(raw, str) or raw in seen:
-            continue
+    raws = source_refs if isinstance(source_refs, (list, tuple)) else []
+    for raw in sorted({r for r in raws if isinstance(r, str)}):
         source, sep, record_id = raw.partition(":")
         if not sep or not source or not record_id:
             continue
-        seen.add(raw)
         ref = {"source_name": source, "external_id": record_id}
         url = _record_url(source, record_id)
         if url:
@@ -2178,14 +2240,46 @@ def _attach_relationship_provenance(sro: Dict[str, Any], rel: Dict[str, Any]) ->
     match_type = rel.get("match_type")
     if isinstance(match_type, str) and match_type:
         sro["x_edgeguard_match_type"] = match_type
-    for prop, key, cap in (
-        ("sources", "x_edgeguard_sources", None),
-        ("source_refs", "x_edgeguard_source_refs", _MAX_SOURCE_REFS),
-        ("misp_event_ids", "x_edgeguard_misp_event_ids", None),
-    ):
+    for prop, key, cap in _SRO_PROVENANCE_LISTS:
         values = _listify(rel.get(prop))
         if values:
             sro[key] = sorted(dict.fromkeys(values))[:cap] if cap else sorted(dict.fromkeys(values))
+
+
+def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> None:
+    """Fold the provenance of a second SRO with the same id into the first (2026-10).
+
+    Both SROs are read back into relationship-property form and merged by ``_merge_rel_props``;
+    ``confidence``, ``external_references`` and the ``x_edgeguard_*`` provenance of ``existing``
+    are then rebuilt from the merged map, so the result does not depend on which edge came
+    first. The capped lists stay exact: each SRO holds the first entries of its sorted list, and
+    the first entries of the merged list are among them.
+    """
+
+    def _as_rel_props(sro: Dict[str, Any]) -> Dict[str, Any]:
+        props: Dict[str, Any] = {}
+        confidence = sro.get("confidence")
+        if isinstance(confidence, int) and not isinstance(confidence, bool):
+            props["confidence_score"] = confidence / 100
+        if sro.get("x_edgeguard_match_type"):
+            props["match_type"] = sro["x_edgeguard_match_type"]
+        for prop, key, _cap in _SRO_PROVENANCE_LISTS:
+            if sro.get(key):
+                props[prop] = sro[key]
+        return props
+
+    merged = _merge_rel_props([_as_rel_props(existing), _as_rel_props(incoming)])
+    for key in ("confidence", "external_references", "x_edgeguard_match_type") + tuple(
+        key for _prop, key, _cap in _SRO_PROVENANCE_LISTS
+    ):
+        existing.pop(key, None)
+    confidence = _unit_confidence(merged.get("confidence_score"))
+    if confidence >= 0:
+        existing["confidence"] = int(round(confidence * 100))
+    external_references = _external_references(merged.get("source_refs"))
+    if external_references:
+        existing["external_references"] = external_references
+    _attach_relationship_provenance(existing, merged)
 
 
 def _extract_zones(props: Dict[str, Any]) -> List[str]:
