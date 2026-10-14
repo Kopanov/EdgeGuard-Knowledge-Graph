@@ -809,8 +809,9 @@ class NVDCollector:
         - Makes at most ``EDGEGUARD_NVD_MAX_PER_RUN`` MISP writes (``limit``, when set, lowers that
           cap) and stops reading at the record where the cap is reached.
         - Moves the cursor only when the read was complete and every write was confirmed: to the end
-          of the window, or to the record at which the cap stopped the run. An addition MISP
-          answered without storing, or without an attribute list to check, keeps it too.
+          of the window, or to the record at which the cap stopped the run. Additions MISP's
+          answers do not confirm are looked up by value (``MISPWriter.existing_values``); a cursor
+          that cannot move fails the task and names the CVEs not written.
         - NVD not serving the window raises ``NvdIncrementalUnavailable`` (transient): nothing is
           written and the cursor stays.
 
