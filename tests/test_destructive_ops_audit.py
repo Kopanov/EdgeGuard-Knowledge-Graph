@@ -77,11 +77,13 @@ def test_clear_edgeguard_managed_records_counts(monkeypatch):
     client = nc.Neo4jClient.__new__(nc.Neo4jClient)
     client.driver = MagicMock()
     session = client.driver.session.return_value.__enter__.return_value
-    # count managed, count others, count enriched, then one delete batch that empties the set
+    # count managed, count others, count enriched, the relationship pre-pass (empty), then one
+    # delete batch that empties the set
     session.run.side_effect = [
         MagicMock(single=lambda: {"count": 5}),
         MagicMock(single=lambda: {"count": 40}),
         MagicMock(single=lambda: {"count": 2}),
+        MagicMock(single=lambda: {"deleted": 0}),
         MagicMock(single=lambda: {"deleted": 5}),
     ]
     assert client.clear_edgeguard_managed() is True

@@ -1373,18 +1373,21 @@ class TestTlpPromotion:
 
 
 class TestClearEdgeguardManaged:
-    def _client(self, managed: int, deleted_batches: list[int]):
+    def _client(self, managed: int, deleted_batches: list[int], rel_batches: list[int] | None = None):
         client = Neo4jClient.__new__(Neo4jClient)
         client.driver = MagicMock()
         client._connection_healthy = True
         queries: list[str] = []
         deletes = iter(deleted_batches)
+        rel_deletes = iter(rel_batches or [])
 
         def run(query, **kwargs):
             queries.append(query)
             result = MagicMock()
             if "DETACH DELETE" in query:
                 result.single.return_value = {"deleted": next(deletes, 0)}
+            elif "DELETE r" in query:
+                result.single.return_value = {"deleted": next(rel_deletes, 0)}
             elif "<> true" in query:
                 result.single.return_value = {"count": 5}
             else:
@@ -1429,6 +1432,19 @@ class TestClearEdgeguardManaged:
         client, queries = self._client(managed=0, deleted_batches=[])
         assert client.clear_edgeguard_managed() is True
         assert not [q for q in queries if "DETACH DELETE" in q]
+
+    def test_relationships_of_marked_nodes_go_first_in_bounded_batches(self):
+        # 2026-10-12: DETACH DELETE on a 10,000-node batch that holds a hub ran a 2g heap out of
+        # memory on the 478K-node / 2.66M-edge graph; relationships are deleted first, bounded.
+        client, queries = self._client(managed=3, deleted_batches=[3], rel_batches=[50_000, 20, 0])
+        assert client.clear_edgeguard_managed() is True
+        rel_queries = [q for q in queries if "DELETE r" in q]
+        assert len(rel_queries) == 3
+        for q in rel_queries:
+            assert "MATCH (n)-[r]-() WHERE n.edgeguard_managed = true" in q
+            assert "WITH DISTINCT r LIMIT 50000 DELETE r" in q
+        first_node_delete = next(i for i, q in enumerate(queries) if "DETACH DELETE" in q)
+        assert all(i < first_node_delete for i, q in enumerate(queries) if "DELETE r" in q)
 
     def test_returns_false_without_driver(self):
         client = Neo4jClient.__new__(Neo4jClient)

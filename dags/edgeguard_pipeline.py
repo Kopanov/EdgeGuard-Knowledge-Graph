@@ -1998,6 +1998,8 @@ def run_build_relationships(**context):
     # Success: output already streamed to the task log line-by-line
     # by the helper; no final stdout dump needed.
     logger.info("[build_relationships] complete (exit 0)")
+    # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
+    return {"built": True, "returncode": returncode}
 
 
 def run_enrichment_jobs(**context):
@@ -2412,6 +2414,31 @@ def get_baseline_config(context=None) -> tuple:
     return effective_limit, baseline_days
 
 
+def _require_baseline_start(context, step: str) -> None:
+    """Refuse to run a baseline step whose ``baseline_start`` did not succeed (2026-10-12).
+
+    The tier groups and ``full_neo4j_sync`` use ``trigger_rule=ALL_DONE`` so that one failed
+    source does not skip the others, but ALL_DONE also fires on ``upstream_failed``: on the
+    2026-10-12 smoke run a failed ``baseline_clean`` was followed by every collector and by
+    ``full_neo4j_sync`` on the un-wiped graph. ``baseline_start`` publishes an XCom only when it
+    ran to completion, which only happens after ``baseline_clean`` succeeded; no XCom means the
+    chain is broken above this step.
+    """
+    ti = (context or {}).get("ti")
+    if ti is None:
+        return
+    try:
+        marker = ti.xcom_pull(task_ids="baseline_start")
+    except Exception as e:  # API drift must not turn into a false refusal
+        logger.warning("[BASELINE] %s: could not read the baseline_start XCom (%s); proceeding", step, e)
+        return
+    if not marker:
+        raise AirflowException(
+            f"[BASELINE] {step}: baseline_start did not succeed (no XCom marker) — refusing to run after a "
+            "failed baseline_clean / baseline_start; clear the failed task to resume the run"
+        )
+
+
 def run_baseline_collector(collector_name: str, collector_class, context=None, **kwargs):
     """
     Run a single collector in baseline mode.
@@ -2429,6 +2456,8 @@ def run_baseline_collector(collector_name: str, collector_class, context=None, *
     context         : Airflow task context (for dag_run.conf overrides)
     **kwargs        : passed through to the collector constructor
     """
+    _require_baseline_start(context, collector_name)
+
     from collectors.misp_writer import MISPWriter
 
     limit, baseline_days = get_baseline_config(context=context)
@@ -2588,6 +2617,8 @@ def run_baseline_malwarebazaar(**context):
 
 def run_baseline_full_sync(**context):
     """Run a FULL (non-incremental) MISP→Neo4j sync after baseline collection."""
+    _require_baseline_start(context, "full_neo4j_sync")
+
     from run_misp_to_neo4j import MISPToNeo4jSync
 
     logger.info("[BASELINE] Starting full MISP→Neo4j sync (all history)")
@@ -2600,6 +2631,8 @@ def run_baseline_full_sync(**context):
         )
         raise AirflowException(f"Baseline full MISP→Neo4j sync failed: {detail}")
     logger.info("[BASELINE] Full sync complete")
+    # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
+    return {"synced": True}
 
 
 def run_baseline_enrichment(**context):
@@ -2617,6 +2650,8 @@ def run_baseline_enrichment(**context):
         raise AirflowException(f"Baseline enrichment failed: {e}")
     finally:
         client.close()
+    # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
+    return {"enriched": True}
 
 
 def assert_baseline_postconditions(**context):
@@ -2721,12 +2756,32 @@ def assert_baseline_postconditions(**context):
         except Exception as _ctx_err:
             # Context introspection is best-effort — if Airflow internals
             # change shape we don't want to BLOCK the invariant check that
-            # would have run anyway. Log and continue.
+            # would have run anyway.
+            # Airflow 3's RuntimeTaskInstance has no get_dagrun(): on the 2026-10-12 smoke run
+            # this branch logged "running invariants anyway", the invariants passed on the synced
+            # graph and the run ended success with run_enrichment_jobs failed. Fall back to the
+            # XCom markers the chain tasks return on success and FAIL (not skip) when one is
+            # missing: Airflow derives the run state from the leaf tasks, and a skipped leaf
+            # counts as success.
             logger.warning(
-                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); running invariants anyway.",
+                "[BASELINE-POSTCHECK] upstream-state introspection failed (%s: %s); checking the chain's XCom markers instead.",
                 type(_ctx_err).__name__,
                 _ctx_err,
             )
+            missing: list[str] = []
+            for upstream_task_id in sorted(_BASELINE_CRITICAL_CHAIN):
+                try:
+                    marker = ti.xcom_pull(task_ids=upstream_task_id)
+                except Exception as _xcom_err:
+                    logger.warning("[BASELINE-POSTCHECK] XCom pull for %s failed: %s", upstream_task_id, _xcom_err)
+                    marker = None
+                if not marker:
+                    missing.append(upstream_task_id)
+            if missing:
+                raise AirflowException(
+                    f"[BASELINE-POSTCHECK] upstream task(s) {missing} did not succeed (no XCom marker) — "
+                    "the baseline is incomplete; fix the failed task and clear it to resume the run"
+                )
 
     client = Neo4jClient()
     violations = []
@@ -3033,6 +3088,9 @@ def _baseline_start_summary(**context):
     # a no-op instruction.
     logger.info('  Fresh-baseline (wipe Neo4j + MISP + checkpoints): {"fresh_baseline": "true"}')
     logger.info("=" * 55)
+    # XCom marker read by _require_baseline_start: present only when this task ran to the end,
+    # which (ALL_SUCCESS) only happens after baseline_clean succeeded.
+    return {"started": True, "limit": limit, "baseline_days": baseline_days, "fresh_baseline": is_fresh_baseline}
 
 
 baseline_start = PythonOperator(

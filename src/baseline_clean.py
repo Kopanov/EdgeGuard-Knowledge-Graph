@@ -557,6 +557,24 @@ def _wipe_neo4j(client: Any, scope: str = WIPE_SCOPE_EDGEGUARD) -> None:
         raise RuntimeError("Neo4jClient.clear_edgeguard_managed() returned False")
 
 
+def misp_delete_read_timeout_sec() -> int:
+    """Read timeout of one ``DELETE /events/<id>`` in the wipe (default 900 s).
+
+    MISP deletes an event's attributes inside the request: on 2026-10-12 the
+    120,556-attribute OTX event of the 2026-09 baseline took longer than the previous
+    30 s, MISP finished the delete server-side, and the client-side ``ReadTimeout``
+    aborted the wipe with 320 of 329 events left. The NVD event of the same baseline
+    holds 131,949 attributes. Override with ``EDGEGUARD_MISP_DELETE_TIMEOUT_SEC``.
+    """
+    raw = os.environ.get("EDGEGUARD_MISP_DELETE_TIMEOUT_SEC", "").strip()
+    try:
+        value = int(raw) if raw else 900
+    except ValueError:
+        logger.warning("EDGEGUARD_MISP_DELETE_TIMEOUT_SEC=%r is not an integer; using 900", raw)
+        value = 900
+    return value if value > 0 else 900
+
+
 def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pages: int = 20) -> int:
     """Step 3: delete all EdgeGuard-tagged events from MISP.
 
@@ -671,7 +689,7 @@ def _wipe_misp_events(misp_url: str, misp_api_key: str, ssl_verify: bool, max_pa
                 del_resp = sess.delete(
                     f"{misp_url}/events/{eid}",
                     verify=ssl_verify,
-                    timeout=(15, 30),
+                    timeout=(15, misp_delete_read_timeout_sec()),
                     allow_redirects=False,  # Red Team H1 — defense-in-depth
                 )
             if del_resp.status_code == 200:

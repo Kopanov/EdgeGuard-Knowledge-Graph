@@ -1460,6 +1460,30 @@ class Neo4jClient:
             logger.error(f"Neo4j database error (terminal): {type(e).__name__}: {e}")
             return []
 
+    @staticmethod
+    def _delete_relationships_batched(session, match_clause: str, batch_size: int = 50_000) -> int:
+        """Delete the relationships selected by ``match_clause`` (which binds ``r``) in
+        batches of ``batch_size`` until a batch deletes nothing. Returns the total.
+
+        Deleting relationships ahead of the node batches keeps each transaction's
+        working set bounded by ``batch_size`` edges instead of by the degree of
+        whatever nodes land in a ``DETACH DELETE`` batch. On the 2026-09 graph
+        (478K nodes, 2.66M relationships) the first 10,000-node batch held hubs
+        (Source, Tactic, popular Malware) and ran a 2g heap out of memory
+        (``Neo.TransientError.General.OutOfMemoryError``, 2026-10-12).
+        """
+        total = 0
+        while True:
+            result = session.run(
+                f"{match_clause} WITH DISTINCT r LIMIT {batch_size} DELETE r RETURN count(r) AS deleted",
+                timeout=NEO4J_READ_TIMEOUT,
+            )
+            batch_deleted = result.single()["deleted"]
+            if not batch_deleted:
+                return total
+            total += batch_deleted
+            logger.debug(f"Deleted batch of {batch_deleted} relationships")
+
     @retry_with_backoff(max_retries=3)
     def clear_all(self) -> bool:
         """
@@ -1479,6 +1503,9 @@ class Neo4jClient:
                 counts = session.run("MATCH (n) RETURN count(n) as count", timeout=NEO4J_READ_TIMEOUT)
                 node_count = counts.single()["count"]
 
+                # Relationships first, in bounded batches (see _delete_relationships_batched).
+                rels_deleted = self._delete_relationships_batched(session, "MATCH ()-[r]->()")
+
                 # Clear in batches to avoid memory issues
                 batch_size = 10000
                 deleted = 0
@@ -1496,7 +1523,7 @@ class Neo4jClient:
                 # Clear Source nodes
                 session.run("MATCH (s:Source) DETACH DELETE s", timeout=NEO4J_READ_TIMEOUT)
 
-            logger.info(f"Cleared {deleted} nodes and relationships")
+            logger.info(f"Cleared {deleted} nodes and {rels_deleted} relationships")
             record_destructive_op("clear_all", target="neo4j", affected=deleted, scope="every node")
             return True
 
@@ -1554,6 +1581,12 @@ class Neo4jClient:
                     enriched,
                 )
 
+                # Relationships touching a marked node first, in bounded batches (same heap
+                # reason as clear_all); a relationship on a node that goes, goes with it.
+                rels_deleted = self._delete_relationships_batched(
+                    session, "MATCH (n)-[r]-() WHERE n.edgeguard_managed = true"
+                )
+
                 batch_size = 10000
                 deleted = 0
                 while deleted < node_count:
@@ -1568,7 +1601,7 @@ class Neo4jClient:
                     deleted += batch_deleted
                     logger.debug(f"Deleted batch of {batch_deleted} EdgeGuard-managed nodes")
 
-            logger.info(f"Cleared {deleted} EdgeGuard-managed nodes and their relationships")
+            logger.info(f"Cleared {deleted} EdgeGuard-managed nodes and {rels_deleted} relationships")
             record_destructive_op(
                 "clear_edgeguard_managed",
                 target="neo4j",
