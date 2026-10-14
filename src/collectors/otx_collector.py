@@ -109,6 +109,12 @@ _MAX_PULSE_ADVERSARIES = 5
 _MAX_PULSE_PAIRS = 50  # families × adversaries of ONE pulse, encoded "family::adversary"
 _PULSE_NAME_PLACEHOLDERS = frozenset({"", "unknown", "n/a", "none", "null", "-"})
 
+# OTX indicator types whose value is a hex digest of something other than a file: an import hash, a
+# PE hash, a TLS client fingerprint and a certificate fingerprint. MISPWriter types a generic
+# ``hash`` by its digest length (md5 / sha1 / sha256 / sha512), which would store these as file
+# hashes, so they are not collected (2026-10). Typed ``sha256`` before that, MISP dropped them.
+_NON_FILE_HASH_TYPES = frozenset({"FileHash-IMPHASH", "FileHash-PEHASH", "JA3", "SSLCertFingerprint"})
+
 
 def _pulse_actor_pairs(families: List[str], adversaries: List[str]) -> List[str]:
     """``"family::adversary"`` for every family × adversary named by ONE pulse. Encoding the pair
@@ -476,6 +482,7 @@ class OTXCollector:
 
             # Process pulses
             processed = []
+            non_file_hashes = 0
 
             to_process = pulses if limit is None else pulses[:limit]
             for pulse in to_process:
@@ -574,6 +581,9 @@ class OTXCollector:
                 # Extract indicators - one entry per indicator (zone holds all matched sectors)
                 indicators = pulse.get("indicators", [])
                 for ind in indicators:
+                    if ind.get("type") in _NON_FILE_HASH_TYPES:
+                        non_file_hashes += 1
+                        continue
                     indicator_type = self.map_indicator_type(ind.get("type"), ind.get("indicator"))
                     indicator_value = ind.get("indicator")
                     indicator_first_seen = ind.get("created") or pulse_created
@@ -695,6 +705,12 @@ class OTXCollector:
             unique = _dedupe_pulse_items(processed)
 
             logger.info(f"[OK] OTX: Processed {len(unique)} unique items")
+            if non_file_hashes:
+                logger.info(
+                    "[SKIP] OTX: %d indicators of a non-file hash type (%s) not collected",
+                    non_file_hashes,
+                    ", ".join(sorted(_NON_FILE_HASH_TYPES)),
+                )
 
             def _advance_otx_incremental_cursor(successful_pulses: Optional[List[Dict]] = None) -> None:
                 """Advance cursor to the last successfully processed pulse timestamp.

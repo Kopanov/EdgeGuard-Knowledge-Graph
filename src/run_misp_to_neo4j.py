@@ -944,7 +944,7 @@ def normalize_misp_tag_list(tags: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def _extract_tlp_tag(tags: List[Dict[str, Any]]) -> str:
+def _extract_tlp_tag(tags: List[Dict[str, Any]], ref: str = "") -> str:
     """Rehydrate the ``tlp:<level>`` MISP tag (2026-10, fresh-baseline PR).
 
     MISPWriter stamps one ``tlp:<level>`` tag on every attribute (``_tlp_tag``);
@@ -956,6 +956,10 @@ def _extract_tlp_tag(tags: List[Dict[str, Any]]) -> str:
     ``tlp`` at all, failing the ``tlp_on_every_node`` acceptance check. The merge
     keeps the most restrictive level, so the default never loosens a stricter
     value already on the node.
+
+    The default is logged with ``ref`` (the attribute's UUID): the node then passes
+    ``tlp_on_every_node``, and an attribute whose tags were lost may have come
+    from a green or amber OTX pulse.
     """
     for tag in tags:
         name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
@@ -965,6 +969,12 @@ def _extract_tlp_tag(tags: List[Dict[str, Any]]) -> str:
                 return level
     from config import EDGEGUARD_DEFAULT_TLP
 
+    logger.warning(
+        "[TLP] MISP attribute %s has no tlp: tag (%d other tags); the default level %r applies",
+        ref or "<no uuid>",
+        len(tags),
+        EDGEGUARD_DEFAULT_TLP,
+    )
     return EDGEGUARD_DEFAULT_TLP
 
 
@@ -3074,7 +3084,7 @@ class MISPToNeo4jSync:
                 "attack_vector": attack_vector,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
                 # ResilMesh-compatible fields — populated when NVD_META is present
                 "cwe": nvd_meta.get("cwe", []),
@@ -3224,7 +3234,7 @@ class MISPToNeo4jSync:
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
                 # 2026-10: tlp:<level> tag → n.tlp; a curated attribute leaves the node's own TLP
-                "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags),
+                "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags, attr_misp_uuid),
                 "relationships": relationships,
             }
             return self._with_provenance(item, relationships)
@@ -3323,7 +3333,7 @@ class MISPToNeo4jSync:
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
                 # 2026-10: tlp:<level> tag → n.tlp; a curated attribute leaves the node's own TLP
-                "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags),
+                "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags, attr_misp_uuid),
                 "uses_techniques": uses_techniques,
                 "reported_techniques": reported_techniques,
                 "pulse_id": malware_pulse_id,
@@ -3391,7 +3401,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.8,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
             return self._with_provenance(item, relationships)
@@ -3431,7 +3441,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.95,  # MITRE ATT&CK range
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
             }
             return self._with_provenance(item, relationships)
 
@@ -3507,7 +3517,7 @@ class MISPToNeo4jSync:
                 "confidence_score": 0.9,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
             }
             return self._with_provenance(item, relationships)
 
@@ -3609,7 +3619,7 @@ class MISPToNeo4jSync:
                 "pulse_name": otx_meta.get("pulse_name") or tf_meta.get("malware_family") or raw_comment,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                "tlp": _extract_tlp_tag(tags, attr_misp_uuid),  # 2026-10: tlp:<level> tag → n.tlp
                 "relationships": relationships,
             }
 

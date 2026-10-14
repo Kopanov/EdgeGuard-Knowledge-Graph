@@ -59,3 +59,21 @@ def test_push_batch_sends_the_cleaned_batch_and_counts_skips_as_failed():
     sent = w.session.post.call_args.kwargs["json"]["Attribute"]
     assert sent == [{"type": "domain", "value": "ok.example", "comment": "ab"}]
     assert (ok, failed) == (1, 1)
+
+
+def _writer_with_response(**post):
+    w = mw.MISPWriter.__new__(mw.MISPWriter)
+    w.url = "https://misp.local"
+    w.verify_ssl = False
+    w.stats = {"attributes_added": 0, "batches_sent": 0, "errors": 0}
+    w.session = MagicMock()
+    w.session.post.configure_mock(**post)
+    return w
+
+
+def test_a_rejected_batch_counts_the_skipped_attributes_as_failed():
+    good = {"type": "domain", "value": "ok.example"}
+    bad = {"type": "url", "value": f"https://x.example/{FLAG}"}
+    rejected = MagicMock(status_code=400, text='{"errors": "Invalid attribute"}')
+    assert _writer_with_response(return_value=rejected)._push_batch("349", [good, bad]) == (0, 2)
+    assert _writer_with_response(side_effect=ValueError("broken answer"))._push_batch("349", [good, bad]) == (0, 2)
