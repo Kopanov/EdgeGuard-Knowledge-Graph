@@ -56,8 +56,9 @@ from neo4j_client import (
 )
 from node_identity import is_placeholder_name
 from query_pause import query_pause
+from relationship_provenance import CURATED_CLAIM_CONFIDENCE, CURATED_CLAIMS_PREFIX, CURATED_PREDICATES
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
-from source_registry import canonical_source_id, format_source_ref, misp_tag_to_canonical_map
+from source_registry import canonical_source_id, curated_label_for, format_source_ref, misp_tag_to_canonical_map
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
 from source_truthful_timestamps import extract_source_truthful_timestamps
 
@@ -462,6 +463,101 @@ def _item_source_refs(item: Dict, source: str) -> List[str]:
         if ref and ref not in refs:
             refs.append(ref)
     return refs
+
+
+# ---------------------------------------------------------------------------
+# Curated packages (2026-10)
+# ---------------------------------------------------------------------------
+# A curated package is imported once into MISP as its own event (``scripts/
+# import_curated_package.py``). Each actor / malware attribute names an existing node and
+# carries that node's claims in its comment:
+#
+#   CURATED_CLAIMS:{"c": [{"p": "uses_technique", "o": "T1566", "src": "coreideas", "id": "<id>"}]}
+#
+# ``p`` is the predicate, ``o`` the object's key (ATT&CK id, malware name, Tool S-id, CVE id),
+# ``src`` the source that asserts the claim (defaults to the package's source) and ``id`` that
+# source's record id. Every claim becomes a relationship labelled with the package's curated
+# label (``coreideas_curated``, else ``curated_other``) at 0.85, written with MATCH on both
+# ends. A curated attribute is not merged as a node (``sync_to_neo4j`` skips it): a package
+# never creates nodes and never changes the node it names. The item still carries no
+# description, types, zones or TLP, so nothing leaks if it ever reached a merge.
+_CURATED_MAX_CLAIMS_PER_ATTRIBUTE = 2000
+_CURATED_PREDICATES = CURATED_PREDICATES
+
+
+def _parse_curated_claims(raw_comment: str) -> Optional[List[Dict]]:
+    """The claims of a ``CURATED_CLAIMS:`` comment; ``None`` when the comment is not one."""
+    text = (raw_comment or "").strip()
+    if not text.startswith(CURATED_CLAIMS_PREFIX):
+        return None
+    rest = text[len(CURATED_CLAIMS_PREFIX) :].lstrip()
+    newline = rest.find("\n")
+    json_part = rest if newline < 0 else rest[:newline]
+    try:
+        meta = json.loads(json_part)
+    except (ValueError, TypeError):
+        logger.warning("Unreadable %s comment — the attribute's claims were not taken", CURATED_CLAIMS_PREFIX)
+        return []
+    claims = meta.get("c") if isinstance(meta, dict) else None
+    if not isinstance(claims, list):
+        return []
+    if len(claims) > _CURATED_MAX_CLAIMS_PER_ATTRIBUTE:
+        logger.warning(
+            "%s: %d claims on one attribute, taking the first %d",
+            CURATED_CLAIMS_PREFIX,
+            len(claims),
+            _CURATED_MAX_CLAIMS_PER_ATTRIBUTE,
+        )
+    return [c for c in claims[:_CURATED_MAX_CLAIMS_PER_ATTRIBUTE] if isinstance(c, dict)]
+
+
+def _curated_claim_rows(
+    claims: List[Dict], subject_type: str, subject_key: Dict[str, str], package_source: str, evt_id: str
+) -> List[Dict]:
+    """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``)."""
+    label = curated_label_for(package_source)
+    rows: List[Dict] = []
+    skipped = 0
+    for claim in claims:
+        target = _CURATED_PREDICATES.get(str(claim.get("p") or "").strip().lower(), {}).get(subject_type)
+        obj = str(claim.get("o") or "").strip()
+        if target is None or not obj:
+            skipped += 1
+            continue
+        rel_type, to_type, key = target
+        if key == "cve_id":
+            obj = normalize_cve_id_for_graph(obj) or ""
+        elif key == "mitre_id":
+            obj = obj.upper()
+        if not obj:
+            skipped += 1
+            continue
+        source = canonical_source_id(claim.get("src")) or package_source
+        ref = format_source_ref(source, claim.get("id"))
+        rows.append(
+            {
+                "rel_type": rel_type,
+                "from_type": subject_type,
+                "from_key": dict(subject_key),
+                "to_type": to_type,
+                "to_key": {key: obj},
+                "confidence": CURATED_CLAIM_CONFIDENCE,
+                "match_type": label,
+                "source": source,
+                "source_refs": [ref] if ref else [],
+                "misp_event_id": evt_id,
+                # exact canonical names on both ends — never alias matching (see the writer)
+                "exact_names": True,
+            }
+        )
+    if skipped:
+        logger.info(
+            "Curated %s %s: %d claim(s) skipped (unknown predicate for this subject, or no object)",
+            subject_type,
+            next(iter(subject_key.values()), "?"),
+            skipped,
+        )
+    return rows
 
 
 def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
@@ -3052,6 +3148,15 @@ class MISPToNeo4jSync:
                 except (ValueError, IndexError):
                     actor_description = raw_comment
 
+            # 2026-10: a curated package's attribute carries claims, not a profile (see
+            # CURATED_CLAIMS_PREFIX); it names the node and must not change it.
+            curated_claims = _parse_curated_claims(raw_comment)
+            if curated_claims is not None:
+                actor_description = ""
+                relationships.extend(
+                    _curated_claim_rows(curated_claims, "ThreatActor", {"name": actor_name}, source_id, _evt_id)
+                )
+
             # Build EMPLOYS_TECHNIQUE relationships to techniques.
             # Attribution edge (who uses the TTP). See 2026-04 refactor note
             # in src/neo4j_client.py create_actor_technique_relationship.
@@ -3095,7 +3200,9 @@ class MISPToNeo4jSync:
                 "report_ids": actor_report_ids,
                 "uses_malware": actor_uses_malware,
                 "uses_tools": actor_uses_tools,
-                "zone": zones,
+                # 2026-10: a curated attribute is not merged as a node (see sync_to_neo4j)
+                "curated": curated_claims is not None,
+                "zone": [] if curated_claims is not None else zones,
                 "tag": source_id,
                 "source": [source_id],
                 # PR (S5): legacy first_seen removed —
@@ -3107,7 +3214,8 @@ class MISPToNeo4jSync:
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                # 2026-10: tlp:<level> tag → n.tlp; a curated attribute leaves the node's own TLP
+                "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags),
                 "relationships": relationships,
             }
             return self._with_provenance(item, relationships)
@@ -3147,6 +3255,15 @@ class MISPToNeo4jSync:
                         malware_name,
                     )
 
+            # 2026-10: curated package claims (see CURATED_CLAIMS_PREFIX) — the node is named, not changed.
+            curated_claims = _parse_curated_claims(raw_comment)
+            if curated_claims is not None:
+                description = ""
+                malware_types = []
+                relationships.extend(
+                    _curated_claim_rows(curated_claims, "Malware", {"name": malware_name}, source_id, _evt_id)
+                )
+
             # Build ATTRIBUTED_TO relationship to threat actor
             if threat_actor:
                 relationships.append(
@@ -3177,10 +3294,14 @@ class MISPToNeo4jSync:
                 "type": "malware",
                 "name": malware_name,
                 "aliases": malware_aliases,
-                "malware_types": malware_types if malware_types else ["unknown"],
+                "malware_types": []
+                if curated_claims is not None
+                else (malware_types if malware_types else ["unknown"]),
                 "family": value,
                 "description": description,
-                "zone": zones,  # zone is now an array
+                # 2026-10: a curated attribute is not merged as a node (see sync_to_neo4j)
+                "curated": curated_claims is not None,
+                "zone": [] if curated_claims is not None else zones,  # zone is now an array
                 "tag": source_id,
                 "source": [source_id],
                 # PR (S5): legacy first_seen removed —
@@ -3192,7 +3313,8 @@ class MISPToNeo4jSync:
                 "confidence_score": confidence,
                 "misp_event_id": str(event_info.get("id", "")),
                 "misp_attribute_id": attr_misp_uuid,
-                "tlp": _extract_tlp_tag(tags),  # 2026-10: tlp:<level> tag → n.tlp
+                # 2026-10: tlp:<level> tag → n.tlp; a curated attribute leaves the node's own TLP
+                "tlp": "" if curated_claims is not None else _extract_tlp_tag(tags),
                 "uses_techniques": uses_techniques,
                 "reported_techniques": reported_techniques,
                 "pulse_id": malware_pulse_id,
@@ -3980,6 +4102,16 @@ class MISPToNeo4jSync:
             # "MISP returned 0 events" from "sync_to_neo4j was never called".
             logger.info("[NEO4J SYNC] no items received — skipping (empty MISP window or no parsable attributes)")
             return 0, 0, []
+
+        # 2026-10 (curated packages): a curated attribute only names an existing node — it is
+        # never merged (MERGE would create the node if the package named one the graph lacks).
+        # Its claims are written by the caller as MATCH-only relationships.
+        curated = sum(1 for i in items if i.get("curated"))
+        if curated:
+            items = [i for i in items if not i.get("curated")]
+            logger.info("[NEO4J SYNC] %d curated package attribute(s): relationships only, no node merge", curated)
+            if not items:
+                return 0, 0, []
 
         indexed = list(enumerate(items))
         indexed.sort(key=lambda iv: (_neo4j_sync_item_sort_rank(iv[1]), iv[0]))

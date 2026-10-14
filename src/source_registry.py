@@ -158,6 +158,10 @@ class Source:
     rate_limit: str = "unlimited"
     cli_default_enabled: bool = True
     cli_description: str = ""
+    # Curated sources (2026-10): the evidence label (``r.match_type``) of the claims a package
+    # curated by this source carries, e.g. ``coreideas_curated``. ``None`` for feeds; a curated
+    # package from a source without one gets ``CURATED_OTHER_LABEL``.
+    curated_label: Optional[str] = None
     # Optional override for the CLI listing's "name" column. Defaults
     # to display_name when unset. The only source that uses this today
     # is NVD: the historical CLI listing called it "National
@@ -422,6 +426,7 @@ _REGISTRY: Tuple[Source, ...] = (
         misp_tag="source:CoreIdeas",
         # A curated claim has no first-observed date of its own.
         reliable_first_seen=False,
+        curated_label="coreideas_curated",
     ),
     Source(
         canonical_id="misp_galaxy",
@@ -702,6 +707,21 @@ def misp_tag_to_canonical_map() -> Dict[str, str]:
         name = src.misp_tag[len("source:") :] if src.misp_tag.startswith("source:") else src.misp_tag
         out[name] = src.canonical_id
     return out
+
+
+# Evidence label of a curated claim whose package source has no ``curated_label`` (a curated
+# feed nobody registered): the claim keeps a closed-list label, its ``r.sources`` the real name.
+CURATED_OTHER_LABEL = "curated_other"
+
+
+def curated_label_for(source: Optional[str]) -> str:
+    """The ``r.match_type`` of claims in a curated package from ``source`` (2026-10).
+
+    The registered source's ``curated_label`` (``coreideas`` → ``coreideas_curated``), else
+    ``curated_other`` — the label list stays closed whatever package arrives.
+    """
+    src = get_source(source) if source else None
+    return (src.curated_label if src and src.curated_label else None) or CURATED_OTHER_LABEL
 
 
 def canonical_source_id(name: Optional[str]) -> Optional[str]:

@@ -24,7 +24,7 @@ All fragments use double quotes only: they run inside single-quoted
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Dict, Sequence, Tuple
 
 # Cap on ``r.misp_event_ids`` per edge; same value as
 # ``build_relationships.CRITICAL_MAX_EVENT_IDS_PER_EDGE`` (pinned by a test).
@@ -123,3 +123,21 @@ def aggregated_prov_set(rel_var: str, pattern: str, edge_var: str, max_events: i
         f"{rel_var}.source_refs = {union('source_refs')}, "
         f"{rel_var}.misp_event_ids = {union('misp_event_ids')}[0..{max_events}]"
     )
+
+
+# ---------------------------------------------------------------------------
+# Curated packages (2026-10)
+# ---------------------------------------------------------------------------
+# The claims a curated package may carry, by predicate and subject label:
+# (relationship type, object label, object key). Shared by the MISP→Neo4j sync (which turns
+# claims into relationships) and ``scripts/import_curated_package.py`` (which validates a
+# package before it reaches MISP).
+CURATED_PREDICATES: Dict[str, Dict[str, Tuple[str, str, str]]] = {
+    "uses_technique": {"ThreatActor": ("EMPLOYS_TECHNIQUE", "Technique", "mitre_id")},
+    "implements_technique": {"Malware": ("IMPLEMENTS_TECHNIQUE", "Technique", "mitre_id")},
+    "uses_malware": {"ThreatActor": ("USES_MALWARE", "Malware", "name")},
+    "uses_tool": {"ThreatActor": ("USES_TOOL", "Tool", "mitre_id")},
+    "exploits": {"ThreatActor": ("EXPLOITS", "CVE", "cve_id"), "Malware": ("EXPLOITS", "CVE", "cve_id")},
+}
+CURATED_CLAIMS_PREFIX = "CURATED_CLAIMS:"
+CURATED_CLAIM_CONFIDENCE = 0.85
