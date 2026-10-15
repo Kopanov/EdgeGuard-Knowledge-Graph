@@ -850,7 +850,7 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
    docker compose exec airflow airflow dags trigger edgeguard_neo4j_sync --conf '{"force_sync": true}'
    ```
 
-   `run_neo4j_sync` consumes the Variable (sets it back to `false`) and runs a full sync; `force_sync` bypasses `check_sync_needed` ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), `edgeguard_neo4j_sync`). Every NVD attribute sets its CVE's description and dates again, and the KEV and CISA ICS records (and an `OTX_META` block's own `description` field, where it has one) fill the descriptions step 2 removed; a CVE that only OTX names keeps none. The run re-merges every attribute in MISP and takes about as long as the full sync of a baseline.
+   `run_neo4j_sync` runs a full sync and clears the Variable once it succeeded ("Requesting a full MISP → Neo4j sync"); `force_sync` bypasses `check_sync_needed` ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), `edgeguard_neo4j_sync`). Every NVD attribute sets its CVE's description and dates again, and the KEV and CISA ICS records (and an `OTX_META` block's own `description` field, where it has one) fill the descriptions step 2 removed; a CVE that only OTX names keeps none. The run re-merges every attribute in MISP and takes about as long as the full sync of a baseline.
 
 4. **Check.** Step 1 returns no rows, and a CVE that NVD, OTX and the KEV all name shows NVD's text and dates:
 
