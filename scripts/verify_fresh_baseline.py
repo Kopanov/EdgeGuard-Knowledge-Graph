@@ -13,7 +13,14 @@ CVE list properties are on the ``CVE`` node (judged on CVEs NVD has had time to
 analyse — see check 4), the ATT&CK entries that the MISP
 import rule used to mangle are present, OTX actor names are clean, ``tlp`` and the
 ``edgeguard_managed`` marker are on every EdgeGuard node and edge, ICS techniques
-link only to ICS tactics, and the ResilMesh-facing schema is unchanged.
+link only to ICS tactics, and the ResilMesh-facing schema is unchanged. Since the
+relationship-provenance, campaign-membership and CVE-score changes of 2026-10 it also
+checks that every relationship type carries the provenance properties its writers
+guarantee and none of the dropped ``source_id`` / ``source_ids`` / ``report_ids``,
+that campaign membership is ``PART_OF_CAMPAIGN`` (``PART_OF`` stays ResilMesh's), that a
+CVE's ``cvss_score`` / ``cvss_version`` / ``severity`` come from its CVSS sub-nodes, and
+it reports the ``SOURCED_FROM`` count of every ``Source`` node, warning when a source
+collected by default delivered nothing.
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -29,7 +36,8 @@ Usage:
   python scripts/verify_fresh_baseline.py --require-malwarebazaar   # after enabling that source
 
 Exit code 0 = every mandatory check passed; 1 = at least one failed; 2 = could
-not reach Neo4j.
+not reach Neo4j. A warning (``[WARN]``; ``ok: false`` with ``mandatory: false`` in the
+JSON) is reported and leaves the exit code unchanged.
 """
 
 from __future__ import annotations
@@ -42,7 +50,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
 BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
@@ -113,6 +121,53 @@ EDGEGUARD_REL_TYPES = (
 # per-source node edge, ``r.source``), not INVOLVES (alert edges carry no source claim) and not
 # PART_OF (ResilMesh's asset hierarchy).
 PROVENANCE_REL_TYPES = tuple(t for t in EDGEGUARD_REL_TYPES if t not in ("SOURCED_FROM", "INVOLVES", "PART_OF"))
+# What each relationship type is guaranteed to carry, by the writers of the baseline DAG (2026-10
+# relationship provenance; a test derives the same table from the writers' Cypher). A list may be
+# empty — ``misp_event_ids`` of a link whose records name no MISP event, ``source_refs`` of a feed
+# keyed by the value itself — so the contract is presence; ``relationships_name_their_source``
+# additionally requires ``sources`` to be non-empty.
+_PROVENANCE_LISTS = ("sources", "source_refs", "misp_event_ids")
+# ``enrichment_jobs``: the campaign links (RUNS, PART_OF_CAMPAIGN) inherit the lists of the links
+# they are built from, the Vulnerability ↔ CVE bridge (REFERS_TO) takes the vulnerability record's;
+# none states an evidence label.
+_INHERITED_REL_TYPES = ("RUNS", "PART_OF_CAMPAIGN", "REFERS_TO")
+# ``Neo4jClient._merge_cvss_node``: the feed and the MISP event of the score; no record id (the CVE
+# is the record) and no evidence label.
+_CVSS_REL_TYPES = ("HAS_CVSS_v2", "HAS_CVSS_v30", "HAS_CVSS_v31", "HAS_CVSS_v40")
+REL_PROVENANCE_CONTRACT: Dict[str, Tuple[str, ...]] = {
+    # Every other provenance type is written by ``build_relationships``
+    # (``relationship_provenance.prov_set``) and/or the sync (``create_misp_relationships_batch``),
+    # both of which also state the evidence (``match_type``).
+    **{
+        t: _PROVENANCE_LISTS + ("match_type",)
+        for t in PROVENANCE_REL_TYPES
+        if t not in _INHERITED_REL_TYPES + _CVSS_REL_TYPES
+    },
+    **{t: _PROVENANCE_LISTS for t in _INHERITED_REL_TYPES},
+    **{t: ("sources", "misp_event_ids") for t in _CVSS_REL_TYPES},
+    # The per-source edge of a node: the source id (``source``, a string), the source's record ids
+    # and the MISP events that carried the node.
+    "SOURCED_FROM": ("source", "source_refs", "misp_event_ids"),
+}
+# One pass over the relationships, one row per type, for checks 12b and 12c: how many edges
+# EdgeGuard manages, how many of those carry each contract property (``source`` only as a string,
+# the scalar it must stay), how many have an empty ``misp_event_ids``, and how many edges carry a
+# key dropped in 2026-10 (``source_id``, ``source_ids``, ``report_ids``).
+_REL_PROVENANCE_SCAN = (
+    "MATCH ()-[r]->() RETURN type(r) AS type, count(*) AS edges, "
+    "sum(CASE WHEN r.edgeguard_managed = true THEN 1 ELSE 0 END) AS managed, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.sources IS NOT NULL THEN 1 ELSE 0 END) AS with_sources, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.source_refs IS NOT NULL THEN 1 ELSE 0 END) AS with_source_refs, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.misp_event_ids IS NOT NULL THEN 1 ELSE 0 END) "
+    "AS with_misp_event_ids, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.match_type IS NOT NULL THEN 1 ELSE 0 END) AS with_match_type, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.source IS NOT NULL "
+    "THEN CASE apoc.meta.cypher.type(r.source) WHEN 'STRING' THEN 1 ELSE 0 END ELSE 0 END) AS with_source, "
+    "sum(CASE WHEN r.edgeguard_managed = true AND r.misp_event_ids = [] THEN 1 ELSE 0 END) AS empty_misp_event_ids, "
+    "sum(CASE WHEN r.source_id IS NOT NULL OR r.source_ids IS NOT NULL OR r.report_ids IS NOT NULL "
+    "THEN 1 ELSE 0 END) AS legacy_keys "
+    "ORDER BY type"
+)
 # Labels parsed from MISP attributes — the only nodes that carry ``tlp`` (the tag travels
 # with the attribute). Source/Sector/Campaign/CVSS* and the ResilMesh-model nodes written
 # on alert ingestion (Host, IP, Alert, …) are marker-stamped when EdgeGuard creates them but
@@ -128,6 +183,35 @@ _MANGLED_TOOLS_HINT = (
 _NVD_ANALYSIS_LAG_DAYS = 45
 _MIN_ANALYSED_CVES = 100
 _MANGLED_TOOLS = ("S0005",)
+# CVE score (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from the first of
+# its CVSS sub-nodes, in this order, whose ``base_score`` is a number in [0, 10]; without one the
+# score and version are null and the severity is UNKNOWN (``cvss_selection.CVSS_VERSIONS``,
+# ``Neo4jClient._cve_cvss_selection_cypher``; both pinned by a test).
+_CVSS_SELECTION_ORDER = (
+    ("HAS_CVSS_v31", "CVSSv31", "3.1"),
+    ("HAS_CVSS_v30", "CVSSv30", "3.0"),
+    ("HAS_CVSS_v2", "CVSSv2", "2.0"),
+    ("HAS_CVSS_v40", "CVSSv40", "4.0"),
+)
+_CVSS_RATINGS = ("NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL")
+_CVE_BEST_CVSS = (
+    "head([p IN ["
+    + ", ".join(
+        f"[head([(c)-[:{rel}]->(x:{label}) WHERE x.base_score >= 0.0 AND x.base_score <= 10.0 | x]), '{version}']"
+        for rel, label, version in _CVSS_SELECTION_ORDER
+    )
+    + "] WHERE p[0] IS NOT NULL]) AS best"
+)
+# Per-source presence (2026-10): the canonical ``Source.source_id`` of every collector, by how a
+# default deployment runs it (``src/source_registry.py``, the collector flags in ``src/config.py``,
+# the keys in ``src/source_key_check.py``; pinned by a test). Collected by default, without a key
+# or a flag (NVD also answers without a key, at a lower rate):
+DEFAULT_SOURCES = ("cisa_kev", "mitre_attck", "nvd", "urlhaus", "feodo_tracker", "ssl_blacklist")
+# Skipped by design without an API key; this script cannot see which keys the deployment holds.
+KEYED_SOURCES = ("alienvault_otx", "virustotal", "threatfox", "abuseipdb")
+# Off unless EDGEGUARD_ENABLE_CISA_ICS / EDGEGUARD_ENABLE_MALWAREBAZAAR is set; judged by
+# --require-cisa-ics / --require-malwarebazaar.
+FLAG_GUARDED_SOURCES = ("cisa_ics", "malwarebazaar")
 
 
 def _post(statement: str, params: Optional[Dict[str, Any]] = None, timeout: int = 180) -> List[Dict[str, Any]]:
@@ -150,12 +234,17 @@ class Report:
         self.checks: List[Dict[str, Any]] = []
 
     def add(self, name: str, ok: Optional[bool], detail: Any, mandatory: bool = True) -> None:
-        """``ok=None`` means informational (no pass/fail)."""
+        """``ok=None`` means informational (no pass/fail); ``ok=False`` on a check that is not
+        mandatory is a warning: reported, the exit code unchanged."""
         self.checks.append({"check": name, "ok": ok, "mandatory": mandatory, "detail": detail})
 
     @property
     def failed(self) -> List[Dict[str, Any]]:
         return [c for c in self.checks if c["mandatory"] and c["ok"] is False]
+
+    @property
+    def warnings(self) -> List[Dict[str, Any]]:
+        return [c for c in self.checks if not c["mandatory"] and c["ok"] is False]
 
 
 def _one(statement: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -256,11 +345,19 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     )
     rep.add("no_composite_actor_names", r.get("c") == 0, r)
 
-    # 7. TLP on every node parsed from a MISP attribute.
+    # 7. TLP on every node parsed from a MISP attribute. Since 2026-10 the sync gives a MISP
+    #    attribute without a ``tlp:`` tag the level ``EDGEGUARD_DEFAULT_TLP`` and logs
+    #    ``[TLP] MISP attribute <uuid> has no tlp: tag``, so a lost tag no longer fails this check:
+    #    it shows in the sync log. The check still fails for a node of these labels that a writer
+    #    left without ``tlp``.
     r = _one(
         "MATCH (n) WHERE n.edgeguard_managed = true AND any(l IN labels(n) WHERE l IN $labels) "
         "RETURN count(n) AS total, sum(CASE WHEN n.tlp IS NULL THEN 1 ELSE 0 END) AS missing",
         {"labels": list(_TLP_LABELS)},
+    )
+    r["note"] = (
+        "a MISP attribute without a tlp: tag syncs with EDGEGUARD_DEFAULT_TLP; lost tags show in the sync log "
+        "as '[TLP] MISP attribute <uuid> has no tlp: tag'"
     )
     rep.add("tlp_on_every_node", (r.get("total") or 0) > 0 and r.get("missing") == 0, r)
 
@@ -430,6 +527,106 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         "UNWIND r.sources AS s RETURN type(r) AS type, s AS source, count(*) AS c ORDER BY type, c DESC"
     )
     rep.add("relationship_sources_breakdown", None, by_source)
+
+    # 12b. Provenance per relationship type (2026-10): every EdgeGuard edge carries what
+    #      ``REL_PROVENANCE_CONTRACT`` says the writers of its type guarantee. One pass over the
+    #      relationships, one row per relationship type; a type outside the contract (ResilMesh's,
+    #      INVOLVES, PART_OF) is not judged. Presence is judged, not content: an empty
+    #      ``misp_event_ids`` list is legitimate (a same-pulse ATTRIBUTED_TO whose malware and actor
+    #      records share no MISP event, a campaign link built on such links) and only counted.
+    rel_rows = _post(_REL_PROVENANCE_SCAN)
+    missing = [
+        {"type": x["type"], "property": p, "edges": (x.get("managed") or 0) - (x.get(f"with_{p}") or 0)}
+        for x in rel_rows
+        for p in REL_PROVENANCE_CONTRACT.get(x["type"], ())
+        if (x.get(f"with_{p}") or 0) < (x.get("managed") or 0)
+    ]
+    checked = sum(x.get("managed") or 0 for x in rel_rows if x["type"] in REL_PROVENANCE_CONTRACT)
+    rep.add(
+        "relationship_provenance_complete",
+        None if checked == 0 else not missing,
+        {
+            "missing_by_type": missing,
+            "edges_checked": checked,
+            "empty_misp_event_ids_by_type": [
+                {"type": x["type"], "edges": x["empty_misp_event_ids"]}
+                for x in rel_rows
+                if x.get("empty_misp_event_ids")
+            ],
+        },
+    )
+
+    # 12c. The relationship keys dropped in 2026-10 stay dropped: no ``source_id`` (last writer
+    #      wins), ``source_ids`` (evidence names) or ``report_ids`` (OTX only) on a relationship of
+    #      an EdgeGuard type; other types are reported, never failed on. ``Source`` nodes keep
+    #      ``source_id``: it is their key, and every ``SOURCED_FROM`` write matches on it.
+    source_rows = _post(
+        "MATCH (s:Source) RETURN s.source_id AS source_id, COUNT { (s)<-[:SOURCED_FROM]-() } AS sourced_from "
+        "ORDER BY source_id"
+    )
+    legacy = [{"type": x["type"], "edges": x["legacy_keys"]} for x in rel_rows if x.get("legacy_keys")]
+    keyless = sum(1 for x in source_rows if x.get("source_id") is None)
+    rep.add(
+        "no_legacy_relationship_properties",
+        not [x for x in legacy if x["type"] in EDGEGUARD_REL_TYPES] and keyless == 0,
+        {"legacy_keys_by_type": legacy, "source_nodes_without_source_id": keyless, "source_nodes": len(source_rows)},
+    )
+
+    # 13. Campaign membership (2026-10): Malware / Indicator -[:PART_OF_CAMPAIGN]-> Campaign.
+    #     ``PART_OF`` is ResilMesh's (IP → Subnet, the OrganizationUnit hierarchy); EdgeGuard used
+    #     it for campaign membership until 2026-10, so none may end at a Campaign.
+    r = _one(
+        "RETURN COUNT { ()-[:PART_OF]->(:Campaign) } AS part_of_to_campaign, "
+        "COUNT { (n)-[:PART_OF_CAMPAIGN]->(c) WHERE NOT c:Campaign OR NOT (n:Malware OR n:Indicator) } "
+        "AS part_of_campaign_misplaced, "
+        "COUNT { ()-[:PART_OF_CAMPAIGN]->() } AS part_of_campaign, COUNT { ()-[:PART_OF]->() } AS part_of"
+    )
+    rep.add(
+        "campaign_membership_is_part_of_campaign",
+        r.get("part_of_to_campaign") == 0 and r.get("part_of_campaign_misplaced") == 0,
+        r,
+    )
+
+    # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
+    #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and
+    #     version are that sub-node's and the severity a CVSS rating; without one, score and
+    #     version are null and the severity is UNKNOWN (before 2026-10 an unscored CVE read 3.0 /
+    #     LOW, and the record merged last set the score). EdgeGuard-created CVEs only;
+    #     informational while there is no CVE (the per-source check below names the silent source).
+    r = _one(
+        f"MATCH (c:CVE) WHERE c.edgeguard_managed = true WITH c, {_CVE_BEST_CVSS} "
+        "RETURN count(c) AS cves, sum(CASE WHEN best IS NULL THEN 0 ELSE 1 END) AS with_cvss, "
+        "sum(CASE WHEN best IS NOT NULL AND (c.cvss_score IS NULL OR c.cvss_version IS NULL) "
+        "THEN 1 ELSE 0 END) AS scored_without_score, "
+        "sum(CASE WHEN best IS NOT NULL AND c.cvss_score IS NOT NULL AND c.cvss_version IS NOT NULL "
+        "AND (c.cvss_score <> best[0].base_score OR c.cvss_version <> best[1] "
+        "OR NOT coalesce(c.severity, '') IN $ratings) THEN 1 ELSE 0 END) AS score_not_from_cvss, "
+        "sum(CASE WHEN best IS NULL AND (c.cvss_score IS NOT NULL OR c.cvss_version IS NOT NULL "
+        "OR coalesce(c.severity, '') <> 'UNKNOWN') THEN 1 ELSE 0 END) AS unscored_with_score",
+        {"ratings": list(_CVSS_RATINGS)},
+    )
+    defects = ("scored_without_score", "score_not_from_cvss", "unscored_with_score")
+    rep.add("cve_score_from_cvss", None if not r.get("cves") else all(r.get(k) == 0 for k in defects), r)
+
+    # 15. Per-source presence (2026-10): the ``SOURCED_FROM`` count of every ``Source`` node (the
+    #     rows of 12c; alias nodes such as ``otx`` or ``cisa`` are listed too). A source collected by
+    #     default that delivered nothing is a warning, not a failure: an upstream outage skips its
+    #     collector without failing the run, and the collector's task log says why. A keyed source
+    #     is skipped by design without its API key, a flag-guarded one without its flag (judged by
+    #     ``--require-cisa-ics`` / ``--require-malwarebazaar``); both are only listed.
+    delivered = {x.get("source_id"): x.get("sourced_from") or 0 for x in source_rows}
+    silent = [s for s in DEFAULT_SOURCES if not delivered.get(s)]
+    rep.add(
+        "default_sources_delivered",
+        not silent,
+        {
+            "default_sources_without_data": silent,
+            "keyed_sources_without_data": [s for s in KEYED_SOURCES if not delivered.get(s)],
+            "flag_guarded_sources_without_data": [s for s in FLAG_GUARDED_SOURCES if not delivered.get(s)],
+            "sourced_from_by_source": source_rows,
+        },
+        mandatory=False,
+    )
     return rep
 
 
@@ -461,10 +658,18 @@ def main() -> int:
         print(json.dumps(result, indent=2, default=str))
     else:
         for c in rep.checks:
-            mark = "INFO" if c["ok"] is None else ("PASS" if c["ok"] else "FAIL")
+            if c["ok"] is None:
+                mark = "INFO"
+            elif c["ok"]:
+                mark = "PASS"
+            else:
+                mark = "FAIL" if c["mandatory"] else "WARN"
             detail = json.dumps(c["detail"], default=str)
             print(f"[{mark}] {c['check']}: {detail[:300]}")
-        print("\nRESULT:", "PASS" if result["passed"] else f"FAIL ({len(rep.failed)} mandatory check(s) failed)")
+        verdict = "PASS" if result["passed"] else f"FAIL ({len(rep.failed)} mandatory check(s) failed)"
+        if rep.warnings:
+            verdict += f"; {len(rep.warnings)} warning(s): " + ", ".join(c["check"] for c in rep.warnings)
+        print("\nRESULT:", verdict)
     return 0 if result["passed"] else 1
 
 
