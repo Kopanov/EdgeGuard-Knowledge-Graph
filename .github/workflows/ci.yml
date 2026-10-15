@@ -1,4 +1,4 @@
-# Runs ruff, mypy, pytest (with coverage), Docker build, and pip-audit on pushes/PRs.
+# Runs ruff, mypy, pytest (with coverage), a Neo4j integration test, Docker build, and pip-audit on pushes/PRs.
 name: CI
 
 on:
@@ -80,6 +80,53 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  # ── Real Neo4j: the actor alias merge ─────────────────────────────────────
+  # Mocked sessions cannot show what APOC's mergeNodes does to property types (its "combine" stores
+  # equal values as one string). This job runs the merge on a throwaway Neo4j with APOC, from the
+  # image docker-compose.yml deploys. The password exists only inside this job's container.
+  neo4j-integration:
+    name: Neo4j integration (actor alias merge)
+    runs-on: ubuntu-latest
+    services:
+      neo4j:
+        image: neo4j:2026.03.1-community
+        env:
+          NEO4J_AUTH: neo4j/edgeguard-ci-only
+          NEO4J_PLUGINS: '["apoc"]'
+          NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+          NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p edgeguard-ci-only 'RETURN 1'"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 40
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3 (node24)
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0 (node24)
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dev dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run the integration tests
+        env:
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USER: neo4j
+          NEO4J_PASSWORD: edgeguard-ci-only
+          MISP_URL: https://misp.local
+          MISP_API_KEY: test-key-12345678901234567890
+          EDGEGUARD_IT_NEO4J_URI: bolt://localhost:7687
+          EDGEGUARD_IT_NEO4J_USER: neo4j
+          EDGEGUARD_IT_NEO4J_PASSWORD: edgeguard-ci-only
+          EDGEGUARD_IT_NEO4J_REQUIRED: "1"
+        run: pytest tests/test_actor_alias_merge_neo4j.py -v -rs
 
   # ── Docker build + image vulnerability scan ───────────────────────────────
   docker:

@@ -301,7 +301,7 @@ Runs `src/build_relationships.py` to create or refresh all cross-source graph re
 Runs `src/enrichment_jobs.py` — **five** jobs in sequence (`run_all_enrichment_jobs`):
 
 1. **Vulnerability↔CVE bridge** (`bridge_vulnerability_cve` — `REFERS_TO`)
-1b. **Actor alias merge** (`merge_alias_duplicate_actors`, 2026-10 — folds non-MITRE actors named by an alias of exactly one MITRE actor into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`)
+1b. **Actor alias merge** (`merge_alias_duplicate_actors`, 2026-10 — folds non-MITRE actors named by an alias of exactly one MITRE actor, or resolved by the canonical threat-actor reference to another actor on the graph, into that node; `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`, `EDGEGUARD_CANONICAL_THREAT_ACTORS`)
 2. **Campaign nodes** (`build_campaign_nodes`)
 3. **Co-occurrence calibration** (`calibrate_cooccurrence_confidence`; legacy — no-op since 2026-10, no `misp_cooccurrence` edges are written)
 4. **IOC confidence decay** (`decay_ioc_confidence` — idempotent last step)

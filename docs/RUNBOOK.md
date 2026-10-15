@@ -713,6 +713,51 @@ Only curated claims set `r.tlp`, so step 2 removes it. A link the package create
 
 In Neo4j the claims are relationships like any other: the API routes that traverse relationships (for example `GET /actors/{name}/summary` and `/graph/explore`) and the STIX bundles expose them (2026-10: a STIX relationship names the curated source in `x_edgeguard_sources` and is marked with at least the package's TLP level; `x_edgeguard_match_type` shows the curated label only on a link the package created). No export filter by source exists, so import a package only on an instance whose API consumers may receive its claims.
 
+## Canonical threat-actor reference (2026-10)
+
+The actor alias merge (`merge_alias_duplicate_actors`) reads `src/reference/canonical_threat_actors.json`. At each run it logs `[ACTOR-ALIAS-MERGE] canonical reference <version>: <n> actors`. The warning `canonical reference unavailable (<reason>); merging by MITRE aliases only` means the file is missing, unreadable, larger than 16 MB, of another `schema_version` or inconsistent, or that its data could not be applied to the graph's names. The merge then runs on ATT&CK aliases alone; restore the file (or `EDGEGUARD_CANONICAL_THREAT_ACTORS`) and the next run uses it again.
+
+The job's other warnings name pairs it did not merge:
+
+- `(ambiguous)`: the name is an ATT&CK alias of several groups;
+- `(conflict)`: the ATT&CK aliases and the reference name different canonical actors, or the reference keeps the name as an actor of its own;
+- `(blocked)`: the name is an ATT&CK alias of a group, but the reference marks it ambiguous or never_merge;
+- `(chain)`: the node is also a canonical in the same run.
+
+A conflict or a blocked pair after an ATT&CK release usually means the reference predates the release: rebuild it (below). The final line, `[ACTOR-ALIAS-MERGE] complete — …`, counts each kind.
+
+**Rebuilding.** The inputs are:
+
+- the threat-actor entities export of the MISP galaxies;
+- the raw mitre-intrusion-set galaxy dump it was built from (ATT&CK revocations);
+- an export of the graph's `ThreatActor` nodes, which is read-only and is kept outside the repository. Its ATT&CK-sourced nodes are the ATT&CK version EdgeGuard loaded. Their aliases are read from the record MITRE delivered (the node's `SOURCED_FROM` edge to the ATT&CK source), not from the node: the node's `aliases` also hold every name the merge folded in, which are no ATT&CK claims. An export made before 2026-10-15 lacks these aliases and is refused;
+- `src/reference/canonical_threat_actor_overrides.json`.
+
+```bash
+python scripts/build_canonical_threat_actors.py --export-graph-actors /tmp/graph_threat_actors.json
+python scripts/build_canonical_threat_actors.py --galaxy galaxy_threat_actors_<date>.json \
+    --attack-galaxy-raw misp_galaxy_mitre-intrusion-set_<date>.json \
+    --graph-actors /tmp/graph_threat_actors.json --unresolved-out /tmp/unresolved_actors.json
+```
+
+The version defaults to the build date. The same inputs and version give a byte-identical file. Review the printed report before committing:
+
+- the revoked folds and the ATT&CK groups anchored from the loaded version;
+- the 360net-threat-actor records left out because they join no ATT&CK actor;
+- the duplicate groups the merge would fold, and the ATT&CK aliases the reference resolves elsewhere (the merge skips those pairs as conflicts or blocked);
+- the spelling variants, the spellings of one name that two actors held (made ambiguous), and the suffix-rule short forms, including those another actor held by a galaxy synonym;
+- every override decision with its effect.
+
+Add or change decisions only in the overrides file, with a reason, a date and `"status": "proposed"` until reviewed. A rebuild keeps them. `tests/test_canonical_threat_actors.py` fails when the overrides file changed after the last build.
+
+**At each ATT&CK release.** After the MITRE collector has loaded the new release, export the graph again and rebuild. In the report's canonical-key check, every ATT&CK node must be either a canonical key or a revoked group that resolves to its successor. Then look at:
+
+- groups the new release renamed, which take the loaded name;
+- new groups, anchored by name;
+- ATT&CK aliases that now resolve elsewhere.
+
+When the release revokes groups, take a new MISP galaxy dump as well, so that the revocations are folded.
+
 ## Retrieving raw MISP data from a Neo4j node
 
 Three complementary retrieval paths exist for every MISP-sourced node
@@ -888,7 +933,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-10-15 — failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._
