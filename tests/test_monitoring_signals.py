@@ -580,7 +580,7 @@ class TestDagRunInProgress:
         for dag in dags.values():
             assert dag.tasks, dag.dag_id
             for task in dag.tasks:
-                # DAG_LAST_SUCCESS (EdgeGuardDAGLastSuccessStale, EdgeGuardBuildRelationshipsSilentDeath).
+                # DAG_LAST_SUCCESS (EdgeGuardDAGLastSuccessStale).
                 assert dag_module._on_task_success in _callbacks(task.on_success_callback), task.task_id
 
     def test_the_former_series_is_no_longer_read_or_written(self):
@@ -689,6 +689,58 @@ class TestBuildRelationshipsSilentDeath:
         metrics_server.record_build_relationships_completion()
         after = _sample("edgeguard_build_relationships_last_completion_timestamp")
         assert after is not None and after > before and abs(after - time.time()) < 5
+
+
+class TestFullSyncRequestPendingAlert:
+    """2026-10: run_neo4j_sync's failure callback counts a requested full sync (``NEO4J_FULL_SYNC``) that
+    failed on its last attempt; no rule read that series, so the request could keep every scheduled run
+    a full sync, with no incremental sync, without an alert."""
+
+    _LABELS = {"task": "run_neo4j_sync", "error_type": "full_sync_request_pending", "source": "edgeguard_neo4j_sync"}
+
+    def test_the_rule_reads_the_series_the_failure_callback_counts(
+        self, dag_module, dags, compose_metrics, monkeypatch
+    ):
+        class _Pending(_StubVariable):
+            @staticmethod
+            def get(key, default=None):
+                return "true" if key == "NEO4J_FULL_SYNC" else default
+
+        monkeypatch.setattr(dag_module, "Variable", _Pending)
+        monkeypatch.setattr(dag_module, "PIPELINE_ERRORS", metrics_server.PIPELINE_ERRORS, raising=False)
+        monkeypatch.setattr(dag_module, "_on_task_failure", lambda context: None)
+        monkeypatch.setattr(dag_module, "ENABLE_SLACK_ALERTS", False)
+        before = _sample("edgeguard_pipeline_errors_total", self._LABELS) or 0
+        dag_module._on_neo4j_sync_failure(
+            {"dag": dags["edgeguard_neo4j_sync"], "task_instance": SimpleNamespace(task_id="run_neo4j_sync")}
+        )
+        assert _sample("edgeguard_pipeline_errors_total", self._LABELS) == before + 1
+
+        rule = _rule("EdgeGuardNeo4jFullSyncRequestPending")
+        selectors = re.findall(r"\b(edgeguard_\w+)\{([^}]*)\}", rule["expr"])
+        assert len(selectors) == 3, "the increase clause and both sides of the first-failure clause"
+        wanted = {k: v for k, v in self._LABELS.items() if k != "source"}
+        for metric, matchers in selectors:
+            assert metric == "edgeguard_pipeline_errors_total"
+            assert dict(re.findall(r'(\w+)="([^"]*)"', matchers)) == wanted
+        # Every alert names metrics src/metrics_server.py defines.
+        assert '"edgeguard_pipeline_errors_total"' in (_SRC / "metrics_server.py").read_text()
+
+    def test_the_first_failure_fires_and_the_window_is_the_sync_interval(self):
+        rule = _rule("EdgeGuardNeo4jFullSyncRequestPending")
+        selector = 'edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"}'
+        assert _norm(rule["expr"]) == (
+            f"sum by (source) ( increase({selector}[3d]) ) > 0 or "
+            f"( sum by (source) ({selector}) unless sum by (source) ({selector} offset 3d) )"
+        ), "increase() is 0 for a new series: the second clause catches the first failure"
+        assert rule["for"] == "0m" and rule["labels"]["severity"] == "warning"
+
+    def test_the_docs_name_it(self):
+        table = (_ROOT / "docs" / "PROMETHEUS_SETUP.md").read_text()
+        assert "| `EdgeGuardNeo4jFullSyncRequestPending` |" in table
+        runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()
+        section = runbook.split("## Requesting a full MISP → Neo4j sync", 1)[1].split("\n## ", 1)[0]
+        assert "`EdgeGuardNeo4jFullSyncRequestPending`" in section
 
 
 def _write_state(state_dir: Path, last_sync: datetime) -> None:

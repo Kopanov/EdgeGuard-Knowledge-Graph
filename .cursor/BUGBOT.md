@@ -936,7 +936,7 @@ Current correct values:
 | `edgeguard_medium_freq` | 5h |
 | `edgeguard_low_freq` | 8h 30m |
 | `edgeguard_daily` | 8h 30m |
-| `edgeguard_neo4j_sync` | 22h |
+| `edgeguard_neo4j_sync` | 68h |
 | `edgeguard_baseline` | 32h |
 
 ### Every task must have `execution_timeout`
@@ -982,7 +982,7 @@ if self.neo4j.merge_vulnerability(item, ...):
 
 ### Prometheus stuck-run alerts require gauge wiring
 
-The `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` and `EdgeGuardBuildRelationshipsSilentDeath` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_in_progress_start_timestamp` (2026-10; formerly `edgeguard_dag_run_start_timestamp`; set by the listener plugin `plugins/edgeguard_dag_run_state.py`) and `edgeguard_dag_last_success_timestamp` (set by `_on_task_success`) being written. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback`, of the listener plugin or its compose mount, or of the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.
+The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_in_progress_start_timestamp` (2026-10; formerly `edgeguard_dag_run_start_timestamp`; set by the listener plugin `plugins/edgeguard_dag_run_state.py`) and `edgeguard_dag_last_success_timestamp` (set by `_on_task_success`) being written. `EdgeGuardBuildRelationshipsSilentDeath` (2026-10) compares `edgeguard_neo4j_sync_last_success_timestamp` (stamped by `record_neo4j_sync` after a successful sync, scheduled or baseline) with `edgeguard_build_relationships_last_completion_timestamp` (stamped by `record_build_relationships_completion` at build_relationships' SUMMARY line). If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback`, of the listener plugin or its compose mount, of the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions, or of either stamp call without also removing the corresponding alerts.
 
 ---
 

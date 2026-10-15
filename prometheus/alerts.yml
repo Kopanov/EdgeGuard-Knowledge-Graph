@@ -301,7 +301,36 @@ groups:
           component: neo4j
         annotations:
           summary: "Neo4j sync is stale"
-          description: "No MISP to Neo4j sync has completed in over 144 hours (two 3-day sync intervals)."
+          description: "No MISP to Neo4j sync has completed in over 145 hours: the longest gap the 3-day schedule leaves between two syncs, plus every attempt of the sync task."
+
+      - alert: EdgeGuardNeo4jFullSyncRequestPending
+        # 2026-10: a requested full sync (Airflow Variable NEO4J_FULL_SYNC=true) that failed on its last
+        # attempt leaves the Variable set: every scheduled run of edgeguard_neo4j_sync is a full sync
+        # again and no incremental sync runs until one succeeds. run_neo4j_sync's failure callback
+        # (_on_neo4j_sync_failure) logs it at ERROR, sends it to Slack when enabled and counts it here,
+        # once per failed run. The 3-day window is the sync's schedule interval: a request that keeps
+        # failing is reported again at the next failed run.
+        #
+        # Second clause, as for EdgeGuardSourceAccessDenied: increase() is 0 for a series that has
+        # just been created, and the first failed request creates the series. "Present now, absent 3
+        # days ago" covers that first failure.
+        expr: |
+          sum by (source) (
+            increase(edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"}[3d])
+          ) > 0
+          or
+          (
+            sum by (source) (edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"})
+              unless
+            sum by (source) (edgeguard_pipeline_errors_total{task="run_neo4j_sync", error_type="full_sync_request_pending"} offset 3d)
+          )
+        for: 0m
+        labels:
+          severity: warning
+          component: neo4j
+        annotations:
+          summary: "A requested full MISP to Neo4j sync failed and is still pending"
+          description: "A run of {{ $labels.source }} failed its requested full sync on the last attempt in the last 3 days, leaving NEO4J_FULL_SYNC true: while it stays true, every scheduled run is a full sync again and no incremental sync runs until one succeeds. Fix the cause named in the run_neo4j_sync log, or resume incremental syncs with `airflow variables set NEO4J_FULL_SYNC false` (docs/RUNBOOK.md, \"Requesting a full MISP → Neo4j sync\")."
 
       - alert: EdgeGuardDAGRunFailures
         expr: |
@@ -320,7 +349,7 @@ groups:
       # than this means a run the scheduler did not end (a stalled scheduler), a deleted run, or a
       # listener plugin that is not loaded.
       #   edgeguard_pipeline     5 h 30 min    edgeguard_daily        8 h 30 min
-      #   edgeguard_medium_freq  5 h           edgeguard_neo4j_sync   22 h
+      #   edgeguard_medium_freq  5 h           edgeguard_neo4j_sync   68 h 15 min
       #   edgeguard_low_freq     8 h 30 min    edgeguard_baseline     32 h
       - record: edgeguard:dag_run_max_seconds
         expr: |

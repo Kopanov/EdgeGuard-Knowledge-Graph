@@ -122,7 +122,21 @@ def generate_test_metrics(**context):
     """
     Generate test metrics for demonstration purposes.
     This is useful for testing the Grafana dashboards.
+
+    For a single-process (bare-metal) metrics server only: the values are recorded in the registry of
+    the process that runs this task. 2026-10: with ``PROMETHEUS_MULTIPROC_DIR`` set (the compose
+    deployment) it records nothing and returns False. The directory is shared by every task process
+    and served by the ``metrics`` service, so the fake series would be served as real ones:
+    ``record_neo4j_sync`` stamps ``edgeguard_neo4j_sync_last_success_timestamp``, which
+    ``EdgeGuardNeo4jSyncStale`` and ``EdgeGuardBuildRelationshipsSilentDeath`` read, and the fake
+    collection and source-health series would mix with the real ones.
     """
+    if (os.getenv("PROMETHEUS_MULTIPROC_DIR") or "").strip():
+        logger.warning(
+            "PROMETHEUS_MULTIPROC_DIR is set: test metrics are not generated, they would be served as real "
+            "series by the `metrics` compose service (for example the last successful Neo4j sync)."
+        )
+        return False
     try:
         from metrics_server import (
             record_collection,
@@ -266,6 +280,8 @@ generate_test_metrics_task >> health_check_task
    Only **run_metrics_server** is in that DAG — no parallel tasks racing the HTTP bind.
 
 2. Optional: trigger **edgeguard_metrics_helpers** manually after the server is up — **generate_test_metrics** then **health_check**.
+   **generate_test_metrics** is for a single-process (bare-metal) metrics server only; with
+   PROMETHEUS_MULTIPROC_DIR set (the Compose deployment) it records nothing (2026-10).
 
 3. Prometheus: the repository configuration scrapes the `metrics` compose service as **metrics:8001**
    over edgeguard_net (2026-10). For a server started by this DAG on a bare-metal host, point the
