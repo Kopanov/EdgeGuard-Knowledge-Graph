@@ -254,6 +254,19 @@ class TestJob:
         assert "clear" not in session.kinds() and out["cves_cleared"] == 0
         assert "earlier scores are kept" in caplog.text
 
+    def test_ids_that_no_longer_match_clear_nothing(self, monkeypatch, caplog):
+        # A full-size file whose ids match no node (a changed format): the row count passes any
+        # threshold, the nodes matched do not, so the scores of the graph stay.
+        body = f"#model_version:v1,score_date:{SCORE_DATE}\ncve,epss,percentile\n" + "".join(
+            f"CVE-2020-{n:05d},0.1,0.2\n" for n in range(10001, 10001 + 5001)
+        )
+        _feed(monkeypatch, body)
+        session = FakeSession(scored_before=4_000, matched=0, cves=4_200, cleared=4_000)
+        with caplog.at_level("WARNING", logger="cve_feed_enrichment"):
+            out = cfe.enrich_cve_epss(_client(session))
+        assert "clear" not in session.kinds() and out["cves_cleared"] == 0
+        assert "no CVE node matched" in caplog.text and "earlier scores are kept" in caplog.text
+
     def test_a_feed_of_half_the_scored_nodes_still_clears(self, monkeypatch):
         _feed(monkeypatch)
         session = FakeSession(scored_before=4, cleared=2)

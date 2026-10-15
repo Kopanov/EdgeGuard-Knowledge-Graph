@@ -52,8 +52,9 @@ _MAX_VALUE_CHARS = 64
 _CHUNK_BYTES = 1024 * 1024
 _CVE_ID_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
 _EPSS_META_RE = re.compile(r"(\w+):([^,\s]+)")
-# A feed holding fewer rows than this share of the CVE nodes that already have EPSS is not used to
-# clear values: a short file must never wipe the scores of the graph.
+# A run that matched fewer CVE nodes than this share of the nodes that already have EPSS does not
+# clear values: neither a short file nor ids that no longer match (a changed format) may wipe the
+# scores of the graph. The nodes matched, not the rows read, are what the comparison needs.
 _MIN_FEED_SHARE_FOR_CLEARING = 0.5
 
 
@@ -232,22 +233,21 @@ def enrich_cve_epss(neo4j_client) -> Dict:
         score_date=score_date,
         model_version=model_version,
     )
-    if len(rows) < _MIN_FEED_SHARE_FOR_CLEARING * scored_before:
+    if updated == 0 and _single_value(neo4j_client, "MATCH (c:CVE) RETURN count(c) AS cves", "cves") > 0:
+        # Every published CVE is in the feed, so CVE nodes with no match mean a changed format or id
+        # scheme, not an absence of data.
+        logger.warning("[EPSS] no CVE node matched the %d feed rows", len(rows))
+    if updated < _MIN_FEED_SHARE_FOR_CLEARING * scored_before:
         logger.warning(
-            "[EPSS] the feed holds %d rows, fewer than %d%% of the %d CVE nodes scored before; "
+            "[EPSS] the file matched %d CVE nodes, fewer than %d%% of the %d scored before; "
             "earlier scores are kept, not cleared",
-            len(rows),
+            updated,
             int(_MIN_FEED_SHARE_FOR_CLEARING * 100),
             scored_before,
         )
         cleared = 0
     else:
         cleared = _single_value(neo4j_client, _EPSS_CLEAR_CYPHER, "cleared", score_date=score_date)
-
-    if updated == 0 and _single_value(neo4j_client, "MATCH (c:CVE) RETURN count(c) AS cves", "cves") > 0:
-        # Every published CVE is in the feed, so CVE nodes with no match mean a changed format or id
-        # scheme, not an absence of data.
-        logger.warning("[EPSS] no CVE node matched the %d feed rows", len(rows))
     logger.info("[EPSS] updated %d CVE nodes, cleared %d that left the feed", updated, cleared)
     return {
         "rows_in_feed": len(rows),
