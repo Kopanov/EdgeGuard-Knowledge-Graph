@@ -27,8 +27,10 @@ the source that asserts it (defaults to the package's source) and ``id`` that so
 id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
 
 A claim is rejected (reported, not imported) when its predicate does not fit its subject, it
-has no object, or its source is not a registered curated source: the claim's source goes into
-``r.sources`` / ``r.source_refs`` and the STIX export, so no other name may reach them.
+has no object, its object id is malformed (technique ``T1234`` / ``T1234.123``, tool ``S1234``,
+CVE ``CVE-YYYY-NNNN``; upper or lower case, as the sync matches them upper-case), or its source is
+not a registered curated source: the claim's source goes into ``r.sources`` / ``r.source_refs``
+and the STIX export, so no other name may reach them.
 
 The event is created unpublished, for the creating organisation only, with the tags
 ``EdgeGuard``, the package source's ``source:*`` tag and ``tlp:<level>``. Each entity becomes one
@@ -53,6 +55,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -75,6 +78,13 @@ KINDS = {"threat_actor": ("ThreatActor", "threat-actor"), "malware": ("Malware",
 TLP_LEVELS = ("clear", "white", "green", "amber", "amber+strict", "red")
 # The MISP comment column holds 64 KB; keep a margin for the JSON wrapper.
 COMMENT_BUDGET = 60_000
+# 2026-10: the id format of a claim's object, by object label, with the form shown in messages.
+# Checked on the id as the sync keys it (trimmed, upper-case); a malformed id can match no node.
+ID_FORMATS = {
+    "Technique": (re.compile(r"T\d{4}(\.\d{3})?", re.ASCII), "T1234 or T1234.123"),
+    "Tool": (re.compile(r"S\d{4}", re.ASCII), "S1234"),
+    "CVE": (re.compile(r"CVE-\d{4}-\d{4,}", re.ASCII), "CVE-YYYY-NNNN"),
+}
 
 
 def _tlp_level(package: Dict[str, Any]) -> str:
@@ -92,8 +102,13 @@ def _claim_problem(claim: Any, subject_label: str, default_src: Optional[str]) -
     predicate = str(claim.get("p") or "").strip().lower()
     if subject_label not in CURATED_PREDICATES.get(predicate, {}):
         return "predicate", f"predicate {predicate!r} not allowed for {subject_label}"
-    if not str(claim.get("o") or "").strip():
+    obj = str(claim.get("o") or "").strip()
+    if not obj:
         return "object", "no object"
+    object_label = CURATED_PREDICATES[predicate][subject_label][1]
+    id_format = ID_FORMATS.get(object_label)
+    if id_format is not None and not id_format[0].fullmatch(obj.upper()):
+        return "id", f"{object_label} id {obj!r} is malformed (expected {id_format[1]})"
     # 2026-10: only a registered curated source may assert a claim — the claim's source goes into
     # ``r.sources`` / ``r.source_refs`` and the STIX export, so no other name may reach them.
     source = canonical_source_id(claim.get("src")) or default_src

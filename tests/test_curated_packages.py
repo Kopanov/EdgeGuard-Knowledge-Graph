@@ -845,3 +845,77 @@ class TestClaimSources:
         ]
         assert any("not a registered curated source" in r.getMessage() for r in caplog.records)
         assert not any(src.lower() in r.getMessage().lower() for r in caplog.records), "the name is not logged"
+
+
+# --------------------------------------------------------------------------- object id formats
+class TestClaimIds:
+    """Id format fix (2026-10): the importer rejects a claim whose object id is malformed —
+    technique ``T1234`` / ``T1234.123``, tool ``S1234``, CVE ``CVE-YYYY-NNNN`` (four or more
+    digits). Ids are checked as the sync keys them (trimmed, upper-case)."""
+
+    def _validate(self, importer, predicate, obj, kind="threat_actor"):
+        package = _package(entities=[{"kind": kind, "name": "apt29", "claims": [{"p": predicate, "o": obj}]}])
+        errors, warnings, summary = importer.validate(package)
+        assert errors == []
+        return warnings, summary
+
+    @pytest.mark.parametrize(
+        "predicate, obj",
+        [
+            ("uses_technique", "T1566"),
+            ("uses_technique", "T1566.001"),
+            ("uses_technique", " t1566.001 "),
+            ("uses_tool", "S0002"),
+            ("uses_tool", "s1234"),
+            ("exploits", "CVE-2021-44228"),
+            ("exploits", "cve-2021-1234567"),
+            ("uses_malware", "Cobalt Strike"),  # a malware name has no id format
+        ],
+    )
+    def test_well_formed_ids_are_imported(self, importer, predicate, obj):
+        warnings, summary = self._validate(importer, predicate, obj)
+        assert (summary["claims"], summary["claims_skipped"]) == (1, 0), warnings
+
+    @pytest.mark.parametrize(
+        "predicate, obj, expected",
+        [
+            ("uses_technique", "T15", "T1234 or T1234.123"),
+            ("uses_technique", "T15660", "T1234 or T1234.123"),
+            ("uses_technique", "T1566.1", "T1234 or T1234.123"),
+            ("uses_technique", "T1566.0011", "T1234 or T1234.123"),
+            ("uses_technique", "TA0001", "T1234 or T1234.123"),
+            ("uses_technique", "1566", "T1234 or T1234.123"),
+            ("uses_technique", "T１５６６", "T1234 or T1234.123"),  # full-width digits
+            ("uses_tool", "S12", "S1234"),
+            ("uses_tool", "S00021", "S1234"),
+            ("uses_tool", "T1566", "S1234"),
+            ("exploits", "CVE-21-1234", "CVE-YYYY-NNNN"),
+            ("exploits", "CVE-2021-123", "CVE-YYYY-NNNN"),
+            ("exploits", "CVE2021-44228", "CVE-YYYY-NNNN"),
+            ("exploits", "2021-44228", "CVE-YYYY-NNNN"),
+        ],
+    )
+    def test_malformed_ids_are_rejected(self, importer, predicate, obj, expected):
+        warnings, summary = self._validate(importer, predicate, obj)
+        assert (summary["claims"], summary["claims_skipped"]) == (0, 1)
+        assert summary["claims_skipped_by_reason"] == {"id": 1}
+        assert any(f"id {obj!r} is malformed (expected {expected})" in w for w in warnings), warnings
+
+    def test_malware_claims_are_checked_too(self, importer):
+        warnings, summary = self._validate(importer, "implements_technique", "T99", kind="malware")
+        assert summary["claims_skipped_by_reason"] == {"id": 1}
+        warnings, summary = self._validate(importer, "exploits", "CVE-2017-11882", kind="malware")
+        assert summary["claims_skipped"] == 0
+
+    def test_a_malformed_claim_is_not_written_to_misp(self, importer):
+        package = _package(
+            entities=[
+                {
+                    "kind": "threat_actor",
+                    "name": "apt29",
+                    "claims": [{"p": "uses_tool", "o": "S0002", "id": "a"}, {"p": "uses_tool", "o": "S2", "id": "b"}],
+                }
+            ]
+        )
+        (attr,) = importer.build_event(package)["Event"]["Attribute"]
+        assert [c["o"] for c in _parse_curated_claims(attr["comment"])] == ["S0002"]
