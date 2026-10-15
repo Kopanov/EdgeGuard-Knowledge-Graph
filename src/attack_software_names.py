@@ -24,8 +24,8 @@ This module holds what every site needs to treat such a name as the family it na
   name, else the non-MITRE node of its base name (the enrichment job ``merge_malware_attack_twins`` and
   ``scripts/verify_fresh_baseline.py``).
 
-Standard library only: ``scripts/verify_fresh_baseline.py`` imports this module outside the
-pipeline's environment.
+Standard library and ``node_identity`` only: ``scripts/verify_fresh_baseline.py`` imports this
+module outside the pipeline's environment.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+
+from node_identity import is_placeholder_name
 
 # A trailing ATT&CK software id: whitespace, a hyphen, whitespace, ``S`` and four digits. ASCII
 # whitespace only (``re.ASCII``), the set Java's ``\s`` matches, so the Cypher patterns below decide
@@ -93,7 +95,10 @@ def split_attack_software_id(name: Any) -> Tuple[str, Optional[str]]:
 
     ``"Cobalt Strike - S0154"`` → ``("Cobalt Strike", "S0154")``; case and surrounding whitespace are
     ignored (``"njrat  -  s0385 "`` → ``("njrat", "S0385")``) and the id is returned upper-case. A name
-    without an id comes back stripped with ``None``; a non-string comes back as ``("", None)``.
+    without an id comes back stripped with ``None``; a non-string comes back as ``("", None)``. A base
+    that is no name (``"Unknown - S0154"``, ``"Malware - S0001"``: a placeholder the node merge
+    rejects) is not split off: the name keeps its id, which is what names the software, so it never
+    becomes a generic merge key; the twin merge folds such a node by its id.
     """
     if not isinstance(name, str):
         return "", None
@@ -101,7 +106,10 @@ def split_attack_software_id(name: Any) -> Tuple[str, Optional[str]]:
     match = _SUFFIXED_NAME_RE.match(text)
     if match is None:
         return text, None
-    return match.group("base").strip(), match.group("id").upper()
+    base, attack_id = match.group("base").strip(), match.group("id").upper()
+    if is_placeholder_name(base):
+        return text, attack_id
+    return base, attack_id
 
 
 def _canonical(name: Any) -> str:

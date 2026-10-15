@@ -74,6 +74,12 @@ class TestSplit:
     def test_only_the_last_id_is_removed(self):
         assert split_attack_software_id("X - S0001 - S0002") == ("X - S0001", "S0002")
 
+    @pytest.mark.parametrize("name", ["Unknown - S0154", "malware - S0001", " Generic  -  s0002 ", "N/A - S0003"])
+    def test_a_base_that_is_no_name_is_not_split_off(self, name):
+        # A generic base would merge unrelated records; the id is what names the software.
+        base, attack_id = split_attack_software_id(name)
+        assert base == name.strip() and attack_id == name.strip()[-5:].upper()
+
 
 class TestCypherPatternsDecideAsTheHelper:
     """The Java patterns are run here with Python's ``re`` in ASCII mode: for the syntax they use
