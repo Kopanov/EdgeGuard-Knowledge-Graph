@@ -43,6 +43,7 @@ from build_rel_queries import assigned_queries  # noqa: E402
 import attack_revoked  # noqa: E402
 import build_relationships  # noqa: E402
 import stix_exporter  # noqa: E402
+from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX  # noqa: E402
 from neo4j_client import Neo4jClient  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync, _curated_claim_rows  # noqa: E402
 
@@ -183,7 +184,14 @@ class TestBuildRelationships:
         parent_step = [(q, p) for q, p in technique_steps if "SUBTECHNIQUE_OF" in q]
         assert len(parent_step) == 1 and parent_step[0][1] is None, "step 1b takes no map"
         assert all(p == {"iterate_params": expected} for q, p in technique_steps if "SUBTECHNIQUE_OF" not in q)
-        assert all(p is None for q, p in iterate if ":Technique {mitre_id:" not in q), "other steps take no map"
+        # 2026-10: steps 9b and 2d take the ATT&CK software id pattern and the folded Malware names
+        # (none here: the fake client's read returns no Malware row); every other step takes nothing.
+        software_id_params = {
+            "iterate_params": {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX, "folded_families": {}}
+        }
+        other = [p for q, p in iterate if ":Technique {mitre_id:" not in q]
+        assert all(p is None or p == software_id_params for p in other), "other steps take no map"
+        assert sum(1 for p in other if p == software_id_params) == 2, "9b and 2d"
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 

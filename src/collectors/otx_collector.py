@@ -29,6 +29,7 @@ import requests
 
 # Import MISP writer
 from actor_name_hygiene import clean_actor_names
+from attack_software_names import split_attack_software_id
 
 # Import baseline checkpoint (incremental cursor only — no page-based checkpointing)
 from baseline_checkpoint import (
@@ -130,14 +131,32 @@ def _pulse_actor_pairs(families: List[str], adversaries: List[str]) -> List[str]
     return out
 
 
+def _family_entry_name(entry: Any) -> str:
+    """The name of one ``malware_families`` entry: a string, or an object named by ``name``,
+    ``display_name`` or, last, ``id`` (OTX gives a malware family the family name as its id, the
+    ``/malware/<id>`` path; no recorded pulse in the repository carries an object entry, so all three
+    keys are read); ``""`` for anything else."""
+    if isinstance(entry, str):
+        return entry.strip()
+    if isinstance(entry, dict):
+        for key in ("name", "display_name", "id"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
 def _pulse_family_names(families: Any) -> List[str]:
-    """Family names a pulse lists (``malware_families`` entries are strings or ``{"name": ...}``),
-    trimmed, placeholder-free, de-duplicated case-insensitively, first-seen order, capped."""
+    """Family names a pulse lists (``malware_families`` entries, see ``_family_entry_name``),
+    trimmed, placeholder-free, de-duplicated case-insensitively, first-seen order, capped.
+
+    2026-10: a name that carries its ATT&CK software id (``"Cobalt Strike - S0154"``, the MISP
+    galaxy naming) is given without it, as the malware item is named (``split_attack_software_id``).
+    """
     out: List[str] = []
     seen: set = set()
     for fam in families or []:
-        name = (fam if isinstance(fam, str) else (fam or {}).get("name", "")) if fam is not None else ""
-        name = str(name).strip()
+        name, _attack_id = split_attack_software_id(_family_entry_name(fam))
         key = name.lower()
         if key in _PULSE_NAME_PLACEHOLDERS or key in seen:
             continue
@@ -175,8 +194,9 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     extra_tids = [t for t in (dup.get("reported_techniques") or []) if t not in (kept.get("reported_techniques") or [])]
     if extra_tids:
         kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids
-    # Families / adversaries of every pulse that listed the IOC (copy-on-write as above).
-    for _list_key in ("pulse_malware_families", "pulse_malware_actor_pairs"):
+    # Families / adversaries of every pulse that listed the IOC (copy-on-write as above), and the
+    # names a malware item was given (2026-10: "Cobalt Strike - S0154" next to "Cobalt Strike").
+    for _list_key in ("pulse_malware_families", "pulse_malware_actor_pairs", "aliases"):
         _extra = [x for x in (dup.get(_list_key) or []) if x not in (kept.get(_list_key) or [])]
         if _extra:
             kept[_list_key] = list(kept.get(_list_key) or []) + _extra
@@ -632,12 +652,22 @@ class OTXCollector:
                 # same pattern or the per-pulse timestamp contract is
                 # broken (some entities from one pulse carry the source's
                 # claim, others don't — silently inconsistent).
-                malware_families = pulse.get("malware_families", [])
+                # 2026-10: OTX names families as the MISP ATT&CK galaxy does, with the ATT&CK software
+                # id as a suffix ("Cobalt Strike - S0154"). Passed through, each became a Malware node
+                # of its own beside the ATT&CK one ("cobalt strike"), and the indicators of the family
+                # split between the two (136 such twins on the graph of 2026-10-14). The item is named
+                # by the base name and keeps the original string as an alias. An entry without a name
+                # is skipped (it became a placeholder "Unknown" item before, rejected at the node merge).
+                malware_families = pulse.get("malware_families", []) or []
                 for mal in malware_families:
-                    mal_name = mal if isinstance(mal, str) else mal.get("name", "Unknown")
+                    raw_family = _family_entry_name(mal)
+                    if not raw_family:
+                        continue
+                    mal_name, attack_software_id = split_attack_software_id(raw_family)
                     mal_item: Dict[str, Any] = {
                         "type": "malware",
                         "name": mal_name,
+                        "aliases": [raw_family] if attack_software_id else [],
                         "malware_types": ["unknown"],
                         "family": mal_name,
                         "description": pulse_description[:1000],

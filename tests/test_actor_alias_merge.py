@@ -580,6 +580,7 @@ class TestRunnerRegistration:
         assert order == [
             "bridge_vulnerability_cve",
             "merge_alias_duplicate_actors",
+            "merge_malware_attack_twins",  # 2026-10: the Malware ATT&CK-id twin merge
             "build_campaign_nodes",
             "calibrate_cooccurrence_confidence",
             "decay_ioc_confidence",
@@ -598,11 +599,20 @@ class TestRunnerRegistration:
 
         monkeypatch.setattr(enrichment_jobs, "bridge_vulnerability_cve", _rec("bridge"))
         monkeypatch.setattr(enrichment_jobs, "merge_alias_duplicate_actors", _rec("actor_alias_merge"))
+        monkeypatch.setattr(enrichment_jobs, "merge_malware_attack_twins", _rec("malware_twin_merge"))
         monkeypatch.setattr(enrichment_jobs, "build_campaign_nodes", _rec("campaigns"))
         monkeypatch.setattr(enrichment_jobs, "calibrate_cooccurrence_confidence", _rec("calibration"))
         monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", _rec("decay"))
         monkeypatch.setattr(enrichment_jobs, "enrich_cve_epss", _rec("epss"))
 
         summary = enrichment_jobs.run_all_enrichment_jobs(MagicMock())
-        assert seen == ["bridge", "actor_alias_merge", "campaigns", "calibration", "decay", "epss"]
+        assert seen == [
+            "bridge",
+            "actor_alias_merge",
+            "malware_twin_merge",
+            "campaigns",
+            "calibration",
+            "decay",
+            "epss",
+        ]
         assert summary["actor_alias_merge"] == {"n": 1}
