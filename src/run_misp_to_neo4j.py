@@ -570,7 +570,8 @@ def _curated_claim_rows(
     """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``).
 
     ``tlp`` is the package's TLP level (``_curated_claims_tlp``), carried on every row. A technique
-    id ATT&CK revoked is translated to its successor (2026-10, ``attack_revoked``) and logged.
+    id ATT&CK revoked is translated to its successor (2026-10, ``attack_revoked``) and logged; the
+    row keeps the id the claim named in ``cited_ids`` (``r.cited_ids`` on the link).
     """
     label = curated_label_for(package_source)
     revoked = load_revoked_ids()
@@ -585,6 +586,7 @@ def _curated_claim_rows(
             skipped += 1
             continue
         rel_type, to_type, key = target
+        cited: List[str] = []
         if key == "cve_id":
             obj = normalize_cve_id_for_graph(obj) or ""
         elif key == "mitre_id":
@@ -592,6 +594,7 @@ def _curated_claim_rows(
             successor = revoked.technique_successor(obj) if to_type == "Technique" else None
             if successor is not None:
                 translated.append(f"{obj} -> {successor}")
+                cited = [obj]
                 obj = successor
         if not obj:
             skipped += 1
@@ -620,6 +623,8 @@ def _curated_claim_rows(
                 # exact canonical names on both ends — never alias matching (see the writer)
                 "exact_names": True,
                 "tlp": tlp or None,
+                # 2026-10: the revoked id the claim named, when it was translated (r.cited_ids)
+                "cited_ids": cited,
             }
         )
     if skipped:
@@ -2685,21 +2690,28 @@ class MISPToNeo4jSync:
 
         2026-10: an id ATT&CK revoked is translated to its successor (``attack_revoked``), so the
         ``EMPLOYS_TECHNIQUE`` row it becomes lands on the technique that exists; ``name`` stays the
-        tag's. Two tags that translate to the same id give one entry.
+        tag's. Two tags that translate to the same id give one entry. Each entry lists the revoked
+        ids its tags named (``cited_ids``, empty when every tag named the id itself); the row
+        carries them to ``r.cited_ids`` (explainability).
         """
         techniques = self._extract_technique_tags(tags)
         revoked = load_revoked_ids()
         out: List[Dict] = []
-        seen = set()
+        by_id: Dict[str, Dict] = {}
         for technique in techniques:
+            cited = None
             successor = revoked.technique_successor(technique["mitre_id"])
             if successor is not None:
                 logger.debug("Technique tag %s is a revoked ATT&CK id; using %s", technique["mitre_id"], successor)
+                cited = technique["mitre_id"]
                 technique = {**technique, "mitre_id": successor}
-            if technique["mitre_id"] in seen:
-                continue
-            seen.add(technique["mitre_id"])
-            out.append(technique)
+            entry = by_id.get(technique["mitre_id"])
+            if entry is None:
+                entry = {**technique, "cited_ids": []}
+                by_id[technique["mitre_id"]] = entry
+                out.append(entry)
+            if cited is not None and cited not in entry["cited_ids"]:
+                entry["cited_ids"].append(cited)
         return out
 
     def _extract_technique_tags(self, tags: List[Dict]) -> List[Dict]:
@@ -3324,6 +3336,8 @@ class MISPToNeo4jSync:
                         "confidence": confidence,
                         "technique_name": technique.get("name", ""),
                         "misp_event_id": _evt_id,
+                        # 2026-10: revoked ids the tags named for this technique (r.cited_ids)
+                        "cited_ids": technique.get("cited_ids") or [],
                     }
                 )
 

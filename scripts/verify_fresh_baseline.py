@@ -413,6 +413,7 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         rep.add("no_revoked_attack_techniques", False, detail)
         rep.add("no_revoked_attack_groups", False, detail)
         rep.add("no_revoked_attack_software", False, detail)
+        rep.add("translated_links_record_cited_ids", False, detail)
     else:
         r = _one(
             "MATCH (t:Technique) WITH t, t.mitre_id IN $ids AS is_revoked "
@@ -462,6 +463,30 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
             None if not r.get("mitre_software") else r.get("revoked_software") == 0,
             r,
         )
+        # Explainability (2026-10): a link a revoked id led to records the id the source cited
+        # (``r.cited_ids``). Judged on the OTX indicator path, which carries most of these links:
+        # every link to the successor of a revoked id in ``attack_ids`` names that id.
+        r = _one(
+            "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 "
+            "UNWIND i.attack_ids AS cited "
+            "WITH i, cited, $revoked[toString(cited)] AS successor WHERE successor IS NOT NULL "
+            "OPTIONAL MATCH (i)-[r:USES_TECHNIQUE]->(:Technique {mitre_id: successor}) "
+            "RETURN count(*) AS cited_revoked_ids, count(r) AS linked, "
+            "sum(CASE WHEN r IS NOT NULL AND cited IN coalesce(r.cited_ids, []) THEN 1 ELSE 0 END) AS recorded",
+            {"revoked": dict(revoked.techniques)},
+        )
+        r["map_version"] = revoked.version
+        rep.add(
+            "translated_links_record_cited_ids",
+            None if not r.get("linked") else r.get("recorded") == r.get("linked"),
+            r,
+        )
+    # Actors the alias merge folded others into (``n.merged_from``): reported, not judged.
+    r = _one(
+        "MATCH (a:ThreatActor) WHERE a.merged_from IS NOT NULL "
+        "RETURN count(a) AS actors, sum(size(a.merged_from)) AS names_folded"
+    )
+    rep.add("actor_merges_recorded", None, r, mandatory=False)
 
     # 10. CISA ICS advisories (opt-in).
     r = _one(

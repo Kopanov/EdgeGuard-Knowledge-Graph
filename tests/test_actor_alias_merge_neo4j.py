@@ -91,8 +91,10 @@ REFERENCE = {
 }
 
 
-@pytest.fixture(scope="module")
-def raw_driver():
+def open_test_database():
+    """The throwaway database's driver, for a module-scoped fixture (shared by the Neo4j integration
+    tests): waits up to 120 s for the server, refuses a database that holds a node this suite did not
+    write or has no APOC, and removes the suite's nodes when the module is done."""
     driver = GraphDatabase.driver(
         URI, auth=(os.getenv("EDGEGUARD_IT_NEO4J_USER", "neo4j"), os.getenv("EDGEGUARD_IT_NEO4J_PASSWORD", ""))
     )
@@ -119,6 +121,11 @@ def raw_driver():
     with driver.session() as session:
         session.run(f"MATCH (n:{LABEL}) DETACH DELETE n")
     driver.close()
+
+
+@pytest.fixture(scope="module")
+def raw_driver():
+    yield from open_test_database()
 
 
 @pytest.fixture
@@ -172,7 +179,7 @@ class TestMergeOnNeo4j:
         clop = _one(
             driver,
             "MATCH (a:ThreatActor {name: 'clop'}) RETURN a.source AS source, a.zone AS zone, "
-            "a.aliases AS aliases, a.pulse_ids AS pulse_ids, a.uuid AS uuid",
+            "a.aliases AS aliases, a.pulse_ids AS pulse_ids, a.uuid AS uuid, a.merged_from AS merged_from",
         )
         assert clop == {
             "source": ["alienvault_otx"],
@@ -180,10 +187,18 @@ class TestMergeOnNeo4j:
             "aliases": ["cl0p"],
             "pulse_ids": ["p1"],
             "uuid": "u-clop",
+            "merged_from": ["cl0p"],  # explainability: the nodes this job folded in, apart from aliases
         }
-        apt28 = _one(driver, "MATCH (a:ThreatActor {name: 'apt28'}) RETURN a.aliases AS aliases, a.source AS source")
+        apt28 = _one(
+            driver,
+            "MATCH (a:ThreatActor {name: 'apt28'}) RETURN a.aliases AS aliases, a.source AS source, "
+            "a.merged_from AS merged_from",
+        )
         assert set(apt28["aliases"]) == {"APT28", "Fancy Bear", "fancy bear"}
         assert sorted(apt28["source"]) == ["alienvault_otx", "mitre_attck"]
+        assert apt28["merged_from"] == ["fancy bear"]
+        untouched = _one(driver, "MATCH (a:ThreatActor {name: 'apt29'}) RETURN a.merged_from AS merged_from")
+        assert untouched == {"merged_from": None}
 
     def test_edges_move_collapse_and_keep_their_types(self, graph):
         client, driver = graph

@@ -226,6 +226,12 @@ class TestMergeBehaviour:
         assert "mergeRels: true" in query
         assert "produceSelfRel: false" in query
         assert "singleElementAsArray" not in query  # it would turn SOURCED_FROM's scalar r.source into a list
+        # Explainability (2026-10): the names folded in, apart from aliases (which mix every source's),
+        # recorded before the merge and kept across merges ("combine", wrapped back into a list).
+        merged_from = query.index("c.merged_from = apoc.coll.toSet(coalesce(c.merged_from, []) + [d IN dups | d.name])")
+        assert merged_from < merge_call
+        assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["merged_from"] == "combine"
+        assert "merged_from" in enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
 
     def test_every_list_property_is_wrapped_back_into_a_list_in_the_merge_statement(self):
         # 2026-10: "combine" stores equal values as one string (two OTX nodes of one actor both hold

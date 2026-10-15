@@ -153,9 +153,22 @@ def _revoked_software_rows(params: Dict[str, Any], software=_GRAPH_SOFTWARE) -> 
     return [{"mitre_software": len(mitre), "revoked_software": len(revoked), "examples": revoked[:10]}]
 
 
+# Explainability (2026-10): (indicator's cited revoked ids, links to their successors, links that name
+# the cited id) — a correct graph records every one.
+_GRAPH_CITED = (25135, 24440, 24440)
+
+
+def _cited_rows(cited=_GRAPH_CITED) -> List[Dict[str, Any]]:
+    return [{"cited_revoked_ids": cited[0], "linked": cited[1], "recorded": cited[2]}]
+
+
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
+    if "AS recorded" in s:
+        return _cited_rows()
+    if "AS names_folded" in s:
+        return [{"actors": 30, "names_folded": 33}]
     if "AS revoked_ids" in s:
         return _revoked_technique_rows(params)
     if "AS revoked_groups_from_mitre" in s:
@@ -1086,15 +1099,23 @@ class TestWarningLevel:
 
 # --------------------------------------------------------------------------- 9b. revoked ATT&CK objects
 def _run_with_graph(
-    vfb, monkeypatch, techniques=_GRAPH_TECHNIQUES, actors=_GRAPH_ACTORS, software=_GRAPH_SOFTWARE, seen=None
+    vfb,
+    monkeypatch,
+    techniques=_GRAPH_TECHNIQUES,
+    actors=_GRAPH_ACTORS,
+    software=_GRAPH_SOFTWARE,
+    cited=_GRAPH_CITED,
+    seen=None,
 ):
     """``run_checks`` on the healthy rows, with check 9b answered from ``techniques`` / ``actors`` /
-    ``software``."""
+    ``software`` / ``cited``."""
 
     def fake_post(statement, params=None, timeout=180):
         params = params or {}
         if seen is not None:
             seen.append((statement, params))
+        if "AS recorded" in statement:
+            return _cited_rows(cited)
         if "AS revoked_ids" in statement:
             return _revoked_technique_rows(params, techniques)
         if "AS revoked_groups_from_mitre" in statement:
@@ -1119,9 +1140,32 @@ class TestRevokedAttackObjects:
             "no_revoked_attack_groups",
             "revoked_group_names_folded",
             "no_revoked_attack_software",
+            "translated_links_record_cited_ids",
         ):
             assert _check(rep, name)["ok"] is True, name
         assert rep.failed == [] and rep.warnings == []
+        merges = _check(rep, "actor_merges_recorded")
+        assert merges["ok"] is None and merges["detail"] == {"actors": 30, "names_folded": 33}
+
+    def test_a_translated_link_without_its_cited_id_fails(self, vfb, monkeypatch):
+        """The explainability write missing: links to successors exist, but some do not name the id."""
+        rep = _run_with_graph(vfb, monkeypatch, cited=(25135, 24440, 24000))
+        c = _check(rep, "translated_links_record_cited_ids")
+        assert c["ok"] is False and c["mandatory"] is True
+        assert [x["check"] for x in rep.failed] == ["translated_links_record_cited_ids"]
+
+    def test_the_cited_ids_check_is_informational_without_translated_links(self, vfb, monkeypatch):
+        rep = _run_with_graph(vfb, monkeypatch, cited=(0, 0, 0))
+        assert _check(rep, "translated_links_record_cited_ids")["ok"] is None
+
+    def test_the_cited_ids_check_receives_the_map(self, vfb, monkeypatch):
+        import attack_revoked
+
+        seen: List[Any] = []
+        _run_with_graph(vfb, monkeypatch, seen=seen)
+        ((statement, params),) = [(s, p) for s, p in seen if "AS recorded" in s]
+        assert params["revoked"] == dict(attack_revoked.load_revoked_ids().techniques)
+        assert "$revoked[toString(cited)]" in statement and "cited IN coalesce(r.cited_ids, [])" in statement
 
     def test_revoked_software_from_mitre_fails(self, vfb, monkeypatch):
         """The hosted graph of 2026-10-15: ``darkmoon`` from MITRE (revoked into PoisonIvy)."""
@@ -1205,5 +1249,10 @@ class TestRevokedAttackObjects:
         monkeypatch.setattr(vfb, "load_revoked_ids", lambda: attack_revoked.load_revoked_ids(missing))
         rep = _run_with_graph(vfb, monkeypatch)
         failed = {c["check"]: c["detail"] for c in rep.failed}
-        assert set(failed) == {"no_revoked_attack_techniques", "no_revoked_attack_groups", "no_revoked_attack_software"}
+        assert set(failed) == {
+            "no_revoked_attack_techniques",
+            "no_revoked_attack_groups",
+            "no_revoked_attack_software",
+            "translated_links_record_cited_ids",
+        }
         assert failed["no_revoked_attack_techniques"]["problem"] == "file not found"

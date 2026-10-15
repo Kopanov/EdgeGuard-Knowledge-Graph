@@ -230,12 +230,56 @@ class TestSro:
         assert "confidence" not in sro
 
     def test_extension_declares_the_new_properties(self):
-        for prop in ("x_edgeguard_match_type", "x_edgeguard_sources", "x_edgeguard_source_refs"):
+        for prop in (
+            "x_edgeguard_match_type",
+            "x_edgeguard_sources",
+            "x_edgeguard_source_refs",
+            "x_edgeguard_cited_ids",
+            "x_edgeguard_merged_from",
+        ):
             assert prop in sx.EDGEGUARD_EXTENSION_PROPERTIES
         definition = sx._extension_definition()
-        # 1.1.0 (2026-10-14) added these; 1.2.0 (2026-10-15) added x_edgeguard_status on vulnerabilities.
-        assert definition["version"] == "1.2.0"
+        # 1.1.0 (2026-10-14) added the provenance; 1.2.0 (2026-10-15) x_edgeguard_status on
+        # vulnerabilities; 1.3.0 (2026-10-15) the explainability properties.
+        assert definition["version"] == "1.3.0"
         assert definition["modified"].startswith("2026-10-15")
+
+    def test_a_link_a_revoked_id_led_to_carries_the_cited_ids(self):
+        actor = sx._deterministic_id("intrusion-set", "apt29")
+        technique = sx._deterministic_id("attack-pattern", "T1059.001")
+        rel = {**MITRE, "cited_ids": ["T1086"]}
+        sro = _exporter({})._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, rel)
+        assert sro["x_edgeguard_cited_ids"] == ["T1086"]
+        plain = _exporter({})._edge_to_sro("EMPLOYS_TECHNIQUE", actor, technique, MITRE)
+        assert "x_edgeguard_cited_ids" not in plain, "absent when every source cited the target itself"
+
+    def test_an_actor_bundle_with_the_new_properties_parses_strictly(self):
+        row = {
+            "seed": {"name": "clop", "aliases": ["cl0p"], "merged_from": ["cl0p"]},
+            "malware": [],
+            "actor_tech": [_pair({"mitre_id": "T1059.001", "name": "PowerShell"}, {**MITRE, "cited_ids": ["T1086"]})],
+            "mal_tech": [],
+            "campaigns": [],
+            "uses_malware": [],
+            "tools": [],
+            "exploits": [],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_threat_actor("clop")
+        parsed = stix2.parse(json.dumps(bundle))  # strict: every x_edgeguard_* property is declared
+        (actor,) = [o for o in parsed.objects if o.type == "intrusion-set"]
+        (link,) = [o for o in parsed.objects if o.type == "relationship"]
+        assert actor["x_edgeguard_merged_from"] == ["cl0p"] and link["x_edgeguard_cited_ids"] == ["T1086"]
+
+    def test_merged_sros_take_the_union_of_the_cited_ids(self):
+        merged = sx._merge_rel_props([{**MITRE, "cited_ids": ["T1086"]}, {**CURATED, "cited_ids": ["T1064", "T1086"]}])
+        assert merged["cited_ids"] == ["T1064", "T1086"]
+
+    def test_an_intrusion_set_names_the_actor_nodes_folded_into_it(self):
+        exporter = _exporter({})
+        sdo = exporter._actor_sdo({"name": "clop", "aliases": ["cl0p"], "merged_from": ["cl0p", "cl0p"]})
+        assert sdo["x_edgeguard_merged_from"] == ["cl0p"]
+        assert "x_edgeguard_merged_from" not in exporter._actor_sdo({"name": "apt29"})
 
     @pytest.mark.parametrize(
         "edge, source_type, target_type, stix_type, reversed_",

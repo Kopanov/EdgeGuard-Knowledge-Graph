@@ -1072,6 +1072,8 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "misp_event_ids": "combine",
     "misp_attribute_ids": "combine",
     "pulse_ids": "combine",
+    # 2026-10 (explainability): the names of the nodes folded into this one, kept across merges
+    "merged_from": "combine",
     # edge lists (only relevant when mergeRels collapses parallel edges);
     # ``misp_event_ids`` above covers edges too
     "sources": "combine",
@@ -1156,7 +1158,9 @@ def _list_or_wrapped(ref: str) -> str:
 # run (``$reference_canonicals``), and a duplicate is never MITRE-sourced:
 # re-checked here so a stale candidate list can never merge two canonical
 # actors. ``c.aliases`` gains the duplicate names BEFORE the merge, as
-# required. After the merge every list property of the node is wrapped back
+# required, and so does ``c.merged_from`` (explainability, 2026-10: unlike
+# ``aliases``, which also hold every source's aliases, it names only the
+# nodes this job folded in). After the merge every list property of the node is wrapped back
 # into a de-duplicated list (``_list_or_wrapped``): two nodes with the same
 # single source (``["alienvault_otx"]`` on both, as for two OTX names of one
 # actor) come out of ``"combine"`` with ``source`` as a string, and
@@ -1172,7 +1176,8 @@ WHERE d.name IN g.duplicates
   AND NOT $mitre_source IN coalesce(d.source, [])
 WITH c, collect(DISTINCT d) AS dups
 WHERE size(dups) > 0
-SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name])
+SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
+    c.merged_from = apoc.coll.toSet(coalesce(c.merged_from, []) + [d IN dups | d.name])
 WITH c, size(dups) AS n_dups, dups
 CALL apoc.refactor.mergeNodes([c] + dups, {
     properties: $strategy,
