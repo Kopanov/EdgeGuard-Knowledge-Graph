@@ -46,9 +46,11 @@ _WRITTEN_BY_TYPE: Dict[str, FrozenSet[str]] = {
             "SUBTECHNIQUE_OF",
             "USES_MALWARE",
             "USES_TOOL",
+            "RUNS",  # 2026-10-15: the campaign links state their evidence (campaign_grouping)
+            "PART_OF_CAMPAIGN",
         )
     },
-    **{t: _LISTS for t in ("RUNS", "PART_OF_CAMPAIGN", "REFERS_TO")},
+    **{t: _LISTS for t in ("REFERS_TO",)},
     **{
         t: frozenset({"sources", "misp_event_ids"})
         for t in ("HAS_CVSS_v2", "HAS_CVSS_v30", "HAS_CVSS_v31", "HAS_CVSS_v40")

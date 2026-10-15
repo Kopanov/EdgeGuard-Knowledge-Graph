@@ -191,6 +191,33 @@ def decay_ioc_confidence(neo4j_client) -> Dict:
 # ---------------------------------------------------------------------------
 
 
+# 2026-10 (explainability): a campaign is EdgeGuard's grouping of one actor's attributed malware and
+# those malware's active indicators, not a source's claim. Its links say so (``match_type``) and
+# carry the confidence of the evidence they rest on: a malware link its ATTRIBUTED_TO link's; an
+# indicator link its best path, each path as strong as its weaker link (INDICATES, ATTRIBUTED_TO);
+# RUNS the actor's strongest attribution. Recomputed on every run, like the links themselves.
+CAMPAIGN_MATCH_TYPE = "campaign_grouping"
+
+
+def _weaker(x: str, y: str) -> str:
+    """Cypher: the smaller of two confidences, ignoring a missing one."""
+    return f"CASE WHEN {x} IS NULL THEN {y} WHEN {y} IS NULL THEN {x} WHEN {x} < {y} THEN {x} ELSE {y} END"
+
+
+def _strongest(values: str) -> str:
+    """Cypher: the largest non-null value of a list (null when there is none)."""
+    return (
+        f"reduce(_best = null, _v IN {values} | "
+        "CASE WHEN _v IS NOT NULL AND (_best IS NULL OR _v > _best) THEN _v ELSE _best END)"
+    )
+
+
+def _campaign_evidence(rel_var: str, confidence: str, quote: str = '"') -> str:
+    """``SET`` items naming a campaign link's evidence; ``quote`` is ``'`` inside a double-quoted
+    ``apoc.periodic.iterate`` statement."""
+    return f"{rel_var}.match_type = {quote}{CAMPAIGN_MATCH_TYPE}{quote}, {rel_var}.confidence_score = {confidence}"
+
+
 def build_campaign_nodes(neo4j_client) -> Dict:
     """
     Materialise Campaign nodes from the existing threat graph.
@@ -401,6 +428,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 r_runs.trg_uuid = coalesce(r_runs.trg_uuid, c.uuid),
                 r_runs.updated_at = datetime(),
                 r_runs.edgeguard_managed = true,
+                // 2026-10 (explainability): the kind of evidence, and the actor's strongest attribution.
+                {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
                 // 2026-10 (relationship provenance): the campaign is built from the
                 // actor's ATTRIBUTED_TO links, so RUNS carries their feeds, record ids
                 // and MISP events.
@@ -446,6 +475,8 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
                 r.updated_at = datetime(),
                 r.edgeguard_managed = true,
+                // 2026-10 (explainability): the kind of evidence, and the ATTRIBUTED_TO link's confidence.
+                {_campaign_evidence("r", "_at.confidence_score")},
                 // 2026-10 (relationship provenance): inherited from the ATTRIBUTED_TO link.
                 {inherited_prov_set("r", ["_at"])}
             RETURN count(*) AS links
@@ -516,6 +547,7 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                    r.trg_uuid = coalesce(r.trg_uuid, c.uuid),
                    r.updated_at = datetime(),
                    r.edgeguard_managed = true,
+                   __CAMPAIGN_EVIDENCE__,
                    __INHERITED_PROV__",
               {batchSize: 25, parallel: false, retries: 2}
             )
@@ -528,6 +560,19 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 # ATTRIBUTED_TO links of the path that put the indicator in the campaign.
                 "__INHERITED_PROV__",
                 inherited_prov_set("r", ["_ind", "_at"]),
+            ).replace(
+                # 2026-10 (explainability): the indicator's best path to the campaign's actor, each
+                # path as strong as its weaker link; over every path, so the row order does not matter.
+                "__CAMPAIGN_EVIDENCE__",
+                _campaign_evidence(
+                    "r",
+                    _strongest(
+                        "[(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name}) | "
+                        + _weaker("_xi.confidence_score", "_xa.confidence_score")
+                        + "]"
+                    ),
+                    quote="'",
+                ),
             )
             result = session.run(link_indicators_batched, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()

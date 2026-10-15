@@ -357,6 +357,23 @@ class TestEnrichment:
         assert 'inherited_prov_set("r", ["_ind", "_at"])' in src
         assert 'prov_with("v", node_feeds("v"))' in src
 
+    def test_campaign_links_state_their_evidence(self):
+        """2026-10-15: RUNS / PART_OF_CAMPAIGN say they are EdgeGuard's grouping and carry the
+        confidence of the evidence they rest on (run on a real Neo4j in
+        tests/test_explainability_neo4j.py)."""
+        assert enrichment_jobs.CAMPAIGN_MATCH_TYPE == "campaign_grouping"
+        src = Path(enrichment_jobs.__file__).read_text()
+        body = src.split("def build_campaign_nodes")[1].split("\ndef ")[0]
+        assert 'r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]")' in body
+        assert '_campaign_evidence("r", "_at.confidence_score")' in body
+        assert "__CAMPAIGN_EVIDENCE__" in body and 'quote="\'"' in body
+        weaker = enrichment_jobs._weaker("x", "y")
+        assert weaker == "CASE WHEN x IS NULL THEN y WHEN y IS NULL THEN x WHEN x < y THEN x ELSE y END"
+        strongest = enrichment_jobs._strongest("[1, null, 3]")
+        assert strongest.startswith("reduce(_best = null, _v IN [1, null, 3] |")
+        inner = enrichment_jobs._campaign_evidence("r", "0.5", quote="'")
+        assert inner == "r.match_type = 'campaign_grouping', r.confidence_score = 0.5" and '"' not in inner
+
     def test_calibrator_filters_on_the_evidence_label(self):
         src = Path(enrichment_jobs.__file__).read_text()
         body = src.split("def calibrate_cooccurrence_confidence")[1].split("\ndef ")[0]
