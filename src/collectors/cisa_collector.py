@@ -280,9 +280,10 @@ class CISACollector:
                         # derived from knownRansomwareCampaignUse (Known 9.0 / CRITICAL, otherwise
                         # 7.0 / HIGH) and were stored and exported as if they were CVSS; the CVE's
                         # CVSS now comes from NVD only, and ransomware use travels as its own field.
+                        # Nor does it name an attack vector: the item no longer sends an invented
+                        # "NETWORK" (the CVE's attack vector comes from its CVSS).
                         "severity": "UNKNOWN",
                         "cvss_score": None,
-                        "attack_vector": "NETWORK",
                         "vendor": vendor,
                         "product": product,
                         "required_action": required_action,

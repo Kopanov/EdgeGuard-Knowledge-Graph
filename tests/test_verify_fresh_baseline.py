@@ -12,13 +12,91 @@ invariant is really broken.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
+import re
 import sys
-from typing import Any, Dict, List
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, FrozenSet, List
+from unittest.mock import MagicMock
 
 import pytest
 
 _SCRIPT = os.path.join(os.path.dirname(__file__), "..", "scripts", "verify_fresh_baseline.py")
+_SRC = Path(__file__).resolve().parent.parent / "src"
+
+# What the writers of the baseline DAG put on each relationship type, read from the code (2026-10
+# relationship provenance; ``TestContractIsWhatTheWritersWrite`` derives the same table from their
+# Cypher). The scan rows of a correct graph follow it.
+_LISTS: FrozenSet[str] = frozenset({"sources", "source_refs", "misp_event_ids"})
+_WRITTEN_BY_TYPE: Dict[str, FrozenSet[str]] = {
+    **{
+        t: _LISTS | {"match_type"}
+        for t in (
+            "EMPLOYS_TECHNIQUE",
+            "IMPLEMENTS_TECHNIQUE",
+            "USES_TECHNIQUE",
+            "ATTRIBUTED_TO",
+            "INDICATES",
+            "EXPLOITS",
+            "TARGETS",
+            "AFFECTS",
+            "IN_TACTIC",
+            "SUBTECHNIQUE_OF",
+            "USES_MALWARE",
+            "USES_TOOL",
+        )
+    },
+    **{t: _LISTS for t in ("RUNS", "PART_OF_CAMPAIGN", "REFERS_TO")},
+    **{
+        t: frozenset({"sources", "misp_event_ids"})
+        for t in ("HAS_CVSS_v2", "HAS_CVSS_v30", "HAS_CVSS_v31", "HAS_CVSS_v40")
+    },
+    "SOURCED_FROM": frozenset({"source", "source_refs", "misp_event_ids"}),
+}
+_SCAN_PROPS = ("sources", "source_refs", "misp_event_ids", "match_type", "source")
+
+
+def _scan_row(rel_type, edges=10, managed=None, written=None, empty_events=0, legacy=0):
+    """One row of the per-type relationship scan (checks 12b / 12c)."""
+    managed = edges if managed is None else managed
+    written = _WRITTEN_BY_TYPE.get(rel_type, frozenset()) if written is None else written
+    row = {"type": rel_type, "edges": edges, "managed": managed, "empty_misp_event_ids": empty_events}
+    row.update({f"with_{p}": managed if p in written else 0 for p in _SCAN_PROPS})
+    row["legacy_keys"] = legacy
+    return row
+
+
+def _healthy_scan() -> List[Dict[str, Any]]:
+    rows = [_scan_row(t) for t in sorted(_WRITTEN_BY_TYPE)]
+    # A campaign link whose ATTRIBUTED_TO links name no MISP event has an empty list: legitimate.
+    rows = [dict(r, empty_misp_event_ids=2) if r["type"] == "RUNS" else r for r in rows]
+    # ResilMesh's own edges carry no EdgeGuard provenance and are not judged.
+    rows.append(_scan_row("ON", edges=3, managed=0))
+    return rows
+
+
+# ``SOURCED_FROM`` count per ``Source`` node on a correct default baseline: the keyed sources whose
+# key the deployment holds delivered, VirusTotal (no key) and the two flag-guarded sources did not,
+# and the alias nodes (``otx``, ``cisa``) never receive edges.
+_SOURCE_ROWS = [
+    {"source_id": "abuseipdb", "sourced_from": 10000},
+    {"source_id": "alienvault_otx", "sourced_from": 149000},
+    {"source_id": "cisa", "sourced_from": 0},
+    {"source_id": "cisa_ics", "sourced_from": 0},
+    {"source_id": "cisa_kev", "sourced_from": 1500},
+    {"source_id": "feodo_tracker", "sourced_from": 7600},
+    {"source_id": "malwarebazaar", "sourced_from": 0},
+    {"source_id": "misp", "sourced_from": 0},
+    {"source_id": "mitre_attck", "sourced_from": 1900},
+    {"source_id": "nvd", "sourced_from": 140000},
+    {"source_id": "otx", "sourced_from": 0},
+    {"source_id": "ssl_blacklist", "sourced_from": 11000},
+    {"source_id": "threatfox", "sourced_from": 7400},
+    {"source_id": "urlhaus", "sourced_from": 34000},
+    {"source_id": "virustotal", "sourced_from": 0},
+]
 
 
 @pytest.fixture(scope="module")
@@ -95,6 +173,22 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [{"nodes": 0}]
     if "UNWIND r.sources AS s" in s:
         return [{"type": "INDICATES", "source": "threatfox", "c": 5}]
+    if "AS legacy_keys" in s:
+        return _healthy_scan()
+    if "AS sourced_from" in s:
+        return [dict(x) for x in _SOURCE_ROWS]
+    if "AS part_of_to_campaign" in s:
+        return [{"part_of_to_campaign": 0, "part_of_campaign_misplaced": 0, "part_of_campaign": 1600, "part_of": 0}]
+    if "AS unscored_with_score" in s:
+        return [
+            {
+                "cves": 141000,
+                "with_cvss": 126500,
+                "scored_without_score": 0,
+                "score_not_from_cvss": 0,
+                "unscored_with_score": 0,
+            }
+        ]
     raise AssertionError(f"unexpected statement in test dispatcher: {statement[:120]}")
 
 
@@ -382,3 +476,554 @@ class TestRealBreakageStillFails:
         )
         assert [c["check"] for c in rep.failed] == ["provenance_lists_are_lists"]
         assert _check(rep, "provenance_lists_are_lists")["detail"] == {"edges": 21, "nodes": 11}
+
+
+# --------------------------------------------------------------------------- 2026-10 data contracts
+def _replace_scan_row(rel_type, **changes):
+    """Override for ``_run``: the per-type scan with one row changed (or added)."""
+
+    def override(statement, rows):
+        if "AS legacy_keys" not in statement:
+            return rows
+        out = [dict(r, **changes) if r["type"] == rel_type else r for r in rows]
+        if not any(r["type"] == rel_type for r in rows):
+            out.append(dict(_scan_row(rel_type), **changes))
+        return out
+
+    return override
+
+
+class TestRelationshipProvenanceContract:
+    """Relationship provenance (2026-10): each relationship type carries what its writers guarantee —
+    the three lists and ``match_type`` on the evidence links, the lists only on the links the
+    enrichment jobs derive, ``sources`` / ``misp_event_ids`` on the CVSS edges, and ``source`` /
+    ``source_refs`` / ``misp_event_ids`` on the per-source ``SOURCED_FROM`` edge."""
+
+    def test_correct_graph_passes_including_the_types_without_an_evidence_label(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        c = _check(rep, "relationship_provenance_complete")
+        assert c["ok"] is True and c["mandatory"] is True
+        assert c["detail"]["missing_by_type"] == []
+        # RUNS / PART_OF_CAMPAIGN / REFERS_TO carry no match_type, HAS_CVSS_* no source_refs and
+        # SOURCED_FROM no sources: the healthy scan has them all at 0 and the check still passes.
+        assert c["detail"]["edges_checked"] == 10 * len(_WRITTEN_BY_TYPE)
+
+    def test_an_empty_misp_event_ids_list_is_reported_never_failed(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, override=_replace_scan_row("PART_OF_CAMPAIGN", empty_misp_event_ids=10))
+        c = _check(rep, "relationship_provenance_complete")
+        assert c["ok"] is True
+        assert {"type": "PART_OF_CAMPAIGN", "edges": 10} in c["detail"]["empty_misp_event_ids_by_type"]
+
+    def test_edges_edgeguard_does_not_manage_are_not_judged(self, vfb, monkeypatch):
+        # A partner's REFERS_TO without the marker: the ownership check owns that case.
+        rep = _run(vfb, monkeypatch, override=_replace_scan_row("REFERS_TO", edges=14, managed=10))
+        assert _check(rep, "relationship_provenance_complete")["ok"] is True
+
+    @pytest.mark.parametrize(
+        "rel_type, prop",
+        [
+            ("INDICATES", "match_type"),
+            ("USES_TECHNIQUE", "match_type"),
+            ("ATTRIBUTED_TO", "source_refs"),
+            ("EXPLOITS", "misp_event_ids"),
+            ("IN_TACTIC", "sources"),
+            ("RUNS", "misp_event_ids"),
+            ("PART_OF_CAMPAIGN", "source_refs"),
+            ("REFERS_TO", "sources"),
+            ("HAS_CVSS_v31", "misp_event_ids"),
+            ("SOURCED_FROM", "source"),
+            ("SOURCED_FROM", "source_refs"),
+            ("SOURCED_FROM", "misp_event_ids"),
+        ],
+    )
+    def test_a_missing_contract_property_fails(self, vfb, monkeypatch, rel_type, prop):
+        rep = _run(vfb, monkeypatch, override=_replace_scan_row(rel_type, **{f"with_{prop}": 7}))
+        assert [c["check"] for c in rep.failed] == ["relationship_provenance_complete"]
+        detail = _check(rep, "relationship_provenance_complete")["detail"]
+        assert detail["missing_by_type"] == [{"type": rel_type, "property": prop, "edges": 3}]
+
+    def test_a_list_valued_sourced_from_source_fails(self, vfb, monkeypatch):
+        # ``with_source`` counts a string only: the scalar the alias-merge normaliser must leave alone.
+        rep = _run(vfb, monkeypatch, override=_replace_scan_row("SOURCED_FROM", with_source=0))
+        assert [c["check"] for c in rep.failed] == ["relationship_provenance_complete"]
+
+    def test_informational_on_a_graph_without_edgeguard_edges(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, override=lambda st, rows: [] if "AS legacy_keys" in st else rows)
+        assert _check(rep, "relationship_provenance_complete")["ok"] is None
+
+    def test_contract_covers_every_type_built_from_the_sources(self, vfb):
+        assert set(vfb.REL_PROVENANCE_CONTRACT) == set(vfb.PROVENANCE_REL_TYPES) | {"SOURCED_FROM"}
+        assert "INVOLVES" not in vfb.REL_PROVENANCE_CONTRACT and "PART_OF" not in vfb.REL_PROVENANCE_CONTRACT
+
+    def test_one_pass_over_the_relationships_and_only_presence_is_judged(self, vfb):
+        scan = vfb._REL_PROVENANCE_SCAN
+        assert scan.count("MATCH ") == 1 and "RETURN type(r) AS type" in scan
+        assert "r.misp_event_ids IS NOT NULL" in scan and "size(r.misp_event_ids)" not in scan
+        assert "apoc.meta.cypher.type(r.source) WHEN 'STRING'" in scan
+
+    def test_each_scan_column_counts_its_own_property_on_managed_edges(self, vfb):
+        columns = {
+            name: expr for expr, name in re.findall(r"sum\((CASE WHEN .*?END)\)\s+AS (\w+)", vfb._REL_PROVENANCE_SCAN)
+        }
+        for prop in ("sources", "source_refs", "misp_event_ids", "match_type"):
+            assert columns[f"with_{prop}"] == (
+                f"CASE WHEN r.edgeguard_managed = true AND r.{prop} IS NOT NULL THEN 1 ELSE 0 END"
+            ), prop
+        assert columns["with_source"].startswith("CASE WHEN r.edgeguard_managed = true AND r.source IS NOT NULL THEN")
+        assert columns["managed"] == "CASE WHEN r.edgeguard_managed = true THEN 1 ELSE 0 END"
+        assert columns["empty_misp_event_ids"] == (
+            "CASE WHEN r.edgeguard_managed = true AND r.misp_event_ids = [] THEN 1 ELSE 0 END"
+        )
+        # every column the check reads exists in the scan
+        for props in vfb.REL_PROVENANCE_CONTRACT.values():
+            assert {f"with_{p}" for p in props} <= set(columns)
+
+
+# One relationship row for every group ``Neo4jClient.create_misp_relationships_batch`` writes
+# (``exact`` marks a curated claim, written by its own exact-name query).
+_ACTOR, _MALWARE, _IND = (
+    ("ThreatActor", {"name": "apt29"}),
+    ("Malware", {"name": "emotet"}),
+    ("Indicator", {"value": "1.2.3.4"}),
+)
+_TECH, _CVE, _TOOL = (
+    ("Technique", {"mitre_id": "T1059"}),
+    ("CVE", {"cve_id": "CVE-2024-1"}),
+    ("Tool", {"mitre_id": "S0002"}),
+)
+_SYNC_ROWS = [
+    {
+        "rel_type": rel_type,
+        "from_type": src[0],
+        "from_key": src[1],
+        "to_type": dst[0],
+        "to_key": dst[1],
+        "match_type": "m",
+        "source": "threatfox",
+        "exact_names": exact,
+    }
+    for rel_type, src, dst, exact in (
+        ("EMPLOYS_TECHNIQUE", _ACTOR, _TECH, False),
+        ("EMPLOYS_TECHNIQUE", ("Campaign", {"name": "op x"}), _TECH, False),
+        ("EMPLOYS_TECHNIQUE", _ACTOR, _TECH, True),
+        ("IMPLEMENTS_TECHNIQUE", _MALWARE, _TECH, False),
+        ("IMPLEMENTS_TECHNIQUE", _MALWARE, _TECH, True),
+        ("IMPLEMENTS_TECHNIQUE", _TOOL, _TECH, False),
+        ("ATTRIBUTED_TO", _MALWARE, ("ThreatActor", {"name": "ta542"}), False),
+        ("INDICATES", _IND, _MALWARE, False),
+        ("TARGETS", _IND, ("Sector", {"name": "energy"}), False),
+        ("AFFECTS", _CVE, ("Sector", {"name": "energy"}), False),
+        ("EXPLOITS", _IND, _CVE, False),
+        ("EXPLOITS", _ACTOR, _CVE, False),
+        ("EXPLOITS", _MALWARE, _CVE, False),
+        ("USES_MALWARE", _ACTOR, _MALWARE, False),
+        ("USES_TOOL", _ACTOR, _TOOL, False),
+    )
+]
+_REL_MERGE = re.compile(r"MERGE \(\w+\)-\[(\w+):(\w+)\]->\(\w+\)")
+
+
+class _Record(dict):
+    """Every column reads 0; an APOC failure column read with ``get`` is absent (a clean batch)."""
+
+    def __missing__(self, key):
+        return 0
+
+
+class _Result:
+    def __iter__(self):
+        return iter([{"name": "apt29"}])
+
+    def single(self):
+        return _Record()
+
+
+class _RecordingSession:
+    def __init__(self, queries):
+        self.queries = queries
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, query, *args, **kwargs):
+        self.queries.append(query)
+        return _Result()
+
+
+class TestContractIsWhatTheWritersWrite:
+    """The script's contract must equal what the writers of the baseline DAG put on each type:
+    stricter fails a correct graph, looser misses a defect. Derived from the writers' own Cypher —
+    every ``build_relationships`` step (rendered without a database), the sync's batch writer, the
+    campaign and Vulnerability ↔ CVE jobs, the CVSS sub-node writer and the three ``SOURCED_FROM``
+    writers. A property counts for a type when every writer of that type assigns it after its
+    MERGE. The single-pair writers of the in-process ``run_pipeline.py`` path are not part of the
+    baseline DAG and are left out."""
+
+    def _writer_queries(self, monkeypatch) -> Dict[str, List[str]]:
+        """The Cypher each writer sends, by writer, recorded without a database."""
+        import build_relationships
+        import enrichment_jobs
+        from neo4j_client import Neo4jClient
+
+        by_writer: Dict[str, List[str]] = defaultdict(list)
+
+        class _BuildClient:
+            def connect(self):
+                return True
+
+            def close(self):
+                pass
+
+            def run(self, query, **kw):
+                return [{"count": 0, "c": 0}]
+
+        def _batched(client, label, outer, inner, stats, key, batch_size=5000, skip_query=None, params=None):
+            by_writer["build_relationships"].append(inner)
+            return True
+
+        monkeypatch.setattr(build_relationships, "Neo4jClient", _BuildClient)
+        monkeypatch.setattr(build_relationships, "_safe_run_batched", _batched)
+        monkeypatch.setattr(build_relationships, "query_pause", lambda: None)
+        build_relationships.build_relationships()
+
+        writer = ""
+        client = Neo4jClient.__new__(Neo4jClient)
+        client.driver = MagicMock()
+        client.driver.session.side_effect = lambda **kw: _RecordingSession(by_writer[writer])
+        client._connection_healthy = True
+        writer = "sync"
+        written = client.create_misp_relationships_batch([dict(r) for r in _SYNC_ROWS], source_id="misp")
+        # every row reached its query (AFFECTS and the indicator EXPLOITS row run against two labels)
+        assert (written, written.failed) == (len(_SYNC_ROWS) + 2, 0)
+        writer = "enrichment"
+        enrichment_jobs.build_campaign_nodes(client)
+        enrichment_jobs.bridge_vulnerability_cve(client)
+        writer = "cvss"
+        for rel_type, label in (
+            ("HAS_CVSS_v2", "CVSSv2"),
+            ("HAS_CVSS_v30", "CVSSv30"),
+            ("HAS_CVSS_v31", "CVSSv31"),
+            ("HAS_CVSS_v40", "CVSSv40"),
+        ):
+            assert client._merge_cvss_node("CVE-2024-1", "nvd", label, rel_type, {"base_score": 7.5}, "13")
+        writer = "sourced_from"
+        key = {"value": "1.2.3.4", "indicator_type": "ipv4"}
+        assert client._upsert_sourced_relationship("Indicator", key, "threatfox", "{}", 0.7, misp_event_id="13")
+        client.merge_indicators_batch([dict(key, tag="threatfox", misp_event_id="13")], source_id="threatfox")
+        client.merge_vulnerabilities_batch([{"cve_id": "CVE-2024-1", "tag": "nvd", "misp_event_id": "13"}], "nvd")
+        return by_writer
+
+    @staticmethod
+    def _assignments(queries: List[str]) -> Dict[str, List[FrozenSet[str]]]:
+        """Per relationship type, the contract properties each MERGE of that type assigns."""
+        per_type: Dict[str, List[FrozenSet[str]]] = defaultdict(list)
+        for query in queries:
+            for merge in _REL_MERGE.finditer(query):
+                var, rel_type = merge.groups()
+                block = query[merge.end() :].split("MERGE (", 1)[0]
+                per_type[rel_type].append(
+                    frozenset(p for p in _SCAN_PROPS if re.search(rf"\b{re.escape(var)}\.{p}\s*=(?!=)", block))
+                )
+        return per_type
+
+    def test_every_writer_path_was_recorded(self, monkeypatch):
+        by_writer = self._writer_queries(monkeypatch)
+        merged = {w: set(self._assignments(q)) for w, q in by_writer.items()}
+        assert len(by_writer["build_relationships"]) == 20
+        assert merged["build_relationships"] >= {"IN_TACTIC", "SUBTECHNIQUE_OF", "USES_TECHNIQUE", "TARGETS"}
+        assert merged["sync"] == {
+            "EMPLOYS_TECHNIQUE",
+            "IMPLEMENTS_TECHNIQUE",
+            "ATTRIBUTED_TO",
+            "INDICATES",
+            "TARGETS",
+            "AFFECTS",
+            "EXPLOITS",
+            "USES_MALWARE",
+            "USES_TOOL",
+        }
+        assert merged["enrichment"] == {"RUNS", "PART_OF_CAMPAIGN", "REFERS_TO"}
+        assert merged["cvss"] == {"HAS_CVSS_v2", "HAS_CVSS_v30", "HAS_CVSS_v31", "HAS_CVSS_v40"}
+        assert merged["sourced_from"] == {"SOURCED_FROM"}
+        assert len(self._assignments(by_writer["sourced_from"])["SOURCED_FROM"]) == 3, "single + two batch writers"
+
+    def test_contract_equals_what_every_writer_assigns(self, vfb, monkeypatch):
+        per_type = self._assignments([q for queries in self._writer_queries(monkeypatch).values() for q in queries])
+        guaranteed = {t: frozenset.intersection(*sets) for t, sets in per_type.items()}
+        contract = {t: frozenset(props) for t, props in vfb.REL_PROVENANCE_CONTRACT.items()}
+        assert set(contract) <= set(guaranteed), f"no writer found for {set(contract) - set(guaranteed)}"
+        assert {t: guaranteed[t] for t in contract} == contract
+        # The fixture the check tests run on is the same table.
+        assert {t: guaranteed[t] for t in _WRITTEN_BY_TYPE} == _WRITTEN_BY_TYPE
+
+    def test_every_relationship_row_of_the_sync_states_its_evidence(self):
+        # ``match_type`` is assigned by the batch writer as ``coalesce(row.match_type, r.match_type)``:
+        # it holds only because every row the sync builds names its evidence.
+        import ast
+
+        tree = ast.parse((_SRC / "run_misp_to_neo4j.py").read_text())
+        rows = [
+            {k.value for k in node.keys if isinstance(k, ast.Constant)}
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Dict)
+            and any(isinstance(k, ast.Constant) and k.value == "rel_type" for k in node.keys)
+        ]
+        assert len(rows) >= 12
+        assert all("match_type" in keys for keys in rows)
+
+
+class TestLegacyRelationshipProperties:
+    """The keys dropped in 2026-10 (``source_id``, ``source_ids``, ``report_ids``) stay off EdgeGuard
+    relationships; ``Source`` nodes keep ``source_id`` as their key."""
+
+    def test_correct_graph_passes(self, vfb, monkeypatch):
+        c = _check(_run(vfb, monkeypatch), "no_legacy_relationship_properties")
+        assert c["ok"] is True and c["detail"]["source_nodes"] == len(_SOURCE_ROWS)
+
+    @pytest.mark.parametrize("rel_type", ["INDICATES", "SOURCED_FROM", "HAS_CVSS_v31", "PART_OF"])
+    def test_a_legacy_key_on_an_edgeguard_type_fails(self, vfb, monkeypatch, rel_type):
+        rep = _run(vfb, monkeypatch, override=_replace_scan_row(rel_type, legacy_keys=4))
+        assert [c["check"] for c in rep.failed] == ["no_legacy_relationship_properties"]
+        assert {"type": rel_type, "edges": 4} in _check(rep, "no_legacy_relationship_properties")["detail"][
+            "legacy_keys_by_type"
+        ]
+
+    def test_a_partner_type_is_reported_not_failed(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch, override=_replace_scan_row("ON", legacy_keys=2))
+        c = _check(rep, "no_legacy_relationship_properties")
+        assert c["ok"] is True and c["detail"]["legacy_keys_by_type"] == [{"type": "ON", "edges": 2}]
+
+    def test_a_source_node_without_its_key_fails(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                rows + [{"source_id": None, "sourced_from": 0}] if "AS sourced_from" in st else rows
+            ),
+        )
+        assert [c["check"] for c in rep.failed] == ["no_legacy_relationship_properties"]
+        assert _check(rep, "no_legacy_relationship_properties")["detail"]["source_nodes_without_source_id"] == 1
+
+    def test_the_scan_reads_the_three_legacy_keys_on_every_relationship(self, vfb):
+        scan = vfb._REL_PROVENANCE_SCAN
+        assert scan.startswith("MATCH ()-[r]->() RETURN")
+        for key in ("r.source_id IS NOT NULL", "r.source_ids IS NOT NULL", "r.report_ids IS NOT NULL"):
+            assert key in scan
+
+
+class TestCampaignMembership:
+    """Campaign membership is ``PART_OF_CAMPAIGN`` (Malware / Indicator → Campaign); ``PART_OF`` stays
+    ResilMesh's (IP → Subnet, the OrganizationUnit hierarchy) and never ends at a Campaign."""
+
+    def test_correct_graph_passes_and_resilmesh_part_of_is_left_alone(self, vfb, monkeypatch):
+        assert _check(_run(vfb, monkeypatch), "campaign_membership_is_part_of_campaign")["ok"] is True
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [dict(rows[0], part_of=40)] if "AS part_of_to_campaign" in st else rows,
+        )
+        assert _check(rep, "campaign_membership_is_part_of_campaign")["ok"] is True
+
+    @pytest.mark.parametrize("column", ["part_of_to_campaign", "part_of_campaign_misplaced"])
+    def test_campaign_membership_under_another_name_fails(self, vfb, monkeypatch, column):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [dict(rows[0], **{column: 3})] if "AS part_of_to_campaign" in st else rows,
+        )
+        assert [c["check"] for c in rep.failed] == ["campaign_membership_is_part_of_campaign"]
+
+    def test_query_shape(self, vfb, monkeypatch):
+        seen = {}
+
+        def capture(st, rows):
+            if "AS part_of_to_campaign" in st:
+                seen["st"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        assert "COUNT { ()-[:PART_OF]->(:Campaign) }" in seen["st"]
+        assert "WHERE NOT c:Campaign OR NOT (n:Malware OR n:Indicator)" in seen["st"]
+
+
+class TestCveScoreFromCvss:
+    """CVE scores (2026-10): with a CVSS sub-node whose base score is in [0, 10] the CVE has the
+    selected sub-node's score and version and a CVSS rating; without one, no score, no version and
+    severity UNKNOWN."""
+
+    def test_correct_graph_passes(self, vfb, monkeypatch):
+        c = _check(_run(vfb, monkeypatch), "cve_score_from_cvss")
+        assert c["ok"] is True and c["mandatory"] is True
+
+    @pytest.mark.parametrize("column", ["scored_without_score", "score_not_from_cvss", "unscored_with_score"])
+    def test_each_kind_of_wrong_score_fails(self, vfb, monkeypatch, column):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [dict(rows[0], **{column: 14451})] if "AS unscored_with_score" in st else rows,
+        )
+        assert [c["check"] for c in rep.failed] == ["cve_score_from_cvss"]
+
+    def test_informational_without_cves(self, vfb, monkeypatch):
+        empty = {"cves": 0, "with_cvss": None, "scored_without_score": None, "score_not_from_cvss": None}
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [dict(empty, unscored_with_score=None)] if "AS unscored_with_score" in st else rows
+            ),
+        )
+        assert _check(rep, "cve_score_from_cvss")["ok"] is None and rep.failed == []
+
+    def test_selection_is_the_writer_selection(self, vfb):
+        import cvss_selection
+        import neo4j_client
+
+        assert vfb._CVSS_SELECTION_ORDER == tuple(
+            (v.rel_type, v.label, v.version) for v in cvss_selection.CVSS_VERSIONS
+        )
+        assert vfb._CVSS_RATINGS == cvss_selection.QUALITATIVE_SEVERITIES
+
+        def squeeze(text: str) -> str:
+            return re.sub(r"\s+", "", text)
+
+        assert squeeze("WITH c, " + vfb._CVE_BEST_CVSS) == squeeze(neo4j_client._cve_cvss_selection_cypher("c"))
+
+    def test_query_judges_edgeguard_cves_against_unknown(self, vfb, monkeypatch):
+        import cvss_selection
+
+        seen = {}
+
+        def capture(st, rows):
+            if "AS unscored_with_score" in st:
+                seen["st"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        assert seen["st"].startswith("MATCH (c:CVE) WHERE c.edgeguard_managed = true WITH c, head(")
+        assert f"coalesce(c.severity, '') <> '{cvss_selection.UNKNOWN_SEVERITY}'" in seen["st"]
+        assert "c.cvss_score <> best[0].base_score OR c.cvss_version <> best[1]" in seen["st"]
+
+
+class TestDefaultSourcesDelivered:
+    """Per-source presence (2026-10): the ``SOURCED_FROM`` count of every ``Source`` node; a source
+    collected by default that delivered nothing is a warning (exit code unchanged); keyed and
+    flag-guarded sources are only listed."""
+
+    def test_correct_graph_passes_and_lists_every_source_node(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        c = _check(rep, "default_sources_delivered")
+        assert c["ok"] is True and c["mandatory"] is False and rep.warnings == []
+        assert c["detail"]["sourced_from_by_source"] == _SOURCE_ROWS
+        assert c["detail"]["keyed_sources_without_data"] == ["virustotal"]
+        assert c["detail"]["flag_guarded_sources_without_data"] == ["cisa_ics", "malwarebazaar"]
+
+    @pytest.mark.parametrize("source", ["urlhaus", "nvd", "ssl_blacklist"])
+    def test_a_silent_default_source_warns_without_failing(self, vfb, monkeypatch, source):
+        def override(st, rows):
+            if "AS sourced_from" in st:
+                return [dict(x, sourced_from=0) if x["source_id"] == source else x for x in rows]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override)
+        c = _check(rep, "default_sources_delivered")
+        assert c["ok"] is False and rep.failed == [] and [w["check"] for w in rep.warnings] == [c["check"]]
+        assert c["detail"]["default_sources_without_data"] == [source]
+
+    def test_a_missing_source_node_warns(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [x for x in rows if x["source_id"] != "cisa_kev"] if "AS sourced_from" in st else rows
+            ),
+        )
+        assert _check(rep, "default_sources_delivered")["detail"]["default_sources_without_data"] == ["cisa_kev"]
+
+    def test_a_keyed_source_without_data_is_not_a_warning(self, vfb, monkeypatch):
+        def override(st, rows):
+            if "AS sourced_from" in st:
+                return [dict(x, sourced_from=0) if x["source_id"] in ("threatfox", "abuseipdb") else x for x in rows]
+            return rows
+
+        c = _check(_run(vfb, monkeypatch, override=override), "default_sources_delivered")
+        assert c["ok"] is True and c["detail"]["keyed_sources_without_data"] == ["virustotal", "threatfox", "abuseipdb"]
+
+    def test_classification_follows_the_collectors_keys_and_flags(self, vfb):
+        import collector_allowlist
+        import source_key_check
+        import source_registry
+
+        def canonical(name: str) -> str:
+            src = source_registry.get_source(name) or source_registry.get_source(name.split("_enrich")[0])
+            assert src is not None, name
+            return src.canonical_id
+
+        collectors = {canonical(n) for n in collector_allowlist.COLLECT_SOURCES_CANONICAL}
+        keyed = {canonical(s.name) for s in source_key_check.KEYED_SOURCES if s.needs_key}
+        flagged = {s for s in collectors - keyed if not source_registry.get_source(s).cli_default_enabled}
+        assert set(vfb.KEYED_SOURCES) == keyed
+        assert set(vfb.FLAG_GUARDED_SOURCES) == flagged == {"cisa_ics", "malwarebazaar"}
+        assert set(vfb.DEFAULT_SOURCES) == collectors - keyed - flagged
+        assert "nvd" in vfb.DEFAULT_SOURCES, "NVD needs no key (needs_key=False): it is collected by default"
+
+
+class TestTlpCheckDescription:
+    def test_the_check_says_where_lost_tags_show(self, vfb, monkeypatch):
+        note = _check(_run(vfb, monkeypatch), "tlp_on_every_node")["detail"]["note"]
+        assert "[TLP] MISP attribute" in note and "EDGEGUARD_DEFAULT_TLP" in note
+        # the sync's own log line, so the note names a message that exists
+        assert '"[TLP] MISP attribute %s has no tlp: tag' in (_SRC / "run_misp_to_neo4j.py").read_text()
+
+
+class TestWarningLevel:
+    """A warning is printed as WARN and in the RESULT line, keeps ``ok: false`` / ``mandatory: false`` in
+    the JSON, and leaves the exit code at 0."""
+
+    def _main(self, vfb, monkeypatch, capsys, argv, silent_source):
+        def override(st, rows):
+            if silent_source and "AS sourced_from" in st:
+                return [dict(x, sourced_from=0) if x["source_id"] == silent_source else x for x in rows]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override)
+        monkeypatch.setattr(vfb, "run_checks", lambda *a, **k: rep)
+        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py", *argv])
+        code = vfb.main()
+        return code, capsys.readouterr().out
+
+    def test_text_output_with_a_warning(self, vfb, monkeypatch, capsys):
+        code, out = self._main(vfb, monkeypatch, capsys, [], "urlhaus")
+        assert code == 0
+        assert "[WARN] default_sources_delivered:" in out
+        assert "RESULT: PASS; 1 warning(s): default_sources_delivered" in out
+
+    def test_text_output_without_a_warning(self, vfb, monkeypatch, capsys):
+        code, out = self._main(vfb, monkeypatch, capsys, [], None)
+        assert code == 0 and "[PASS] default_sources_delivered:" in out
+        assert out.rstrip().endswith("RESULT: PASS")
+
+    def test_a_failure_still_fails_next_to_a_warning(self, vfb, monkeypatch, capsys):
+        def override(st, rows):
+            if "AS sourced_from" in st:
+                return [dict(x, sourced_from=0) if x["source_id"] == "urlhaus" else x for x in rows]
+            if "AS part_of_to_campaign" in st:
+                return [dict(rows[0], part_of_to_campaign=5)]
+            return rows
+
+        rep = _run(vfb, monkeypatch, override=override)
+        monkeypatch.setattr(vfb, "run_checks", lambda *a, **k: rep)
+        monkeypatch.setattr(sys, "argv", ["verify_fresh_baseline.py"])
+        assert vfb.main() == 1
+        out = capsys.readouterr().out
+        assert "[FAIL] campaign_membership_is_part_of_campaign:" in out
+        assert "RESULT: FAIL (1 mandatory check(s) failed); 1 warning(s): default_sources_delivered" in out
+
+    def test_json_output(self, vfb, monkeypatch, capsys):
+        code, out = self._main(vfb, monkeypatch, capsys, ["--json"], "urlhaus")
+        result = json.loads(out)
+        c = next(x for x in result["checks"] if x["check"] == "default_sources_delivered")
+        assert code == 0 and result["passed"] is True and c["ok"] is False and c["mandatory"] is False

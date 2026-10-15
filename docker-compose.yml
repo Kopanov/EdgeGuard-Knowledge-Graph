@@ -111,6 +111,11 @@ x-common-env: &common-env
   EDGEGUARD_NVD_BASELINE_KEV_SWEEP: ${EDGEGUARD_NVD_BASELINE_KEV_SWEEP:-true}
   EDGEGUARD_NVD_EXTRA_CVE_IDS: ${EDGEGUARD_NVD_EXTRA_CVE_IDS:-}
   EDGEGUARD_DEFAULT_TLP: ${EDGEGUARD_DEFAULT_TLP:-white}
+  # Fresh-baseline wipe (src/baseline_clean.py): read timeout of one MISP event delete, in seconds.
+  EDGEGUARD_MISP_DELETE_TIMEOUT_SEC: ${EDGEGUARD_MISP_DELETE_TIMEOUT_SEC:-900}
+  # OTX page ceilings (50 pulses per page); a baseline that reaches its ceiling logs a warning.
+  EDGEGUARD_OTX_BASELINE_MAX_PAGES: ${EDGEGUARD_OTX_BASELINE_MAX_PAGES:-200}
+  EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES: ${EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES:-25}
   # Incremental MISP -> Neo4j sync writes only attributes changed in the window
   # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
   EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}

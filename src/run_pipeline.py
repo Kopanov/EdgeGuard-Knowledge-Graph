@@ -494,7 +494,7 @@ class EdgeGuardPipeline:
                                 "description": obj.get("description", ""),
                                 "cvss_score": None,  # None = unscored; 0.0 is a valid CVSS score
                                 "severity": "UNKNOWN",
-                                "attack_vector": "UNKNOWN",
+                                # No attack vector: merge_cve derives it from the CVSS sub-nodes (2026-10).
                                 "zone": self._extract_zones_from_stix_labels(obj),
                                 "tag": "stix_import",
                                 "source": [_stix_object_source(obj)],  # Source as array (like zone)

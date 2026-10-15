@@ -82,7 +82,7 @@ from config import (
     nvd_update_existing,
     resolve_collection_limit,
 )
-from cvss_selection import select_cvss
+from cvss_selection import cvss_attack_vector, select_cvss, select_cvss_payload
 
 # Import resilience utilities
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
@@ -1035,12 +1035,13 @@ class NVDCollector:
 
         metrics = cve_data.get("metrics", {})
 
-        # Get attack vector and full CVSS component data
-        attack_vector = "UNKNOWN"
+        # Full CVSS component data of every version NVD supplies, each from the first metric NVD
+        # lists for it. 2026-10: v3.1, v3.0 and v2 used to be alternatives, so the record kept only
+        # the first of them, and an incremental update then removed the sub-nodes of the others as
+        # withdrawn (``Neo4jClient._replace_nvd_owned_cve_data``) when NVD added a newer version.
         cvss_v31_data = {}
         cvss_v30_data = {}
         cvss_v2_data = {}
-        result_impacts = []
 
         # CVSSv4.0 — available from NVD since 2024 (ResilMesh schema: CVSSv40 node + HAS_CVSS_v40 rel)
         cvss_v40_data = None
@@ -1056,10 +1057,6 @@ class NVDCollector:
         if metrics.get("cvssMetricV31"):
             m31 = metrics["cvssMetricV31"][0]
             d31 = m31.get("cvssData", {})
-            if "AV:" in d31.get("vectorString", ""):
-                for part in d31["vectorString"].split("/"):
-                    if part.startswith("AV:"):
-                        attack_vector = part.split(":")[1]
             # Full v3.1 payload for CVSS sub-node (ResilMesh schema)
             cvss_v31_data = {
                 "vector_string": d31.get("vectorString", ""),
@@ -1076,18 +1073,9 @@ class NVDCollector:
                 "impact_score": m31.get("impactScore", 0.0),
                 "exploitability_score": m31.get("exploitabilityScore", 0.0),
             }
-            result_impacts = [
-                d31.get("confidentialityImpact", ""),
-                d31.get("integrityImpact", ""),
-                d31.get("availabilityImpact", ""),
-            ]
-        elif metrics.get("cvssMetricV30"):
+        if metrics.get("cvssMetricV30"):
             m30 = metrics["cvssMetricV30"][0]
             d30 = m30.get("cvssData", {})
-            if "AV:" in d30.get("vectorString", ""):
-                for part in d30["vectorString"].split("/"):
-                    if part.startswith("AV:"):
-                        attack_vector = part.split(":")[1]
             cvss_v30_data = {
                 "vector_string": d30.get("vectorString", ""),
                 "attack_vector": d30.get("attackVector", ""),
@@ -1103,12 +1091,7 @@ class NVDCollector:
                 "impact_score": m30.get("impactScore", 0.0),
                 "exploitability_score": m30.get("exploitabilityScore", 0.0),
             }
-            result_impacts = [
-                d30.get("confidentialityImpact", ""),
-                d30.get("integrityImpact", ""),
-                d30.get("availabilityImpact", ""),
-            ]
-        elif metrics.get("cvssMetricV2"):
+        if metrics.get("cvssMetricV2"):
             m2 = metrics["cvssMetricV2"][0]
             d2 = m2.get("cvssData", {})
             cvss_v2_data = {
@@ -1134,13 +1117,23 @@ class NVDCollector:
         # 2026-10: the record's score is its first CVSS in the order v3.1 → v3.0 → v2 → v4.0
         # (``cvss_selection``); without any CVSS it is None and the severity UNKNOWN. It used
         # to be 0.0, which MISPWriter tagged ``cvss:low`` and the sync read back as 3.0 / LOW.
-        cvss_score, severity, _ = select_cvss(
-            {
-                "cvss_v31_data": cvss_v31_data,
-                "cvss_v30_data": cvss_v30_data,
-                "cvss_v2_data": cvss_v2_data,
-                "cvss_v40_data": cvss_v40_data,
-            }
+        # The attack vector and the CIA impacts come from the same CVSS: the attack vector in NVD's
+        # words, None without CVSS (it was the letter of the CVSS 3.x vector's ``AV`` metric, or
+        # ``UNKNOWN``); the impacts only when that CVSS is 3.x, as before (CVSS 2 rates them NONE /
+        # PARTIAL / COMPLETE, and the CVSS 4.0 payload does not carry them).
+        payloads = {
+            "cvss_v31_data": cvss_v31_data,
+            "cvss_v30_data": cvss_v30_data,
+            "cvss_v2_data": cvss_v2_data,
+            "cvss_v40_data": cvss_v40_data,
+        }
+        cvss_score, severity, _ = select_cvss(payloads)
+        attack_vector = cvss_attack_vector(payloads)
+        scoring = select_cvss_payload(payloads)
+        result_impacts = (
+            [scoring[1].get(k, "") for k in ("confidentiality_impact", "integrity_impact", "availability_impact")]
+            if scoring and scoring[0].version in ("3.1", "3.0")
+            else []
         )
 
         # CWE identifiers (ResilMesh: cwe LIST OF STRING)
@@ -1397,16 +1390,19 @@ class NVDCollector:
                         or (max(checkpoint.get("pages") or [0]) if checkpoint.get("pages") else 0)
                         or 0
                     )
+                # 2026-10: every attempt reads all windows. The records of the windows read are pushed
+                # to MISP only after the last window, so an attempt that resumed at the window where
+                # an earlier one stopped would push only the windows from there on; the windows run
+                # newest first, and the newest CVEs never reached MISP while the attempt ended in
+                # success. The checkpoint position stays for ``edgeguard baseline status``.
                 if not checkpoint.get("completed") and checkpoint.get("nvd_window_idx") is not None:
-                    start_wi = int(checkpoint["nvd_window_idx"])
-                    resume_index = int(checkpoint.get("nvd_start_index", 0))
-                    if start_wi >= len(windows):
-                        start_wi, resume_index = 0, 0
-                        total_batches_done = 0
-                    else:
-                        logger.info(
-                            f"  Resuming baseline at window {start_wi + 1}/{len(windows)}, startIndex={resume_index}"
-                        )
+                    logger.info(
+                        "  An earlier attempt stopped at window %s/%s; its records were not pushed, so this "
+                        "attempt reads every window again",
+                        int(checkpoint["nvd_window_idx"]) + 1,
+                        len(windows),
+                    )
+                    total_batches_done = 0
 
                 # PR-N17 Fix #2 (BLOCK, 2026-04-22): track whether any
                 # window aborted due to fetch error so the operator

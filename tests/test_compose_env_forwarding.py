@@ -43,6 +43,9 @@ FORWARDED = [
     ("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true"),  # 2026-10 whole KEV catalogue in baseline mode
     ("EDGEGUARD_NVD_BASELINE_KEV_SWEEP", "true"),  # 2026-10 NVD records of every KEV CVE in baseline mode
     ("EDGEGUARD_NVD_EXTRA_CVE_IDS", None),  # 2026-10 CVE ids fetched by id; empty = none
+    ("EDGEGUARD_MISP_DELETE_TIMEOUT_SEC", "900"),  # 2026-10 fresh-baseline wipe: one MISP event delete
+    ("EDGEGUARD_OTX_BASELINE_MAX_PAGES", "200"),  # 2026-10 OTX baseline page ceiling (50 pulses per page)
+    ("EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES", "25"),
     ("EDGEGUARD_DEFAULT_TLP", "white"),
     ("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true"),  # incremental sync writes only changed attributes
     ("EDGEGUARD_NEO4J_READ_TIMEOUT", "900"),  # int(os.getenv(...)) — empty would raise

@@ -1866,6 +1866,7 @@ def cmd_clear_misp(args) -> int:
             return 0
 
     try:
+        from baseline_clean import misp_delete_read_timeout_sec
         from config import apply_misp_http_host_header
 
         _sess = _req.Session()
@@ -1933,7 +1934,9 @@ def cmd_clear_misp(args) -> int:
                     with warnings.catch_warnings():
                         if not SSL_VERIFY:
                             warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
-                        del_resp = _sess.delete(f"{MISP_URL}/events/{eid}", verify=SSL_VERIFY, timeout=(15, 30))
+                        del_resp = _sess.delete(
+                            f"{MISP_URL}/events/{eid}", verify=SSL_VERIFY, timeout=(15, misp_delete_read_timeout_sec())
+                        )
                     if del_resp.status_code == 200:
                         deleted += 1
                     elif del_resp.status_code == 302:

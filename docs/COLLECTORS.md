@@ -167,7 +167,7 @@ def detect_sectors(self, text: str) -> List[str]:
     'confidence_score': 0.5,
     'severity': 'UNKNOWN',
     'cvss_score': None,  # a pulse reference carries no CVSS (2026-10; was 0.0, tagged cvss:low)
-    'attack_vector': 'NETWORK',
+    # no 'attack_vector' (2026-10; an invented 'NETWORK' was sent)
 }
 
 # Threat Actor (auto-extracted from pulse adversary field — 2026-10: the free-text
@@ -195,10 +195,10 @@ def detect_sectors(self, text: str) -> List[str]:
 ### What It Does
 Collects CVE records from the National Vulnerability Database, including:
 - CVE IDs and descriptions (up to 1000 chars)
-- CVSS scores (v4.0, v3.1, v3.0, v2) with full component data
+- Every CVSS version NVD supplies (v4.0, v3.1, v3.0, v2), each with full component data (2026-10; before, the record kept only one of v3.1, v3.0 and v2, and an incremental update then removed the sub-node of an older version when NVD added a newer one)
 - `cvss_score` / `severity`: the record's first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`src/cvss_selection.py`); `None` / `UNKNOWN` when the record has none — rejected CVEs, CVEs awaiting NVD analysis without a CNA score. Until 2026-10 such a record carried 0.0, was tagged `cvss:low` and showed as 3.0 / LOW in Neo4j (14,451 CVEs on the hosted 730-day baseline). The CVSS 2 rating is read from the metric object, where NVD API 2.0 puts it.
 - Affected products (CPE matching)
-- Attack vectors
+- `attack_vector`: NVD's word (`NETWORK`, `ADJACENT_NETWORK`, `LOCAL`, `PHYSICAL`) for the attack vector of the CVSS that gives the score; `None` without CVSS. Until 2026-10 it was the letter of the CVSS 3.x vector's `AV` metric (`N`, `L`, `A`, `P`), or `UNKNOWN` without CVSS 3.x. `result_impacts` also come from the scoring CVSS when it is 3.x, as before (none from CVSS 2 or 4.0).
 - CWE identifiers
 - Reference URLs and tags (advisory/patch links)
 - **CISA KEV fields** — `cisa_exploit_add`, `cisa_action_due`, `cisa_required_action`, `cisa_vulnerability_name` (strongest signal of active exploitation; auto-boosts confidence to 0.9)
@@ -226,9 +226,9 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
   - Each slice is handled before the next is read, so memory stays at one slice.
 - **CVEs MISP does not hold yet** (no `source:NVD` attribute) are added when they lie in the scope a baseline collects: published within `EDGEGUARD_BASELINE_DAYS` of now (default 730), on CISA's KEV list (`cisaExploitAdd`), or listed in `EDGEGUARD_NVD_EXTRA_CVE_IDS`. NVD also modifies older CVEs (1,002 published more than 24 months earlier in the 14 days to 2026-10-14); those are not added. The scope follows the `EDGEGUARD_BASELINE_DAYS` environment variable on the worker, default 730; the Airflow Variable `BASELINE_DAYS` and a run's `baseline_days` are not read. A test value left in place (such as 7) narrows the scope.
 - **CVEs MISP holds.** The run lists them with `MISPWriter.index_source_attributes` once the first record has been read: the complete listing of `source:NVD` attributes, non-exportable tags included (`includeAllTags`). A listing that fails writes nothing, since a partial one would make stored CVEs look new. Each read CVE is rebuilt and compared with each stored copy:
-  - `NVD_META` by digest (`nvd_meta_digest`). `last_modified`, keys with empty values and the order of `cwe`, `ref_tags`, `cpe_type` and `affected_products` are ignored, so a change only to data EdgeGuard does not store (translations, SSVC, CNA product data) needs no edit.
+  - `NVD_META` by digest (`nvd_meta_digest`). `last_modified`, keys with empty values and the order of `cwe`, `ref_tags`, `cpe_type` and `affected_products` are ignored, so a change only to data EdgeGuard does not store (translations, SSVC, CNA product data) needs no edit. `attack_vector` is ignored too (2026-10): it is derived from the CVSS payloads, and copies written before 2026-10 hold a letter (`N`) or `UNKNOWN` where the rebuilt item has NVD's word.
   - Tags by family; tag names compare without case, as MISP resolves them.
-  - One-time edits: a copy written before 2026-10 compares as changed once if its CVE has more than 10 CPE matches, because its `affected_products` held a hash-order-dependent 10 of them and the collector now keeps NVD's first 10. That was 21% of a 2,000-record sample and 33 of 768 planned edits in the live dry run of 2026-10-14; they count against the cap.
+  - One-time edits: a copy written before 2026-10 compares as changed once if its CVE has more than 10 CPE matches, because its `affected_products` held a hash-order-dependent 10 of them and the collector now keeps NVD's first 10. That was 21% of a 2,000-record sample and 33 of 768 planned edits in the live dry run of 2026-10-14; they count against the cap. Likewise, a copy of a CVE for which NVD has more than one of CVSS 3.1, 3.0 and 2 compares as changed once: the collector kept only the first of them until 2026-10, and the edit adds the others, whose sub-nodes the sync then keeps.
 
   A copy that differs is edited in place (`MISPWriter.update_attribute`, `POST /attributes/edit/{uuid}`):
   - the new `NVD_META` comment and `first_seen` / `last_seen`;
@@ -240,7 +240,7 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
   - **Description, KEV fields, `last_modified` and `status`** are taken from the record. `status` becomes `["rejected"]` once NVD rejects the CVE; a node written before 2026-10 gets `status` at its next write, and a full sync writes it on every NVD CVE.
   - **NVD's lists** (`cwe`, `ref_tags`, `cpe_type`, `result_impacts`, `reference_urls`, `affected_products`) are set from the record even when empty, on a node EdgeGuard manages whose only source is NVD; an empty list removes the property. CISA ICS, the KEV and OTX records and partner writes supply these lists as well, so on a node with another source an empty NVD list leaves the property as it is (on the hosted graph on 2026-10-15, 126,669 of the CVE nodes with `cwe` had NVD as their only source and 3,679 had NVD and another source).
   - **CVSS sub-nodes** are updated for the versions the record has. A sub-node of a version the record no longer has is removed (`_replace_nvd_owned_cve_data`), but only when EdgeGuard manages it and NVD is the only feed that asserted it: CISA ICS writes CVSS sub-nodes too.
-  - **Score.** The node's `cvss_score`, `severity` and `cvss_version` are then derived from its remaining CVSS sub-nodes (`_set_cve_score_from_cvss`, the last step of `merge_cve`), so a CVSS version NVD withdrew no longer scores the node.
+  - **Score.** The node's `cvss_score`, `severity`, `cvss_version` and `attack_vector` are then derived from its remaining CVSS sub-nodes (`_set_cve_score_from_cvss`, the last step of `merge_cve`), so a CVSS version NVD withdrew no longer scores the node.
   - **Not changed:** a removed KEV entry (the KEV fields are not cleared) and zones (they accumulate).
 
   `EDGEGUARD_NVD_UPDATE_EXISTING=false` leaves stored CVEs as they are.
@@ -283,7 +283,7 @@ NVD 2.0 requires **`pubStartDate` and `pubEndDate` together**; each window **≤
     'confidence_score': 0.9,  # 0.9 when on CISA KEV, 0.6 otherwise
     'severity': 'HIGH',
     'cvss_score': 8.5,
-    'attack_vector': 'NETWORK',
+    'attack_vector': 'NETWORK',  # NVD's word for the scoring CVSS's attack vector; None without CVSS
     'affected_products': ['cpe:2.3:a:hospital_mgmt:system:1.0:*:*:*:*:*:*:*'],
     'reference_urls': ['https://vendor.example.com/advisory/2024-001'],
     'cisa_exploit_add': '2024-01-12',       # date added to CISA KEV
@@ -333,7 +333,7 @@ def detect_sectors(self, text: str) -> list:
     'confidence_score': 0.9,  # High confidence - confirmed exploited
     'severity': 'UNKNOWN',
     'cvss_score': None,
-    'attack_vector': 'NETWORK',
+    # no 'attack_vector' (2026-10; an invented 'NETWORK' was sent)
     'vendor': 'SCADA Systems Inc',
     'product': 'Grid Manager Pro',
     'required_action': 'Apply patch by due date',
@@ -872,8 +872,8 @@ The raw sector list is kept on the item as `ics_sectors`; every emitted zone is 
     'reference_urls': ['https://www.cisa.gov/news-events/ics-advisories/icsa-26-281-01'],
     'ref_tags': [], 'cpe_type': [], 'result_impacts': ['HIGH', 'HIGH', 'NONE'],
 }
-# No CVSS block in the advisory → no score: severity UNKNOWN, cvss_score None, attack_vector NETWORK
-# (2026-10; was 7.0 / HIGH, copied from the KEV collector's ransomware-derived values).
+# No CVSS block in the advisory → no score: severity UNKNOWN, cvss_score None, attack_vector None
+# (2026-10; was 7.0 / HIGH, copied from the KEV collector's ransomware-derived values, and NETWORK).
 # Dates absent → the four timestamp keys are omitted (honest-NULL), never wall-clock.
 # MISP: tagged source:CISA-ICS + zone:<Zone>; NOT tagged CISA-KEV. Same CVE in two advisories → MISP dedups the
 # second attribute (type, value); the first advisory's metadata wins.
@@ -1139,4 +1139,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
+_Last updated: 2026-10-15 — § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`. Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._

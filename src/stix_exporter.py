@@ -311,8 +311,9 @@ EDGEGUARD_EXTENSION_ID = _deterministic_id("extension-definition", "edgeguard-pr
 # ``modified`` and ``version`` are bumped when the definition changes.
 _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
 # 1.1.0 (2026-10-14): relationship provenance properties on SROs.
-_EXTENSION_MODIFIED = "2026-10-14T00:00:00.000Z"
-_EXTENSION_VERSION = "1.1.0"
+# 1.2.0 (2026-10-15): x_edgeguard_status (NVD's record status) on vulnerabilities.
+_EXTENSION_MODIFIED = "2026-10-15T00:00:00.000Z"
+_EXTENSION_VERSION = "1.2.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -339,6 +340,9 @@ _VULNERABILITY_PROMOTED_FIELDS: Tuple[Tuple[str, str], ...] = (
     # KEV's knownRansomwareCampaignUse ("Known" / "Unknown").
     ("cvss_version", "x_edgeguard_cvss_version"),
     ("known_ransomware_use", "x_edgeguard_known_ransomware_use"),
+    # 2026-10: NVD's record status, ["rejected"] or ["active"]; without it a rejected CVE exported
+    # like an active one.
+    ("status", "x_edgeguard_status"),
 )
 
 # Every top-level ``x_edgeguard_*`` property the exporter can emit. The
