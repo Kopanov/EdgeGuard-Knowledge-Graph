@@ -832,7 +832,9 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
    ```cypher
    MATCH (c)
    WHERE (c:CVE OR c:Vulnerability)
-     AND c.description =~ '(?s)\\s*(([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*|CVE from [^\\s|]+\\s*)'
+     AND (c.description =~ '(?s)\\s*([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*'
+       OR ((c.edgeguard_managed = true OR c.edgeguard_enriched = true)
+           AND c.description =~ '\\s*CVE from [a-z0-9_-]+\\s*'))
    RETURN labels(c)[0] AS label, count(c) AS nodes;
    ```
 
@@ -841,7 +843,9 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
    ```cypher
    MATCH (c)
    WHERE (c:CVE OR c:Vulnerability)
-     AND c.description =~ '(?s)\\s*(([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*|CVE from [^\\s|]+\\s*)'
+     AND (c.description =~ '(?s)\\s*([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*'
+       OR ((c.edgeguard_managed = true OR c.edgeguard_enriched = true)
+           AND c.description =~ '\\s*CVE from [a-z0-9_-]+\\s*'))
    REMOVE c.description;
    ```
 
@@ -865,6 +869,80 @@ A wipe and a new baseline need none of this. A graph that is kept is repaired on
    ```
 
 A CVE without an NVD record keeps the text and dates of the first record that filled them (CISA's KEV text, a CISA ICS advisory), also when that source later revises its record (a revised advisory's `last_modified`, an edited KEV text): no ranking of the other sources exists yet.
+
+## Repairing Malware, ThreatActor and Tool descriptions (2026-10)
+
+Since 2026-10 a `Malware`, `ThreatActor` or `Tool` description comes from MITRE ATT&CK: the record MITRE delivered (source `mitre_attck`) sets it, and a record from any other source fills it only where the node has none. The OTX collector gives its malware-family and adversary items no description (the pulse's text describes the report, not the family or actor), and the sync takes no description from an OTX malware or actor attribute, from a metadata block (`MITRE_USES_TECHNIQUES:{...}` or any other; also a block that does not parse or follows other text) or from MISPWriter's placeholder for an item without text ("Malware from <source>", "Threat actor from <source>", "MITRE ATT&CK tool: <name>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK tactic") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP"). A graph built before 2026-10 keeps what the record merged last wrote: on an entity MITRE and OTX both name (Cobalt Strike, APT29, the actors and families a demonstration shows) often the description of an OTX pulse, on an OTX family from a pulse without a description the raw `MITRE_USES_TECHNIQUES:{"rt":[...],"pid":"..."}` block, and on every `Tactic` node the placeholder "MITRE ATT&CK tactic".
+
+**What repairs it.** The MITRE collector's next run does not. An unchanged ATT&CK release is not even downloaded (the bundle's ETag answers 304), and a new one adds only attributes MISP does not hold yet: MISPWriter skips every attribute its source already has in MISP ([COLLECTORS.md](COLLECTORS.md), "Duplicate avoidance"), so the existing MITRE attributes do not change and the incremental sync, which writes changed attributes only, does not re-read them. One full MISP → Neo4j sync does: it re-reads every MITRE attribute, whose comment holds ATT&CK's text after the block, and sets that text on every node MITRE describes, whatever OTX wrote there. On a node MITRE does not describe it only fills a missing description, so the text OTX left there, and a block or placeholder stored anywhere, are removed first. A wipe and a new baseline need none of this.
+
+A graph that is kept is repaired once, after the deploy, in this order (each Cypher statement via `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`). The full sync of step 5 also completes [Repairing CVE descriptions and dates](#repairing-cve-descriptions-and-dates-2026-10): when both are needed, run that section's steps 1–2 as well before it, and one full sync serves both.
+
+1. **Count** the descriptions that are a metadata block, hold one, or are a placeholder (read-only):
+
+   ```cypher
+   MATCH (n)
+   WHERE (n:Malware OR n:ThreatActor OR n:Tool OR n:Technique OR n:Tactic)
+     AND (n.description =~ '(?s)\\s*([A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|CURATED_CLAIMS):.*'
+       OR n.description =~ '(?s).*\\b([A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|CURATED_CLAIMS):\\s*[\\[{].*'
+       OR ((n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+           AND n.description =~ '\\s*((Malware|Threat actor|MITRE ATT&CK technique) from [a-z0-9_-]+|MITRE ATT&CK tactic|MITRE ATT&CK tool: [^\\n]+)\\s*'))
+   RETURN labels(n)[0] AS label, count(n) AS nodes;
+   ```
+
+2. **Remove those descriptions.** The full sync sets ATT&CK's text again on every node MITRE describes. A placeholder is removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`; a graph built before 2026-10 stamped `edgeguard_managed` on every node EdgeGuard wrote), and only with a source id after "from" (lowercase, as MISPWriter writes the item's tag), so a partner's or a MISP-native text such as "Threat actor from Iran" stays:
+
+   ```cypher
+   MATCH (n)
+   WHERE (n:Malware OR n:ThreatActor OR n:Tool OR n:Technique OR n:Tactic)
+     AND (n.description =~ '(?s)\\s*([A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|CURATED_CLAIMS):.*'
+       OR n.description =~ '(?s).*\\b([A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|CURATED_CLAIMS):\\s*[\\[{].*'
+       OR ((n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+           AND n.description =~ '\\s*((Malware|Threat actor|MITRE ATT&CK technique) from [a-z0-9_-]+|MITRE ATT&CK tactic|MITRE ATT&CK tool: [^\\n]+)\\s*'))
+   REMOVE n.description;
+   ```
+
+3. **Count** the families and actors OTX names and MITRE does not that carry a description (read-only). On a graph built before 2026-10 that description is, almost always, the description of the first OTX pulse that named the entity:
+
+   ```cypher
+   MATCH (n)
+   WHERE (n:Malware OR n:ThreatActor)
+     AND n.edgeguard_managed = true
+     AND n.description IS NOT NULL
+     AND 'alienvault_otx' IN n.source
+     AND NOT 'mitre_attck' IN n.source
+   RETURN labels(n)[0] AS label, count(n) AS nodes;
+   ```
+
+4. **Remove those descriptions.** Decision (2026-10): an entity only OTX describes shows no description, as it does on a new baseline, rather than a report's text the full sync could never replace (a record from another source only fills). The full sync fills the description again where an attribute of another source than OTX carries text (a MISP attribute of another feed). Only nodes EdgeGuard created (`edgeguard_managed`) are touched, so a partner's own text stays:
+
+   ```cypher
+   MATCH (n)
+   WHERE (n:Malware OR n:ThreatActor)
+     AND n.edgeguard_managed = true
+     AND n.description IS NOT NULL
+     AND 'alienvault_otx' IN n.source
+     AND NOT 'mitre_attck' IN n.source
+   REMOVE n.description;
+   ```
+
+5. **One full MISP → Neo4j sync**, as in [Repairing CVE descriptions and dates](#repairing-cve-descriptions-and-dates-2026-10), step 3:
+
+   ```bash
+   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC true
+   docker compose exec airflow airflow dags trigger edgeguard_neo4j_sync --conf '{"force_sync": true}'
+   ```
+
+6. **Check.** Steps 1 and 3 return no rows (step 3 may list a node another source than OTX described), and an entity MITRE and OTX both name shows ATT&CK's text:
+
+   ```cypher
+   MATCH (n:ThreatActor {name: 'apt29'}) RETURN n.description, n.source;
+   // ATT&CK's text, beginning "[APT29](https://attack.mitre.org/groups/G0016)"
+   MATCH (n:Malware {name: 'cobalt strike'}) RETURN n.description, n.source;
+   // ATT&CK's text, beginning "[Cobalt Strike](https://attack.mitre.org/software/S0154)"
+   ```
+
+A `Tactic` node has no description after step 2 until MISP holds the tactic's ATT&CK text: the MITRE collector gives tactics their description since 2026-10, but MISPWriter writes it only into an attribute MISP does not hold yet, so on a MISP that is kept the tactics show none until the next baseline. A MISP attribute an OTX run wrote before 2026-10 keeps the pulse's text after its block; the sync ignores it.
 
 ## Retrieving raw MISP data from a Neo4j node
 
@@ -1041,7 +1119,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-10-15 — `EdgeGuardBuildRelationshipsSilentDeath` compares the last successful sync with the last build_relationships completion (new gauge `edgeguard_build_relationships_last_completion_timestamp`), so it no longer fires during a baseline's collection phase or while a build_relationships retry may still complete. Same day: `EdgeGuardBuildRelationshipsSilentDeath` described by the series it reads (the latest successful baseline task). Same day: new section "Requesting a full MISP → Neo4j sync": `NEO4J_FULL_SYNC` is cleared only after the full sync succeeded, the mode line in the task log, that no incremental sync runs while the request stands, the alert after the last failed attempt and the recovery step, the 8-hour task limit and the 68-hour DAG run limit. Same day: "Canonical threat-actor reference": what each component reading it does without it ([ATTRIBUTION] warnings). Same day: new section "Malware ATT&CK-id twin merge": what the job logs (including the twins that fold into the node of their base name and the ambiguous ones it skips), the dry run, the acceptance check, an approximate count query and what remains after the job. Same day: "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — `EdgeGuardBuildRelationshipsSilentDeath` compares the last successful sync with the last build_relationships completion (new gauge `edgeguard_build_relationships_last_completion_timestamp`), so it no longer fires during a baseline's collection phase or while a build_relationships retry may still complete. Same day: `EdgeGuardBuildRelationshipsSilentDeath` described by the series it reads (the latest successful baseline task). Same day: "Repairing CVE descriptions and dates", steps 1–2: the placeholder "CVE from <source>" is matched only with a lowercase source id and removed only from a node EdgeGuard created or wrote to, as for the entity placeholders. Same day: "Repairing Malware, ThreatActor and Tool descriptions", steps 1–2: a placeholder is matched only with a lowercase source id after "from" and removed only from a node EdgeGuard created or wrote to (`edgeguard_managed`, `edgeguard_enriched`), so a partner's text such as "Threat actor from Iran" stays. Same day: new section "Repairing Malware, ThreatActor and Tool descriptions": MITRE's record sets the description and other sources only fill it; the MITRE collector's next run repairs nothing (ETag 304, existing attributes skipped), one full sync does after removing descriptions that are metadata blocks or placeholders and the OTX pulse text on nodes MITRE does not describe (decision: such nodes show none); Tactic nodes keep none on a kept MISP. Same day: new section "Requesting a full MISP → Neo4j sync": `NEO4J_FULL_SYNC` is cleared only after the full sync succeeded, the mode line in the task log, that no incremental sync runs while the request stands, the alert after the last failed attempt and the recovery step, the 8-hour task limit and the 68-hour DAG run limit. Same day: "Canonical threat-actor reference": what each component reading it does without it ([ATTRIBUTION] warnings). Same day: new section "Malware ATT&CK-id twin merge": what the job logs (including the twins that fold into the node of their base name and the ambiguous ones it skips), the dry run, the acceptance check, an approximate count query and what remains after the job. Same day: "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._

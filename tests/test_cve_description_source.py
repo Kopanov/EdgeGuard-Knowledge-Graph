@@ -511,3 +511,51 @@ class TestStixImport:
         ) in query
         assert "n.description = $description" not in query
         assert params["fill_description"] == data["description"]
+
+
+# ================================================================ the RUNBOOK repair (docs/RUNBOOK.md)
+CVE_RUNBOOK_SECTION = "## Repairing CVE descriptions and dates (2026-10)"
+
+
+def _cve_runbook_statements() -> list:
+    doc = (_SRC.parent / "docs" / "RUNBOOK.md").read_text()
+    section = doc.split(CVE_RUNBOOK_SECTION, 1)[1].split("\n## ", 1)[0]
+    return [block.strip().rstrip(";") for block in re.findall(r"```cypher\n(.*?)```", section, re.S)]
+
+
+def _cve_runbook_removes(text: str) -> bool:
+    """Whether steps 1-2 match *text* on a node EdgeGuard created or wrote to (``=~`` is a full match)."""
+    remove = _cve_runbook_statements()[1]
+    patterns = [p.replace("\\\\", "\\") for p in re.findall(r"=~ '((?:[^'\\]|\\.)*)'", remove)]
+    return any(re.fullmatch(p, text) for p in patterns)
+
+
+class TestCveRunbookCleanup:
+    def test_step_2_removes_what_step_1_counts_and_guards_the_placeholder(self):
+        count, remove = _cve_runbook_statements()[:2]
+        assert count.split("RETURN")[0] == remove.split("REMOVE")[0]
+        guard, _, placeholder = remove.partition("(c.edgeguard_managed = true OR c.edgeguard_enriched = true)")
+        assert placeholder.lstrip().startswith("AND c.description =~ '\\\\s*CVE from [a-z0-9_-]+")
+        assert "CVE from" not in guard, "the placeholder only on a node EdgeGuard wrote"
+
+    @pytest.mark.parametrize(
+        ("text", "removed"),
+        [
+            ('OTX_META:{"pulse_id":"6a4fdf500b5e6dffde939998"}', True),
+            ("Referenced in OTX pulse: Indonesian Banking Sector Threat Landscape", True),
+            ("CVE from alienvault_otx", True),
+            ("CVE from cisa_kev", True),
+            ("CVE from Microsoft", False),
+            ("CVE from the vendor advisory", False),
+            ("A remote code execution vulnerability in BIND.", False),
+        ],
+    )
+    def test_what_steps_1_and_2_remove(self, text, removed):
+        assert _cve_runbook_removes(text) is removed
+
+    @pytest.mark.parametrize(
+        "text",
+        ["CVE from alienvault_otx", "CVE from Microsoft", "Referenced in OTX pulse: x", "A description"],
+    )
+    def test_the_runbook_removes_what_the_sync_drops(self, text):
+        assert _cve_runbook_removes(text) is (_vulnerability_comment_description(text) is None)

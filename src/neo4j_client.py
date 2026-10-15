@@ -841,7 +841,8 @@ def _tlp_most_restrictive_clause(existing: str, incoming: str) -> str:
 def _set_if_absent_clause(existing: str, incoming: str) -> str:
     """2026-10: keep ``existing`` when it holds a value, else take ``incoming`` (an empty string
     counts as no value). For text a record may supply but must not replace: a CVE's description
-    and dates from any record but NVD's (``_CVE_RECORD_TEXT_PROPS``)."""
+    and dates from any record but NVD's (``_CVE_RECORD_TEXT_PROPS``), a Malware / ThreatActor / Tool
+    description from any record but MITRE's (``_entity_description_fill``)."""
     return f"CASE WHEN {existing} IS NULL OR {existing} = '' THEN {incoming} ELSE {existing} END"
 
 
@@ -1000,6 +1001,30 @@ def _batch_record_text_clauses(node: str, row: str) -> List[str]:
         f"ELSE {_set_if_absent_clause(f'{node}.{prop}', f'{row}.{prop}')} END"
         for prop in _CVE_RECORD_TEXT_PROPS
     ]
+
+
+# 2026-10: the source whose record sets a Malware, ThreatActor or Tool description: MITRE ATT&CK, the
+# record MITRE delivered (``mitre_attck``, the MITRE collector's tag, carried by its MISP attributes and
+# by the STIX flow's objects of a MITRE event). A record from any other source fills the description
+# only where the node has none (``_set_if_absent_clause``), so ATT&CK's text stays whatever the order of
+# the merges. Until 2026-10 the record merged last set it: the OTX collector gave every malware family
+# and adversary of a pulse the pulse's description, and the sync took a malware attribute's raw
+# ``MITRE_USES_TECHNIQUES`` block as one, so Cobalt Strike or APT29 showed a report's text or a JSON
+# block depending on the order of the events in the sync.
+_ENTITY_DESCRIPTION_SOURCE = "mitre_attck"
+
+
+def _entity_description_fill(data: Dict, source_id: str, extra_props: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The description of a Malware / ThreatActor / Tool record (2026-10): MITRE's record
+    (``_ENTITY_DESCRIPTION_SOURCE``) sets it and it is added to ``extra_props``; any other record's is
+    returned as the ``fill_props`` of ``merge_node_with_source``. None when the record has no text."""
+    description = data.get("description")
+    if not isinstance(description, str) or not description.strip():
+        return None
+    if source_id == _ENTITY_DESCRIPTION_SOURCE:
+        extra_props["description"] = description
+        return None
+    return {"description": description}
 
 
 # 2026-10: CISA's SSVC decision points, which only NVD's record supplies (``nvd_collector.cisa_ssvc``):
@@ -2657,8 +2682,9 @@ class Neo4jClient:
                     params_extra[prop_name] = prop_value
 
             # 2026-10: text a record may supply but must not replace (a CVE's description and dates
-            # from any record but NVD's, ``merge_cve``) is set only where the node has none. The
-            # parameter is prefixed so it cannot collide with a standard parameter of this statement.
+            # from any record but NVD's, ``merge_cve``; a Malware / ThreatActor / Tool description from
+            # any record but MITRE's, ``_entity_description_fill``) is set only where the node has none.
+            # The parameter is prefixed so it cannot collide with a standard parameter of this statement.
             for prop_name, prop_value in (fill_props or {}).items():
                 _validate_prop_name(prop_name)
                 if prop_name in extra_props or prop_value is None or prop_value == "":
@@ -3420,6 +3446,9 @@ class Neo4jClient:
               Malware as a campaign anchor → false campaign absorbs
               indicators from dozens of unrelated threats.
         Defense-in-depth: Q2/Q9 Cypher WHERE also filter placeholders.
+
+        ``description`` (2026-10): MITRE's record (``source_id`` ``mitre_attck``) sets it; a record from
+        any other source fills it only where the node has none (``_entity_description_fill``).
         """
         # PR-N10: reject placeholder names at ingest. Canonicalization
         # (NFC + strip + lower) happens inside is_placeholder_name so
@@ -3464,10 +3493,13 @@ class Neo4jClient:
             # Source-report provenance: every OTX pulse that mentioned this malware
             # (incl. the extra pulses de-duplication folded into ``report_ids``).
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
-        if data.get("description"):
-            extra_props["description"] = data["description"]
+        # 2026-10: MITRE's record sets the description, any other record only fills it (until then the
+        # record merged last set it, an OTX pulse's text or a raw JSON block among them).
+        fill_props = _entity_description_fill(data, source_id, extra_props)
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "Malware", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+        )
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a ThreatActor node with source tracking.
@@ -3484,6 +3516,8 @@ class Neo4jClient:
         function's docstring for the full rationale. Without this guard,
         ``ThreatActor{name:"unknown"}`` becomes a false-hub to every
         Malware whose attributed_to is "unknown" / "unspecified" / etc.
+
+        ``description``: as in ``merge_malware`` (2026-10).
         """
         raw_name = data.get("name")
         if is_placeholder_name(raw_name):
@@ -3503,14 +3537,12 @@ class Neo4jClient:
             return False
         key_props = canonicalize_merge_key("ThreatActor", {"name": raw_name})
         aliases = data.get("aliases", [])
-        description = data.get("description", "")
         # uses_techniques: list of MITRE technique IDs this actor explicitly uses,
         # extracted from the ATT&CK STIX relationships bundle by the MITRE collector.
         uses_techniques = data.get("uses_techniques", [])
 
         extra_props: Dict[str, Any] = {
             "aliases": aliases,
-            "description": description,
             "uses_techniques": uses_techniques,
             # 2026-10: see merge_malware — reported (pulse-level) ids stay separate.
             "reported_techniques": data.get("reported_techniques", []) or [],
@@ -3526,8 +3558,12 @@ class Neo4jClient:
             extra_props["primary_motivation"] = data["primary_motivation"]
         if data.get("resource_level"):
             extra_props["resource_level"] = data["resource_level"]
+        # 2026-10: as in merge_malware — MITRE's record sets the description, any other only fills it.
+        fill_props = _entity_description_fill(data, source_id, extra_props)
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("ThreatActor", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "ThreatActor", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+        )
 
     def _normalize_mitre_id(self, raw: Any, *, label: str, data: Dict) -> Optional[str]:
         """PR-N16 Fix #2 (BLOCK, 2026-04-22): normalize a MITRE ATT&CK
@@ -3621,7 +3657,10 @@ class Neo4jClient:
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
         """MERGE a Tool node with source tracking.
 
-        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization."""
+        PR-N13 Fix #2 + PR-N16 Fix #2: None-guard + uppercase canonicalization.
+
+        ``description``: as in ``merge_malware`` (2026-10).
+        """
         mitre_id = self._normalize_mitre_id(data.get("mitre_id"), label="Tool", data=data)
         if mitre_id is None:
             return False
@@ -3635,12 +3674,14 @@ class Neo4jClient:
             extra_props["tool_types"] = data["tool_types"]
         if data.get("name"):
             extra_props["name"] = data["name"]
-        if data.get("description"):
-            extra_props["description"] = data["description"]
         if data.get("aliases"):
             extra_props["aliases"] = data["aliases"]
+        # 2026-10: as in merge_malware — MITRE's record sets the description, any other only fills it.
+        fill_props = _entity_description_fill(data, source_id, extra_props)
         _mark_deprecated(data, extra_props)
-        return self.merge_node_with_source("Tool", key_props, data, source_id, extra_props=extra_props)
+        return self.merge_node_with_source(
+            "Tool", key_props, data, source_id, extra_props=extra_props, fill_props=fill_props
+        )
 
     @retry_with_backoff(max_retries=3)
     def mark_inactive_nodes(self, active_event_ids: List[str]) -> Dict[str, int]:
