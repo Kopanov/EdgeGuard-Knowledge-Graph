@@ -1,6 +1,6 @@
 {
  "schema_version": 1,
- "description": "Hand-reviewed decisions for canonical_threat_actors.json. scripts/build_canonical_threat_actors.py applies them after the galaxy rules, so a rebuild never drops them: 'merge' makes each name a synonym of the actor with the canonical key 'into' (an actor without an ATT&CK id that a name is the key of is folded into it; a key that no actor has yet creates the actor), 'never_merge' takes each name out of every actor and lists it under 'ambiguous', and 'canonical_name' sets the display name of the actor with the key 'key' (a name with another key re-keys the actor and keeps the old key as a synonym). Each decision states its reason, date and status: 'proposed' until reviewed, then 'accepted'. Both are applied.",
+ "description": "Hand-reviewed decisions for canonical_threat_actors.json. scripts/build_canonical_threat_actors.py applies them after the galaxy rules, so a rebuild never drops them: 'never_merge' with an 'actor' first takes the names away from that actor and never gives them back to it; 'merge' makes each name a synonym of the actor with the canonical key 'into' (an actor without an ATT&CK id that a name is the key of is folded into it; a key that no actor has yet creates the actor); 'never_merge' without an 'actor' takes each name out of every actor and lists it under 'ambiguous'; 'canonical_name' sets the display name of the actor with the key 'key' (a name with another key re-keys the actor and keeps the old key as a synonym). Where two graph nodes are spelling variants of one name, the canonical is the node with more relationships, so that fewer edges move, unless it is an ATT&CK group's name. Each decision states its reason, date and status: 'proposed' until reviewed, then 'accepted'. Both are applied.",
  "merge": [
   {
    "names": ["lazarus"],
@@ -27,6 +27,13 @@
    "names": ["andariel group"],
    "into": "andariel",
    "reason": "The ATT&CK name of G0138 with ' group' appended. The node's report describes Andariel's SmallTiger and ModeLoader campaign; no malware is shared with the ATT&CK node, whose links come from ATT&CK only.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["lotus panda"],
+   "into": "lotus blossom",
+   "reason": "Kept: Lotus Panda is a widely used name of Lotus Blossom (G0030). The threat-actor galaxy links its Lotus Panda record to G0030, and on the graph the two nodes share Chrysalis, Cobalt Strike and Sagerunex (46 and 64 relationships).",
    "date": "2026-10-15",
    "status": "proposed"
   },
@@ -59,9 +66,9 @@
    "status": "proposed"
   },
   {
-   "names": ["silver fox apt"],
-   "into": "void arachne",
-   "reason": "Name variant of Silver Fox (descriptor 'APT'), which the threat-actor galaxy lists as a synonym of Void Arachne. The node shares ValleyRAT with both 'silver fox' and 'void arachne', and its Winos 4.0 report matches theirs. Depends on the galaxy's Silver Fox = Void Arachne link.",
+   "names": ["silver fox apt", "silverfox"],
+   "into": "silver fox",
+   "reason": "Silver Fox is its own canonical actor (see the never_merge with Void Arachne). 'silver fox apt' (29 relationships) adds the descriptor 'APT', 'silverfox' (69) drops the space; 'silver fox' (25) shares ValleyRAT with both and ABCDoor and RustSL with 'silverfox'. 'silverfox' holds the most relationships, but the canonical keeps the name as written in the galaxy and the reports.",
    "date": "2026-10-15",
    "status": "proposed"
   },
@@ -78,9 +85,72 @@
    "reason": "Konni with ' group' appended; the galaxy lists Konni as a synonym of Opal Sleet, and the node shares EndRAT, RemcosRAT and RftRAT with the 'opal sleet' node.",
    "date": "2026-10-15",
    "status": "proposed"
+  },
+  {
+   "names": ["blackbasta"],
+   "into": "black basta",
+   "reason": "Spelling variant of the Black Basta ransomware gang (OTX-only). 'black basta' holds 42 relationships, 'blackbasta' 41; they share the Black Basta, Cobalt Strike, DarkGate and SystemBC families.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["cl0p"],
+   "into": "clop",
+   "reason": "Spelling variant of the Clop ransomware gang (OTX-only). 'clop' holds 93 relationships, 'cl0p' 68; both reports describe the gang's file-transfer exploitation campaigns and they share LemurLoot.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["dire wolf"],
+   "into": "direwolf",
+   "reason": "Spelling variant of the Dire Wolf ransomware gang that emerged in May 2025 (OTX-only). 'direwolf' holds 18 relationships, 'dire wolf' 10; both carry the Dire Wolf ransomware family.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["transparenttribe"],
+   "into": "transparent tribe",
+   "reason": "Spelling variant of ATT&CK's Transparent Tribe (G0134; 62 relationships against 24). The node's report describes a Pakistan-nexus espionage campaign against Indian military targets, which is Transparent Tribe's.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["team pcp"],
+   "into": "teampcp",
+   "reason": "Spelling variant of ATT&CK's TeamPCP (G1056; 151 relationships against 3). Both report supply-chain attacks on package registries, and they share router_runtime.js.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["cyber av3ngers"],
+   "into": "cyberav3ngers",
+   "reason": "Spelling variant of ATT&CK's CyberAv3ngers (G1027; 61 relationships against 25); the galaxy's 'Cyber Av3ngers' record joins the ATT&CK group by its spacing, and the two nodes share IOCONTROL.",
+   "date": "2026-10-15",
+   "status": "proposed"
   }
  ],
  "never_merge": [
+  {
+   "names": ["silver fox"],
+   "actor": "void arachne",
+   "reason": "Not merged: the threat-actor galaxy lists Silver Fox as a synonym of Void Arachne, a vendor equivalence that is not universally accepted (the two share ValleyRAT and Winos 4.0, families several Chinese-speaking clusters use). A wrong merge is worse than a missed one.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["famous chollima"],
+   "actor": "wagemole",
+   "reason": "Not merged: the threat-actor galaxy lists Famous Chollima as a synonym of Wagemole, a vendor equivalence that is not universally accepted (both name overlapping North Korean IT-worker and fake-interview activity). A wrong merge is worse than a missed one.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "names": ["ta488"],
+   "actor": "void blizzard",
+   "reason": "Not merged: the threat-actor galaxy lists TA488 as a synonym of Void Blizzard, a vendor equivalence that is not universally accepted; the two graph nodes share no malware or pulse. A wrong merge is worse than a missed one.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
   {
    "names": ["medusa"],
    "reason": "The name clashes with MedusaLocker, a different ransomware, and with the Medusa Android banking trojan. ATT&CK's G1051 is 'Medusa Group' and the suffix rule would map the bare name to it. The graph's 'medusa' node describes that same ransomware operation (it shares the Medusa ransomware family with G1051), but the bare name is not safe to merge.",
@@ -112,6 +182,12 @@
    "status": "proposed"
   },
   {
+   "names": ["tonto", "pacha"],
+   "reason": "Doubtful short forms the suffix rule derives from 'Tonto Team' (G0131) and 'Pacha Group': both are common words (Spanish 'tonto', and a title and brand name), and the reports name the groups in full. Neither is a graph name today. The other short forms checked (gorgon, sunshop, chronus, belsen, daixin) are distinctive and kept.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
    "names": ["blackenergy"],
    "reason": "A malware family name. ATT&CK lists 'BlackEnergy (Group)' as an alias of Sandworm Team (G0034); EdgeGuard's actor-name hygiene drops the parenthetical, which leaves the malware's name, so the bare name is not taken as the group ('blackenergy group' still is).",
    "date": "2026-10-15",
@@ -125,13 +201,6 @@
   }
  ],
  "canonical_name": [
-  {
-   "key": "unc1549",
-   "name": "Nimbus Manticore",
-   "reason": "ATT&CK publishes this group as Nimbus Manticore (G1059), and that is the name EdgeGuard writes for its ATT&CK node; the galaxy version used predates the group in ATT&CK and names it UNC1549 with Nimbus Manticore as a synonym. The key must equal the ATT&CK node's name; UNC1549 stays a synonym.",
-   "date": "2026-10-15",
-   "status": "proposed"
-  },
   {
    "key": "interlock",
    "name": "Interlock",
@@ -157,6 +226,34 @@
    "key": "forumtroll",
    "name": "ForumTroll",
    "reason": "Display name of the actor created by the ForumTroll merge: the name the reports use.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "key": "silver fox",
+   "name": "Silver Fox",
+   "reason": "Display name of the Silver Fox actor created by its merge.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "key": "black basta",
+   "name": "Black Basta",
+   "reason": "Display name of the actor created by the Black Basta merge: the gang's own name.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "key": "clop",
+   "name": "Clop",
+   "reason": "Display name of the actor created by the Clop merge.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "key": "direwolf",
+   "name": "DireWolf",
+   "reason": "Display name of the actor created by the Dire Wolf merge, spelled like its key.",
    "date": "2026-10-15",
    "status": "proposed"
   }

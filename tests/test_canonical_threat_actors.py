@@ -1,9 +1,10 @@
 """Canonical threat-actor reference (2026-10): the generator's rules and the committed file.
 
-``scripts/build_canonical_threat_actors.py`` turns the MISP galaxy threat-actor clusters into
-``src/reference/canonical_threat_actors.json``: canonical actors (anchored by ATT&CK id), their
-synonyms, and the names that are ambiguous. The rules are tested on small fixtures; the committed
-file is checked for consistency (the galaxy export it is built from is not in the repository).
+``scripts/build_canonical_threat_actors.py`` turns the MISP galaxy threat-actor clusters, the ATT&CK
+revocations and the ATT&CK version EdgeGuard loaded into ``src/reference/canonical_threat_actors.json``:
+canonical actors (anchored by ATT&CK), their synonyms, and the names that are ambiguous. The rules
+are tested on small fixtures; the committed file is checked for consistency (the inputs it is built
+from are not in the repository).
 """
 
 from __future__ import annotations
@@ -93,8 +94,28 @@ def overrides(merge=(), never_merge=(), canonical_name=()):
     }
 
 
-def build(gen, *records, ovr=None):
-    return gen.build_reference(doc(*records), ovr or overrides(), version="2026.10.15")
+def build(gen, *records, ovr=None, revocations=None, loaded=()):
+    return gen.build_reference(
+        doc(*records), ovr or overrides(), version="2026.10.15", revocations=revocations, loaded_attack=loaded
+    )
+
+
+def node(name, aliases=(), source=("mitre_attck",), relationships=0, attack_id=None, malware=()):
+    """One row of a graph export (``--export-graph-actors``)."""
+    return {
+        "name": name,
+        "aliases": list(aliases),
+        "source": list(source),
+        "relationships": relationships,
+        "pulses": 0,
+        "malware": list(malware),
+        "attack_id": attack_id,
+    }
+
+
+def loaded(gen, *nodes):
+    """The loaded ATT&CK version: ATT&CK-sourced graph rows."""
+    return gen.load_loaded_attack(gen.load_graph_actors(list(nodes)))
 
 
 def actors(reference):
@@ -482,6 +503,247 @@ class TestOverrides:
             gen.load_overrides(ovr)
 
 
+# --------------------------------------------------------------------------- ATT&CK revocations
+
+
+class TestRevokedGroups:
+    def test_revoked_group_folds_into_its_successor(self, gen):
+        ref, stats = build(
+            gen,
+            mitre("Charming Kitten", "G0058", ["Newscaster"]),
+            mitre("Magic Hound", "G0059", ["Mint Sandstorm"]),
+            ta("Charming Kitten", ["Ajax Team"], attack="G0058"),
+            revocations={"G0058": "G0059"},
+        )
+        a = actors(ref)
+        assert list(a) == ["magic hound"]
+        # the revoked group's ATT&CK name, and the name of the galaxy record that carried its id
+        assert origins_of(a["magic hound"], "charming kitten") == ["misp_galaxy:threat-actor", "mitre_revoked"]
+        assert origins_of(a["magic hound"], "newscaster") == ["mitre_revoked"]
+        assert "ajax team" in a["magic hound"]["synonyms"]
+        assert "mitre_revoked" in a["magic hound"]["origins"]
+        assert ref["revoked_attack_groups"] == [
+            {
+                "mitre_attack": "G0058",
+                "name": "Charming Kitten",
+                "key": "charming kitten",
+                "revoked_into": "G0059",
+                "actor": "magic hound",
+            }
+        ]
+        assert stats.revoked_folds[0]["successor"] == "magic hound"
+
+    def test_a_name_two_groups_shared_has_one_owner_after_the_fold(self, gen):
+        records = [
+            mitre("APT29", "G0016", ["NOBELIUM", "Dark Halo"]),
+            mitre("UNC2452", "G0118", ["NOBELIUM", "Dark Halo"]),
+            ms("NOBELIUM", ["Midnight Blizzard"]),
+        ]
+        ref, _ = build(gen, *records)
+        assert owner(ref, "dark halo") == "AMBIGUOUS"
+        assert "nobelium" in actors(ref)  # its own actor: the name of two ATT&CK groups
+        ref, stats = build(gen, *records, revocations={"G0118": "G0016"})
+        assert list(actors(ref)) == ["apt29"]
+        assert owner(ref, "nobelium") == owner(ref, "dark halo") == owner(ref, "unc2452") == "apt29"
+        assert owner(ref, "midnight blizzard") == "apt29"
+        assert stats.join_ambiguous == []
+
+    def test_record_carrying_a_revoked_id_is_no_anchor_conflict(self, gen):
+        # Kimsuky's galaxy record carries G0086 (Stolen Pencil), which ATT&CK revoked into Kimsuky.
+        ref, stats = build(
+            gen,
+            mitre("Kimsuky", "G0094"),
+            mitre("Stolen Pencil", "G0086"),
+            ta("Kimsuky", ["Velvet Chollima"], attack="G0086"),
+            revocations={"G0086": "G0094"},
+        )
+        assert stats.anchor_conflicts == []
+        assert {"stolen pencil", "velvet chollima"} <= set(actors(ref)["kimsuky"]["synonyms"])
+
+    def test_revocation_chains_and_cycles(self, gen):
+        ref, _ = build(
+            gen,
+            mitre("A", "G0001"),
+            mitre("B", "G0002"),
+            mitre("C", "G0003"),
+            revocations={"G0001": "G0002", "G0002": "G0003"},
+        )
+        assert list(actors(ref)) == ["c"]
+        with pytest.raises(gen.ReferenceInputError, match="cycle"):
+            build(gen, mitre("A", "G0001"), mitre("B", "G0002"), revocations={"G0001": "G0002", "G0002": "G0001"})
+
+    def test_revocations_are_read_from_the_raw_galaxy_dump(self, gen):
+        def cluster(uuid, value, attack_id, revoked_by=None):
+            relations = (
+                [{"referenced_galaxy_cluster_type": "revoked-by", "referenced_galaxy_cluster_uuid": revoked_by}]
+                if revoked_by
+                else [{"referenced_galaxy_cluster_type": "uses", "referenced_galaxy_cluster_uuid": "x"}]
+            )
+            return {
+                "GalaxyCluster": {
+                    "uuid": uuid,
+                    "value": value,
+                    "GalaxyElement": [{"key": "external_id", "value": attack_id}],
+                    "GalaxyClusterRelation": relations,
+                }
+            }
+
+        raw = {
+            "payload": {
+                "response": [
+                    cluster("u1", "UNC2452 - G0118", "G0118", revoked_by="u2"),
+                    cluster("u2", "APT29 - G0016", "G0016"),
+                ]
+            }
+        }
+        assert gen.load_revocations(raw) == {"G0118": "G0016"}
+        with pytest.raises(gen.ReferenceInputError):
+            gen.load_revocations({"payload": {"response": []}})
+
+
+# --------------------------------------------------------------------------- the loaded ATT&CK version
+
+
+class TestLoadedAttack:
+    def test_loaded_aliases_are_the_strongest_claims_and_join_records(self, gen):
+        records = [mitre("APT28", "G0007", ["Fancy Bear"]), ms("Forest Blizzard", ["STRONTIUM"])]
+        ref, _ = build(gen, *records)
+        assert "forest blizzard" in actors(ref)  # the galaxy copy does not list it
+        attack = loaded(gen, node("apt28", ["APT28", "Fancy Bear", "Forest Blizzard"], attack_id="G0007"))
+        ref, stats = build(gen, *records, loaded=attack)
+        a = actors(ref)
+        assert list(a) == ["apt28"]
+        assert origins_of(a["apt28"], "forest blizzard") == ["misp_galaxy:microsoft-activity-group", "mitre_loaded"]
+        assert "strontium" in a["apt28"]["synonyms"]
+        assert "mitre_loaded" in a["apt28"]["origins"]
+        assert stats.loaded_groups == 1
+
+    def test_loaded_alias_outranks_an_older_galaxy_alias(self, gen):
+        ref, stats = build(
+            gen,
+            mitre("Group A", "G0001", ["Shared Name"]),
+            mitre("Group B", "G0002"),
+            loaded=loaded(gen, node("group b", ["Group B", "Shared Name"])),
+        )
+        assert owner(ref, "shared name") == "group b"
+        assert stats.contested_resolved[0] == {"name": "shared name", "actor": "group b", "over": ["group a"]}
+
+    def test_an_actor_key_still_outranks_a_loaded_alias(self, gen):
+        # ATT&CK lists Thrip as an alias of Lotus Blossom while Thrip is its own group.
+        ref, _ = build(
+            gen,
+            mitre("Lotus Blossom", "G0030"),
+            mitre("Thrip", "G0076"),
+            loaded=loaded(gen, node("lotus blossom", ["Lotus Blossom", "Thrip"])),
+        )
+        assert owner(ref, "thrip") == "thrip"
+
+    def test_group_missing_from_the_galaxy_is_anchored_by_name(self, gen):
+        ref, stats = build(
+            gen,
+            ta("UNC1549", ["Nimbus Manticore", "Smoke Sandstorm"]),
+            loaded=loaded(gen, node("nimbus manticore", ["NIMBUS MANTICORE", "UNC1549", "TA455"], attack_id="G1059")),
+        )
+        a = actors(ref)
+        assert list(a) == ["nimbus manticore"]
+        assert (a["nimbus manticore"]["name"], a["nimbus manticore"]["mitre_attack"]) == ("NIMBUS MANTICORE", "G1059")
+        assert {"unc1549", "ta455", "smoke sandstorm"} <= set(a["nimbus manticore"]["synonyms"])
+        assert stats.loaded_anchored == [{"key": "nimbus manticore", "mitre_attack": "G1059"}]
+
+    def test_group_renamed_in_the_loaded_version_takes_the_loaded_name(self, gen):
+        ref, stats = build(
+            gen,
+            mitre("Old Name", "G1234", ["Alias"]),
+            loaded=loaded(gen, node("new name", ["New Name"], attack_id="G1234")),
+        )
+        a = actors(ref)
+        assert list(a) == ["new name"]
+        assert a["new name"]["mitre_attack"] == "G1234"
+        assert {"old name", "alias"} <= set(a["new name"]["synonyms"])
+        assert stats.loaded_renamed == [{"mitre_attack": "G1234", "galaxy": "old name", "loaded": "new name"}]
+
+    def test_revoked_group_still_loaded_goes_to_its_successor(self, gen):
+        ref, stats = build(
+            gen,
+            mitre("APT29", "G0016"),
+            mitre("UNC2452", "G0118"),
+            revocations={"G0118": "G0016"},
+            loaded=loaded(gen, node("apt29", ["APT29"]), node("unc2452", ["UNC2452", "StellarParticle"])),
+        )
+        a = actors(ref)
+        assert list(a) == ["apt29"]
+        assert origins_of(a["apt29"], "stellarparticle") == ["mitre_revoked"]
+        assert stats.loaded_revoked_nodes == [{"node": "unc2452", "successor": "apt29"}]
+
+    def test_loaded_rows_are_read_like_synonyms(self, gen):
+        rows = [
+            node("sandworm team", ["Sandworm Team", "BlackEnergy (Group)", "G0034", "unknown"], attack_id="G0034"),
+            node("sandworm", [], source=("alienvault_otx",)),
+            node("bad", [], attack_id="not-an-id"),
+        ]
+        groups = gen.load_loaded_attack(gen.load_graph_actors(rows))
+        assert [(g.key, g.name, g.attack_id, g.aliases) for g in groups] == [
+            ("bad", "bad", None, ()),
+            ("sandworm team", "Sandworm Team", "G0034", ("blackenergy",)),
+        ]
+
+    def test_export_rows_keep_the_attack_id_not_the_description(self, gen):
+        rows = gen.export_rows(
+            [
+                {
+                    "name": "nimbus manticore",
+                    "aliases": ["NIMBUS MANTICORE"],
+                    "source": ["mitre_attck"],
+                    "relationships": 3,
+                    "pulses": 1,
+                    "malware": ["minifast", "minifast", None],
+                    "attack_description": "[NIMBUS MANTICORE](https://attack.mitre.org/groups/G1059) is ...",
+                },
+                {"name": "x", "aliases": None, "source": ["alienvault_otx"], "attack_description": None},
+            ]
+        )
+        assert rows[0]["attack_id"] == "G1059" and rows[0]["malware"] == ["minifast"]
+        assert "attack_description" not in rows[0]
+        assert rows[1]["attack_id"] is None
+
+
+# --------------------------------------------------------------------------- never_merge with an actor
+
+
+class TestNeverMergePairs:
+    def test_a_name_kept_away_from_an_actor_can_be_its_own_actor(self, gen):
+        ovr = overrides(
+            merge=[{"names": ["silverfox", "silver fox apt"], "into": "silver fox"}],
+            never_merge=[{"names": ["Silver Fox"], "actor": "void arachne"}],
+        )
+        ref, _ = build(gen, ta("Void Arachne", ["Silver Fox", "Winos"]), ovr=ovr)
+        a = actors(ref)
+        assert set(a) == {"void arachne", "silver fox"}
+        assert "silver fox" not in a["void arachne"]["synonyms"]
+        assert a["silver fox"]["synonyms"] == ["silver fox apt", "silverfox"]
+        assert [(p["name"], p["actor"]) for p in ref["never_merge_pairs"]] == [("silver fox", "void arachne")]
+
+    def test_a_name_kept_away_and_owned_by_nobody_is_never_merged(self, gen):
+        ovr = overrides(never_merge=[{"names": ["famous chollima"], "actor": "wagemole"}])
+        ref, _ = build(gen, ta("Wagemole", ["Famous Chollima"]), ovr=ovr)
+        entry = next(e for e in ref["ambiguous"] if e["key"] == "famous chollima")
+        assert entry["actors"] == ["wagemole"]
+        assert entry["never_merge"]["actor"] == "wagemole"
+        assert owner(ref, "famous chollima") == "AMBIGUOUS"
+
+    def test_merging_a_name_into_the_actor_it_is_kept_from_is_refused(self, gen):
+        ovr = overrides(
+            merge=[{"names": ["silver fox"], "into": "void arachne"}],
+            never_merge=[{"names": ["silver fox"], "actor": "void arachne"}],
+        )
+        with pytest.raises(gen.ReferenceInputError, match="kept away from"):
+            gen.load_overrides(ovr)
+
+    def test_the_actor_must_exist(self, gen):
+        with pytest.raises(gen.ReferenceInputError, match="no actor has that key"):
+            build(gen, ta("Wagemole"), ovr=overrides(never_merge=[{"names": ["x y"], "actor": "nobody"}]))
+
+
 # --------------------------------------------------------------------------- determinism + report
 
 
@@ -551,14 +813,56 @@ class TestReport:
         g = report["graph"]
         assert g["resolved"] == 4
         assert g["resolution"]["ambiguous"] == 1
-        assert [d["canonical"] for d in g["duplicate_groups"]["all"]] == ["sandworm team"]
+        assert [(d["canonical"], d["duplicates"]) for d in g["duplicate_groups"]["all"]] == [
+            ("sandworm team", ["sandworm"])
+        ]
         assert g["duplicate_groups"]["nodes_folded"] == 1
         assert [u["name"] for u in g["unresolved"]["all"]] == ["clop", "qilin", "new group"]
         assert len(g["unresolved"]["top"]) == 1
         check = g["canonical_key_check"]
         assert check["attack_keys_matching_graph"] == 3
-        assert [m["graph_name"] for m in check["graph_attack_names_not_canonical_keys"]] == ["new group"]
+        assert [m["graph_name"] for m in check["graph_attack_nodes_not_canonical_keys"]] == ["new group"]
         assert "Graph: 8 ThreatActor nodes" in gen.format_report(report, top=1)
+
+    def test_merge_pairs_never_take_an_attack_node_or_a_missing_canonical(self, gen):
+        ref, _ = build(
+            gen,
+            mitre("APT29", "G0016"),
+            mitre("UNC2452", "G0118"),
+            ta("Midnight Blizzard", ["Cozy Bear"]),
+            revocations={"G0118": "G0016"},
+        )
+        index = gen.build_index(ref)
+        rows = gen.load_graph_actors(
+            [
+                node("apt29", relationships=100),
+                node("unc2452", relationships=31),  # ATT&CK-sourced: never a duplicate
+                node("unc2452 group", source=("alienvault_otx",)),  # resolves to apt29 (suffix rule)
+                node("cozy bear", source=("alienvault_otx",)),  # resolves to midnight blizzard, not on the graph
+            ]
+        )
+        assert gen.merge_pairs(index, rows) == [("unc2452 group", "apt29")]
+
+    def test_spelling_variants_and_short_forms_are_listed(self, gen):
+        ref, stats = build(gen, mitre("Sandworm Team", "G0034"), ta("Black Basta"))
+        graph = gen.load_graph_actors(
+            [
+                node("sandworm team", relationships=118, malware=["prestige", "industroyer2"]),
+                node("sandworm", source=("alienvault_otx",), relationships=105, malware=["prestige - s1058"]),
+                node("blackbasta", source=("alienvault_otx",), relationships=41),
+                node("cl0p", source=("alienvault_otx",), relationships=68),
+                node("clop", source=("alienvault_otx",), relationships=93),
+            ]
+        )
+        g = gen.build_report(ref, stats, graph)["graph"]
+        variants = {v["triage_key"]: [n["name"] for n in v["names"]] for v in g["spelling_variants"]}
+        assert variants == {"blackbasta": ["black basta", "blackbasta"], "clop": ["cl0p", "clop"]}
+        assert gen.triage_key("Cl0p") != gen.triage_key("clop")  # keys are lower-case first
+        assert gen.triage_key(gen.actor_key("Cl0p")) == gen.triage_key("clop") == "clop"
+        short = g["suffix_short_forms_on_graph"]
+        assert [(s["name"], s["from"], s["shared_malware"]) for s in short] == [
+            ("sandworm", "sandworm team", ["prestige"])
+        ]
 
     def test_graph_derived_files_are_refused_inside_the_repo(self, gen):
         assert gen.main(["--export-graph-actors", str(_ROOT / "graph_actors.json")]) == 1
@@ -586,7 +890,9 @@ class TestCommittedReference:
         assert re.fullmatch(r"\d{4}\.\d{2}\.\d{2}", committed["version"])
         assert committed["generated_at"] == committed["version"].replace(".", "-")
         roles = [i["role"] for i in committed["inputs"]]
-        assert roles == ["galaxy", "overrides"]
+        assert roles == ["galaxy", "attack_revocations", "loaded_attack", "overrides"]
+        loaded_input = committed["inputs"][2]
+        assert loaded_input["exported_at"] and loaded_input["attack_nodes"] > 0
         assert all(re.fullmatch(r"[0-9a-f]{64}", i["sha256"]) for i in committed["inputs"])
         notices = " ".join(a.get("notice", "") + a.get("licence", "") for a in committed["attribution"])
         assert "CC0-1.0" in notices
@@ -596,7 +902,7 @@ class TestCommittedReference:
         )
 
     def test_built_from_the_committed_overrides(self, committed):
-        overrides_input = committed["inputs"][1]
+        overrides_input = next(i for i in committed["inputs"] if i["role"] == "overrides")
         assert overrides_input["file"] == OVERRIDES.name
         assert overrides_input["sha256"] == hashlib.sha256(OVERRIDES.read_bytes()).hexdigest(), (
             "canonical_threat_actor_overrides.json changed after the reference was built: rebuild it with "
@@ -624,7 +930,9 @@ class TestCommittedReference:
         assert counts["actors"] == len(keys)
         assert counts["synonyms"] == sum(len(a["synonyms"]) for a in committed["actors"])
         assert counts["ambiguous"] == len(committed["ambiguous"])
-        assert counts["attack_groups"] == sum(1 for a in committed["actors"] if a["mitre_attack"])
+        assert counts["attack_groups"] == sum(
+            1 for a in committed["actors"] if a["mitre_attack"] or "mitre_loaded" in a["origins"]
+        )
 
     def test_actor_entries(self, committed):
         attack_ids = [a["mitre_attack"] for a in committed["actors"] if a["mitre_attack"]]
@@ -636,9 +944,11 @@ class TestCommittedReference:
             assert listed == set(a["synonyms"]), a["key"]
             for origin, names in a["synonym_origins"].items():
                 assert names == sorted(names)
-                assert origin in ("mitre", "suffix_rule", "override") or origin.startswith("misp_galaxy:"), origin
+                assert origin in ("mitre", "mitre_loaded", "mitre_revoked", "suffix_rule", "override") or (
+                    origin.startswith("misp_galaxy:")
+                ), origin
             assert a["mitre_attack"] is None or re.fullmatch(r"G\d{4}", a["mitre_attack"])
-            assert a["records"] or a["origins"] == ["override"]
+            assert a["records"] or a["origins"] in (["override"], ["mitre_loaded"])
         keys = {a["key"] for a in committed["actors"]}
         for entry in committed["ambiguous"]:
             assert entry["actors"] == sorted(entry["origins"])
@@ -653,7 +963,37 @@ class TestCommittedReference:
         assert by_id["G0034"]["key"] == "sandworm team"
         assert by_id["G0007"]["key"] == "apt28"
         assert by_id["G0094"]["key"] == "kimsuky"
+        assert by_id["G1059"]["key"] == "nimbus manticore"  # anchored by the loaded ATT&CK version
         assert len(by_id) >= 190
+
+    def test_revoked_attack_groups_are_folded(self, gen, committed):
+        revoked = {r["mitre_attack"]: r for r in committed["revoked_attack_groups"]}
+        assert {k: r["actor"] for k, r in revoked.items()} == {
+            "G0042": "patchwork",
+            "G0057": "oilrig",
+            "G0058": "magic hound",
+            "G0074": "dragonfly",
+            "G0086": "kimsuky",
+            "G0118": "apt29",
+        }
+        assert not {a["mitre_attack"] for a in committed["actors"]} & set(revoked)
+        index = gen.build_index(committed)
+        for name, actor in (
+            ("unc2452", "apt29"),
+            ("nobelium", "apt29"),
+            ("dark halo", "apt29"),
+            ("apt34", "oilrig"),
+            ("forest blizzard", "apt28"),
+            ("iron liberty", "dragonfly"),
+        ):
+            assert gen.resolve(index, name).actor == actor, name
+
+    def test_never_merge_pairs_hold(self, committed):
+        by_key = {a["key"]: a for a in committed["actors"]}
+        assert committed["never_merge_pairs"]
+        for pair in committed["never_merge_pairs"]:
+            assert pair["name"] not in by_key[pair["actor"]]["synonyms"], pair
+            assert pair["status"] in ("proposed", "accepted") and pair["reason"]
 
     def test_overrides_are_applied(self, gen, committed, committed_overrides):
         by_key = {a["key"]: a for a in committed["actors"]}
@@ -665,7 +1005,16 @@ class TestCommittedReference:
                 assert key == target or key in by_key[target]["synonyms"], (name, target)
         for decision in committed_overrides["never_merge"]:
             for name in decision["names"]:
-                assert "never_merge" in ambiguous[gen.actor_key(name)], name
+                key = gen.actor_key(name)
+                if decision.get("actor"):
+                    assert key not in by_key[gen.actor_key(decision["actor"])]["synonyms"], name
+                    assert (
+                        key in by_key
+                        or any(key in a["synonyms"] for a in by_key.values())
+                        or ("never_merge" in ambiguous[key])
+                    ), name
+                else:
+                    assert "never_merge" in ambiguous[key], name
         for decision in committed_overrides["canonical_name"]:
             key = gen.actor_key(decision["name"])
             assert by_key[key]["name"] == decision["name"]
@@ -679,4 +1028,6 @@ class TestCommittedReference:
         assert gen.resolve(index, "Sandworm").actor == "sandworm team"
         assert gen.resolve(index, "andariel").actor == "andariel"
         assert gen.resolve(index, "medusa").how == "never_merge"
+        assert gen.resolve(index, "famous chollima").how == "never_merge"
+        assert gen.resolve(index, "silverfox").actor == "silver fox"
         assert gen.resolve(index, "no such actor").how == "unresolved"

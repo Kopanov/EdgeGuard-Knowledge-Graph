@@ -2,7 +2,7 @@
  "schema_version": 1,
  "version": "2026.10.15",
  "generated_at": "2026-10-15",
- "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built from the MISP galaxy threat-actor clusters by scripts/build_canonical_threat_actors.py, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
+ "description": "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged.",
  "generator": "scripts/build_canonical_threat_actors.py",
  "key_normalisation": "NFC, trimmed, lower-case (node_identity.canonicalize_merge_key for ThreatActor)",
  "inputs": [
@@ -74,10 +74,26 @@
    ]
   },
   {
+   "role": "attack_revocations",
+   "file": "misp_galaxy_mitre-intrusion-set_20261013.json",
+   "sha256": "721fe3d3de269688c70014aefb67eb7cb5c59aedfc551517c12ee50a959928bd",
+   "revoked_groups": 6
+  },
+  {
+   "role": "loaded_attack",
+   "file": "graph_threat_actors_20261015.json",
+   "sha256": "3c2b16aee48a96969c5a6eb4be8ed131b63c51722ccc17e8b0d1cd220acb2d89",
+   "exported_at": "2026-10-15T07:37:49+00:00",
+   "threat_actor_nodes": 899,
+   "attack_nodes": 195,
+   "attack_nodes_with_id": 137,
+   "used": "the names and aliases of the ATT&CK-sourced ThreatActor nodes (the ATT&CK version EdgeGuard loaded)"
+  },
+  {
    "role": "overrides",
    "file": "canonical_threat_actor_overrides.json",
-   "sha256": "232e71a654b2d8221d169ba2fbf15eee21d0e799ca33cb73949fd9eed8a7b795",
-   "decisions": 23
+   "sha256": "571a8584ce461d25590bf8517bd8aac8164f5ec40a185d2554458ea2ab49880f",
+   "decisions": 37
   }
  ],
  "attribution": [
@@ -87,24 +103,24 @@
    "url": "https://github.com/MISP/misp-galaxy"
   },
   {
-   "source": "MITRE ATT&CK (group names, ids and aliases, as carried by the mitre-intrusion-set galaxy)",
+   "source": "MITRE ATT&CK (group names, ids, aliases and revocations, from the mitre-intrusion-set galaxy and from the ATT&CK version EdgeGuard loaded)",
    "notice": "© The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation.",
    "url": "https://attack.mitre.org/resources/legal-and-branding/terms-of-use/"
   }
  ],
  "rules": [
-  "Records with the same ATT&CK id are one actor named after the ATT&CK group; a record whose own name is the ATT&CK name of a different group is not anchored by its id.",
-  "A record without an ATT&CK id joins an anchored actor only when its name (for the 360net-threat-actor galaxy also the name without its ' - APT-C-NN' id) is that actor's key, an ATT&CK alias of it or the name of a record anchored to it, for exactly one actor; names that differ only in spaces, hyphens, dots or underscores are the same name. Otherwise records with the same name form an actor of their own.",
+  "Records with the same ATT&CK id are one actor named after the ATT&CK group; a record whose own name is the ATT&CK name of a different group is not anchored by its id. A group ATT&CK revoked into another is folded into its successor (origin mitre_revoked). The ATT&CK version EdgeGuard loaded anchors too: its names and aliases are the strongest claims after an actor key (origin mitre_loaded), and a group the galaxy copy does not have is anchored by its name.",
+  "A record without an ATT&CK id joins an anchored actor only when its name (for the 360net-threat-actor galaxy also the name without its ' - APT-C-NN' id) is that actor's key, an ATT&CK alias or revoked name of it or the name of a record anchored to it, for exactly one actor; names that differ only in spaces, hyphens, dots or underscores are the same name. Otherwise records with the same name form an actor of their own.",
   "Synonyms never merge two actors.",
-  "A name claimed by several actors goes to the actor whose own name it is (actor key, then ATT&CK alias or record name, then galaxy synonym); a tie makes it ambiguous. ATT&CK ids, placeholder names and lists of names are not synonyms; a synonym is taken as EdgeGuard's actor-name hygiene writes it.",
-  "Suffix rule: the variant with or without a trailing ' group' / ' team' of an actor key or ATT&CK alias is a synonym when no other actor claims it (a shortened name keeps at least three characters and a letter; nothing is added to a name that already contains 'group' or 'team').",
-  "Overrides are applied last: merge, then never_merge, then canonical_name."
+  "A name claimed by several actors goes to the actor whose own name it is (actor key, then loaded ATT&CK alias, then galaxy ATT&CK alias, revoked name or record name, then galaxy synonym); a tie makes it ambiguous. ATT&CK ids, placeholder names and lists of names are not synonyms; a synonym is taken as EdgeGuard's actor-name hygiene writes it.",
+  "Suffix rule: the variant with or without a trailing ' group' / ' team' of an actor key or ATT&CK name is a synonym when no other actor claims it (a shortened name keeps at least three characters and a letter; nothing is added to a name that already contains 'group' or 'team').",
+  "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name."
  ],
  "counts": {
-  "actors": 1179,
-  "attack_groups": 195,
-  "synonyms": 4526,
-  "ambiguous": 64
+  "actors": 1174,
+  "attack_groups": 191,
+  "synonyms": 4567,
+  "ambiguous": 62
  },
  "actors": [
   {
@@ -223,7 +239,8 @@
    "mitre_attack": "G0018",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/16ade1aa-0ea1-4bb7-88cc-9079df2ae756",
@@ -324,7 +341,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/cca311c0-dc91-5aee-b282-5e412040dac3",
@@ -382,6 +400,12 @@
      "blackshadow",
      "pink sandstorm"
     ],
+    "mitre_loaded": [
+     "agonizing serpens",
+     "americium",
+     "blackshadow",
+     "pink sandstorm"
+    ],
     "suffix_rule": [
      "agonizing serpens group",
      "agonizing serpens team",
@@ -402,7 +426,8 @@
    "mitre_attack": "G0130",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fa19de15-6169-428d-9cd6-3ca3d56075b7",
@@ -458,6 +483,13 @@
      "operation woolen-goldfish",
      "rocket kitten"
     ],
+    "mitre_loaded": [
+     "ajaxtm",
+     "flying kitten",
+     "operation saffron rose",
+     "operation woolen-goldfish",
+     "rocket kitten"
+    ],
     "suffix_rule": [
      "ajax security",
      "ajaxtm group",
@@ -478,7 +510,8 @@
    "key": "akira",
    "mitre_attack": "G1024",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/46bb06cb-f2d9-4b37-8c92-a27e224ad90d"
@@ -502,6 +535,11 @@
      "howling scorpius",
      "punk spider"
     ],
+    "mitre_loaded": [
+     "gold sahara",
+     "howling scorpius",
+     "punk spider"
+    ],
     "suffix_rule": [
      "akira group",
      "akira team",
@@ -521,7 +559,8 @@
    "origins": [
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-ics-groups/fd28d200-2f1f-464a-af1f-fcadac7640a1",
@@ -540,6 +579,9 @@
      "palmetto fusion"
     ],
     "mitre": [
+     "palmetto fusion"
+    ],
+    "mitre_loaded": [
      "palmetto fusion"
     ],
     "suffix_rule": [
@@ -692,7 +734,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/26a2854b-51e4-5fc9-8c30-2880d1483ed1",
@@ -742,6 +785,11 @@
      "whois team"
     ],
     "mitre": [
+     "onyx sleet",
+     "plutonium",
+     "silent chollima"
+    ],
+    "mitre_loaded": [
      "onyx sleet",
      "plutonium",
      "silent chollima"
@@ -949,7 +997,8 @@
    "mitre_attack": "G1007",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/64d5f96a-f121-4d19-89f6-6709f5c49faa",
@@ -977,7 +1026,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/c4004152-f87a-5052-b02b-5602ee3c0fd3",
@@ -1012,6 +1062,12 @@
      "unc4736"
     ],
     "mitre": [
+     "citrine sleet",
+     "gleaming pisces",
+     "unc1720",
+     "unc4736"
+    ],
+    "mitre_loaded": [
      "citrine sleet",
      "gleaming pisces",
      "unc1720",
@@ -1087,7 +1143,8 @@
    "mitre_attack": "G1028",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/8332952e-b86b-486b-acc3-1c2a85d39394",
@@ -1129,6 +1186,15 @@
      "two-tailed scorpion"
     ],
     "mitre": [
+     "arid viper",
+     "big bang apt",
+     "desert falcon",
+     "grey karkadann",
+     "mantis",
+     "tag-63",
+     "two-tailed scorpion"
+    ],
+    "mitre_loaded": [
      "arid viper",
      "big bang apt",
      "desert falcon",
@@ -1217,7 +1283,8 @@
    "mitre_attack": "G0099",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c4d50cdf-87ce-407d-86d8-862883485842",
@@ -1244,6 +1311,12 @@
      "blind eagle"
     ],
     "mitre": [
+     "aguilaciega",
+     "apt-q-98",
+     "blind eagle",
+     "tag-144"
+    ],
+    "mitre_loaded": [
      "aguilaciega",
      "apt-q-98",
      "blind eagle",
@@ -1315,7 +1388,8 @@
    "mitre_attack": "G0006",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6a2e693f-24e5-451a-9f88-b36a108e5662",
@@ -1357,6 +1431,11 @@
      "comment group",
      "comment panda"
     ],
+    "mitre_loaded": [
+     "comment crew",
+     "comment group",
+     "comment panda"
+    ],
     "suffix_rule": [
      "apt1 group",
      "apt1 team",
@@ -1373,7 +1452,8 @@
    "mitre_attack": "G0005",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c47f937f-1022-4f42-8525-e7a4779a14cb",
@@ -1411,6 +1491,12 @@
      "numbered panda"
     ],
     "mitre": [
+     "dnscalc",
+     "dyncalc",
+     "ixeshe",
+     "numbered panda"
+    ],
+    "mitre_loaded": [
      "dnscalc",
      "dyncalc",
      "ixeshe",
@@ -1465,7 +1551,8 @@
    "mitre_attack": "G0023",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/d6e88e18-81e8-4709-82d8-973095da1e70",
@@ -1492,7 +1579,8 @@
    "mitre_attack": "G0025",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/090242d7-73fc-4738-af68-20162f7a5aae",
@@ -1519,6 +1607,9 @@
     "mitre": [
      "deputy dog"
     ],
+    "mitre_loaded": [
+     "deputy dog"
+    ],
     "suffix_rule": [
      "apt17 group",
      "apt17 team",
@@ -1533,7 +1624,8 @@
    "mitre_attack": "G0026",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/38fd6a28-3353-4f2b-bb2b-459fecd5c648",
@@ -1560,6 +1652,11 @@
      "tg-0416",
      "threat group-0416"
     ],
+    "mitre_loaded": [
+     "dynamite panda",
+     "tg-0416",
+     "threat group-0416"
+    ],
     "suffix_rule": [
      "apt18 group",
      "apt18 team",
@@ -1576,7 +1673,8 @@
    "mitre_attack": "G0073",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fe8796a4-2a02-41a0-9d27-7aa1e995feb6",
@@ -1608,6 +1706,12 @@
      "temp.avengers"
     ],
     "mitre": [
+     "c0d0so0",
+     "codoso",
+     "codoso team",
+     "sunshop group"
+    ],
+    "mitre_loaded": [
      "c0d0so0",
      "codoso",
      "codoso team",
@@ -1717,10 +1821,12 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/213cdde9-c11a-4ea9-8ce0-c868e9826fec",
+    "microsoft-activity-group/8d84d7b0-7716-5ab3-a3a4-f373dd148347",
     "mitre-intrusion-set/bef4c620-0787-42a8-a96d-b7eb6e85917c",
     "threat-actor/5b4ee3ea-eee3-4c8e-8323-85ae32658754"
    ],
@@ -1729,20 +1835,34 @@
     "apt-c-20",
     "apt28 group",
     "apt28 team",
+    "atg2",
     "atk5",
+    "blue athena",
     "bluedelta",
+    "crisisfour",
     "fancy bear",
     "fancy bear group",
     "fancy bear team",
     "fighting ursa",
+    "forest blizzard",
+    "forest blizzard group",
+    "forest blizzard team",
     "frozenlake",
+    "frozenlake group",
+    "frozenlake team",
     "grey-cloud",
     "group 74",
     "group-4127",
     "gruesomelarch",
+    "gruesomelarch group",
+    "gruesomelarch team",
+    "hellfire",
     "iron twilight",
+    "iron twilight group",
+    "iron twilight team",
     "itg05",
     "lake relic",
+    "operation pawn storm",
     "pawn storm",
     "pawn storm group",
     "pawn storm team",
@@ -1770,27 +1890,38 @@
     "tsar team",
     "tsarteam",
     "uac-0001",
-    "uac-0028"
+    "uac-0028",
+    "z-lom team"
    ],
    "synonym_origins": {
     "misp_galaxy:microsoft-activity-group": [
      "apt 28",
+     "atg2",
+     "blue athena",
+     "crisisfour",
      "fancy bear",
+     "forest blizzard",
      "grey-cloud",
      "group-4127",
+     "hellfire",
+     "operation pawn storm",
      "pawn storm",
      "sednit",
      "sofacy",
      "strontium",
      "tg-4127",
-     "tsarteam"
+     "tsar team",
+     "tsarteam",
+     "z-lom team"
     ],
     "misp_galaxy:threat-actor": [
      "apt-c-20",
      "atk5",
+     "blue athena",
      "bluedelta",
      "fancy bear",
      "fighting ursa",
+     "forest blizzard",
      "frozenlake",
      "group 74",
      "gruesomelarch",
@@ -1824,11 +1955,36 @@
      "threat group-4127",
      "tsar team"
     ],
+    "mitre_loaded": [
+     "fancy bear",
+     "forest blizzard",
+     "frozenlake",
+     "group 74",
+     "gruesomelarch",
+     "iron twilight",
+     "pawn storm",
+     "sednit",
+     "snakemackerel",
+     "sofacy",
+     "strontium",
+     "swallowtail",
+     "tg-4127",
+     "threat group-4127",
+     "tsar team"
+    ],
     "suffix_rule": [
      "apt28 group",
      "apt28 team",
      "fancy bear group",
      "fancy bear team",
+     "forest blizzard group",
+     "forest blizzard team",
+     "frozenlake group",
+     "frozenlake team",
+     "gruesomelarch group",
+     "gruesomelarch team",
+     "iron twilight group",
+     "iron twilight team",
      "pawn storm group",
      "pawn storm team",
      "sednit group",
@@ -1852,11 +2008,16 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded",
+    "mitre_revoked"
    ],
    "records": [
     "microsoft-activity-group/31982812-c8bf-5e85-b0ba-0c64a7d05d20",
+    "microsoft-activity-group/d7247cf9-13b6-4781-b789-a5f33521633b",
     "mitre-intrusion-set/899ce53f-13a0-479b-a0e4-67d46e241542",
+    "mitre-intrusion-set/dc5e2999-ca1a-47d4-8d12-a6984b138a1b",
+    "threat-actor/2ee5ed7a-c4d0-40be-a837-20817474a15b",
     "threat-actor/b2056ff0-00b9-482e-b11c-c771daa5f28a",
     "threat-actor/bee8b09c-07e5-4c12-94d6-266ebcb1ec24"
    ],
@@ -1875,6 +2036,10 @@
     "cozyduke",
     "cozyduke group",
     "cozyduke team",
+    "dark halo",
+    "dark halo group",
+    "dark halo team",
+    "darkhalo",
     "group 100",
     "ice relic",
     "icecap",
@@ -1889,18 +2054,28 @@
     "midnight blizzard group",
     "midnight blizzard team",
     "minidionis",
+    "nobelium",
+    "nobelium group",
+    "nobelium team",
     "noblebaron",
     "noblebaron group",
     "noblebaron team",
     "seaduke",
+    "solar phoenix",
     "solarstorm",
     "solarstorm group",
     "solarstorm team",
+    "stellarparticle",
+    "stellarparticle group",
+    "stellarparticle team",
     "ta421",
     "the dukes",
     "the dukes group",
     "the dukes team",
     "uac-0029",
+    "unc2452",
+    "unc2452 group",
+    "unc2452 team",
     "unc3524",
     "unc3524 group",
     "unc3524 team",
@@ -1911,7 +2086,9 @@
    "synonym_origins": {
     "misp_galaxy:microsoft-activity-group": [
      "cozy bear",
-     "midnight blizzard"
+     "midnight blizzard",
+     "nobelium",
+     "unc2452"
     ],
     "misp_galaxy:threat-actor": [
      "atk7",
@@ -1919,16 +2096,22 @@
      "bluebravo",
      "cloaked ursa",
      "cozy bear",
+     "darkhalo",
      "group 100",
      "ice relic",
      "icecap",
      "iron hemlock",
      "itg11",
+     "midnight blizzard",
      "minidionis",
+     "nobelium",
      "seaduke",
+     "solar phoenix",
+     "stellarparticle",
      "ta421",
      "the dukes",
      "uac-0029",
+     "unc2452",
      "unc3524",
      "yttrium"
     ],
@@ -1936,14 +2119,39 @@
      "blue kitsune",
      "cozy bear",
      "cozyduke",
+     "dark halo",
      "iron hemlock",
      "iron ritual",
      "midnight blizzard",
+     "nobelium",
      "noblebaron",
      "solarstorm",
      "the dukes",
+     "unc2452",
      "unc3524",
      "yttrium"
+    ],
+    "mitre_loaded": [
+     "blue kitsune",
+     "cozy bear",
+     "cozyduke",
+     "dark halo",
+     "iron hemlock",
+     "iron ritual",
+     "midnight blizzard",
+     "nobelium",
+     "noblebaron",
+     "solarstorm",
+     "the dukes",
+     "unc2452",
+     "unc3524",
+     "yttrium"
+    ],
+    "mitre_revoked": [
+     "dark halo",
+     "nobelium",
+     "stellarparticle",
+     "unc2452"
     ],
     "suffix_rule": [
      "apt29 group",
@@ -1954,18 +2162,26 @@
      "cozy bear team",
      "cozyduke group",
      "cozyduke team",
+     "dark halo group",
+     "dark halo team",
      "iron hemlock group",
      "iron hemlock team",
      "iron ritual group",
      "iron ritual team",
      "midnight blizzard group",
      "midnight blizzard team",
+     "nobelium group",
+     "nobelium team",
      "noblebaron group",
      "noblebaron team",
      "solarstorm group",
      "solarstorm team",
+     "stellarparticle group",
+     "stellarparticle team",
      "the dukes group",
      "the dukes team",
+     "unc2452 group",
+     "unc2452 team",
      "unc3524 group",
      "unc3524 team",
      "yttrium group",
@@ -1979,7 +2195,8 @@
    "mitre_attack": "G0022",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/0bbdf25b-30ff-4894-a1cd-49260d0dd2d9",
@@ -2023,6 +2240,14 @@
      "threat group-0110",
      "ups team"
     ],
+    "mitre_loaded": [
+     "buckeye",
+     "gothic panda",
+     "pirpi",
+     "tg-0110",
+     "threat group-0110",
+     "ups team"
+    ],
     "suffix_rule": [
      "apt3 group",
      "apt3 team",
@@ -2043,7 +2268,8 @@
    "mitre_attack": "G0013",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/f047ee18-7985-4946-8bfb-4ed754d3a0dd",
@@ -2071,7 +2297,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/37808cab-cbb3-560b-bebd-375fa328ea1e",
@@ -2137,6 +2364,13 @@
      "oceanlotus",
      "sealotus"
     ],
+    "mitre_loaded": [
+     "apt-c-00",
+     "bismuth",
+     "canvas cyclone",
+     "oceanlotus",
+     "sealotus"
+    ],
     "suffix_rule": [
      "apt-c-00 group",
      "apt-c-00 team",
@@ -2161,7 +2395,8 @@
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/4c0f085a-70b1-5ee6-a45a-dc368f03e701",
@@ -2213,6 +2448,11 @@
      "holmium",
      "peach sandstorm"
     ],
+    "mitre_loaded": [
+     "elfin",
+     "holmium",
+     "peach sandstorm"
+    ],
     "suffix_rule": [
      "apt33 group",
      "apt33 team",
@@ -2226,34 +2466,14 @@
    }
   },
   {
-   "name": "APT34",
-   "key": "apt34",
-   "mitre_attack": "G0057",
-   "origins": [
-    "mitre"
-   ],
-   "records": [
-    "mitre-intrusion-set/68ba94ab-78b8-43e7-83e2-aed3466882c6"
-   ],
-   "synonyms": [
-    "apt34 group",
-    "apt34 team"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "apt34 group",
-     "apt34 team"
-    ]
-   }
-  },
-  {
    "name": "APT37",
    "key": "apt37",
    "mitre_attack": "G0067",
    "origins": [
     "misp_galaxy:360net-threat-actor",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "360net-threat-actor/96c3508e-f5f9-52b4-9d1e-b246d68f643d",
@@ -2326,6 +2546,14 @@
      "scarcruft",
      "temp.reaper"
     ],
+    "mitre_loaded": [
+     "group123",
+     "inkysquid",
+     "reaper",
+     "ricochet chollima",
+     "scarcruft",
+     "temp.reaper"
+    ],
     "suffix_rule": [
      "apt37 group",
      "apt37 team",
@@ -2351,7 +2579,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/3a32c54d-d86a-55de-b16a-d9a08a5cf49b",
@@ -2406,6 +2635,14 @@
      "sapphire sleet",
      "stardust chollima"
     ],
+    "mitre_loaded": [
+     "beagleboyz",
+     "bluenoroff",
+     "copernicium",
+     "nickel gladstone",
+     "sapphire sleet",
+     "stardust chollima"
+    ],
     "override": [
      "apt 38"
     ],
@@ -2433,7 +2670,8 @@
    "mitre_attack": "G0087",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/44e43fad-ffcb-4210-abcf-eaaed9735f80",
@@ -2467,6 +2705,11 @@
      "ta454"
     ],
     "mitre": [
+     "chafer",
+     "itg07",
+     "remix kitten"
+    ],
+    "mitre_loaded": [
      "chafer",
      "itg07",
      "remix kitten"
@@ -2515,7 +2758,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/2fc42ffc-dd1a-560e-ac97-05e8fa27bbe5",
@@ -2576,6 +2820,11 @@
      "brass typhoon",
      "wicked panda"
     ],
+    "mitre_loaded": [
+     "barium",
+     "brass typhoon",
+     "wicked panda"
+    ],
     "suffix_rule": [
      "apt41 group",
      "apt41 team",
@@ -2594,7 +2843,8 @@
    "mitre_attack": "G1044",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c0291346-defe-48d7-9542-9e074ba1bdfb",
@@ -2649,7 +2899,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/fa562b27-d3ff-5e7c-9079-c957eb01a0e0",
@@ -2714,6 +2965,13 @@
      "unc2630"
     ],
     "mitre": [
+     "bronze fleetwood",
+     "keyhole panda",
+     "manganese",
+     "mulberry typhoon",
+     "unc2630"
+    ],
+    "mitre_loaded": [
      "bronze fleetwood",
      "keyhole panda",
      "manganese",
@@ -2841,7 +3099,8 @@
    "key": "aquatic panda",
    "mitre_attack": "G0143",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/64b52e7d-b2c4-4a02-9372-08a463f5dc11"
@@ -3069,7 +3328,8 @@
    "key": "axiom",
    "mitre_attack": "G0001",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/a0cb9370-e39b-44d5-9f50-ef78e412b973"
@@ -3081,6 +3341,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "group 72"
+    ],
+    "mitre_loaded": [
      "group 72"
     ],
     "suffix_rule": [
@@ -3137,7 +3400,8 @@
    "mitre_attack": "G0135",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/9735c036-8ebe-47e9-9c77-b0ae656dab93",
@@ -3431,7 +3695,8 @@
    "key": "bitter",
    "mitre_attack": "G1002",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/7f848c02-4d1e-4808-a4ae-4670681370a9"
@@ -3445,6 +3710,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "t-apt-17"
+    ],
+    "mitre_loaded": [
      "t-apt-17"
     ],
     "suffix_rule": [
@@ -3477,6 +3745,23 @@
    }
   },
   {
+   "name": "Black Basta",
+   "key": "black basta",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [
+    "blackbasta"
+   ],
+   "synonym_origins": {
+    "override": [
+     "blackbasta"
+    ]
+   }
+  },
+  {
    "name": "Blackatom",
    "key": "blackatom",
    "mitre_attack": null,
@@ -3502,7 +3787,8 @@
    "key": "blackbyte",
    "mitre_attack": "G1043",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/02b16bd6-ae88-417a-8a3f-02c5e166175a"
@@ -3516,6 +3802,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "hecamede"
+    ],
+    "mitre_loaded": [
      "hecamede"
     ],
     "suffix_rule": [
@@ -3629,7 +3918,8 @@
    "mitre_attack": "G0063",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/da49b9f1-ca99-443f-9728-0a074db66850",
@@ -3673,7 +3963,8 @@
    "mitre_attack": "G0098",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6fe8a2a1-a1b0-4af8-953d-4babd329f8f8",
@@ -3707,6 +3998,9 @@
      "temp.overboard"
     ],
     "mitre": [
+     "palmerworm"
+    ],
+    "mitre_loaded": [
      "palmerworm"
     ],
     "suffix_rule": [
@@ -3785,7 +4079,8 @@
    "key": "blue mockingbird",
    "mitre_attack": "G0108",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/73a80fab-2aa3-48e0-a4d0-3a4828200aee"
@@ -4175,7 +4470,8 @@
    "mitre_attack": "G0060",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/93f52415-0fe4-4d3d-896c-fc9b8e88ab90",
@@ -4207,6 +4503,10 @@
      "tick castle"
     ],
     "mitre": [
+     "redbaldknight",
+     "tick"
+    ],
+    "mitre_loaded": [
      "redbaldknight",
      "tick"
     ],
@@ -4591,7 +4891,8 @@
    "mitre_attack": "G0008",
    "origins": [
     "misp_galaxy:360net-threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "360net-threat-actor/a4aba29f-fb91-50d9-bdf9-2b184922a200",
@@ -4611,6 +4912,9 @@
      "carbanak - apt-c-11"
     ],
     "mitre": [
+     "anunak"
+    ],
+    "mitre_loaded": [
      "anunak"
     ],
     "suffix_rule": [
@@ -4839,39 +5143,6 @@
    }
   },
   {
-   "name": "Charming Kitten",
-   "key": "charming kitten",
-   "mitre_attack": "G0058",
-   "origins": [
-    "misp_galaxy:threat-actor",
-    "mitre"
-   ],
-   "records": [
-    "mitre-intrusion-set/92d5b3fd-3b39-438e-af68-770e447beada",
-    "threat-actor/f98bac6b-12fd-4cad-be84-c84666932232"
-   ],
-   "synonyms": [
-    "charming kitten group",
-    "charming kitten team",
-    "charmingcypress",
-    "group 83",
-    "ikittens",
-    "newsbeef"
-   ],
-   "synonym_origins": {
-    "misp_galaxy:threat-actor": [
-     "charmingcypress",
-     "group 83",
-     "ikittens",
-     "newsbeef"
-    ],
-    "suffix_rule": [
-     "charming kitten group",
-     "charming kitten team"
-    ]
-   }
-  },
-  {
    "name": "Chaya_004",
    "key": "chaya_004",
    "mitre_attack": null,
@@ -4949,7 +5220,8 @@
    "key": "chimera",
    "mitre_attack": "G0114",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/8c1f0187-0826-4320-bddc-5f326cfcfe2c"
@@ -5054,7 +5326,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/43fe584d-88e5-5f2b-a9fd-a866e62040bb",
@@ -5090,6 +5363,11 @@
      "slime34"
     ],
     "mitre": [
+     "bronze starlight",
+     "dev-0401",
+     "emperor dragonfly"
+    ],
+    "mitre_loaded": [
      "bronze starlight",
      "dev-0401",
      "emperor dragonfly"
@@ -5315,7 +5593,8 @@
    "mitre_attack": "G0003",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/8f5e8dc7-739d-4f5e-a8a1-a66e004d7063",
@@ -5342,6 +5621,10 @@
      "tg-2889"
     ],
     "mitre": [
+     "tg-2889",
+     "threat group 2889"
+    ],
+    "mitre_loaded": [
      "tg-2889",
      "threat group 2889"
     ],
@@ -5400,6 +5683,23 @@
    }
   },
   {
+   "name": "Clop",
+   "key": "clop",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [
+    "cl0p"
+   ],
+   "synonym_origins": {
+    "override": [
+     "cl0p"
+    ]
+   }
+  },
+  {
    "name": "CloudSorcerer",
    "key": "cloudsorcerer",
    "mitre_attack": null,
@@ -5447,7 +5747,8 @@
    "mitre_attack": "G0080",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/dc6fe6ee-04c2-49be-ba3d-f38d2463c02a",
@@ -5475,6 +5776,11 @@
      "mule libra"
     ],
     "mitre": [
+     "cobalt gang",
+     "cobalt spider",
+     "gold kingswood"
+    ],
+    "mitre_loaded": [
      "cobalt gang",
      "cobalt spider",
      "gold kingswood"
@@ -5693,7 +5999,8 @@
    "key": "confucius",
    "mitre_attack": "G0142",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6eded342-33e5-4451-b6b2-e1c62863129f"
@@ -5707,6 +6014,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "confucius apt"
+    ],
+    "mitre_loaded": [
      "confucius apt"
     ],
     "suffix_rule": [
@@ -5744,7 +6054,8 @@
    "mitre_attack": "G1052",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/46599a4a-77ee-4697-9474-2683b6464859",
@@ -5774,6 +6085,14 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "deceptivedevelopment",
+     "dev#popper",
+     "gwisin gang",
+     "purplebravo",
+     "tag-121",
+     "tenacious pungsan"
+    ],
+    "mitre_loaded": [
      "deceptivedevelopment",
      "dev#popper",
      "gwisin gang",
@@ -5851,7 +6170,8 @@
    "mitre_attack": "G0052",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/dcd81c6e-ebf7-4a16-93e0-9a97fa49c88a",
@@ -5987,7 +6307,8 @@
    "mitre_attack": "G0132",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/bb82e0b0-6e9c-439f-970a-4c917a74c5f2",
@@ -6243,7 +6564,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/b76e22b0-26a4-50ca-b876-09bc90a81b3b",
@@ -6284,6 +6606,12 @@
      "yellow liderc"
     ],
     "mitre": [
+     "crimson sandstorm",
+     "ta456",
+     "tortoise shell",
+     "yellow liderc"
+    ],
+    "mitre_loaded": [
      "crimson sandstorm",
      "ta456",
      "tortoise shell",
@@ -6589,7 +6917,8 @@
    "mitre_attack": "G1027",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/a07a367a-146c-45a8-a830-d3d337b9befa",
@@ -6611,6 +6940,12 @@
     ],
     "mitre": [
      "soldiers of soloman"
+    ],
+    "mitre_loaded": [
+     "soldiers of soloman"
+    ],
+    "override": [
+     "cyber av3ngers"
     ],
     "suffix_rule": [
      "cyberav3ngers group",
@@ -6711,7 +7046,8 @@
    "mitre_attack": "G1034",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/f3be6240-f68e-47e1-90d2-ad8f3b3bb8a6",
@@ -6734,6 +7070,10 @@
      "evasive panda"
     ],
     "mitre": [
+     "bronze highland",
+     "evasive panda"
+    ],
+    "mitre_loaded": [
      "bronze highland",
      "evasive panda"
     ],
@@ -6877,7 +7217,8 @@
    "mitre_attack": "G0070",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/8a831aaa-f3e0-47a3-bed8-a9ced744dd12",
@@ -6950,7 +7291,8 @@
     "misp_galaxy:360net-threat-actor",
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "360net-threat-actor/f52ab8b8-71f2-5a88-946f-853dc3441efe",
@@ -7033,6 +7375,10 @@
      "dubnium",
      "zigzag hail"
     ],
+    "mitre_loaded": [
+     "dubnium",
+     "zigzag hail"
+    ],
     "suffix_rule": [
      "darkhotel group",
      "darkhotel team",
@@ -7049,7 +7395,8 @@
    "mitre_attack": "G0079",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6b9ebeb5-20bf-48b0-afb7-988d769a2f01",
@@ -7145,7 +7492,8 @@
    "mitre_attack": "G0105",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/813636db-3939-4a45-bea9-6113e970c029",
@@ -7194,7 +7542,8 @@
    "key": "deep panda",
    "mitre_attack": "G0009",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/a653431d-6a5e-4600-8ad3-609b5af57064"
@@ -7220,6 +7569,13 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "black vine",
+     "kungfu kittens",
+     "pinkpanther",
+     "shell crew",
+     "webmasters"
+    ],
+    "mitre_loaded": [
      "black vine",
      "kungfu kittens",
      "pinkpanther",
@@ -7521,6 +7877,23 @@
    }
   },
   {
+   "name": "DireWolf",
+   "key": "direwolf",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [
+    "dire wolf"
+   ],
+   "synonym_origins": {
+    "override": [
+     "dire wolf"
+    ]
+   }
+  },
+  {
    "name": "DIZZY PANDA",
    "key": "dizzy panda",
    "mitre_attack": null,
@@ -7697,16 +8070,23 @@
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded",
+    "mitre_revoked"
    ],
    "records": [
     "microsoft-activity-group/45d0f984-2b63-517b-922a-12924bcf4f68",
+    "mitre-ics-groups/790c3072-49d1-4c4f-8fd0-dc3db50887c1",
     "mitre-ics-groups/9b4143ce-253c-45c4-a160-0d0a7450aace",
     "mitre-intrusion-set/1c63d4ec-0a75-4daa-b1df-0d11af3d3cc1",
+    "mitre-intrusion-set/76d59913-1d24-4992-a8ac-05a3eb093f71",
     "threat-actor/64d6559c-6d5c-4585-bbf9-c17868f763ee"
    ],
    "synonyms": [
     "atk6",
+    "berserk bear",
+    "berserk bear group",
+    "berserk bear team",
     "blue kraken",
     "bromine",
     "bromine group",
@@ -7715,8 +8095,14 @@
     "crouching yeti",
     "crouching yeti group",
     "crouching yeti team",
+    "dragonfly 2.0",
+    "dragonfly 2.0 group",
+    "dragonfly 2.0 team",
     "dragonfly group",
     "dragonfly team",
+    "dymalloy",
+    "dymalloy group",
+    "dymalloy team",
     "energetic bear",
     "energetic bear group",
     "energetic bear team",
@@ -7725,6 +8111,9 @@
     "ghost blizzard team",
     "group 24",
     "havex",
+    "iron liberty",
+    "iron liberty group",
+    "iron liberty team",
     "itg15",
     "koala team",
     "temp.isotope",
@@ -7736,6 +8125,7 @@
    ],
    "synonym_origins": {
     "misp_galaxy:microsoft-activity-group": [
+     "berserk bear",
      "blue kraken",
      "bromine",
      "crouching yeti",
@@ -7744,66 +8134,77 @@
      "koala team",
      "tg-4192"
     ],
+    "misp_galaxy:mitre-ics-groups": [
+     "dragonfly 2.0"
+    ],
     "misp_galaxy:threat-actor": [
      "atk6",
+     "berserk bear",
      "blue kraken",
      "bromine",
      "castle",
      "crouching yeti",
+     "dymalloy",
      "energetic bear",
      "ghost blizzard",
      "group 24",
      "havex",
+     "iron liberty",
      "itg15",
      "koala team",
      "tg-4192"
     ],
     "mitre": [
+     "berserk bear",
      "bromine",
      "crouching yeti",
+     "dymalloy",
      "energetic bear",
      "ghost blizzard",
+     "iron liberty",
      "temp.isotope",
      "tg-4192"
     ],
+    "mitre_loaded": [
+     "berserk bear",
+     "bromine",
+     "crouching yeti",
+     "dymalloy",
+     "energetic bear",
+     "ghost blizzard",
+     "iron liberty",
+     "temp.isotope",
+     "tg-4192"
+    ],
+    "mitre_revoked": [
+     "berserk bear",
+     "dragonfly 2.0",
+     "dymalloy",
+     "iron liberty"
+    ],
     "suffix_rule": [
+     "berserk bear group",
+     "berserk bear team",
      "bromine group",
      "bromine team",
      "crouching yeti group",
      "crouching yeti team",
+     "dragonfly 2.0 group",
+     "dragonfly 2.0 team",
      "dragonfly group",
      "dragonfly team",
+     "dymalloy group",
+     "dymalloy team",
      "energetic bear group",
      "energetic bear team",
      "ghost blizzard group",
      "ghost blizzard team",
+     "iron liberty group",
+     "iron liberty team",
      "temp.isotope group",
      "temp.isotope team",
      "tg-4192 group",
      "tg-4192 team"
-    ]
-   }
-  },
-  {
-   "name": "Dragonfly 2.0",
-   "key": "dragonfly 2.0",
-   "mitre_attack": "G0074",
-   "origins": [
-    "misp_galaxy:mitre-ics-groups",
-    "mitre"
-   ],
-   "records": [
-    "mitre-ics-groups/790c3072-49d1-4c4f-8fd0-dc3db50887c1",
-    "mitre-intrusion-set/76d59913-1d24-4992-a8ac-05a3eb093f71"
-   ],
-   "synonyms": [
-    "dragonfly 2.0 group",
-    "dragonfly 2.0 team"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "dragonfly 2.0 group",
-     "dragonfly 2.0 team"
     ]
    }
   },
@@ -7834,7 +8235,8 @@
    "mitre_attack": "G0017",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/f3bdec95-3d62-42d9-a840-29630f6cdc1a",
@@ -7968,7 +8370,8 @@
    "mitre_attack": "G0031",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/ae41895a-243f-4a65-b99b-d85022326c31",
@@ -8241,7 +8644,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/3f8b7c98-7484-523f-9d58-181274e6fc8f",
@@ -8291,6 +8695,12 @@
      "tag-22"
     ],
     "mitre": [
+     "charcoal typhoon",
+     "chromium",
+     "controlx",
+     "tag-22"
+    ],
+    "mitre_loaded": [
      "charcoal typhoon",
      "chromium",
      "controlx",
@@ -8448,7 +8858,8 @@
    "mitre_attack": "G0066",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/03506554-5f37-4f8f-9ce4-0e9f01a1b484",
@@ -8473,6 +8884,11 @@
      "sneaky panda"
     ],
     "mitre": [
+     "beijing group",
+     "elderwood gang",
+     "sneaky panda"
+    ],
+    "mitre_loaded": [
      "beijing group",
      "elderwood gang",
      "sneaky panda"
@@ -8556,7 +8972,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/7f190457-6829-55c4-9b6b-bccdadb747cb",
@@ -8600,6 +9017,13 @@
      "frozenvista",
      "unc2589"
     ],
+    "mitre_loaded": [
+     "bleeding bear",
+     "cadet blizzard",
+     "dev-0586",
+     "frozenvista",
+     "unc2589"
+    ],
     "suffix_rule": [
      "bleeding bear group",
      "bleeding bear team",
@@ -8622,7 +9046,8 @@
    "mitre_attack": "G0020",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/96e239be-ad99-49eb-b127-3007b8c1bec9",
@@ -8673,7 +9098,8 @@
    "mitre_attack": "G0120",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/1f0f9a14-11aa-49aa-9174-bcd0eaa979de",
@@ -8836,7 +9262,8 @@
    "mitre_attack": "G1011",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/129f2f77-1ab2-4c35-bd5e-21260cee92af",
@@ -8959,7 +9386,8 @@
    "mitre_attack": "G0137",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6566aac9-dad8-4332-ae73-20c23bad7f02",
@@ -9003,7 +9431,8 @@
    "mitre_attack": "G0051",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fbe9387f-34e6-4828-ac28-3080020c597b",
@@ -9055,7 +9484,8 @@
    "mitre_attack": "G1016",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fd66436e-4d33-450e-ac4c-f7810f1c85f4",
@@ -9077,6 +9507,9 @@
     "mitre": [
      "elephant beetle"
     ],
+    "mitre_loaded": [
+     "elephant beetle"
+    ],
     "suffix_rule": [
      "elephant beetle group",
      "elephant beetle team",
@@ -9091,7 +9524,8 @@
    "mitre_attack": "G0085",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/d0b3393b-3bec-4ba3-bda9-199d30db47b6",
@@ -9118,7 +9552,8 @@
    "mitre_attack": "G0053",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/85403903-15e0-4f9f-9be4-a259ecad4022",
@@ -9142,7 +9577,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/3126bd2c-3d04-5174-ad03-40136b94f574",
@@ -9195,6 +9631,13 @@
      "skeleton spider",
      "taal"
     ],
+    "mitre_loaded": [
+     "camouflage tempest",
+     "itg08",
+     "magecart group 6",
+     "skeleton spider",
+     "taal"
+    ],
     "suffix_rule": [
      "camouflage tempest group",
      "camouflage tempest team",
@@ -9216,7 +9659,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/9471ad21-0553-5483-bf7c-e6ad9c062c79",
@@ -9271,6 +9715,13 @@
      "itg14",
      "sangria tempest"
     ],
+    "mitre_loaded": [
+     "carbon spider",
+     "elbrus",
+     "gold niagara",
+     "itg14",
+     "sangria tempest"
+    ],
     "suffix_rule": [
      "carbon spider group",
      "carbon spider team",
@@ -9293,7 +9744,8 @@
    "mitre_attack": "G0061",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fd19bd82-1b14-49a1-a176-6cdc46b8a826",
@@ -9314,6 +9766,9 @@
      "punch comet"
     ],
     "mitre": [
+     "syssphinx"
+    ],
+    "mitre_loaded": [
      "syssphinx"
     ],
     "suffix_rule": [
@@ -9490,39 +9945,6 @@
    }
   },
   {
-   "name": "Forest Blizzard",
-   "key": "forest blizzard",
-   "mitre_attack": null,
-   "origins": [
-    "misp_galaxy:microsoft-activity-group"
-   ],
-   "records": [
-    "microsoft-activity-group/8d84d7b0-7716-5ab3-a3a4-f373dd148347"
-   ],
-   "synonyms": [
-    "atg2",
-    "crisisfour",
-    "forest blizzard group",
-    "forest blizzard team",
-    "hellfire",
-    "operation pawn storm",
-    "z-lom team"
-   ],
-   "synonym_origins": {
-    "misp_galaxy:microsoft-activity-group": [
-     "atg2",
-     "crisisfour",
-     "hellfire",
-     "operation pawn storm",
-     "z-lom team"
-    ],
-    "suffix_rule": [
-     "forest blizzard group",
-     "forest blizzard team"
-    ]
-   }
-  },
-  {
    "name": "ForumTroll",
    "key": "forumtroll",
    "mitre_attack": null,
@@ -9546,7 +9968,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/0757856a-1313-57d8-bb6c-f4c537e110da",
@@ -9589,6 +10012,13 @@
      "unc757"
     ],
     "mitre": [
+     "lemon sandstorm",
+     "parisite",
+     "pioneer kitten",
+     "rubidium",
+     "unc757"
+    ],
+    "mitre_loaded": [
      "lemon sandstorm",
      "parisite",
      "pioneer kitten",
@@ -9658,7 +10088,8 @@
    "key": "frankenstein",
    "mitre_attack": "G0101",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6b1b551c-d770-4f95-8cfc-3cd253c4c04e"
@@ -9786,7 +10217,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/6085aad0-1d95-11ea-a140-078d42aced40",
@@ -9818,6 +10250,9 @@
     "mitre": [
      "granite typhoon"
     ],
+    "mitre_loaded": [
+     "granite typhoon"
+    ],
     "suffix_rule": [
      "gallium group",
      "gallium team",
@@ -9832,7 +10267,8 @@
    "mitre_attack": "G0084",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/2fd2be6a-d3a2-4a65-b499-05ea2693abee",
@@ -9898,7 +10334,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/fc77a775-d06f-5efc-a6fa-0b2af01902a7",
@@ -9964,6 +10401,16 @@
      "winterflounder"
     ],
     "mitre": [
+     "actinium",
+     "aqua blizzard",
+     "armageddon",
+     "dev-0157",
+     "iron tilden",
+     "nastyshrew",
+     "primitive bear",
+     "shuckworm"
+    ],
+    "mitre_loaded": [
      "actinium",
      "aqua blizzard",
      "armageddon",
@@ -10099,7 +10546,8 @@
    "mitre_attack": "G0036",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/0ea72cd5-ca30-46ba-bc04-378f701c658f",
@@ -10122,7 +10570,8 @@
    "mitre_attack": "G0141",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/99910207-1741-4da1-9b5d-537410186b51",
@@ -10739,7 +11188,8 @@
    "mitre_attack": "G0115",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c77c5576-ca19-42ed-a36f-4b4486a84133",
@@ -10758,6 +11208,9 @@
      "pinchy spider"
     ],
     "mitre": [
+     "pinchy spider"
+    ],
+    "mitre_loaded": [
      "pinchy spider"
     ],
     "suffix_rule": [
@@ -10900,7 +11353,8 @@
    "mitre_attack": "G0078",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/1f21da59-6a13-455b-afd0-d58d0a5a7d27",
@@ -11202,7 +11656,8 @@
    "mitre_attack": "G0043",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/7331c66a-5601-4d3f-acf6-ad9e3035eb40",
@@ -11323,7 +11778,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/9728610a-17cb-5cac-9322-ef19ae296a29",
@@ -11359,6 +11815,10 @@
      "silk typhoon"
     ],
     "mitre": [
+     "operation exchange marauder",
+     "silk typhoon"
+    ],
+    "mitre_loaded": [
      "operation exchange marauder",
      "silk typhoon"
     ],
@@ -11627,7 +12087,8 @@
    "origins": [
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-ics-groups/a529ddda-9a44-4a0f-912e-4681f442b488",
@@ -11662,6 +12123,11 @@
      "unc1530"
     ],
     "mitre": [
+     "lyceum",
+     "siamesekitten",
+     "spirlin"
+    ],
+    "mitre_loaded": [
      "lyceum",
      "siamesekitten",
      "spirlin"
@@ -11730,7 +12196,8 @@
    "mitre_attack": "G0126",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/54dfec3e-6464-4f74-9d69-b7c817b7e5a3",
@@ -11883,7 +12350,8 @@
    "mitre_attack": "G0072",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/ebb73863-fa44-4617-b4cb-b9ed3414eb87",
@@ -12133,7 +12601,8 @@
    "key": "inc ransom",
    "mitre_attack": "G1032",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/cb41e991-65f4-4668-a65f-f4200545b5a1"
@@ -12147,6 +12616,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "gold ionic"
+    ],
+    "mitre_loaded": [
      "gold ionic"
     ],
     "suffix_rule": [
@@ -12163,7 +12635,8 @@
    "mitre_attack": "G0100",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/ead23196-d7b6-4ce6-a124-4ab4b67d81bd",
@@ -12196,6 +12669,10 @@
      "cloud atlas",
      "inception framework"
     ],
+    "mitre_loaded": [
+     "cloud atlas",
+     "inception framework"
+    ],
     "suffix_rule": [
      "cloud atlas group",
      "cloud atlas team",
@@ -12212,7 +12689,8 @@
    "mitre_attack": "G0136",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/e5603ea8-4c36-40e7-b7af-a077d24fedc1",
@@ -12255,7 +12733,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/b19bc1a0-2489-56ae-aa61-ed147310363e",
@@ -12294,6 +12773,12 @@
      "manatee tempest"
     ],
     "mitre": [
+     "dev-0243",
+     "evil corp",
+     "manatee tempest",
+     "unc2165"
+    ],
+    "mitre_loaded": [
      "dev-0243",
      "evil corp",
      "manatee tempest",
@@ -12919,7 +13404,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/66571167-13fe-5817-93e0-54ae8f206fdc",
@@ -12994,6 +13480,16 @@
      "vixen panda"
     ],
     "mitre": [
+     "apt15",
+     "gref",
+     "mirage",
+     "nickel",
+     "nylon typhoon",
+     "playful dragon",
+     "royalapt",
+     "vixen panda"
+    ],
+    "mitre_loaded": [
      "apt15",
      "gref",
      "mirage",
@@ -13123,12 +13619,15 @@
     "misp_galaxy:360net-threat-actor",
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded",
+    "mitre_revoked"
    ],
    "records": [
     "360net-threat-actor/84e18657-3995-5837-88f1-f823520382a8",
     "microsoft-activity-group/44be06b1-e17a-5ea6-a0a2-067933a7af77",
     "mitre-intrusion-set/0ec2f388-bf0f-4b5c-97b1-fc736d26c25f",
+    "mitre-intrusion-set/7a0d4c09-dfe7-4fa2-965a-1a0e42fedd70",
     "threat-actor/aac49b4e-74e9-49fa-84f9-e340cf8bafbc",
     "threat-actor/bcaaad6f-0597-4b89-b69b-84a6be2b7bc3"
    ],
@@ -13158,6 +13657,9 @@
     "springtail",
     "springtail group",
     "springtail team",
+    "stolen pencil",
+    "stolen pencil group",
+    "stolen pencil team",
     "ta427",
     "ta427 group",
     "ta427 team",
@@ -13201,6 +13703,20 @@
      "thallium",
      "velvet chollima"
     ],
+    "mitre_loaded": [
+     "apt43",
+     "black banshee",
+     "earth kumiho",
+     "emerald sleet",
+     "patheticslug",
+     "springtail",
+     "ta427",
+     "thallium",
+     "velvet chollima"
+    ],
+    "mitre_revoked": [
+     "stolen pencil"
+    ],
     "suffix_rule": [
      "apt43 group",
      "apt43 team",
@@ -13216,6 +13732,8 @@
      "patheticslug team",
      "springtail group",
      "springtail team",
+     "stolen pencil group",
+     "stolen pencil team",
      "ta427 group",
      "ta427 team",
      "thallium group",
@@ -13428,7 +13946,8 @@
    "mitre_attack": "G1004",
    "origins": [
     "misp_galaxy:microsoft-activity-group",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/d4dfb329-822c-5db3-a078-a8c0f77924da",
@@ -13450,6 +13969,10 @@
      "strawberry tempest"
     ],
     "mitre": [
+     "dev-0537",
+     "strawberry tempest"
+    ],
+    "mitre_loaded": [
      "dev-0537",
      "strawberry tempest"
     ],
@@ -13685,7 +14208,8 @@
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/9630b0aa-ee9e-5b58-9f79-cf7fa8d291a8",
@@ -13779,6 +14303,14 @@
      "nickel academy",
      "zinc"
     ],
+    "mitre_loaded": [
+     "diamond sleet",
+     "guardians of peace",
+     "hidden cobra",
+     "labyrinth chollima",
+     "nickel academy",
+     "zinc"
+    ],
     "override": [
      "lazarus"
     ],
@@ -13804,7 +14336,8 @@
    "key": "lazyscripter",
    "mitre_attack": "G0140",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/abc5a1d4-f0dc-49d1-88a1-4a80e478bb03"
@@ -13848,7 +14381,8 @@
    "origins": [
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-ics-groups/956a44f1-0d5c-4f3c-a9a7-16f96f9656e4",
@@ -13867,6 +14401,9 @@
      "raspite"
     ],
     "mitre": [
+     "raspite"
+    ],
+    "mitre_loaded": [
      "raspite"
     ],
     "suffix_rule": [
@@ -13913,7 +14450,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/99e708f7-1c01-467d-b0da-f6cebd434abc",
@@ -13984,6 +14522,16 @@
      "temp.periscope"
     ],
     "mitre": [
+     "apt40",
+     "bronze mohawk",
+     "gadolinium",
+     "gingham typhoon",
+     "kryptonite panda",
+     "mudcarp",
+     "temp.jumper",
+     "temp.periscope"
+    ],
+    "mitre_loaded": [
      "apt40",
      "bronze mohawk",
      "gadolinium",
@@ -14261,7 +14809,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/b3c378fc-1ce3-5a46-a32e-f55a584c6536",
@@ -14320,6 +14869,16 @@
      "radium",
      "raspberry typhoon",
      "spring dragon"
+    ],
+    "mitre_loaded": [
+     "bilbug",
+     "dragonfish",
+     "radium",
+     "raspberry typhoon",
+     "spring dragon"
+    ],
+    "override": [
+     "lotus panda"
     ],
     "suffix_rule": [
      "bilbug group",
@@ -14411,7 +14970,8 @@
    "key": "luminousmoth",
    "mitre_attack": "G1014",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/b7f627e2-0817-4cd5-8d50-e75f8aa85cc6"
@@ -14528,7 +15088,8 @@
    "origins": [
     "misp_galaxy:360net-threat-actor",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "360net-threat-actor/d0b9840d-efe2-5200-89d1-2f1a37737e30",
@@ -14557,6 +15118,10 @@
      "machete-apt"
     ],
     "mitre": [
+     "apt-c-43",
+     "el machete"
+    ],
+    "mitre_loaded": [
      "apt-c-43",
      "el machete"
     ],
@@ -14644,23 +15209,33 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded",
+    "mitre_revoked"
    ],
    "records": [
     "microsoft-activity-group/400cd1b8-52b7-5a5c-984f-9b4af35ea231",
+    "mitre-intrusion-set/92d5b3fd-3b39-438e-af68-770e447beada",
     "mitre-intrusion-set/f9d6633a-55e6-4adc-9263-6ae080421a13",
     "threat-actor/b8967b3c-3bc9-11e8-8701-8b1ead8c099e",
-    "threat-actor/c1d44f44-425e-48fd-b78b-84b988da8bc3"
+    "threat-actor/c1d44f44-425e-48fd-b78b-84b988da8bc3",
+    "threat-actor/f98bac6b-12fd-4cad-be84-c84666932232"
    ],
    "synonyms": [
     "agent serpens",
     "apt35",
     "apt35 group",
     "apt35 team",
+    "charming kitten",
+    "charming kitten group",
+    "charming kitten team",
+    "charmingcypress",
     "cobalt illusion",
     "cobalt illusion group",
     "cobalt illusion team",
     "cobalt mirage",
+    "group 83",
+    "ikittens",
     "itg18",
     "itg18 group",
     "itg18 team",
@@ -14669,9 +15244,11 @@
     "mint sandstorm",
     "mint sandstorm group",
     "mint sandstorm team",
+    "newsbeef",
     "newscaster",
     "newscaster group",
     "newscaster team",
+    "parastoo",
     "phosphorus",
     "phosphorus group",
     "phosphorus team",
@@ -14684,16 +15261,25 @@
    "synonym_origins": {
     "misp_galaxy:microsoft-activity-group": [
      "apt35",
+     "charming kitten",
      "mint sandstorm",
      "newscaster",
+     "parastoo",
      "phosphorus"
     ],
     "misp_galaxy:threat-actor": [
      "agent serpens",
      "apt35",
+     "charming kitten",
+     "charmingcypress",
      "cobalt mirage",
+     "group 83",
+     "ikittens",
      "mint sandstorm",
+     "newsbeef",
+     "newscaster",
      "newscaster team",
+     "parastoo",
      "phosphorus",
      "rich ion",
      "ta453",
@@ -14701,6 +15287,7 @@
     ],
     "mitre": [
      "apt35",
+     "charming kitten",
      "cobalt illusion",
      "itg18",
      "mint sandstorm",
@@ -14708,9 +15295,24 @@
      "phosphorus",
      "ta453"
     ],
+    "mitre_loaded": [
+     "apt35",
+     "charming kitten",
+     "cobalt illusion",
+     "itg18",
+     "mint sandstorm",
+     "newscaster",
+     "phosphorus",
+     "ta453"
+    ],
+    "mitre_revoked": [
+     "charming kitten"
+    ],
     "suffix_rule": [
      "apt35 group",
      "apt35 team",
+     "charming kitten group",
+     "charming kitten team",
      "cobalt illusion group",
      "cobalt illusion team",
      "itg18 group",
@@ -14849,7 +15451,8 @@
    "mitre_attack": "G1026",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/bf668120-e9a6-4017-a014-bfc0f5232656",
@@ -14926,7 +15529,8 @@
    "key": "medusa group",
    "mitre_attack": "G1051",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/918da025-04bd-48af-b6c4-f3e4d1b915eb"
@@ -14940,7 +15544,8 @@
    "mitre_attack": "G0045",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/222fbd21-fc4f-4b7e-9f85-0e6e3a76c33f",
@@ -15006,6 +15611,16 @@
      "red apollo",
      "stone panda"
     ],
+    "mitre_loaded": [
+     "apt10",
+     "bronze riverside",
+     "cicada",
+     "cvnx",
+     "hogfish",
+     "potassium",
+     "red apollo",
+     "stone panda"
+    ],
     "suffix_rule": [
      "apt10 group",
      "apt10 team",
@@ -15034,7 +15649,8 @@
    "mitre_attack": "G1013",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/bfc5ddb3-4dfb-4278-8928-020e1b3feddd",
@@ -15099,7 +15715,8 @@
    "mitre_attack": "G1054",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/8cf6e33b-b6ef-4a1f-a77c-0ecdde93161f",
@@ -15119,6 +15736,9 @@
     "mitre": [
      "earth kasha"
     ],
+    "mitre_loaded": [
+     "earth kasha"
+    ],
     "suffix_rule": [
      "earth kasha group",
      "earth kasha team",
@@ -15132,7 +15752,8 @@
    "key": "moafee",
    "mitre_attack": "G0002",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/2e5d3a83-fe00-41a5-9b60-237efc84832f"
@@ -15217,7 +15838,8 @@
    "mitre_attack": "G0103",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/88489675-d216-4884-a98f-49a89fcc1643",
@@ -15288,7 +15910,8 @@
    "mitre_attack": "G0021",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/df71bb3b-813c-45eb-a8bc-f2a419837411",
@@ -15320,6 +15943,10 @@
      "operation molerats"
     ],
     "mitre": [
+     "gaza cybergang",
+     "operation molerats"
+    ],
+    "mitre_loaded": [
      "gaza cybergang",
      "operation molerats"
     ],
@@ -15355,27 +15982,6 @@
    }
   },
   {
-   "name": "MONSOON",
-   "key": "monsoon",
-   "mitre_attack": "G0042",
-   "origins": [
-    "mitre"
-   ],
-   "records": [
-    "mitre-intrusion-set/9559ecaf-2e75-48a7-aee8-9974020bc772"
-   ],
-   "synonyms": [
-    "monsoon group",
-    "monsoon team"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "monsoon group",
-     "monsoon team"
-    ]
-   }
-  },
-  {
    "name": "MONTY SPIDER",
    "key": "monty spider",
    "mitre_attack": null,
@@ -15402,7 +16008,8 @@
    "mitre_attack": "G1036",
    "origins": [
     "misp_galaxy:microsoft-activity-group",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/b1e94607-7211-585d-8197-73e7d9229400",
@@ -15420,6 +16027,9 @@
      "storm-1789"
     ],
     "mitre": [
+     "storm-1789"
+    ],
+    "mitre_loaded": [
      "storm-1789"
     ],
     "suffix_rule": [
@@ -15479,7 +16089,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/ef415059-e150-5324-877e-44b65ab022f5",
@@ -15513,6 +16124,10 @@
      "vengeful kitten"
     ],
     "mitre": [
+     "dev-0500",
+     "marigold sandstorm"
+    ],
+    "mitre_loaded": [
      "dev-0500",
      "marigold sandstorm"
     ],
@@ -15580,7 +16195,8 @@
    "mitre_attack": "G1019",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/7251b44b-6072-476c-b8d9-a6e32c355b28",
@@ -15625,7 +16241,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/da68ca6d-250f-50f1-a585-240475fdbb35",
@@ -15688,6 +16305,16 @@
      "temp.zagros"
     ],
     "mitre": [
+     "earth vetala",
+     "mango sandstorm",
+     "mercury",
+     "muddykrill",
+     "seedworm",
+     "static kitten",
+     "ta450",
+     "temp.zagros"
+    ],
+    "mitre_loaded": [
      "earth vetala",
      "mango sandstorm",
      "mercury",
@@ -15778,7 +16405,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/4020ad2a-fa0e-56f2-a33a-bffb3b1717f6",
@@ -15888,6 +16516,23 @@
      "twill typhoon",
      "unc6384"
     ],
+    "mitre_loaded": [
+     "bronze president",
+     "camaro dragon",
+     "clumsytoad",
+     "earth preta",
+     "fireant",
+     "hive0154",
+     "luminous moth",
+     "red lich",
+     "reddelta",
+     "stately taurus",
+     "ta416",
+     "tantalum",
+     "temp.hex",
+     "twill typhoon",
+     "unc6384"
+    ],
     "suffix_rule": [
      "bronze president group",
      "bronze president team",
@@ -15931,7 +16576,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/1b1524f4-16b0-5b85-aea4-844babea4ccb",
@@ -15969,6 +16615,12 @@
      "unc1543"
     ],
     "mitre": [
+     "dev-0206",
+     "gold prelude",
+     "ta569",
+     "unc1543"
+    ],
+    "mitre_loaded": [
      "dev-0206",
      "gold prelude",
      "ta569",
@@ -16061,7 +16713,8 @@
    "mitre_attack": "G0019",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/2a158b0a-7ef8-43cb-9985-bf34d1e12050",
@@ -16237,7 +16890,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/47b5007a-3fb1-466a-9578-629e6e735493",
@@ -16366,7 +17020,8 @@
    "mitre_attack": "G0014",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/23b6a0f5-fa95-46f9-a6f3-4549c5e45ec8",
@@ -16436,28 +17091,47 @@
    }
   },
   {
-   "name": "Nimbus Manticore",
+   "name": "NIMBUS MANTICORE",
    "key": "nimbus manticore",
-   "mitre_attack": null,
+   "mitre_attack": "G1059",
    "origins": [
-    "misp_galaxy:threat-actor"
+    "misp_galaxy:threat-actor",
+    "mitre_loaded"
    ],
    "records": [
-    "threat-actor/a2a7d49f-f517-4eeb-9ec8-b9b74e3fe756"
+    "threat-actor/a2a7d49f-f517-4eeb-9ec8-b9b74e3fe756",
+    "threat-actor/c2f1f2e3-9573-49be-b01e-6ffff9a9571b"
    ],
    "synonyms": [
+    "cobalt smokey",
+    "cobalt smokey group",
+    "cobalt smokey team",
+    "nimbus manticore group",
+    "nimbus manticore team",
+    "ta455",
+    "ta455 group",
+    "ta455 team",
     "unc1549",
     "unc1549 group",
     "unc1549 team"
    ],
    "synonym_origins": {
     "misp_galaxy:threat-actor": [
+     "ta455",
      "unc1549"
     ],
-    "override": [
+    "mitre_loaded": [
+     "cobalt smokey",
+     "ta455",
      "unc1549"
     ],
     "suffix_rule": [
+     "cobalt smokey group",
+     "cobalt smokey team",
+     "nimbus manticore group",
+     "nimbus manticore team",
+     "ta455 group",
+     "ta455 team",
      "unc1549 group",
      "unc1549 team"
     ]
@@ -16485,27 +17159,6 @@
     "suffix_rule": [
      "nitro group",
      "nitro team"
-    ]
-   }
-  },
-  {
-   "name": "NOBELIUM",
-   "key": "nobelium",
-   "mitre_attack": null,
-   "origins": [
-    "misp_galaxy:microsoft-activity-group"
-   ],
-   "records": [
-    "microsoft-activity-group/d7247cf9-13b6-4781-b789-a5f33521633b"
-   ],
-   "synonyms": [
-    "nobelium group",
-    "nobelium team"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "nobelium group",
-     "nobelium team"
     ]
    }
   },
@@ -16557,7 +17210,8 @@
    "mitre_attack": "G0133",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fed4f0a2-4347-4530-b0f5-6dfd49b29172",
@@ -16575,6 +17229,9 @@
      "dustsquad"
     ],
     "mitre": [
+     "dustsquad"
+    ],
+    "mitre_loaded": [
      "dustsquad"
     ],
     "suffix_rule": [
@@ -16708,16 +17365,22 @@
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded",
+    "mitre_revoked"
    ],
    "records": [
     "microsoft-activity-group/b6260d6d-a2f7-5b79-8132-5c456a225f53",
     "mitre-ics-groups/4945c0e7-9f4b-404d-83b2-e5cd3f26c32f",
     "mitre-intrusion-set/4ca1929c-7d64-4aab-b849-badbfc0c760d",
+    "mitre-intrusion-set/68ba94ab-78b8-43e7-83e2-aed3466882c6",
     "threat-actor/42be2a84-5a5c-4c6d-9864-3f09d75bb0ba"
    ],
    "synonyms": [
     "apt 34",
+    "apt34",
+    "apt34 group",
+    "apt34 team",
     "atk40",
     "cobalt gypsy",
     "cobalt gypsy group",
@@ -16756,6 +17419,7 @@
    ],
    "synonym_origins": {
     "misp_galaxy:microsoft-activity-group": [
+     "apt34",
      "cobalt gypsy",
      "crambus",
      "europium",
@@ -16764,6 +17428,7 @@
     ],
     "misp_galaxy:threat-actor": [
      "apt 34",
+     "apt34",
      "atk40",
      "cobalt gypsy",
      "crambus",
@@ -16778,6 +17443,7 @@
      "twisted kitten"
     ],
     "mitre": [
+     "apt34",
      "cobalt gypsy",
      "crambus",
      "earth simnavaz",
@@ -16789,7 +17455,25 @@
      "itg13",
      "ta452"
     ],
+    "mitre_loaded": [
+     "apt34",
+     "cobalt gypsy",
+     "crambus",
+     "earth simnavaz",
+     "europium",
+     "evasive serpens",
+     "hazel sandstorm",
+     "helix kitten",
+     "irn2",
+     "itg13",
+     "ta452"
+    ],
+    "mitre_revoked": [
+     "apt34"
+    ],
     "suffix_rule": [
+     "apt34 group",
+     "apt34 team",
      "cobalt gypsy group",
      "cobalt gypsy team",
      "crambus group",
@@ -17325,7 +18009,8 @@
    "mitre_attack": "G0116",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/28f04ed3-8e91-4805-b1f6-869020517871",
@@ -17348,7 +18033,8 @@
    "mitre_attack": "G0071",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/5636b7b3-d99b-4edd-aa05-ee649c1d4ef1",
@@ -17480,14 +18166,8 @@
    "records": [
     "threat-actor/aa469d96-9357-11e9-bd7d-df125c7cba53"
    ],
-   "synonyms": [
-    "pacha"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "pacha"
-    ]
-   }
+   "synonyms": [],
+   "synonym_origins": {}
   },
   {
    "name": "Packrat",
@@ -17611,10 +18291,13 @@
    "mitre_attack": "G0040",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded",
+    "mitre_revoked"
    ],
    "records": [
     "mitre-intrusion-set/17862c7d-9e60-48a0-b48e-da4dc4c3f6b0",
+    "mitre-intrusion-set/9559ecaf-2e75-48a7-aee8-9974020bc772",
     "threat-actor/18d473a5-831b-47a5-97a1-a32156299825"
    ],
    "synonyms": [
@@ -17627,6 +18310,9 @@
     "dropping elephant group",
     "dropping elephant team",
     "hangover group",
+    "monsoon",
+    "monsoon group",
+    "monsoon team",
     "operation hangover",
     "operation hangover group",
     "operation hangover team",
@@ -17644,6 +18330,7 @@
      "atk11",
      "chinastrats",
      "dropping elephant",
+     "monsoon",
      "orange athos",
      "quilted tiger",
      "sarit",
@@ -17654,13 +18341,26 @@
      "chinastrats",
      "dropping elephant",
      "hangover group",
+     "monsoon",
      "operation hangover"
+    ],
+    "mitre_loaded": [
+     "chinastrats",
+     "dropping elephant",
+     "hangover group",
+     "monsoon",
+     "operation hangover"
+    ],
+    "mitre_revoked": [
+     "monsoon"
     ],
     "suffix_rule": [
      "chinastrats group",
      "chinastrats team",
      "dropping elephant group",
      "dropping elephant team",
+     "monsoon group",
+     "monsoon team",
      "operation hangover group",
      "operation hangover team",
      "patchwork group",
@@ -17916,7 +18616,8 @@
    "mitre_attack": "G0011",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/fe98767f-9df8-42b9-83c9-004b1dec8647",
@@ -17975,7 +18676,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/154e97b5-47ef-415a-99a6-2157f1b50339",
@@ -18004,7 +18706,8 @@
    "key": "play",
    "mitre_attack": "G1040",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/ecbf507f-6786-4121-a4cc-0fd6a8d3a29d"
@@ -18119,7 +18822,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/ce5357da-0e15-5022-bd4f-74aa689d0b2e",
@@ -18150,6 +18854,9 @@
     "mitre": [
      "plaid rain"
     ],
+    "mitre_loaded": [
+     "plaid rain"
+    ],
     "suffix_rule": [
      "plaid rain group",
      "plaid rain team",
@@ -18164,7 +18871,8 @@
    "mitre_attack": "G0033",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/7ecc3b4f-5cdb-457e-b55a-df376b359446",
@@ -18295,7 +19003,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/5744f91a-d2d8-4f92-920f-943dd80c578f",
@@ -18316,6 +19025,9 @@
      "strongpity"
     ],
     "mitre": [
+     "strongpity"
+    ],
+    "mitre_loaded": [
      "strongpity"
     ],
     "suffix_rule": [
@@ -18469,7 +19181,8 @@
    "mitre_attack": "G0024",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/5ce5392a-3a6c-4e07-9df3-9b6a9159ac45",
@@ -18501,6 +19214,10 @@
      "tg-6952"
     ],
     "mitre": [
+     "apt2",
+     "msupdater"
+    ],
+    "mitre_loaded": [
      "apt2",
      "msupdater"
     ],
@@ -18612,7 +19329,8 @@
    "mitre_attack": "G0075",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/f40eb8ce-2a74-4e56-89a1-227021410142",
@@ -18940,7 +19658,8 @@
    "key": "redcurl",
    "mitre_attack": "G1039",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/82323c70-4186-4b61-94f5-b227c3b28e89"
@@ -18962,7 +19681,8 @@
    "mitre_attack": "G1042",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/2c40f629-6cf9-4f75-af32-9a98caec24ae",
@@ -19336,7 +20056,8 @@
    "mitre_attack": "G0106",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/44102191-3a31-45f8-acbe-34bdb441d5ad",
@@ -19388,7 +20109,8 @@
    "mitre_attack": "G0048",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c416b28c-103b-4df1-909e-78089a7e0e5f",
@@ -19567,7 +20289,8 @@
    "mitre_attack": "G1031",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/674582ec-51c4-42ce-b409-797239e37a2a",
@@ -19603,6 +20326,11 @@
      "ta471"
     ],
     "mitre": [
+     "lorec53",
+     "storm-0587",
+     "ta471"
+    ],
+    "mitre_loaded": [
      "lorec53",
      "storm-0587",
      "ta471"
@@ -19646,7 +20374,8 @@
    "mitre_attack": "G1045",
    "origins": [
     "misp_galaxy:microsoft-activity-group",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/3b357ed0-c50c-5793-b0e9-e60ada7a50e5",
@@ -19822,7 +20551,8 @@
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/473eb51c-36cb-5e3a-8347-2f57df809be9",
@@ -19907,6 +20637,17 @@
      "voodoo bear"
     ],
     "mitre": [
+     "apt44",
+     "electrum",
+     "frozenbarents",
+     "iridium",
+     "iron viking",
+     "quedagh",
+     "seashell blizzard",
+     "telebots",
+     "voodoo bear"
+    ],
+    "mitre_loaded": [
      "apt44",
      "electrum",
      "frozenbarents",
@@ -20045,7 +20786,8 @@
    "mitre_attack": "G0029",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c5574ca0-d5a4-490a-b207-e4658e5fd1d7",
@@ -20161,7 +20903,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/565b1ffa-6aa0-534d-a7bd-82ae942dd813",
@@ -20210,6 +20953,12 @@
      "unc3944"
     ],
     "mitre": [
+     "octo tempest",
+     "roasted 0ktapus",
+     "storm-0875",
+     "unc3944"
+    ],
+    "mitre_loaded": [
      "octo tempest",
      "roasted 0ktapus",
      "storm-0875",
@@ -20299,7 +21048,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/fc91881e-92c0-5a63-a0b9-b253958a594e",
@@ -20338,6 +21088,12 @@
      "unc1326"
     ],
     "mitre": [
+     "cosmic wolf",
+     "marbled dust",
+     "silicon",
+     "teal kurma"
+    ],
+    "mitre_loaded": [
      "cosmic wolf",
      "marbled dust",
      "silicon",
@@ -20679,7 +21435,8 @@
    "key": "sharpshooter",
    "mitre_attack": "G0104",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/5e78ae92-3ffd-4b16-bf62-e798529d73f1"
@@ -20701,7 +21458,8 @@
    "mitre_attack": "G1057",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/5e30362d-935b-4b1c-8bf2-96c7b7b7e299",
@@ -20719,6 +21477,10 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "bling libra",
+     "unc6240"
+    ],
+    "mitre_loaded": [
      "bling libra",
      "unc6240"
     ],
@@ -20759,7 +21521,8 @@
    "mitre_attack": "G1008",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/03be849d-b5a2-4766-9dda-48976bae5710",
@@ -20781,7 +21544,8 @@
    "key": "sidewinder",
    "mitre_attack": "G0121",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/3fc023b2-c5cc-481d-9c3e-70141ae1a87e"
@@ -20798,6 +21562,10 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "rattlesnake",
+     "t-apt-04"
+    ],
+    "mitre_loaded": [
      "rattlesnake",
      "t-apt-04"
     ],
@@ -20858,7 +21626,8 @@
    "key": "silence",
    "mitre_attack": "G0091",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/d13c8a7f-740b-4efa-a232-de7d6bb05321"
@@ -20871,6 +21640,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "whisper spider"
+    ],
+    "mitre_loaded": [
      "whisper spider"
     ],
     "suffix_rule": [
@@ -20899,7 +21671,8 @@
    "mitre_attack": "G0122",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/90784c1e-4aba-40eb-9adf-7556235e6384",
@@ -20929,6 +21702,10 @@
      "yellow nabu"
     ],
     "mitre": [
+     "cobalt dickens",
+     "ta407"
+    ],
+    "mitre_loaded": [
      "cobalt dickens",
      "ta407"
     ],
@@ -21027,6 +21804,25 @@
    }
   },
   {
+   "name": "Silver Fox",
+   "key": "silver fox",
+   "mitre_attack": null,
+   "origins": [
+    "override"
+   ],
+   "records": [],
+   "synonyms": [
+    "silver fox apt",
+    "silverfox"
+   ],
+   "synonym_origins": {
+    "override": [
+     "silver fox apt",
+     "silverfox"
+    ]
+   }
+  },
+  {
    "name": "SilverFish",
    "key": "silverfish",
    "mitre_attack": null,
@@ -21053,7 +21849,8 @@
    "mitre_attack": "G0083",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/76565741-3452-4069-ab08-80c0ea95bbeb",
@@ -21527,7 +22324,8 @@
    "mitre_attack": "G0054",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/d1acfbb3-647b-4723-9154-800ec119006e",
@@ -21677,7 +22475,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/06630ccd-98ed-5aec-8083-e04c894bd2d6",
@@ -21716,6 +22515,12 @@
      "nahr elbard"
     ],
     "mitre": [
+     "callisto group",
+     "coldriver",
+     "seaborgium",
+     "ta446"
+    ],
+    "mitre_loaded": [
      "callisto group",
      "coldriver",
      "seaborgium",
@@ -21781,7 +22586,8 @@
    "mitre_attack": "G0038",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/894aab42-3371-47b1-8859-a4a074c804c8",
@@ -21820,27 +22626,6 @@
     "suffix_rule": [
      "stealth mango and tangelo group",
      "stealth mango and tangelo team"
-    ]
-   }
-  },
-  {
-   "name": "Stolen Pencil",
-   "key": "stolen pencil",
-   "mitre_attack": "G0086",
-   "origins": [
-    "mitre"
-   ],
-   "records": [
-    "mitre-intrusion-set/7a0d4c09-dfe7-4fa2-965a-1a0e42fedd70"
-   ],
-   "synonyms": [
-    "stolen pencil group",
-    "stolen pencil team"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "stolen pencil group",
-     "stolen pencil team"
     ]
    }
   },
@@ -22285,7 +23070,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/559c8dc4-1022-50ed-9f1c-d7715737fd87",
@@ -23150,7 +23936,8 @@
    "mitre_attack": "G1046",
    "origins": [
     "misp_galaxy:microsoft-activity-group",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/6784f384-a942-5d7a-b693-4f8e383d54e0",
@@ -23607,7 +24394,8 @@
    "mitre_attack": "G0041",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/277d2f87-2ae5-4730-a3aa-50c1fdff9656",
@@ -23627,6 +24415,9 @@
      "projectsauron"
     ],
     "mitre": [
+     "projectsauron"
+    ],
+    "mitre_loaded": [
      "projectsauron"
     ],
     "suffix_rule": [
@@ -23664,7 +24455,8 @@
    "mitre_attack": "G0039",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/5cbe0d3b-6fb1-471f-b591-4b192915116d",
@@ -23865,7 +24657,8 @@
    "mitre_attack": "G1018",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/467271fd-47c0-4e90-a3f9-d84f5cf790d0",
@@ -24103,33 +24896,13 @@
    }
   },
   {
-   "name": "TA455",
-   "key": "ta455",
-   "mitre_attack": null,
-   "origins": [
-    "misp_galaxy:threat-actor"
-   ],
-   "records": [
-    "threat-actor/c2f1f2e3-9573-49be-b01e-6ffff9a9571b"
-   ],
-   "synonyms": [
-    "ta455 group",
-    "ta455 team"
-   ],
-   "synonym_origins": {
-    "suffix_rule": [
-     "ta455 group",
-     "ta455 team"
-    ]
-   }
-  },
-  {
    "name": "TA459",
    "key": "ta459",
    "mitre_attack": "G0062",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/62a64fd3-aaf7-4d09-a375-d6f8bb118481",
@@ -24243,7 +25016,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/c85120d0-c397-5d30-9d57-3b019090acd5",
@@ -24286,6 +25060,11 @@
      "spandex tempest"
     ],
     "mitre": [
+     "chimborazo",
+     "hive0065",
+     "spandex tempest"
+    ],
+    "mitre_loaded": [
      "chimborazo",
      "hive0065",
      "spandex tempest"
@@ -24371,7 +25150,8 @@
    "mitre_attack": "G0127",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/94873029-f950-4268-9cfd-5032e15cb182",
@@ -24398,6 +25178,10 @@
      "shakthak"
     ],
     "mitre": [
+     "gold cabin",
+     "shathak"
+    ],
+    "mitre_loaded": [
      "gold cabin",
      "shathak"
     ],
@@ -24551,7 +25335,8 @@
    "mitre_attack": "G1037",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/13ef3485-70d2-4567-b934-0e83c1eafcf1",
@@ -24578,7 +25363,8 @@
    "mitre_attack": "G1038",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/a5cfbc79-316c-42f2-915d-6e8fef4085f8",
@@ -24848,7 +25634,8 @@
    "mitre_attack": "G0015",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/59140a2e-d117-4206-9b2c-2a8662bd9d46",
@@ -24963,7 +25750,8 @@
    "mitre_attack": "G1056",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/20f26558-e05d-46cf-8847-c2b5a83ee779",
@@ -24984,6 +25772,7 @@
     "shellforce",
     "shellforce group",
     "shellforce team",
+    "team pcp",
     "teampcp group",
     "teampcp team",
     "unc6780",
@@ -25004,6 +25793,16 @@
      "shadow-water-058",
      "shellforce",
      "unc6780"
+    ],
+    "mitre_loaded": [
+     "deadcatx3",
+     "pcpcat",
+     "shadow-water-058",
+     "shellforce",
+     "unc6780"
+    ],
+    "override": [
+     "team pcp"
     ],
     "suffix_rule": [
      "deadcatx3 group",
@@ -25058,7 +25857,8 @@
    "mitre_attack": "G0139",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/35d1b3be-49d4-42f1-aaa6-ef159c880bca",
@@ -25159,7 +25959,8 @@
    "origins": [
     "misp_galaxy:mitre-ics-groups",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-ics-groups/acb04037-e160-4a4e-a8cf-8a53a2f8221b",
@@ -25183,6 +25984,9 @@
      "xenotime"
     ],
     "mitre": [
+     "xenotime"
+    ],
+    "mitre_loaded": [
      "xenotime"
     ],
     "suffix_rule": [
@@ -25324,19 +26128,34 @@
   {
    "name": "The Gentlemen",
    "key": "the gentlemen",
-   "mitre_attack": null,
+   "mitre_attack": "G1058",
    "origins": [
-    "misp_galaxy:threat-actor"
+    "misp_galaxy:threat-actor",
+    "mitre_loaded"
    ],
    "records": [
     "threat-actor/1c047671-227b-466f-9929-37df40abd485"
    ],
    "synonyms": [
+    "gold sherwood",
+    "gold sherwood group",
+    "gold sherwood team",
+    "storm-2697",
+    "storm-2697 group",
+    "storm-2697 team",
     "the gentlemen group",
     "the gentlemen team"
    ],
    "synonym_origins": {
+    "mitre_loaded": [
+     "gold sherwood",
+     "storm-2697"
+    ],
     "suffix_rule": [
+     "gold sherwood group",
+     "gold sherwood team",
+     "storm-2697 group",
+     "storm-2697 team",
      "the gentlemen group",
      "the gentlemen team"
     ]
@@ -25378,7 +26197,8 @@
    "key": "the white company",
    "mitre_attack": "G0089",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/6688d679-ccdb-4f12-abf6-c7545dd767a4"
@@ -25483,7 +26303,8 @@
    "key": "threat group-1314",
    "mitre_attack": "G0028",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/d519164e-f5fa-4b8c-a1fb-cf0172ad0983"
@@ -25495,6 +26316,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "tg-1314"
+    ],
+    "mitre_loaded": [
      "tg-1314"
     ],
     "suffix_rule": [
@@ -25510,7 +26334,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/45dc2a46-f0b1-5b5c-bf32-57d160542800",
@@ -25597,6 +26422,16 @@
      "luckymouse",
      "tg-3390"
     ],
+    "mitre_loaded": [
+     "apt27",
+     "bronze union",
+     "earth smilodon",
+     "emissary panda",
+     "iron tiger",
+     "linen typhoon",
+     "luckymouse",
+     "tg-3390"
+    ],
     "suffix_rule": [
      "apt27 group",
      "apt27 team",
@@ -25644,7 +26479,8 @@
    "mitre_attack": "G0076",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/d69e568e-9ac8-4c08-b32c-d93b43ba9172",
@@ -25761,7 +26597,8 @@
    "mitre_attack": "G1022",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/b516b235-fc7d-4635-aca5-3d33312339c3",
@@ -25811,7 +26648,8 @@
    "mitre_attack": "G0131",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c5b81590-6814-4d2a-8baa-15c4b6c7f960",
@@ -25834,8 +26672,7 @@
     "lone castle",
     "pla unit 65017",
     "red beifang",
-    "tag-74",
-    "tonto"
+    "tag-74"
    ],
    "synonym_origins": {
     "misp_galaxy:threat-actor": [
@@ -25855,6 +26692,12 @@
      "earth akhlut",
      "karma panda"
     ],
+    "mitre_loaded": [
+     "bronze huntley",
+     "cactuspete",
+     "earth akhlut",
+     "karma panda"
+    ],
     "suffix_rule": [
      "bronze huntley group",
      "bronze huntley team",
@@ -25863,8 +26706,7 @@
      "earth akhlut group",
      "earth akhlut team",
      "karma panda group",
-     "karma panda team",
-     "tonto"
+     "karma panda team"
     ]
    }
   },
@@ -25961,7 +26803,8 @@
    "key": "transparent tribe",
    "mitre_attack": "G0134",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/e44e0985-bc65-4a8f-b578-211c858128e3"
@@ -25980,7 +26823,8 @@
     "projectm group",
     "projectm team",
     "transparent tribe group",
-    "transparent tribe team"
+    "transparent tribe team",
+    "transparenttribe"
    ],
    "synonym_origins": {
     "mitre": [
@@ -25988,6 +26832,15 @@
      "copper fieldstone",
      "mythic leopard",
      "projectm"
+    ],
+    "mitre_loaded": [
+     "apt36",
+     "copper fieldstone",
+     "mythic leopard",
+     "projectm"
+    ],
+    "override": [
+     "transparenttribe"
     ],
     "suffix_rule": [
      "apt36 group",
@@ -26072,7 +26925,8 @@
    "mitre_attack": "G0081",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/56319646-eb6e-41fc-ae53-aadfa7adb924",
@@ -26102,6 +26956,10 @@
      "red orthrus"
     ],
     "mitre": [
+     "keyboy",
+     "pirate panda"
+    ],
+    "mitre_loaded": [
      "keyboy",
      "pirate panda"
     ],
@@ -26217,7 +27075,8 @@
     "misp_galaxy:360net-threat-actor",
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "360net-threat-actor/1972273e-2152-558c-b575-222c6d2f3e10",
@@ -26321,6 +27180,17 @@
      "wraith"
     ],
     "mitre": [
+     "belugasturgeon",
+     "group 88",
+     "iron hunter",
+     "krypton",
+     "secret blizzard",
+     "snake",
+     "venomous bear",
+     "waterbug",
+     "whitebear"
+    ],
+    "mitre_loaded": [
      "belugasturgeon",
      "group 88",
      "iron hunter",
@@ -27282,44 +28152,6 @@
    }
   },
   {
-   "name": "UNC2452",
-   "key": "unc2452",
-   "mitre_attack": "G0118",
-   "origins": [
-    "misp_galaxy:threat-actor",
-    "mitre"
-   ],
-   "records": [
-    "mitre-intrusion-set/dc5e2999-ca1a-47d4-8d12-a6984b138a1b",
-    "threat-actor/2ee5ed7a-c4d0-40be-a837-20817474a15b"
-   ],
-   "synonyms": [
-    "darkhalo",
-    "solar phoenix",
-    "stellarparticle",
-    "stellarparticle group",
-    "stellarparticle team",
-    "unc2452 group",
-    "unc2452 team"
-   ],
-   "synonym_origins": {
-    "misp_galaxy:threat-actor": [
-     "darkhalo",
-     "solar phoenix",
-     "stellarparticle"
-    ],
-    "mitre": [
-     "stellarparticle"
-    ],
-    "suffix_rule": [
-     "stellarparticle group",
-     "stellarparticle team",
-     "unc2452 group",
-     "unc2452 team"
-    ]
-   }
-  },
-  {
    "name": "UNC2465",
    "key": "unc2465",
    "mitre_attack": null,
@@ -27501,7 +28333,8 @@
    "mitre_attack": "G1048",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/461b8e25-8f4a-4ea2-a4a8-e39df7ce6630",
@@ -28810,7 +29643,8 @@
    "key": "velvet ant",
    "mitre_attack": "G1047",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/e1fc262c-dad2-4b82-abda-5f08dd134971"
@@ -29059,18 +29893,10 @@
     "threat-actor/2ac0db88-8e88-447b-ad44-f781326f5884"
    ],
    "synonyms": [
-    "silver fox",
-    "silver fox apt",
     "void arachne group",
     "void arachne team"
    ],
    "synonym_origins": {
-    "misp_galaxy:threat-actor": [
-     "silver fox"
-    ],
-    "override": [
-     "silver fox apt"
-    ],
     "suffix_rule": [
      "void arachne group",
      "void arachne team"
@@ -29133,7 +29959,6 @@
    ],
    "synonyms": [
     "laundry bear",
-    "ta488",
     "uac-0190",
     "void blizzard group",
     "void blizzard team"
@@ -29144,7 +29969,6 @@
     ],
     "misp_galaxy:threat-actor": [
      "laundry bear",
-     "ta488",
      "uac-0190"
     ],
     "suffix_rule": [
@@ -29160,7 +29984,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/46db3943-9a37-5f2b-8238-5b768934785e",
@@ -29210,6 +30035,15 @@
      "storm-0842"
     ],
     "mitre": [
+     "banished kitten",
+     "cobalt mystique",
+     "handala hack",
+     "homeland justice",
+     "karma",
+     "karmabelow80",
+     "red sandstorm"
+    ],
+    "mitre_loaded": [
      "banished kitten",
      "cobalt mystique",
      "handala hack",
@@ -29269,7 +30103,8 @@
    "mitre_attack": "G0123",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/b2e34388-6938-4c59-a702-80dc219e15e3",
@@ -29289,6 +30124,9 @@
      "lebanese cedar"
     ],
     "mitre": [
+     "lebanese cedar"
+    ],
+    "mitre_loaded": [
      "lebanese cedar"
     ],
     "suffix_rule": [
@@ -29333,7 +30171,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/7c4a32dc-24d5-5d69-96a2-9d0a2ae0f31b",
@@ -29381,6 +30220,15 @@
      "voltzite"
     ],
     "mitre": [
+     "bronze silhouette",
+     "dazedtoad",
+     "dev-0391",
+     "insidious taurus",
+     "unc3236",
+     "vanguard panda",
+     "voltzite"
+    ],
+    "mitre_loaded": [
      "bronze silhouette",
      "dazedtoad",
      "dev-0391",
@@ -29445,7 +30293,6 @@
     "threat-actor/09aa3edb-e956-43f0-9fcb-a3154b47d202"
    ],
    "synonyms": [
-    "famous chollima",
     "nickel tapestry",
     "unc5267",
     "void dokkaebi",
@@ -29455,7 +30302,6 @@
    ],
    "synonym_origins": {
     "misp_galaxy:threat-actor": [
-     "famous chollima",
      "nickel tapestry",
      "unc5267",
      "void dokkaebi",
@@ -29602,7 +30448,8 @@
    "key": "water galura",
    "mitre_attack": "G1050",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/be8847e0-9512-45db-895e-f871ab6d3820"
@@ -29616,6 +30463,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "gold feather"
+    ],
+    "mitre_loaded": [
      "gold feather"
     ],
     "suffix_rule": [
@@ -29944,7 +30794,8 @@
    "mitre_attack": "G0107",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/b74f909f-8e52-4b69-b770-162bf59a1b4e",
@@ -30037,7 +30888,8 @@
    "key": "windigo",
    "mitre_attack": "G0124",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/4e868dad-682d-4897-b8df-2dc98f46c68a"
@@ -30059,7 +30911,8 @@
    "mitre_attack": "G0112",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/afec6dc3-a18e-4b62-b1a4-5510e1a498d1",
@@ -30080,6 +30933,9 @@
      "windy phoenix"
     ],
     "mitre": [
+     "bahamut"
+    ],
+    "mitre_loaded": [
      "bahamut"
     ],
     "suffix_rule": [
@@ -30120,7 +30976,8 @@
    "key": "winnti group",
    "mitre_attack": "G0044",
    "origins": [
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/c5947e1c-1cbc-434c-94b8-27c7e3be0fff"
@@ -30132,6 +30989,9 @@
    ],
    "synonym_origins": {
     "mitre": [
+     "blackfly"
+    ],
+    "mitre_loaded": [
      "blackfly"
     ],
     "suffix_rule": [
@@ -30146,7 +31006,8 @@
    "mitre_attack": "G1035",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/75a07184-a7e5-4222-95a1-a04dbc96a29c",
@@ -30172,6 +31033,10 @@
      "uac-0114"
     ],
     "mitre": [
+     "ta473",
+     "uac-0114"
+    ],
+    "mitre_loaded": [
      "ta473",
      "uac-0114"
     ],
@@ -30212,7 +31077,8 @@
    "mitre_attack": "G0090",
    "origins": [
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "mitre-intrusion-set/f8cb7b36-62ef-4488-8a6d-a7033e3271c1",
@@ -30230,6 +31096,9 @@
      "ashen lepus"
     ],
     "mitre": [
+     "ashen lepus"
+    ],
+    "mitre_loaded": [
      "ashen lepus"
     ],
     "suffix_rule": [
@@ -30308,7 +31177,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/120dc1ae-e850-5059-a4fb-520748ca6881",
@@ -30381,6 +31251,18 @@
      "unc2053"
     ],
     "mitre": [
+     "dev-0193",
+     "dev-0237",
+     "fin12",
+     "gold blackburn",
+     "grim spider",
+     "itg23",
+     "periwinkle tempest",
+     "pistachio tempest",
+     "temp.mixmaster",
+     "unc1878"
+    ],
+    "mitre_loaded": [
      "dev-0193",
      "dev-0237",
      "fin12",
@@ -30769,7 +31651,8 @@
    "origins": [
     "misp_galaxy:microsoft-activity-group",
     "misp_galaxy:threat-actor",
-    "mitre"
+    "mitre",
+    "mitre_loaded"
    ],
    "records": [
     "microsoft-activity-group/27eb4928-b3e6-5ae1-bbb6-f73bce8d7c69",
@@ -30812,6 +31695,10 @@
      "violet typhoon"
     ],
     "mitre": [
+     "apt31",
+     "violet typhoon"
+    ],
+    "mitre_loaded": [
      "apt31",
      "violet typhoon"
     ],
@@ -31538,23 +32425,6 @@
    }
   },
   {
-   "key": "berserk bear",
-   "actors": [
-    "dragonfly",
-    "dragonfly 2.0"
-   ],
-   "origins": {
-    "dragonfly": [
-     "misp_galaxy:microsoft-activity-group",
-     "misp_galaxy:threat-actor",
-     "mitre"
-    ],
-    "dragonfly 2.0": [
-     "mitre"
-    ]
-   }
-  },
-  {
    "key": "bert",
    "actors": [],
    "origins": {},
@@ -31571,28 +32441,14 @@
    ],
    "origins": {
     "sandworm team": [
-     "mitre"
+     "mitre",
+     "mitre_loaded"
     ]
    },
    "never_merge": {
     "reason": "A malware family name. ATT&CK lists 'BlackEnergy (Group)' as an alias of Sandworm Team (G0034); EdgeGuard's actor-name hygiene drops the parenthetical, which leaves the malware's name, so the bare name is not taken as the group ('blackenergy group' still is).",
     "date": "2026-10-15",
     "status": "proposed"
-   }
-  },
-  {
-   "key": "blue athena",
-   "actors": [
-    "apt28",
-    "forest blizzard"
-   ],
-   "origins": {
-    "apt28": [
-     "misp_galaxy:threat-actor"
-    ],
-    "forest blizzard": [
-     "misp_galaxy:microsoft-activity-group"
-    ]
    }
   },
   {
@@ -31732,21 +32588,6 @@
    }
   },
   {
-   "key": "dark halo",
-   "actors": [
-    "apt29",
-    "unc2452"
-   ],
-   "origins": {
-    "apt29": [
-     "mitre"
-    ],
-    "unc2452": [
-     "mitre"
-    ]
-   }
-  },
-  {
    "key": "darkshadow",
    "actors": [
     "shadow typhoon",
@@ -31792,19 +32633,20 @@
    }
   },
   {
-   "key": "dymalloy",
+   "key": "famous chollima",
    "actors": [
-    "dragonfly",
-    "dragonfly 2.0"
+    "wagemole"
    ],
    "origins": {
-    "dragonfly": [
-     "misp_galaxy:threat-actor",
-     "mitre"
-    ],
-    "dragonfly 2.0": [
-     "mitre"
+    "wagemole": [
+     "misp_galaxy:threat-actor"
     ]
+   },
+   "never_merge": {
+    "reason": "Not merged: the threat-actor galaxy lists Famous Chollima as a synonym of Wagemole, a vendor equivalence that is not universally accepted (both name overlapping North Korean IT-worker and fake-interview activity). A wrong merge is worse than a missed one.",
+    "date": "2026-10-15",
+    "status": "proposed",
+    "actor": "wagemole"
    }
   },
   {
@@ -31964,22 +32806,6 @@
    }
   },
   {
-   "key": "iron liberty",
-   "actors": [
-    "dragonfly",
-    "dragonfly 2.0"
-   ],
-   "origins": {
-    "dragonfly": [
-     "misp_galaxy:threat-actor",
-     "mitre"
-    ],
-    "dragonfly 2.0": [
-     "mitre"
-    ]
-   }
-  },
-  {
    "key": "jerseymikes",
    "actors": [
     "apt26",
@@ -32103,18 +32929,19 @@
    }
   },
   {
-   "key": "parastoo",
+   "key": "pacha",
    "actors": [
-    "charming kitten",
-    "magic hound"
+    "pacha group"
    ],
    "origins": {
-    "charming kitten": [
-     "misp_galaxy:threat-actor"
-    ],
-    "magic hound": [
-     "misp_galaxy:microsoft-activity-group"
+    "pacha group": [
+     "suffix_rule"
     ]
+   },
+   "never_merge": {
+    "reason": "Doubtful short forms the suffix rule derives from 'Tonto Team' (G0131) and 'Pacha Group': both are common words (Spanish 'tonto', and a title and brand name), and the reports name the groups in full. Neither is a graph name today. The other short forms checked (gorgon, sunshop, chronus, belsen, daixin) are distinctive and kept.",
+    "date": "2026-10-15",
+    "status": "proposed"
    }
   },
   {
@@ -32274,6 +33101,23 @@
    }
   },
   {
+   "key": "ta488",
+   "actors": [
+    "void blizzard"
+   ],
+   "origins": {
+    "void blizzard": [
+     "misp_galaxy:threat-actor"
+    ]
+   },
+   "never_merge": {
+    "reason": "Not merged: the threat-actor galaxy lists TA488 as a synonym of Void Blizzard, a vendor equivalence that is not universally accepted; the two graph nodes share no malware or pulse. A wrong merge is worse than a missed one.",
+    "date": "2026-10-15",
+    "status": "proposed",
+    "actor": "void blizzard"
+   }
+  },
+  {
    "key": "ta544",
    "actors": [
     "narwhal spider",
@@ -32334,6 +33178,22 @@
    }
   },
   {
+   "key": "tonto",
+   "actors": [
+    "tonto team"
+   ],
+   "origins": {
+    "tonto team": [
+     "suffix_rule"
+    ]
+   },
+   "never_merge": {
+    "reason": "Doubtful short forms the suffix rule derives from 'Tonto Team' (G0131) and 'Pacha Group': both are common words (Spanish 'tonto', and a title and brand name), and the reports name the groups in full. Neither is a graph name today. The other short forms checked (gorgon, sunshop, chronus, belsen, daixin) are distinctive and kept.",
+    "date": "2026-10-15",
+    "status": "proposed"
+   }
+  },
+  {
    "key": "tsar",
    "actors": [
     "apt28"
@@ -32387,11 +33247,13 @@
    ],
    "origins": {
     "ember bear": [
-     "mitre"
+     "mitre",
+     "mitre_loaded"
     ],
     "saint bear": [
      "misp_galaxy:threat-actor",
-     "mitre"
+     "mitre",
+     "mitre_loaded"
     ]
    }
   },
@@ -32469,6 +33331,73 @@
      "misp_galaxy:microsoft-activity-group"
     ]
    }
+  }
+ ],
+ "revoked_attack_groups": [
+  {
+   "mitre_attack": "G0042",
+   "name": "MONSOON",
+   "key": "monsoon",
+   "revoked_into": "G0040",
+   "actor": "patchwork"
+  },
+  {
+   "mitre_attack": "G0057",
+   "name": "APT34",
+   "key": "apt34",
+   "revoked_into": "G0049",
+   "actor": "oilrig"
+  },
+  {
+   "mitre_attack": "G0058",
+   "name": "Charming Kitten",
+   "key": "charming kitten",
+   "revoked_into": "G0059",
+   "actor": "magic hound"
+  },
+  {
+   "mitre_attack": "G0074",
+   "name": "Dragonfly 2.0",
+   "key": "dragonfly 2.0",
+   "revoked_into": "G0035",
+   "actor": "dragonfly"
+  },
+  {
+   "mitre_attack": "G0086",
+   "name": "Stolen Pencil",
+   "key": "stolen pencil",
+   "revoked_into": "G0094",
+   "actor": "kimsuky"
+  },
+  {
+   "mitre_attack": "G0118",
+   "name": "UNC2452",
+   "key": "unc2452",
+   "revoked_into": "G0016",
+   "actor": "apt29"
+  }
+ ],
+ "never_merge_pairs": [
+  {
+   "name": "famous chollima",
+   "actor": "wagemole",
+   "reason": "Not merged: the threat-actor galaxy lists Famous Chollima as a synonym of Wagemole, a vendor equivalence that is not universally accepted (both name overlapping North Korean IT-worker and fake-interview activity). A wrong merge is worse than a missed one.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "name": "silver fox",
+   "actor": "void arachne",
+   "reason": "Not merged: the threat-actor galaxy lists Silver Fox as a synonym of Void Arachne, a vendor equivalence that is not universally accepted (the two share ValleyRAT and Winos 4.0, families several Chinese-speaking clusters use). A wrong merge is worse than a missed one.",
+   "date": "2026-10-15",
+   "status": "proposed"
+  },
+  {
+   "name": "ta488",
+   "actor": "void blizzard",
+   "reason": "Not merged: the threat-actor galaxy lists TA488 as a synonym of Void Blizzard, a vendor equivalence that is not universally accepted; the two graph nodes share no malware or pulse. A wrong merge is worse than a missed one.",
+   "date": "2026-10-15",
+   "status": "proposed"
   }
  ]
 }

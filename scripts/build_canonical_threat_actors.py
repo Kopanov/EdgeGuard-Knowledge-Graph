@@ -3,19 +3,24 @@
 
 The same actor reaches the graph under several names (``lazarus`` from one feed, ``lazarus group``
 from ATT&CK), which splits its evidence across duplicate ``ThreatActor`` nodes. This script turns
-the MISP galaxy threat-actor clusters into a reviewed dictionary of canonical actors and their
-synonyms. It does not touch the graph: the alias-merge job reads the reference in a later step.
+the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded into a reviewed
+dictionary of canonical actors and their synonyms. It never writes to the graph; the actor alias
+merge (``enrichment_jobs.merge_alias_duplicate_actors``) reads the reference.
 
 Inputs
 ------
-``--galaxy``     the threat-actor entities export of the MISP galaxies
-                 (``galaxy_threat_actors_<date>.json``: one record per galaxy cluster of the
-                 threat-actor, mitre-intrusion-set, microsoft-activity-group, 360net-threat-actor and
-                 mitre-ics-groups galaxies, with ``name``, ``aliases``, ``external_ids.mitre_attack``
-                 and ``provenance``).
-``--overrides``  hand-reviewed decisions (``src/reference/canonical_threat_actor_overrides.json``):
-                 ``merge`` (names into a canonical key), ``never_merge`` (names) and
-                 ``canonical_name`` (display names). Applied last, so a rebuild keeps them.
+``--galaxy``             the threat-actor entities export of the MISP galaxies
+                         (``galaxy_threat_actors_<date>.json``: one record per cluster of the
+                         threat-actor, mitre-intrusion-set, microsoft-activity-group,
+                         360net-threat-actor and mitre-ics-groups galaxies, with ``name``,
+                         ``aliases``, ``external_ids.mitre_attack`` and ``provenance``).
+``--attack-galaxy-raw``  the raw mitre-intrusion-set galaxy dump that export was built from; its
+                         ``revoked-by`` relations say which ATT&CK groups were revoked into which.
+``--graph-actors``       an export made by ``--export-graph-actors``. Its ATT&CK-sourced nodes are
+                         the ATT&CK version EdgeGuard loaded (newer than the galaxy copy); the
+                         rest of it feeds the report.
+``--overrides``          hand-reviewed decisions (``src/reference/canonical_threat_actor_overrides.json``),
+                         applied last so that a rebuild keeps them.
 
 Grouping rules (a wrong merge is worse than a missed one)
 ---------------------------------------------------------
@@ -24,36 +29,54 @@ name on write: NFC, trimmed, lower-case. The ``name_key`` of the input is not us
 
 1. Anchor by ATT&CK id. All records with the same ``mitre_attack`` id are one actor whose
    canonical name and key are the ATT&CK group name (the mitre-intrusion-set value without its
-   `` - G0032`` suffix), i.e. the name EdgeGuard writes for that group. A record whose own name is
-   the ATT&CK name of a *different* group (the galaxy names several ATT&CK ids for it and the
-   export kept the first) is not anchored by that id; it goes through rule 2 instead.
+   `` - G0032`` suffix). A record whose own name is the ATT&CK name of a different, not revoked
+   group (the galaxy names several ATT&CK ids for it and the export kept the first) is not
+   anchored by that id; it goes through rule 2 instead.
+
+   * A group ATT&CK revoked into another (``revoked-by``) is folded into its successor. Its key,
+     name and aliases become synonyms of the successor (origin ``mitre_revoked``).
+   * The ATT&CK version EdgeGuard loaded is anchored too. For each ATT&CK-sourced graph node, its
+     name and aliases are ATT&CK claims, the strongest after an actor key (origin
+     ``mitre_loaded``). A node whose name is no galaxy group's key does one of three things:
+     - it goes to its successor when it is a revoked group;
+     - it renames the galaxy group whose ATT&CK id its description carries;
+     - otherwise it becomes an anchor by name.
 2. A record without an ATT&CK id joins an anchored actor only when its name equals that actor's
-   key, one of its ATT&CK aliases, or the name of a record anchored to it (rule 1), and that name
-   belongs to exactly one anchored actor (an actor key outranks another actor's alias). Names that
-   differ only in spaces, hyphens, dots or underscores are the same name ("SaintBear" is ATT&CK's
-   "Saint Bear"); the exact name is tried first. A 360net-threat-actor name is also tried without
-   its `` - APT-C-NN`` id ("Darkhotel - APT-C-06"). Otherwise records with the same name form an
-   actor of their own, named after the threat-actor galaxy value, else the
-   microsoft-activity-group, the 360net-threat-actor or the mitre-ics-groups value.
+   key, one of its ATT&CK aliases or revoked names, or the name of a record anchored to it.
+   That name must belong to exactly one anchored actor; an actor key outranks another actor's
+   alias. Names that differ only in spaces, hyphens, dots or underscores are the same name
+   ("SaintBear" is ATT&CK's "Saint Bear"); the exact name is tried first. A 360net-threat-actor
+   name is also tried without its `` - APT-C-NN`` id ("Darkhotel - APT-C-06"). Otherwise records
+   with the same name form an actor of their own. It is named after the threat-actor galaxy
+   value, else the microsoft-activity-group, the 360net-threat-actor or the mitre-ics-groups value.
 3. Synonyms are the names the records give for their actor (aliases, and the names of joined
    records). They never merge two actors.
-4. A synonym claimed by more than one actor goes to the actor whose own name it is: an actor key
-   always stays with its actor; otherwise an ATT&CK alias or a record's own name outranks a
-   galaxy synonym. If no single actor holds the strongest claim, the name is ambiguous and is
-   never merged. ATT&CK group ids listed as synonyms are dropped (the id is ``mitre_attack``), and
-   so are placeholder names (``node_identity.is_placeholder_name``). A synonym is taken as
-   EdgeGuard's actor-name hygiene writes it (``actor_name_hygiene.clean_actor_names``: a trailing
-   parenthetical is dropped); a list of names is not a synonym.
-5. Suffix rule. For every actor key and ATT&CK alias, the variant with a trailing `` group`` /
-   `` team`` removed (or added, when the name has neither) becomes a synonym when no actor claims
-   it yet; a variant two actors would get is ambiguous. A shortened name keeps at least three
-   characters and a letter, and nothing is added to a name that already has the word ``group`` or
-   ``team`` in it. Shortened names can be common words; the report lists them for review.
-6. Overrides are applied last: ``merge`` (a name into a canonical key; creates the actor when no
-   actor has that key, folds an actor without an ATT&CK id whose key is the name, never folds an
-   ATT&CK group), ``never_merge`` (takes a name out of every actor and lists it as ambiguous) and
-   ``canonical_name`` (sets the display name; a name with another key re-keys an actor without an
-   ATT&CK id and keeps the old key as a synonym).
+4. A synonym claimed by more than one actor goes to the actor whose own name it is. In order:
+   - an actor key always stays with its actor;
+   - then a loaded ATT&CK alias;
+   - then a galaxy ATT&CK alias, a revoked group's name or a record's own name;
+   - then a plain galaxy synonym.
+   If no single actor holds the strongest claim, the name is ambiguous and is never merged.
+   Some names are never synonyms: ATT&CK group ids (the id is ``mitre_attack``), placeholder names
+   (``node_identity.is_placeholder_name``) and lists of names. A synonym is taken as EdgeGuard's
+   actor-name hygiene writes it (``actor_name_hygiene.clean_actor_names``: a trailing parenthetical
+   is dropped).
+5. Suffix rule. Applies to every actor key, ATT&CK alias and revoked name: the variant with a
+   trailing `` group`` / `` team`` removed (or added, when the name has neither) becomes a
+   synonym when no actor claims it yet. A variant two actors would get is ambiguous. A shortened
+   name keeps at least three characters and a letter. Nothing is added to a name that already
+   has the word ``group`` or ``team`` in it. Shortened names can be common words; the report lists
+   them for review.
+6. Overrides are applied last, in this order:
+   - ``never_merge`` with an ``actor`` takes the names away from that actor and never gives them
+     back to it;
+   - ``merge`` puts a name into a canonical key. It creates the actor when no actor has that key,
+     and folds an actor without an ATT&CK id whose key is the name. It never folds an ATT&CK
+     group.
+   - ``never_merge`` without an ``actor`` takes a name out of every actor and lists it as
+     ambiguous;
+   - ``canonical_name`` sets the display name. A name with another key re-keys an actor that is
+     not an ATT&CK group and keeps the old key as a synonym.
 
 The output is deterministic: the same inputs and ``--version`` give a byte-identical file.
 ``--version`` defaults to the build date (CalVer ``YYYY.MM.DD``); ``generated_at`` is that date.
@@ -61,22 +84,28 @@ The output is deterministic: the same inputs and ``--version`` give a byte-ident
 Report
 ------
 The build prints the counts, the rule effects and every override decision. With
-``--graph-actors`` (an export made by ``--export-graph-actors``) it also checks the canonical keys
-against the names EdgeGuard wrote for the ATT&CK groups, and reports how the graph's actor names
-resolve: how many resolve, the duplicate groups the merge job would fold, and the unresolved
-names by relationship count (the first 50 in the report; ``--unresolved-out`` writes all).
+``--graph-actors`` it also reports on the graph:
+- it checks the canonical keys against the names EdgeGuard wrote for the ATT&CK groups;
+- it reports how the graph's actor names resolve and the duplicate groups the merge would fold;
+- it reports the ATT&CK aliases the reference gives elsewhere;
+- it lists names that differ only in spelling (``triage_key``) and the suffix-rule short forms
+  that exist on the graph;
+- it ranks the unresolved names by relationship count: the first 50 in the report, all of them
+  with ``--unresolved-out``.
 
-``--export-graph-actors PATH`` reads every ``ThreatActor`` node's name, aliases, sources,
-relationship count and pulse count over the Neo4j HTTP Query API v2 in read mode (same
-settings as ``scripts/verify_fresh_baseline.py``: ``NEO4J_HTTP_URL`` or ``NEO4J_HTTP``,
-``NEO4J_DATABASE``, ``NEO4J_USER``, ``NEO4J_PASSWORD``). Graph-derived files must be written
-outside the repository; the script refuses a path inside it.
+``--export-graph-actors PATH`` reads every ``ThreatActor`` node over the Neo4j HTTP Query API v2
+in read mode: name, aliases, sources, relationship count, pulse count, malware names, and the
+ATT&CK group id an ATT&CK node's description links to. It uses the same settings as
+``scripts/verify_fresh_baseline.py``: ``NEO4J_HTTP_URL`` or ``NEO4J_HTTP``, ``NEO4J_DATABASE``,
+``NEO4J_USER``, ``NEO4J_PASSWORD``. Graph-derived files must be written outside the
+repository; the script refuses a path inside it.
 
 Usage::
 
-    python scripts/build_canonical_threat_actors.py --export-graph-actors /tmp/graph_actors.json
+    python scripts/build_canonical_threat_actors.py --export-graph-actors /tmp/graph_threat_actors.json
     python scripts/build_canonical_threat_actors.py --galaxy galaxy_threat_actors_20261013.json \\
-        --graph-actors /tmp/graph_actors.json --unresolved-out /tmp/unresolved_actors.json
+        --attack-galaxy-raw misp_galaxy_mitre-intrusion-set_20261013.json \\
+        --graph-actors /tmp/graph_threat_actors.json --unresolved-out /tmp/unresolved_actors.json
 
 Exit code 0 = built (or exported); 1 = invalid input or override; 2 = Neo4j unreachable.
 """
@@ -111,6 +140,7 @@ DEFAULT_OVERRIDES = _SRC / "reference" / "canonical_threat_actor_overrides.json"
 
 SCHEMA_VERSION = 1
 MITRE_GALAXY = "mitre-intrusion-set"
+MITRE_SOURCE = "mitre_attck"  # the graph's source tag of ATT&CK nodes (SOURCE_TAGS["mitre"])
 # Display-name preference for an actor without an ATT&CK id (rule 2), then any other galaxy.
 GALAXY_NAME_PRIORITY: Tuple[str, ...] = (
     "threat-actor",
@@ -120,6 +150,8 @@ GALAXY_NAME_PRIORITY: Tuple[str, ...] = (
     MITRE_GALAXY,
 )
 ORIGIN_MITRE = "mitre"
+ORIGIN_MITRE_LOADED = "mitre_loaded"
+ORIGIN_MITRE_REVOKED = "mitre_revoked"
 ORIGIN_SUFFIX = "suffix_rule"
 ORIGIN_OVERRIDE = "override"
 GALAXY_ORIGIN_PREFIX = "misp_galaxy:"
@@ -127,7 +159,8 @@ NAME_SUFFIXES: Tuple[str, ...] = (" group", " team")
 OVERRIDE_STATUSES = frozenset({"proposed", "accepted"})
 
 # Claim strength (rule 4): lower wins. An actor key always wins and is not a claim.
-TIER_OWN_NAME = 1  # an ATT&CK alias, or the name of a record that belongs to the actor
+TIER_LOADED_ATTACK = 0  # an alias of the ATT&CK version EdgeGuard loaded
+TIER_OWN_NAME = 1  # a galaxy ATT&CK alias, a revoked group's name, or a record's own name
 TIER_SYNONYM = 2  # an alias a galaxy record gives
 
 _ATTACK_NAME_SUFFIX_RE = re.compile(r"\s+-\s+G\d{4}\s*$")
@@ -136,6 +169,7 @@ _ATTACK_NAME_SUFFIX_RE = re.compile(r"\s+-\s+G\d{4}\s*$")
 _THREE_SIXTY_GALAXY = "360net-threat-actor"
 _THREE_SIXTY_ID_SUFFIX_RE = re.compile(r"\s+-\s+APT-C-\d+\s*$", re.IGNORECASE)
 _ATTACK_GROUP_ID_RE = re.compile(r"^G\d{4}$")
+_ATTACK_GROUP_URL_RE = re.compile(r"attack\.mitre\.org/groups/(G\d{4})")
 _GROUP_OR_TEAM_WORD_RE = re.compile(r"\b(?:group|team)\b")
 _SEPARATORS_RE = re.compile(r"[\s\-_.]+")
 _ATTACK_ID_KEY_RE = re.compile(r"^g\d{4}$")
@@ -145,28 +179,31 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DESCRIPTION = (
     "Canonical threat actors for EdgeGuard: one entry per actor with its canonical key (the "
     "ThreatActor name EdgeGuard writes, normalised like node_identity.canonicalize_merge_key), its "
-    "ATT&CK group id and the synonyms that name it. Built from the MISP galaxy threat-actor "
-    "clusters by scripts/build_canonical_threat_actors.py, with the hand-reviewed decisions of "
-    "canonical_threat_actor_overrides.json applied last. Names listed under 'ambiguous' point to "
-    "more than one actor, or were marked never_merge, and are never merged."
+    "ATT&CK group id and the synonyms that name it. Built by scripts/build_canonical_threat_actors.py "
+    "from the MISP galaxy threat-actor clusters and the ATT&CK version EdgeGuard loaded, with the "
+    "hand-reviewed decisions of canonical_threat_actor_overrides.json applied last. Names listed "
+    "under 'ambiguous' point to more than one actor, or were marked never_merge, and are never merged."
 )
 RULES: Tuple[str, ...] = (
     "Records with the same ATT&CK id are one actor named after the ATT&CK group; a record whose own "
-    "name is the ATT&CK name of a different group is not anchored by its id.",
+    "name is the ATT&CK name of a different group is not anchored by its id. A group ATT&CK revoked "
+    "into another is folded into its successor (origin mitre_revoked). The ATT&CK version EdgeGuard "
+    "loaded anchors too: its names and aliases are the strongest claims after an actor key (origin "
+    "mitre_loaded), and a group the galaxy copy does not have is anchored by its name.",
     "A record without an ATT&CK id joins an anchored actor only when its name (for the "
     "360net-threat-actor galaxy also the name without its ' - APT-C-NN' id) is that actor's key, an "
-    "ATT&CK alias of it or the name of a record anchored to it, for exactly one actor; names that "
-    "differ only in spaces, hyphens, dots or underscores are the same name. Otherwise records with "
-    "the same name form an actor of their own.",
+    "ATT&CK alias or revoked name of it or the name of a record anchored to it, for exactly one "
+    "actor; names that differ only in spaces, hyphens, dots or underscores are the same name. "
+    "Otherwise records with the same name form an actor of their own.",
     "Synonyms never merge two actors.",
-    "A name claimed by several actors goes to the actor whose own name it is (actor key, then ATT&CK "
-    "alias or record name, then galaxy synonym); a tie makes it ambiguous. ATT&CK ids, placeholder "
-    "names and lists of names are not synonyms; a synonym is taken as EdgeGuard's actor-name hygiene "
-    "writes it.",
+    "A name claimed by several actors goes to the actor whose own name it is (actor key, then loaded "
+    "ATT&CK alias, then galaxy ATT&CK alias, revoked name or record name, then galaxy synonym); a tie "
+    "makes it ambiguous. ATT&CK ids, placeholder names and lists of names are not synonyms; a synonym "
+    "is taken as EdgeGuard's actor-name hygiene writes it.",
     "Suffix rule: the variant with or without a trailing ' group' / ' team' of an actor key or "
-    "ATT&CK alias is a synonym when no other actor claims it (a shortened name keeps at least three "
+    "ATT&CK name is a synonym when no other actor claims it (a shortened name keeps at least three "
     "characters and a letter; nothing is added to a name that already contains 'group' or 'team').",
-    "Overrides are applied last: merge, then never_merge, then canonical_name.",
+    "Overrides are applied last: never_merge with an actor, merge, never_merge, canonical_name.",
 )
 ATTRIBUTION: Tuple[Dict[str, str], ...] = (
     {
@@ -176,7 +213,8 @@ ATTRIBUTION: Tuple[Dict[str, str], ...] = (
         "url": "https://github.com/MISP/misp-galaxy",
     },
     {
-        "source": "MITRE ATT&CK (group names, ids and aliases, as carried by the mitre-intrusion-set galaxy)",
+        "source": "MITRE ATT&CK (group names, ids, aliases and revocations, from the mitre-intrusion-set "
+        "galaxy and from the ATT&CK version EdgeGuard loaded)",
         "notice": "© The MITRE Corporation. This work is reproduced and distributed with the "
         "permission of The MITRE Corporation.",
         "url": "https://attack.mitre.org/resources/legal-and-branding/terms-of-use/",
@@ -185,7 +223,7 @@ ATTRIBUTION: Tuple[Dict[str, str], ...] = (
 
 
 class ReferenceInputError(ValueError):
-    """Invalid galaxy input or override decision (exit code 1)."""
+    """Invalid input or override decision (exit code 1)."""
 
 
 # --------------------------------------------------------------------------- names
@@ -228,6 +266,29 @@ def compact_key(key: str) -> str:
     return _SEPARATORS_RE.sub("", key)
 
 
+def triage_key(key: str) -> str:
+    """``compact_key`` with ``0`` read as ``o`` (``"cl0p"`` / ``"clop"``). Used only to list
+    spelling variants in the report, never to merge."""
+    return compact_key(key).replace("0", "o")
+
+
+def clean_synonym(name: Any) -> Tuple[str, str]:
+    """``(status, key)`` of a name as a synonym: the key EdgeGuard's actor-name hygiene writes for
+    it. ``status`` is ``ok``, ``rewritten`` (a trailing parenthetical dropped), ``list`` / ``not a
+    name`` (no single name, key ``""``), ``placeholder`` / ``empty`` (key ``""``) or ``attack_id``."""
+    if not isinstance(name, str) or not actor_key(name):
+        return "empty", ""
+    if is_placeholder_name(name):
+        return "placeholder", ""
+    cleaned = clean_actor_names(name)
+    if len(cleaned) != 1:
+        return ("list" if cleaned else "not a name"), ""
+    key = actor_key(cleaned[0])
+    if _ATTACK_ID_KEY_RE.match(key):
+        return "attack_id", key
+    return ("rewritten" if key != actor_key(name) else "ok"), key
+
+
 def _usable(key: str) -> bool:
     return bool(key) and not is_placeholder_name(key)
 
@@ -250,7 +311,7 @@ class GalaxyRecord:
     name: str
     key: str
     mitre_attack: Optional[str]
-    aliases: Tuple[Tuple[str, str], ...]  # (display name, key), usable keys only, in input order
+    aliases: Tuple[str, ...]  # synonym keys, in input order
 
     @property
     def origin(self) -> str:
@@ -267,6 +328,16 @@ class GalaxyRecord:
         return (self.key,)
 
 
+@dataclass(frozen=True)
+class LoadedAttackGroup:
+    """An ATT&CK-sourced ``ThreatActor`` node: a group of the ATT&CK version EdgeGuard loaded."""
+
+    key: str
+    name: str  # display name: the alias spelled like the key, else the key
+    attack_id: Optional[str]  # from the node's description link, when it has one
+    aliases: Tuple[str, ...]  # synonym keys (``clean_synonym``), without the key
+
+
 @dataclass
 class BuildStats:
     """What each rule did; printed by the report."""
@@ -276,6 +347,13 @@ class BuildStats:
     attack_groups: int = 0
     attack_ids_without_mitre_record: List[str] = field(default_factory=list)
     anchor_conflicts: List[Dict[str, str]] = field(default_factory=list)
+    revoked_folds: List[Dict[str, str]] = field(default_factory=list)
+    revoked_without_successor: List[str] = field(default_factory=list)
+    loaded_groups: int = 0
+    loaded_revoked_nodes: List[Dict[str, str]] = field(default_factory=list)
+    loaded_renamed: List[Dict[str, str]] = field(default_factory=list)
+    loaded_anchored: List[Dict[str, Optional[str]]] = field(default_factory=list)
+    loaded_id_mismatches: List[Dict[str, str]] = field(default_factory=list)
     joined: Dict[str, int] = field(default_factory=dict)
     joined_by_spacing: List[Dict[str, str]] = field(default_factory=list)
     join_ambiguous: List[Dict[str, Any]] = field(default_factory=list)
@@ -291,7 +369,8 @@ class BuildStats:
     suffix_also_existing: int = 0
     suffix_blocked: int = 0
     suffix_ambiguous: List[str] = field(default_factory=list)
-    suffix_shortened: List[Dict[str, str]] = field(default_factory=list)
+    suffix_shortened: List[Dict[str, str]] = field(default_factory=list)  # added by the rule
+    suffix_short_forms: List[Dict[str, str]] = field(default_factory=list)  # every short form it derived
     overrides: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -315,37 +394,36 @@ def _record_from_input(raw: Mapping[str, Any], stats: BuildStats) -> Optional[Ga
         stats.skipped_records.append(source_record)
         stats.dropped_placeholder_names += 1
         return None
-    aliases: List[Tuple[str, str]] = []
+    aliases: List[str] = []
     for alias in raw.get("aliases") or []:
-        alias_name = alias.get("name") if isinstance(alias, Mapping) else alias
-        if not isinstance(alias_name, str) or not actor_key(alias_name):
-            continue
-        if is_placeholder_name(alias_name):
-            stats.dropped_placeholder_names += 1
-            continue
+        raw_alias = alias.get("name") if isinstance(alias, Mapping) else alias
+        alias_name = str(raw_alias)
         # A synonym is the name EdgeGuard would write for it: its actor-name hygiene drops a trailing
         # parenthetical ("xHunt campaign (<source>)" -> "xHunt campaign") and splits lists. A list
         # or a description never reaches the graph as one name, so it is not a synonym.
-        cleaned = clean_actor_names(alias_name)
-        if len(cleaned) != 1:
+        status, alias_key = clean_synonym(raw_alias)
+        if status == "empty":
+            continue
+        if status == "placeholder":
+            stats.dropped_placeholder_names += 1
+            continue
+        if status in ("list", "not a name"):
             stats.synonyms_dropped_by_name_hygiene.append(
-                {"record": source_record, "synonym": alias_name, "why": "list" if cleaned else "not a name"}
+                {"record": source_record, "synonym": alias_name, "why": status}
             )
             continue
-        alias_key = actor_key(cleaned[0])
-        if alias_key != actor_key(alias_name):
-            stats.synonyms_rewritten_by_name_hygiene.append(
-                {"record": source_record, "synonym": alias_name, "written_as": alias_key}
-            )
-        alias_name = cleaned[0]
-        if _ATTACK_ID_KEY_RE.match(alias_key):
+        if status == "attack_id":
             stats.dropped_attack_id_synonyms += 1
             if alias_key.upper() != attack_id:
                 stats.dropped_attack_id_synonyms_of_other_groups.append(
                     {"record": source_record, "name": name, "mitre_attack": attack_id or "", "synonym": alias_name}
                 )
             continue
-        aliases.append((alias_name, alias_key))
+        if status == "rewritten":
+            stats.synonyms_rewritten_by_name_hygiene.append(
+                {"record": source_record, "synonym": alias_name, "written_as": alias_key}
+            )
+        aliases.append(alias_key)
     return GalaxyRecord(galaxy, source_record, name, key, attack_id, tuple(aliases))
 
 
@@ -409,6 +487,56 @@ def galaxy_input_metadata(doc: Mapping[str, Any], file_name: str, sha256: str) -
     }
 
 
+def load_revocations(raw_doc: Mapping[str, Any]) -> Dict[str, str]:
+    """Revoked ATT&CK group id -> the id it was revoked into, from the ``revoked-by`` relations of
+    a raw mitre-intrusion-set galaxy dump (MISP ``/galaxy_clusters/restSearch`` response)."""
+    payload = raw_doc.get("payload") if isinstance(raw_doc, Mapping) else None
+    entries = payload.get("response") if isinstance(payload, Mapping) else None
+    if not isinstance(entries, list) or not entries:
+        raise ReferenceInputError("ATT&CK galaxy dump: no payload.response cluster list")
+    clusters = [e.get("GalaxyCluster", e) for e in entries if isinstance(e, Mapping)]
+    id_of: Dict[str, str] = {}
+    for cluster in clusters:
+        for element in cluster.get("GalaxyElement") or []:
+            if element.get("key") == "external_id" and _ATTACK_GROUP_ID_RE.match(str(element.get("value"))):
+                id_of[str(cluster.get("uuid"))] = str(element["value"])
+    revocations: Dict[str, str] = {}
+    for cluster in clusters:
+        for relation in cluster.get("GalaxyClusterRelation") or []:
+            if relation.get("referenced_galaxy_cluster_type") != "revoked-by":
+                continue
+            revoked = id_of.get(str(cluster.get("uuid")))
+            successor = id_of.get(str(relation.get("referenced_galaxy_cluster_uuid")))
+            if not revoked or not successor:
+                raise ReferenceInputError(
+                    f"ATT&CK galaxy dump: revoked-by relation of {cluster.get('value')!r} without ids"
+                )
+            if revocations.get(revoked, successor) != successor:
+                raise ReferenceInputError(f"ATT&CK galaxy dump: {revoked} is revoked into two groups")
+            revocations[revoked] = successor
+    return dict(sorted(revocations.items()))
+
+
+def load_loaded_attack(
+    graph_rows: Iterable[Mapping[str, Any]], mitre_source: str = MITRE_SOURCE
+) -> List[LoadedAttackGroup]:
+    """The ATT&CK groups EdgeGuard loaded: the ATT&CK-sourced rows of a graph export."""
+    groups: Dict[str, LoadedAttackGroup] = {}
+    for row in graph_rows:
+        if mitre_source not in (row.get("source") or []):
+            continue
+        key = actor_key(row.get("name"))
+        if not _usable(key):
+            continue
+        aliases = [a for a in (row.get("aliases") or []) if isinstance(a, str)]
+        display = next((a.strip() for a in aliases if actor_key(a) == key), str(row.get("name")).strip())
+        keys = sorted({k for status, k in map(clean_synonym, aliases) if status in ("ok", "rewritten") and k != key})
+        attack_id = row.get("attack_id")
+        attack_id = attack_id if isinstance(attack_id, str) and _ATTACK_GROUP_ID_RE.match(attack_id) else None
+        groups[key] = LoadedAttackGroup(key, display, attack_id, tuple(keys))
+    return [groups[k] for k in sorted(groups)]
+
+
 # --------------------------------------------------------------------------- overrides
 
 
@@ -421,6 +549,7 @@ class OverrideDecision:
     reason: str
     date: str
     status: str
+    actor: str = ""  # never_merge: the actor the names are kept away from ("" = every actor)
 
     def as_record(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"decision": self.kind}
@@ -428,6 +557,8 @@ class OverrideDecision:
             out.update({"names": list(self.names), "into": self.into})
         elif self.kind == "never_merge":
             out["names"] = list(self.names)
+            if self.actor:
+                out["actor"] = self.actor
         else:
             out.update({"key": self.into, "name": self.display_name})
         out.update({"reason": self.reason, "date": self.date, "status": self.status})
@@ -479,7 +610,14 @@ def load_overrides(doc: Mapping[str, Any]) -> List[OverrideDecision]:
     for i, entry in enumerate(doc.get("never_merge") or []):
         where = f"overrides never_merge[{i}]"
         reason, date, status = _check_common(entry, where)
-        decisions.append(OverrideDecision("never_merge", _names(entry, where), "", "", reason, date, status))
+        actor = ""
+        if entry.get("actor") is not None:
+            actor = actor_key(entry.get("actor"))
+            if not _usable(actor):
+                raise ReferenceInputError(f"{where}: 'actor' must name an actor key")
+        decisions.append(
+            OverrideDecision("never_merge", _names(entry, where), "", "", reason, date, status, actor=actor)
+        )
     for i, entry in enumerate(doc.get("canonical_name") or []):
         where = f"overrides canonical_name[{i}]"
         reason, date, status = _check_common(entry, where)
@@ -491,6 +629,7 @@ def load_overrides(doc: Mapping[str, Any]) -> List[OverrideDecision]:
 
     merged_into: Dict[str, str] = {}
     never: Set[str] = set()
+    kept_away: Set[Tuple[str, str]] = set()
     for d in decisions:
         for name in d.names:
             k = actor_key(name)
@@ -498,11 +637,16 @@ def load_overrides(doc: Mapping[str, Any]) -> List[OverrideDecision]:
                 if merged_into.get(k, d.into) != d.into:
                     raise ReferenceInputError(f"overrides: {name!r} is merged into two actors")
                 merged_into[k] = d.into
+            elif d.kind == "never_merge" and d.actor:
+                kept_away.add((k, d.actor))
             elif d.kind == "never_merge":
                 never.add(k)
     both = sorted(never & (set(merged_into) | set(merged_into.values())))
     if both:
         raise ReferenceInputError(f"overrides: {both} are both merged and never_merge")
+    contradicted = sorted(k for k, target in merged_into.items() if (k, target) in kept_away)
+    if contradicted:
+        raise ReferenceInputError(f"overrides: {contradicted} are merged into an actor they are kept away from")
     chained = sorted(k for k, target in merged_into.items() if target in merged_into and merged_into[target] != target)
     if chained:
         raise ReferenceInputError(f"overrides: merge targets that are themselves merged elsewhere: {chained}")
@@ -520,7 +664,18 @@ class _Actor:
     records: List[GalaxyRecord] = field(default_factory=list)
     origins: Set[str] = field(default_factory=set)
     synonyms: Dict[str, Set[str]] = field(default_factory=dict)  # key -> origins
-    mitre_aliases: Set[str] = field(default_factory=set)
+    attack_aliases: Set[str] = field(default_factory=set)  # the galaxy copy's ATT&CK aliases
+    loaded_aliases: Set[str] = field(default_factory=set)  # the loaded ATT&CK version's aliases
+    revoked_names: Set[str] = field(default_factory=set)  # names of the groups revoked into this one
+    revoked: List[Dict[str, str]] = field(default_factory=list)  # [{"mitre_attack", "name"}]
+    loaded: bool = False  # the loaded ATT&CK version has a node with this key
+
+    @property
+    def is_attack_group(self) -> bool:
+        return self.mitre_attack is not None or self.loaded
+
+    def attack_names(self) -> Set[str]:
+        return (self.attack_aliases | self.loaded_aliases | self.revoked_names) - {self.key}
 
 
 class _Claims:
@@ -541,16 +696,28 @@ class _Claims:
         return sorted(self._by_key.items())
 
 
-def _anchored_actors(
-    records: Sequence[GalaxyRecord], stats: BuildStats
+def _anchor_attack_groups(
+    records: Sequence[GalaxyRecord],
+    stats: BuildStats,
+    revocations: Mapping[str, str],
+    loaded: Sequence[LoadedAttackGroup],
 ) -> Tuple[Dict[str, _Actor], List[GalaxyRecord]]:
-    """Rule 1. Returns the ATT&CK actors by id and the records left for rule 2."""
+    """Rule 1. Returns the ATT&CK actors by key and the records left for rule 2."""
     by_id: Dict[str, List[GalaxyRecord]] = defaultdict(list)
     for r in records:
         if r.mitre_attack:
             by_id[r.mitre_attack].append(r)
 
-    actors: Dict[str, _Actor] = {}
+    def final(attack_id: str) -> str:
+        seen = [attack_id]
+        while attack_id in revocations:
+            attack_id = revocations[attack_id]
+            if attack_id in seen:
+                raise ReferenceInputError(f"ATT&CK revocations form a cycle: {' -> '.join(seen + [attack_id])}")
+            seen.append(attack_id)
+        return attack_id
+
+    groups: Dict[str, _Actor] = {}
     for attack_id in sorted(by_id):
         members = sorted(by_id[attack_id], key=lambda r: (_galaxy_rank(r.galaxy), r.name, r.source_record))
         mitre_records = [r for r in members if r.galaxy == MITRE_GALAXY]
@@ -559,11 +726,10 @@ def _anchored_actors(
         else:
             head = members[0]
             stats.attack_ids_without_mitre_record.append(attack_id)
-        actors[attack_id] = _Actor(key=head.key, name=head.name, mitre_attack=attack_id)
-    stats.attack_groups = len(actors)
+        groups[attack_id] = _Actor(key=head.key, name=head.name, mitre_attack=attack_id)
 
     key_owner: Dict[str, str] = {}
-    for attack_id, actor in actors.items():
+    for attack_id, actor in groups.items():
         if actor.key in key_owner:
             raise ReferenceInputError(
                 f"ATT&CK groups {key_owner[actor.key]} and {attack_id} share the canonical key {actor.key!r}"
@@ -576,44 +742,99 @@ def _anchored_actors(
             leftover.append(r)
             continue
         other = key_owner.get(r.key)
-        if other is not None and other != r.mitre_attack:
+        if other is not None and final(other) != final(r.mitre_attack):
             stats.anchor_conflicts.append(
-                {
-                    "record": r.source_record,
-                    "name": r.name,
-                    "mitre_attack": r.mitre_attack,
-                    "attack_name_of": other,
-                }
+                {"record": r.source_record, "name": r.name, "mitre_attack": r.mitre_attack, "attack_name_of": other}
             )
             leftover.append(r)
             continue
-        actors[r.mitre_attack].records.append(r)
-    for actor in actors.values():
+        groups[r.mitre_attack].records.append(r)
+    for attack_id, actor in groups.items():
         for r in actor.records:
-            if r.galaxy == MITRE_GALAXY:
-                actor.mitre_aliases.update(k for _, k in r.aliases)
-    return actors, leftover
+            if r.galaxy == MITRE_GALAXY and r.mitre_attack == attack_id:
+                actor.attack_aliases.update(r.aliases)
+
+    # Revoked groups fold into their successor.
+    revoked_keys: Dict[str, str] = {}  # revoked group's key -> successor id
+    for revoked_id in sorted(revocations):
+        if revoked_id not in groups:
+            continue
+        successor_id = final(revoked_id)
+        if successor_id not in groups:
+            stats.revoked_without_successor.append(revoked_id)
+            continue
+        gone = groups.pop(revoked_id)
+        target = groups[successor_id]
+        target.records.extend(gone.records)
+        target.revoked_names |= {gone.key} | gone.attack_aliases | gone.revoked_names
+        target.revoked.extend([{"mitre_attack": revoked_id, "name": gone.name}] + gone.revoked)
+        revoked_keys[gone.key] = successor_id
+        stats.revoked_folds.append(
+            {"revoked": revoked_id, "name": gone.name, "into": successor_id, "successor": target.key}
+        )
+
+    # The ATT&CK version EdgeGuard loaded: its names are what the graph holds.
+    anchors: Dict[str, _Actor] = {actor.key: actor for actor in groups.values()}
+    stats.loaded_groups = len(loaded)
+    pending: List[LoadedAttackGroup] = []
+    for g in loaded:
+        matched = anchors.get(g.key)
+        if matched is None:
+            pending.append(g)
+            continue
+        matched.loaded = True
+        matched.loaded_aliases.update(g.aliases)
+        if g.attack_id and matched.mitre_attack and g.attack_id != matched.mitre_attack:
+            stats.loaded_id_mismatches.append({"node": g.key, "galaxy": matched.mitre_attack, "loaded": g.attack_id})
+    renamed: List[LoadedAttackGroup] = []
+    for g in pending:
+        revoked_into = revoked_keys.get(g.key)
+        if revoked_into is None and g.attack_id is not None and g.attack_id in revocations:
+            revoked_into = final(g.attack_id)
+        if revoked_into is not None and revoked_into in groups:
+            target = groups[revoked_into]
+            target.revoked_names |= {g.key} | set(g.aliases)
+            stats.loaded_revoked_nodes.append({"node": g.key, "successor": target.key})
+            continue
+        renamed.append(g)
+    for g in renamed:
+        same_id = groups.get(g.attack_id) if g.attack_id else None
+        if same_id is not None and not same_id.loaded:
+            # ATT&CK renamed the group: the loaded name is what EdgeGuard writes.
+            old = same_id.key
+            del anchors[old]
+            same_id.key, same_id.name, same_id.loaded = g.key, g.name, True
+            same_id.attack_aliases.add(old)
+            same_id.loaded_aliases.update(g.aliases)
+            anchors[g.key] = same_id
+            stats.loaded_renamed.append({"mitre_attack": same_id.mitre_attack or "", "galaxy": old, "loaded": g.key})
+            continue
+        new_id = g.attack_id if g.attack_id and g.attack_id not in groups and g.attack_id not in revocations else None
+        anchors[g.key] = _Actor(key=g.key, name=g.name, mitre_attack=new_id, loaded=True, loaded_aliases=set(g.aliases))
+        stats.loaded_anchored.append({"key": g.key, "mitre_attack": new_id})
+    stats.attack_groups = len(anchors)
+    return anchors, leftover
 
 
 def _join_or_standalone(
-    anchored: Dict[str, _Actor], leftover: Sequence[GalaxyRecord], stats: BuildStats
+    anchors: Dict[str, _Actor], leftover: Sequence[GalaxyRecord], stats: BuildStats
 ) -> Dict[str, _Actor]:
     """Rule 2. Adds joined records to their ATT&CK actor; returns the standalone actors by key.
 
     A name is matched as it is first and then by its compact form (``compact_key``), so
     ``"SaintBear"`` joins ATT&CK's ``"Saint Bear"``."""
-    exact: Dict[str, Dict[str, str]] = defaultdict(dict)  # name key -> attack id -> how
-    for attack_id, actor in anchored.items():
-        for alias in actor.mitre_aliases:
-            exact[alias].setdefault(attack_id, "attack_alias")
+    exact: Dict[str, Dict[str, str]] = defaultdict(dict)  # name key -> anchor key -> how
+    for anchor_key, actor in anchors.items():
+        for alias in actor.attack_names():
+            exact[alias].setdefault(anchor_key, "attack_alias")
         for r in actor.records:
-            exact[r.key].setdefault(attack_id, "record_name")
-        exact[actor.key][attack_id] = "key"
+            exact[r.key].setdefault(anchor_key, "record_name")
+        exact[anchor_key][anchor_key] = "key"
     compact: Dict[str, Dict[str, str]] = defaultdict(dict)
     for name_key in sorted(exact):
-        for attack_id, how in exact[name_key].items():
-            if compact[compact_key(name_key)].get(attack_id) != "key":
-                compact[compact_key(name_key)][attack_id] = how
+        for anchor_key, how in exact[name_key].items():
+            if compact[compact_key(name_key)].get(anchor_key) != "key":
+                compact[compact_key(name_key)][anchor_key] = how
 
     joined: Dict[str, int] = defaultdict(int)
     standalone_records: Dict[str, List[GalaxyRecord]] = defaultdict(list)
@@ -631,23 +852,19 @@ def _join_or_standalone(
                     spacing = True
                     break
         # An actor key outranks an alias or record name of another actor (rule 4): "unc2452" is
-        # ATT&CK group G0118 even though APT29 (G0016) lists it as an alias.
+        # ATT&CK group G0118's own name although APT29 (G0016) lists it as an alias.
         by_key = [a for a, how in hits.items() if how == "key"]
         if by_key:
             hits = {by_key[0]: "key"}
         if len(hits) == 1:
-            (attack_id, how), *_ = hits.items()
-            anchored[attack_id].records.append(r)
+            (anchor_key, how), *_ = hits.items()
+            anchors[anchor_key].records.append(r)
             joined[how + (" (spacing)" if spacing else "")] += 1
             if spacing:
-                stats.joined_by_spacing.append(
-                    {"record": r.source_record, "name": r.name, "actor": anchored[attack_id].key}
-                )
+                stats.joined_by_spacing.append({"record": r.source_record, "name": r.name, "actor": anchor_key})
             continue
         if len(hits) > 1:
-            stats.join_ambiguous.append(
-                {"record": r.source_record, "name": r.name, "candidates": [anchored[a].key for a in sorted(hits)]}
-            )
+            stats.join_ambiguous.append({"record": r.source_record, "name": r.name, "candidates": sorted(hits)})
         standalone_records[compact_key(r.key)].append(r)
     stats.joined = dict(sorted(joined.items()))
 
@@ -663,15 +880,25 @@ def _join_or_standalone(
 def _collect_claims(actors: Mapping[str, _Actor]) -> _Claims:
     claims = _Claims()
     for actor in actors.values():
+        if actor.loaded:
+            actor.origins.add(ORIGIN_MITRE_LOADED)
+        if actor.revoked:
+            actor.origins.add(ORIGIN_MITRE_REVOKED)
+        revoked_ids = {r["mitre_attack"] for r in actor.revoked}
         for r in actor.records:
             actor.origins.add(r.origin)
+            revoked_record = r.galaxy == MITRE_GALAXY and r.mitre_attack in revoked_ids
+            origin = ORIGIN_MITRE_REVOKED if revoked_record else r.origin
             if r.key != actor.key:
-                claims.add(r.key, actor.key, TIER_OWN_NAME, r.origin)
-            for _, alias_key in r.aliases:
-                if alias_key == actor.key:
-                    continue
-                tier = TIER_OWN_NAME if r.galaxy == MITRE_GALAXY and actor.mitre_attack else TIER_SYNONYM
-                claims.add(alias_key, actor.key, tier, r.origin)
+                claims.add(r.key, actor.key, TIER_OWN_NAME, origin)
+            attack_record = r.galaxy == MITRE_GALAXY and (revoked_record or r.mitre_attack == actor.mitre_attack)
+            for alias_key in r.aliases:
+                if alias_key != actor.key:
+                    claims.add(alias_key, actor.key, TIER_OWN_NAME if attack_record else TIER_SYNONYM, origin)
+        for alias in sorted(actor.loaded_aliases - {actor.key}):
+            claims.add(alias, actor.key, TIER_LOADED_ATTACK, ORIGIN_MITRE_LOADED)
+        for name in sorted(actor.revoked_names - {actor.key}):
+            claims.add(name, actor.key, TIER_OWN_NAME, ORIGIN_MITRE_REVOKED)
     return claims
 
 
@@ -708,41 +935,52 @@ def _apply_suffix_rule(
     proposals: Dict[str, Set[str]] = defaultdict(set)
     for key in sorted(actors):
         actor = actors[key]
-        bases = [actor.key] + sorted(a for a in actor.mitre_aliases if a in actor.synonyms)
+        bases = [actor.key] + sorted(a for a in actor.attack_names() if a in actor.synonyms)
         for base in bases:
             for variant in suffix_variants(base):
                 if variant == actor.key:
                     continue
+                shortened = not variant.endswith(NAME_SUFFIXES)
                 if owner.get(variant) == actor.key:
                     if ORIGIN_SUFFIX not in actor.synonyms[variant]:
                         actor.synonyms[variant].add(ORIGIN_SUFFIX)
                         stats.suffix_also_existing += 1
+                        if shortened:
+                            stats.suffix_short_forms.append({"name": variant, "actor": actor.key, "rule": "already"})
                     continue
                 if variant in owner or variant in ambiguous:
                     stats.suffix_blocked += 1
+                    if shortened:
+                        stats.suffix_short_forms.append({"name": variant, "actor": actor.key, "rule": "blocked"})
                     continue
                 proposals[variant].add(actor.key)
     for variant in sorted(proposals):
         proposers = sorted(proposals[variant])
+        shortened = not variant.endswith(NAME_SUFFIXES)
         if len(proposers) == 1:
             actors[proposers[0]].synonyms[variant] = {ORIGIN_SUFFIX}
             stats.suffix_added += 1
-            if not variant.endswith(NAME_SUFFIXES):
+            if shortened:
                 # A shortened name can be a common word ("medusa"): listed for review.
                 stats.suffix_shortened.append({"name": variant, "actor": proposers[0]})
+                stats.suffix_short_forms.append({"name": variant, "actor": proposers[0], "rule": "added"})
         else:
             ambiguous[variant] = {p: {ORIGIN_SUFFIX} for p in proposers}
             stats.suffix_ambiguous.append(variant)
+            if shortened:
+                stats.suffix_short_forms.extend({"name": variant, "actor": p, "rule": "ambiguous"} for p in proposers)
 
 
 def _apply_overrides(
     actors: Dict[str, _Actor],
     ambiguous: Dict[str, Dict[str, Set[str]]],
     never_merge: Dict[str, Dict[str, Any]],
+    pairs: List[Dict[str, Any]],
     decisions: Sequence[OverrideDecision],
     stats: BuildStats,
 ) -> None:
-    """Rule 6: merges, then never_merge, then display names. Every decision is recorded with its effect."""
+    """Rule 6: never_merge with an actor, merges, never_merge, display names. Every decision is
+    recorded with its effect."""
 
     def owner_of(key: str) -> Optional[str]:
         if key in actors:
@@ -752,8 +990,31 @@ def _apply_overrides(
                 return actor.key
         return None
 
-    for d in (d for d in decisions if d.kind == "merge"):
+    kept_away: Dict[str, Dict[str, Set[str]]] = {}  # name -> actor it is kept away from -> its claim
+    pair_decisions = [d for d in decisions if d.kind == "never_merge" and d.actor]
+    for d in pair_decisions:
+        if d.actor not in actors:
+            raise ReferenceInputError(f"override never_merge with actor {d.actor!r}: no actor has that key")
         effects: List[str] = []
+        for name in d.names:
+            k = actor_key(name)
+            if k == d.actor:
+                raise ReferenceInputError(f"override never_merge {k!r}: it is the key of {d.actor!r}")
+            claim: Set[str] = set()
+            if k in actors[d.actor].synonyms:
+                claim = actors[d.actor].synonyms.pop(k)
+                effects.append(f"{k!r} taken from {d.actor!r} ({', '.join(sorted(claim))})")
+            elif k in ambiguous and d.actor in ambiguous[k]:
+                claim = ambiguous[k].pop(d.actor)
+                effects.append(f"{d.actor!r} no longer claims ambiguous {k!r}")
+            else:
+                effects.append(f"{k!r} is not {d.actor!r}'s")
+            kept_away.setdefault(k, {})[d.actor] = claim
+            pairs.append({"name": k, "actor": d.actor, "reason": d.reason, "date": d.date, "status": d.status})
+        stats.overrides.append({**d.as_record(), "effect": effects})
+
+    for d in (d for d in decisions if d.kind == "merge"):
+        effects = []
         target_owner = owner_of(d.into)
         if target_owner is None:
             if d.into in ambiguous:
@@ -776,9 +1037,9 @@ def _apply_overrides(
                 effects.append(f"{k!r} already a synonym ({', '.join(sorted(target.synonyms[k] - {ORIGIN_OVERRIDE}))})")
             elif current is not None and current == k:
                 folded = actors[k]
-                if folded.mitre_attack:
+                if folded.is_attack_group:
                     raise ReferenceInputError(
-                        f"override merge: {k!r} is ATT&CK group {folded.mitre_attack}; ATT&CK groups are never merged"
+                        f"override merge: {k!r} is an ATT&CK group; ATT&CK groups are never merged"
                     )
                 del actors[k]
                 target.records.extend(folded.records)
@@ -810,7 +1071,7 @@ def _apply_overrides(
                 effects.append(f"added {k!r}")
         stats.overrides.append({**d.as_record(), "effect": effects})
 
-    for d in (d for d in decisions if d.kind == "never_merge"):
+    for d in (d for d in decisions if d.kind == "never_merge" and not d.actor):
         effects = []
         for name in d.names:
             k = actor_key(name)
@@ -847,10 +1108,8 @@ def _apply_overrides(
                 raise ReferenceInputError(
                     f"override canonical_name {d.into!r}: {new_key!r} is ambiguous or never_merge"
                 )
-            if actor.mitre_attack:
-                raise ReferenceInputError(
-                    f"override canonical_name {d.into!r}: the key of ATT&CK group {actor.mitre_attack} is its ATT&CK name"
-                )
+            if actor.is_attack_group:
+                raise ReferenceInputError(f"override canonical_name {d.into!r}: an ATT&CK group keeps its ATT&CK name")
             actor.synonyms.pop(new_key, None)
             old_key = actor.key
             del actors[old_key]
@@ -863,6 +1122,28 @@ def _apply_overrides(
             effects.append(f"key {old_key!r} -> {new_key!r} ({old_key!r} kept as a synonym)")
         actor.name = d.display_name
         stats.overrides.append({**d.as_record(), "effect": effects})
+
+    # A name kept away from an actor must not have come back to it; one that belongs to no actor
+    # now is listed as never merged.
+    pair_info = {(p["name"], p["actor"]): p for p in pairs}
+    for k in sorted(kept_away):
+        current = owner_of(k)
+        for excluded in sorted(kept_away[k]):
+            if current == excluded:
+                raise ReferenceInputError(f"override: {k!r} is kept away from {excluded!r} but belongs to it")
+        if current is None:
+            claims = ambiguous.setdefault(k, {})
+            for excluded, claim in kept_away[k].items():
+                if claim and excluded in actors:
+                    claims.setdefault(excluded, set()).update(claim)
+            if k not in never_merge:
+                first = pair_info[(k, sorted(kept_away[k])[0])]
+                never_merge[k] = {
+                    "reason": first["reason"],
+                    "date": first["date"],
+                    "status": first["status"],
+                    "actor": first["actor"],
+                }
 
 
 def _check_invariants(actors: Mapping[str, _Actor], ambiguous: Mapping[str, Any]) -> None:
@@ -892,6 +1173,8 @@ def build_reference(
     *,
     version: str,
     inputs: Sequence[Mapping[str, Any]] = (),
+    revocations: Optional[Mapping[str, str]] = None,
+    loaded_attack: Sequence[LoadedAttackGroup] = (),
 ) -> Tuple[Dict[str, Any], BuildStats]:
     """Pure: the reference document and what each rule did. Raises ``ReferenceInputError``."""
     match = _VERSION_RE.match(version)
@@ -905,11 +1188,11 @@ def build_reference(
     stats = BuildStats()
     decisions = load_overrides(overrides_doc)
     records = load_galaxy_records(galaxy_doc, stats)
-    anchored, leftover = _anchored_actors(records, stats)
-    standalone = _join_or_standalone(anchored, leftover, stats)
+    anchors, leftover = _anchor_attack_groups(records, stats, revocations or {}, loaded_attack)
+    standalone = _join_or_standalone(anchors, leftover, stats)
 
     actors: Dict[str, _Actor] = {}
-    for actor in list(anchored.values()) + list(standalone.values()):
+    for actor in list(anchors.values()) + list(standalone.values()):
         if actor.key in actors:  # a standalone name equal to an ATT&CK key joined in rule 2
             raise AssertionError(f"duplicate actor key {actor.key!r}")
         actors[actor.key] = actor
@@ -918,10 +1201,12 @@ def build_reference(
     ambiguous = _resolve_claims(actors, claims, stats)
     _apply_suffix_rule(actors, ambiguous, stats)
     never_merge: Dict[str, Dict[str, Any]] = {}
-    _apply_overrides(actors, ambiguous, never_merge, decisions, stats)
+    pairs: List[Dict[str, Any]] = []
+    _apply_overrides(actors, ambiguous, never_merge, pairs, decisions, stats)
     _check_invariants(actors, ambiguous)
 
     actor_entries: List[Dict[str, Any]] = []
+    revoked_entries: List[Dict[str, Any]] = []
     for key in sorted(actors):
         actor = actors[key]
         by_origin: Dict[str, List[str]] = defaultdict(list)
@@ -940,6 +1225,16 @@ def build_reference(
                 "synonym_origins": {o: by_origin[o] for o in sorted(by_origin)},
             }
         )
+        for revoked in actor.revoked:
+            revoked_entries.append(
+                {
+                    "mitre_attack": revoked["mitre_attack"],
+                    "name": revoked["name"],
+                    "key": actor_key(revoked["name"]),
+                    "revoked_into": actor.mitre_attack,
+                    "actor": actor.key,
+                }
+            )
     ambiguous_entries: List[Dict[str, Any]] = []
     for key in sorted(ambiguous):
         entry: Dict[str, Any] = {
@@ -963,12 +1258,14 @@ def build_reference(
         "rules": list(RULES),
         "counts": {
             "actors": len(actor_entries),
-            "attack_groups": sum(1 for a in actor_entries if a["mitre_attack"]),
+            "attack_groups": sum(1 for a in actor_entries if a["mitre_attack"] or ORIGIN_MITRE_LOADED in a["origins"]),
             "synonyms": sum(len(a["synonyms"]) for a in actor_entries),
             "ambiguous": len(ambiguous_entries),
         },
         "actors": actor_entries,
         "ambiguous": ambiguous_entries,
+        "revoked_attack_groups": sorted(revoked_entries, key=lambda e: e["mitre_attack"]),
+        "never_merge_pairs": sorted(pairs, key=lambda p: (p["name"], p["actor"])),
     }
     return reference, stats
 
@@ -1009,6 +1306,7 @@ def load_graph_actors(doc: Any) -> List[Dict[str, Any]]:
     for row in rows:
         if not isinstance(row, Mapping) or not isinstance(row.get("name"), str):
             raise ReferenceInputError("graph actors: every row needs a 'name'")
+        attack_id = row.get("attack_id")
         out.append(
             {
                 "name": row["name"],
@@ -1016,9 +1314,26 @@ def load_graph_actors(doc: Any) -> List[Dict[str, Any]]:
                 "source": [s for s in (row.get("source") or []) if isinstance(s, str)],
                 "relationships": int(row.get("relationships") or 0),
                 "pulses": int(row.get("pulses") or 0),
+                "malware": sorted({m for m in (row.get("malware") or []) if isinstance(m, str)}),
+                "attack_id": attack_id if isinstance(attack_id, str) else None,
             }
         )
     return out
+
+
+def graph_input_metadata(doc: Any, file_name: str, sha256: str, mitre_source: str = MITRE_SOURCE) -> Dict[str, Any]:
+    rows = load_graph_actors(doc)
+    attack = [r for r in rows if mitre_source in r["source"]]
+    return {
+        "role": "loaded_attack",
+        "file": file_name,
+        "sha256": sha256,
+        "exported_at": doc.get("exported_at") if isinstance(doc, Mapping) else None,
+        "threat_actor_nodes": len(rows),
+        "attack_nodes": len(attack),
+        "attack_nodes_with_id": sum(1 for r in attack if r["attack_id"]),
+        "used": "the names and aliases of the ATT&CK-sourced ThreatActor nodes (the ATT&CK version EdgeGuard loaded)",
+    }
 
 
 _TRIAGE_SUFFIXES: Tuple[str, ...] = (
@@ -1044,11 +1359,30 @@ def _strip_triage_suffixes(key: str) -> str:
     return key
 
 
+def merge_pairs(
+    index: Mapping[str, Resolution], graph_rows: Sequence[Mapping[str, Any]], mitre_source: str = MITRE_SOURCE
+) -> List[Tuple[str, str]]:
+    """The ``(duplicate, canonical)`` pairs the reference gives the actor alias merge: a node that
+    is not ATT&CK-sourced and whose name resolves (as a key or synonym, not ambiguous or
+    never_merge) to another canonical key that is a node on the graph."""
+    on_graph = {actor_key(r["name"]) for r in graph_rows}
+    pairs = []
+    for row in graph_rows:
+        if mitre_source in row["source"]:
+            continue
+        key = actor_key(row["name"])
+        res = index.get(key)
+        if res is None or res.actor is None or res.actor == key or res.actor not in on_graph:
+            continue
+        pairs.append((key, res.actor))
+    return sorted(pairs)
+
+
 def build_report(
     reference: Mapping[str, Any],
     stats: BuildStats,
     graph_actors: Optional[Sequence[Mapping[str, Any]]] = None,
-    mitre_source: str = "mitre_attck",
+    mitre_source: str = MITRE_SOURCE,
     top: int = 50,
 ) -> Dict[str, Any]:
     actors = reference["actors"]
@@ -1059,12 +1393,22 @@ def build_report(
             "standalone_actors": stats.standalone_actors,
             "actors_created_by_overrides": sum(1 for a in actors if a["origins"] == [ORIGIN_OVERRIDE]),
             "synonyms_by_origin": _count_origins(actors),
+            "never_merge_pairs": len(reference.get("never_merge_pairs", [])),
         },
         "rules": {
             "records_by_galaxy": dict(sorted(stats.records_by_galaxy.items())),
             "skipped_records": stats.skipped_records,
             "attack_ids_without_mitre_record": stats.attack_ids_without_mitre_record,
             "anchor_conflicts": stats.anchor_conflicts,
+            "revoked_folds": stats.revoked_folds,
+            "revoked_without_successor": stats.revoked_without_successor,
+            "loaded_attack": {
+                "groups": stats.loaded_groups,
+                "revoked_nodes": stats.loaded_revoked_nodes,
+                "renamed": stats.loaded_renamed,
+                "anchored_by_name": stats.loaded_anchored,
+                "id_mismatches": stats.loaded_id_mismatches,
+            },
             "joined_by_name": stats.joined,
             "joined_by_spacing_variant": stats.joined_by_spacing,
             "join_ambiguous_records": stats.join_ambiguous,
@@ -1094,49 +1438,47 @@ def build_report(
     for g in graph_actors:
         res = resolve(index, g["name"])
         rows.append({**g, "key": actor_key(g["name"]), "resolves_to": res.actor, "how": res.how})
+    row_by_key = {r["key"]: r for r in rows}
     how_counts: Dict[str, int] = defaultdict(int)
     for row in rows:
         how_counts[row["how"]] += 1
 
-    mitre_nodes = {row["key"]: row for row in rows if mitre_source in row["source"]}
-    anchored = {a["key"]: a for a in actors if a["mitre_attack"]}
+    attack_nodes = {row["key"]: row for row in rows if mitre_source in row["source"]}
+    attack_actors = {a["key"]: a for a in actors if a["mitre_attack"] or ORIGIN_MITRE_LOADED in a["origins"]}
     keys_not_on_graph = [
-        {"mitre_attack": a["mitre_attack"], "key": k, "graph_node": _graph_presence(k, rows)}
-        for k, a in sorted(anchored.items(), key=lambda kv: kv[1]["mitre_attack"])
-        if k not in mitre_nodes
+        {"mitre_attack": a["mitre_attack"], "key": k} for k, a in sorted(attack_actors.items()) if k not in attack_nodes
     ]
-    graph_only = [
+    nodes_not_keys = [
         {
             "graph_name": k,
-            "resolves_to": mitre_nodes[k]["resolves_to"],
-            "how": mitre_nodes[k]["how"],
-            "relationships": mitre_nodes[k]["relationships"],
+            "resolves_to": node["resolves_to"],
+            "how": node["how"],
+            "relationships": node["relationships"],
+            "revoked": any(r["key"] == k for r in reference.get("revoked_attack_groups", [])),
         }
-        for k in sorted(mitre_nodes)
-        if k not in anchored
+        for k, node in sorted(attack_nodes.items())
+        if k not in attack_actors
     ]
 
-    groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        if row["resolves_to"]:
-            groups[row["resolves_to"]].append(row)
+    pairs = merge_pairs(index, rows, mitre_source)
+    groups: Dict[str, List[str]] = defaultdict(list)
+    for dup, canonical in pairs:
+        groups[canonical].append(dup)
     duplicate_groups = []
-    for canonical, members in groups.items():
-        if len(members) < 2:
-            continue
-        members = sorted(members, key=lambda r: (-r["relationships"], r["key"]))
-        mitre_members = [m["key"] for m in members if mitre_source in m["source"]]
+    for canonical, dups in groups.items():
+        dups = sorted(dups, key=lambda k: (-row_by_key[k]["relationships"], k))
         duplicate_groups.append(
             {
                 "canonical": canonical,
                 "mitre_attack": by_key[canonical]["mitre_attack"],
-                "graph_names": [m["key"] for m in members],
-                "relationships": sum(m["relationships"] for m in members),
-                "canonical_on_graph": any(m["key"] == canonical for m in members),
-                "attack_nodes_not_canonical": [k for k in mitre_members if k != canonical],
+                "attack_group": canonical in attack_actors,
+                "duplicates": dups,
+                "relationships_moved": sum(row_by_key[k]["relationships"] for k in dups),
+                "relationships": row_by_key[canonical]["relationships"]
+                + sum(row_by_key[k]["relationships"] for k in dups),
             }
         )
-    duplicate_groups.sort(key=lambda g: (-len(g["graph_names"]), -g["relationships"], g["canonical"]))
+    duplicate_groups.sort(key=lambda g: (-len(g["duplicates"]), -g["relationships"], g["canonical"]))
 
     unresolved = sorted(
         (r for r in rows if r["how"] == "unresolved"),
@@ -1150,40 +1492,98 @@ def build_report(
             if res.actor or res.how in ("ambiguous", "never_merge"):
                 candidates.append({"graph_name": r["key"], "base": base, "resolves_to": res.actor, "how": res.how})
 
-    # The alias merge job reads the ATT&CK aliases on the graph today: the ones the reference gives
-    # to another actor (or none) are where the two would disagree.
+    # ATT&CK aliases on the graph that the reference gives to another actor (or to none).
     alias_conflicts = []
     aliases_unknown = []
-    for k, node in sorted(mitre_nodes.items()):
-        if k not in anchored:
-            continue
-        for alias in sorted({actor_key(a) for a in node["aliases"]}):
-            if not _usable(alias) or alias == k:
+    for k, node in sorted(attack_nodes.items()):
+        expected = node["resolves_to"]
+        cleaned = (clean_synonym(a) for a in node["aliases"])
+        for alias in sorted({key for status, key in cleaned if status in ("ok", "rewritten")}):
+            if alias == k:
                 continue
             res = resolve(index, alias)
             if res.how == "unresolved":
-                aliases_unknown.append({"attack_group": k, "graph_alias": alias})
-            elif res.actor != k:
+                aliases_unknown.append({"attack_node": k, "graph_alias": alias})
+            elif res.actor != expected:
                 alias_conflicts.append(
-                    {"attack_group": k, "graph_alias": alias, "reference": res.actor, "how": res.how}
+                    {
+                        "attack_node": k,
+                        "expected": expected,
+                        "graph_alias": alias,
+                        "reference": res.actor,
+                        "how": res.how,
+                    }
                 )
+
+    # Spelling variants: graph names and reference names that share a triage key but resolve
+    # differently (or not at all). Listed for review, never merged by this rule.
+    by_triage: Dict[str, Set[str]] = defaultdict(set)
+    for name in set(row_by_key) | set(index):
+        by_triage[triage_key(name)].add(name)
+    spelling: List[Dict[str, Any]] = []
+    for tkey, names in by_triage.items():
+        if len(names) < 2 or not names & set(row_by_key):
+            continue
+        targets = {resolve(index, n).actor for n in names}
+        if len(targets) < 2 and None not in targets:
+            continue
+        spelling.append(
+            {
+                "triage_key": tkey,
+                "names": [
+                    {
+                        "name": n,
+                        "graph_relationships": row_by_key[n]["relationships"] if n in row_by_key else None,
+                        "resolves_to": resolve(index, n).actor,
+                        "how": resolve(index, n).how,
+                    }
+                    for n in sorted(names)
+                ],
+            }
+        )
+    spelling.sort(key=lambda v: (-sum(int(n["graph_relationships"] or 0) for n in v["names"]), v["triage_key"]))
+
+    shortened_on_graph = []
+    for item in sorted(stats.suffix_short_forms, key=lambda i: (i["name"], i["actor"])):
+        short_row = row_by_key.get(item["name"])
+        if short_row is None:
+            continue
+        canonical_row = row_by_key.get(item["actor"])
+        shared = (
+            sorted(
+                {_malware_key(m) for m in short_row["malware"]} & {_malware_key(m) for m in canonical_row["malware"]}
+            )
+            if canonical_row
+            else []
+        )
+        shortened_on_graph.append(
+            {
+                "name": item["name"],
+                "from": item["actor"],
+                "suffix_rule": item["rule"],
+                "resolves_to": short_row["resolves_to"],
+                "how": short_row["how"],
+                "relationships": short_row["relationships"],
+                "pulses": short_row["pulses"],
+                "canonical_relationships": canonical_row["relationships"] if canonical_row else None,
+                "shared_malware": shared,
+            }
+        )
 
     report["graph"] = {
         "actors": len(rows),
-        "attack_nodes": len(mitre_nodes),
+        "attack_nodes": len(attack_nodes),
         "resolution": dict(sorted(how_counts.items())),
         "resolved": how_counts["key"] + how_counts["synonym"],
         "canonical_key_check": {
-            "attack_keys_matching_graph": len(anchored) - len(keys_not_on_graph),
+            "attack_keys_matching_graph": len(attack_actors) - len(keys_not_on_graph),
             "attack_keys_not_on_graph": keys_not_on_graph,
-            "graph_attack_names_not_canonical_keys": graph_only,
+            "graph_attack_nodes_not_canonical_keys": nodes_not_keys,
         },
         "duplicate_groups": {
             "groups": len(duplicate_groups),
-            "nodes_folded": sum(len(g["graph_names"]) - 1 for g in duplicate_groups),
-            "into_attack_groups": sum(1 for g in duplicate_groups if g["mitre_attack"]),
-            "canonical_not_on_graph": [g["canonical"] for g in duplicate_groups if not g["canonical_on_graph"]],
-            "containing_another_attack_node": [g for g in duplicate_groups if g["attack_nodes_not_canonical"]],
+            "nodes_folded": len(pairs),
+            "into_attack_groups": sum(1 for g in duplicate_groups if g["attack_group"]),
             "largest": duplicate_groups[:25],
             "all": duplicate_groups,
         },
@@ -1200,6 +1600,8 @@ def build_report(
             ],
             "suffix_variant_candidates": candidates,
         },
+        "spelling_variants": spelling,
+        "suffix_short_forms_on_graph": shortened_on_graph,
         "graph_attack_aliases_resolving_elsewhere": alias_conflicts,
         "graph_attack_aliases_unknown": aliases_unknown,
         "seed_decisions_on_graph": _decisions_on_graph(stats.overrides, rows, index),
@@ -1207,11 +1609,12 @@ def build_report(
     return report
 
 
-def _graph_presence(key: str, rows: Sequence[Mapping[str, Any]]) -> Optional[str]:
-    for row in rows:
-        if row["key"] == key:
-            return ", ".join(row["source"]) or "present"
-    return None
+_SOFTWARE_ID_SUFFIX_RE = re.compile(r"\s+-\s+s\d{4}$")
+
+
+def _malware_key(name: str) -> str:
+    """A Malware node name without the ATT&CK software id some feeds append ("prestige - s1058")."""
+    return _SOFTWARE_ID_SUFFIX_RE.sub("", name.strip().lower())
 
 
 def _count_origins(actors: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
@@ -1228,7 +1631,7 @@ def _decisions_on_graph(
     on_graph = {r["key"]: r for r in rows}
     out = []
     for d in decisions:
-        names = [actor_key(n) for n in d.get("names", [])] + ([d["into"]] if d.get("into") else [])
+        names = [actor_key(n) for n in d.get("names", [])] + [d[k] for k in ("into", "actor") if d.get(k)]
         if d["decision"] == "canonical_name":
             names = [d["key"]]
         out.append(
@@ -1252,10 +1655,23 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
     lines.append(f"Canonical threat-actor reference {report['version']}")
     lines.append(
         f"  actors {c['actors']} (ATT&CK groups {c['attack_groups']}, standalone {c['standalone_actors']}, "
-        f"created by overrides {c['actors_created_by_overrides']}); synonyms {c['synonyms']}; ambiguous {c['ambiguous']}"
+        f"created by overrides {c['actors_created_by_overrides']}); synonyms {c['synonyms']}; "
+        f"ambiguous {c['ambiguous']}; never_merge pairs {c['never_merge_pairs']}"
     )
     lines.append(f"  synonym origins: {json.dumps(c['synonyms_by_origin'])}")
     lines.append(f"  records by galaxy: {json.dumps(r['records_by_galaxy'])}; skipped {len(r['skipped_records'])}")
+    for fold in r["revoked_folds"]:
+        lines.append(
+            f"  revoked ATT&CK group folded: {fold['revoked']} {fold['name']!r} -> {fold['into']} {fold['successor']!r}"
+        )
+    for revoked_id in r["revoked_without_successor"]:
+        lines.append(f"  revoked ATT&CK group {revoked_id} kept: its successor is not in the galaxy")
+    la = r["loaded_attack"]
+    lines.append(
+        f"  loaded ATT&CK version: {la['groups']} groups; revoked nodes {len(la['revoked_nodes'])}, renamed "
+        f"{len(la['renamed'])}, anchored by name {[(a['key'], a['mitre_attack']) for a in la['anchored_by_name']]}, "
+        f"id mismatches {la['id_mismatches']}"
+    )
     lines.append(f"  joined by name (rule 2): {json.dumps(r['joined_by_name'])}")
     for item in r["joined_by_spacing_variant"]:
         lines.append(f"  joined by a spacing variant: {item['name']!r} -> {item['actor']}")
@@ -1290,8 +1706,9 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
     for d in report["overrides"]:
         what = d.get("names") or [d.get("name")]
         target = f" -> {d['into']!r}" if d.get("into") else ""
+        away = f" (from {d['actor']!r})" if d.get("actor") else ""
         key = f" {d['key']!r}" if d["decision"] == "canonical_name" else ""
-        lines.append(f"  [{d['status']}] {d['decision']}{key} {what}{target}: {'; '.join(d['effect'])}")
+        lines.append(f"  [{d['status']}] {d['decision']}{key} {what}{target}{away}: {'; '.join(d['effect'])}")
         lines.append(f"      reason: {d['reason']}")
 
     g = report.get("graph")
@@ -1303,29 +1720,25 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
         f"{g['resolved']} ({json.dumps(g['resolution'])})"
     )
     k = g["canonical_key_check"]
-    lines.append(f"  canonical keys equal to the ATT&CK node names: {k['attack_keys_matching_graph']}")
+    lines.append(f"  ATT&CK canonical keys that are ATT&CK nodes: {k['attack_keys_matching_graph']}")
     for item in k["attack_keys_not_on_graph"]:
+        lines.append(f"  ATT&CK group without a node: {item['mitre_attack']} {item['key']!r}")
+    for item in k["graph_attack_nodes_not_canonical_keys"]:
+        kind = "revoked group" if item["revoked"] else "not a canonical key"
         lines.append(
-            f"  mismatch: {item['mitre_attack']} {item['key']!r} has no ATT&CK node (node: {item['graph_node']})"
-        )
-    for item in k["graph_attack_names_not_canonical_keys"]:
-        lines.append(
-            f"  ATT&CK node {item['graph_name']!r} ({item['relationships']} rels) has no ATT&CK id in the galaxy; "
+            f"  ATT&CK node {item['graph_name']!r} ({item['relationships']} rels) is a {kind}; "
             f"reference: {item['how']} {item['resolves_to']}"
         )
     d = g["duplicate_groups"]
     lines.append(
-        f"  duplicate groups the merge job would fold: {d['groups']} ({d['nodes_folded']} nodes; "
+        f"  duplicate groups the merge would fold: {d['groups']} ({d['nodes_folded']} nodes; "
         f"{d['into_attack_groups']} into ATT&CK groups)"
     )
-    for group in d["largest"][:10]:
+    for group in d["all"]:
         attack = f" {group['mitre_attack']}" if group["mitre_attack"] else ""
-        lines.append(f"    {group['canonical']}{attack}: {group['graph_names']} ({group['relationships']} rels)")
-    if d["canonical_not_on_graph"]:
-        lines.append(f"  groups whose canonical key is not a node: {d['canonical_not_on_graph']}")
-    for group in d["containing_another_attack_node"]:
         lines.append(
-            f"  WARNING group {group['canonical']!r} contains ATT&CK nodes {group['attack_nodes_not_canonical']}"
+            f"    {group['canonical']}{attack} <- {group['duplicates']} ({group['relationships_moved']} of "
+            f"{group['relationships']} rels move)"
         )
     u = g["unresolved"]
     lines.append(f"  unresolved: {u['count']} names ({u['relationships']} relationships); top {min(top, u['count'])}:")
@@ -1335,13 +1748,34 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
         lines.append("  unresolved names whose base name resolves (review candidates):")
         for item in u["suffix_variant_candidates"]:
             lines.append(f"    {item['graph_name']!r} -> base {item['base']!r}: {item['how']} {item['resolves_to']}")
+    lines.append(
+        f"  spelling variants (same triage key, resolved differently or not at all): {len(g['spelling_variants'])}"
+    )
+    for item in g["spelling_variants"]:
+        names = "; ".join(
+            f"{n['name']} [{n['graph_relationships'] if n['graph_relationships'] is not None else '-'} rels, "
+            f"{n['how']} {n['resolves_to'] or ''}]".replace(" ]", "]")
+            for n in item["names"]
+        )
+        lines.append(f"    {item['triage_key']}: {names}")
+    lines.append(f"  suffix-rule short forms that are graph names: {len(g['suffix_short_forms_on_graph'])}")
+    for item in g["suffix_short_forms_on_graph"]:
+        lines.append(
+            f"    {item['name']!r} (from {item['from']!r}, {item['suffix_rule']}): {item['relationships']} rels, "
+            f"{item['pulses']} pulses; "
+            f"reference: {item['how']} {item['resolves_to']}; canonical node {item['canonical_relationships']} rels; "
+            f"shared malware {item['shared_malware']}"
+        )
     conflicts = g["graph_attack_aliases_resolving_elsewhere"]
     lines.append(
         f"  ATT&CK node aliases on the graph that the reference resolves elsewhere: {len(conflicts)} "
         f"(unknown to the reference: {len(g['graph_attack_aliases_unknown'])})"
     )
-    for item in conflicts[:25]:
-        lines.append(f"    {item['attack_group']}: {item['graph_alias']!r} -> {item['how']} {item['reference']}")
+    for item in conflicts:
+        lines.append(
+            f"    {item['attack_node']} (expected {item['expected']}): {item['graph_alias']!r} -> "
+            f"{item['how']} {item['reference']}"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -1351,16 +1785,20 @@ _EXPORT_CYPHER = """
 MATCH (a:ThreatActor)
 RETURN a.name AS name, a.aliases AS aliases, a.source AS source,
        COUNT { (a)--() } AS relationships,
-       COUNT { UNWIND coalesce(a.pulse_ids, []) AS p RETURN DISTINCT p } AS pulses
+       COUNT { UNWIND coalesce(a.pulse_ids, []) AS p RETURN DISTINCT p } AS pulses,
+       [(m:Malware)-[:ATTRIBUTED_TO]->(a) | m.name] + [(a)-[:USES_MALWARE]->(m:Malware) | m.name] AS malware,
+       CASE WHEN $mitre_source IN coalesce(a.source, []) THEN left(coalesce(a.description, ''), 300) END AS attack_description
 ORDER BY name
 """
 
 
-def _http_query(statement: str, timeout: int = 300) -> Tuple[str, List[Dict[str, Any]]]:
+def _http_query(
+    statement: str, parameters: Optional[Mapping[str, Any]] = None, timeout: int = 300
+) -> Tuple[str, List[Dict[str, Any]]]:
     base = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
     url = f"{base}/db/{os.getenv('NEO4J_DATABASE', 'neo4j')}/query/v2"
     auth = f"{os.getenv('NEO4J_USER', 'neo4j')}:{os.getenv('NEO4J_PASSWORD', '')}"
-    body = json.dumps({"statement": statement, "parameters": {}, "accessMode": "Read"}).encode()
+    body = json.dumps({"statement": statement, "parameters": dict(parameters or {}), "accessMode": "Read"}).encode()
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Authorization", "Basic " + base64.b64encode(auth.encode()).decode())
     req.add_header("Content-Type", "application/json")
@@ -1383,8 +1821,29 @@ def _http_query(statement: str, timeout: int = 300) -> Tuple[str, List[Dict[str,
     return url, [dict(zip(data["fields"], row, strict=True)) for row in data["values"]]
 
 
+def export_rows(raw_rows: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Export rows from the query rows: malware names de-duplicated, and the ATT&CK group id an
+    ATT&CK node's description links to (the description itself is not kept)."""
+    rows = []
+    for raw in raw_rows:
+        match = _ATTACK_GROUP_URL_RE.search(raw.get("attack_description") or "")
+        rows.append(
+            {
+                "name": raw.get("name"),
+                "aliases": raw.get("aliases"),
+                "source": raw.get("source"),
+                "relationships": raw.get("relationships"),
+                "pulses": raw.get("pulses"),
+                "malware": sorted({m for m in (raw.get("malware") or []) if isinstance(m, str)}),
+                "attack_id": match.group(1) if match else None,
+            }
+        )
+    return rows
+
+
 def export_graph_actors(out: Path) -> int:
-    url, rows = _http_query(_EXPORT_CYPHER)
+    url, raw_rows = _http_query(_EXPORT_CYPHER, {"mitre_source": MITRE_SOURCE})
+    rows = export_rows(raw_rows)
     doc = {
         "exported_at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
         "url": url,
@@ -1418,10 +1877,15 @@ def _read_json(path: Path) -> Any:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("--galaxy", type=Path, help="threat-actor entities export of the MISP galaxies")
+    ap.add_argument("--attack-galaxy-raw", type=Path, help="raw mitre-intrusion-set galaxy dump (ATT&CK revocations)")
     ap.add_argument("--overrides", type=Path, default=DEFAULT_OVERRIDES)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--version", default=None, help="CalVer YYYY.MM.DD (default: today, UTC)")
-    ap.add_argument("--graph-actors", type=Path, help="graph export (from --export-graph-actors) for the report")
+    ap.add_argument(
+        "--graph-actors",
+        type=Path,
+        help="graph export (from --export-graph-actors): the loaded ATT&CK version, and the report",
+    )
     ap.add_argument("--unresolved-out", type=Path, help="write every unresolved graph name here (outside the repo)")
     ap.add_argument("--report-json", type=Path, help="write the full report as JSON here (outside the repo)")
     ap.add_argument("--top", type=int, default=50, help="unresolved names shown in the report (default 50)")
@@ -1429,7 +1893,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--export-graph-actors",
         type=Path,
         metavar="PATH",
-        help="read ThreatActor names, aliases and sources from Neo4j (read-only) into PATH and exit",
+        help="read the ThreatActor nodes from Neo4j (read-only) into PATH and exit",
     )
     args = ap.parse_args(argv)
 
@@ -1453,17 +1917,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         galaxy_doc = _read_json(args.galaxy)
         overrides_doc = _read_json(args.overrides)
-        inputs = [
-            galaxy_input_metadata(galaxy_doc, args.galaxy.name, _sha256(args.galaxy)),
+        galaxy_meta = galaxy_input_metadata(galaxy_doc, args.galaxy.name, _sha256(args.galaxy))
+        inputs: List[Dict[str, Any]] = [galaxy_meta]
+        revocations: Dict[str, str] = {}
+        if args.attack_galaxy_raw is not None:
+            raw_sha = _sha256(args.attack_galaxy_raw)
+            built_from = {
+                f["sha256"] for g in galaxy_meta["galaxies"] if g["galaxy"] == MITRE_GALAXY for f in g["raw_files"]
+            }
+            if raw_sha not in built_from:
+                raise ReferenceInputError(
+                    f"{args.attack_galaxy_raw.name} is not the mitre-intrusion-set dump the galaxy export was built from"
+                )
+            revocations = load_revocations(_read_json(args.attack_galaxy_raw))
+            inputs.append(
+                {
+                    "role": "attack_revocations",
+                    "file": args.attack_galaxy_raw.name,
+                    "sha256": raw_sha,
+                    "revoked_groups": len(revocations),
+                }
+            )
+        else:
+            print("WARNING: no --attack-galaxy-raw: revoked ATT&CK groups are not folded", file=sys.stderr)
+        graph_doc = _read_json(args.graph_actors) if args.graph_actors else None
+        graph = load_graph_actors(graph_doc) if graph_doc is not None else None
+        loaded = load_loaded_attack(graph) if graph is not None else []
+        if graph_doc is not None and args.graph_actors is not None:
+            inputs.append(graph_input_metadata(graph_doc, args.graph_actors.name, _sha256(args.graph_actors)))
+        inputs.append(
             {
                 "role": "overrides",
                 "file": args.overrides.name,
                 "sha256": _sha256(args.overrides),
                 "decisions": sum(len(overrides_doc.get(k) or []) for k in ("merge", "never_merge", "canonical_name")),
-            },
-        ]
-        reference, stats = build_reference(galaxy_doc, overrides_doc, version=version, inputs=inputs)
-        graph = load_graph_actors(_read_json(args.graph_actors)) if args.graph_actors else None
+            }
+        )
+        reference, stats = build_reference(
+            galaxy_doc, overrides_doc, version=version, inputs=inputs, revocations=revocations, loaded_attack=loaded
+        )
     except (ReferenceInputError, OSError, json.JSONDecodeError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
