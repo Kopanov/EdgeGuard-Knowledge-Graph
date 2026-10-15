@@ -458,10 +458,10 @@ class TestStep2d:
         assert ok is False
         assert _step(iterate, "_q2d_remove_outer") is None and _step(iterate, "_q2d_trim_outer") is None
 
-    @pytest.mark.parametrize("failing", ["_q2d_trim_outer", ("_q2d_remove_outer", "_q2d_trim_outer")])
-    def test_step_2d_counts_once_in_the_summary(self, monkeypatch, caplog, failing):
+    def test_step_2d_counts_once_in_the_summary(self, monkeypatch, caplog):
+        # The gating makes it structural: after a failed part, no later part of step 2d runs.
         with caplog.at_level("INFO", logger="build_relationships"):
-            ok, _iterate = _run_build(monkeypatch, failing=failing)
+            ok, _iterate = _run_build(monkeypatch, failing="_q2d_trim_outer")
         assert ok is False
         assert "failures=1/20" in caplog.text
 

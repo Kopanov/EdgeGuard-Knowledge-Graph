@@ -33,7 +33,7 @@ PR-N31 closes the deferred items called out in the PR #110 merge body:
 * **build_campaign_nodes happy-path test** — Holistic H2 from the
   PR-N29 audit. Pre-N31 the only behavioural test on this function
   exercised the backfill log line; this PR adds an end-to-end
-  happy-path pin that all 11 Cypher queries are issued in the right
+  happy-path pin that all 12 Cypher queries are issued in the right
   order and the `results` dict is populated correctly.
 
 This module pins the contract for all 5 areas.
@@ -508,7 +508,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
       * Step 1 creates 1 Campaign
       * Steps 2/3a/4/5 link malware/indicators, prune stale, cleanup, reactivate
       * The returned `results` dict reflects the per-step counts
-      * All 11 expected session.run() calls fire in the right order
+      * All 12 expected session.run() calls fire in the right order
       * Campaign uuid is computed deterministically from the actor name
 
     Without this test, a refactor that re-orders / silently swallows
@@ -519,7 +519,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
 
     def _build_fake_session(self, actor_name: str = "APT-N31-Test"):
         """Construct a MagicMock session that returns happy-path values
-        for each of the 11 session.run() calls build_campaign_nodes
+        for each of the 12 session.run() calls build_campaign_nodes
         makes. Returns ``(client, sess, captured_queries)`` so the test
         can inspect what queries were issued + in what order.
 
@@ -559,6 +559,10 @@ class TestPRN31BuildCampaignNodesHappyPath:
         malware_prune_result = MagicMock()
         malware_prune_result.single.return_value = {"pruned": 0}
 
+        # (4c) Step 2c settle_runs (2026-10) — no actor lost every attribution
+        runs_result = MagicMock()
+        runs_result.single.return_value = {"removed": 0}
+
         # (5) Step 3a link_indicators_batched — apoc.periodic.iterate shape
         link_i_result = MagicMock()
         link_i_result.single.return_value = {
@@ -592,6 +596,7 @@ class TestPRN31BuildCampaignNodesHappyPath:
             backfill_result,
             link_m_result,
             malware_prune_result,
+            runs_result,
             link_i_result,
             links_count_result,
             prune_result,
@@ -637,9 +642,9 @@ class TestPRN31BuildCampaignNodesHappyPath:
             f"results dict must include campaign accounting; got keys: {sorted(results.keys())}"
         )
 
-    def test_happy_path_issues_all_11_queries(self):
-        """The function must issue all 11 expected session.run() calls (2026-10: the database's
-        clock, and Step 2b, the malware membership prune).
+    def test_happy_path_issues_all_12_queries(self):
+        """The function must issue all 12 expected session.run() calls (2026-10: the database's
+        clock, Step 2b, the malware membership prune, and Step 2c, which settles RUNS).
         Fewer calls means a step was silently skipped (the swallower
         pattern PR-N21 fixed); more means a step duplicated or a new
         step was added without updating this pin (intentional break-
@@ -654,14 +659,14 @@ class TestPRN31BuildCampaignNodesHappyPath:
         finally:
             ej.time.sleep = original_sleep
 
-        assert sess.run.call_count == 11, (
-            f"build_campaign_nodes must issue exactly 11 session.run() calls "
-            f"(1 clock + 1 pre-fetch + 6 step queries + 3 follow-ups); got {sess.run.call_count}. "
+        assert sess.run.call_count == 12, (
+            f"build_campaign_nodes must issue exactly 12 session.run() calls "
+            f"(1 clock + 1 pre-fetch + 7 step queries + 3 follow-ups); got {sess.run.call_count}. "
             f"If you added a step, update this pin AND the fake-session fixture."
         )
 
     def test_happy_path_query_order(self):
-        """The 11 queries must fire in a specific order (pre-fetch FIRST,
+        """The 12 queries must fire in a specific order (pre-fetch FIRST,
         Campaign create SECOND, etc). A reorder could break the
         backfill-after-create invariant the post-PR-#33 audit caught."""
         ej = self._import_fresh_enrichment_jobs()
@@ -689,6 +694,8 @@ class TestPRN31BuildCampaignNodesHappyPath:
             ":Malware",
             # (5) Step 2b prune_malware — membership whose attribution is gone (2026-10)
             "(:Malware)-[r:PART_OF_CAMPAIGN]->(:Campaign)",
+            # (5b) Step 2c settle_runs — RUNS follows attribution (2026-10)
+            "MATCH (a:ThreatActor)-[r_runs:RUNS]->(:Campaign)",
             # (6) Step 3a — apoc.periodic.iterate signature
             "apoc.periodic.iterate",
         ]

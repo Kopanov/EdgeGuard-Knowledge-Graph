@@ -354,7 +354,8 @@ class TestBuildSteps:
         added = rp.inherited_prov_set("r", ["_at"])
         assert "r.source_refs = apoc.coll.toSet(coalesce(r.source_refs, []) + coalesce(_at.source_refs, []))" in added
         replaced = rp.inherited_prov_set("r", ["_at"], replace=True)
-        assert "r.source_refs = apoc.coll.toSet(coalesce(_at.source_refs, []))" in replaced
+        # ``[] +`` keeps a list when the source link holds a plain string
+        assert "r.source_refs = apoc.coll.toSet([] + coalesce(_at.source_refs, []))" in replaced
         assert "coalesce(r." not in replaced
         pattern = "(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor)"
         agg = rp.aggregated_prov_set("r", pattern, ["_xi", "_xa"], max_events=7, replace=True)

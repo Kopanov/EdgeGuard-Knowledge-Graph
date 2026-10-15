@@ -100,7 +100,9 @@ def inherited_prov_set(
 
     def union(field: str) -> str:
         parts = " + ".join(f"coalesce({e}.{field}, [])" for e in edge_exprs)
-        own = "" if replace else f"coalesce({rel_var}.{field}, []) + "
+        # ``[] +`` keeps a list when a source link holds one of the lists as a plain string
+        # (apoc.coll.toSet raises on a string; the accumulating form is a list concatenation).
+        own = "[] + " if replace else f"coalesce({rel_var}.{field}, []) + "
         return f"apoc.coll.toSet({own}{parts})"
 
     return (

@@ -237,6 +237,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       Malware     -[:PART_OF_CAMPAIGN]-> Campaign
       Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign)
 
+    The links follow attribution (2026-10): a malware link whose ATTRIBUTED_TO is gone is pruned
+    (Step 2b), a RUNS whose actor has no attribution left is removed (Step 2c), and every link's
+    provenance is replaced on each run by that of the links it currently rests on.
+
     ``PART_OF_CAMPAIGN`` was ``PART_OF`` until 2026-10: ResilMesh uses ``PART_OF`` for its own
     asset model (IP → Subnet, the OrganizationUnit hierarchy), and in the shared database one
     relationship name must have one meaning.
@@ -521,6 +525,27 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                     "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges whose attribution is gone", malware_pruned
                 )
             results["malware_links_pruned"] = malware_pruned
+            query_pause()
+
+            # Step 2c (2026-10): RUNS follows attribution too. Step 1 rewrites RUNS only for actors
+            # that still qualify (attributed malware and an active indicator); every other RUNS is
+            # settled here: removed when the actor has no ATTRIBUTED_TO left (the campaign then
+            # retires in Step 4), otherwise its evidence and provenance are recomputed from the
+            # actor's current attributions. Either way RUNS names no link step 2d removed or trimmed.
+            settle_runs = f"""
+            MATCH (a:ThreatActor)-[r_runs:RUNS]->(:Campaign)
+            WITH a, r_runs, EXISTS {{ (a)<-[:ATTRIBUTED_TO]-(:Malware) }} AS attributed
+            FOREACH (_ IN CASE WHEN attributed THEN [] ELSE [1] END | DELETE r_runs)
+            FOREACH (_ IN CASE WHEN attributed THEN [1] ELSE [] END |
+                SET {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
+                    {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)})
+            RETURN sum(CASE WHEN attributed THEN 0 ELSE 1 END) AS removed
+            """
+            runs_record = session.run(settle_runs, timeout=NEO4J_READ_TIMEOUT).single()
+            runs_removed = runs_record["removed"] if runs_record else 0
+            if runs_removed:
+                logger.info("[CAMPAIGN] removed %d RUNS edges whose actor has no attribution left", runs_removed)
+            results["runs_removed"] = runs_removed
             query_pause()
 
             # Step 3a: Link active indicators to their campaigns (top 100 per
