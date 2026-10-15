@@ -261,9 +261,9 @@ NEO4J_SYNC_DURATION = Histogram(
 # alert was permanently firing or permanently silent depending on eval
 # semantics. Either way it carried no signal. This gauge is written on
 # every successful sync completion and read by the alert as
-# ``time() - edgeguard_neo4j_sync_last_success_timestamp > 518400``
-# (2026-10: 144 h, the longest gap the 3-day schedule produces without a
-# failure; the derivation is in prometheus/alerts.yml). Since 2026-10 the
+# ``time() - edgeguard_neo4j_sync_last_success_timestamp > 522000``
+# (2026-10: 145 h, the longest gap the 3-day schedule produces plus the
+# sync task's longest run; the derivation is in prometheus/alerts.yml). Since 2026-10 the
 # baseline DAG's full sync writes it too.
 NEO4J_SYNC_LAST_SUCCESS = Gauge(
     "edgeguard_neo4j_sync_last_success_timestamp",

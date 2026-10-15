@@ -94,6 +94,10 @@ x-common-env: &common-env
   # MalwareBazaar (abuse.ch) source (2026-10): flag-guarded, default off; per-run cap mirrors src/config.py.
   EDGEGUARD_ENABLE_MALWAREBAZAAR: ${EDGEGUARD_ENABLE_MALWAREBAZAAR:-false}
   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN: ${EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN:-500}
+  # ThreatFox / URLhaus per-run caps (2026-10), sized to each feed's window (7 and 30 days); they
+  # replace EDGEGUARD_INCREMENTAL_LIMIT for the two sources. Defaults mirror src/config.py.
+  EDGEGUARD_THREATFOX_MAX_PER_RUN: ${EDGEGUARD_THREATFOX_MAX_PER_RUN:-10000}
+  EDGEGUARD_URLHAUS_MAX_PER_RUN: ${EDGEGUARD_URLHAUS_MAX_PER_RUN:-50000}
   EDGEGUARD_CISA_INCREMENTAL_DAYS: ${EDGEGUARD_CISA_INCREMENTAL_DAYS:-30}
   # VirusTotal free-tier budget (src/collectors/virustotal_budget.py): daily lookups, per-run cap,
   # MISP candidate window. The ledger lives in the ./state bind mount.
@@ -121,6 +125,13 @@ x-common-env: &common-env
   # OTX page ceilings (50 pulses per page); a baseline that reaches its ceiling logs a warning.
   EDGEGUARD_OTX_BASELINE_MAX_PAGES: ${EDGEGUARD_OTX_BASELINE_MAX_PAGES:-200}
   EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES: ${EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES:-25}
+  # Re-reported indicators (2026-10, src/collectors/misp_writer.py): the stored copy of an
+  # indicator a source reports again is edited when MISP last wrote it more than this many days ago
+  # (0 = off), at most EDGEGUARD_MISP_REFRESH_MAX_PER_RUN edits (0 = no cap) and
+  # EDGEGUARD_MISP_REFRESH_MAX_SECONDS seconds (0 = no limit) per run. Defaults mirror src/config.py.
+  EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS: ${EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS:-30}
+  EDGEGUARD_MISP_REFRESH_MAX_PER_RUN: ${EDGEGUARD_MISP_REFRESH_MAX_PER_RUN:-2000}
+  EDGEGUARD_MISP_REFRESH_MAX_SECONDS: ${EDGEGUARD_MISP_REFRESH_MAX_SECONDS:-600}
   # Incremental MISP -> Neo4j sync writes only attributes changed in the window
   # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
   EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}

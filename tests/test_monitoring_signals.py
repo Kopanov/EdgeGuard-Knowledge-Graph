@@ -716,13 +716,19 @@ class TestSyncStaleness:
 
         expr = _norm(_rule("EdgeGuardNeo4jSyncStale")["expr"])
         assert expr == (
-            "time() - edgeguard_neo4j_sync_last_success_timestamp > 518400 "
+            "time() - edgeguard_neo4j_sync_last_success_timestamp > 522000 "
             "and edgeguard_neo4j_sync_last_success_timestamp > 0"
         )
-        threshold_h = 518400 / 3600
-        timeout_h = sync_dag.dagrun_timeout.total_seconds() / 3600
-        # The stamp is written when a sync ends, so the next sync may take up to its timeout longer.
-        assert max(gaps) + timeout_h <= threshold_h
+        threshold_h = 522000 / 3600
+        # The stamp is written when run_neo4j_sync succeeds, so the next sync may take up to every
+        # attempt of that task longer (never longer than the DAG run's timeout).
+        sync_task = sync_dag.get_task("run_neo4j_sync")
+        attempts = sync_task.retries + 1
+        task_h = (
+            attempts * sync_task.execution_timeout + sync_task.retries * sync_task.retry_delay
+        ).total_seconds() / 3600
+        duration_h = min(task_h, sync_dag.dagrun_timeout.total_seconds() / 3600)
+        assert max(gaps) + duration_h <= threshold_h, (max(gaps), duration_h)
         assert max(sim.after_baseline) <= threshold_h
         assert _rule("EdgeGuardNeo4jSyncStale")["for"] == "1h"
 

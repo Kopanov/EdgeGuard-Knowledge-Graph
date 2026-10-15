@@ -285,15 +285,15 @@ groups:
         # 28 February) is skipped and the next sync starts 96 h after the previous one; after
         # 28 February of a leap year the gap is 120 h. A baseline's full sync also stamps the
         # gauge and restarts the 71 h guard, which leaves up to 143 h until the next scheduled
-        # sync starts. The gauge is written when a sync ends, so the next sync's duration adds to
-        # the gap: up to 22 h (its dagrun_timeout) after a 120 h gap, less after a baseline, whose
-        # full sync outlasts an incremental one. 144 h (two intervals) covers these gaps; `for: 1h`
-        # adds the margin. A failed sync is reported by its failed task; this alert reports syncs
+        # sync starts. The gauge is written when run_neo4j_sync succeeds, so that task's duration
+        # adds to the gap: up to three attempts of its 8 h limit and two 5 min retry delays
+        # (24 h 10 min) after a 120 h gap, less after a baseline, whose full sync outlasts an
+        # incremental one. 145 h covers these gaps; `for: 1h` adds the margin. A failed sync is reported by its failed task; this alert reports syncs
         # that stop happening. The schedule is unchanged: a daily cron or a 3-day timedelta would
         # change when syncs run, not only how they are watched. Assumes the default
         # NEO4J_SYNC_INTERVAL of 72 h; tests/test_monitoring_signals.py simulates the schedule.
         expr: |
-          time() - edgeguard_neo4j_sync_last_success_timestamp > 518400
+          time() - edgeguard_neo4j_sync_last_success_timestamp > 522000
           and edgeguard_neo4j_sync_last_success_timestamp > 0
         for: 1h
         labels:
@@ -328,7 +328,7 @@ groups:
           or label_replace(vector(18900), "dag_id", "edgeguard_medium_freq", "", "")
           or label_replace(vector(31500), "dag_id", "edgeguard_low_freq", "", "")
           or label_replace(vector(31500), "dag_id", "edgeguard_daily", "", "")
-          or label_replace(vector(80100), "dag_id", "edgeguard_neo4j_sync", "", "")
+          or label_replace(vector(245700), "dag_id", "edgeguard_neo4j_sync", "", "")
           or label_replace(vector(116100), "dag_id", "edgeguard_baseline", "", "")
 
       - alert: EdgeGuardDAGRunStuck

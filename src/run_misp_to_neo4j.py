@@ -1078,6 +1078,51 @@ def normalize_misp_tag_list(tags: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _meta_object(parsed: Any, prefix: str, ref: str = "") -> Dict[str, Any]:
+    """A parsed ``<PREFIX>:`` comment as a dict; any other JSON value is treated as absent (2026-10).
+
+    MISPWriter writes a JSON object after the prefix. A comment written by anyone else (a MISP
+    user, a federated instance) can hold ``null``, a list, a number or a string there; ``.get``
+    on such a value raised ``AttributeError``, which escaped the attribute's parse and failed its
+    event, the run and every later incremental run. The attribute is kept without the metadata
+    and the attribute's UUID (``ref``) is logged.
+    """
+    if isinstance(parsed, dict):
+        return parsed
+    logger.warning(
+        "[META] %s comment of attribute %s holds a JSON %s, not an object — the metadata is ignored",
+        prefix,
+        ref or "?",
+        type(parsed).__name__,
+    )
+    return {}
+
+
+def _scalar_strings(values: List[Any]) -> List[str]:
+    """The strings and numbers of a JSON list, numbers as strings; other elements dropped (2026-10).
+
+    The lists reach node properties (``n.attack_ids``, ``n.targeted_countries``, ``uses_techniques``),
+    and Neo4j refuses a property list holding a map, a list, a null or mixed types: the whole
+    ``UNWIND`` batch then failed, and with it the run and every later incremental run. The lists
+    MISPWriter writes hold strings only and pass unchanged.
+    """
+    return [
+        x if isinstance(x, str) else str(x)
+        for x in values
+        if isinstance(x, str) or (isinstance(x, (int, float)) and not isinstance(x, bool))
+    ]
+
+
+def _meta_list(meta: Dict[str, Any], key: str) -> List[str]:
+    """``meta[key]`` when it is a JSON list, as ``_scalar_strings``; otherwise ``[]`` (2026-10).
+
+    A string such as ``"T1059"`` in a list-valued key is ignored instead of being iterated into
+    its characters (``T``, ``1``, ``0``, ``5``, ``9``).
+    """
+    value = meta.get(key)
+    return _scalar_strings(value) if isinstance(value, list) else []
+
+
 def _extract_tlp_tag(tags: List[Dict[str, Any]], ref: str = "") -> str:
     """Rehydrate the ``tlp:<level>`` MISP tag (2026-10, fresh-baseline PR).
 
@@ -1165,7 +1210,8 @@ def _pair_without_software_id(pair: str) -> str:
 
 def _pulse_family_lists(otx_meta: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     """``OTX_META.mf`` / ``.pa`` as the indicator's ``pulse_malware_families`` /
-    ``pulse_malware_actor_pairs``: stripped, empty entries and pairs without ``::`` dropped.
+    ``pulse_malware_actor_pairs``: stripped, empty entries and pairs without ``::`` dropped; a value
+    that is not a JSON list is no list (``_meta_list``).
 
     2026-10: family names lose an ATT&CK software id suffix (attributes written before carry
     ``"Cobalt Strike - S0154"``), as the Malware node is named, and the lists are de-duplicated
@@ -1173,10 +1219,10 @@ def _pulse_family_lists(otx_meta: Dict[str, Any]) -> Tuple[List[str], List[str]]
     the graph.
     """
     families = _dedupe_casefold(
-        split_attack_software_id(str(x))[0] for x in (otx_meta.get("mf") or []) if str(x).strip()
+        split_attack_software_id(str(x))[0] for x in _meta_list(otx_meta, "mf") if str(x).strip()
     )
     pairs = _dedupe_casefold(
-        _pair_without_software_id(str(x).strip()) for x in (otx_meta.get("pa") or []) if "::" in str(x)
+        _pair_without_software_id(str(x).strip()) for x in _meta_list(otx_meta, "pa") if "::" in str(x)
     )
     return families, pairs
 
@@ -2589,8 +2635,15 @@ class MISPToNeo4jSync:
                         nl = rest.find("\n")
                         json_part = rest if nl < 0 else rest[:nl]
                         tail = (rest[nl + 1 :].strip() if nl >= 0 else "") or ""
-                        meta = json.loads(json_part)
-                        uses_techniques = [str(x) for x in (meta.get("t") or [])]
+                        parsed = json.loads(json_part)
+                        # 2026-10: read as ``parse_attribute`` reads a tool's comment: an object's
+                        # "t" list, or the older bare list; any other JSON value is no metadata
+                        # (``.get`` on it raised and dropped the whole event from the conversion).
+                        if isinstance(parsed, list):
+                            uses_techniques = _scalar_strings(parsed)
+                        else:
+                            meta = _meta_object(parsed, "MITRE_USES_TECHNIQUES", attr_uuid)
+                            uses_techniques = _meta_list(meta, "t")
                         description = tail or description
                     except (ValueError, TypeError, json.JSONDecodeError):
                         pass
@@ -3469,19 +3522,20 @@ class MISPToNeo4jSync:
                         actor_description = ""
                     parsed = json.loads(json_part)
                     if isinstance(parsed, dict):
-                        uses_techniques = parsed.get("t", [])
+                        # 2026-10: list-valued keys accept only lists (``_meta_list``).
+                        uses_techniques = _meta_list(parsed, "t")
                         # 2026-10: pulse-level ids ("rt") and the pulse id ("pid")
                         # written by MISPWriter._technique_meta.
-                        reported_techniques = [str(x) for x in (parsed.get("rt") or [])]
+                        reported_techniques = [str(x) for x in _meta_list(parsed, "rt")]
                         actor_pulse_id = str(parsed.get("pid") or "").strip()
-                        actor_report_ids = [str(x).strip() for x in (parsed.get("rids") or []) if str(x).strip()]
+                        actor_report_ids = [str(x).strip() for x in _meta_list(parsed, "rids") if str(x).strip()]
                         actor_several_actor_pulses = [
-                            str(x).strip() for x in (parsed.get("sap") or []) if str(x).strip()
+                            str(x).strip() for x in _meta_list(parsed, "sap") if str(x).strip()
                         ]
-                        actor_uses_malware = [str(x).strip() for x in (parsed.get("m") or []) if str(x).strip()]
-                        actor_uses_tools = [str(x).strip() for x in (parsed.get("s") or []) if str(x).strip()]
+                        actor_uses_malware = [str(x).strip() for x in _meta_list(parsed, "m") if str(x).strip()]
+                        actor_uses_tools = [str(x).strip() for x in _meta_list(parsed, "s") if str(x).strip()]
                     elif isinstance(parsed, list):
-                        uses_techniques = parsed
+                        uses_techniques = _scalar_strings(parsed)
                 except (ValueError, IndexError):
                     actor_description = raw_comment
 
@@ -3595,13 +3649,15 @@ class MISPToNeo4jSync:
                     nl = rest.find("\n")
                     json_part = rest if nl < 0 else rest[:nl]
                     tail = (rest[nl + 1 :].strip() if nl >= 0 else "") or ""
-                    meta = json.loads(json_part)
-                    uses_techniques = [str(x) for x in (meta.get("t") or [])]
+                    # 2026-10: a value other than a JSON object counts as no metadata, and list-valued
+                    # keys accept only lists (``{"t": "T1059"}`` gave ['T', '1', '0', '5', '9']).
+                    meta = _meta_object(json.loads(json_part), "MITRE_USES_TECHNIQUES", attr_misp_uuid)
+                    uses_techniques = [str(x) for x in _meta_list(meta, "t")]
                     # 2026-10: pulse-level ids ("rt") + pulse id ("pid"), see MISPWriter._technique_meta.
-                    reported_techniques = [str(x) for x in (meta.get("rt") or [])]
+                    reported_techniques = [str(x) for x in _meta_list(meta, "rt")]
                     malware_pulse_id = str(meta.get("pid") or "").strip()
-                    malware_report_ids = [str(x).strip() for x in (meta.get("rids") or []) if str(x).strip()]
-                    malware_several_actor_pulses = [str(x).strip() for x in (meta.get("sap") or []) if str(x).strip()]
+                    malware_report_ids = [str(x).strip() for x in _meta_list(meta, "rids") if str(x).strip()]
+                    malware_several_actor_pulses = [str(x).strip() for x in _meta_list(meta, "sap") if str(x).strip()]
                     description = tail or description
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
@@ -3822,9 +3878,9 @@ class MISPToNeo4jSync:
                         json_part = uses_json
                     parsed = json.loads(json_part)
                     if isinstance(parsed, dict):
-                        uses_techniques = parsed.get("t", [])
+                        uses_techniques = _meta_list(parsed, "t")  # 2026-10: lists only
                     elif isinstance(parsed, list):
-                        uses_techniques = parsed
+                        uses_techniques = _scalar_strings(parsed)
                 except (ValueError, IndexError):
                     description = raw_comment
             else:
@@ -3943,14 +3999,16 @@ class MISPToNeo4jSync:
             raw_comment = attr.get("comment", "") or ""
             otx_meta: dict = {}
             tf_meta: dict = {}
+            # 2026-10: a value other than a JSON object (``OTX_META:null``, ``TF_META:"s"``) counts as
+            # no metadata (``_meta_object``) instead of failing the event on ``.get``.
             if raw_comment.startswith("OTX_META:"):
                 try:
-                    otx_meta = json.loads(raw_comment[len("OTX_META:") :])
+                    otx_meta = _meta_object(json.loads(raw_comment[len("OTX_META:") :]), "OTX_META", attr_misp_uuid)
                 except ValueError:
                     logger.debug("Failed to parse OTX_META for %s %s", indicator_type, value[:30])
             elif raw_comment.startswith("TF_META:"):
                 try:
-                    tf_meta = json.loads(raw_comment[len("TF_META:") :])
+                    tf_meta = _meta_object(json.loads(raw_comment[len("TF_META:") :]), "TF_META", attr_misp_uuid)
                 except ValueError:
                     logger.debug("Failed to parse TF_META for %s %s", indicator_type, value[:30])
 
@@ -3985,13 +4043,14 @@ class MISPToNeo4jSync:
 
             # Enrich indicator with OTX pulse metadata
             if otx_meta:
-                item["attack_ids"] = otx_meta.get("attack_ids", [])
-                item["targeted_countries"] = otx_meta.get("targeted_countries", [])
-                item["pulse_tags"] = otx_meta.get("pulse_tags", [])
-                item["pulse_references"] = otx_meta.get("pulse_references", [])
+                # 2026-10: list-valued keys accept only lists (``_meta_list``).
+                item["attack_ids"] = _meta_list(otx_meta, "attack_ids")
+                item["targeted_countries"] = _meta_list(otx_meta, "targeted_countries")
+                item["pulse_tags"] = _meta_list(otx_meta, "pulse_tags")
+                item["pulse_references"] = _meta_list(otx_meta, "pulse_references")
                 item["pulse_author"] = otx_meta.get("pulse_author", "")
                 item["pulse_tlp"] = otx_meta.get("pulse_tlp", "")
-                item["otx_industries"] = otx_meta.get("otx_industries", [])
+                item["otx_industries"] = _meta_list(otx_meta, "otx_industries")
                 item["description"] = otx_meta.get("description", "")
                 # PR-N10 Fix #3 (7-agent audit Logic Tracker B1): pull
                 # ``malware_family`` and ``attributed_to`` out of OTX_META
@@ -4012,7 +4071,7 @@ class MISPToNeo4jSync:
                 # silently received None for every OTX-sourced row.
                 item["pulse_id"] = otx_meta.get("pulse_id", "")
                 # 2026-10: other pulses of the same run that listed the IOC (OTX_META.report_ids).
-                rids = [str(x).strip() for x in (otx_meta.get("report_ids") or []) if str(x).strip()]
+                rids = [str(x).strip() for x in _meta_list(otx_meta, "report_ids") if str(x).strip()]
                 if rids:
                     item["report_ids"] = rids
                 # 2026-10 (regular-update linking): OTX_META.mf / .adv → lists on the indicator
@@ -4023,7 +4082,7 @@ class MISPToNeo4jSync:
                 if _pairs:
                     item["pulse_malware_actor_pairs"] = _pairs
                 # 2026-10: the IOC's pulses whose adversaries are several actors (OTX collector).
-                _several = [str(x).strip() for x in (otx_meta.get("sap") or []) if str(x).strip()]
+                _several = [str(x).strip() for x in _meta_list(otx_meta, "sap") if str(x).strip()]
                 if _several:
                     item["several_actor_pulses"] = _several
                 item["indicator_role"] = otx_meta.get("indicator_role", "")
