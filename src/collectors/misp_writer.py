@@ -218,6 +218,18 @@ def _attack_domain(item: Dict[str, Any]) -> str:
     return domain if domain in ("enterprise", "ics", "mobile") else "enterprise"
 
 
+# 2026-10: ATT&CK marks a retired object without a successor ``x_mitre_deprecated: true``. The MITRE
+# collector keeps such objects with ``deprecated: True``; the flag travels as this MISP tag and the
+# sync (``run_misp_to_neo4j._extract_deprecated_tag``) sets ``n.deprecated = true`` on the node, so
+# its links stay and consumers can filter. Revoked objects never reach the writer.
+ATTACK_DEPRECATED_TAG = "attack-status:deprecated"
+
+
+def _deprecated_tags(item: Dict[str, Any]) -> List[str]:
+    """``[ATTACK_DEPRECATED_TAG]`` for an item ATT&CK deprecated, else ``[]``."""
+    return [ATTACK_DEPRECATED_TAG] if item.get("deprecated") is True else []
+
+
 # 2026-10 audit: the 730-day baseline is ONE collector run, so a family named in N pulses carries
 # all N ids in `rids`; the earlier 32 cut every link beyond the 33rd pulse (Mirai, Cobalt Strike,
 # AgentTesla appear in hundreds). MISP `comment` is TEXT (64 KB); 500 × ~27 chars ≈ 13 KB.
@@ -2008,6 +2020,7 @@ class MISPWriter:
 
         # Add MITRE ATT&CK galaxy tag for malware - CRITICAL for STIX conversion
         tags.append(f'misp-galaxy:malware="{name}"')
+        tags.extend(_deprecated_tags(malware))  # 2026-10: ATT&CK x_mitre_deprecated
 
         description = sanitize_value(malware.get("description", ""), max_length=400)
 
@@ -2092,6 +2105,7 @@ class MISPWriter:
 
         # Add MITRE threat-actor galaxy tag - CRITICAL for STIX conversion
         tags.append(f'misp-galaxy:threat-actor="{name}"')
+        tags.extend(_deprecated_tags(actor))  # 2026-10: ATT&CK x_mitre_deprecated
 
         description = sanitize_value(actor.get("description", ""), max_length=255)
 
@@ -2172,6 +2186,7 @@ class MISPWriter:
         # This enables PyMISP to recognize and convert to attack-pattern
         tags.append(f'misp-galaxy:mitre-attack-pattern="{name} - {mitre_id}"')
         tags.append(f'mitre-attack:technique="{mitre_id}"')
+        tags.extend(_deprecated_tags(technique))  # 2026-10: ATT&CK x_mitre_deprecated
 
         description = sanitize_value(technique.get("description", ""), max_length=255)
         tactic_phases = technique.get("tactic_phases") or []
@@ -2234,6 +2249,7 @@ class MISPWriter:
 
         if shortname:
             tags.append(f"mitre-tactic:{shortname.lower()}")
+        tags.extend(_deprecated_tags(tactic))  # 2026-10: ATT&CK x_mitre_deprecated
 
         description = sanitize_value(str(tactic.get("description", "")), max_length=255)
 
@@ -2281,6 +2297,7 @@ class MISPWriter:
 
         # Tag as tool type for MISP galaxy compatibility
         tags.append(f'misp-galaxy:tool="{name}"')
+        tags.extend(_deprecated_tags(tool))  # 2026-10: ATT&CK x_mitre_deprecated
         for ttype in tool.get("tool_types", []):
             tt = sanitize_value(str(ttype), max_length=50).lower()
             if tt:

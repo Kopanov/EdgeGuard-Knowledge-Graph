@@ -32,6 +32,11 @@ CVE ``CVE-YYYY-NNNN``; upper or lower case, as the sync matches them upper-case)
 not a registered curated source: the claim's source goes into ``r.sources`` / ``r.source_refs``
 and the STIX export, so no other name may reach them.
 
+A technique id ATT&CK has revoked (``T1086``, replaced by ``T1059.001``) is accepted: the claim is
+imported as written and the sync links it to the successor (2026-10, ``src/attack_revoked.py``).
+The summary lists each such id with its successor and claim count (``revoked_technique_ids``), a
+warning names it, and ``--check-graph`` looks up the successor.
+
 The event is created unpublished, for the creating organisation only, with the tags
 ``EdgeGuard``, the package source's ``source:*`` tag and ``tlp:<level>``. Each entity becomes one
 ``threat-actor`` / ``malware-type`` attribute, tagged with the same source and TLP, whose comment
@@ -69,6 +74,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from attack_revoked import load_revoked_ids  # noqa: E402
 from node_identity import canonicalize_merge_key  # noqa: E402
 from relationship_provenance import CURATED_CLAIMS_PREFIX, CURATED_PREDICATES  # noqa: E402
 from source_registry import (  # noqa: E402
@@ -163,6 +169,9 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
     by_predicate: Counter = Counter()
     by_source: Counter = Counter()
     skipped_by_reason: Counter = Counter()
+    # 2026-10: technique ids ATT&CK revoked, with the successor the sync links their claims to
+    revoked = load_revoked_ids()
+    translated: Counter = Counter()
     seen_subjects = set()
     kept = rejected = 0
     for n, entity in enumerate(entities):
@@ -191,13 +200,23 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
                 warnings.append(f"{where}.claims[{m}] skipped: {problem[1]}")
                 continue
             good.append(claim)
-            by_predicate[str(claim.get("p")).strip().lower()] += 1
+            predicate = str(claim.get("p")).strip().lower()
+            by_predicate[predicate] += 1
             by_source[canonical_source_id(claim.get("src")) or source or "?"] += 1
+            if CURATED_PREDICATES[predicate][KINDS[kind][0]][1] == "Technique":
+                technique_id = str(claim.get("o")).strip().upper()
+                if revoked.technique_successor(technique_id) is not None:
+                    translated[technique_id] += 1
         kept += len(good)
         if len(_comment(good, source)) > COMMENT_BUDGET:
             errors.append(f"{where}: {len(good)} claims exceed the {COMMENT_BUDGET}-character comment budget")
         if not good:
             warnings.append(f"{where}: {kind} {subject!r} has no valid claim and is not imported")
+    for technique_id, count in sorted(translated.items()):
+        warnings.append(
+            f"technique {technique_id} is a revoked ATT&CK id: its {count} claim(s) are imported as written "
+            f"and the sync links them to its successor {revoked.technique_successor(technique_id)}"
+        )
     summary = {
         "name": name,
         "source": source,
@@ -208,6 +227,9 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
         "claims_skipped_by_reason": dict(skipped_by_reason),
         "by_predicate": dict(by_predicate),
         "by_claim_source": dict(by_source),
+        "revoked_technique_ids": {
+            t: {"successor": revoked.technique_successor(t), "claims": n} for t, n in sorted(translated.items())
+        },
     }
     return errors, warnings, summary
 
@@ -298,9 +320,11 @@ def _check_rows(package: Dict[str, Any]) -> Dict[Tuple[str, str], List[Dict[str,
     """The valid claims by ``(predicate, subject label)``, keyed as the sync matches them.
 
     Names are NFC-normalised, trimmed and lower-cased (``canonicalize_merge_key``, as the batch
-    writer does); ATT&CK and CVE ids are trimmed and upper-cased (as the sync does).
+    writer does); ATT&CK and CVE ids are trimmed and upper-cased (as the sync does), and a revoked
+    technique id is replaced by its successor (2026-10, as the sync does).
     """
     source = canonical_source_id(package.get("source"))
+    revoked = load_revoked_ids()
     groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for entity in package.get("entities") or []:
         if not isinstance(entity, dict) or entity.get("kind") not in KINDS:
@@ -316,6 +340,8 @@ def _check_rows(package: Dict[str, Any]) -> Dict[Tuple[str, str], List[Dict[str,
             _rel_type, object_label, key = CURATED_PREDICATES[predicate][subject_label]
             obj = str(claim["o"]).strip()
             obj = canonicalize_merge_key(object_label, {"name": obj})["name"] if key == "name" else obj.upper()
+            if object_label == "Technique":
+                obj = revoked.translate_technique(obj)
             rows = groups.setdefault((predicate, subject_label), [])
             rows.append({"i": len(rows), "s": subject, "o": obj})
     return groups

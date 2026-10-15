@@ -75,6 +75,96 @@ ATTACK_DOMAIN_ICS = "ics"
 ENTERPRISE_KILL_CHAIN_NAME = "mitre-attack"
 ICS_KILL_CHAIN_NAME = "mitre-ics-attack"
 
+# Revoked and deprecated ATT&CK objects (2026-10). ATT&CK keeps a replaced object in the bundle
+# with ``revoked: true`` and a ``revoked-by`` relationship to the object that replaces it, and a
+# retired object without a successor with ``x_mitre_deprecated: true``. ``_parse_bundle`` skips
+# revoked objects of every type (they become neither items nor relationship endpoints) and adds a
+# revoked group's or software's name and aliases to its successor's ``aliases``; deprecated objects
+# are kept with ``deprecated: True``. A feed that still names a revoked technique id is translated
+# to the successor downstream (``attack_revoked``). Measured on the hosted graph (2026-10-15): 158
+# of 982 Technique nodes and 6 ThreatActor nodes were revoked ATT&CK objects.
+REVOKED_BY = "revoked-by"
+# Object types whose name and aliases a successor inherits (groups and software).
+_ALIAS_TYPES = frozenset({"intrusion-set", "malware", "tool"})
+
+
+def _is_revoked(obj: dict) -> bool:
+    """STIX ``revoked: true``."""
+    return obj.get("revoked") is True
+
+
+def _is_deprecated(obj: dict) -> bool:
+    """ATT&CK ``x_mitre_deprecated: true`` (retired, no successor)."""
+    return obj.get("x_mitre_deprecated") is True
+
+
+def _object_aliases(obj: dict) -> list:
+    """The aliases ATT&CK publishes for a group (``aliases``) or a piece of software (``x_mitre_aliases``)."""
+    if obj.get("type") == "intrusion-set":
+        return list(obj.get("aliases") or [])
+    return list(obj.get("x_mitre_aliases") or obj.get("aliases") or [])
+
+
+def _with_extra_aliases(aliases: list, extra: list) -> list:
+    """``aliases`` followed by the entries of ``extra`` it lacks (case-insensitive; order kept).
+
+    The successor's own aliases stay first, so a downstream cap (20 alias tags per MISP attribute)
+    never drops one of them for an inherited name. Without ``extra`` the list is returned as is.
+    """
+    if not extra:
+        return aliases
+    out = list(aliases or [])
+    seen = {a.strip().casefold() for a in out if isinstance(a, str)}
+    for name in extra:
+        if isinstance(name, str) and name.strip() and name.strip().casefold() not in seen:
+            seen.add(name.strip().casefold())
+            out.append(name.strip())
+    return out
+
+
+def _revoked_successor_aliases(objects: list, revoked_ids: set) -> Tuple[dict, dict]:
+    """Names a successor inherits from the groups and software it replaced.
+
+    Returns ``(extra_aliases, stats)``: ``{successor STIX id: [names]}`` — each revoked
+    intrusion-set / malware / tool's name and aliases, keyed by the last non-revoked object of its
+    ``revoked-by`` chain (A revoked by B, B revoked by C → C) — and counts for the log. A chain that
+    loops, names two successors, or ends outside the bundle adds nothing.
+    """
+    by_id = {obj.get("id"): obj for obj in objects if obj.get("id")}
+    revoked_by: dict = {}
+    for obj in objects:
+        if obj.get("type") == "relationship" and obj.get("relationship_type") == REVOKED_BY:
+            src, tgt = obj.get("source_ref"), obj.get("target_ref")
+            if src in revoked_ids and tgt:
+                revoked_by.setdefault(src, set()).add(tgt)
+    extra: dict = {}
+    stats = {"no_successor": 0, "unresolved": 0}
+    for stix_id in sorted(revoked_ids):
+        obj = by_id.get(stix_id) or {}
+        if obj.get("type") not in _ALIAS_TYPES:
+            continue
+        current, seen = stix_id, {stix_id}
+        while current in revoked_ids:
+            targets = revoked_by.get(current)
+            if not targets:
+                current = None
+                stats["no_successor"] += 1
+                break
+            if len(targets) > 1 or next(iter(targets)) in seen:
+                current = None
+                stats["unresolved"] += 1
+                break
+            current = next(iter(targets))
+            seen.add(current)
+        successor = by_id.get(current) if current else None
+        if successor is None or successor.get("type") not in _ALIAS_TYPES:
+            if current is not None:
+                stats["no_successor"] += 1
+            continue
+        names = [obj.get("name", "")] + _object_aliases(obj)
+        extra.setdefault(current, []).extend(n for n in names if isinstance(n, str) and n.strip())
+    return extra, stats
+
 
 def _record_ics_failure(exc: BaseException) -> None:
     """Tick the pipeline error counter for an ICS bundle failure.
@@ -355,17 +445,28 @@ class MITRECollector:
         ``x_mitre_sectors`` / ``x-mitre-asset`` targets — deliberately NOT used
         for zoning here (possible follow-up: map ICS sectors to EdgeGuard zones).
 
+        Revoked objects (``revoked: true``) of every type are skipped: they become neither items
+        nor relationship endpoints, and a revoked group's or software's name and aliases are added
+        to its successor's ``aliases`` (the successor is in the same bundle, through the
+        ``revoked-by`` relationship). Deprecated objects (``x_mitre_deprecated: true``) are kept
+        and carry ``deprecated: True``; every other item carries ``deprecated: False``.
+
         Returns:
             dict with keys ``techniques``, ``tactics``, ``actors``, ``malware``,
             ``tools``, ``relationships`` (lists in the same shapes as before).
         """
+        revoked_ids = {obj.get("id") for obj in objects if _is_revoked(obj) and obj.get("id")}
+        extra_aliases, alias_stats = _revoked_successor_aliases(objects, revoked_ids)
+
         # Build ID mapping for relationships
         id_map = {}  # STIX ID -> {type, mitre_id, name}
 
-        # First pass: build ID map
+        # First pass: build ID map (revoked objects left out, so no relationship reaches them)
         for obj in objects:
             obj_type = obj.get("type", "")
             stix_id = obj.get("id", "")
+            if stix_id in revoked_ids:
+                continue
 
             if obj_type == "attack-pattern":
                 external_ids = obj.get("external_references", [])
@@ -408,11 +509,18 @@ class MITRECollector:
 
         # Second pass: extract relationships
         relationships = []
+        dropped_revoked_rels = 0
         for obj in objects:
             if obj.get("type") == "relationship":
                 src_ref = obj.get("source_ref", "")
                 tgt_ref = obj.get("target_ref", "")
                 rel_type = obj.get("relationship_type", "")
+                if _is_revoked(obj) or src_ref in revoked_ids or tgt_ref in revoked_ids:
+                    # 2026-10: a relationship to or from a revoked object is dropped (counted for
+                    # the types this collector maps; ``revoked-by`` itself is read above).
+                    if rel_type in ("uses", "subtechnique-of", "attributed-to"):
+                        dropped_revoked_rels += 1
+                    continue
 
                 src = id_map.get(src_ref, {})
                 tgt = id_map.get(tgt_ref, {})
@@ -527,6 +635,9 @@ class MITRECollector:
 
         for obj in objects:
             obj_type = obj.get("type", "")
+            if obj.get("id") in revoked_ids:
+                continue
+            deprecated = _is_deprecated(obj)
 
             if obj_type == "attack-pattern":
                 # Technique — also extract kill-chain phases for IN_TACTIC linkage
@@ -567,6 +678,7 @@ class MITRECollector:
                             "tactic_phases": tactic_phases,
                             "detection": (obj.get("x_mitre_detection", "") or "")[:1000],
                             "is_subtechnique": obj.get("x_mitre_is_subtechnique", False),
+                            "deprecated": deprecated,
                             "confidence_score": 0.8,
                         }
                     )
@@ -600,6 +712,7 @@ class MITRECollector:
                             # parse_attribute will then route to first_seen_at_source.
                             "first_seen": obj.get("created"),
                             "last_seen": obj.get("modified"),
+                            "deprecated": deprecated,
                             "confidence_score": 0.9,
                         }
                     )
@@ -615,7 +728,10 @@ class MITRECollector:
                         "type": "actor",
                         "attack_domain": domain,
                         "name": actor_name,
-                        "aliases": obj.get("aliases", []),
+                        # 2026-10: plus the names of the groups ATT&CK revoked in its favour
+                        # (UNC2452 → APT29), so lookups and the actor alias merge find it by them.
+                        "aliases": _with_extra_aliases(obj.get("aliases", []), extra_aliases.get(obj.get("id"), [])),
+                        "deprecated": deprecated,
                         "description": description[:500],
                         "zone": sectors,
                         "tag": self.tag,
@@ -658,7 +774,9 @@ class MITRECollector:
                         # with the alias round-trip fix. (Malware aliases
                         # do NOT feed actor attribution: the old Q2
                         # Branch-3 path was removed as a forgery vector.)
-                        "aliases": obj.get("x_mitre_aliases", []) or obj.get("aliases", []),
+                        # 2026-10: plus the names of the software ATT&CK revoked in its favour.
+                        "aliases": _with_extra_aliases(_object_aliases(obj), extra_aliases.get(obj.get("id"), [])),
+                        "deprecated": deprecated,
                         # STIX 2 uses ``labels``; some bundles also use ``malware_types``.
                         "malware_types": obj.get("malware_types", []) or obj.get("labels", []),
                         "family": obj.get("name", ""),
@@ -704,6 +822,11 @@ class MITRECollector:
                         "attack_domain": domain,
                         "mitre_id": mitre_id,
                         "name": tool_name,
+                        # 2026-10: ATT&CK's aliases plus the names of the software it revoked in
+                        # this tool's favour (Ngrok S9000 → ngrok S0508). Tool aliases do not
+                        # travel through MISP (the writer tags aliases of actors and malware only).
+                        "aliases": _with_extra_aliases(_object_aliases(obj), extra_aliases.get(obj.get("id"), [])),
+                        "deprecated": deprecated,
                         "description": description[:500],
                         "tool_types": obj.get("labels", []),
                         "zone": sectors,
@@ -720,6 +843,29 @@ class MITRECollector:
                         "uses_techniques": _tool_uses.get(tool_name, []),
                     }
                 )
+
+        if revoked_ids or dropped_revoked_rels:
+            by_type: dict = {}
+            for obj in objects:
+                if obj.get("id") in revoked_ids:
+                    by_type[obj.get("type", "?")] = by_type.get(obj.get("type", "?"), 0) + 1
+            logger.info(
+                "   → [%s] skipped %d revoked ATT&CK objects %s and %d relationships that reach them; "
+                "%d successors inherit revoked names (%d revoked groups/software without a successor in the bundle, "
+                "%d with a looping or ambiguous revoked-by chain)",
+                domain,
+                len(revoked_ids),
+                dict(sorted(by_type.items())),
+                dropped_revoked_rels,
+                len(extra_aliases),
+                alias_stats["no_successor"],
+                alias_stats["unresolved"],
+            )
+        n_deprecated = sum(
+            1 for items in (techniques, tactics, actors, malware, tools) for it in items if it["deprecated"]
+        )
+        if n_deprecated:
+            logger.info("   → [%s] %d deprecated ATT&CK objects kept, marked deprecated", domain, n_deprecated)
 
         return {
             "techniques": techniques,

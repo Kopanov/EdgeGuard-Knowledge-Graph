@@ -630,6 +630,17 @@ def _validate_rel_type(name: str) -> str:
     return name
 
 
+def _mark_deprecated(data: Dict[str, Any], extra_props: Dict[str, Any]) -> None:
+    """``n.deprecated = true`` for an item ATT&CK deprecated (2026-10).
+
+    ATT&CK retires an object without a successor with ``x_mitre_deprecated: true``. The node and
+    its links stay; the flag lets consumers filter (``WHERE coalesce(n.deprecated, false) = false``).
+    Set only, never cleared: another source's item about the same node says nothing about it.
+    """
+    if data.get("deprecated") is True:
+        extra_props["deprecated"] = True
+
+
 def _validate_prop_name(name: str) -> str:
     """Raise ValueError if *name* is not a safe Cypher property identifier."""
     if not _PROP_NAME_RE.match(name):
@@ -3332,6 +3343,7 @@ class Neo4jClient:
             extra_props["pulse_ids"] = [str(data["pulse_id"])] + [str(x) for x in (data.get("report_ids") or []) if x]
         if data.get("description"):
             extra_props["description"] = data["description"]
+        _mark_deprecated(data, extra_props)
         return self.merge_node_with_source("Malware", key_props, data, source_id, extra_props=extra_props)
 
     def merge_actor(self, data: Dict, source_id: str = "mitre_attck") -> bool:
@@ -3391,6 +3403,7 @@ class Neo4jClient:
             extra_props["primary_motivation"] = data["primary_motivation"]
         if data.get("resource_level"):
             extra_props["resource_level"] = data["resource_level"]
+        _mark_deprecated(data, extra_props)
         return self.merge_node_with_source("ThreatActor", key_props, data, source_id, extra_props=extra_props)
 
     def _normalize_mitre_id(self, raw: Any, *, label: str, data: Dict) -> Optional[str]:
@@ -3460,6 +3473,7 @@ class Neo4jClient:
             extra_props["name"] = data["name"]
         if data.get("description"):
             extra_props["description"] = data["description"]
+        _mark_deprecated(data, extra_props)
         return self.merge_node_with_source("Technique", key_props, data, source_id, extra_props=extra_props)
 
     def merge_tactic(self, data: Dict, source_id: str = "mitre_attck") -> bool:
@@ -3478,6 +3492,7 @@ class Neo4jClient:
             extra_props["name"] = data["name"]
         if data.get("description"):
             extra_props["description"] = data["description"]
+        _mark_deprecated(data, extra_props)
         return self.merge_node_with_source("Tactic", key_props, data, source_id, extra_props=extra_props)
 
     def merge_tool(self, data: Dict, source_id: str = "mitre_attck") -> bool:
@@ -3501,6 +3516,7 @@ class Neo4jClient:
             extra_props["description"] = data["description"]
         if data.get("aliases"):
             extra_props["aliases"] = data["aliases"]
+        _mark_deprecated(data, extra_props)
         return self.merge_node_with_source("Tool", key_props, data, source_id, extra_props=extra_props)
 
     @retry_with_backoff(max_retries=3)
