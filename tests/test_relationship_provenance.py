@@ -361,8 +361,8 @@ class TestBuildSteps:
         agg = rp.aggregated_prov_set("r", pattern, ["_xi", "_xa"], max_events=7, replace=True)
         assert (
             "r.source_refs = apoc.coll.toSet(reduce(_acc = [], _x IN "
-            f"[{pattern} | coalesce(_xi.source_refs, []) + coalesce(_xa.source_refs, [])] | _acc + _x))"
-        ) in agg
+            f"[{pattern} | [] + coalesce(_xi.source_refs, []) + coalesce(_xa.source_refs, [])] | _acc + _x))"
+        ) in agg, "every operand a list element: two plain strings never concatenate"
         assert agg.endswith("[0..7]") and "coalesce(r." not in agg
         # the default keeps the accumulating form, byte for byte
         assert rp.aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at") == (

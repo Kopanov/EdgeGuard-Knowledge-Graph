@@ -131,6 +131,10 @@ def aggregated_prov_set(
 
     def union(field: str) -> str:
         per_match = " + ".join(f"coalesce({e}.{field}, [])" for e in edge_vars)
+        if len(edge_vars) > 1:
+            # A list stored as a plain string (APOC ``combine``) must not meet another one: two
+            # strings would concatenate into one value. ``[] +`` makes every operand a list element.
+            per_match = "[] + " + per_match
         own = "" if replace else f"coalesce({rel_var}.{field}, []) + "
         return f"apoc.coll.toSet({own}reduce(_acc = [], _x IN [{pattern} | {per_match}] | _acc + _x))"
 

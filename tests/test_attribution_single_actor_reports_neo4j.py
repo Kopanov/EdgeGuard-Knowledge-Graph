@@ -88,6 +88,9 @@ CREATE (i2:Indicator:{LABEL} {{indicator_type: 'domain', value: 'two.it.example'
                                     'pterolnk::gamaredon group', 'pterolnk::gamaredon group::p2']}})
 CREATE (i3:Indicator:{LABEL} {{indicator_type: 'domain', value: 'three.it.example', uuid: 'u-i3', active: true,
         pulse_malware_actor_pairs: ['lockbit::venomous bear::p5']}})
+CREATE (i4:Indicator:{LABEL} {{indicator_type: 'domain', value: 'four.it.example', uuid: 'u-i4', active: true}})
+CREATE (i4)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: 'threatfox',
+        source_refs: 'threatfox:9'}}]->(strmal2)
 CREATE (i1)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(kaz)
 CREATE (i2)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(ptero)
 CREATE (i3)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(lb)
@@ -162,14 +165,15 @@ def _acceptance(driver, several) -> dict:
         return dict(row)
 
 
-def _campaign_refs(driver) -> dict:
-    """``source_refs`` of the campaign links of Turla's campaign."""
+def _campaign_refs(driver, actor: str = "turla") -> dict:
+    """``source_refs`` of the campaign links of an actor's campaign."""
     with driver.session() as session:
         return {
             (r["n"], r["t"]): sorted(r["refs"] or [])
             for r in session.run(
-                "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'turla'}) "
-                "RETURN coalesce(n.name, n.value) AS n, type(r) AS t, r.source_refs AS refs"
+                "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: $actor}) "
+                "RETURN coalesce(n.name, n.value) AS n, type(r) AS t, r.source_refs AS refs",
+                actor=actor,
             )
         }
 
@@ -196,6 +200,12 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     assert ("pterolnk", "turla") in before and ("kazuar", "gamaredon group") in before
     assert "alienvault_otx:p2" in _campaign_refs(raw_driver)[("turla", "RUNS")]
     assert "unc-it-test" in _runs(raw_driver)
+    # An indicator path whose two links both hold a list as a plain string: two entries, never one
+    # concatenated value.
+    assert _campaign_refs(raw_driver, "gamaredon group")[("four.it.example", "PART_OF_CAMPAIGN")] == [
+        "alienvault_otx:p2",
+        "threatfox:9",
+    ]
     # The acceptance check, by hand from the fixture: twelve same-pulse links (the partner's is not
     # EdgeGuard's); five rest only on p2 (kazuar, pterolnk and strmal to gamaredon, pterolnk to turla
     # and to unc-it-test), nine name p2 (strmal2 too), norefs names no pulse.
