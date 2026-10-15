@@ -448,7 +448,7 @@ def ensure_metrics_server():
 defines **30+ alert rules** across multiple groups (collection, circuit
 breaker, health, pipeline, MISP-push, Neo4j, MISP-fetch-fallback). The
 table below highlights the **operator-relevant** subset; for the full
-list (including disk / inode / Bravo-ops alerts), grep
+list (including the disk, inode and `build_relationships` alerts), grep
 `prometheus/alerts.yml` directly. Preflight (`scripts/preflight_baseline.sh`
 `[11]`) enforces a floor of `≥ 11` rules.
 
@@ -469,14 +469,14 @@ list (including disk / inode / Bravo-ops alerts), grep
 | `EdgeGuardMispBatchPermanentFailure` | MISP push 5xx exhausted retries | critical |
 | `EdgeGuardMispSustainedBackoff` | MISP push backoff fired >1× in 15m | warning |
 | `EdgeGuardMispEventAttributesTruncated` | PR-N24 H3 — event attribute count exceeded `MAX_EVENT_ATTRIBUTES`; deferred to end of sync | warning |
-| `EdgeGuardBuildRelationshipsSilentDeath` | PR-N21 Bravo-ops — no `build_rels_completions` for 6h after baseline start | critical |
-| `EdgeGuardApocBatchPartial` | PR-N21 Bravo-ops — apoc.periodic.iterate reported per-row errors | warning |
+| `EdgeGuardBuildRelationshipsSilentDeath` | PR-N21 — no `build_rels_completions` for 6h after baseline start | critical |
+| `EdgeGuardApocBatchPartial` | PR-N21 — apoc.periodic.iterate reported per-row errors | warning |
 | **`EdgeGuardMispFetchFallbackActive`** | **PR-N31** — `sum by (branch) (rate(...{outcome="engaged"}[10m])) > 0` for 10m. Sustained engagement of the PyMISP / requests-restSearch fallback signals the primary `/events/index` is broken. | warning |
 | **`EdgeGuardMispFetchFallbackHardError`** | **PR-N31** — `sum by (branch) (rate(...{outcome="hard_error"}[5m])) > 0` for 1m. The `_MispFallbackHardError` sentinel raised in `src/run_misp_to_neo4j.py` (errors-payload, unexpected-shape, non-200 mid-pagination, or cap-hit). The dagrun has already failed (PR-N29 H1: `retries=0` on critical chain). | **critical** |
 
 The 2026-04 train added several alert classes:
 - **`SyncEventsFailed` / `SyncCoverageGap` / `Neo4jLabelDropBig`** (PR-N18) — catch silent-skip regressions where a single MISP 5xx lost ~99K NVD CVEs from the graph.
-- **`BuildRelationshipsSilentDeath` / `ApocBatchPartial`** (PR-N21 Bravo-ops) — surface the `build_relationships` post-sync silent-death and APOC partial-batch responses.
+- **`BuildRelationshipsSilentDeath` / `ApocBatchPartial`** (PR-N21) — surface the `build_relationships` post-sync silent-death and APOC partial-batch responses.
 - **`MispEventAttributesTruncated`** (PR-N24 H3) — surfaces the deferred-large-event signal.
 - **`MispFetchFallbackActive` / `MispFetchFallbackHardError`** (PR-N31) — see § "MISP fetch fallback" in [`docs/RUNBOOK.md`](RUNBOOK.md) § 8 for triage.
 
@@ -616,6 +616,6 @@ docker-compose -f docker-compose.monitoring.yml down -v
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: replaced the "11-row" alert table snapshot with a "operator-relevant subset" table + pointer to `prometheus/alerts.yml` as canonical source (30+ rules at HEAD); added the two PR-N31 fallback alerts + several other 2026-04 additions; reframed "the last three" narrative paragraph as a per-PR-train summary. Added `edgeguard_misp_fetch_fallback_active_total` Counter (labels: `branch`, `outcome`) to the implicit metrics inventory.
+_Last updated: 2026-10-15 — wording only: the PR-N21 alerts are cited by PR number, without personal names. Prior: 2026-04-26 — PR-N33 docs audit: replaced the "11-row" alert table snapshot with a "operator-relevant subset" table + pointer to `prometheus/alerts.yml` as canonical source (30+ rules at HEAD); added the two PR-N31 fallback alerts + several other 2026-04 additions; reframed "the last three" narrative paragraph as a per-PR-train summary. Added `edgeguard_misp_fetch_fallback_active_total` Counter (labels: `branch`, `outcome`) to the implicit metrics inventory.
 
 Prior: 2026-04-19 chips 5b + 5e added five new source-truthful counters: `edgeguard_source_truthful_claim_accepted_total` / `_dropped_total` / `_coerce_rejected_total` / `_future_clamp_total` (PR #42, observability for the per-source first_seen / last_seen pipeline shipped in PR #41) plus `edgeguard_source_truthful_creator_rejected_total` (PR #44, fires when the MISP tag-impersonation defense refuses a source-truthful claim). 2026-03-24: repo **`prometheus/prometheus.yml`** scrapes EdgeGuard metrics at **`host.docker.internal:8001`** (not 8000 REST). Metrics server default port **8001**._

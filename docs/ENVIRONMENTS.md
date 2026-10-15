@@ -41,7 +41,7 @@ To keep dependencies clean and reproducible, use a dedicated environment per pro
 
 **Version:** EdgeGuard requires **Python 3.12+** (`requires-python` in `pyproject.toml`, CI, and `Dockerfile`). Apache Airflow **3.2** (upgraded from 2.11 in April 2026 — see [AIRFLOW_DAGS.md § Airflow 2 to 3 upgrade](AIRFLOW_DAGS.md)) supports Python 3.10–3.14 upstream; this repository standardizes on 3.12 for a single supported interpreter line.
 
-**Pinned component versions** (PR #36 — Vanko's request to make these explicit and verifiable at runtime):
+**Pinned component versions** (PR #36 — explicit and verifiable at runtime):
 
 | Component | Pinned in | Recommended | Verified by |
 |---|---|---|---|
@@ -176,4 +176,4 @@ for the operator runbook that references the baseline lock.
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: clarified `from config import …` requires `src/` on PYTHONPATH (or editable install); removed unverified "3s pause between chunks" claim from `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` description (the only documented inter-batch throttle is `EDGEGUARD_MISP_BATCH_THROTTLE_SEC=5.0` on the MISP-push side). Prior: 2026-04-15 MISP sync tuning + baseline mutex env vars._
+_Last updated: 2026-10-15 — wording only: the pinned-versions note carries no personal name. Prior: 2026-04-26 — PR-N33 docs audit: clarified `from config import …` requires `src/` on PYTHONPATH (or editable install); removed unverified "3s pause between chunks" claim from `EDGEGUARD_NEO4J_SYNC_CHUNK_SIZE` description (the only documented inter-batch throttle is `EDGEGUARD_MISP_BATCH_THROTTLE_SEC=5.0` on the MISP-push side). Prior: 2026-04-15 MISP sync tuning + baseline mutex env vars._

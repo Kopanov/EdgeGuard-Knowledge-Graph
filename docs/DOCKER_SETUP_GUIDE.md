@@ -42,7 +42,7 @@ MISP_API_KEY=your-misp-api-key-here
 # HEAP_INITIAL is EQUAL to HEAP_MAX per Neo4j Operations Manual ("set
 # initial and max to the same value to avoid GC pauses caused by heap
 # resizing").
-# 2026-04-19 (Vanko's overnight regression): bumped tx_memory 4g→8g
+# 2026-04-19 (overnight baseline regression): bumped tx_memory 4g→8g
 # (was hitting MemoryLimitExceededException during build_relationships
 # on a 344K-node graph), container 22g→32g (was undersized at 22g for
 # even the working set), and heap_initial 4g→12g (= MAX; no mid-run
@@ -113,7 +113,7 @@ Where the "Typical RSS peak" comes from for the baseline-capable profile:
 
 The 32g cgroup limit gives ~7g headroom over typical peak — well above Neo4j's own production-safe formula (`heap + pagecache + 2g JVM + 2g OS + ~2g for Bolt/threads/Lucene = ~28g`).
 
-**The Baseline-capable profile is what landed after the 2026-04-19 overnight regression** (Vanko's run of `edgeguard_baseline`):
+**The Baseline-capable profile is what landed after the 2026-04-19 overnight regression** (an `edgeguard_baseline` run):
 
 - Old `NEO4J_TX_MEMORY_MAX=4g` was hit during `build_relationships` against a 344K-node graph — Neo4j logged `MemoryLimitExceededException` and the subprocess got stuck before Airflow's (separately-too-short) 45min timeout fired. Bumped to `8g`.
 - Old `NEO4J_CONTAINER_MEMORY_LIMIT=22g` was undersized: typical RSS during baseline (~25g) exceeded the cgroup limit, immediate OOM risk. Bumped to `32g` for ~7g headroom over typical peak.
@@ -270,6 +270,6 @@ docker exec misp_misp_1 php -i | grep "Scan this dir"
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
+_Last updated: 2026-10-15 — wording only: the 2026-04-19 regression is described without personal names. Prior: 2026-04-26 — PR-N33 docs audit: corrected "Tiny dev" container default 4g → 8g (matches `docker-compose.yml:121` `${NEO4J_CONTAINER_MEMORY_LIMIT:-8g}`).
 
-Prior: 2026-04-19 — added Recommended Neo4j memory profiles table (Tiny dev / Mid box / Baseline-capable) after the 2026-04-19 overnight baseline regression. Baseline-capable profile bumped per Vanko's findings: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX per Neo4j Operations Manual; eliminates GC pauses from resizing), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). Memory-math note clarifies that `tx_memory` is a CAP on transaction allocations, not additive to heap+pagecache._
+Prior: 2026-04-19 — added Recommended Neo4j memory profiles table (Tiny dev / Mid box / Baseline-capable) after the 2026-04-19 overnight baseline regression. Baseline-capable profile bumped per the findings of that run: `NEO4J_TX_MEMORY_MAX` 4g→8g, `NEO4J_HEAP_INITIAL` 4g→12g (= MAX per Neo4j Operations Manual; eliminates GC pauses from resizing), `NEO4J_CONTAINER_MEMORY_LIMIT` 22g→32g (adequate headroom over ~25g typical RSS peak). Memory-math note clarifies that `tx_memory` is a CAP on transaction allocations, not additive to heap+pagecache._

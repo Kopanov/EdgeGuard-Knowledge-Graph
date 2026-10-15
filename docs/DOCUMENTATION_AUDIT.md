@@ -131,7 +131,7 @@ Use paths under the repo root, e.g. `dags/edgeguard_pipeline.py` (DAG schedules)
 
 ---
 
-_Last updated: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
+_Last updated: 2026-10-15 — wording only: the PR #126 entry states the documentation rule instead of naming a review tool's rule file. Prior: 2026-06-11 — added the PR #126 entry (Stage-2 GraphRAG readiness: alias round-trip, KEV marker, ioc_normalize read-side layer, `/actors/{name}/summary`, 19 catalog shapes — see the PR train section below). Prior: 2026-04-26 — PR-N33 docs audit (6-agent fan-out)._
 
 The PR-N26 → PR-N32 train added significant capabilities that earlier
 versions of this index did not cover. Added rows for: TIMESTAMPS,
@@ -211,8 +211,9 @@ Per-PR narrative for the train (cross-doc summary):
 
 * **PR #126 (2026-06-11):** Stage-2 GraphRAG readiness (alias round-trip,
   KEV marker, `ioc_normalize` read-side layer, `/actors/{name}/summary`,
-  19 catalog queries). Per BUGBOT.md §11, updated the core graph docs for
-  the touched code paths: METHODOLOGY.md (real three-layer confidence
+  19 catalog queries). Following the review rule that a change to a code
+  path updates the matching docs, updated the core graph docs for the
+  touched code paths: METHODOLOGY.md (real three-layer confidence
   model — the aspirational `data_quality_factor` formula removed),
   KNOWLEDGE_GRAPH.md (ATTRIBUTED_TO alias note + the two new CVE range
   indexes), RESILMESH_INTEROPERABILITY.md (new REST endpoint + read-side

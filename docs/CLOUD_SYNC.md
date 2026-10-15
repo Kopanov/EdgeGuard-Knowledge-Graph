@@ -169,8 +169,8 @@ in a single pass later. No silent drift.
 
 PR #33 used to have a separate "Mechanism A" (Python-side precomputation
 of endpoint uuids, threaded into UNWIND row dicts) for
-`create_misp_relationships_batch`. Bugbot caught a mismatch class on PR
-#33 round 4 — a producer's incomplete from_key (e.g. an Indicator
+`create_misp_relationships_batch`. A review of PR #33 found a class of
+mismatches — a producer's incomplete from_key (e.g. an Indicator
 relationship with no `indicator_type`) would yield a precomputed uuid
 that didn't match the actual node's `n.uuid` because the node MERGE
 used the real key. The refactor switched all 11 batch templates to
@@ -734,4 +734,4 @@ vs EdgeGuard-derived state) and pinned by
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._
+_Last updated: 2026-10-15 — wording only: the PR #33 review finding is stated without naming the review tool. Prior: 2026-04-26 — PR-N33 docs audit: verified — no factual drift; the n.uuid / r.src_uuid / r.trg_uuid contract still reflects the live code at HEAD (parity check between `EDGEGUARD_NODE_UUID_NAMESPACE` and `EDGEGUARD_STIX_NAMESPACE` is enforced at module import). Prior: 2026-04-18 PR #41 cleanup pass._
