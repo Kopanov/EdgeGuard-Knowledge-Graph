@@ -32,7 +32,12 @@ from neo4j import time as _neo4j_time
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from ioc_normalize import canonicalize_lookup, normalize_cve_id, normalize_mitre_technique_id
+from ioc_normalize import (
+    canonicalize_lookup,
+    indicator_type_filter,
+    normalize_cve_id,
+    normalize_mitre_technique_id,
+)
 from neo4j_client import Neo4jClient
 from package_meta import package_version
 
@@ -380,13 +385,34 @@ class ThreatResponse(BaseModel):
     )
 
 
+class RelatedRelationship(BaseModel):
+    """How one related node is connected to the indicator found by ``/search/indicator`` (2026-10)."""
+
+    relationship_type: str = Field(description="Graph relationship type, e.g. INDICATES, EXPLOITS, USES_TECHNIQUE.")
+    direction: str = Field(
+        description="'outgoing' (indicator → related node) or 'incoming' (related node → indicator)."
+    )
+    labels: List[str] = Field(default=[], description="The related node's labels, sorted.")
+
+
 class IndicatorResponse(BaseModel):
     """Indicator search response."""
 
     value: str
     found: bool
     indicator: Optional[Dict[str, Any]] = None
-    related: List[Dict[str, Any]] = []
+    related: List[Dict[str, Any]] = Field(
+        default=[],
+        description=(
+            "Properties of the related nodes: Malware, ThreatActor and CVE / Vulnerability first, then "
+            "Technique, Campaign, Sector and any other label, at most 10 per kind, in a stable order."
+        ),
+    )
+    # 2026-10: optional, so a client that reads only ``related`` is unaffected.
+    relationships: List[RelatedRelationship] = Field(
+        default=[],
+        description="Same order and length as `related`: element i states how `related[i]` is connected.",
+    )
     zone: Optional[str] = None
     normalized_value: Optional[str] = Field(
         default=None,
@@ -614,13 +640,61 @@ async def query_threats(request: Request, q: ThreatQuery):
             _raise_api_error(e, "Query failed")
 
 
+# 2026-10: the related nodes of ``/search/indicator``. The undirected ``LIMIT 10`` without an
+# ``ORDER BY`` returned an arbitrary ten neighbours (Technique and Campaign nodes could crowd out the
+# malware the indicator ``INDICATES``) and no relationship type. Each (relationship type, direction,
+# node) appears once; the nodes are grouped by kind in a fixed priority — what the indicator points
+# at (Malware, ThreatActor, CVE / Vulnerability) before its context (Technique, Campaign, Sector)
+# and any other label (the alphabetically first label names the kind) — and ordered inside a kind
+# by relationship type, direction and natural key, at most ``$per_kind`` per kind. The final
+# ``ORDER BY`` carries each row's position in its kind, so the order does not depend on how the
+# runtime streams the unwound lists.
+_SEARCH_RELATED_PER_KIND = 10
+_SEARCH_RELATED_CYPHER = """
+    MATCH (n:Indicator {value: $value})-[r]-(related)
+    WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+      AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
+      AND (related.edgeguard_managed = true OR related.edgeguard_enriched = true)
+    WITH DISTINCT related, type(r) AS relationship_type,
+         CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END AS direction
+    WITH related, relationship_type, direction,
+         CASE
+           WHEN related:Malware THEN 'Malware'
+           WHEN related:ThreatActor THEN 'ThreatActor'
+           WHEN related:CVE OR related:Vulnerability THEN 'CVE'
+           WHEN related:Technique THEN 'Technique'
+           WHEN related:Campaign THEN 'Campaign'
+           WHEN related:Sector THEN 'Sector'
+           ELSE reduce(k = '', l IN labels(related) | CASE WHEN k = '' OR l < k THEN l ELSE k END)
+         END AS kind
+    WITH related, relationship_type, direction, kind,
+         CASE kind
+           WHEN 'Malware' THEN 0 WHEN 'ThreatActor' THEN 1 WHEN 'CVE' THEN 2
+           WHEN 'Technique' THEN 3 WHEN 'Campaign' THEN 4 WHEN 'Sector' THEN 5 ELSE 6
+         END AS priority
+    ORDER BY priority, kind, relationship_type, direction,
+             coalesce(related.cve_id, related.mitre_id, related.name, related.value, related.source_id),
+             related.uuid
+    WITH priority, kind,
+         collect({node: related, relationship_type: relationship_type, direction: direction})[..$per_kind] AS rows
+    UNWIND range(0, size(rows) - 1) AS position
+    WITH priority, kind, position, rows[position] AS row
+    RETURN row.node AS related, row.relationship_type AS relationship_type, row.direction AS direction,
+           labels(row.node) AS labels
+    ORDER BY priority, kind, position
+"""
+
+
 @app.post("/search/indicator", response_model=IndicatorResponse, dependencies=[Depends(_verify_api_key)])
 @limiter.limit(_RATE_LIMIT_READ)
 async def search_indicator(request: Request, s: IndicatorSearch):
     """
     Search for a specific indicator.
 
-    Returns the indicator and related threats/entities.
+    Returns the indicator and related threats/entities: ``related`` holds the related nodes'
+    properties and ``relationships`` (2026-10) the relationship type and direction of each, in
+    the same order — Malware, ThreatActor and CVE / Vulnerability before Technique, Campaign,
+    Sector and other labels, at most ``_SEARCH_RELATED_PER_KIND`` per kind.
     """
     _require_neo4j()
 
@@ -648,12 +722,14 @@ async def search_indicator(request: Request, s: IndicatorSearch):
         with neo4j_client.driver.session() as session:
             # Find the indicator
             # 2026-10 readiness check: ``zone`` was accepted and echoed but never applied.
+            # One value may be stored under several types ((indicator_type, value) is the key);
+            # the lowest type answers, so repeated searches return the same node.
             zone_value = s.zone.value if s.zone else None
             query = """
                 MATCH (n:Indicator {value: $value})
                 WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
                   AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
-                RETURN n LIMIT 1
+                RETURN n ORDER BY n.indicator_type LIMIT 1
             """
             result = session.run(query, value=normalized_value, zone=zone_value, timeout=_NEO4J_QUERY_TIMEOUT)
             record = result.single()
@@ -668,24 +744,33 @@ async def search_indicator(request: Request, s: IndicatorSearch):
 
             indicator = _node_props(record["n"])
 
-            # Find related entities
-            related_query = """
-                MATCH (n:Indicator {value: $value})--(related)
-                WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
-                  AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
-                  AND (related.edgeguard_managed = true OR related.edgeguard_enriched = true)
-                RETURN related LIMIT 10
-            """
-            related_result = session.run(
-                related_query, value=normalized_value, zone=zone_value, timeout=_NEO4J_QUERY_TIMEOUT
+            # Find related entities (2026-10: directed, typed and in a stable order; see
+            # ``_SEARCH_RELATED_CYPHER``).
+            related_rows = list(
+                session.run(
+                    _SEARCH_RELATED_CYPHER,
+                    value=normalized_value,
+                    zone=zone_value,
+                    per_kind=_SEARCH_RELATED_PER_KIND,
+                    timeout=_NEO4J_QUERY_TIMEOUT,
+                )
             )
-            related = [_node_props(r["related"]) for r in related_result]
+            related = [_node_props(r["related"]) for r in related_rows]
+            relationships = [
+                RelatedRelationship(
+                    relationship_type=r["relationship_type"],
+                    direction=r["direction"],
+                    labels=sorted(str(label) for label in (r["labels"] or [])),
+                )
+                for r in related_rows
+            ]
 
             return IndicatorResponse(
                 value=s.value,
                 found=True,
                 indicator=indicator,
                 related=related,
+                relationships=relationships,
                 zone=s.zone.value if s.zone else None,
                 normalized_value=normalized_value,
             )
@@ -773,8 +858,15 @@ def _indicator_filter_conditions(
     conditions: list[str] = []
     params: Dict[str, Any] = {}
     if indicator_type:
+        # 2026-10: the graph stores every file digest as ``hash``; md5 / sha1 / sha256 / sha512
+        # select the ``hash`` nodes whose value has that digest's hexadecimal length
+        # (``ioc_normalize.indicator_type_filter``). An exact comparison never matched.
+        graph_type, value_pattern = indicator_type_filter(indicator_type)
         conditions.append("n.indicator_type = $indicator_type")
-        params["indicator_type"] = indicator_type
+        params["indicator_type"] = graph_type
+        if value_pattern is not None:
+            conditions.append("n.value =~ $indicator_value_pattern")
+            params["indicator_value_pattern"] = value_pattern
     if zone:
         conditions.append("$zone IN n.zone")
         params["zone"] = zone
@@ -908,6 +1000,9 @@ class CdbListEnum(str, Enum):
 # Wazuh CDB export: hard cap on exported entries. One bounded query — CDB
 # lists of this size load fine in wazuh-analysisd; raise deliberately (with
 # a Wazuh-side memory check) if a deployment ever needs more.
+# 2026-10: the cap keeps the most recently updated entries (it kept the
+# alphabetically first ones), and a cut list is reported in the
+# ``X-EdgeGuard-Truncated`` response header and the log.
 _CDB_EXPORT_MAX_ENTRIES = 50_000
 
 # CDB keys: the file format splits each line on the FIRST ':' — a key
@@ -918,6 +1013,11 @@ _CDB_EXPORT_MAX_ENTRIES = 50_000
 # instead of CDB lookups. Embedded newlines would likewise corrupt the
 # line-oriented format.
 _CDB_KEY_FORBIDDEN_CHARS = (":", "\n", "\r")
+
+# 2026-10: newest first by the last sync that reported the entry (``n.last_updated``; Cypher sorts
+# null first in a descending order, hence the explicit null rank), ties by key; one row beyond the
+# cap so the route can tell a cut list from a complete one.
+_CDB_ORDER_AND_LIMIT = "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1"
 
 
 def _cdb_value_sanitize(text: str) -> str:
@@ -958,7 +1058,13 @@ async def export_wazuh_cdb(
       * Keys containing ':' / line breaks are skipped (see
         ``_CDB_KEY_FORBIDDEN_CHARS`` — excludes url/ipv6 types), count in
         the ``X-EdgeGuard-Skipped`` header.
-      * Output is sorted by key for deterministic diffs between pulls.
+      * At most ``_CDB_EXPORT_MAX_ENTRIES`` entries. Since 2026-10 the
+        entries are ordered newest first by ``n.last_updated`` (the last
+        sync that reported them; entries without it last), ties by key, so
+        the cap keeps the most recently updated entries and the order is
+        deterministic; before, the cap kept the alphabetically first keys.
+        ``X-EdgeGuard-Truncated: true`` (and a log warning) says the list
+        was cut; ``false`` that it is complete.
 
     Filter logic is shared with ``/indicators`` and ``/vulnerabilities``
     via ``_indicator_filter_conditions`` / ``_vulnerability_filter_conditions``
@@ -975,14 +1081,14 @@ async def export_wazuh_cdb(
             match_clause = "MATCH (n:Indicator)"
             return_clause = (
                 "RETURN n.value AS key, n.indicator_type AS type, "
-                "n.confidence_score AS confidence ORDER BY key LIMIT $cap"
+                f"n.confidence_score AS confidence {_CDB_ORDER_AND_LIMIT}"
             )
         else:
             conditions, params = _vulnerability_filter_conditions(None, zone_value)
             match_clause = "MATCH (n)"
             return_clause = (
                 "RETURN n.cve_id AS key, n.severity AS severity, n.cvss_score AS cvss, "
-                "n.cisa_exploit_add AS kev ORDER BY key LIMIT $cap"
+                f"n.cisa_exploit_add AS kev {_CDB_ORDER_AND_LIMIT}"
             )
 
         # Operational blocklist: decay-retired entries must drop out.
@@ -997,27 +1103,36 @@ async def export_wazuh_cdb(
         lines: list[str] = []
         skipped = 0
         with neo4j_client.driver.session() as session:
-            result = session.run(query, **params, timeout=_NEO4J_QUERY_TIMEOUT)
-            for r in result:
-                key = r["key"]
-                if not isinstance(key, str) or not key.strip():
-                    skipped += 1
-                    continue
-                key = key.strip()
-                if any(ch in key for ch in _CDB_KEY_FORBIDDEN_CHARS):
-                    skipped += 1
-                    continue
-                if list_name is CdbListEnum.indicators:
-                    itype = _cdb_value_sanitize(r["type"] or "unknown")
-                    conf = r["confidence"]
-                    value = f"type={itype} confidence={conf:.2f}" if isinstance(conf, (int, float)) else f"type={itype}"
-                else:
-                    sev = _cdb_value_sanitize(r["severity"] or "unknown")
-                    cvss = r["cvss"]
-                    value = f"severity={sev} cvss={cvss}" if isinstance(cvss, (int, float)) else f"severity={sev}"
-                    if r["kev"]:
-                        value += f" kev={_cdb_value_sanitize(r['kev'])}"
-                lines.append(f"{key}:{value}")
+            # One row more than the cap: its presence is what tells a cut list from a complete one.
+            rows = list(session.run(query, **params, timeout=_NEO4J_QUERY_TIMEOUT))
+        truncated = len(rows) > _CDB_EXPORT_MAX_ENTRIES
+        if truncated:
+            logger.warning(
+                "Wazuh CDB export truncated: list=%s zone=%s kept the %d most recently updated entries",
+                list_name.value,
+                zone_value or "all",
+                _CDB_EXPORT_MAX_ENTRIES,
+            )
+        for r in rows[:_CDB_EXPORT_MAX_ENTRIES]:
+            key = r["key"]
+            if not isinstance(key, str) or not key.strip():
+                skipped += 1
+                continue
+            key = key.strip()
+            if any(ch in key for ch in _CDB_KEY_FORBIDDEN_CHARS):
+                skipped += 1
+                continue
+            if list_name is CdbListEnum.indicators:
+                itype = _cdb_value_sanitize(r["type"] or "unknown")
+                conf = r["confidence"]
+                value = f"type={itype} confidence={conf:.2f}" if isinstance(conf, (int, float)) else f"type={itype}"
+            else:
+                sev = _cdb_value_sanitize(r["severity"] or "unknown")
+                cvss = r["cvss"]
+                value = f"severity={sev} cvss={cvss}" if isinstance(cvss, (int, float)) else f"severity={sev}"
+                if r["kev"]:
+                    value += f" kev={_cdb_value_sanitize(r['kev'])}"
+            lines.append(f"{key}:{value}")
 
         body = "\n".join(lines) + ("\n" if lines else "")
         filename = f"edgeguard_{zone_value or 'all'}_{list_name.value}.cdb"
@@ -1027,6 +1142,7 @@ async def export_wazuh_cdb(
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "X-EdgeGuard-Entries": str(len(lines)),
                 "X-EdgeGuard-Skipped": str(skipped),
+                "X-EdgeGuard-Truncated": "true" if truncated else "false",
             },
         )
 
@@ -1053,10 +1169,14 @@ async def graph_explore(
     Return Cytoscape.js-formatted graph data for the interactive visualization.
 
     Views:
-    - **attacks**: Malware → Indicators → Sectors
+    - **attacks**: Indicators → the Malware they indicate (``INDICATES``), and the Indicators' sectors
     - **actors**: ThreatActors → Techniques (→ Tactics)
     - **indicators**: IOCs grouped by zone
     - **vulnerabilities**: CVEs sized by CVSS, CISA KEV highlighted
+
+    Edges named after a graph relationship (``INDICATES``, ``EMPLOYS_TECHNIQUE``, ``IN_TACTIC``) point
+    the way the relationship does; ``BELONGS_TO`` / ``IN_ZONE`` link a node to a sector node built
+    from its ``zone`` property and are not graph relationships.
     """
     _require_neo4j()
 
@@ -1067,6 +1187,9 @@ async def graph_explore(
     nodes: list = []
     edges: list = []
     seen_ids: set = set()
+    # 2026-10: one edge per (source, target, type); a node reached on several rows (an indicator
+    # of two malware, a technique of two actors) added its sector / tactic edge once per row.
+    seen_edges: set = set()
 
     def _add_node(nid: str, label: str, ntype: str, extra: dict | None = None):
         if nid not in seen_ids:
@@ -1077,6 +1200,9 @@ async def graph_explore(
             nodes.append({"data": data})
 
     def _add_edge(src: str, tgt: str, etype: str, extra: dict | None = None):
+        if (src, tgt, etype) in seen_edges:
+            return
+        seen_edges.add((src, tgt, etype))
         data = {"source": src, "target": tgt, "type": etype}
         if extra:
             data.update(extra)
@@ -1085,31 +1211,29 @@ async def graph_explore(
     try:
         with neo4j_client.driver.session(default_access_mode="READ") as session:
             if view == GraphView.attacks:
-                # Malware → Indicators → Sectors
+                # Indicators → the Malware they indicate, and the Indicators' sectors
                 zone_ind = ""
                 if zone:
                     zone_ind = "AND $zone IN coalesce(i.zone, [])"
 
-                # Malware → Indicator edges are INDICATES (dropped/observed
-                # artifact) or DROPS (file drop). The pre-2026-04 filter
-                # included a generic "USES" type which was unreachable here
-                # — USES used to mean (Actor/Malware) → Technique, not
-                # Malware → Indicator. The generic USES edge type was
-                # retired entirely in PR #41 / PR-N1; only the two valid
-                # Malware → Indicator edge types remain.
+                # 2026-10: every writer creates (Indicator)-[:INDICATES]->(Malware)
+                # (build_relationships, the sync's relationship batches, neo4j_client); the view
+                # matched (Malware)-[INDICATES|DROPS]->(Indicator), a direction and a DROPS type
+                # nothing writes, so the default view was always empty. The edge is drawn in
+                # graph direction, indicator → malware.
                 cypher = f"""
-                    MATCH (m:Malware)-[r]->(i:Indicator)
-                    WHERE type(r) IN ['INDICATES', 'DROPS'] AND (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
+                    MATCH (i:Indicator)-[:INDICATES]->(m:Malware)
+                    WHERE (m.edgeguard_managed = true OR m.edgeguard_enriched = true)
+                      AND (i.edgeguard_managed = true OR i.edgeguard_enriched = true)
                     {zone_ind}
-                    WITH m, i, type(r) AS rel_type
+                    WITH m, i
                     LIMIT $limit
                     RETURN m.name AS malware_name, m.family AS malware_family,
                            i.value AS ind_value, i.indicator_type AS ind_type,
                            coalesce(i.zone, ['global']) AS ind_zones,
                            i.confidence_score AS ind_confidence,
                            i.indicator_role AS ind_role,
-                           i.threat_label AS ind_threat_label,
-                           rel_type
+                           i.threat_label AS ind_threat_label
                 """
                 result = session.run(cypher, limit=limit, **zone_param, timeout=_NEO4J_QUERY_TIMEOUT)
                 for r in result:
@@ -1128,7 +1252,7 @@ async def graph_explore(
                             "threat_label": r.get("ind_threat_label", ""),
                         },
                     )
-                    _add_edge(mid, iid, r.get("rel_type", "INDICATES"))
+                    _add_edge(iid, mid, "INDICATES")
                     for z in r.get("ind_zones", []):
                         sid = f"sector:{z}"
                         _add_node(sid, z.title(), "sector", {"sector": z})
@@ -1227,9 +1351,9 @@ async def graph_explore(
 
             elif view == GraphView.vulnerabilities:
                 # CVEs sized by CVSS, CISA KEV highlighted.
-                # CISA KEV fields live on CVE nodes (via merge_cve), while CVSS/severity
-                # live on Vulnerability nodes (via merge_vulnerability). Query both labels
-                # and coalesce so KEV data is never missed.
+                # The sync writes CVE nodes (score, severity and KEV fields, ``merge_cve``);
+                # Vulnerability nodes come only from the per-item fallback and the alert path
+                # (2026-10). Both labels are read and grouped by cve_id, so a twin pair is one node.
                 zone_vuln = ""
                 if zone:
                     zone_vuln = "AND $zone IN coalesce(n.zone, [])"
@@ -1316,7 +1440,15 @@ async def stix_types(request: Request):
     without having to read the docstring on the export endpoint. Each
     entry includes a working example identifier so a smoke test can
     curl straight from the response.
+
+    2026-10: each ``returns`` names every graph relationship the export
+    walks at ``depth=2`` (the 2026-10 additions included), and
+    ``relationship_mappings`` lists the STIX relationship each graph
+    relationship becomes — derived from the exporter's own table
+    (``stix_exporter.stix_relationship_mappings``).
     """
+    from stix_exporter import stix_relationship_mappings
+
     return {
         "media_type": "application/stix+json;version=2.1",
         "default_depth": 2,
@@ -1330,31 +1462,46 @@ async def stix_types(request: Request):
                 "name": "indicator",
                 "identifier": "indicator value (IP, domain, hash, URL)",
                 "example": "1.2.3.4",
-                "returns": "indicator + INDICATES/EXPLOITS/USES_TECHNIQUE/TARGETS 1-hop",
+                "returns": (
+                    "indicator + 1 hop: INDICATES malware, EXPLOITS CVEs, USES_TECHNIQUE techniques, "
+                    "TARGETS sectors, PART_OF_CAMPAIGN campaigns"
+                ),
                 "primary_relation": "indicates→malware",
             },
             {
                 "name": "actor",
                 "identifier": "ThreatActor name or alias (case-insensitive)",
                 "example": "APT28",
-                "returns": "actor + attributed malware + techniques + campaigns",
+                "returns": (
+                    "actor + attributed malware (ATTRIBUTED_TO), EMPLOYS_TECHNIQUE techniques, the "
+                    "IMPLEMENTS_TECHNIQUE techniques of the attributed malware, RUNS campaigns, "
+                    "USES_MALWARE malware, USES_TOOL tools, EXPLOITS CVEs, TARGETS sectors"
+                ),
                 "primary_relation": "intrusion-set uses malware",
             },
             {
                 "name": "technique",
-                "identifier": "MITRE ATT&CK technique ID",
+                "identifier": "MITRE ATT&CK technique ID (a revoked ID exports its successor)",
                 "example": "T1059",
-                "returns": "technique + actors/malware/tools/indicators that use it",
+                "returns": (
+                    "technique + actors (EMPLOYS_TECHNIQUE), malware and tools (IMPLEMENTS_TECHNIQUE), "
+                    "indicators (USES_TECHNIQUE), parent technique and sub-techniques (SUBTECHNIQUE_OF)"
+                ),
                 "primary_relation": "actors uses technique",
             },
             {
                 "name": "cve",
                 "identifier": "CVE identifier",
                 "example": "CVE-2021-44228",
-                "returns": "CVE + exploiting indicators + affected sectors",
+                "returns": (
+                    "CVE + exploiting indicators, threat actors and malware (EXPLOITS) + affected sectors (AFFECTS)"
+                ),
                 "primary_relation": "indicators related-to CVE",
             },
         ],
+        # Graph relationship → STIX relationship, in graph direction; pairs not listed are
+        # exported as ``related-to``.
+        "relationship_mappings": stix_relationship_mappings(),
     }
 
 

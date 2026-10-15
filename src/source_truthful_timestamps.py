@@ -215,6 +215,22 @@ except ImportError:  # pragma: no cover — defensive
 # install, not a test-context issue, so no defensive fallback.
 from source_trust import is_attribute_creator_trusted, safe_orgc_for_log  # noqa: E402
 
+# 2026-10: the Neo4j driver's temporal types, which ``iso_str`` converts to their Python
+# equivalents before formatting. The driver is a runtime dependency; the guard only keeps this
+# module importable in a context without it.
+try:
+    from neo4j.time import Date as _Neo4jDate
+    from neo4j.time import DateTime as _Neo4jDateTime
+    from neo4j.time import Time as _Neo4jTime
+
+    # Only real classes: a test module that stubs ``neo4j`` with a mock must not make
+    # ``isinstance`` raise.
+    _NEO4J_TEMPORAL_TYPES: Tuple[type, ...] = tuple(
+        t for t in (_Neo4jDate, _Neo4jDateTime, _Neo4jTime) if isinstance(t, type)
+    )
+except ImportError:  # pragma: no cover — defensive
+    _NEO4J_TEMPORAL_TYPES = ()
+
 # ---------------------------------------------------------------------------
 # Sanity bounds for int/float Unix epoch parsing in coerce_iso
 # ---------------------------------------------------------------------------
@@ -588,12 +604,26 @@ def iso_str(val: Any) -> Optional[str]:
     plain ISO string at every read site that hands the value to a
     third-party serializer.
 
-    Both ``neo4j.time.DateTime`` and Python's ``datetime.datetime``
-    expose ``.isoformat()``; for any other type we fall back to ``str()``
-    which is correct for already-string values and harmless for None.
+    A ``neo4j.time`` ``Date`` / ``DateTime`` / ``Time`` is converted with
+    ``to_native()`` before it is formatted (2026-10): the driver type's own
+    ``isoformat()`` always prints nine fractional digits (nanoseconds,
+    ``.000000000`` included), which ``stix2`` 3.0.2 rejects (at most six),
+    so every STIX export of a node the sync wrote with Cypher ``datetime()``
+    answered HTTP 500. The native value keeps microseconds and prints the
+    fraction only when it is not zero. Python's ``datetime`` / ``date`` /
+    ``time`` are formatted with their own ``.isoformat()``; for any other
+    type we fall back to ``str()``, which is correct for already-string
+    values and harmless for None.
     """
     if val is None:
         return None
+    if _NEO4J_TEMPORAL_TYPES and isinstance(val, _NEO4J_TEMPORAL_TYPES):
+        try:
+            val = val.to_native()  # type: ignore[attr-defined]  # the driver's Date / DateTime / Time
+        except (TypeError, ValueError, OverflowError):
+            # Outside Python's range: the driver's own form below; the STIX boundary
+            # (``stix_exporter._stix_ts``) still cuts the fraction to six digits.
+            pass
     if hasattr(val, "isoformat"):
         try:
             return val.isoformat()
