@@ -325,6 +325,14 @@ class TestStixExport:
     def test_a_missing_map_keeps_the_id(self, no_map):
         assert [p["mid"] for p in self._export("T1086")] == ["T1086"]
 
+    def test_the_request_id_is_logged_at_debug_only_and_normalised(self, caplog):
+        """A request parameter: never above DEBUG, never the raw value (a newline would add a line)."""
+        with caplog.at_level(logging.DEBUG, logger="stix_exporter"):
+            assert [p["mid"] for p in self._export("\nt1086 ")] == ["T1059.001"]
+        lines = [r for r in caplog.records if "revoked ATT&CK id" in r.getMessage()]
+        assert lines and all(r.levelno == logging.DEBUG for r in lines)
+        assert all("\n" not in r.getMessage() and "T1086" in r.getMessage() for r in lines)
+
 
 def test_all_sites_load_the_map_once(monkeypatch):
     """One read per process: the sites share ``attack_revoked``'s cache."""

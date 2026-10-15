@@ -1139,8 +1139,12 @@ class StixExporter:
         limit = _clamp_limit(limit)
         successor = load_revoked_ids().technique_successor(mitre_id)
         if successor is not None:
-            logger.info(
-                "STIX export: technique %s is a revoked ATT&CK id; exporting its successor %s", mitre_id, successor
+            # A request parameter: logged at DEBUG, and only as the normalised id that matched the
+            # map (an ATT&CK id pattern), never the raw value (no line can be injected).
+            logger.debug(
+                "STIX export: technique %s is a revoked ATT&CK id; exporting its successor %s",
+                str(mitre_id).strip().upper(),
+                successor,
             )
             mitre_id = successor
         # ``Technique.mitre_id`` is unique, so the seed is a single row
