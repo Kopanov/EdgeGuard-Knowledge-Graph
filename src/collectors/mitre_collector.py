@@ -749,6 +749,10 @@ class MITRECollector:
                             "mitre_id": mitre_id,
                             "name": obj.get("name", ""),
                             "shortname": shortname,
+                            # 2026-10: ATT&CK's description of the tactic. It was read for zoning only, so
+                            # MISP held MISPWriter's placeholder "MITRE ATT&CK tactic" and the sync stored
+                            # that as every Tactic node's description.
+                            "description": tactic_desc[:500],
                             "zone": self.detect_sectors(tactic_desc) or ["global"],
                             "tag": self.tag,
                             "source": [self.tag],

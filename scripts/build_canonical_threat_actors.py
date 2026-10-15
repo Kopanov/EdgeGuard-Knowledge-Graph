@@ -1907,10 +1907,12 @@ def format_report(report: Mapping[str, Any], top: int = 50) -> str:
 # --------------------------------------------------------------------------- graph export (read-only)
 
 # An ATT&CK node's ``aliases`` are not ATT&CK's alone: the sync accumulates every source's aliases
-# on the node and the actor alias merge adds the names it folds in, and another feed can overwrite
-# its ``description``. The record MITRE delivered is kept on the node's SOURCED_FROM edge to the
-# ATT&CK source (``raw_data``, written when the edge is created): its aliases and the group link
-# in its description are ATT&CK's own.
+# on the node and the actor alias merge adds the names it folds in. The record MITRE delivered is
+# kept on the node's SOURCED_FROM edge to the ATT&CK source (``raw_data``, written when the edge is
+# created): its aliases are ATT&CK's own. Its ``description`` is ATT&CK's too since 2026-10 (only
+# MITRE's record sets it, any other source only fills it); a graph built before that may still hold
+# the text of the feed merged last there until it is repaired (RUNBOOK "Repairing Malware,
+# ThreatActor and Tool descriptions"), so the group link is read from the delivered record first.
 _EXPORT_CYPHER = """
 MATCH (a:ThreatActor)
 OPTIONAL MATCH (a)-[sf:SOURCED_FROM]->(:Source {source_id: $mitre_source})
