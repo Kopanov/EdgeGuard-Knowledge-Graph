@@ -4922,13 +4922,24 @@ class Neo4jClient:
         # splice this helper. The dedup-concat fragments come from
         # _dedup_concat_clause / _dedup_concat_optional_clause so the eventual
         # native-Cypher migration changes those two functions only.
-        def _set_clause(src_var: str, trg_var: str, extra_set: str = "") -> str:
+        def _set_clause(src_var: str, trg_var: str, extra_set: str = "", curated: bool = False) -> str:
             sources_dedup = _dedup_concat_clause("r.sources", "[row.source]")
             refs_dedup = _dedup_concat_clause("r.source_refs", "coalesce(row.source_refs, [])")
             misp_dedup = _dedup_concat_optional_clause(
                 "r.misp_event_ids", "row.misp_event_id", require_nonempty_string=True
             )
             extra = f"\n            {extra_set}," if extra_set else ""
+            # 2026-10 (curated packages, label takeover fix): a curated claim never relabels a link
+            # that already exists. It sets its label and 0.85 ON CREATE only, on a link the claim
+            # itself creates; on an existing link it adds its provenance and leaves ``match_type``
+            # and ``confidence_score`` as they are. Under the maximum rule below, a 0.85 claim
+            # turned an ``otx_pulse`` (0.6) link into a curated one, and the OTX label is written on
+            # creation only, so it never came back.
+            on_create = (
+                "ON CREATE SET r.match_type = row.match_type, r.confidence_score = row.confidence\n        "
+                if curated
+                else ""
+            )
             # PR-N10 (7-agent audit Cross-Checker BLOCK 1): respect the
             # calibrator's demotion stamp. Pre-fix this batched helper
             # (the chokepoint for create_misp_relationships_batch, called
@@ -4949,16 +4960,23 @@ class Neo4jClient:
             # adds to the lists and never replaces them; the single
             # ``r.source_id`` (last writer wins) was dropped.
             return (
-                f"SET r.sources = {sources_dedup},\n"
+                on_create + f"SET r.sources = {sources_dedup},\n"
                 f"            r.source_refs = {refs_dedup},\n"
-                # 2026-10 (aging logic check): a weaker later row never lowers an edge — the label follows
-                # the stronger evidence and the confidence keeps the maximum (same rule as the TLP ladder
-                # on nodes). ``match_type`` is evaluated first so it still sees the previous confidence.
-                f"            r.match_type = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} >= r.confidence_score "
-                f"THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END,\n"
-                f"            r.confidence_score = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} > r.confidence_score "
-                f"THEN {confidence_expr} ELSE r.confidence_score END,\n"
-                f"            r.edgeguard_managed = true,{extra}\n"
+                + (
+                    ""
+                    if curated
+                    # 2026-10 (aging logic check): a weaker later row never lowers an edge — the label
+                    # follows the stronger evidence and the confidence keeps the maximum (same rule as
+                    # the TLP ladder on nodes). ``match_type`` is evaluated first so it still sees the
+                    # previous confidence.
+                    else (
+                        f"            r.match_type = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} >= r.confidence_score "
+                        f"THEN coalesce(row.match_type, r.match_type) ELSE r.match_type END,\n"
+                        f"            r.confidence_score = CASE WHEN r.confidence_score IS NULL OR {confidence_expr} > r.confidence_score "
+                        f"THEN {confidence_expr} ELSE r.confidence_score END,\n"
+                    )
+                )
+                + f"            r.edgeguard_managed = true,{extra}\n"
                 f"            r.misp_event_ids = {misp_dedup},\n"
                 f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
                 f"            r.updated_at = datetime(),\n"
@@ -5093,48 +5111,50 @@ class Neo4jClient:
 
         # 2026-10 (curated packages): exact canonical names on both ends — never aliases (aliases
         # are rehydrated from MISP tags; matching on them under a curated label would be the
-        # forgery vector build_relationships Q2 branch 3 was removed for).
+        # forgery vector build_relationships Q2 branch 3 was removed for). Only curated-package
+        # rows reach these six templates; their label and confidence are written on creation only
+        # (``_set_clause(curated=True)``).
         q_actor_employs_exact = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor {{name: row.actor}})
         MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
-        {_set_clause("a", "t")}
+        {_set_clause("a", "t", curated=True)}
         """
         q_malware_implements_exact = f"""
         UNWIND $rows AS row
         MATCH (m:Malware {{name: row.entity}})
         MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)
-        {_set_clause("m", "t")}
+        {_set_clause("m", "t", curated=True)}
         """
         q_actor_uses_malware = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor {{name: row.subject}})
         MATCH (m:Malware {{name: row.malware}})
         MERGE (a)-[r:USES_MALWARE]->(m)
-        {_set_clause("a", "m")}
+        {_set_clause("a", "m", curated=True)}
         """
         q_actor_uses_tool = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor {{name: row.subject}})
         MATCH (t:Tool {{mitre_id: row.tool}})
         MERGE (a)-[r:USES_TOOL]->(t)
-        {_set_clause("a", "t")}
+        {_set_clause("a", "t", curated=True)}
         """
         q_actor_exploits = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor {{name: row.subject}})
         MATCH (c:CVE {{cve_id: row.cve_id}})
         MERGE (a)-[r:EXPLOITS]->(c)
-        {_set_clause("a", "c")}
+        {_set_clause("a", "c", curated=True)}
         """
         q_malware_exploits = f"""
         UNWIND $rows AS row
         MATCH (m:Malware {{name: row.subject}})
         MATCH (c:CVE {{cve_id: row.cve_id}})
         MERGE (m)-[r:EXPLOITS]->(c)
-        {_set_clause("m", "c")}
+        {_set_clause("m", "c", curated=True)}
         """
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:

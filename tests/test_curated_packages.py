@@ -2,10 +2,11 @@
 
 A package (e.g. ``YYYY-MM-DD_EdgeGuard_CoreIdeas_package``) becomes one MISP event; each
 actor / malware attribute names an existing node and carries its claims in a
-``CURATED_CLAIMS:`` comment. The sync turns every claim into a relationship labelled with
-the package's curated label (``coreideas_curated``, else ``curated_other``) at 0.85, with the
-claim's own source in ``r.sources`` and its record id in ``r.source_refs``, MATCHing both
-ends — a package never creates nodes and never changes the node it names.
+``CURATED_CLAIMS:`` comment. The sync turns every claim into a relationship, MATCHing both
+ends — a package never creates nodes and never changes the node it names. A link the claim
+creates gets the package's curated label (``coreideas_curated``, else ``curated_other``) at
+0.85; a link that already exists keeps its label and confidence. Either way the claim's own
+source goes into ``r.sources`` and its record id into ``r.source_refs``.
 """
 
 from __future__ import annotations
@@ -261,6 +262,137 @@ def _client_and_run(rows):
     client, captured = _capturing_client()
     client.create_misp_relationships_batch(rows, source_id="misp")
     return client, captured
+
+
+def _one_claim_of_each_kind():
+    """Rows for all six curated templates (actor and malware subjects)."""
+    actor = _curated_claim_rows(
+        [
+            {"p": "uses_technique", "o": "T1566", "id": "a"},
+            {"p": "uses_malware", "o": "emotet", "id": "b"},
+            {"p": "uses_tool", "o": "S0002", "id": "c"},
+            {"p": "exploits", "o": "CVE-2021-44228", "id": "d"},
+        ],
+        "ThreatActor",
+        {"name": "apt29"},
+        "coreideas",
+        "5",
+    )
+    malware = _curated_claim_rows(
+        [{"p": "implements_technique", "o": "T1486", "id": "e"}, {"p": "exploits", "o": "CVE-2017-11882", "id": "f"}],
+        "Malware",
+        {"name": "lockbit"},
+        "coreideas",
+        "5",
+    )
+    return actor + malware
+
+
+def _split_top_level(text, sep=","):
+    """``text`` split on ``sep`` outside parentheses / brackets / braces."""
+    parts, depth, current = [], 0, []
+    for ch in text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    parts.append("".join(current))
+    return parts
+
+
+def _assignments(clause):
+    """``{property: expression}`` for every ``r.<property> = <expression>`` of a SET clause."""
+    out = {}
+    for part in _split_top_level(clause):
+        name, sep, expr = part.strip().partition("=")
+        if sep and name.strip().startswith("r."):
+            out[name.strip()[2:]] = " ".join(expr.split())
+    return out
+
+
+def _merge_clauses(query):
+    """``(on_create, set_)``: the assignments of the ``ON CREATE SET`` (empty when the template has
+    none) and of the plain ``SET`` that follow the template's ``MERGE``."""
+    after_merge = query.split("MERGE ", 1)[1].split("\n", 1)[1]
+    body = after_merge.split("RETURN ", 1)[0]
+    on_create = {}
+    if body.lstrip().startswith("ON CREATE SET "):
+        first, body = body.lstrip()[len("ON CREATE SET ") :].split("\n", 1)
+        on_create = _assignments(first)
+    set_text = body.lstrip()
+    assert set_text.startswith("SET "), set_text[:80]
+    return on_create, _assignments(set_text[len("SET ") :])
+
+
+def _after_write(link, query, created):
+    """The link's properties after the template's write; written properties hold ``<written>``.
+
+    On a link MERGE creates, ``ON CREATE SET`` and ``SET`` both run; on an existing link only
+    ``SET`` does. ``row.<field>`` expressions are read as the row's value.
+    """
+    on_create, set_ = _merge_clauses(query)
+    out = dict(link)
+    for assignments in (on_create, set_) if created else (set_,):
+        for prop, expr in assignments.items():
+            out[prop] = expr if expr.startswith("row.") else "<written>"
+    return out
+
+
+class TestCuratedClaimsNeverRelabel:
+    """Label takeover fix (2026-10): a curated claim writes its label and 0.85 only on a link it
+    creates; on an existing link (an OTX ``otx_pulse`` 0.6 link, say) it adds its provenance and
+    leaves ``match_type`` and ``confidence_score`` as they are. The OTX label is written on
+    creation only, so a curated label written over it never came back."""
+
+    OTX_LINK = {"match_type": "otx_pulse", "confidence_score": 0.6, "sources": ["alienvault_otx"]}
+
+    def _curated_queries(self):
+        _, captured = _client_and_run(_one_claim_of_each_kind())
+        queries = {q.split("MERGE ")[1].split("\n")[0].strip(): q for q, _ in captured}
+        assert len(queries) == 6, sorted(queries)
+        return queries
+
+    def test_an_existing_link_keeps_its_label_and_confidence(self):
+        for merge, query in self._curated_queries().items():
+            after = _after_write(self.OTX_LINK, query, created=False)
+            assert (after["match_type"], after["confidence_score"]) == ("otx_pulse", 0.6), merge
+            assert after["sources"] == "<written>", f"{merge}: the curated source is still added"
+            assert {"source_refs", "misp_event_ids"} <= set(after), merge
+
+    def test_a_link_the_claim_creates_gets_the_curated_label_and_confidence(self):
+        for merge, query in self._curated_queries().items():
+            after = _after_write({}, query, created=True)
+            assert (after["match_type"], after["confidence_score"]) == ("row.match_type", "row.confidence"), merge
+        rows = _one_claim_of_each_kind()
+        assert {(r["match_type"], r["confidence"]) for r in rows} == {("coreideas_curated", 0.85)}
+
+    def test_on_create_follows_the_merge_directly(self):
+        """Cypher accepts ``ON CREATE SET`` only immediately after ``MERGE``."""
+        for merge, query in self._curated_queries().items():
+            assert f"MERGE {merge}\n        ON CREATE SET r.match_type = row.match_type" in query, merge
+
+    def test_feed_templates_keep_the_stronger_evidence_rule(self):
+        """Control: non-curated rows still move a link's label and confidence to stronger evidence."""
+        rel = {
+            "rel_type": "EMPLOYS_TECHNIQUE",
+            "from_type": "ThreatActor",
+            "from_key": {"name": "apt29"},
+            "to_type": "Technique",
+            "to_key": {"mitre_id": "T1566"},
+            "confidence": 0.8,
+            "match_type": "misp_attribute_tag",
+        }
+        ((query, _rows),) = _client_and_run([rel])[1]
+        on_create, set_ = _merge_clauses(query)
+        assert on_create == {}
+        assert set_["match_type"].startswith("CASE WHEN r.confidence_score IS NULL OR")
+        assert set_["confidence_score"].startswith("CASE WHEN r.confidence_score IS NULL OR")
+        assert _after_write(self.OTX_LINK, query, created=False)["match_type"] == "<written>"
 
 
 # --------------------------------------------------------------------------- import script

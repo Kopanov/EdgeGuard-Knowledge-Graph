@@ -501,11 +501,12 @@ def _item_source_refs(item: Dict, source: str) -> List[str]:
 #
 # ``p`` is the predicate, ``o`` the object's key (ATT&CK id, malware name, Tool S-id, CVE id),
 # ``src`` the source that asserts the claim (defaults to the package's source) and ``id`` that
-# source's record id. Every claim becomes a relationship labelled with the package's curated
-# label (``coreideas_curated``, else ``curated_other``) at 0.85, written with MATCH on both
-# ends. A curated attribute is not merged as a node (``sync_to_neo4j`` skips it): a package
-# never creates nodes and never changes the node it names. The item still carries no
-# description, types, zones or TLP, so nothing leaks if it ever reached a merge.
+# source's record id. Every claim becomes a relationship written with MATCH on both ends: a link
+# the claim creates is labelled with the package's curated label (``coreideas_curated``, else
+# ``curated_other``) at 0.85; a link that already exists keeps its label and confidence and
+# gains the claim's provenance. A curated attribute is not merged as a node (``sync_to_neo4j``
+# skips it): a package never creates nodes and never changes the node it names. The item still
+# carries no description, types, zones or TLP, so nothing leaks if it ever reached a merge.
 _CURATED_MAX_CLAIMS_PER_ATTRIBUTE = 2000
 _CURATED_PREDICATES = CURATED_PREDICATES
 
