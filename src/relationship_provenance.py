@@ -24,7 +24,7 @@ All fragments use double quotes only: they run inside single-quoted
 
 from __future__ import annotations
 
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Sequence, Tuple, Union
 
 # Cap on ``r.misp_event_ids`` per edge; same value as
 # ``build_relationships.CRITICAL_MAX_EVENT_IDS_PER_EDGE`` (pinned by a test).
@@ -87,16 +87,23 @@ def prov_set(rel_var: str = "r") -> str:
     )
 
 
-def inherited_prov_set(rel_var: str, edge_exprs: Sequence[str], max_events: int = MAX_EVENT_IDS_PER_EDGE) -> str:
+def inherited_prov_set(
+    rel_var: str, edge_exprs: Sequence[str], max_events: int = MAX_EVENT_IDS_PER_EDGE, replace: bool = False
+) -> str:
     """``SET`` items for a link derived from other links: it inherits their provenance.
 
     ``edge_exprs`` are Cypher expressions yielding the source links (e.g. ``"_at"``), whose
-    ``sources`` / ``source_refs`` / ``misp_event_ids`` are added to ``rel_var``'s.
+    ``sources`` / ``source_refs`` / ``misp_event_ids`` are added to ``rel_var``'s. With
+    ``replace`` (2026-10) they become ``rel_var``'s: a link that rests on exactly those links
+    then names no evidence a later run removed or trimmed from them.
     """
 
     def union(field: str) -> str:
         parts = " + ".join(f"coalesce({e}.{field}, [])" for e in edge_exprs)
-        return f"apoc.coll.toSet(coalesce({rel_var}.{field}, []) + {parts})"
+        # ``[] +`` keeps a list when a source link holds one of the lists as a plain string
+        # (apoc.coll.toSet raises on a string; the accumulating form is a list concatenation).
+        own = "[] + " if replace else f"coalesce({rel_var}.{field}, []) + "
+        return f"apoc.coll.toSet({own}{parts})"
 
     return (
         f"{rel_var}.sources = {union('sources')}, "
@@ -105,18 +112,31 @@ def inherited_prov_set(rel_var: str, edge_exprs: Sequence[str], max_events: int 
     )
 
 
-def aggregated_prov_set(rel_var: str, pattern: str, edge_var: str, max_events: int = MAX_EVENT_IDS_PER_EDGE) -> str:
+def aggregated_prov_set(
+    rel_var: str,
+    pattern: str,
+    edge_var: Union[str, Sequence[str]],
+    max_events: int = MAX_EVENT_IDS_PER_EDGE,
+    replace: bool = False,
+) -> str:
     """``SET`` items for a link derived from every link matching ``pattern`` (e.g. a campaign).
 
     ``pattern`` is a Cypher path pattern binding ``edge_var``, read as a pattern
-    comprehension, e.g. ``"(a)<-[_at:ATTRIBUTED_TO]-(:Malware)"`` with ``edge_var="_at"``.
+    comprehension, e.g. ``"(a)<-[_at:ATTRIBUTED_TO]-(:Malware)"`` with ``edge_var="_at"``; a
+    pattern of several links names each of them (``["_xi", "_xa"]``). With ``replace``
+    (2026-10) the provenance of the matching links becomes ``rel_var``'s instead of being added
+    to it, so a derived link follows the removal and trimming of the links it rests on.
     """
+    edge_vars = [edge_var] if isinstance(edge_var, str) else list(edge_var)
 
     def union(field: str) -> str:
-        return (
-            f"apoc.coll.toSet(coalesce({rel_var}.{field}, []) + "
-            f"reduce(_acc = [], _x IN [{pattern} | coalesce({edge_var}.{field}, [])] | _acc + _x))"
-        )
+        per_match = " + ".join(f"coalesce({e}.{field}, [])" for e in edge_vars)
+        if len(edge_vars) > 1:
+            # A list stored as a plain string (APOC ``combine``) must not meet another one: two
+            # strings would concatenate into one value. ``[] +`` makes every operand a list element.
+            per_match = "[] + " + per_match
+        own = "" if replace else f"coalesce({rel_var}.{field}, []) + "
+        return f"apoc.coll.toSet({own}reduce(_acc = [], _x IN [{pattern} | {per_match}] | _acc + _x))"
 
     return (
         f"{rel_var}.sources = {union('sources')}, "
