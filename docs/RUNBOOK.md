@@ -386,9 +386,9 @@ Each entry: symptom → detection signal → remediation.
 
 ## Neo4j statement timeouts (`[NEO4J-TIMEOUT]`, 2026-10)
 
-- **What applies.** Every pipeline statement carries a transaction timeout that the Neo4j server enforces:
-  - `EDGEGUARD_NEO4J_READ_TIMEOUT` (default 1200 s) for the sync, relationship-build, enrichment and wipe statements;
-  - 60 s for the relationship batch writes, which fail fast on lock contention and are retried;
+- **What applies.** Every pipeline statement carries a transaction timeout that the Neo4j server enforces. The limits are protection against a statement that hangs, set loose so that a slow statement on a large graph does not reach them:
+  - `EDGEGUARD_NEO4J_READ_TIMEOUT` (default 3600 s) for the sync, relationship-build, enrichment and wipe statements;
+  - 600 s for the relationship batch writes (a batch takes seconds; deadlocks are reported at once and retried);
   - 300 s for the REST API and STIX export queries.
 
   A driver opened directly by a CLI command or a script carries none.

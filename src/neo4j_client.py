@@ -429,10 +429,14 @@ def _confidence_respect_calibrator(value) -> str:
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 # seconds; 120 s was too low for a 441K-node graph and 300 s for the 730-day "Indicator -> Malware
 # (family match)" link query (289 s on 2026-10-13, 316 s with MalwareBazaar and ATT&CK for ICS added).
-# 2026-10: 1200 s (was 900): headroom for the larger graph of a 730-day baseline; a statement that
-# runs longer is aborted by the server and logged as ``[NEO4J-TIMEOUT]`` (``_TimeoutSession``).
-NEO4J_READ_TIMEOUT = int(os.getenv("EDGEGUARD_NEO4J_READ_TIMEOUT", "1200"))
-_REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
+# 2026-10: 3600 s (was 900). The timeouts are protection against a statement that hangs, not a
+# budget: loose enough that a slow statement on the graph of a 730-day baseline never reaches them,
+# well inside the Airflow task limits (5–6 h). A statement aborted at its timeout is logged as
+# ``[NEO4J-TIMEOUT]`` (``_TimeoutSession``).
+NEO4J_READ_TIMEOUT = int(os.getenv("EDGEGUARD_NEO4J_READ_TIMEOUT", "3600"))
+# Relationship UNWIND batches (2026-10: 600 s, was 60): a batch takes seconds; the limit only stops one that
+# hangs. Deadlocks are reported by Neo4j at once and retried by the batch writer.
+_REL_QUERY_TIMEOUT = 600  # seconds
 
 # Every column ``apoc.periodic.iterate`` yields that a caller needs to judge a batched step.
 # ``errorMessages`` alone is not enough: a Neo4j heap OOM inside a batch came back with an
