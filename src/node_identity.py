@@ -393,9 +393,10 @@ def compute_node_uuid(label: str, key_dict: Dict[str, Any]) -> str:
 # * Malware/ThreatActor/Campaign name: lowercase (case never matters
 #   for identity)
 # * Indicator value with type in
-#   {ipv4, ipv6, domain, hostname, md5, sha1, sha256, sha512, ssdeep,
-#    ja3, ja3s, jarm, mutex, btc, xmr, eth}: lowercase (RFC + standard
-#   convention says these are case-insensitive)
+#   {ipv4, ipv6, domain, hostname, md5, sha1, sha256, sha512, hash,
+#    x509-fingerprint-sha1, ssdeep, imphash, ja3, ja3s, jarm, mutex}:
+#   lowercase (RFC + standard convention says these are case-insensitive;
+#   the cryptocurrency types are excluded, see the set below)
 # * Indicator value with type in {url, email, filename, regkey, cmdline}:
 #   LEFT AS-IS — case is meaningful (URL path, file path, regkey path
 #   are all case-sensitive on most systems; email local-part is
@@ -445,6 +446,9 @@ _CASE_INSENSITIVE_INDICATOR_TYPES = frozenset(
         # addresses are case-sensitive across the board (Base58 BTC/XMR,
         # EIP-55 checksummed ETH) — no crypto-address type belongs here.
         "hash",
+        # TLS certificate fingerprint (SSL Blacklist, 2026-10): a hex digest like the file
+        # hashes above, so case never matters.
+        "x509-fingerprint-sha1",
         "ssdeep",
         "imphash",
         "ja3",
