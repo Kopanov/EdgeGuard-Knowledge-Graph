@@ -89,6 +89,21 @@ COLLECTOR_SKIPS = Counter(
     ["source", "reason_class"],
 )
 
+# 2026-10: outcome of each source's most recent collector run, one series per outcome (1 for the
+# latest outcome, 0 for the others). A run that collects nothing, a conditional GET answered with
+# HTTP 304 and a skipped run all add 0 to edgeguard_indicators_collected_total; this gauge tells
+# them apart, so EdgeGuardNoIndicatorsCollected can leave out the sources whose last run was
+# ``not_modified`` or ``skipped`` (before, MITRE's daily 304 and every keyless source fired it).
+COLLECTOR_RUN_OUTCOMES = ("collected", "empty", "not_modified", "skipped", "failed")
+
+COLLECTOR_LAST_RUN_OUTCOME = Gauge(
+    "edgeguard_collector_last_run_outcome",
+    "Outcome of the most recent collector run of a source (1 = this outcome, 0 = another): "
+    "collected, empty (success, nothing collected), not_modified (HTTP 304), skipped, failed",
+    ["source", "outcome"],
+    multiprocess_mode="mostrecent",
+)
+
 COLLECTION_DURATION = Histogram(
     "edgeguard_collection_duration_seconds",
     "Time spent collecting indicators",
@@ -246,7 +261,10 @@ NEO4J_SYNC_DURATION = Histogram(
 # alert was permanently firing or permanently silent depending on eval
 # semantics. Either way it carried no signal. This gauge is written on
 # every successful sync completion and read by the alert as
-# ``time() - edgeguard_neo4j_sync_last_success_timestamp > 259200``.
+# ``time() - edgeguard_neo4j_sync_last_success_timestamp > 522000``
+# (2026-10: 145 h, the longest gap the 3-day schedule produces plus the
+# sync task's longest run; the derivation is in prometheus/alerts.yml). Since 2026-10 the
+# baseline DAG's full sync writes it too.
 NEO4J_SYNC_LAST_SUCCESS = Gauge(
     "edgeguard_neo4j_sync_last_success_timestamp",
     "Unix timestamp (seconds) of the last successful MISP→Neo4j sync "
@@ -562,6 +580,15 @@ BUILD_RELATIONSHIPS_COMPLETIONS = Counter(
     "Absence after a baseline started = silent subprocess death (OOM / SIGKILL).",
 )
 
+# 2026-10: when build_relationships last completed. EdgeGuardBuildRelationshipsSilentDeath compares it
+# with the last successful MISP→Neo4j sync, which build_relationships follows in both the scheduled
+# sync DAG and the baseline.
+BUILD_RELATIONSHIPS_LAST_COMPLETION = Gauge(
+    "edgeguard_build_relationships_last_completion_timestamp",
+    "Unix timestamp (seconds) of the last build_relationships run that reached its [BUILD_RELATIONSHIPS SUMMARY] line.",
+    multiprocess_mode="mostrecent",
+)
+
 APOC_BATCH_PARTIAL = Counter(
     "edgeguard_apoc_batch_partial_total",
     "APOC periodic.iterate batches that reported partial success (non-empty "
@@ -587,9 +614,17 @@ DAG_LAST_SUCCESS = Gauge(
     multiprocess_mode="mostrecent",
 )
 
+# 2026-10: the start time of the DAG run in progress, 0 when none is. Written by the Airflow
+# listener plugin plugins/edgeguard_dag_run_state.py: the scheduler's run-started hook sets the
+# run's start_date, the run-succeeded and run-failed hooks (scheduler, and API server for a run
+# marked by hand) set 0; with ``mostrecent`` the newest write of any process wins. Before, it was
+# refreshed on every task success and never cleared, so EdgeGuardDAGRunStuck fired from one hour
+# after a run until the DAG's next run (permanently after the baseline). The series name changed
+# with the meaning: values the former ``edgeguard_dag_run_start_timestamp`` left in the metrics
+# directory are not read by any rule.
 DAG_RUN_START = Gauge(
-    "edgeguard_dag_run_start_timestamp",
-    "Unix timestamp when the current DAG run started (0 = idle)",
+    "edgeguard_dag_run_in_progress_start_timestamp",
+    "Unix timestamp at which the DAG run in progress started (0 = no run in progress)",
     ["dag_id"],
     multiprocess_mode="mostrecent",
 )
@@ -719,6 +754,18 @@ def record_collector_skip(source: str, reason_class: str = "missing_api_key"):
     """Record that an optional collector was skipped (e.g. no API key)."""
     safe = (reason_class or "unknown").replace('"', "")[:80]
     COLLECTOR_SKIPS.labels(source=source, reason_class=safe).inc()
+
+
+def record_collector_outcome(source: str, outcome: str) -> None:
+    """Record the outcome of a source's latest collector run (see COLLECTOR_LAST_RUN_OUTCOME).
+
+    Every outcome series of the source is written, so the previous outcome drops to 0 in the same
+    step and the most-recent merge across task processes always shows exactly one outcome at 1.
+    """
+    if outcome not in COLLECTOR_RUN_OUTCOMES:
+        raise ValueError(f"unknown collector outcome {outcome!r}; expected one of {COLLECTOR_RUN_OUTCOMES}")
+    for candidate in COLLECTOR_RUN_OUTCOMES:
+        COLLECTOR_LAST_RUN_OUTCOME.labels(source=source, outcome=candidate).set(1 if candidate == outcome else 0)
 
 
 def record_collection_duration(source: str, zone: str, duration: float):
@@ -1100,9 +1147,11 @@ def record_build_relationships_completion() -> None:
     """PR-N21 Bravo-ops: call once per successful build_relationships run,
     when ``[BUILD_RELATIONSHIPS SUMMARY]`` is emitted. Absence after a
     baseline starts = silent subprocess death (OOM / SIGKILL). The
-    ``EdgeGuardBuildRelationshipsSilentDeath`` alert fires on 6h of
-    zero-rate after baseline kickoff."""
+    ``EdgeGuardBuildRelationshipsSilentDeath`` alert fires when a sync completed more than
+    15 h 25 min ago (every attempt, retries included, has ended) and no completion has been
+    stamped since (2026-10)."""
     BUILD_RELATIONSHIPS_COMPLETIONS.inc()
+    BUILD_RELATIONSHIPS_LAST_COMPLETION.set(time.time())
 
 
 def record_apoc_batch_partial(step: str) -> None:

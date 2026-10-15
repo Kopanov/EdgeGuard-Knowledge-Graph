@@ -955,6 +955,10 @@ The `default_args` dict must include `on_failure_callback` pointing to `_on_task
 
 The `default_args` dict must include `on_success_callback` pointing to `_on_task_success`. This updates the `edgeguard_dag_last_success_timestamp` Prometheus gauge for stuck-run detection. Without it, the `EdgeGuardDAGLastSuccessStale` alert becomes dead code. Flag removal of this callback.
 
+### DAG runs are marked in progress by the listener plugin only (2026-10)
+
+`edgeguard_dag_run_in_progress_start_timestamp` is written only by `plugins/edgeguard_dag_run_state.py`: `on_dag_run_running` sets the run's `start_date`, `on_dag_run_success` and `on_dag_run_failed` set 0. The scheduler calls these hooks in order when it starts and ends a run, and the API server calls the end hooks when a run is marked failed or successful by hand. `docker-compose.yml` must keep `AIRFLOW__CORE__PLUGINS_FOLDER` and the `./plugins` mount on the `airflow` service. Flag any code in `dags/` that writes `DAG_RUN_START` (a DAG-level callback runs late in the DAG processor and can clear the next run's mark, and none runs on a manual state change), a hook that can raise, and a new DAG missing from the `edgeguard:dag_run_max_seconds` recording rule in `prometheus/alerts.yml`.
+
 ### Baseline DAG must have `is_paused_upon_creation=False`
 
 `edgeguard_baseline` must set `is_paused_upon_creation=False`. Without this, manual triggers silently queue forever because Airflow starts DAGs paused by default. The `schedule_interval=None` already prevents automatic execution. Flag removal of this setting.
@@ -978,7 +982,7 @@ if self.neo4j.merge_vulnerability(item, ...):
 
 ### Prometheus stuck-run alerts require gauge wiring
 
-The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_start_timestamp` and `edgeguard_dag_last_success_timestamp` gauges being set by the DAG code. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback` or the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.
+The `EdgeGuardDAGRunStuck`, `EdgeGuardDAGLastSuccessStale` and `EdgeGuardBuildRelationshipsSilentDeath` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_in_progress_start_timestamp` (2026-10; formerly `edgeguard_dag_run_start_timestamp`; set by the listener plugin `plugins/edgeguard_dag_run_state.py`) and `edgeguard_dag_last_success_timestamp` (set by `_on_task_success`) being written. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback`, of the listener plugin or its compose mount, or of the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.
 
 ---
 

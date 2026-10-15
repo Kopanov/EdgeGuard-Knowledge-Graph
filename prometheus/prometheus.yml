@@ -37,11 +37,17 @@ scrape_configs:
   # ================================================================================
   # EdgeGuard Metrics Server (/metrics — port 8001; 8000 is FastAPI REST, not Prometheus)
   # ================================================================================
+  # 2026-10: the `metrics` service of docker-compose.yml, by service name over edgeguard_net (the
+  # monitoring stack runs in the same Compose project, see docker-compose.monitoring.yml). The
+  # previous target, host.docker.internal:8001, reached nothing on Linux: the metrics port is
+  # published on 127.0.0.1 only, and host.docker.internal resolves to the docker0 bridge address.
+  # Bare-metal install (metrics server on the host, Prometheus in Docker): replace the target with
+  # 'host.docker.internal:8001'; on Linux, also bind the server to an address the bridge reaches
+  # (EDGEGUARD_METRICS_HOST), since a 127.0.0.1 bind is not reachable from a container there.
   - job_name: 'edgeguard'
     static_configs:
-      - targets: 
-        - 'host.docker.internal:8001'  # For Docker Desktop/Mac/Windows (metrics DAG / metrics_server.py)
-        # - 'edgeguard-metrics:8001'    # If running metrics server in Docker
+      - targets:
+        - 'metrics:8001'
     metrics_path: /metrics
     scrape_interval: 30s
     scrape_timeout: 10s

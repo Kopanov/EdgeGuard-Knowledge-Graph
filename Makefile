@@ -151,6 +151,9 @@ logs-graphql:
 logs-api:
 	$(COMPOSE) logs -f api
 
+# Both files in one Compose project (2026-10): Prometheus joins edgeguard_net, which only
+# docker-compose.yml declares, and scrapes the `metrics` service by name. The monitoring file on its
+# own is rejected by Compose (undefined network).
 monitoring: .env
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 	@echo "  ✓ Monitoring started"

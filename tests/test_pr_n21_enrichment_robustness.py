@@ -357,9 +357,9 @@ class TestBravoOpsPrometheusAlerts:
         assert "EdgeGuardBuildRelationshipsSilentDeath" in src, (
             "Prometheus must define EdgeGuardBuildRelationshipsSilentDeath alert"
         )
-        # Must reference the completion counter
-        assert "edgeguard_build_relationships_completions_total" in src, (
-            "silent-death alert must key on the completion counter"
+        # Must reference the completion stamp (2026-10: a timestamp gauge set with the counter)
+        assert "edgeguard_build_relationships_last_completion_timestamp" in src, (
+            "silent-death alert must key on the completion stamp"
         )
         # Must be critical severity (OOM-kill is data-loss, page the operator)
         silent_death_block = src[src.find("EdgeGuardBuildRelationshipsSilentDeath") :]

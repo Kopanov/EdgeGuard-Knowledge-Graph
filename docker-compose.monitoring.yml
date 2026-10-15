@@ -1,6 +1,14 @@
 # ================================================================================
 # EdgeGuard Monitoring Stack
 # Prometheus + Grafana for EdgeGuard Threat Intelligence Pipeline
+#
+# Start it together with the application stack, as one Compose project (2026-10):
+#   make monitoring
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+# Prometheus scrapes the `metrics` service by name over the application network `edgeguard_net`,
+# which docker-compose.yml declares and this file only references. Started on its own
+# (`docker compose -f docker-compose.monitoring.yml up`), Compose rejects the file before any
+# container starts: the service "prometheus" refers to the undefined network edgeguard_net.
 # ================================================================================
 
 services:
@@ -16,8 +24,10 @@ services:
     image: prom/prometheus:v3.5.0
     container_name: edgeguard_prometheus
     restart: unless-stopped
-    # 2026-10: the EdgeGuard scrape target is host.docker.internal:8001, which only resolves on
-    # Docker Desktop by default; host-gateway makes it resolve on Linux hosts too.
+    # 2026-10: host.docker.internal is kept for the optional host targets commented out in
+    # prometheus/prometheus.yml. On Linux it resolves to the docker0 bridge address, so a host
+    # service is reachable only when it listens there (a 127.0.0.1-only publish is not). The
+    # EdgeGuard target itself is the `metrics` service, reached over edgeguard_net (below).
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -47,6 +57,15 @@ services:
           memory: 1g
     networks:
       - edgeguard_monitoring
+      # 2026-10: the application network of docker-compose.yml, where the `metrics` service
+      # (container edgeguard_metrics) serves /metrics on 8001. Before, Prometheus scraped
+      # host.docker.internal:8001, which on Linux is the docker0 bridge address, while the metrics
+      # port is published on 127.0.0.1 only: the scrape was refused everywhere but on Docker
+      # Desktop. The network is deliberately not redeclared here (external or otherwise):
+      # docker-compose.yml gives it no fixed name (Compose names it <project>_edgeguard_net), and
+      # when both files are loaded together Compose rejects `external: true` next to the driver and
+      # ipam settings of the base definition.
+      - edgeguard_net
     healthcheck:
       test: ["CMD", "wget", "-q", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
       interval: 30s
@@ -179,6 +198,10 @@ services:
       - "127.0.0.1:9093:9093"
     volumes:
       - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # 2026-10: notification secrets, read by Alertmanager when a notification is sent
+      # (slack_api_url_file in alertmanager.yml). The directory ships empty; without the Slack file
+      # Alertmanager still starts and logs a failed Slack delivery. See docs/PROMETHEUS_SETUP.md.
+      - ./prometheus/secrets:/etc/alertmanager/secrets:ro
       - alertmanager_data:/alertmanager
     command:
       - '--config.file=/etc/alertmanager/alertmanager.yml'

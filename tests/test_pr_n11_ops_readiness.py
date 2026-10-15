@@ -95,22 +95,22 @@ class TestFix1AlertRulesWired:
         )
 
     def test_every_alert_references_existing_metric(self):
-        """Each alert's expr must reference a counter defined in
-        metrics_server.py. Prevents shipping alerts against counters
-        that don't exist — a Prom-side silence."""
+        """Each alert's expr must reference a metric defined in
+        metrics_server.py. Prevents shipping alerts against metrics
+        that don't exist — a Prom-side silence. 2026-10: counters and
+        gauges alike (EdgeGuardBuildRelationshipsSilentDeath compares two
+        timestamp gauges)."""
         metrics_src = (SRC / "metrics_server.py").read_text()
         group = self._rules()
         for rule in group["rules"]:
             expr = rule["expr"]
-            # Extract the counter name (anything ending in _total inside rate())
             import re
 
-            counter_names = re.findall(r"edgeguard_\w+_total", expr)
-            assert counter_names, f"alert {rule['alert']!r} expr references no counter: {expr}"
-            for counter in counter_names:
-                assert counter in metrics_src, (
-                    f"alert {rule['alert']!r} references counter {counter!r} "
-                    f"that is not defined in src/metrics_server.py"
+            metric_names = re.findall(r"\bedgeguard_\w+", expr)
+            assert metric_names, f"alert {rule['alert']!r} expr references no metric: {expr}"
+            for metric in metric_names:
+                assert f'"{metric}"' in metrics_src, (
+                    f"alert {rule['alert']!r} references metric {metric!r} that is not defined in src/metrics_server.py"
                 )
 
     def test_every_alert_has_bounded_labels(self):

@@ -645,8 +645,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "edgeguard_neo4j_nodes",
-          "legendFormat": "{{label}} ({{zone}})",
+          "expr": "edgeguard_neo4j_nodes{zone=\"all\"}",
+          "legendFormat": "{{label}}",
           "range": true,
           "refId": "A"
         }
@@ -735,13 +735,14 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (zone) (edgeguard_neo4j_nodes)",
-          "legendFormat": "{{zone}}",
+          "expr": "edgeguard_neo4j_nodes{zone=\"all\"} - (edgeguard_neo4j_nodes{zone=\"all\"} offset 1d)",
+          "legendFormat": "{{label}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Neo4j Node Counts by Zone",
+      "description": "Change of each label's node count against the same time the day before, the comparison EdgeGuardNeo4jLabelDropBig alerts on. The node counts are recorded per label with zone=\"all\" after every successful sync; nodes carry several zones, so a per-zone split cannot be summed.",
+      "title": "Neo4j Node Count Change (24 h) by Label",
       "type": "timeseries"
     },
     {
