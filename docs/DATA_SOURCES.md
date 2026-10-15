@@ -122,6 +122,7 @@
 - Vendor/product names
 - Description
 - Date added to KEV
+- Known ransomware campaign use (`known_ransomware_use` on the `CVE` node; 2026-10: no CVSS score is derived from it — the catalogue carries none, and the node's score comes from its CVSS sub-nodes)
 
 **How classified:**
 - Description text searched for sector keywords
@@ -216,8 +217,9 @@
 **What we get:**
 - CVE IDs
 - Descriptions
-- CVSS scores (including v4 when present)
+- CVSS scores (including v4 when present); 2026-10: a CVE's `cvss_score` / `severity` come from its first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`cvss_version` names it), and a CVE without any CVSS has no score and severity `UNKNOWN`
 - Attack vectors
+- NVD's record status (`status`, `["active"]` or `["rejected"]`, 2026-10)
 
 ---
 
@@ -294,4 +296,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-15 — SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-15 — SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

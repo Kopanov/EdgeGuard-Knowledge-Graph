@@ -18,7 +18,7 @@ Output: 37 findings. Driven fixes in PR-F9, PR-G1, PR-I, PR-J, PR-K1, PR-K2, PR-
 
 ### Pass 2 — Comprehensive production-test audit (2026-04-20 afternoon)
 
-**Trigger:** operator pivoted from reactive Bugbot-fix cycles to proactive comprehensive auditing. 5 parallel agents audited specific 730d concerns. **~60 findings.**
+**Trigger:** the work moved from fixing review findings pull request by pull request to a proactive audit; five parallel audit passes covered specific 730-day baseline concerns. **~60 findings.**
 
 | # | Focus | File | Findings |
 |---|-------|------|----------|

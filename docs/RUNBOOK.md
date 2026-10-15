@@ -70,8 +70,8 @@ the change to take effect. Revert by unsetting + restarting.
 | `EdgeGuardNeo4jIneffectiveBatch` | critical | `rate(edgeguard_neo4j_merge_ineffective_batch_total[5m]) > 0` for 5m |
 | `EdgeGuardNeo4jBatchPermanentFailure` | critical | `rate(edgeguard_neo4j_batch_permanent_failure_total[5m]) > 0` for 5m |
 | `EdgeGuardMergeRejectPlaceholderSpike` | warning | `increase(edgeguard_merge_reject_placeholder_total[15m]) > 10` for 15m |
-| `EdgeGuardBuildRelationshipsSilentDeath` | critical | `absent(build_rels_completions) or rate == 0` for 6h after baseline start (PR-N21 Bravo-ops) |
-| `EdgeGuardApocBatchPartial` | warning | `increase(edgeguard_apoc_batch_partial_total[15m]) > 0` (PR-N21 Bravo-ops) |
+| `EdgeGuardBuildRelationshipsSilentDeath` | critical | `absent(build_rels_completions) or rate == 0` for 6h after baseline start (PR-N21) |
+| `EdgeGuardApocBatchPartial` | warning | `increase(edgeguard_apoc_batch_partial_total[15m]) > 0` (PR-N21) |
 | `EdgeGuardMispFetchFallbackActive` | warning | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="engaged"}[10m])) > 0` for 10m (PR-N31 — sustained fallback engagement signals primary `/events/index` is broken) |
 | `EdgeGuardMispFetchFallbackHardError` | **critical** | `sum by (branch) (rate(edgeguard_misp_fetch_fallback_active_total{outcome="hard_error"}[5m])) > 0` for 1m (PR-N31 — `_MispFallbackHardError` sentinel raised; baseline run already failed since `retries=0` on critical chain) |
 | `EdgeGuardSourceAccessDenied` | warning | `edgeguard_collector_skips_total{reason_class=~".+_auth_denied"}` rose in the last 25 h, or appeared for the first time (2026-10). The provider refuses the source's requests (HTTP 401/403) and the task stays green while nothing is collected: run `python src/source_key_check.py`, renew the key, or check whether the provider blocks this host |
@@ -91,7 +91,7 @@ Each entry: symptom → detection signal → remediation.
 ### 1. MISP batch permanent failure (5xx exhaustion)
 
 - **Symptom.** One or more 500-attribute batches lost; post-baseline
-  `MATCH (i:Indicator {source: 'otx'}) RETURN count(i)` is lower than
+  `MATCH (i:Indicator) WHERE 'alienvault_otx' IN i.source RETURN count(i)` is lower than
   `edgeguard_indicators_collected_total{source="otx"}` counter value.
 - **Prom alert.** `EdgeGuardMispBatchPermanentFailure` — critical.
 - **Log probe.** `docker logs edgeguard_airflow 2>&1 | grep "\[MISP-PUSH-FAILURE\]" | tail -20`
@@ -237,7 +237,52 @@ Each entry: symptom → detection signal → remediation.
   4. PR-N10's merge-time reject already blocked actual new writes —
      the graph is safe. Focus on WHY the collector started emitting.
 
-### 7. Baseline postcheck skipped due to upstream failure (PR-N27)
+### 7. Baseline chain stopped after a failed step; postcheck (PR-N27, 2026-10)
+
+**7a. Collectors and `full_neo4j_sync` refuse to run (2026-10).**
+
+- **Symptom.** The `tier1_core` / `tier2_feeds` collector tasks (a
+  flag-guarded source that is switched off still skips) and
+  `full_neo4j_sync` fail at start, without their retry, with `[BASELINE] <step>: baseline_start
+  is <state> in this run — refusing to run after a failed baseline_clean /
+  baseline_start` (or `... did not succeed (no XCom marker) ...`).
+- **What it means.** `baseline_clean` or `baseline_start` did not succeed
+  in this DAG run. The tier groups and `full_neo4j_sync` keep
+  `trigger_rule=ALL_DONE`, so that one failed source does not stop the
+  others; that rule also fires after an upstream failure, and before
+  2026-10 every collector and the full sync then ran on an un-wiped store.
+  The guard reads the task states of this run from Airflow 3; only where
+  Airflow reports none (Airflow 2, or a failed call) does it read the XCom
+  marker that `baseline_start` returns on success. A marker left by an
+  earlier success therefore does not count, and a `baseline_start` marked
+  success by hand does.
+- **Triage.** Read the `baseline_clean` log. The clean step's time limit is
+  60 minutes (`execution_timeout`, 2026-10). It deletes Neo4j relationships
+  in batches of 50,000 before the node batches (a single node batch holding
+  hub nodes ran a 2 GB heap out of memory), and it waits up to
+  `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC` (default 900 s) for each MISP event
+  delete, because MISP deletes an event's attributes inside the request
+  (the OTX and NVD events of a 730-day baseline hold about 150,000
+  attributes each).
+  Fix the cause, then clear `baseline_clean` together with its downstream
+  tasks (it has `retries=0`); the run resumes under the baseline lock it
+  still holds.
+
+**7b. Postcheck on Airflow 3 (the shipped image).**
+
+- **Symptom.** `baseline_postcheck` fails with `[BASELINE-POSTCHECK]
+  upstream task(s) did not succeed: {...}` (or `... (no XCom marker)`),
+  after a warning that the upstream-state introspection failed.
+- **What it means.** Airflow 3's task instance has no `get_dagrun()`, so
+  the PR-N27 path below does not run. The postcheck reads the states of
+  `full_neo4j_sync`, `build_relationships` and `run_enrichment_jobs` in this
+  run, or, where Airflow reports none, the XCom markers they return on
+  success, and fails when one did not succeed. It fails rather than skips
+  because Airflow derives the run state from the leaf tasks and a skipped
+  leaf counts as success; before 2026-10 such a run could end `success`
+  with `run_enrichment_jobs` failed. Triage the task named in the message.
+
+**7c. Baseline postcheck skipped due to upstream failure — Airflow 2 (PR-N27).**
 
 - **Symptom.** Airflow `baseline_postcheck` task log contains a
   `[BASELINE-POSTCHECK-SKIPPED]` ERROR line; postcheck task state =
@@ -364,7 +409,7 @@ Worker resident set: baseline should peak around 6 GB. **If
 baseline even kicks off, raise `AIRFLOW_MEMORY_LIMIT` first or the
 baseline will OOM mid-run.**
 
-### Two Bravo-ops Prometheus alerts (added in PR-N21)
+### Two `build_relationships` Prometheus alerts (added in PR-N21)
 
 Both fire on the new counters `build_relationships` now emits:
 
@@ -394,7 +439,7 @@ When `EdgeGuardApocBatchPartial` fires:
    - `MemoryLimitExceededException` → Neo4j TX memory cap hit. Lower batch size for that step, OR raise `NEO4J_TX_MEMORY_MAX` (but watch the ceiling — above 4g on 8 GB worker and you're eating worker RSS).
    - `DeadlockDetected` → transient, re-run the step.
    - Schema / constraint error → code bug, file an issue, do NOT re-run blindly.
-3. Option A — re-trigger the whole `edgeguard_baseline` DAG from `build_relationships` task in Airflow UI (Graph view → click `build_relationships` → "Clear" → confirm). It re-runs all 20 sub-steps, but the early-step MERGEs are idempotent so only the failed step's edges are re-created. There is currently NO per-step CLI flag — `src/build_relationships.py` runs all 12 steps as a single Python program. (See Issue #58 for the planned `--step N` CLI; until then, full-task re-run is the supported path.)
+3. Option A — re-trigger the whole `edgeguard_baseline` DAG from `build_relationships` task in Airflow UI (Graph view → click `build_relationships` → "Clear" → confirm). It re-runs all 20 sub-steps, but the early-step MERGEs are idempotent so only the failed step's edges are re-created. There is currently NO per-step CLI flag — `src/build_relationships.py` runs all 20 steps as a single Python program. (See Issue #58 for the planned `--step N` CLI; until then, full-task re-run is the supported path.)
 4. Option B — if partial data is acceptable for the demo window, leave it. The next incremental sync will fill in most missed edges. Flag for follow-up.
 
 ### Post-run summary grep
@@ -517,10 +562,11 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
 
 ### Before a 730d baseline run
 
-1. **Launch path decided.** Per Option A above — DAG trigger via
-   `airflow dags trigger edgeguard_baseline` AFTER pausing the 4
-   incremental schedulers (see PR-N35 callout — there is no CLI
-   baseline subcommand at HEAD).
+1. **Launch path decided.** Per Option A above — trigger the
+   `edgeguard_baseline` DAG (`airflow dags trigger edgeguard_baseline`, the
+   Airflow UI, or the `edgeguard baseline` / `edgeguard fresh-baseline`
+   wrappers, which trigger the same DAG), preferably after pausing the 5
+   scheduled DAGs.
 2. **Preflight green.** `./scripts/preflight_baseline.sh` returns exit 0.
    Check `[12]` asks every provider whether it accepts the configured API
    key; a rejected key means that source is skipped for the whole baseline
@@ -532,7 +578,7 @@ own. The `baseline_in_progress.lock` sentinel is held by the DAG
    Neo4j Browser or `graphql_api`.
 4. **Prometheus rules loaded.** Verify the `edgeguard_pipeline_observability`
    rule group has at least 11 alerts (4 from PR-N11/N12 + 2 added in PR-N18 +
-   2 Bravo-ops added in PR-N21 + 2 MISP-fetch-fallback added in PR-N31 +
+   2 `build_relationships` alerts added in PR-N21 + 2 MISP-fetch-fallback added in PR-N31 +
    1 PR-N24 H3 placeholder-pager). The full `prometheus/alerts.yml` has more
    rules than this — `[11] PR-N29 invariants` in `scripts/preflight_baseline.sh`
    enforces a floor of `≥ 11` against the canonical YAML.:
@@ -602,6 +648,12 @@ RETURN label, c ORDER BY c DESC;
 
 Any non-zero on #1–#4 = regression; file issue.
 
+Then run the acceptance script, `python scripts/verify_fresh_baseline.py`
+([BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) § "Fresh-baseline
+acceptance"). Since 2026-10 it also fails when a relationship built from the
+sources names no source (`relationships_name_their_source`) or when a
+provenance list is stored as a plain string (`provenance_lists_are_lists`).
+
 ---
 
 ## Importing a curated package (2026-10)
@@ -641,6 +693,8 @@ REMOVE r.tlp;
 ```
 
 Only curated claims set `r.tlp`, so step 2 removes it. A link the package created and another source asserted afterwards (an OTX pulse naming the same technique, say) still carries the curated label and is deleted in step 1; the relationship build and a full sync (`NEO4J_FULL_SYNC=true`) recreate it from that source's data. To remove one package of several, delete its event, remove the layer as above and run a full sync, which writes the remaining packages' claims again. To leave the layer out of a shared dataset without removing it, filter on `r.sources`, not on `r.match_type` (`docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
+
+In Neo4j the claims are relationships like any other: the API routes that traverse relationships (for example `GET /actors/{name}/summary` and `/graph/explore`) and the STIX bundles expose them (2026-10: a STIX relationship names the curated source in `x_edgeguard_sources` and is marked with at least the package's TLP level; `x_edgeguard_match_type` shows the curated label only on a link the package created). No export filter by source exists, so import a package only on an instance whose API consumers may receive its claims.
 
 ## Retrieving raw MISP data from a Neo4j node
 
@@ -705,9 +759,9 @@ into `r.raw_data` on the `SOURCED_FROM` edge
 need the original payload without a round-trip to MISP.
 
 ```cypher
-MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'otx'})
+MATCH (i:Indicator)-[r:SOURCED_FROM]->(:Source {source_id: 'alienvault_otx'})
 WHERE i.value = '203.0.113.5'
-RETURN r.raw_data LIMIT 1;
+RETURN r.raw_data, r.misp_event_ids, r.source_refs LIMIT 1;
 ```
 
 ### Coverage
@@ -817,7 +871,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._

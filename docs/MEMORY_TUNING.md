@@ -65,7 +65,7 @@ batch size is tuned to the recommended 8G already).
 
 Established by **PR-F4 (#60)**: the 2026-04-19 overnight 730-day
 baseline ran with default 512M `memory_limit` and lost ~14.7% of NVD
-attributes (13,620 of 92,620) to MISP HTTP 500 errors. Bravo's
+attributes (13,620 of 92,620) to MISP HTTP 500 errors. The
 investigation traced the 5xx to PHP-FPM worker exhaustion in
 `AppModel.php` when the NVD event grew past ~75K attributes — each
 `edit-event` call had to load the whole event for dedup, blowing through

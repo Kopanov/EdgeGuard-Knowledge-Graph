@@ -37,10 +37,9 @@ dedup cache-key drift; STIX emitter-consumer desync — all surface
 disproportionately on long runs. A bird's-eye view makes those
 cross-component contracts visible.
 
-**Use case 2 — audit agents.** When spawning a Claude agent to review
-a change, the agent starts with no model of the system. A diagram in
-markdown is the densest way to give the agent the model it needs to
-make good judgment calls.
+**Use case 2 — automated review.** An automated reviewer of a change
+starts with no model of the system. A diagram in Markdown is the
+densest way to give it the model it needs to judge the change.
 
 **Use case 3 — onboarding & external integration.** ResilMesh
 integrators, new contributors, and operators asking "where does my
@@ -196,7 +195,7 @@ Target: complete before the next 730-day baseline attempt.
 **Failure modes illuminated:**
 - Cross-event dedup cache-key desync (PR-F7 was here)
 - Source-tag alias resolution (PR-F7 round-3 fix)
-- Dedup prefetch pagination bounds (PR-F7 Bugbot LOW)
+- Dedup prefetch pagination bounds (PR-F7)
 - Zone detection precedence (text vs explicit tag vs event `x_edgeguard_zones`)
 - SOURCED_FROM edge creation semantics (PR #41 source-truthful architecture)
 - MISP tag-impersonation defense firing point (PR #44 Chip 5e / PR-I gauge)
@@ -314,4 +313,4 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._
+_Last updated: 2026-10-15 — wording only: use case 2 and one failure-mode label no longer name review tools. Prior: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._

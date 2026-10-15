@@ -151,7 +151,7 @@ The `pages` list is ONLY used by `get_baseline_status()` (line 249) to report `l
 
 ## What's handled well (do NOT change)
 
-- **Atomic O_EXCL sentinel acquisition in `baseline_lock.py`** — PR #38 bugbot-driven rewrite; O_EXCL+corrupt-sentinel-probe handles known race windows
+- **Atomic O_EXCL sentinel acquisition in `baseline_lock.py`** — PR #38 rewrite after review; O_EXCL+corrupt-sentinel-probe handles known race windows
 - **Preservation of incremental cursors on checkpoint clear** (`baseline_checkpoint.py:192-229`) — default-preserve contract is documented and honored
 - **PR-F6 parent-DAG liveness callback** — correctly scoped to tier-1 collector sites; rate-limited to 60s; `AbortedByDagFailureException` properly NOT routed through transient/catastrophic error split
 - **Tier-1 sequential chain** (cisa→mitre→otx→nvd) — empirically justified by 2026-04-19 NVD loss incident

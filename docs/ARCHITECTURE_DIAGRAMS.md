@@ -34,7 +34,7 @@ graph TB
         MISP[(MISP 2.4.x<br/>Single Source of Truth<br/>port 8443)]
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
-        BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ PR-N26 r.misp_event_ids array on edges"]
+        BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
         ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge]
     end
 
@@ -127,13 +127,18 @@ graph TB
     I -->|USES_TECHNIQUE| T
     I -->|PART_OF_CAMPAIGN| CAMP
     V -->|AFFECTS| S
+    CVE -->|AFFECTS| S
     V -->|REFERS_TO| CVE
     CVE -->|REFERS_TO| V
     CVE -->|HAS_CVSS_v*| CVSS[CVSSv2 / v3.0 / v3.1 / v4.0]
     T -->|IN_TACTIC| TAC[Tactic]
     T -->|SUBTECHNIQUE_OF| T
-    A -->|USES_MALWARE| M
-    A -->|USES_TOOL| TL[Tool]
+    TA -->|USES_MALWARE| M
+    TA -->|USES_TOOL| TOOL[Tool]
+    TA -->|EXPLOITS| CVE
+    M -->|EXPLOITS| CVE
+    TA -->|TARGETS| S
+    M -->|TARGETS| S
     TOOL[Tool] -->|IMPLEMENTS_TECHNIQUE| T
 
     %% Edge legend:
@@ -147,12 +152,17 @@ graph TB
     %% HAS_CVSS_v31, HAS_CVSS_v40 (per neo4j_client.py — note the
     %% underscore + lowercase v + version).
     %%
-    %% PR-N26 (2026-04-23): the four edge types created by
-    %% build_relationships.py — INDICATES, EXPLOITS, TARGETS, AFFECTS —
-    %% additionally carry r.misp_event_ids[] for per-edge MISP-event
-    %% provenance (intersection of the endpoint nodes' arrays). Backfill
-    %% via scripts/backfill_edge_misp_event_ids.py for graphs that
-    %% pre-date PR-N26.
+    %% Provenance (2026-10): every relationship built from the sources
+    %% carries r.sources[] (who asserts it), r.source_refs[] (their record
+    %% ids) and r.misp_event_ids[] (the MISP events); see KNOWLEDGE_GRAPH.md
+    %% "Relationship provenance". PR-N26 (2026-04-23) had added
+    %% r.misp_event_ids[] to INDICATES, EXPLOITS, TARGETS and AFFECTS only;
+    %% scripts/backfill_edge_misp_event_ids.py backfills those four types on
+    %% graphs that pre-date PR-N26.
+    %%
+    %% ThreatActor / Malware -[:EXPLOITS]-> CVE comes only from curated
+    %% packages (2026-10); ThreatActor / Malware -[:TARGETS]-> Sector from
+    %% build_relationships Q7c / Q7d (2026-10).
 
     classDef core fill:#2563eb,stroke:#1d4ed8,color:#fff
     classDef vuln fill:#dc2626,stroke:#b91c1c,color:#fff
@@ -332,7 +342,9 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
+*Last updated: 2026-10-15 — §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+
+*Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
 
 - *§6 (HIGH): `neo4j: 5 retries, 2s base` → `3 retries, 2s base` (matches `_run_with_retries` and `_retry_db_op` in `src/neo4j_client.py`).*
 - *§6 (MED): added new branch + explanatory note for the PR-N29 H1 `retries=0` carve-out on the 4 baseline critical-chain tasks (`baseline_clean`, `baseline_full_neo4j_sync`, `baseline_build_relationships`, `baseline_run_enrichment_jobs`); operator now sees the immediate-fail path that pages via `EdgeGuardMispFetchFallbackHardError`.*

@@ -171,8 +171,8 @@ Normal ops keep the fields coupled (completed → keys popped). BUT: if `update_
 - **Atomic write**: tmp → fsync → rename; cleanup on failure. POSIX-correct.
 - **Path-traversal guard**: `Path.is_relative_to` is the correct primitive. Docstring explains prior `startswith` bug.
 - **fcntl advisory lock** on BOTH `update_source_checkpoint` AND `update_source_incremental` — baseline and incremental writes don't race within same source entry.
-- **Fresh-baseline counter reset** (PR-G1 Bugbot round-2): explicit `completed=True` reset handles re-run-after-complete transition.
-- **Writer/reader key alignment** (PR-G1 Bugbot round-1): `current_page` read matches write; test pins it.
+- **Fresh-baseline counter reset** (PR-G1): explicit `completed=True` reset handles re-run-after-complete transition.
+- **Writer/reader key alignment** (PR-G1): `current_page` read matches write; test pins it.
 - **Incremental preservation contract**: `clear_checkpoint(include_incremental=False)` is default; wipe scripts opt-in to True. Well-documented.
 - **MISP redirect/host-header hardening** in baseline_clean.py: max_redirects=0, EDGEGUARD_MISP_HTTP_HOST, 302-tracking, client-side `"EdgeGuard" in info` filter — defends wipe against DNS hijack + permission masquerade.
 - **Settle+verify-poll** with derived timeout on Neo4j size: adaptive to scale.

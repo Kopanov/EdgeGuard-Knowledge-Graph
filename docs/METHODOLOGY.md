@@ -50,9 +50,9 @@ Each source uses different attribute types. We normalize to a standard set:
 | `ipv6` | ip-src, ip-dst (IPv6 address) | IPv6 | IPv6 addresses: MISP has one type for both families, so the address decides (2026-10) |
 | `domain` | domain, hostname | domain | DNS names |
 | `url` | url, uri | URL | Web addresses |
-| `hash` | md5, sha1, sha256, sha512 | MD5, SHA256 | File hashes |
+| `hash` | md5, sha1, sha256, sha512 — chosen by the length of the hex digest (2026-10) | MD5, SHA1, SHA256 (`FileHash-MD5` / `-SHA1` / `-SHA256`) | File hashes. Import hashes, PE hashes and JA3 fingerprints from OTX are not collected (2026-10) |
 | `x509-fingerprint-sha1` | x509-fingerprint-sha1 | — (SSLCertFingerprint is not collected) | SHA-1 fingerprints of TLS certificates (SSL Blacklist, 2026-10) |
-| `email` | email-src, email-dst | EMAIL | Email addresses |
+| `email` | email-src, email-dst | EMAIL, email | Email addresses (OTX e-mail indicators are no longer typed as domains, 2026-10) |
 | `cve` | vulnerability | CVE | CVE IDs |
 
 ### 2.2 Normalization Logic
@@ -306,8 +306,9 @@ def merge_node(existing, new):
 
 When explaining a score, cite the layer that produced it (source prior, the
 co-occurrence calibration band, or the `last_decayed_tier`) — multi-source
-corroboration is visible through per-source `SOURCED_FROM` edges, not
-folded into a single multiplier.
+corroboration is visible through per-source `SOURCED_FROM` edges and, for a
+relationship, through `r.sources[]` (`size(r.sources) >= 2` = two or more
+sources assert it; 2026-10), not folded into a single multiplier.
 
 ---
 
@@ -478,4 +479,4 @@ Future enhancements include embedding-based classification for better context un
 
 ---
 
-_Last updated: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._
+_Last updated: 2026-10-15 — § 2.1 type mapping: `ipv6` from MISP `ip-src` / `ip-dst` by the address; `x509-fingerprint-sha1` for SSL Blacklist certificate fingerprints; a generic hash is typed by digest length (md5 / sha1 / sha256 / sha512); OTX non-file hashes are not collected; OTX `email` typed as e-mail; relationship corroboration visible through `r.sources[]`. Prior: 2026-06-11 — removed the aspirational data_quality_factor confidence formula (no such factor exists in code); documented the real three-layer model (source prior → co-occurrence calibration → time decay). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: corrected the per-source confidence table to match `src/collectors/`. Findings: NVD says 0.7 in doc but actual is 0.6 (default) / 0.9 (when CISA-listed); OTX says 0.5-0.7 range but actual is flat 0.5 across all 4 emit sites; added missing rows for AbuseIPDB (vendor score / 100), ThreatFox/global feeds (0.5/0.6/vendor), and split MISP into push-side (0.8) vs collector-side (0.5–0.8). Prior: 2026-04-26 PR-N33 docs audit (removed contradictory "tag scopes the dedup key"; fixed `vulnerability_key` Cypher); 2026-03-28._

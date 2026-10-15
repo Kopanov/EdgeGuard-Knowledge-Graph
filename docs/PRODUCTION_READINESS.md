@@ -11,7 +11,7 @@
 
 ## Overall Status: GREEN — READY FOR PRODUCTION TEST
 
-The core pipeline is functional, well-documented, and CI-verified. All CI jobs pass (lint, type-check, unit tests, security scan, Docker build). Bugbot is active on every PR. The main remaining work is Phase 3 (Query Engine) and ResilMesh integration.
+The core pipeline is functional, well-documented, and CI-verified. All CI jobs pass (lint, type-check, unit tests, security scan, Docker build). Every pull request also receives an automated code review. The main remaining work is Phase 3 (Query Engine) and ResilMesh integration.
 
 ---
 
@@ -32,7 +32,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | **Security Hardening** | ✅ Ready | Input sanitization, injection guards, SSL, rate limiting |
 | **Monitoring/Metrics** | ⚠️ Partially | Metrics of every Airflow task process are served by the `metrics` compose service on **8001** (loopback, 2026-10); alert rules evaluate in Prometheus; **Alertmanager receivers are placeholders** (no notification is delivered until a Slack webhook or mailbox is configured and the configuration is rendered); Grafana dashboard. |
 | **CI/CD Pipeline** | ✅ Ready | GitHub Actions: lint, type-check, unit tests, Docker build, security scan |
-| **Automated Code Review** | ✅ Ready | Bugbot active on every PR with comprehensive rules |
+| **Automated Code Review** | ✅ Ready | Automated review on every pull request, with project-specific review rules |
 
 ### ⏳ NOT STARTED - Future Phases
 
@@ -112,7 +112,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | `MATCH (n)` full-graph scan | Added label on all graph traversal patterns |
 | No `start_period` on Docker healthchecks | Added to all services |
 
-### ✅ Phase 6 — CI/CD & Monitoring (2026-03-17) — Bugbot findings
+### ✅ Phase 6 — CI/CD & Monitoring (2026-03-17) — review findings
 
 | Issue | Fix Applied |
 |-------|-------------|
@@ -234,7 +234,7 @@ in 3.x and is not what EdgeGuard uses).
 
 **The project is production-ready for its core function** (threat intel ingestion → MISP → Neo4j).
 
-All 5 CI checks pass cleanly. The codebase has been through 6 rounds of systematic fixes covering security, architecture, data quality, Airflow DAG design, dependency management, and monitoring. Bugbot is active and watching every PR.
+All 5 CI checks pass cleanly. The codebase has been through 6 rounds of systematic fixes covering security, architecture, data quality, Airflow DAG design, dependency management, and monitoring. Every pull request receives an automated code review.
 
 **What's left:**
 - Phase 3: Query Engine (LLM integration)
@@ -244,4 +244,4 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-*Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*
+*Last updated: 2026-10-15 — wording only: automated code review is described without naming the tool. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*
