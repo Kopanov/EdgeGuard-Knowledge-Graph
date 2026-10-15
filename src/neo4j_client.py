@@ -4845,6 +4845,9 @@ class Neo4jClient:
             # 2026-10 (curated packages): the package's TLP level, which the curated templates
             # write to ``r.tlp`` (most restrictive wins); the feed templates do not read it.
             row_tlp = str(rel.get("tlp") or "").strip().lower() or None
+            # 2026-10 (explainability): the technique ids the source cited that ATT&CK revoked into
+            # the row's technique (``attack_revoked``); written to ``r.cited_ids`` by ``_set_clause``.
+            row_cited = sorted({c.strip() for c in (rel.get("cited_ids") or []) if isinstance(c, str) and c.strip()})
             # NOTE: edge src_uuid / trg_uuid are NO LONGER pre-computed in the
             # dispatch loop. Each Cypher template SETs them directly from the
             # MATCHed node's bound-variable .uuid (Mechanism B), e.g. for
@@ -4896,6 +4899,7 @@ class Neo4jClient:
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
                                 "tlp": row_tlp,
+                                "cited_ids": row_cited,
                             }
                         )
                     else:
@@ -4912,6 +4916,7 @@ class Neo4jClient:
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
+                                "cited_ids": row_cited,
                             }
                         )
                     else:
@@ -4931,6 +4936,7 @@ class Neo4jClient:
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
                                 "tlp": row_tlp,
+                                "cited_ids": row_cited,
                             }
                         )
                     else:
@@ -4954,6 +4960,7 @@ class Neo4jClient:
                                 "confidence": conf,
                                 "misp_event_id": mev,
                                 "match_type": rel.get("match_type"),
+                                "cited_ids": row_cited,
                             }
                         )
                     else:
@@ -5196,6 +5203,10 @@ class Neo4jClient:
                 )
                 + f"            r.edgeguard_managed = true,{extra}\n"
                 f"            r.misp_event_ids = {misp_dedup},\n"
+                # 2026-10 (explainability): a technique row reached through a revoked ATT&CK id adds
+                # the ids the source cited; every other row leaves ``r.cited_ids`` as it is.
+                f"            r.cited_ids = CASE WHEN size(coalesce(row.cited_ids, [])) = 0 THEN r.cited_ids "
+                f"ELSE {_dedup_concat_clause('r.cited_ids', 'row.cited_ids')} END,\n"
                 f"            r.imported_at = coalesce(r.imported_at, datetime()),\n"
                 f"            r.updated_at = datetime(),\n"
                 f"            r.src_uuid = coalesce(r.src_uuid, {src_var}.uuid),\n"

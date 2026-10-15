@@ -367,7 +367,8 @@ class TestEnrichment:
         node_props = enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
         edge_props = enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
         assert {"zone", "source", "misp_event_ids", "aliases"} <= set(node_props)
-        assert set(edge_props) == {"sources", "source_refs", "misp_event_ids"}
+        # 2026-10 (explainability): ``cited_ids`` is an edge provenance list as well
+        assert set(edge_props) == {"sources", "source_refs", "misp_event_ids", "cited_ids"}
         assert "source_ids" not in enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY
         cypher = enrichment_jobs._ACTOR_ALIAS_MERGE_NORMALISE_CYPHER
         node_part, edge_part = cypher.split("MATCH (c)-[r]-()")

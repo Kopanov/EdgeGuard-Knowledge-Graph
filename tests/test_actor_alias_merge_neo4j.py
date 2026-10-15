@@ -52,9 +52,9 @@ CREATE (apt28:ThreatActor:{LABEL} {{name: 'apt28', uuid: 'u-apt28', source: ['mi
         aliases: ['APT28', 'Fancy Bear'], zone: ['global']}})
 CREATE (fb:ThreatActor:{LABEL} {{name: 'fancy bear', uuid: 'u-fb', source: ['alienvault_otx'], zone: ['global']}})
 CREATE (clop:ThreatActor:{LABEL} {{name: 'clop', uuid: 'u-clop', source: ['alienvault_otx'], zone: ['global'],
-        pulse_ids: ['p1']}})
+        pulse_ids: ['p1'], uses_malware: ['clop ransomware']}})
 CREATE (cl0p:ThreatActor:{LABEL} {{name: 'cl0p', uuid: 'u-cl0p', source: ['alienvault_otx'], zone: ['global'],
-        pulse_ids: ['p1']}})
+        pulse_ids: ['p1'], uses_malware: ['clop dropper'], uses_tools: ['S0002']}})
 CREATE (medusa:ThreatActor:{LABEL} {{name: 'medusa', uuid: 'u-medusa', source: ['alienvault_otx']}})
 CREATE (mg:ThreatActor:{LABEL} {{name: 'medusa group', uuid: 'u-mg', source: ['mitre_attck'], aliases: ['Medusa']}})
 CREATE (apt29:ThreatActor:{LABEL} {{name: 'apt29', uuid: 'u-apt29', source: ['mitre_attck'], aliases: ['UNC2452']}})
@@ -69,6 +69,16 @@ CREATE (cl0p)-[:USES_TECHNIQUE {{sources: ['alienvault_otx'], source_refs: ['ali
         misp_event_ids: ['2'], src_uuid: 'u-cl0p', trg_uuid: 'u-t'}}]->(t)
 CREATE (clop)-[:SOURCED_FROM {{source: 'alienvault_otx', src_uuid: 'u-clop'}}]->(otx)
 CREATE (cl0p)-[:SOURCED_FROM {{source: 'alienvault_otx', src_uuid: 'u-cl0p'}}]->(otx)
+CREATE (ps:Technique:{LABEL} {{mitre_id: 'T1059.001', uuid: 'u-ps'}})
+CREATE (clop)-[:EMPLOYS_TECHNIQUE {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        source_refs: ['alienvault_otx:p3'], src_uuid: 'u-clop', trg_uuid: 'u-ps'}}]->(ps)
+CREATE (cl0p)-[:EMPLOYS_TECHNIQUE {{match_type: 'coreideas_curated', confidence_score: 0.85, sources: ['coreideas'],
+        source_refs: ['coreideas:c1'], cited_ids: ['T1086'], src_uuid: 'u-cl0p', trg_uuid: 'u-ps'}}]->(ps)
+CREATE (dropper:Malware:{LABEL} {{name: 'clop dropper', uuid: 'u-dropper'}})
+CREATE (dropper)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        src_uuid: 'u-dropper', trg_uuid: 'u-clop'}}]->(clop)
+CREATE (dropper)-[:ATTRIBUTED_TO {{match_type: 'malware_family', confidence_score: 0.7, sources: ['threatfox'],
+        src_uuid: 'u-dropper', trg_uuid: 'u-cl0p'}}]->(cl0p)
 CREATE (fb)-[:SOURCED_FROM {{source: 'alienvault_otx', src_uuid: 'u-fb'}}]->(otx)
 CREATE (apt28)-[:SOURCED_FROM {{source: 'mitre_attck', src_uuid: 'u-apt28'}}]->(mitre)
 """
@@ -91,8 +101,10 @@ REFERENCE = {
 }
 
 
-@pytest.fixture(scope="module")
-def raw_driver():
+def open_test_database():
+    """The throwaway database's driver, for a module-scoped fixture (shared by the Neo4j integration
+    tests): waits up to 120 s for the server, refuses a database that holds a node this suite did not
+    write or has no APOC, and removes the suite's nodes when the module is done."""
     driver = GraphDatabase.driver(
         URI, auth=(os.getenv("EDGEGUARD_IT_NEO4J_USER", "neo4j"), os.getenv("EDGEGUARD_IT_NEO4J_PASSWORD", ""))
     )
@@ -119,6 +131,11 @@ def raw_driver():
     with driver.session() as session:
         session.run(f"MATCH (n:{LABEL}) DETACH DELETE n")
     driver.close()
+
+
+@pytest.fixture(scope="module")
+def raw_driver():
+    yield from open_test_database()
 
 
 @pytest.fixture
@@ -172,18 +189,30 @@ class TestMergeOnNeo4j:
         clop = _one(
             driver,
             "MATCH (a:ThreatActor {name: 'clop'}) RETURN a.source AS source, a.zone AS zone, "
-            "a.aliases AS aliases, a.pulse_ids AS pulse_ids, a.uuid AS uuid",
+            "a.aliases AS aliases, a.pulse_ids AS pulse_ids, a.uuid AS uuid, a.merged_from AS merged_from, "
+            "a.uses_malware AS uses_malware, a.uses_tools AS uses_tools",
         )
+        clop["uses_malware"] = sorted(clop["uses_malware"])  # APOC keeps the canonical's entries first
         assert clop == {
             "source": ["alienvault_otx"],
             "zone": ["global"],
             "aliases": ["cl0p"],
             "pulse_ids": ["p1"],
             "uuid": "u-clop",
+            "merged_from": ["cl0p"],  # explainability: the nodes this job folded in, apart from aliases
+            "uses_malware": ["clop dropper", "clop ransomware"],  # the duplicate's claims are kept
+            "uses_tools": ["S0002"],  # a single list ("combine" of one side) stays a list
         }
-        apt28 = _one(driver, "MATCH (a:ThreatActor {name: 'apt28'}) RETURN a.aliases AS aliases, a.source AS source")
+        apt28 = _one(
+            driver,
+            "MATCH (a:ThreatActor {name: 'apt28'}) RETURN a.aliases AS aliases, a.source AS source, "
+            "a.merged_from AS merged_from",
+        )
         assert set(apt28["aliases"]) == {"APT28", "Fancy Bear", "fancy bear"}
         assert sorted(apt28["source"]) == ["alienvault_otx", "mitre_attck"]
+        assert apt28["merged_from"] == ["fancy bear"]
+        untouched = _one(driver, "MATCH (a:ThreatActor {name: 'apt29'}) RETURN a.merged_from AS merged_from")
+        assert untouched == {"merged_from": None}
 
     def test_edges_move_collapse_and_keep_their_types(self, graph):
         client, driver = graph
@@ -215,6 +244,32 @@ class TestMergeOnNeo4j:
             "RETURN count(r) AS n, head(collect(r.source)) AS source",
         )
         assert sourced == {"n": 1, "source": "alienvault_otx"}  # the scalar source id stays a scalar
+
+    def test_collapsed_edges_keep_the_strongest_evidence_and_every_cited_id(self, graph):
+        """Parallel edges of the canonical and a duplicate collapse into one: it keeps the union of
+        their provenance lists, cited ids included, and the strongest evidence's label and
+        confidence, here the duplicate's (outgoing and incoming alike)."""
+        client, driver = graph
+        enrichment_jobs.merge_alias_duplicate_actors(client)
+        employs = _one(
+            driver,
+            "MATCH (:ThreatActor {name: 'clop'})-[r:EMPLOYS_TECHNIQUE]->(:Technique {mitre_id: 'T1059.001'}) "
+            "RETURN count(r) AS n, head(collect(r.match_type)) AS match_type, head(collect(r.confidence_score)) AS confidence, "
+            "head(collect(r.sources)) AS sources, head(collect(r.source_refs)) AS refs, head(collect(r.cited_ids)) AS cited",
+        )
+        assert employs["n"] == 1
+        assert (employs["match_type"], employs["confidence"]) == ("coreideas_curated", 0.85)
+        assert sorted(employs["sources"]) == ["alienvault_otx", "coreideas"]
+        assert sorted(employs["refs"]) == ["alienvault_otx:p3", "coreideas:c1"]
+        assert employs["cited"] == ["T1086"]
+        attributed = _one(
+            driver,
+            "MATCH (:Malware {name: 'clop dropper'})-[r:ATTRIBUTED_TO]->(:ThreatActor {name: 'clop'}) "
+            "RETURN count(r) AS n, head(collect(r.match_type)) AS match_type, head(collect(r.confidence_score)) AS confidence, "
+            "head(collect(r.sources)) AS sources",
+        )
+        assert (attributed["n"], attributed["match_type"], attributed["confidence"]) == (1, "malware_family", 0.7)
+        assert sorted(attributed["sources"]) == ["alienvault_otx", "threatfox"]
 
     def test_a_second_run_merges_nothing(self, graph):
         client, driver = graph

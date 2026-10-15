@@ -315,8 +315,11 @@ EDGEGUARD_EXTENSION_ID = _deterministic_id("extension-definition", "edgeguard-pr
 _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
 # 1.1.0 (2026-10-14): relationship provenance properties on SROs.
 # 1.2.0 (2026-10-15): x_edgeguard_status (NVD's record status) on vulnerabilities.
+# 1.3.0 (2026-10-15): explainability. x_edgeguard_cited_ids on SROs (the ATT&CK ids the sources
+#   cited that ATT&CK revoked into the target technique) and x_edgeguard_merged_from on
+#   intrusion-sets (the names of the actor nodes EdgeGuard folded into this one).
 _EXTENSION_MODIFIED = "2026-10-15T00:00:00.000Z"
-_EXTENSION_VERSION = "1.2.0"
+_EXTENSION_VERSION = "1.3.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -371,6 +374,10 @@ EDGEGUARD_EXTENSION_PROPERTIES: Tuple[str, ...] = (
     "x_edgeguard_match_type",
     "x_edgeguard_sources",
     "x_edgeguard_source_refs",
+    # Explainability (2026-10): ids the sources cited before an ATT&CK revocation moved the link,
+    # and the actor nodes folded into an intrusion-set
+    "x_edgeguard_cited_ids",
+    "x_edgeguard_merged_from",
 ) + tuple(stix_key for _, stix_key in _VULNERABILITY_PROMOTED_FIELDS)
 
 _EXTENSION_PREFIX = "x_edgeguard_"
@@ -597,6 +604,8 @@ _SRO_PROVENANCE_LISTS: Tuple[Tuple[str, str, Optional[int]], ...] = (
     ("sources", "x_edgeguard_sources", None),
     ("source_refs", "x_edgeguard_source_refs", _MAX_SOURCE_REFS),
     ("misp_event_ids", "x_edgeguard_misp_event_ids", None),
+    # 2026-10 (explainability): only on links a revoked ATT&CK id led to
+    ("cited_ids", "x_edgeguard_cited_ids", None),
 )
 
 
@@ -1786,7 +1795,13 @@ class StixExporter:
             allow_custom=True,
             **_producer_created_modified(props),
         )
-        return self._apply_source_truthful_custom_props(_to_dict(obj), props)
+        sdo = self._apply_source_truthful_custom_props(_to_dict(obj), props)
+        # 2026-10 (explainability): the actor nodes the alias merge folded into this one; their
+        # intrusion-set ids (derived from the names) no longer appear in exports.
+        merged_from = sorted({m for m in (_listify(props.get("merged_from")) or []) if isinstance(m, str) and m})
+        if merged_from:
+            sdo["x_edgeguard_merged_from"] = merged_from
+        return sdo
 
     def _technique_sdo(self, props: Dict[str, Any]) -> Dict[str, Any]:
         mitre_id = props.get("mitre_id") or props.get("external_id") or ""
@@ -2223,7 +2238,7 @@ def _merge_rel_props(rels: Any) -> Dict[str, Any]:
     if len(maps) <= 1:
         return maps[0] if maps else {}
     merged: Dict[str, Any] = {}
-    for prop in ("sources", "source_refs", "misp_event_ids"):
+    for prop, _key, _cap in _SRO_PROVENANCE_LISTS:
         values = sorted({v for r in maps for v in (_listify(r.get(prop)) or [])})
         if values:
             merged[prop] = values
@@ -2308,8 +2323,9 @@ def _attach_relationship_provenance(sro: Dict[str, Any], rel: Dict[str, Any]) ->
 
     ``x_edgeguard_match_type`` (kind of evidence), ``x_edgeguard_sources`` (who asserts the
     link — e.g. ``mitre_attck``, ``alienvault_otx``, ``coreideas``), ``x_edgeguard_source_refs``
-    (their record ids, bounded) and ``x_edgeguard_misp_event_ids``. Set after the stix2 SDK
-    serialisation, like ``_attach_misp_provenance``.
+    (their record ids, bounded), ``x_edgeguard_misp_event_ids`` and, on a link a revoked ATT&CK
+    id led to, ``x_edgeguard_cited_ids``. Set after the stix2 SDK serialisation, like
+    ``_attach_misp_provenance``.
     """
     if not isinstance(sro, dict) or not rel:
         return

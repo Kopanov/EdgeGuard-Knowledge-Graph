@@ -1069,13 +1069,21 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "tags": "combine",
     "uses_techniques": "combine",
     "reported_techniques": "combine",
+    # 2026-10: the software lists (ATT&CK ``uses`` and pulse families) were "discard" by the
+    # wildcard, so a folded duplicate's claims were lost from the canonical node
+    "uses_malware": "combine",
+    "uses_tools": "combine",
     "misp_event_ids": "combine",
     "misp_attribute_ids": "combine",
     "pulse_ids": "combine",
+    # 2026-10 (explainability): the names of the nodes folded into this one, kept across merges
+    "merged_from": "combine",
     # edge lists (only relevant when mergeRels collapses parallel edges);
     # ``misp_event_ids`` above covers edges too
     "sources": "combine",
     "source_refs": "combine",
+    # 2026-10 (explainability): the revoked ATT&CK ids a technique link was cited by
+    "cited_ids": "combine",
     # everything else: keep the canonical's value, never listify
     ".*": "discard",
 }
@@ -1128,12 +1136,12 @@ RETURN a.name AS name, a.source AS source
 # scalar source id (``combine`` of two parallel edges to the same Source keeps it scalar) and
 # must stay one; the node keys (``zone``, ``aliases`` …) do not exist on edges. APOC's
 # ``singleElementAsArray`` option is not used for that reason: it applies to edges too.
-_ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = ("misp_event_ids", "source_refs", "sources")
+_ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = ("cited_ids", "misp_event_ids", "source_refs", "sources")
 _ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
     sorted(
         k
         for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items()
-        if v == "combine" and k not in ("sources", "source_refs")
+        if v == "combine" and k not in ("sources", "source_refs", "cited_ids")  # edge-only lists
     )
 )
 
@@ -1149,6 +1157,32 @@ def _list_or_wrapped(ref: str) -> str:
     )
 
 
+def _strongest_on_parallel_edges(direction: str) -> str:
+    """Cypher ``CALL`` block: before ``mergeNodes`` collapses parallel edges (same type, same other
+    node, same direction) of the canonical and its duplicates, every edge of a group takes the
+    strongest evidence of the group: the highest ``confidence_score`` and its ``match_type`` (on a
+    tie the alphabetically first label). ``mergeNodes`` keeps one edge's scalars ("discard"), so
+    without this a weaker canonical edge would replace a stronger duplicate edge, against the rule
+    every writer follows (the stronger evidence keeps the label and the confidence)."""
+    pattern = "(n)-[r]->(x)" if direction == "out" else "(n)<-[r]-(x)"
+    return (
+        "CALL (c, dups) {\n"
+        "    UNWIND [c] + dups AS n\n"
+        f"    MATCH {pattern}\n"
+        "    WHERE NOT x IN [c] + dups\n"
+        "    WITH x, type(r) AS rel_type, collect(r) AS group\n"
+        "    WHERE size(group) > 1\n"
+        "    UNWIND group AS e\n"
+        "    WITH group, e\n"
+        "    ORDER BY coalesce(e.confidence_score, -1.0) DESC,\n"
+        "             CASE WHEN e.match_type IS NULL THEN 1 ELSE 0 END, e.match_type\n"
+        "    WITH group, head(collect(e)) AS best\n"
+        "    FOREACH (e IN group | SET e.confidence_score = best.confidence_score, e.match_type = best.match_type)\n"
+        f"    RETURN count(*) AS parallel_groups_{direction}\n"
+        "}\n"
+    )
+
+
 # One ``mergeNodes`` call per canonical with ALL of its duplicates in the
 # batch, so rows of the UNWIND never touch each other's nodes (a duplicate
 # maps to exactly one canonical thanks to the ambiguity guard). The
@@ -1156,11 +1190,16 @@ def _list_or_wrapped(ref: str) -> str:
 # run (``$reference_canonicals``), and a duplicate is never MITRE-sourced:
 # re-checked here so a stale candidate list can never merge two canonical
 # actors. ``c.aliases`` gains the duplicate names BEFORE the merge, as
-# required. After the merge every list property of the node is wrapped back
+# required, and so does ``c.merged_from`` (explainability, 2026-10: unlike
+# ``aliases``, which also hold every source's aliases, it names only the
+# nodes this job folded in). After the merge every list property of the node is wrapped back
 # into a de-duplicated list (``_list_or_wrapped``): two nodes with the same
 # single source (``["alienvault_otx"]`` on both, as for two OTX names of one
 # actor) come out of ``"combine"`` with ``source`` as a string, and
 # ``apoc.coll.toSet`` on that string would roll back the whole batch.
+# Parallel edges that collapse keep the union of their provenance lists
+# (``"combine"``) and, set on every edge of the group before the merge, the
+# strongest evidence's label and confidence (``_strongest_on_parallel_edges``).
 _ACTOR_ALIAS_MERGE_APPLY_CYPHER = (
     """
 UNWIND $groups AS g
@@ -1172,9 +1211,13 @@ WHERE d.name IN g.duplicates
   AND NOT $mitre_source IN coalesce(d.source, [])
 WITH c, collect(DISTINCT d) AS dups
 WHERE size(dups) > 0
-SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name])
+SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
+    c.merged_from = apoc.coll.toSet(coalesce(c.merged_from, []) + [d IN dups | d.name])
 WITH c, size(dups) AS n_dups, dups
-CALL apoc.refactor.mergeNodes([c] + dups, {
+"""
+    + _strongest_on_parallel_edges("out")
+    + _strongest_on_parallel_edges("in")
+    + """CALL apoc.refactor.mergeNodes([c] + dups, {
     properties: $strategy,
     mergeRels: true,
     produceSelfRel: false

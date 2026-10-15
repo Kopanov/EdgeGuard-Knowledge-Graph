@@ -104,6 +104,20 @@ def _technique_sites() -> List[Tuple[str, str, str]]:
     return sites
 
 
+def _full_technique_queries() -> List[Tuple[str, str, str]]:
+    """``(assignment, MATCH variable, whole query)`` for every Technique match (``_technique_sites``)."""
+    out = []
+    for name in _assigned_names():
+        try:
+            values = assigned_queries(name)
+        except Exception:
+            continue
+        for query in values:
+            if isinstance(query, str):
+                out.extend((name, m.group(2), query) for m in _TECHNIQUE_MATCH.finditer(query))
+    return out
+
+
 class TestBuildRelationships:
     def test_every_technique_match_but_the_parent_step_translates_its_id_first(self):
         sites = _technique_sites()
@@ -113,6 +127,8 @@ class TestBuildRelationships:
         for name, var, before in translated:
             # toString: a map lookup by a number raises and would fail the whole batch
             assert f"coalesce($revoked[toString({var})], {var}) AS {var}" in before, f"{name}: {var} is not translated"
+            if not name.endswith("_skip"):  # a link step keeps the cited id for r.cited_ids
+                assert f"{var} AS _cited, coalesce($revoked" in before, f"{name}: the cited id is not kept"
         ((_n, parent_var, before_parent),) = [(n, v, b) for n, v, b in sites if n == "_q1b_inner"]
         assert parent_var == "parent_id" and "$revoked" not in before_parent, "step 1b must not translate the parent"
         assert sorted(n for n, _v, _b in sites if n.endswith("_skip")) == [
@@ -171,6 +187,18 @@ class TestBuildRelationships:
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 
+    def test_every_translating_link_step_records_the_cited_id(self):
+        """Explainability (2026-10): the six link steps that translate write ``r.cited_ids`` with the
+        id the source cited, and only when the map changed it."""
+        inner = [(n, q) for n, _v, q in _full_technique_queries() if not n.endswith("_skip") and n != "_q1b_inner"]
+        assert len(inner) == 6, [n for n, _q in inner]
+        for name, query in inner:
+            var = "tech_id" if "tech_id" in query else "tid"
+            assert build_relationships._cited_set(var) in query, f"{name}: no r.cited_ids"
+        fragment = build_relationships._cited_set("tid")
+        assert "CASE WHEN tid = _cited THEN r.cited_ids" in fragment, "an untranslated id leaves the property"
+        assert "[toString(_cited)]" in fragment and '"' not in fragment and "'" not in fragment
+
     def test_a_missing_map_translates_nothing_and_the_build_goes_on(self, monkeypatch, no_map, caplog):
         with caplog.at_level(logging.WARNING, logger="attack_revoked"):
             calls = self._run_build(monkeypatch)
@@ -214,6 +242,8 @@ class TestSyncTagRows:
     def test_a_revoked_tag_id_becomes_its_successor(self):
         _item, rels = _syncer().parse_attribute(_actor_attribute(*_TAGS), _EVENT)
         assert _employs(rels) == ["T1059.001", "T1566"], "T1086 -> T1059.001, which the tags also name: one row"
+        cited = {r["to_key"]["mitre_id"]: r["cited_ids"] for r in rels if r["rel_type"] == "EMPLOYS_TECHNIQUE"}
+        assert cited == {"T1059.001": ["T1086"], "T1566": []}, "the row keeps the revoked id its tag named"
 
     def test_the_translated_row_reaches_the_writer(self):
         _item, rels = _syncer().parse_attribute(_actor_attribute("PowerShell - T1086"), _EVENT)
@@ -226,10 +256,12 @@ class TestSyncTagRows:
         client.driver.session.return_value.__enter__.return_value = session
         client.create_misp_relationships_batch(rels, source_id="alienvault_otx")
         assert [r["mitre_id"] for r in sent if "mitre_id" in r] == ["T1059.001"]
+        assert [r["cited_ids"] for r in sent if "mitre_id" in r] == [["T1086"]]
 
     def test_a_missing_map_keeps_the_id(self, no_map):
         _item, rels = _syncer().parse_attribute(_actor_attribute(*_TAGS), _EVENT)
         assert _employs(rels) == ["T1086", "T1059.001", "T1566"]
+        assert all(r["cited_ids"] == [] for r in rels if r["rel_type"] == "EMPLOYS_TECHNIQUE")
 
 
 # --------------------------------------------------------------------------- curated claims
@@ -243,6 +275,7 @@ class TestCuratedClaims:
         with caplog.at_level(logging.INFO):
             rows = _curated_claim_rows(claims, "ThreatActor", {"name": "apt29"}, "coreideas", "5")
         assert [r["to_key"] for r in rows] == [{"mitre_id": "T1059.001"}, {"mitre_id": "T1566"}, {"mitre_id": "S9000"}]
+        assert [r["cited_ids"] for r in rows] == [["T1086"], [], []], "the claim's revoked id is kept"
         assert rows[0]["source_refs"] == ["coreideas:c1"], "the claim's own record id is kept"
         assert any("T1086 -> T1059.001" in r.getMessage() for r in caplog.records)
         malware = _curated_claim_rows(

@@ -88,6 +88,12 @@ CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 # list entry from failing the batch (a map lookup by a number raises). The map is read once per run
 # and passed to those steps (and to their orphan counts) as the ``$revoked`` parameter; see
 # ``attack_revoked``. Step 1b (sub-technique → parent) is not translated: see its comment.
+# Explainability (2026-10): a link reached through a translated id records the id the source cited,
+# ``r.cited_ids`` (accumulating, de-duplicated); a link every source made to the technique's own id
+# carries none. With ``r.sources`` / ``r.source_refs`` it answers "this pulse cited T1562, which ATT&CK
+# revoked into T1685".
+
+
 from attack_revoked import technique_successors as _technique_successors  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
@@ -96,6 +102,16 @@ from relationship_provenance import family_feeds as _family_feeds  # noqa: E402
 from relationship_provenance import node_feeds as _node_feeds  # noqa: E402
 from relationship_provenance import prov_set as _prov_set  # noqa: E402
 from relationship_provenance import prov_with as _prov_with  # noqa: E402
+
+
+def _cited_set(var: str) -> str:
+    """``SET`` fragment: add the cited id (``_cited``) to ``r.cited_ids`` when the map moved it to ``var``
+    (explainability, see the note above the imports)."""
+    return (
+        f", r.cited_ids = CASE WHEN {var} = _cited THEN r.cited_ids "
+        "ELSE apoc.coll.toSet(coalesce(r.cited_ids, []) + [toString(_cited)]) END"
+    )
+
 
 try:
     from metrics_server import record_neo4j_relationships
@@ -893,10 +909,11 @@ def build_relationships():
         _inner = (
             "WITH $a AS a "
             + _prov_with("a", _MITRE_FEEDS)
-            + "UNWIND a.uses_techniques AS tid WITH a, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND a.uses_techniques AS tid WITH a, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
+            + _cited_set("tid")
             + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q5_skip = (
@@ -930,10 +947,11 @@ def build_relationships():
         _inner = (
             "WITH $a AS a "
             + _prov_with("a", _OTX_FEEDS)
-            + "UNWIND a.reported_techniques AS tid WITH a, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND a.reported_techniques AS tid WITH a, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
+            + _cited_set("tid")
             + ", r.src_uuid = coalesce(r.src_uuid, a.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q5b_skip = (
@@ -964,10 +982,11 @@ def build_relationships():
         _inner = (
             "WITH $m AS m "
             + _prov_with("m", _MITRE_FEEDS)
-            + "UNWIND m.uses_techniques AS tid WITH m, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND m.uses_techniques AS tid WITH m, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
+            + _cited_set("tid")
             + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q6_skip = (
@@ -997,10 +1016,11 @@ def build_relationships():
         _inner = (
             "WITH $m AS m "
             + _prov_with("m", _OTX_FEEDS)
-            + "UNWIND m.reported_techniques AS tid WITH m, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND m.reported_techniques AS tid WITH m, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
+            + _cited_set("tid")
             + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q6b_skip = (
@@ -1212,10 +1232,11 @@ def build_relationships():
         _q8_inner = (
             "WITH $i AS i "
             + _prov_with("i", _OTX_FEEDS)
-            + "UNWIND i.attack_ids AS tech_id WITH i, coalesce($revoked[toString(tech_id)], tech_id) AS tech_id, "
+            + "UNWIND i.attack_ids AS tech_id WITH i, tech_id AS _cited, coalesce($revoked[toString(tech_id)], tech_id) AS tech_id, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
+            + _cited_set("tech_id")
             + ", r.src_uuid = coalesce(r.src_uuid, i.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q8_skip = (
@@ -1458,10 +1479,11 @@ def build_relationships():
         _inner = (
             "WITH $tool AS tool "
             + _prov_with("tool", _MITRE_FEEDS)
-            + "UNWIND tool.uses_techniques AS tid WITH tool, coalesce($revoked[toString(tid)], tid) AS tid, "
+            + "UNWIND tool.uses_techniques AS tid WITH tool, tid AS _cited, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
+            + _cited_set("tid")
             + ", r.src_uuid = coalesce(r.src_uuid, tool.uuid), r.trg_uuid = coalesce(r.trg_uuid, t.uuid)"
         )
         _q10_skip = (

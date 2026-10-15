@@ -171,7 +171,14 @@ the provenance of the graph relationship it comes from:
 - `x_edgeguard_sources` — the sources that assert the link (`mitre_attck`,
   `alienvault_otx`, `threatfox`, `coreideas`, …);
 - `x_edgeguard_source_refs` — their record ids, `"<source>:<id>"` (at most 200);
-- `x_edgeguard_misp_event_ids` — the MISP events that carried the link.
+- `x_edgeguard_misp_event_ids` — the MISP events that carried the link;
+- `x_edgeguard_cited_ids` — only on a link to a technique that a source cited by an id ATT&CK has
+  since revoked: the ids the sources cited (an OTX pulse citing `T1562` gives a link to `T1685`
+  with `["T1562"]`; definition version 1.3.0).
+
+An `intrusion-set` the actor alias merge folded other actor nodes into carries
+`x_edgeguard_merged_from`: their names (`["cl0p"]` on `clop`; version 1.3.0). The intrusion-set ids
+of those names, derived from the names, no longer appear in exports.
 
 ```json
 {
@@ -226,7 +233,8 @@ provenance above) are **top-level
 extension properties** of the STIX 2.1 extension
 `extension-definition--a9516685-381e-5b4f-9bd4-5cad8c3b1511`
 (`extension_types: ["toplevel-property-extension"]`; version 1.1.0 added
-the relationship provenance properties, version 1.2.0 the record status). The definition
+the relationship provenance properties, version 1.2.0 the record status, version 1.3.0
+`x_edgeguard_cited_ids` and `x_edgeguard_merged_from`). The definition
 object is included in every bundle; its `extension_properties` lists
 every property name EdgeGuard can emit. Each object that carries at
 least one such property declares the extension in its `extensions`
@@ -358,4 +366,4 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-15 — `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`); relationship-type paragraph lists the 2026-10 mappings (`USES_MALWARE` / `USES_TOOL`, `EXPLOITS` from actors and malware, actor / malware `TARGETS`, `PART_OF_CAMPAIGN`, `subtechnique-of`) and the relationships not exported as SROs; bounds on `external_references` (20) and `x_edgeguard_source_refs` (200); extension definition versions (1.1.0: relationship provenance; 1.2.0: `x_edgeguard_status`). Prior: 2026-10-14 — every relationship exported with its provenance (`confidence`, `external_references`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`), curated-package claims included; `depth` table extended. Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
+_Last updated: 2026-10-15 — explainability: `x_edgeguard_cited_ids` on SROs and `x_edgeguard_merged_from` on intrusion-sets (extension definition 1.3.0). Same day: `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`); relationship-type paragraph lists the 2026-10 mappings (`USES_MALWARE` / `USES_TOOL`, `EXPLOITS` from actors and malware, actor / malware `TARGETS`, `PART_OF_CAMPAIGN`, `subtechnique-of`) and the relationships not exported as SROs; bounds on `external_references` (20) and `x_edgeguard_source_refs` (200); extension definition versions (1.1.0: relationship provenance; 1.2.0: `x_edgeguard_status`). Prior: 2026-10-14 — every relationship exported with its provenance (`confidence`, `external_references`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`), curated-package claims included; `depth` table extended. Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
