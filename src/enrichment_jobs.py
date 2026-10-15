@@ -2,7 +2,7 @@
 """
 EdgeGuard — Post-Sync Enrichment Jobs
 ======================================
-Seven graph-quality jobs that run AFTER every MISP→Neo4j sync.
+Six graph-quality jobs that run AFTER every MISP→Neo4j sync.
 They are designed to be idempotent — safe to re-run at any time.
 
 Jobs
@@ -13,8 +13,8 @@ Jobs
 4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
 5. merge_alias_duplicate_actors — Fold duplicate ThreatActors into their canonical actor (ATT&CK
    aliases and the canonical threat-actor reference, src/reference/canonical_threat_actors.json)
-6. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py)
-7. enrich_cve_vulnrichment  — CISA Vulnrichment SSVC onto CVE nodes (cve_feed_enrichment.py)
+6. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py; CISA's SSVC
+                               comes with the NVD records, not from a job)
 """
 
 import logging
@@ -35,7 +35,7 @@ from canonical_threat_actors import (  # noqa: E402
     plan_alias_merges,
     reference_merge_candidates,
 )
-from cve_feed_enrichment import enrich_cve_epss, enrich_cve_vulnrichment  # noqa: E402
+from cve_feed_enrichment import enrich_cve_epss  # noqa: E402
 from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause, apoc_iterate_failures  # noqa: E402
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
@@ -1591,7 +1591,7 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 
 def run_all_enrichment_jobs(neo4j_client) -> Dict:
     """
-    Run all seven post-sync enrichment jobs in sequence.
+    Run all six post-sync enrichment jobs in sequence.
 
     Order matters: ``merge_alias_duplicate_actors`` runs BEFORE
     ``build_campaign_nodes`` so campaigns are built on merged actors.
@@ -1614,54 +1614,47 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
                 logger.debug("Metrics recording failed", exc_info=True)
         return result
 
-    logger.info("\n[1/7] Vulnerability↔CVE REFERS_TO Bridge...")
+    logger.info("\n[1/6] Vulnerability↔CVE REFERS_TO Bridge...")
     summary["bridge"] = _timed("bridge", bridge_vulnerability_cve, neo4j_client)
 
     # Must precede build_campaign_nodes: campaigns are keyed on actor name.
-    logger.info("\n[2/7] ThreatActor Alias-Duplicate Merge...")
+    logger.info("\n[2/6] ThreatActor Alias-Duplicate Merge...")
     summary["actor_alias_merge"] = _timed("actor_alias_merge", merge_alias_duplicate_actors, neo4j_client)
 
-    logger.info("\n[3/7] Campaign Node Builder...")
+    logger.info("\n[3/6] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
 
-    logger.info("\n[4/7] Co-occurrence Confidence Calibration...")
+    logger.info("\n[4/6] Co-occurrence Confidence Calibration...")
     summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
 
-    logger.info("\n[5/7] IOC Confidence Decay...")
+    logger.info("\n[5/6] IOC Confidence Decay...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
-    # Free CVE threat-signal feeds. Flag-off = INFO line, no network call.
-    # Feed outages are logged and skipped inside the jobs (never raise).
-    logger.info("\n[6/7] EPSS scores...")
+    # FIRST EPSS, the one feed written straight to Neo4j. Flag-off = INFO line, no network call.
+    # A feed outage is logged and skipped inside the job (never raises).
+    logger.info("\n[6/6] EPSS scores...")
     if config.ENABLE_EPSS:
         summary["epss"] = _timed("epss", enrich_cve_epss, neo4j_client)
     else:
         logger.info("EPSS enrichment disabled (EDGEGUARD_ENABLE_EPSS=false) — skipping")
         summary["epss"] = {"skipped": "disabled"}
 
-    logger.info("\n[7/7] CISA Vulnrichment SSVC...")
-    if config.ENABLE_VULNRICHMENT:
-        summary["vulnrichment"] = _timed("vulnrichment", enrich_cve_vulnrichment, neo4j_client)
-    else:
-        logger.info("Vulnrichment enrichment disabled (EDGEGUARD_ENABLE_VULNRICHMENT=false) — skipping")
-        summary["vulnrichment"] = {"skipped": "disabled"}
-
     # PR #33 round 13: explicit aggregated summary so an operator scanning logs
-    # sees totals from all 7 jobs without grepping each function's output.
+    # sees totals from all 6 jobs without grepping each function's output.
     def _sum(d):
         if isinstance(d, dict):
             return sum(v for v in d.values() if isinstance(v, (int, float)))
         return d if isinstance(d, (int, float)) else 0
 
     logger.info(
-        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s campaigns=%s calibration=%s decay=%s epss=%s vulnrichment=%s",
+        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s campaigns=%s calibration=%s decay=%s epss=%s",
         _sum(summary.get("bridge")),
         _sum(summary.get("actor_alias_merge")),
         _sum(summary.get("campaigns")),
         _sum(summary.get("calibration")),
         _sum(summary.get("decay")),
-        _sum(summary.get("epss")),
-        _sum(summary.get("vulnrichment")),
+        # The CVE nodes EPSS updated, not a sum of its counts: the feed's row count is not work done.
+        _sum({"cves_updated": (summary.get("epss") or {}).get("cves_updated", 0)}),
     )
     logger.info("[DONE] All enrichment jobs complete")
     return summary

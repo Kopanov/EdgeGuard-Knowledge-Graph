@@ -1,7 +1,7 @@
 # EdgeGuard Data Sources - Complete Reference
 
-**Last Updated:** 2026-10-15 (EPSS and Vulnrichment rows 15-16 added; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
-**Total Sources:** 16 (10 active + 2 placeholders + 2 flag-guarded, off by default + 2 post-sync enrichment feeds, on by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
+**Last Updated:** 2026-10-15 (FIRST EPSS row 15 added; CISA's SSVC decision points come with the NVD records, row 2; measured volumes of the first 730-day baseline; MalwareBazaar row 14 added 2026-10-12)  
+**Total Sources:** 15 (10 active + 2 placeholders + 2 flag-guarded, off by default + 1 post-sync enrichment feed, on by default) — canonical inventory; cross-check `src/collectors/` and `docs/DOCUMENTATION_AUDIT.md`.
 
 **Counts in the overview table** (`~8,000`, `TBD`, etc.) are **illustrative** snapshots, not continuously validated — use your MISP/Neo4j deployment for real numbers.
 
@@ -12,7 +12,7 @@
 | # | Source | Items | Sector Classification | Purpose | Status |
 |---|--------|-------|---------------------|---------|--------|
 | 1 | AlienVault OTX | ~8,000 | ✅ Auto-tagged | Primary IOC source | ✅ Active |
-| 2 | NVD | ~500 | ✅ Auto-tagged | CVE database | ✅ Active |
+| 2 | NVD | ~500 | ✅ Auto-tagged | CVE database; carries CISA's SSVC decision points (2026-10) | ✅ Active |
 | 3 | CISA KEV | ~500 | ✅ Auto-tagged | Known exploits | ✅ Active |
 | 4 | MITRE ATT&CK | ~300 | N/A | TTPs & relationships | ✅ Active |
 | 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
@@ -25,8 +25,7 @@
 | 12 | Healthcare Sector | - | - | Placeholder | ❌ Placeholder |
 | 13 | CISA ICS Advisories | ~900 advisories / 730 days (1–7 CVEs each) | ✅ **Source-asserted** (CISA sector note → Energy / Healthcare / Finance) | ICS-CERT advisories, CVE ↔ critical-infrastructure sector | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_CISA_ICS`, default off) — added 2026-10 |
 | 14 | MalwareBazaar | ~1,000 samples per export (last 48 h; 1,027 on 2026-10-12, 762 with a family label), ≤ 500 pushed per run | ✅ Auto-tagged (`detect_zones_from_text()` on the family label) | Malware sample hashes (sha256) with the family label → `INDICATES` edges to `Malware` nodes | 🚩 Flag-guarded (`EDGEGUARD_ENABLE_MALWAREBAZAAR`, default off) — added 2026-10 |
-| 15 | FIRST EPSS | ~385,000 scores / day (only existing CVEs updated) | N/A | Exploit-prediction score and percentile per CVE | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, default on) — added 2026-10 |
-| 16 | CISA Vulnrichment | one JSON per CVE (~360 MB repo; only graph CVEs kept) | N/A | SSVC exploitation / automatable / technical impact | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_VULNRICHMENT`, default on) — added 2026-10 |
+| 15 | FIRST EPSS | ~385,000 scores / day (only existing CVEs updated) | N/A | Exploit-prediction score and percentile per CVE; the one source written to Neo4j without MISP (§ 8b) | 🚩 Post-sync enrichment (`EDGEGUARD_ENABLE_EPSS`, default on) — added 2026-10 |
 
 **Note:** Energy and Healthcare collectors are placeholders. Member-only ISAC feeds (EE-ISAC, Health-ISAC, HC3) are not planned and no membership is budgeted (decision 2026-10). CISA ICS Advisories (row 13) is a real, flag-guarded collector that covers the ICS-CERT part of the energy/healthcare picture without any membership.
 
@@ -222,6 +221,7 @@
 - CVSS scores (including v4 when present); 2026-10: a CVE's `cvss_score` / `severity` come from its first CVSS in the order v3.1 → v3.0 → v2 → v4.0 (`cvss_version` names it), and a CVE without any CVSS has no score and severity `UNKNOWN`
 - Attack vectors
 - NVD's record status (`status`, `["active"]` or `["rejected"]`, 2026-10)
+- CISA's SSVC decision points (2026-10), which NVD relays from the CISA-ADP container of the CVE record (`metrics.ssvcV203`; CISA's Vulnrichment program): `ssvc_exploitation` (`none` / `poc` / `active`), `ssvc_automatable` (`yes` / `no`), `ssvc_technical_impact` (`partial` / `total`), with `ssvc_version` and `ssvc_timestamp` (the time of CISA's decision). They travel through MISP in `NVD_META` like the rest of the record and are set on the `CVE` node from NVD's record only; a decision CISA withdraws is removed. Compared on 2026-10-15 with the values read from CISA's Vulnrichment repository for 24 CVEs (4 records of `tests/fixtures/nvd_incremental_2026_10_14.json` and a random sample of 20 CVEs of the hosted graph): NVD had a decision for every one, the decision points were the same on all 24, and the timestamp on 22 (on the other 2, NVD gives the day only)
 
 ---
 
@@ -263,41 +263,23 @@
 
 | Attribute | Value |
 |-----------|-------|
-| URL | `https://epss.cyentia.com/epss_scores-current.csv.gz` (override `EPSS_URL`; redirects to `epss.empiricalsecurity.com`) — per `src/cve_feed_enrichment.py` |
+| URL | `https://epss.empiricalsecurity.com/epss_scores-current.csv.gz` (the address FIRST documents; it redirects to the day's file; override `EPSS_URL`) — per `src/cve_feed_enrichment.py` |
 | Format | gzip CSV, first line `#model_version:...,score_date:...`, header `cve,epss,percentile` (~2.7 MB) |
 | Auth | None (public) |
-| Update | Daily, post-sync enrichment job `enrich_cve_epss`, only when `EDGEGUARD_ENABLE_EPSS=true` (default) |
+| Update | FIRST publishes a file every day. The enrichment job `enrich_cve_epss` reads the current file after every Neo4j sync (`edgeguard_neo4j_sync`, every 72 hours by default, `NEO4J_SYNC_INTERVAL`) and after the baseline, when `EDGEGUARD_ENABLE_EPSS=true` (default). The download is bounded by `EPSS_MAX_BYTES` (64 MiB) and `EPSS_DOWNLOAD_DEADLINE_SEC` (300 s) |
 | Classification | n/a |
 
 **What we get:**
-- `CVE.epss_score` (probability of exploitation in the next 30 days, 0-1)
-- `CVE.epss_percentile`, `CVE.epss_score_date`, `CVE.epss_model_version`, `CVE.epss_updated_at`
+- `CVE.epss_score` (probability of exploitation in the next 30 days, 0-1) and `CVE.epss_percentile`
+- `CVE.epss_score_date` and `CVE.epss_model_version` (from the file's first line; a file without a score date is not used), `CVE.epss_updated_at` (the time of the write)
 
-**How classified:** n/a — no sector logic; properties only. No node or relationship is created, so there is no relationship provenance to record.
+**How written:** only on `CVE` nodes that exist (`MATCH`, never `MERGE`); a node a partner created gets the shared-database marker `edgeguard_enriched` ([RESILMESH_INTEROPERABILITY.md § 3.4](RESILMESH_INTEROPERABILITY.md)). Once the whole file is written, a CVE whose EPSS is from an earlier file has left the feed (NVD rejected it, for example) and loses its EPSS properties; a file holding fewer rows than half the CVE nodes already scored is not used for that, so a short file never wipes the scores. A feed failure (HTTP error, timeout, deadline, size cap, bad payload) is logged at ERROR and the job returns `skipped`: it never fails the DAG task. A database failure raises, before anything is cleared; the next run writes the whole file again.
 
-**Licence:** free to use; FIRST asks for attribution ("EPSS data provided by FIRST", https://www.first.org/epss). A feed outage is logged and skipped; it never fails the DAG task.
+**Why not through MISP:** EPSS is the one source EdgeGuard writes straight to Neo4j. It is a new score for every published CVE every day (about 385,000 rows), a measurement of the CVE rather than threat intelligence about it, and MISP would only hold a copy of it. No node or relationship is created, so there is no relationship provenance to record; the score date and model version on every scored node say which file the value came from.
 
----
+**How classified:** n/a — no sector logic; properties only.
 
-### 8c. CISA Vulnrichment (SSVC) — post-sync enrichment, added 2026-10
-**Items:** one JSON per CVE in the repo; only CVEs already in the graph are read | **Zone:** n/a (CVE properties, not new nodes)
-
-| Attribute | Value |
-|-----------|-------|
-| URL | `https://codeload.github.com/cisagov/vulnrichment/zip/refs/heads/develop` (override `VULNRICHMENT_ARCHIVE_URL`; download capped by `VULNRICHMENT_MAX_BYTES`, default 1.5 GB) — per `src/cve_feed_enrichment.py` |
-| Format | Branch zip, CVE JSON 5 files under `<year>/<Nxxx>/CVE-<year>-<n>.json`; the `CISA-ADP` container holds the SSVC decision points |
-| Auth | None (public) |
-| Update | Daily, post-sync enrichment job `enrich_cve_vulnrichment`, only when `EDGEGUARD_ENABLE_VULNRICHMENT=true` (default) |
-| Classification | n/a |
-
-**What we get:**
-- `CVE.ssvc_exploitation` (`none` / `poc` / `active`), `CVE.ssvc_automatable` (`yes` / `no`), `CVE.ssvc_technical_impact` (`partial` / `total`)
-- `CVE.ssvc_timestamp`, `CVE.ssvc_updated_at`
-- `CVE.cwe` is not written: it stays NVD-owned (replaced from NVD's record on a node whose only source is NVD)
-
-**How classified:** n/a — no sector logic; properties only. No node or relationship is created, so there is no relationship provenance to record.
-
-**Licence:** CC0 1.0 (public domain); no attribution required.
+**Terms:** FIRST publishes the scores daily, free of charge and without registration; its EPSS pages state no licence or attribution requirement (checked 2026-10-15). The scores are generated by Empirical Security for FIRST.
 
 ---
 
@@ -341,4 +323,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-15 — SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-15 — FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

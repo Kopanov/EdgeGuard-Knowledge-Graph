@@ -574,7 +574,6 @@ class TestRunnerRegistration:
             "calibrate_cooccurrence_confidence",
             "decay_ioc_confidence",
             "enrich_cve_epss",
-            "enrich_cve_vulnrichment",
         ]
 
     def test_runtime_order_and_summary_key(self, monkeypatch):
@@ -593,8 +592,7 @@ class TestRunnerRegistration:
         monkeypatch.setattr(enrichment_jobs, "calibrate_cooccurrence_confidence", _rec("calibration"))
         monkeypatch.setattr(enrichment_jobs, "decay_ioc_confidence", _rec("decay"))
         monkeypatch.setattr(enrichment_jobs, "enrich_cve_epss", _rec("epss"))
-        monkeypatch.setattr(enrichment_jobs, "enrich_cve_vulnrichment", _rec("vulnrichment"))
 
         summary = enrichment_jobs.run_all_enrichment_jobs(MagicMock())
-        assert seen == ["bridge", "actor_alias_merge", "campaigns", "calibration", "decay", "epss", "vulnrichment"]
+        assert seen == ["bridge", "actor_alias_merge", "campaigns", "calibration", "decay", "epss"]
         assert summary["actor_alias_merge"] == {"n": 1}

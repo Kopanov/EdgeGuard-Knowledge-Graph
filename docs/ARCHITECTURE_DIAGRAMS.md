@@ -35,7 +35,7 @@ graph TB
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
-        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge]
+        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge / EPSS]
     end
 
     subgraph APIs

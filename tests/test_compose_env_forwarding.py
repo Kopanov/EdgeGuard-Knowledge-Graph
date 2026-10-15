@@ -38,6 +38,12 @@ FORWARDED = [
     ("EDGEGUARD_BASELINE_REQUIRED_SOURCES", None),  # empty = no keyed source is mandatory
     ("EDGEGUARD_NVD_INCREMENTAL_DAYS", "14"),  # lookback of an NVD incremental run without a cursor
     ("EDGEGUARD_NVD_CURSOR_OVERLAP_SEC", "3600"),  # 2026-10 NVD incremental cursor
+    # 2026-10: FIRST EPSS, the post-sync enrichment job (``cve_feed_enrichment``); compose carries
+    # the code defaults
+    ("EDGEGUARD_ENABLE_EPSS", "true"),
+    ("EPSS_URL", "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz"),
+    ("EPSS_MAX_BYTES", "67108864"),
+    ("EPSS_DOWNLOAD_DEADLINE_SEC", "300"),
     ("EDGEGUARD_NVD_MAX_PER_RUN", "5000"),
     ("EDGEGUARD_NVD_UPDATE_EXISTING", "true"),
     ("EDGEGUARD_KEV_BASELINE_WHOLE_CATALOGUE", "true"),  # 2026-10 whole KEV catalogue in baseline mode

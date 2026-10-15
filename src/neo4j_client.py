@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 # Add src to path if needed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -947,6 +947,37 @@ _NVD_CVSS_VERSIONS = (
     ("HAS_CVSS_v30", "cvss_v30_data"),
     ("HAS_CVSS_v2", "cvss_v2_data"),
 )
+
+# 2026-10: CISA's SSVC decision points, which only NVD's record supplies (``nvd_collector.cisa_ssvc``):
+# the record's key -> (node property, allowed values; None = a bounded string).
+_NVD_SSVC_PROPERTIES: Dict[str, Tuple[str, Optional[FrozenSet[str]]]] = {
+    "exploitation": ("ssvc_exploitation", frozenset({"none", "poc", "active"})),
+    "automatable": ("ssvc_automatable", frozenset({"yes", "no"})),
+    "technical_impact": ("ssvc_technical_impact", frozenset({"partial", "total"})),
+    "version": ("ssvc_version", None),
+    "timestamp": ("ssvc_timestamp", None),
+}
+
+
+def _nvd_ssvc_values(ssvc: Any) -> Dict[str, Optional[str]]:
+    """The SSVC node properties of an NVD record's ``ssvc`` (validated; None removes a property).
+
+    MISP is an input boundary, so a value outside the allowed set, a non-string or an overlong
+    string is dropped. Without any decision point the record has no SSVC and every property is None.
+    """
+    values: Dict[str, Optional[str]] = {prop: None for prop, _ in _NVD_SSVC_PROPERTIES.values()}
+    if not isinstance(ssvc, dict):
+        return values
+    for key, (prop, allowed) in _NVD_SSVC_PROPERTIES.items():
+        value = ssvc.get(key)
+        if not isinstance(value, str) or not value.strip() or len(value) > 64:
+            continue
+        value = value.strip().lower() if allowed is not None else value.strip()
+        if allowed is None or value in allowed:
+            values[prop] = value
+    if not any(values[_NVD_SSVC_PROPERTIES[k][0]] for k in ("exploitation", "automatable", "technical_impact")):
+        return {prop: None for prop in values}
+    return values
 
 
 def clamp_confidence_score(value: Any) -> Optional[float]:
@@ -3119,7 +3150,11 @@ class Neo4jClient:
           nodes with ``cwe`` had NVD as their only source);
         - a CVSS sub-node of a version the record no longer has is removed when EdgeGuard manages it
           and NVD is the only feed that asserted it (``sources`` of its ``HAS_CVSS_*`` edge, or the
-          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too.
+          node's ``tag`` where the edge predates ``sources``): CISA ICS writes CVSS sub-nodes too;
+        - CISA's SSVC decision points (``ssvc_exploitation``, ``ssvc_automatable``,
+          ``ssvc_technical_impact``, with ``ssvc_version`` and ``ssvc_timestamp``; 2026-10) are set
+          from the record on any node, and removed when the record has none: no other source supplies
+          them, so a decision CISA changed or withdrew never stays from an earlier record.
 
         Failure is logged and leaves the node as it was, like ``_merge_cvss_node``.
         """
@@ -3131,8 +3166,10 @@ class Neo4jClient:
             clean = [str(x) for x in value if x is not None and str(x) != ""] if isinstance(value, list) else []
             lists[prop] = clean or None
         absent = [rel_type for rel_type, key in _NVD_CVSS_VERSIONS if not data.get(key)]
+        ssvc = _nvd_ssvc_values(data.get("ssvc"))
         set_clause = ", ".join(
-            f"c.{prop} = CASE WHEN nvd_only THEN ${prop} ELSE c.{prop} END" for prop in _NVD_OWNED_CVE_LISTS
+            [f"c.{prop} = CASE WHEN nvd_only THEN ${prop} ELSE c.{prop} END" for prop in _NVD_OWNED_CVE_LISTS]
+            + [f"c.{prop} = ${prop}" for prop in ssvc]
         )
         query = f"""
         MATCH (c:CVE {{cve_id: $cve_id}})
@@ -3146,7 +3183,7 @@ class Neo4jClient:
         """
         try:
             with self.driver.session() as session:
-                session.run(query, cve_id=cve_id, absent_rel_types=absent, **lists, timeout=NEO4J_READ_TIMEOUT)
+                session.run(query, cve_id=cve_id, absent_rel_types=absent, **lists, **ssvc, timeout=NEO4J_READ_TIMEOUT)
             return True
         except Exception as e:
             logger.warning(f"Failed to replace the NVD data of CVE {cve_id}: {e}")

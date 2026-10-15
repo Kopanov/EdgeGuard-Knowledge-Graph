@@ -44,7 +44,7 @@ NOW = datetime(2026, 10, 14, 18, 30, tzinfo=timezone.utc)
 # The real records (published, lastModified, status as NVD returned them on 2026-10-14).
 REJECTED = "CVE-2026-22314"  # in MISP as active (high), rejected by NVD on 2026-10-13 14:17 UTC
 ANALYSED = "CVE-2026-83540"  # in MISP with CVSS 4.0 only; NVD added CVSS 3.1 and CPE on 2026-10-13 17:33
-UNCHANGED = ("CVE-2025-0237", "CVE-2025-0238")  # in MISP exactly as NVD has them now
+UNCHANGED = ("CVE-2025-0237", "CVE-2025-0238")  # in MISP as NVD has them now, but for CISA's SSVC (see below)
 NEW = "CVE-2026-93637"  # published 2026-10-14 17:20, not in MISP
 OLD = "CVE-1999-0024"  # published 1997, modified 2026-10-09, not on KEV, not in MISP
 KEV_OLD = "CVE-2021-44228"  # published 2021, on KEV, modified 2026-08-11, not in MISP
@@ -63,6 +63,16 @@ def nvd_record(cve_id: str, **cve_changes) -> dict:
 
 def stored_attribute(cve_id: str) -> dict:
     return copy.deepcopy(FIXTURES["misp"][cve_id])
+
+
+def stored_attribute_with_ssvc(cve_id: str) -> dict:
+    """The stored copy as a baseline written since 2026-10 holds it: ``NVD_META`` also carries CISA's
+    SSVC decision from NVD's record. The hosted baseline of 2026-10-13 predates the ``ssvc`` key."""
+    attr = stored_attribute(cve_id)
+    meta = json.loads(attr["comment"][len("NVD_META:") :])
+    meta["ssvc"] = nvd_collector.cisa_ssvc(nvd_record(cve_id)["cve"].get("metrics"))
+    attr["comment"] = "NVD_META:" + json.dumps(meta)
+    return attr
 
 
 class _Response:
@@ -418,10 +428,27 @@ class TestReadingTheWindow:
 
 # --------------------------------------------------------------------------- one run, end to end
 class TestIncrementalRun:
-    def _fakes(self, cursor=None):
+    def _fakes(self, cursor=None, ssvc_in_stored_copies=True):
         nvd = FakeNvd([nvd_record(c) for c in ALL])
-        misp = FakeMisp([stored_attribute(c) for c in KNOWN])
+        stored = stored_attribute_with_ssvc if ssvc_in_stored_copies else stored_attribute
+        misp = FakeMisp([stored(c) for c in KNOWN])
         return nvd, misp, CursorStore(cursor)
+
+    def test_copies_written_before_ssvc_are_edited_once_to_add_it(self, env):
+        # The hosted MISP of 2026-10-14: NVD has CISA's decision for both CVEs it did not change, and the
+        # copies predate the ``ssvc`` key, so each is edited once, with nothing but ``ssvc`` added.
+        env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")
+        nvd, misp, store = self._fakes(ssvc_in_stored_copies=False)
+        status = run(env, nvd, misp, store)
+        edits = dict(misp.edits())
+        for cve_id in UNCHANGED:
+            before = json.loads(stored_attribute(cve_id)["comment"][len("NVD_META:") :])
+            after = json.loads(edits[stored_attribute(cve_id)["uuid"]]["comment"][len("NVD_META:") :])
+            assert after["ssvc"]["exploitation"] == "none"
+            assert misp_writer.nvd_meta_digest(dict(after, ssvc=None)) == misp_writer.nvd_meta_digest(before)
+        assert status["nvd_incremental"]["updated"] == 4 and status["nvd_incremental"]["unchanged"] == 0
+        store.data.clear()
+        assert run(env, nvd, misp, store)["nvd_incremental"]["unchanged"] == 6, "once"
 
     def test_new_changed_unchanged_and_out_of_scope_cves(self, env):
         env.setenv("EDGEGUARD_NVD_INCREMENTAL_DAYS", "70")  # first run without a cursor; reaches Log4Shell

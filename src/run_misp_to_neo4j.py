@@ -3247,6 +3247,9 @@ class MISPToNeo4jSync:
                 # fields when present (JSON-serialize logic at ~L2389-2431).
                 "version_constraints": nvd_meta.get("version_constraints", []),
                 "status": nvd_meta.get("status", []),
+                # 2026-10: CISA's SSVC decision points from NVD's record; merge_cve sets them from an
+                # NVD record only (``nvd_record``), and validates them there.
+                "ssvc": nvd_meta.get("ssvc") if isinstance(nvd_meta.get("ssvc"), dict) else None,
             }
             return self._with_provenance(item, relationships)
 

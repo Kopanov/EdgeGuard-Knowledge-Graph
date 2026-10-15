@@ -162,9 +162,21 @@ def _cited_rows(cited=_GRAPH_CITED) -> List[Dict[str, Any]]:
     return [{"cited_revoked_ids": cited[0], "linked": cited[1], "recorded": cited[2]}]
 
 
+_EPSS_SSVC_ROW = {
+    "cves": 141000,
+    "with_epss": 139500,
+    "epss_score_dates": 1,
+    "latest_epss_score_date": "2026-10-11T12:00:25Z",
+    "with_ssvc": 61000,
+    "ssvc_exploitation_active": 1500,
+}
+
+
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
+    if "AS ssvc_exploitation_active" in s:
+        return [dict(_EPSS_SSVC_ROW)]
     if "AS recorded" in s:
         return _cited_rows()
     if "AS names_folded" in s:
@@ -880,6 +892,51 @@ class TestLegacyRelationshipProperties:
         assert scan.startswith("MATCH ()-[r]->() RETURN")
         for key in ("r.source_id IS NOT NULL", "r.source_ids IS NOT NULL", "r.report_ids IS NOT NULL"):
             assert key in scan
+
+
+class TestEpssAndSsvc:
+    """FIRST EPSS and CISA's SSVC on CVE nodes (2026-10): no EPSS on a graph with CVEs is a warning,
+    never a failure (the job skips an unavailable feed); SSVC is reported."""
+
+    def test_a_graph_with_epss_passes_and_the_check_is_never_mandatory(self, vfb, monkeypatch):
+        c = _check(_run(vfb, monkeypatch), "cve_epss_and_ssvc")
+        assert c["ok"] is True and c["mandatory"] is False
+        assert c["detail"]["with_ssvc"] == 61000 and "hint" not in c["detail"]
+
+    def test_cves_without_any_epss_are_a_warning(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [dict(rows[0], with_epss=0, epss_score_dates=0, latest_epss_score_date=None)]
+                if "AS ssvc_exploitation_active" in st
+                else rows
+            ),
+        )
+        assert [c["check"] for c in rep.warnings] == ["cve_epss_and_ssvc"] and rep.failed == []
+        assert "EDGEGUARD_ENABLE_EPSS" in _check(rep, "cve_epss_and_ssvc")["detail"]["hint"]
+
+    def test_informational_without_cves(self, vfb, monkeypatch):
+        empty = {k: 0 for k in _EPSS_SSVC_ROW}
+        rep = _run(vfb, monkeypatch, override=lambda st, rows: [empty] if "AS ssvc_exploitation_active" in st else rows)
+        assert _check(rep, "cve_epss_and_ssvc")["ok"] is None and rep.warnings == []
+
+    def test_query_shape(self, vfb, monkeypatch):
+        seen = {}
+
+        def capture(st, rows):
+            if "AS ssvc_exploitation_active" in st:
+                seen["st"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        for fragment in (
+            "MATCH (c:CVE)",
+            "count(c.epss_score) AS with_epss",
+            "count(DISTINCT c.epss_score_date)",
+            "c.ssvc_technical_impact IS NOT NULL",
+        ):
+            assert fragment in seen["st"]
 
 
 class TestCampaignMembership:
