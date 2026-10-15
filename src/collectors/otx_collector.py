@@ -344,6 +344,9 @@ class OTXCollector:
 
         data = response.json()
         pulses = data.get("results", []) if isinstance(data, dict) else data
+        # 2026-10: OTX states how many pulses match the request; a baseline logs it (coverage check).
+        count = data.get("count") if isinstance(data, dict) else None
+        self._otx_reported_total = count if isinstance(count, int) and not isinstance(count, bool) else None
 
         logger.info(f"[FETCH] OTX: Fetched {len(pulses)} pulses")
         return pulses
@@ -419,6 +422,8 @@ class OTXCollector:
                     consecutive_empty = 0
                     all_pulses.extend(pulses)
                     logger.info(f"   Page {page}: {len(pulses)} pulses (total: {len(all_pulses)})")
+                    if page == 1:
+                        self._log_baseline_coverage(baseline_days, max_pages, limit or 50)
                     page += 1
                     time.sleep(2)  # OTX free tier: 30 req/min → 2 s between page fetches
 
@@ -436,7 +441,9 @@ class OTXCollector:
                         "OTX baseline returned 0 pulses for %s-day window — verify API key and OTX connectivity",
                         baseline_days,
                     )
-                logger.info(f"   Baseline complete: {len(pulses)} total pulses collected")
+                reported = getattr(self, "_otx_reported_total", None)
+                of_reported = f" of {reported} that OTX reported for the window" if reported is not None else ""
+                logger.info(f"   Baseline complete: {len(pulses)} total pulses collected{of_reported}")
             else:
                 # Incremental: only pulses modified since last successful run (checkpoint + overlap).
                 inc = get_source_incremental("otx")
@@ -852,6 +859,31 @@ class OTXCollector:
         result = make_status("otx", success, count=count, failed=failed, error=error)
         result["circuit_breaker_state"] = self.circuit_breaker.state.name
         return result
+
+    def _log_baseline_coverage(self, baseline_days: int, max_pages: int, page_size: int) -> None:
+        """Log how many pulses OTX reports for the baseline window and whether the page ceiling reads
+        them all (2026-10): the coverage of a baseline is then stated, not inferred."""
+        reported = getattr(self, "_otx_reported_total", None)
+        if reported is None:
+            return
+        per_page = max(page_size, 1)
+        readable = max_pages * per_page
+        logger.info(
+            "   OTX reports %d subscribed pulses modified in the last %d days; the page ceiling reads up to %d "
+            "(EDGEGUARD_OTX_BASELINE_MAX_PAGES=%d, %d per page)",
+            reported,
+            baseline_days,
+            readable,
+            max_pages,
+            per_page,
+        )
+        if reported > readable:
+            logger.warning(
+                "OTX baseline: the page ceiling stops %d pulses short of the window; set "
+                "EDGEGUARD_OTX_BASELINE_MAX_PAGES to at least %d to read them all",
+                reported - readable,
+                -(-reported // per_page),
+            )
 
     def map_indicator_type(self, ind_type: str, value: str = None) -> str:
         """Map OTX indicator types to standard EdgeGuard types"""
