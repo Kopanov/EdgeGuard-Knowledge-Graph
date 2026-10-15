@@ -508,6 +508,43 @@ class TestDagRunInProgress:
         listener.on_dag_run_success(dag_run=restarted, msg="success")
         assert _in_progress("edgeguard_daily") == 0
 
+    def test_an_older_run_ending_keeps_the_mark_of_the_run_in_progress(self, run_state_listener, monkeypatch, tmp_path):
+        """Marking an older run failed by hand fires the same hook while the current run goes on."""
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        from airflow.models.dagrun import DagRun
+
+        start = datetime(2026, 10, 15, 2, 0, tzinfo=timezone.utc)
+        live = SimpleNamespace(dag_id="edgeguard_daily", run_id="scheduled__live", start_date=start)
+        old = SimpleNamespace(dag_id="edgeguard_daily", run_id="manual__old", start_date=start - timedelta(days=1))
+        running: list = [live]
+        monkeypatch.setattr(DagRun, "find", staticmethod(lambda **kw: list(running)))
+        listener = run_state_listener.listener
+
+        listener.on_dag_run_running(dag_run=live, msg="started")
+        listener.on_dag_run_failed(dag_run=old, msg="Dag Run's state was manually set to `failed`.")
+        assert _in_progress("edgeguard_daily") == start.timestamp(), "the live run stays marked"
+
+        running.clear()
+        listener.on_dag_run_success(dag_run=live, msg="success")
+        assert _in_progress("edgeguard_daily") == 0
+
+    def test_an_unreadable_run_list_clears_the_mark(self, run_state_listener, monkeypatch, tmp_path, caplog):
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        from airflow.models.dagrun import DagRun
+
+        def unreadable(**_kw):
+            raise RuntimeError("metadata database unavailable")
+
+        monkeypatch.setattr(DagRun, "find", staticmethod(unreadable))
+        run = SimpleNamespace(
+            dag_id="edgeguard_low_freq", run_id="r", start_date=datetime(2026, 10, 15, tzinfo=timezone.utc)
+        )
+        run_state_listener.listener.on_dag_run_running(dag_run=run, msg="started")
+        with caplog.at_level(logging.WARNING):
+            run_state_listener.listener.on_dag_run_failed(dag_run=run, msg="timed_out")
+        assert _in_progress("edgeguard_low_freq") == 0
+        assert any("Running runs of edgeguard_low_freq not read" in r.getMessage() for r in caplog.records)
+
     def test_outside_the_multi_process_mode_the_hooks_write_nothing(self, run_state_listener, monkeypatch):
         """The scheduler's own registry is served by nothing; only the shared directory reaches Prometheus."""
         monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)

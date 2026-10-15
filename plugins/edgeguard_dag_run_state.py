@@ -17,7 +17,9 @@ The mark is kept by Airflow's DAG run listener hooks, not by DAG-level or task c
 The first 2026-10 design cleared the mark from DAG-level success and failure callbacks. Those miss
 a manual state change, and the DAG processor runs them asynchronously, so a late callback of one run
 could clear the mark of the next. A run that is deleted fires no hook: its mark stays until the DAG's
-next run starts (docs/PROMETHEUS_SETUP.md gives the command that clears it at once).
+next run starts (docs/PROMETHEUS_SETUP.md gives the command that clears it at once). When a run
+ends while another run of the same DAG is still running (an older run marked failed by hand), the
+mark keeps that run's start time instead of being cleared.
 
 The mark is written only in prometheus_client's multi-process mode (``PROMETHEUS_MULTIPROC_DIR``, set
 on the ``airflow`` service by docker-compose.yml, which also mounts this directory as the Airflow
@@ -70,6 +72,40 @@ def _set_mark(dag_run: Any, value: float) -> None:
         logger.warning("DAG run in-progress mark of %s not written: %s", dag_id, e)
 
 
+def _other_running_start(dag_run: Any) -> Optional[float]:
+    """The start time of the earliest other run of the same DAG still running, or None (2026-10).
+
+    The run whose end a hook reports need not be the one in progress: marking an older run failed in
+    the UI fires the same hook while the current run goes on. Cleared then, the mark would hide that
+    run from ``EdgeGuardDAGRunStuck``. Read from Airflow's metadata database; a failed read clears the
+    mark, as before.
+    """
+    dag_id = getattr(dag_run, "dag_id", None)
+    if not dag_id:
+        return None
+    try:
+        from airflow.models.dagrun import DagRun
+        from airflow.utils.state import DagRunState
+
+        runs = DagRun.find(dag_id=dag_id, state=DagRunState.RUNNING)
+    except Exception as e:  # noqa: BLE001 - a listener must never fail the scheduler or the API call
+        logger.warning("Running runs of %s not read; its in-progress mark is cleared: %s", dag_id, e)
+        return None
+    own = getattr(dag_run, "run_id", None)
+    starts = [
+        r.start_date.timestamp()
+        for r in runs or []
+        if getattr(r, "run_id", None) != own and getattr(r, "start_date", None) is not None
+    ]
+    return min(starts) if starts else None
+
+
+def _end_mark(dag_run: Any) -> None:
+    """A run ended: the mark follows another run of the DAG still running, else it is cleared."""
+    other = _other_running_start(dag_run)
+    _set_mark(dag_run, other if other is not None else 0)
+
+
 class DagRunStateListener:
     """The DAG run hooks (pluggy calls the bound methods with ``dag_run`` and ``msg``)."""
 
@@ -82,12 +118,12 @@ class DagRunStateListener:
     @hookimpl
     def on_dag_run_success(self, dag_run: Any, msg: str) -> None:
         """The run ended successfully, through the scheduler or a manual state change."""
-        _set_mark(dag_run, 0)
+        _end_mark(dag_run)
 
     @hookimpl
     def on_dag_run_failed(self, dag_run: Any, msg: str) -> None:
         """The run failed, timed out or was marked failed by hand."""
-        _set_mark(dag_run, 0)
+        _end_mark(dag_run)
 
 
 class EdgeGuardDagRunStatePlugin(AirflowPlugin):
