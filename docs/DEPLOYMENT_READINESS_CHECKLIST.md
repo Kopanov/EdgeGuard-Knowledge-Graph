@@ -59,7 +59,7 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 |------|--------|---------|------|
 | [ ] | Preflight (recommended) | `python src/edgeguard.py preflight` | All 7 checks pass (env vars, APIs, Neo4j, MISP, Airflow, disk, breakers). Section 1 asks each provider whether it accepts the configured source API key: no `key REJECTED` line |
 | [ ] | MISP + Neo4j | `python src/health_check.py` or `make health` | `overall_healthy`; APOC noted for Neo4j ([ENVIRONMENTS.md](ENVIRONMENTS.md)) |
-| [ ] | REST API health | `curl -s http://<api-host>:8000/health` (or your URL) | **HTTP 200** always; JSON `status: ok` and `neo4j_connected: true` when Neo4j ping + APOC pass ([README.md](../README.md) § Health) |
+| [ ] | REST API health | `curl -sf http://<api-host>:8000/health` (or your URL) | **HTTP 200** with JSON `status: ok` and `neo4j_connected: true` when Neo4j ping + APOC pass; **503** with `status: degraded` otherwise (`curl -f` fails on 503) ([README.md](../README.md) § Health) |
 | [ ] | GraphQL health | `curl -sf http://<api-host>:4001/health` | **HTTP 200** when Neo4j is healthy; **503** if no driver or Neo4j/APOC unhealthy (`curl -f` fails on 503 — intended for “must be up” checks) |
 | [ ] | Airflow | Scheduler up; DAGs not paused; optional: [runtime_smoke_checklist.sh](../scripts/runtime_smoke_checklist.sh) | UI / health reachable |
 | [ ] | MISP from worker | Resolve `MISP_URL` from worker container | No mistaken `localhost` for remote MISP ([MISP_SOURCES.md](MISP_SOURCES.md)) |
@@ -121,4 +121,4 @@ Execute from the **same network context** as Airflow tasks (e.g. `docker exec` i
 
 ---
 
-_Last updated: 2026-04-28 — PR-N35 Tier-1 docs audit: verified `python src/edgeguard.py preflight`, `python src/health_check.py`, `make health`, `EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS` all exist at HEAD. The "All 7 checks pass" wording is approximate (the actual `cmd_preflight` count varies by configuration); operators should rely on green/red signal rather than count. Prior: 2026-04-26 PR-N33 docs audit (cross-linked BASELINE_LAUNCH_CHECKLIST as the launch-day pre-flight); 2026-04-06._
+_Last updated: 2026-10-15 — REST API health row: `/health` answers 503 while degraded (the row documented HTTP 200 in every state). Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: verified `python src/edgeguard.py preflight`, `python src/health_check.py`, `make health`, `EDGEGUARD_MISP_HEALTH_REQUIRE_WORKERS` all exist at HEAD. The "All 7 checks pass" wording is approximate (the actual `cmd_preflight` count varies by configuration); operators should rely on green/red signal rather than count. Prior: 2026-04-26 PR-N33 docs audit (cross-linked BASELINE_LAUNCH_CHECKLIST as the launch-day pre-flight); 2026-04-06._

@@ -426,7 +426,7 @@ EdgeGuard exposes a GraphQL endpoint that mirrors the ISIM GraphQL convention us
 ```
 POST http://localhost:4001/graphql     # queries and mutations
 GET  http://localhost:4001/graphql     # GraphiQL only if EDGEGUARD_GRAPHQL_PLAYGROUND=true (default false — see README)
-GET  http://localhost:4001/health      # liveness: HTTP 200 if Neo4j ping+APOC OK, else 503 (REST /health on :8000 always 200 with body flags — see README)
+GET  http://localhost:4001/health      # liveness: HTTP 200 if Neo4j ping+APOC OK, else 503 (REST /health on :8000 behaves the same — see README)
 ```
 
 ### Example queries
@@ -444,10 +444,10 @@ query {
   }
 }
 
-# List critical vulnerabilities in the healthcare sector
+# List critical vulnerabilities in the healthcare sector (the CVE nodes, highest score first)
 query {
   vulnerabilities(filter: { zone: "healthcare", minCvss: 9.0, limit: 20 }) {
-    cveId description status severity cvssScore
+    cveId description status severity cvssScore cvssVersion published tlp
   }
 }
 
@@ -478,6 +478,8 @@ query {
 | `Technique`, `Tactic` | ❌ EdgeGuard extension | Planned ISIM schema extension |
 | `Campaign` | ❌ EdgeGuard extension | Planned ISIM schema extension |
 
+Every type that maps an EdgeGuard node carries `tlp`, the node's TLP level (null when it has none; 2026-10). `vulnerabilities` returns the `Vulnerability` type built from the `CVE` nodes the sync writes (2026-10: it read the `Vulnerability` label, which the sync does not write, and returned an empty list); `cvssScore` is null for a CVE without CVSS, named by `cvssVersion` otherwise. An `indicators` filter on `md5` / `sha1` / `sha256` / `sha512` selects the stored `hash` indicators of that digest length.
+
 See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for the proposed ISIM schema extension that would make Indicator/ThreatActor/Malware/Technique/Campaign queryable from ResilMesh directly.
 
 ---
@@ -496,4 +498,4 @@ See [`RESILMESH_INTEROPERABILITY.md` §8.4](RESILMESH_INTEROPERABILITY.md) for t
 
 ---
 
-_Last updated: 2026-10-15 — post-sync enrichment adds FIRST EPSS (`src/cve_feed_enrichment.py`). Same day: relationship table: per-source `misp_event_ids[]` / `source_refs[]` on `SOURCED_FROM`, curated-package claims on the technique, `USES_MALWARE` / `USES_TOOL` and `EXPLOITS` rows, `TARGETS` from actors and malware; the edge-traceability paragraph no longer says the technique and attribution edges lack `r.misp_event_ids[]`; the curated sources and the `misp` hub named under the source inventory; after #193: a curated claim sets its label and confidence only on a link it creates, and actor / malware `EXPLOITS` carry the package's TLP. Prior: 2026-10-14 — MISP tag table: `cvss:` only for a CVE with a CVSS score (`cvss:none` for 0.0), `severity:unknown` without; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-06-11 — PR #126: ATTRIBUTED_TO row now documents the alias round-trip (actor/malware aliases survive the MISP round-trip via `alias:` tags) and the removal of the alias attribution-forgery branch (Q2 Branch 3). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._
+_Last updated: 2026-10-15 — GraphQL: `vulnerabilities` reads the `CVE` nodes, every node type carries `tlp`, digest-type indicator filters; the REST `/health` note says 503 while degraded. Same day: post-sync enrichment adds FIRST EPSS (`src/cve_feed_enrichment.py`). Same day: relationship table: per-source `misp_event_ids[]` / `source_refs[]` on `SOURCED_FROM`, curated-package claims on the technique, `USES_MALWARE` / `USES_TOOL` and `EXPLOITS` rows, `TARGETS` from actors and malware; the edge-traceability paragraph no longer says the technique and attribution edges lack `r.misp_event_ids[]`; the curated sources and the `misp` hub named under the source inventory; after #193: a curated claim sets its label and confidence only on a link it creates, and actor / malware `EXPLOITS` carry the package's TLP. Prior: 2026-10-14 — MISP tag table: `cvss:` only for a CVE with a CVSS score (`cvss:none` for 0.0), `severity:unknown` without; relationship provenance: every relationship built from the sources carries `sources[]`, `source_refs[]` and `misp_event_ids[]` (who asserts it, the sources' record ids, the MISP events); `source_id`, `source_ids` and `report_ids` were dropped from relationships. Prior: 2026-06-11 — PR #126: ATTRIBUTED_TO row now documents the alias round-trip (actor/malware aliases survive the MISP round-trip via `alias:` tags) and the removal of the alias attribution-forgery branch (Q2 Branch 3). Prior: 2026-04-28 — PR-N36 Tier-2 deep verification: re-verified — no factual drift. The 13-source inventory matches `src/collectors/` (incl. healthcare/energy placeholders). `EDGEGUARD_REL_BATCH_SIZE` default 500 matches `_RELATIONSHIP_BATCH_DEFAULT` in `src/run_misp_to_neo4j.py:484`; `EDGEGUARD_DEBUG_GC` exists at line 3723. `create_misp_relationships_batch` and the per-edge-type provenance scoping all match code. Prior: 2026-04-26 PR-N33 docs audit (corrected PR-N26 edge scope); 2026-04-18 chip 5a + PR #41 cleanup._
