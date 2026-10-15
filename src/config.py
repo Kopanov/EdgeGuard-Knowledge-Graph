@@ -655,6 +655,45 @@ MISP_PREFETCH_EXISTING_ATTRS = _env_bool("EDGEGUARD_MISP_PREFETCH_EXISTING_ATTRS
 # the prefetch query becomes the slow part of a baseline.
 MISP_CROSS_EVENT_DEDUP = _env_bool("EDGEGUARD_MISP_CROSS_EVENT_DEDUP", "true")
 
+
+# Re-reported indicators (2026-10). The cross-event prefetch above drops every indicator a source
+# already holds in MISP, so an IOC a feed keeps listing was never written again: the incremental
+# sync reads only attributes whose MISP timestamp moved, ``Indicator.last_updated`` stayed at the
+# first import, and ``decay_ioc_confidence`` lowered the node at 90 / 180 days and retired it at
+# 365 while the feed still listed it. ``MISPWriter.push_items`` now edits the stored attribute when
+# the source reports the indicator again and MISP last wrote it longer ago than the interval
+# below; the edit moves MISP's timestamp and keeps the source's dates (see
+# ``MISPWriter._refresh_stored_copies``). Read per call so Airflow tasks and tests pick up the
+# environment at run time.
+
+
+def misp_refresh_last_seen_days() -> int:
+    """``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS`` (default 30; ``0`` = no refresh): a re-reported
+    indicator whose stored copy MISP last wrote (attribute ``timestamp``) more than this many days
+    ago is edited once: its ``last_seen`` becomes the source's claim when that is later than the
+    stored one and otherwise stays as it is, and MISP stamps the attribute anew. The edit resets
+    the timestamp the decision reads, so a copy is edited at most once per interval; 30 days stays
+    well inside decay's first tier (90 days)."""
+    return max(0, _env_int("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", 30))
+
+
+def misp_refresh_max_per_run() -> int:
+    """``EDGEGUARD_MISP_REFRESH_MAX_PER_RUN`` (default 2000; ``0`` = no cap): attribute edits one
+    ``push_items`` call makes at most for re-reported indicators, the longest unwritten first. Each
+    is one MISP request; the rest wait for a later run that reports them again."""
+    return max(0, _env_int("EDGEGUARD_MISP_REFRESH_MAX_PER_RUN", 2000))
+
+
+def misp_refresh_max_seconds() -> int:
+    """``EDGEGUARD_MISP_REFRESH_MAX_SECONDS`` (default 600; ``0`` = no limit): wall-clock time one
+    ``push_items`` call spends on refresh edits at most. No edit starts after it is spent; the rest
+    wait for a later run. 10 minutes is a sixth of the shortest collector task limit (1 hour:
+    ``collect_otx``, ``collect_cisa``, ``collect_virustotal``). An edit in flight is not
+    interrupted, so a run can exceed it by one edit's attempts (``MISPWriter._post_with_retries``:
+    three, with a 600 s read timeout each)."""
+    return max(0, _env_int("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", 600))
+
+
 # OTX incremental: first-run / no-checkpoint lookback; overlap subtracted from stored cursor to avoid gaps.
 OTX_INCREMENTAL_LOOKBACK_DAYS = _env_int("EDGEGUARD_OTX_INCREMENTAL_LOOKBACK_DAYS", 3)
 OTX_INCREMENTAL_OVERLAP_SEC = _env_int("EDGEGUARD_OTX_INCREMENTAL_OVERLAP_SEC", 300)
@@ -744,7 +783,11 @@ NO_LIMIT_SOURCES = set()  # Empty for now - feature available but not active
 #   EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN (default 500) is the per-run limit for this source.
 #   nvd (2026-10): a run reads every CVE modified since its cursor and caps its MISP writes with
 #   EDGEGUARD_NVD_MAX_PER_RUN (default 5000); a cut at 200 lost 37% of new CVEs (30-day replay).
-OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd"})
+#   threatfox, urlhaus (2026-10): the daily run reads a 7-day (ThreatFox API) and a 30-day
+#   (URLhaus csv_recent) window holding about 1,100 new entries per day each; cut at 200, about
+#   80% of them were never collected (neither feed has a cursor). EDGEGUARD_THREATFOX_MAX_PER_RUN
+#   and EDGEGUARD_URLHAUS_MAX_PER_RUN size the cap to the whole window (see their definitions).
+OWN_RUN_CAP_SOURCES = frozenset({"malwarebazaar", "nvd", "threatfox", "urlhaus"})
 
 
 def get_effective_limit(source: str = None, default_limit: int = None) -> Optional[int]:
@@ -1306,6 +1349,22 @@ ENABLE_MALWAREBAZAAR = _env_bool("EDGEGUARD_ENABLE_MALWAREBAZAAR", "false")
 # than "n/a") are kept before unlabelled ones, then the list is cut at the cap.
 # ``0`` disables the cap (only the regular collection limit applies).
 MALWAREBAZAAR_MAX_PER_RUN = _env_int("EDGEGUARD_MALWAREBAZAAR_MAX_PER_RUN", 500)
+
+# ---------------------------------------------------------------------------
+# ThreatFox / URLhaus per-run caps (2026-10)
+# ---------------------------------------------------------------------------
+# Both feeds are read as a window without a cursor: ThreatFox ``get_iocs`` serves the IOCs of
+# the last 7 days (7,398 on the 730-day baseline of 2026-10-13; about 1,050-1,140 new per day),
+# URLhaus ``csv_recent`` the URLs of the last 30 days (34,003 on the same baseline; about 1,130
+# per day). The generic incremental default (200) let about 80% of each day's entries age out
+# of the window uncollected. Each cap covers the whole window with headroom, so a daily run
+# keeps everything the feed still lists and a run that misses days catches up; a run that
+# reaches the cap keeps the newest entries (by ``first_seen`` / ``dateadded``) and logs a
+# warning. Entries MISP already holds are not pushed again (cross-event duplicate prefetch).
+# ``EDGEGUARD_MAX_ENTRIES`` and an explicit baseline limit still apply when lower; ``0``
+# removes the cap.
+THREATFOX_MAX_PER_RUN = _env_int("EDGEGUARD_THREATFOX_MAX_PER_RUN", 10000)
+URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
 
 # ---------------------------------------------------------------------------
 # ThreatActor alias-duplicate merge (2026-10, fresh-baseline PR)

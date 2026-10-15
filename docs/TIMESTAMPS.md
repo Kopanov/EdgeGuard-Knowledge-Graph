@@ -140,6 +140,15 @@ populates the MISP 2.4.120+ native fields:
 
 - `Attribute.first_seen` ← item's `first_seen` (passed through `coerce_iso`)
 - `Attribute.last_seen`  ← item's `last_seen` (passed through `coerce_iso`)
+- **Re-reported indicators (2026-10):** when a collector run reports an indicator MISP already
+  holds for its source and MISP last wrote the stored copy (`Attribute.timestamp`) more than
+  `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago (default 30), `MISPWriter.push_items` edits the copy
+  so that MISP writes a new `Attribute.timestamp`, which brings it into the next incremental sync.
+  The edit sends `Attribute.last_seen` and nothing else: the item's `last_seen` when it is later
+  than the stored one, otherwise the stored value unchanged. Concept 2 therefore holds only dates
+  the source sent: a refresh never writes the time of a run into it (Invariant 1 holds for
+  edited attributes too), and Concept 1 does not move. See
+  [COLLECTORS.md](COLLECTORS.md#re-reported-indicators-2026-10).
 
 **These are the source-truthful ones.** Do NOT confuse with:
 
