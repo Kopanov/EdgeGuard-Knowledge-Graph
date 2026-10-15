@@ -384,6 +384,23 @@ Each entry: symptom → detection signal → remediation.
 
 ---
 
+## Neo4j statement timeouts (`[NEO4J-TIMEOUT]`, 2026-10)
+
+- **What applies.** Every pipeline statement carries a transaction timeout that the Neo4j server enforces. The limits are protection against a statement that hangs, set loose so that a slow statement on a large graph does not reach them:
+  - `EDGEGUARD_NEO4J_READ_TIMEOUT` (default 3600 s) for the sync, relationship-build, enrichment and wipe statements;
+  - 600 s for the relationship batch writes (a batch takes seconds; deadlocks are reported at once and retried);
+  - 300 s for the REST API and STIX export queries.
+
+  A driver opened directly by a CLI command or a script carries none.
+- **Symptom.** A task fails with `[NEO4J-TIMEOUT] the server aborted a statement at its N s transaction timeout: <statement>`.
+- **Log probe.**
+  ```bash
+  docker logs edgeguard_airflow 2>&1 | grep "\[NEO4J-TIMEOUT\]" | tail -20
+  ```
+- **Remediation.**
+  - **The statement is expected to run longer on a large graph** (a baseline build step or an enrichment job): raise `EDGEGUARD_NEO4J_READ_TIMEOUT` in `.env`, recreate the Airflow containers and clear the failed task.
+  - **The statement stalls without progress:** this points to lock contention or memory pressure; see § 5 above and the memory posture below.
+
 ## Bravo-ops: memory posture for the next baseline
 
 After the 2026-04-04 baseline was OOM-killed (exit 137) during

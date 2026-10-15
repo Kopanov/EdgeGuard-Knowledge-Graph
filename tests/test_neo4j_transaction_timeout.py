@@ -13,6 +13,8 @@ import os
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 from neo4j import Query
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
@@ -133,3 +135,111 @@ class TestClientWiring:
 
     def test_connect_source_pins_the_wrapper(self):
         assert "_TimeoutDriver(" in inspect.getsource(inspect.unwrap(nc.Neo4jClient.connect))
+
+
+# --------------------------------------------------------------------------- a timeout is logged (2026-10)
+class _TimedOut(Exception):
+    code = "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration"
+
+
+class _SyntaxError(Exception):
+    code = "Neo.ClientError.Statement.SyntaxError"
+
+
+class _RaisingResult:
+    def __init__(self, exc):
+        self.exc = exc
+
+    def single(self):
+        raise self.exc
+
+    def __iter__(self):
+        raise self.exc
+
+
+class _SessionWith:
+    def __init__(self, result, close_error=None):
+        self.result = result
+        self.close_error = close_error
+
+    def run(self, query, parameters=None, **kwargs):
+        return self.result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        if self.close_error is not None:
+            raise self.close_error
+        return None
+
+
+def _timeout_lines(caplog):
+    return [r.getMessage() for r in caplog.records if "[NEO4J-TIMEOUT]" in r.getMessage()]
+
+
+class TestTimeoutIsLogged:
+    def test_a_timeout_raised_while_reading_names_the_statement_and_its_limit(self, caplog):
+        session = nc._TimeoutSession(_SessionWith(_RaisingResult(_TimedOut("terminated"))))
+        result = session.run("MATCH (n)\n   RETURN count(n) AS c", timeout=1200)
+        with pytest.raises(_TimedOut):
+            result.single()
+        (line,) = _timeout_lines(caplog)
+        assert "1200 s" in line and "MATCH (n) RETURN count(n) AS c" in line
+
+    def test_a_timeout_raised_while_iterating_is_logged(self, caplog):
+        session = nc._TimeoutSession(_SessionWith(_RaisingResult(_TimedOut("terminated"))))
+        with pytest.raises(_TimedOut):
+            list(session.run("MATCH (n) RETURN n", timeout=60))
+        assert len(_timeout_lines(caplog)) == 1
+
+    def test_a_timeout_surfacing_when_the_session_closes_is_logged(self, caplog):
+        inner = _SessionWith(object(), close_error=_TimedOut("terminated"))
+        with pytest.raises(_TimedOut):
+            with nc._TimeoutSession(inner) as s:
+                s.run("CALL apoc.periodic.iterate('x', 'y', {})", timeout=300)
+        (line,) = _timeout_lines(caplog)
+        assert "300 s" in line and "apoc.periodic.iterate" in line
+
+    def test_other_errors_are_not_reported_as_timeouts(self, caplog):
+        session = nc._TimeoutSession(_SessionWith(_RaisingResult(_SyntaxError("bad"))))
+        with pytest.raises(_SyntaxError):
+            session.run("MATCH (n RETURN n", timeout=60).single()
+        assert _timeout_lines(caplog) == []
+
+    def test_one_timeout_is_logged_once(self, caplog):
+        exc = _TimedOut("terminated")
+        nc._log_if_timed_out(exc, 60.0, "MATCH (n) RETURN n")
+        nc._log_if_timed_out(exc, 60.0, "MATCH (n) RETURN n")
+        assert len(_timeout_lines(caplog)) == 1
+
+    def test_without_a_timeout_the_result_is_returned_unchanged(self):
+        result = object()
+        assert nc._TimeoutSession(_SessionWith(result)).run("RETURN 1") is result
+
+    def test_the_message_names_the_limit_that_applied(self, caplog):
+        nc._log_if_timed_out(_TimedOut("a"), float(nc.NEO4J_READ_TIMEOUT), "MATCH (a) RETURN a")
+        nc._log_if_timed_out(_TimedOut("b"), float(nc._REL_QUERY_TIMEOUT), "UNWIND $rows AS row MERGE (x)")
+        nc._log_if_timed_out(_TimedOut("c"), 300.0, "MATCH (s) RETURN s")
+        pipeline, batch, api = _timeout_lines(caplog)
+        assert "EDGEGUARD_NEO4J_READ_TIMEOUT" in pipeline
+        assert "_REL_QUERY_TIMEOUT" in batch and "EDGEGUARD_NEO4J_READ_TIMEOUT" not in batch
+        assert "REST and STIX" in api and "EDGEGUARD_NEO4J_READ_TIMEOUT" not in api
+
+    def test_a_timeout_raised_by_the_next_run_is_logged_against_the_previous_statement(self, caplog):
+        class _UnreadThenTimeout:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, query, parameters=None, **kwargs):
+                self.calls += 1
+                if self.calls == 2:  # the driver reads the first, unread result here
+                    raise _TimedOut("terminated")
+                return object()
+
+        session = nc._TimeoutSession(_UnreadThenTimeout())
+        session.run("UNWIND $rows AS row MERGE (a)-[r:USES]->(b)", timeout=600)
+        with pytest.raises(_TimedOut):
+            session.run("MATCH (n) RETURN count(n)", timeout=3600)
+        (line,) = _timeout_lines(caplog)
+        assert "600 s" in line and "UNWIND $rows AS row MERGE" in line and "count(n)" not in line

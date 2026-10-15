@@ -29,7 +29,7 @@ def _timeout(value):
 
 
 def test_default_leaves_room_for_the_baseline_link_queries():
-    assert _timeout(None) == 900
+    assert _timeout(None) == 3600
 
 
 def test_env_override():
