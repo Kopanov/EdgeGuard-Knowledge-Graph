@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from neo4j import GraphDatabase, Query
+    from neo4j import GraphDatabase, NotificationDisabledCategory, Query
     from neo4j import exceptions as neo4j_exceptions
 except ImportError:
     raise ImportError("neo4j package not installed. Run: pip install neo4j")
@@ -1446,6 +1446,10 @@ class Neo4jClient:
                     max_connection_lifetime=3600,
                     max_connection_pool_size=50,
                     connection_acquisition_timeout=120,
+                    # The server flags apoc.coll.toSet / apoc.coll.sort as deprecated and the driver
+                    # logs each notice at WARNING with the full query text: one sync wrote a 5.4 GB
+                    # task log. Other notification categories still arrive.
+                    notifications_disabled_categories=[NotificationDisabledCategory.DEPRECATION],
                 ),
                 database=_configured_database(),
             )
