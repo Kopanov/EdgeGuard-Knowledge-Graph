@@ -107,13 +107,16 @@ REPORT_ACTORS_QUERY = (
     "WITH collect(CASE WHEN size(names) > 1 THEN {pid: pid, names: names} END) AS reports, count(pid) AS pulses "
     "RETURN reports, pulses"
 )
-# 2026-10: the pulses the OTX collector judged to name several actors, as the indicators record them
-# (``Indicator.several_actor_pulses``, accumulated by the sync from ``OTX_META.sap``). REPORT_ACTORS_QUERY
-# learns such a pulse only from the actors' ``pulse_ids``, which MISP's cross-event de-duplication leaves
-# incomplete: MISP does not push an actor again that it already holds, so a pulse that named one actor
-# when its pairs were written and was later edited to name several is on no actor's ``pulse_ids`` as a
-# pulse of several, and its pairs stayed linkable. One row always: ``pulses`` (the marked pulse ids) and
-# ``indicators`` (how many indicators carry a mark), so an empty answer is a failed read.
+# 2026-10: the pulses the OTX collector judged, with this reference, to name several actors, as the
+# indicators record them (``Indicator.several_actor_pulses``, accumulated by the sync from
+# ``OTX_META.sap``). REPORT_ACTORS_QUERY learns such a pulse only from the actors' ``pulse_ids``, which
+# MISP's cross-event de-duplication leaves incomplete: MISP does not push an actor again that it already
+# holds, so a pulse that named one actor when its pairs were written and was later edited to name several
+# is on no actor's ``pulse_ids`` as a pulse of several, and its pairs stayed linkable. MISP does not push
+# an IOC it holds again either: the mark reaches the indicators through the pulse's new IOCs and through
+# the stored copies of its held IOCs, to which ``MISPWriter._carry_marks`` adds it. A mark judged by name
+# without the reference (``OTX_META.sapn``) is not stored. One row always: ``pulses`` (the marked pulse
+# ids) and ``indicators`` (how many indicators carry a mark), so an empty answer is a failed read.
 INDICATOR_MARKED_REPORTS_QUERY = (
     "MATCH (i:Indicator) WHERE i.several_actor_pulses IS NOT NULL "
     'UNWIND i.several_actor_pulses AS pid WITH i, trim(toString(pid)) AS pid WHERE pid <> "" '
@@ -149,7 +152,8 @@ def several_actor_reports(
     actors name (``REPORT_ACTORS_QUERY``'s ``reports``, judged with *reference*:
     ``reports_naming_several_actors``) and the pulses marked on indicators
     (``INDICATOR_MARKED_REPORTS_QUERY``'s ``pulses``). A mark is the OTX collector's own judgement of the
-    pulse's whole adversary list and is taken as it is. ``build_relationships`` step 2d and the
+    pulse's whole adversary list, made with the canonical reference (2026-10: a judgement by name without
+    it is never stored on a node), and is taken as it is. ``build_relationships`` step 2d and the
     acceptance check ``attribution_from_single_actor_reports`` read this set."""
     marked = {p.strip() for p in marked_pulses or [] if isinstance(p, str) and p.strip()}
     return sorted(set(reports_naming_several_actors(report_rows, reference)) | marked)

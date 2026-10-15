@@ -4027,8 +4027,11 @@ class Neo4jClient:
                             batch_item[_enrich_field] = item[_enrich_field]
                     # 2026-10 (regular-update linking): families / adversaries of the pulse(s) that
                     # listed the IOC accumulate on the node (build_relationships Q9b / Q2d), and so do
-                    # the pulses among them the OTX collector judged to name several actors (step 2d
-                    # attributes nothing from them; the actor nodes miss a pulse edited to name several).
+                    # the pulses among them the OTX collector judged, with the canonical reference, to
+                    # name several actors (step 2d attributes nothing from them; the actor nodes miss a
+                    # pulse edited to name several, whose mark MISPWriter adds to stored IOC copies).
+                    # A mark judged by name without the reference (``several_actor_pulses_by_name``)
+                    # is never stored: it serves the sync's own run.
                     for _list_field in ("pulse_malware_families", "pulse_malware_actor_pairs", "several_actor_pulses"):
                         _vals = [str(x) for x in (item.get(_list_field) or []) if x]
                         if _vals:

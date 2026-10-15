@@ -916,8 +916,10 @@ def build_relationships():
         # provenance of links that a pulse naming one actor supports
         # (``_remove_several_actor_attributions``). The pulses naming several actors are those whose
         # actor nodes are several actors and (2026-10) those the OTX collector marked on indicators
-        # (``Indicator.several_actor_pulses``): MISP does not push an actor it already holds again, so
-        # the nodes miss a pulse edited to name several actors after its pairs were written.
+        # (``Indicator.several_actor_pulses``, judged with the canonical reference): MISP does not push
+        # an actor it already holds again, so the nodes miss a pulse edited to name several actors after
+        # its pairs were written. Nor an IOC: the mark of such a pulse reaches the graph through its new
+        # IOCs and through stored copies of its held IOCs, to which MISPWriter adds it (``_carry_marks``).
         # Bugbot on PR #145: two flat lists unioned across pulses on a shared IOC would cross-link a
         # family from pulse A with an actor from pulse B — the exact cross-report attribution this work
         # replaces; the pair encoding keeps the same-pulse guarantee. Report-scoped evidence:

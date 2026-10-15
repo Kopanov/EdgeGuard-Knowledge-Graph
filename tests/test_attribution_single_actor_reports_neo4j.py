@@ -12,7 +12,9 @@ and ``family::adversary`` (written before). ``snake`` is a name of Turla the ali
 folded yet: a pair naming it is judged by that node's pulses, not by Turla's. ``p6`` (2026-10) named Turla
 alone when its pair ``crutch::turla::p6`` was written and an earlier run linked ``tinyturla`` to Turla from
 it; it was then edited to name several actors. MISP held those actors already, so no actor node records
-``p6``: only the OTX collector's mark on an indicator (``several_actor_pulses``) says so. ``unc-it-test``
+``p6``: only the OTX collector's mark says so, on another indicator of the pulse (``four.it.example``,
+``several_actor_pulses``; the MISP writer adds the mark to the stored copies of up to three held IOCs of
+the pulse, so the indicator carrying the pair need not carry the mark). ``unc-it-test``
 loses its only attribution, and with it its campaign's ``RUNS``. ``strmal`` / ``strmal2`` and ``unc-it-test`` hold
 lists as plain strings, as the actor alias merge's APOC ``combine`` leaves them until its normalising
 statement runs. Step 2d runs as production runs it (its statements, through
@@ -95,9 +97,10 @@ CREATE (i2:Indicator:{LABEL} {{indicator_type: 'domain', value: 'two.it.example'
                                     'pterolnk::gamaredon group', 'pterolnk::gamaredon group::p2']}})
 CREATE (i3:Indicator:{LABEL} {{indicator_type: 'domain', value: 'three.it.example', uuid: 'u-i3', active: true,
         pulse_malware_actor_pairs: ['lockbit::venomous bear::p5']}})
-CREATE (i4:Indicator:{LABEL} {{indicator_type: 'domain', value: 'four.it.example', uuid: 'u-i4', active: true}})
+CREATE (i4:Indicator:{LABEL} {{indicator_type: 'domain', value: 'four.it.example', uuid: 'u-i4', active: true,
+        several_actor_pulses: ['p6']}})
 CREATE (i5:Indicator:{LABEL} {{indicator_type: 'domain', value: 'five.it.example', uuid: 'u-i5', active: true,
-        pulse_malware_actor_pairs: ['crutch::turla::p6'], several_actor_pulses: ['p6']}})
+        pulse_malware_actor_pairs: ['crutch::turla::p6']}})
 CREATE (i4)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: 'threatfox',
         source_refs: 'threatfox:9'}}]->(strmal2)
 CREATE (i1)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.6}}]->(kaz)

@@ -8,11 +8,13 @@ came first in the order, so for an IOC many pulses list the halving took the rep
 the sync groups the IOC with) and then the families: 30 pulses naming APT28 kept 14 of 29 report ids;
 120 pulses naming several actors and 10 naming one kept 1 of 129 report ids and 1 of 8 families.
 
-Now ``pa`` holds one pair per family and adversary (the first pulse's), it is shortened before
-``report_ids`` and ``mf``, ``sap`` keeps only the marks of the pulses still in ``pulse_id`` +
-``report_ids`` (the sync reads a mark only for the pulse buckets the item is in), and the lists that
-were shortened take back what still fits. The IOCs here go through the OTX collector's same-run fold
-and ``MISPWriter.create_attribute``, then the sync's parser.
+Now ``pa`` holds the first pair of each family and adversary (the first pulse's) before the later
+pulses' pairs for them, it is shortened before ``report_ids`` and ``mf`` and from the end, so the later
+pulses' pairs go first and stay while the comment fits (they keep the provenance of those pulses).
+``sap`` keeps only the marks of the pulses still in ``pulse_id`` + ``report_ids``: a mark goes with its
+pulse's id, and the pulse's other IOCs carry it. The lists that were shortened take back what still fits.
+The IOCs here go through the OTX collector's same-run fold and ``MISPWriter.create_attribute``, then the
+sync's parser.
 """
 
 from __future__ import annotations
@@ -71,22 +73,41 @@ def _through_the_writer(pulses):
 
 
 @pytest.mark.parametrize("count", [30, 60])
-def test_pulses_naming_one_actor_keep_every_report_id_and_one_pair_per_family_and_adversary(count):
+def test_pulses_naming_one_actor_keep_every_report_id_and_the_first_pair_of_each_family_and_adversary(count):
     # Two families and two names of APT28 per pulse: four pairs per pulse, 50 entries before.
-    ioc, _attr, meta = _through_the_writer(
+    ioc, attr, meta = _through_the_writer(
         [_pulse(n, ["Zebrocy", "X-Agent"], "APT28, Fancy Bear") for n in range(count)]
     )
     assert len(ioc["report_ids"]) == count - 1
     assert meta["report_ids"] == ioc["report_ids"], "every pulse the sync groups the IOC with"
     assert meta["mf"] == ["Zebrocy", "X-Agent"]
     first = _pid(0)
-    assert meta["pa"] == [
+    assert meta["pa"][:4] == [
         f"Zebrocy::APT28::{first}",
         f"Zebrocy::Fancy Bear::{first}",
         f"X-Agent::APT28::{first}",
         f"X-Agent::Fancy Bear::{first}",
-    ], "the first pulse's pair of each family and adversary"
+    ], "the first pulse's pair of each family and adversary comes first"
+    # Then the later pulses' pairs, in fold order, as many as fit: the shortening cut them, not the
+    # report ids or the families.
+    later = [p for p in ioc["pulse_malware_actor_pairs"] if not p.endswith(first)]
+    assert meta["pa"][4:] == later[: len(meta["pa"]) - 4] and len(meta["pa"]) < 50
+    one_more = dict(meta, pa=meta["pa"] + [later[len(meta["pa"]) - 4]])
+    assert len(_PREFIX + json.dumps(one_more)) > _BUDGET, "the longest part that fits"
     assert "sap" not in meta
+    assert len(attr["comment"]) <= _BUDGET
+
+
+def test_two_pulses_naming_the_same_family_and_adversary_keep_both_pairs_within_the_budget():
+    # Two pulses (Zebrocy, APT28) list the same IOC: the second pulse's pair is its only provenance on
+    # an IOC both list, and the comment has room for it.
+    _ioc, attr, meta = _through_the_writer([_pulse(n, ["Zebrocy"], "APT28") for n in range(2)])
+    assert meta["pa"] == [f"Zebrocy::APT28::{_pid(0)}", f"Zebrocy::APT28::{_pid(1)}"]
+    assert meta["report_ids"] == [_pid(1)]
+    item, _rels = MISPToNeo4jSync(neo4j_client=MagicMock()).parse_attribute(
+        {**attr, "uuid": "20000000-0000-0000-0000-00000000abce"}, _EVENT
+    )
+    assert item["pulse_malware_actor_pairs"] == meta["pa"]
 
 
 def test_pulses_naming_several_actors_shorten_the_marks_with_the_report_ids():
@@ -120,18 +141,28 @@ def test_pulses_naming_several_actors_shorten_the_marks_with_the_report_ids():
 
 
 class TestTheHelpers:
-    def test_pairs_are_one_per_family_and_adversary_the_first_kept(self):
+    def test_the_first_pair_of_each_family_and_adversary_goes_before_the_later_ones(self):
         pairs = [
             "Emotet::TA542::p1",
             "emotet:: ta542 ::p2",
             "Emotet::TA542",
             "Emotet::Mummy Spider::p2",
+            "EMOTET::TA542::P1",
             "Emotet::" + "x" * 320 + "::p3",
             "",
             None,
         ]
-        assert misp_writer._otx_meta_pairs(pairs) == ["Emotet::TA542::p1", "Emotet::Mummy Spider::p2"]
+        assert misp_writer._otx_meta_pairs(pairs) == [
+            "Emotet::TA542::p1",
+            "Emotet::Mummy Spider::p2",
+            "emotet:: ta542 ::p2",
+            "Emotet::TA542",
+        ], "a pair repeated in another case is one pair; a too-long pair is left out"
         assert len(misp_writer._otx_meta_pairs([f"f{i}::a::p" for i in range(80)])) == 50
+        # A later pulse's pairs come after every first one, and the cap cuts them first.
+        many = [f"f{i}::a::p1" for i in range(30)] + [f"f{i}::a::p2" for i in range(30)]
+        interleaved = [pair for i in range(30) for pair in (many[i], many[30 + i])]
+        assert misp_writer._otx_meta_pairs(interleaved) == many[:50]
 
     def test_pairs_go_before_report_ids_and_families(self):
         meta = {
