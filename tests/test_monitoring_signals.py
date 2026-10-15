@@ -622,6 +622,22 @@ class TestDagAlerts:
         limits = _label_map("edgeguard:dag_run_max_seconds", "dag_id")
         assert limits == {dag_id: int(dag.dagrun_timeout.total_seconds()) + 900 for dag_id, dag in dags.items()}
 
+    def test_the_comment_table_gives_each_dags_dagrun_timeout(self, dags):
+        # 2026-10: the table above the record lists the timeouts the record adds 15 minutes to; the sync's
+        # row gave the record's value (68 h 15 min) where the others give the timeout.
+        text = (_ROOT / "prometheus" / "alerts.yml").read_text()
+        table = text.split("# 2026-10: the longest a run of each DAG may be in progress", 1)[1]
+        table = table.split("- record: edgeguard:dag_run_max_seconds", 1)[0]
+        rows = dict(re.findall(r"(edgeguard_\w+)\s+(\d+ h(?: \d+ min)?)", table))
+
+        def seconds(value: str) -> int:
+            hours, _, rest = value.partition(" h")
+            return int(hours) * 3600 + (int(rest.split()[0]) * 60 if rest.strip() else 0)
+
+        assert {dag_id: seconds(v) for dag_id, v in rows.items()} == {
+            dag_id: int(dag.dagrun_timeout.total_seconds()) for dag_id, dag in dags.items()
+        }
+
     def test_last_success_limit_follows_each_dags_schedule(self, dags):
         expr = _norm(_rule("EdgeGuardDAGLastSuccessStale")["expr"])
         assert expr == (
@@ -741,6 +757,28 @@ class TestFullSyncRequestPendingAlert:
         runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()
         section = runbook.split("## Requesting a full MISP → Neo4j sync", 1)[1].split("\n## ", 1)[0]
         assert "`EdgeGuardNeo4jFullSyncRequestPending`" in section
+
+    def test_the_readme_counts_the_rules(self):
+        # 2026-10: the launch-day monitoring step said 37 rules when the file held 38, and 39 with this one.
+        rules = [r for g in _RULES["groups"] for r in g["rules"] if "alert" in r]
+        readme = (_ROOT / "README.md").read_text()
+        assert f"({len(rules)} alert rules at HEAD across {len(_RULES['groups'])} groups)" in readme
+
+    def test_it_says_it_clears_three_days_after_the_last_failure(self):
+        # 2026-10: the rule reads a counter over a 3-day window, so it keeps firing after the request was
+        # cleared or a later run succeeded; "still pending" said otherwise.
+        annotations = _rule("EdgeGuardNeo4jFullSyncRequestPending")["annotations"]
+        assert "pending" not in annotations["summary"] and "in the last 3 days" in annotations["summary"]
+        assert "clears 3 days after the last failure" in annotations["description"]
+        runbook = (_ROOT / "docs" / "RUNBOOK.md").read_text()
+        section = runbook.split("## Requesting a full MISP → Neo4j sync", 1)[1].split("\n## ", 1)[0]
+        assert "clears 3 days after the last failure" in section
+        row = next(
+            line
+            for line in (_ROOT / "docs" / "PROMETHEUS_SETUP.md").read_text().splitlines()
+            if line.startswith("| `EdgeGuardNeo4jFullSyncRequestPending` |")
+        )
+        assert "clears 3 days after the last failure" in row
 
 
 def _write_state(state_dir: Path, last_sync: datetime) -> None:

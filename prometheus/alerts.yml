@@ -309,7 +309,9 @@ groups:
         # again and no incremental sync runs until one succeeds. run_neo4j_sync's failure callback
         # (_on_neo4j_sync_failure) logs it at ERROR, sends it to Slack when enabled and counts it here,
         # once per failed run. The 3-day window is the sync's schedule interval: a request that keeps
-        # failing is reported again at the next failed run.
+        # failing is reported again at the next failed run. The alert follows the counter, not the
+        # Variable: it clears 3 days after the last failure, also when the request was cleared or a
+        # later run succeeded before then (silence it once the request is resolved).
         #
         # Second clause, as for EdgeGuardSourceAccessDenied: increase() is 0 for a series that has
         # just been created, and the first failed request creates the series. "Present now, absent 3
@@ -329,8 +331,8 @@ groups:
           severity: warning
           component: neo4j
         annotations:
-          summary: "A requested full MISP to Neo4j sync failed and is still pending"
-          description: "A run of {{ $labels.source }} failed its requested full sync on the last attempt in the last 3 days, leaving NEO4J_FULL_SYNC true: while it stays true, every scheduled run is a full sync again and no incremental sync runs until one succeeds. Fix the cause named in the run_neo4j_sync log, or resume incremental syncs with `airflow variables set NEO4J_FULL_SYNC false` (docs/RUNBOOK.md, \"Requesting a full MISP → Neo4j sync\")."
+          summary: "A requested full MISP to Neo4j sync failed in the last 3 days"
+          description: "A run of {{ $labels.source }} failed its requested full sync on the last attempt in the last 3 days and left NEO4J_FULL_SYNC true: while it stays true, every scheduled run is a full sync again and no incremental sync runs until one succeeds. Fix the cause named in the run_neo4j_sync log, or resume incremental syncs with `airflow variables set NEO4J_FULL_SYNC false` (docs/RUNBOOK.md, \"Requesting a full MISP → Neo4j sync\"). The alert clears 3 days after the last failure, also when the request was resolved earlier: silence it then."
 
       - alert: EdgeGuardDAGRunFailures
         expr: |
@@ -349,7 +351,7 @@ groups:
       # than this means a run the scheduler did not end (a stalled scheduler), a deleted run, or a
       # listener plugin that is not loaded.
       #   edgeguard_pipeline     5 h 30 min    edgeguard_daily        8 h 30 min
-      #   edgeguard_medium_freq  5 h           edgeguard_neo4j_sync   68 h 15 min
+      #   edgeguard_medium_freq  5 h           edgeguard_neo4j_sync   68 h
       #   edgeguard_low_freq     8 h 30 min    edgeguard_baseline     32 h
       - record: edgeguard:dag_run_max_seconds
         expr: |
