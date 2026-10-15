@@ -183,7 +183,9 @@ class TestBuildRelationships:
         parent_step = [(q, p) for q, p in technique_steps if "SUBTECHNIQUE_OF" in q]
         assert len(parent_step) == 1 and parent_step[0][1] is None, "step 1b takes no map"
         assert all(p == {"iterate_params": expected} for q, p in technique_steps if "SUBTECHNIQUE_OF" not in q)
-        assert all(p is None for q, p in iterate if ":Technique {mitre_id:" not in q), "other steps take no map"
+        assert all(
+            p is None or "revoked" not in p["iterate_params"] for q, p in iterate if ":Technique {mitre_id:" not in q
+        ), "other steps take no map (2026-10: 9b and 2d take the ATT&CK software id pattern)"
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 

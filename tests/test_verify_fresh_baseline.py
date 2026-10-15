@@ -174,9 +174,39 @@ _EPSS_SSVC_ROW = {
 }
 
 
+# Check 10a5 (2026-10, Malware twins): the non-MITRE Malware nodes named with an ATT&CK software id
+# and the MITRE Malware nodes with the record MITRE delivered (the ``raw_data`` of their SOURCED_FROM
+# edge: the sync item without its key property). On a correct graph the only twin left is one whose
+# id no MITRE Malware node has: Mimikatz S0002 is an ATT&CK tool.
+def _mitre_malware_raw(name: str, attack_id: str) -> str:
+    return json.dumps(
+        {
+            "type": "malware",
+            "aliases": [name],
+            "malware_types": ["malware"],
+            "family": name,
+            "description": f"[{name}](https://attack.mitre.org/software/{attack_id}) is malware.",
+            "tag": "mitre_attck",
+            "source": ["mitre_attck"],
+        }
+    )
+
+
+_GRAPH_MALWARE_TWINS = ({"name": "mimikatz - s0002", "aliases": []},)
+_GRAPH_MITRE_MALWARE = (
+    {"name": "cobalt strike", "attack_raw": _mitre_malware_raw("Cobalt Strike", "S0154")},
+    {"name": "poisonivy", "attack_raw": _mitre_malware_raw("PoisonIvy", "S0012")},
+    {"name": "agent tesla", "attack_raw": None},
+)
+
+
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
+    if "d.name =~ $suffixed" in s:
+        return [dict(r) for r in _GRAPH_MALWARE_TWINS]
+    if "AS attack_raw" in s:
+        return [dict(r) for r in _GRAPH_MITRE_MALWARE]
     if "AS ssvc_exploitation_active" in s:
         return [dict(_EPSS_SSVC_ROW)]
     if "AS recorded" in s:
@@ -1315,3 +1345,73 @@ class TestRevokedAttackObjects:
             "translated_links_record_cited_ids",
         }
         assert failed["no_revoked_attack_techniques"]["problem"] == "file not found"
+
+
+class TestMalwareTwinsFolded:
+    """Check 10a5 (2026-10): no Malware node from another source named after an ATT&CK software id
+    ("cobalt strike - s0154", the MISP galaxy naming of OTX) remains when the MITRE Malware node of that
+    id or base name exists. The decision is the enrichment job's (``plan_twin_folds``)."""
+
+    @staticmethod
+    def _run_with(vfb, monkeypatch, twins, seen=None):
+        def override(statement, rows):
+            if seen is not None:
+                seen.append(statement)
+            return [dict(t) for t in twins] if "d.name =~ $suffixed" in statement else rows
+
+        return _run(vfb, monkeypatch, override)
+
+    def test_a_correct_graph_passes_and_reports_the_twin_without_a_target(self, vfb, monkeypatch):
+        rep = _run(vfb, monkeypatch)
+        check = _check(rep, "malware_attack_twins_folded")
+        assert check["ok"] is True
+        assert check["detail"]["without_mitre_target"] == 1
+        assert check["detail"]["examples_without_target"] == ["mimikatz - s0002"]
+
+    @pytest.mark.parametrize(
+        "twin, target",
+        [
+            ({"name": "cobalt strike - s0154", "aliases": []}, "cobalt strike"),  # by the id MITRE delivered
+            ({"name": "agent tesla - s0331", "aliases": []}, "agent tesla"),  # by base name, id unreadable
+            ({"name": "darkmoon - s0209", "aliases": []}, "poisonivy"),  # a revoked id, by its successor
+            ({"name": "cs beacon", "aliases": ["CS Beacon - S0154"]}, "cobalt strike"),  # an alias of its own name
+        ],
+    )
+    def test_a_twin_the_job_folds_fails(self, vfb, monkeypatch, twin, target):
+        rep = self._run_with(vfb, monkeypatch, [twin])
+        check = _check(rep, "malware_attack_twins_folded")
+        assert check["ok"] is False and check["mandatory"] is True
+        assert check["detail"]["examples_foldable"] == [f"{twin['name']} -> {target}"]
+
+    def test_an_ambiguous_twin_fails(self, vfb, monkeypatch):
+        # Its id names one MITRE node and its base name another (whose id cannot be read).
+        rep = self._run_with(vfb, monkeypatch, [{"name": "agent tesla - s0154", "aliases": []}])
+        check = _check(rep, "malware_attack_twins_folded")
+        assert check["ok"] is False and check["detail"]["ambiguous"] == 1
+
+    def test_informational_without_a_suffixed_name_and_no_second_read(self, vfb, monkeypatch):
+        seen: List[str] = []
+        rep = self._run_with(vfb, monkeypatch, [], seen=seen)
+        assert _check(rep, "malware_attack_twins_folded")["ok"] is None
+        assert not any("AS attack_raw" in st for st in seen)
+
+    def test_query_shape(self, vfb, monkeypatch):
+        from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX, CYPHER_SUFFIXED_NAME
+
+        seen: List[Any] = []
+
+        def fake_post(statement, params=None, timeout=180):
+            seen.append((statement, params or {}))
+            return _healthy_rows(statement, params or {})
+
+        monkeypatch.setattr(vfb, "_post", fake_post)
+        vfb.run_checks(False, False)
+        ((twin_st, twin_params),) = [(st, p) for st, p in seen if "d.name =~ $suffixed" in st]
+        assert twin_params == {"suffixed": CYPHER_SUFFIXED_NAME}
+        assert "NOT 'mitre_attck' IN coalesce(d.source, [])" in twin_st
+        ((attack_st, _p),) = [(st, p) for st, p in seen if "AS attack_raw" in st]
+        assert "(c)-[sf:SOURCED_FROM]->(:Source {source_id: 'mitre_attck'})" in attack_st
+        # Check 10a4 looks a family up as step 9b does: as given and without the ATT&CK software id.
+        ((pulse_st, pulse_params),) = [(st, p) for st, p in seen if "pulse_malware_families" in st]
+        assert pulse_params == {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX}
+        assert "m.name IN apoc.coll.toSet([f, trim(apoc.text.replace(f, $software_id_suffix, ''))])" in pulse_st

@@ -315,6 +315,7 @@ def _patch_other_jobs(monkeypatch):
     for name in (
         "bridge_vulnerability_cve",
         "merge_alias_duplicate_actors",
+        "merge_malware_attack_twins",
         "build_campaign_nodes",
         "calibrate_cooccurrence_confidence",
         "decay_ioc_confidence",
@@ -323,16 +324,24 @@ def _patch_other_jobs(monkeypatch):
 
 
 class TestRunner:
-    def test_six_jobs_and_the_summary_line(self, monkeypatch, caplog):
+    def test_seven_jobs_and_the_summary_line(self, monkeypatch, caplog):
         _patch_other_jobs(monkeypatch)
         monkeypatch.setattr(config, "ENABLE_EPSS", True)
         result = {"rows_in_feed": 390_000, "cves_updated": 5, "cves_cleared": 2, "rows_skipped": 0}
         monkeypatch.setattr(enrichment_jobs, "enrich_cve_epss", lambda c: result)
         with caplog.at_level("INFO", logger="enrichment_jobs"):
             summary = enrichment_jobs.run_all_enrichment_jobs(MagicMock())
-        assert set(summary) == {"bridge", "actor_alias_merge", "campaigns", "calibration", "decay", "epss"}
+        assert set(summary) == {
+            "bridge",
+            "actor_alias_merge",
+            "malware_twin_merge",
+            "campaigns",
+            "calibration",
+            "decay",
+            "epss",
+        }
         text = "\n".join(r.getMessage() for r in caplog.records)
-        assert "[1/6]" in text and "[6/6] EPSS" in text and "/7]" not in text
+        assert "[1/7]" in text and "[7/7] EPSS" in text and "/6]" not in text and "/8]" not in text
         # The CVE nodes EPSS updated, not the sum of its counts.
         assert "calibration=1 decay=1 epss=5" in text
 

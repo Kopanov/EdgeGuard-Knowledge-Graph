@@ -95,6 +95,7 @@ CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 
 
 from attack_revoked import technique_successors as _technique_successors  # noqa: E402
+from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX as _SOFTWARE_ID_SUFFIX  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
 from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
@@ -102,6 +103,23 @@ from relationship_provenance import family_feeds as _family_feeds  # noqa: E402
 from relationship_provenance import node_feeds as _node_feeds  # noqa: E402
 from relationship_provenance import prov_set as _prov_set  # noqa: E402
 from relationship_provenance import prov_with as _prov_with  # noqa: E402
+
+# ATT&CK software ids in family names (2026-10): OTX pulses name families as the MISP ATT&CK galaxy
+# does, "Cobalt Strike - S0154". The collectors and the sync now name the Malware node by the base
+# name, but indicators written before carry the suffixed names in ``pulse_malware_families`` /
+# ``pulse_malware_actor_pairs``, and a graph built before holds a twin node of that name until the
+# enrichment job ``merge_malware_attack_twins`` folds it. Steps 9b and 2d therefore look a family up
+# by its name as given and by its name without the id. The pattern travels as the ``$software_id_suffix``
+# parameter (``attack_software_names.CYPHER_SOFTWARE_ID_SUFFIX``), so the statements, wrapped in
+# single quotes for ``apoc.periodic.iterate``, need no escaped backslashes.
+_SOFTWARE_ID_PARAMS = {"software_id_suffix": _SOFTWARE_ID_SUFFIX}
+
+
+def _family_name_variants(var: str) -> str:
+    """Cypher list: the canonical family name ``var`` and, when it ends with an ATT&CK software id,
+    the name without it (``"cobalt strike - s0154"`` → ``["cobalt strike - s0154", "cobalt strike"]``;
+    one entry otherwise). Reads the ``$software_id_suffix`` parameter."""
+    return f'apoc.coll.toSet([{var}, trim(apoc.text.replace({var}, $software_id_suffix, ""))])'
 
 
 def _cited_set(var: str) -> str:
@@ -752,9 +770,12 @@ def build_relationships():
             "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_actor_pairs, [])) > 0 "
             "UNWIND i.pulse_malware_actor_pairs AS pair RETURN DISTINCT pair"
         )
+        # 2026-10: the family by its name as given and without an ATT&CK software id (see
+        # ``_family_name_variants``): pairs written before name "Cobalt Strike - S0154".
         _q2d_inner = (
             'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) = 2 '
-            "WITH toLower(trim(parts[0])) AS fname, toLower(trim(parts[1])) AS aname "
+            "WITH toLower(trim(parts[0])) AS family, toLower(trim(parts[1])) AS aname "
+            "UNWIND " + _family_name_variants("family") + " AS fname WITH fname, aname "
             f'WHERE fname <> "" AND aname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             f"AND NOT aname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "MATCH (m:Malware {name: fname}) MATCH (a:ThreatActor {name: aname}) "
@@ -778,7 +799,13 @@ def build_relationships():
             + ", r.src_uuid = coalesce(r.src_uuid, m.uuid), r.trg_uuid = coalesce(r.trg_uuid, a.uuid)"
         )
         if not _safe_run_batched(
-            client, "Malware → ThreatActor (same pulse)", _q2d_outer, _q2d_inner, stats, "attributed_to_pulse"
+            client,
+            "Malware → ThreatActor (same pulse)",
+            _q2d_outer,
+            _q2d_inner,
+            stats,
+            "attributed_to_pulse",
+            params=_SOFTWARE_ID_PARAMS,
         ):
             failures += 1
         query_pause()
@@ -1436,7 +1463,9 @@ def build_relationships():
         # (OTX_META.mf → i.pulse_malware_families) and this step links them to the existing Malware
         # node. Report-scoped evidence: ``otx_pulse`` 0.6, ON CREATE only, so the IOC-level
         # ``malware_family`` claim (Q9, 0.8) is never downgraded. Canonical lower-case name only —
-        # never ``m.aliases`` (untrusted, PR-N14).
+        # never ``m.aliases`` (untrusted, PR-N14). 2026-10: by the name as given and without an
+        # ATT&CK software id (``_family_name_variants``), so an indicator written before, which names
+        # "Cobalt Strike - S0154", links the ATT&CK node "cobalt strike".
         logger.info("[LINK] 9b/20 Indicator → Malware (named in the same OTX pulse)...")
         _q9b_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 RETURN i"
         _q9b_inner = (
@@ -1444,7 +1473,12 @@ def build_relationships():
             + _prov_with("i", _OTX_FEEDS)
             + "UNWIND i.pulse_malware_families AS fam WITH i, "
             + _PROV_VARS
-            + ", toLower(trim(fam)) AS fname "
+            + ", toLower(trim(fam)) AS family "
+            + "UNWIND "
+            + _family_name_variants("family")
+            + " AS fname WITH i, "
+            + _PROV_VARS
+            + ", fname "
             f'WHERE fname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             "MATCH (m:Malware {name: fname}) "
             "MERGE (i)-[r:INDICATES]->(m) "
@@ -1455,8 +1489,9 @@ def build_relationships():
         )
         _q9b_skip = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 "
-            "UNWIND i.pulse_malware_families AS fam WITH toLower(trim(fam)) AS fname "
-            "WHERE NOT EXISTS { MATCH (m:Malware {name: fname}) } RETURN count(*) AS c"
+            "UNWIND i.pulse_malware_families AS fam WITH toLower(trim(fam)) AS family "
+            "WHERE NOT EXISTS { MATCH (m:Malware) WHERE m.name IN " + _family_name_variants("family") + " } "
+            "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
             client,
@@ -1466,6 +1501,7 @@ def build_relationships():
             stats,
             "indicates_pulse",
             skip_query=_q9b_skip,
+            params=_SOFTWARE_ID_PARAMS,
         ):
             failures += 1
         query_pause()
