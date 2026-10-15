@@ -1,0 +1,38 @@
+{
+ "_provenance": "Real MISP attributes of the hosted EdgeGuard MISP, captured read-only on 2026-10-09 by the MISP structure audit (samples_by_source.alienvault_otx.examples: the 'malware-type' and 'threat-actor' examples, copied verbatim; 'type' is the example's key in the audit, 'tags' the attribute's tag names). Both were written by the OTX collector and MISPWriter before 2026-10-10: the MITRE_USES_TECHNIQUES block holds the pulse's ATT&CK ids under 't', and the text after it is the pulse's description, cut by MISPWriter (malware at 400 characters, actors at 255).",
+ "attributes": [
+  {
+   "type": "malware-type",
+   "value": "KATARU",
+   "category": "Payload delivery",
+   "to_ids": false,
+   "tags": [
+    "zone:Global",
+    "source:AlienVault-OTX",
+    "malware-type:unknown",
+    "misp-galaxy:malware=\"KATARU\""
+   ],
+   "comment": "MITRE_USES_TECHNIQUES:{\"t\":[\"T1110.001\",\"T1498.001\",\"T1053.003\",\"T1082\",\"T1499.002\",\"T1106\",\"T1016\",\"T1059.004\",\"T1562.001\",\"T1068\",\"T1027\",\"T1573.002\",\"T1095\",\"T1037.004\",\"T1543.002\",\"T1105\"]}\nKATARU is an IoT malware variant discovered in August 2026 through Telnet credential brute-forcing against a honeypot from Vietnam. While maintaining traditional Mirai-style botnet capabilities, it distinguishes itself through an extensive feature set including multiple Linux local privilege escalation exploits, comprehensive persistence mechanisms across Linux and embedded platforms, encrypted...",
+   "first_seen": "2026-09-11T17:55:38.561000+00:00",
+   "last_seen": "2026-09-14T10:32:06.888000+00:00",
+   "uuid": "88a1d0e0-e0b4-47d7-9d67-0a4378d5a7f0",
+   "object_relation": null
+  },
+  {
+   "type": "threat-actor",
+   "value": "JeetBot",
+   "category": "Attribution",
+   "to_ids": false,
+   "tags": [
+    "zone:Global",
+    "source:AlienVault-OTX",
+    "misp-galaxy:threat-actor=\"JeetBot\""
+   ],
+   "comment": "MITRE_USES_TECHNIQUES:{\"t\":[\"T1557\",\"T1056.001\",\"T1213.002\",\"T1539\",\"T1176\",\"T1219\",\"T1185\",\"T1555.003\",\"T1090.002\",\"T1552.001\",\"T1573.002\",\"T1567.002\",\"T1071.001\"]}\nA malicious browser extension called 'Twitch Enhanced Viewer | JeetBot' distributed on Chrome Web Store and Firefox Add-ons captures and forwards users' live Twitch OAuth session tokens to Russian-controlled proxy servers. The extension, with approxima...",
+   "first_seen": "2026-09-11T18:06:36.780000+00:00",
+   "last_seen": "2026-09-14T09:49:05.274000+00:00",
+   "uuid": "3261047c-f844-4d01-a12a-a2513f4656ef",
+   "object_relation": null
+  }
+ ]
+}

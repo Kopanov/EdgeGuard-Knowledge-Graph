@@ -531,8 +531,10 @@ def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
 # from <source>", "Threat actor from <source>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK
 # tactic", "MITRE ATT&CK tool: <name>". It names the writer, not the entity; taken as a description it would
 # keep any later record's text off a node that MITRE does not describe, since such a record only fills.
+# <source> is the item's tag, a lowercase source id ("alienvault_otx", "mitre_attck", "unknown"), so a
+# partner's or a MISP-native text such as "Threat actor from Iran" or "Malware from APT28" stays a description.
 _ENTITY_PLACEHOLDER_COMMENT_RE = re.compile(
-    r"^\s*(?:(?:Malware|Threat actor|MITRE ATT&CK technique) from [^\s|]+|MITRE ATT&CK tactic|"
+    r"^\s*(?:(?:Malware|Threat actor|MITRE ATT&CK technique) from [a-z0-9_-]+|MITRE ATT&CK tactic|"
     r"MITRE ATT&CK tool: [^\n]+)\s*$"
 )
 

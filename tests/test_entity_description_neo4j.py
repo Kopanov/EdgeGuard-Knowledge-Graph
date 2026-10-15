@@ -130,7 +130,7 @@ def test_a_tool_takes_mitres_revised_text_and_no_other(client, raw_driver):
 
 
 def test_otx_records_as_synced_since_2026_10_write_no_description(client, raw_driver):
-    from test_entity_description_source import KATARU_PULSE, otx_item, synced, written
+    from test_entity_description_source import KATARU_IDS, KATARU_PULSE, otx_item, synced, written
 
     _create(raw_driver, "kataru")
     kataru = synced(written("malware", otx_item("malware", "KATARU", KATARU_PULSE)), "alienvault_otx")
@@ -138,4 +138,76 @@ def test_otx_records_as_synced_since_2026_10_write_no_description(client, raw_dr
     assert client.merge_malware(kataru, source_id="alienvault_otx")
     node = _node(raw_driver, "kataru")
     assert "description" not in node, "an OTX-only family shows no description"
-    assert sorted(node["reported_techniques"]) == ["T1053.003", "T1082", "T1110.001", "T1498.001"], "the record merged"
+    assert sorted(node["reported_techniques"]) == sorted(KATARU_IDS), "the record merged"
+
+
+def test_the_real_kataru_attribute_of_2026_10_09_writes_no_description(client, raw_driver):
+    # The attribute MISP held with the pulse's text after its block (tests/fixtures/otx_entity_attributes_2026_10_09.json).
+    from test_entity_description_source import REAL_OTX, as_misp_returns, synced
+
+    _create(raw_driver, "kataru")
+    assert client.merge_malware(
+        synced(as_misp_returns(REAL_OTX["KATARU"]), "alienvault_otx"), source_id="alienvault_otx"
+    )
+    assert "description" not in _node(raw_driver, "kataru")
+
+
+# The RUNBOOK repair ("Repairing Malware, ThreatActor and Tool descriptions"), steps 2 and 4, run as written
+# but on the test label only. (label, name, properties) of each node, and whether its description stays.
+_REPAIR_NODES = [
+    (
+        "Malware",
+        "kataru",
+        {
+            "edgeguard_managed": True,
+            "source": ["alienvault_otx"],
+            "description": 'MITRE_USES_TECHNIQUES:{"rt":["T1082"],"pid":"68c30a2bd84d2a2fe1fc3f4b"}',
+        },
+        False,
+    ),
+    (
+        "Tactic",
+        "execution",
+        {"edgeguard_managed": True, "source": ["mitre_attck"], "description": "MITRE ATT&CK tactic"},
+        False,
+    ),
+    (
+        "ThreatActor",
+        "dragonfly",
+        {"edgeguard_enriched": True, "source": ["mitre_attck"], "description": "Threat actor from alienvault_otx"},
+        False,
+    ),
+    ("ThreatActor", "jeetbot", {"edgeguard_managed": True, "source": ["alienvault_otx"], "description": "OTX"}, False),
+    ("ThreatActor", "charming kitten", {"source": ["misp"], "description": "Threat actor from Iran"}, True),
+    ("ThreatActor", "partner actor", {"source": ["misp"], "description": "Threat actor from misp"}, True),
+    ("Malware", "partner family", {"source": ["alienvault_otx"], "description": "A partner's text"}, True),
+    (
+        "Malware",
+        "cobalt strike",
+        {"edgeguard_managed": True, "source": ["mitre_attck", "alienvault_otx"], "description": "ATT&CK"},
+        True,
+    ),
+]
+
+
+def test_the_runbook_repair_removes_edgeguards_text_and_keeps_a_partners(client, raw_driver):
+    from test_entity_description_source import COBALT_STRIKE_TEXT, REAL_OTX, runbook_statements
+
+    texts = {"OTX": REAL_OTX["JeetBot"]["comment"].partition("\n")[2], "ATT&CK": COBALT_STRIKE_TEXT}
+    with raw_driver.session() as session:
+        for label, name, props, _stays in _REPAIR_NODES:
+            props = dict(props, description=texts.get(props["description"], props["description"]))
+            session.run(f"CREATE (n:{label}:{LABEL} {{name: $name}}) SET n += $props", name=name, props=props)
+        statements = runbook_statements()
+        for step in (statements[1], statements[3]):  # steps 2 and 4
+            assert step.count("MATCH (n)\n") == 1
+            session.run(step.replace("MATCH (n)\n", f"MATCH (n:{LABEL})\n", 1))
+        rows = {
+            r["name"]: r["d"]
+            for r in session.run(
+                f"MATCH (n:{LABEL}) WHERE n.name IS NOT NULL RETURN n.name AS name, n.description AS d"
+            )
+        }
+    for _label, name, _props, stays in _REPAIR_NODES:
+        assert (rows[name] is not None) is stays, name
+    assert rows["cobalt strike"] == COBALT_STRIKE_TEXT and rows["charming kitten"] == "Threat actor from Iran"

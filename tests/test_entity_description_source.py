@@ -19,12 +19,19 @@ collector now gives tactics ATT&CK's description (the sync stored the placeholde
 Fixtures: ATT&CK STIX objects in the shape of the ``mitre/cti`` bundle (the helpers of
 ``test_attack_revoked_objects.py``) with ATT&CK's ids, names and descriptions of Dragonfly (G0035),
 Cobalt Strike (S0154), Mimikatz (S0002), PowerShell (T1059.001) and Execution (TA0002); Dragonfly's
-aliases as its attribute on the hosted MISP carried them on 2026-10-09. OTX pulses in the shape the OTX
-API returns, the first with the name, reference, ATT&CK ids and tags of the KATARU pulse on the hosted
-MISP of 2026-10-09 and no description. Both go through the collectors' own code
-(``MITRECollector._parse_bundle``, ``OTXCollector.collect``), MISPWriter's attribute builders and the
-sync's ``parse_attribute``, as a baseline writes and reads them. The same rule on a real Neo4j:
-``tests/test_entity_description_neo4j.py``.
+aliases as its attribute on the hosted MISP carried them on 2026-10-09. The real OTX malware and actor
+attributes of the hosted MISP of 2026-10-09, KATARU and JeetBot, copied verbatim
+(``tests/fixtures/otx_entity_attributes_2026_10_09.json``): a ``MITRE_USES_TECHNIQUES`` block in the form
+MISPWriter wrote before 2026-10-10 (``t``), then the pulse's description. The KATARU pulse in the shape
+the OTX API returns, rebuilt from what that MISP held of it: its name, reference, author, timestamps,
+seven tags and sixteen ATT&CK ids, one of its indicators (160.191.242.92), and as its description the text
+after the KATARU attribute's block (the pulse's description cut at 400 characters by MISPWriter; the rest
+was not captured). The case of an entity MITRE and OTX both describe uses a constructed pulse
+(``REPORT_PULSE``), since the capture holds no OTX attribute of such an entity; its pre-2026-10 attribute
+is built both in the form MISPWriter writes since 2026-10-10 (``rt``, ``pid``) and in the earlier one.
+All go through the collectors' own code (``MITRECollector._parse_bundle``, ``OTXCollector.collect``),
+MISPWriter's attribute builders and the sync's ``parse_attribute``, as a baseline writes and reads them.
+The same rule on a real Neo4j: ``tests/test_entity_description_neo4j.py``.
 """
 
 from __future__ import annotations
@@ -149,24 +156,52 @@ def mitre_items() -> dict:
     }
 
 
+# ---------------------------------------------------------------- real OTX attributes (hosted MISP, 2026-10-09)
+_REAL = json.loads((TESTS / "fixtures" / "otx_entity_attributes_2026_10_09.json").read_text())["attributes"]
+
+
+def as_misp_returns(captured: dict) -> dict:
+    """A captured attribute as MISP returns it: its tag names as ``Tag`` objects."""
+    attr = {k: copy.deepcopy(v) for k, v in captured.items() if k != "tags"}
+    attr["Tag"] = [{"name": name} for name in captured["tags"]]
+    return attr
+
+
+REAL_OTX = {a["value"]: a for a in _REAL}  # KATARU (malware-type), JeetBot (threat-actor)
+_KATARU_BLOCK, _, KATARU_TEXT = REAL_OTX["KATARU"]["comment"].partition("\n")
+KATARU_IDS = json.loads(_KATARU_BLOCK.split(":", 1)[1])["t"]
+
 # ---------------------------------------------------------------- OTX pulses (OTX API shape)
 KATARU_PULSE = {
     "id": "68c30a2bd84d2a2fe1fc3f4b",
-    # Name, reference, ATT&CK ids and tags of the KATARU pulse on the hosted MISP, 2026-10-09.
+    # Rebuilt from the hosted MISP of 2026-10-09 (module docstring): OTX_META of its indicators (tags,
+    # references, author, ATT&CK ids; no TLP, the collector read none), the KATARU attribute (description,
+    # first_seen = the pulse's ``created``, last_seen = its ``modified``).
     "name": "KATARU: IoT Malware Adopts Public LPE Exploits",
-    "description": "",
-    "created": "2026-09-11T17:55:39",
+    "description": KATARU_TEXT,
+    "created": "2026-09-11T17:55:38.561000",
     "modified": "2026-09-14T10:32:06.888000",
-    "TLP": "white",
     "adversary": "",
     "author_name": "AlienVault",
-    "attack_ids": [{"id": "T1110.001"}, {"id": "T1498.001"}, {"id": "T1053.003"}, {"id": "T1082"}],
-    "tags": ["telnet brute-force", "kataru", "iot botnet", "ddos"],
+    "attack_ids": [{"id": i} for i in KATARU_IDS],
+    "tags": [
+        "telnet brute-force",
+        "cve-2026-46300",
+        "kataru",
+        "cve-2026-31431",
+        "cve-2026-43284",
+        "ddos",
+        "iot botnet",
+    ],
     "references": ["https://www.nozominetworks.com/blog/kataru-iot-malware-adopts-public-lpe-exploits"],
+    "targeted_countries": [],
     "industries": [],
     "malware_families": ["KATARU"],
-    "indicators": [{"type": "IPv4", "indicator": "160.191.242.92", "description": ""}],
+    "indicators": [
+        {"type": "IPv4", "indicator": "160.191.242.92", "description": "", "created": "2026-09-11T17:55:39"}
+    ],
 }
+# Constructed: the capture of 2026-10-09 holds no OTX attribute of an entity ATT&CK also describes.
 REPORT_TEXT = (
     "Phishing campaign against European energy operators: Word attachments drop Cobalt Strike beacons, "
     "and the operators used them to harvest credentials and move laterally."
@@ -232,6 +267,7 @@ _BUILDERS = {
 _EVENTS = {
     "mitre_attck": {"id": "33", "info": "EdgeGuard-mitre_attck-2026-10-13", "Tag": []},
     "alienvault_otx": {"id": "34", "info": "EdgeGuard-alienvault_otx-2026-10-13", "Tag": []},
+    "misp": {"id": "35", "info": "Partner event", "Tag": []},
 }
 
 
@@ -264,6 +300,16 @@ def text_after_block(attr: dict) -> str:
     block, _, text = attr["comment"].partition("\n")
     assert _METADATA_COMMENT_RE.match(block) and text
     return text
+
+
+def in_form_before_2026_10_10(attr: dict) -> dict:
+    """An OTX attribute of *attr*'s in the form MISPWriter wrote before 2026-10-10, as the KATARU and
+    JeetBot attributes of 2026-10-09 show it: the pulse's ATT&CK ids under ``t``, no ``pid``."""
+    attr = copy.deepcopy(attr)
+    block, sep, text = attr["comment"].partition("\n")
+    meta = json.loads(block.split(":", 1)[1])
+    attr["comment"] = "MITRE_USES_TECHNIQUES:" + json.dumps({"t": meta["rt"]}, separators=(",", ":")) + sep + text
+    return attr
 
 
 def cut_block(attr: dict) -> dict:
@@ -351,6 +397,18 @@ class TestOtxCollector:
         for item in entities:
             assert "description" not in item, item["name"]
             assert item["pulse_id"] in (KATARU_PULSE["id"], REPORT_PULSE["id"]), "the pulse stays its provenance"
+        for item in items:  # the pulses' descriptions are stored on no item
+            assert not {KATARU_TEXT, REPORT_TEXT} & {v for v in item.values() if isinstance(v, str)}, item
+
+    def test_the_pulse_text_still_decides_every_items_zone(self):
+        # Sector detection scans the whole pulse, its description included: the same pulse with a
+        # healthcare description puts the family and the IOC there, though neither carries the text.
+        plain = otx_items(KATARU_PULSE)
+        hospital = otx_items(dict(KATARU_PULSE, description="Attack on hospital networks and patient records"))
+        assert {tuple(i["zone"]) for i in plain} == {("global",)}
+        assert {tuple(i["zone"]) for i in hospital} == {("healthcare",)}
+        assert {i.get("type", "indicator") for i in hospital} == {"indicator", "malware"}
+        assert all("description" not in i for i in hospital if i.get("type") == "malware")
 
     def test_an_indicator_keeps_its_own_description(self):
         ioc = next(i for i in otx_items(REPORT_PULSE) if i.get("value") == "update-check.example.org")
@@ -385,13 +443,37 @@ class TestSyncedDescription:
         assert attr["comment"] == EXECUTION_TEXT
         assert synced(attr)["description"] == EXECUTION_TEXT
 
-    def test_an_otx_family_from_a_pulse_without_text_gives_none(self):
-        # Before 2026-10: ``tail or description`` stored 'MITRE_USES_TECHNIQUES:{"rt":[...],"pid":"..."}'.
-        attr = written("malware", otx_item("malware", "KATARU", KATARU_PULSE))
+    @pytest.mark.parametrize("pulse_text", ["real", "none"])
+    def test_an_otx_family_whose_comment_is_the_block_alone_gives_none(self, pulse_text):
+        # Since 2026-10 every OTX family's comment is the block alone, whatever the pulse's text; before,
+        # a family from a pulse without a description had that comment, and ``tail or description``
+        # stored 'MITRE_USES_TECHNIQUES:{"rt":[...],"pid":"..."}' as the description.
+        pulse = KATARU_PULSE if pulse_text == "real" else dict(KATARU_PULSE, description="")
+        attr = written("malware", otx_item("malware", "KATARU", pulse))
+        assert "\n" not in attr["comment"]
         item = synced(attr, "alienvault_otx")
         assert item["description"] == ""
-        assert item["reported_techniques"] == ["T1110.001", "T1498.001", "T1053.003", "T1082"]
+        assert item["reported_techniques"] == KATARU_IDS
         assert item["pulse_id"] == KATARU_PULSE["id"]
+
+    @pytest.mark.parametrize("name", ["KATARU", "JeetBot"])
+    def test_a_real_otx_attribute_with_the_pulse_text_gives_none(self, name):
+        # Copied verbatim from the hosted MISP of 2026-10-09; before 2026-10 the sync stored the pulse's
+        # text after the block as the node's description.
+        attr = as_misp_returns(REAL_OTX[name])
+        block_ids = json.loads(attr["comment"].partition("\n")[0].split(":", 1)[1])["t"]
+        assert text_after_block(attr) and len(block_ids) in (13, 16)
+        item = synced(attr, "alienvault_otx")
+        assert item["tag"] == "alienvault_otx" and item["name"].lower() == name.lower()
+        assert item["description"] == ""
+        # The block is still read: MISPWriter wrote the pulse's ids under ``t`` before 2026-10-10.
+        assert item["uses_techniques"] == block_ids
+
+    def test_the_text_of_a_real_otx_attribute_would_be_taken_from_another_source(self):
+        # What keeps the pulse's text off the node is the attribute's source, not its form.
+        comment = REAL_OTX["KATARU"]["comment"]
+        assert _entity_comment_description(comment, "alienvault_otx") is None
+        assert _entity_comment_description(comment, "misp") == KATARU_TEXT
 
     @pytest.mark.parametrize(("kind", "name"), [("malware", "Cobalt Strike"), ("actor", "Dragonfly")])
     def test_an_otx_attribute_written_before_2026_10_gives_none(self, kind, name):
@@ -450,6 +532,27 @@ class TestSyncedDescription:
         ), "only MISPWriter's exact placeholder is one"
         assert _entity_comment_description(None, "mitre_attck") is None
 
+    @pytest.mark.parametrize(
+        "text", ["Threat actor from Iran", "Malware from China", "Malware from APT28", "MITRE ATT&CK technique from T"]
+    )
+    def test_a_partners_short_text_is_no_placeholder(self, text):
+        # MISPWriter's placeholder names the item's tag, a lowercase source id; a MISP-native or partner
+        # text with another word after "from" is a description.
+        assert _entity_comment_description(text, "misp") == text
+        assert (
+            synced(dict(written("actor", {"name": "Charming Kitten", "tag": "misp"}), comment=text), "misp")[
+                "description"
+            ]
+            == text
+        )
+
+    @pytest.mark.parametrize("source", ["alienvault_otx", "mitre_attck", "threatfox", "unknown", "cisa_ics"])
+    def test_every_source_ids_placeholder_is_one(self, source):
+        for kind, name in (("malware", "Cobalt Strike"), ("actor", "Dragonfly")):
+            attr = written(kind, {"name": name, "tag": source, "zone": ["global"]})
+            assert attr["comment"].endswith(f" from {source}")
+            assert _entity_comment_description(attr["comment"], "misp") is None
+
     def test_no_branch_gives_a_metadata_block(self):
         items = mitre_items()
         attrs = [(written(kind, items[kind]), "mitre_attck") for kind in _BUILDERS]
@@ -458,11 +561,36 @@ class TestSyncedDescription:
             (written("malware", otx_item("malware", "KATARU", KATARU_PULSE)), "alienvault_otx"),
             (written("actor", otx_item_before_2026_10("actor", "Dragonfly")), "alienvault_otx"),
         ]
-        assert len(attrs) == 11
+        attrs += [(as_misp_returns(captured), "alienvault_otx") for captured in REAL_OTX.values()]
+        assert len(attrs) == 13
         for attr, source in attrs:
             description = synced(attr, source)["description"]
             assert "MITRE_USES_TECHNIQUES" not in description and "MITRE_TACTIC_PHASES" not in description, description
             assert not _METADATA_COMMENT_RE.match(description)
+
+
+class TestWhereMispWriterWritesTheText:
+    """Where MISPWriter puts ATT&CK's text and how much of it (docs/COLLECTORS.md, MITRE "Descriptions")."""
+
+    @pytest.mark.parametrize(
+        ("kind", "cut"), [("actor", 255), ("technique", 255), ("tactic", 255), ("malware", 400), ("tool", 400)]
+    )
+    def test_the_cut_length_of_each_kind(self, kind, cut):
+        long_text = "Lorem ipsum dolor sit amet. " * 18  # 504 characters, over the MITRE collector's 500
+        attr = written(kind, dict(mitre_items()[kind], description=long_text[:500]))
+        text = synced(attr)["description"]
+        assert len(text) == cut and text.endswith("...") and long_text.startswith(text[:-3])
+
+    @pytest.mark.parametrize(
+        ("kind", "without"),
+        [("tactic", ()), ("technique", ("tactic_phases",)), ("tool", ("uses_techniques",))],
+    )
+    def test_without_a_block_the_text_is_the_whole_comment(self, kind, without):
+        item = {k: v for k, v in mitre_items()[kind].items() if k not in without}
+        comment = written(kind, item)["comment"]
+        assert not _METADATA_COMMENT_RE.match(comment) and "\n" not in comment
+        assert len(comment) > 40 and ATTACK_TEXT[kind].startswith(comment.removesuffix("..."))
+        assert synced(written(kind, item))["description"] == comment
 
 
 # ================================================================ merge_*: MITRE sets, any other record fills
@@ -489,6 +617,16 @@ class TestMergeStatements:
         ) in query
         assert params["fill_description"] == "Text from another record"
         assert "n.description = $description" not in query
+
+    def test_a_tactic_node_takes_attacks_text(self):
+        # docs/RESILMESH_INTEROPERABILITY.md §3.1 Tactic row: ``description`` is ATT&CK's text (2026-10).
+        client, session = _recording_client()
+        item = synced(written("tactic", mitre_items()["tactic"]))
+        assert client.merge_tactic(item, source_id="mitre_attck")
+        statements = [(c.args[0], c.kwargs) for c in session.run.call_args_list if "MERGE (n:Tactic" in c.args[0]]
+        assert len(statements) == 1
+        query, params = statements[0]
+        assert "n.description = $description" in query and params["description"] == EXECUTION_TEXT
 
     @pytest.mark.parametrize("kind", ["malware", "actor", "tool"])
     @pytest.mark.parametrize("source_id", ["mitre_attck", "alienvault_otx"])
@@ -544,9 +682,15 @@ class TestSyncEndToEnd:
 
     @pytest.mark.parametrize(("kind", "otx_name"), [("malware", "Cobalt Strike"), ("actor", "Dragonfly")])
     @pytest.mark.parametrize("first", ["mitre", "otx"])
-    def test_attacks_text_whatever_the_order(self, kind, otx_name, first):
+    @pytest.mark.parametrize("form", ["since_2026_10_10", "before_2026_10_10"])
+    def test_attacks_text_whatever_the_order(self, kind, otx_name, first, form):
+        # MISP holds OTX attributes with the pulse's text in both block forms (module docstring).
         mitre = (written(kind, mitre_items()[kind]), "mitre_attck")
-        otx = (written(kind, otx_item_before_2026_10(kind, otx_name)), "alienvault_otx")
+        otx_attr = written(kind, otx_item_before_2026_10(kind, otx_name))
+        if form == "before_2026_10_10":
+            otx_attr = in_form_before_2026_10_10(otx_attr)
+        assert text_after_block(otx_attr) == REPORT_TEXT
+        otx = (otx_attr, "alienvault_otx")
         node = self._node_after_sync(*((mitre, otx) if first == "mitre" else (otx, mitre)))
         assert description_of(node) == text_after_block(mitre[0])
 
@@ -554,6 +698,11 @@ class TestSyncEndToEnd:
         node = self._node_after_sync(
             (written("malware", otx_item("malware", "KATARU", KATARU_PULSE)), "alienvault_otx")
         )
+        assert description_of(node) is None
+
+    @pytest.mark.parametrize("name", ["KATARU", "JeetBot"])
+    def test_a_real_otx_attribute_leaves_the_node_without_text(self, name):
+        node = self._node_after_sync((as_misp_returns(REAL_OTX[name]), "alienvault_otx"))
         assert description_of(node) is None
 
 
@@ -574,6 +723,13 @@ class TestStixObjects:
         obj = stix(attr)
         assert obj["type"] == stix_type
         assert obj["description"] == synced(attr)["description"] != ""
+
+    @pytest.mark.parametrize(("name", "stix_type"), [("KATARU", "malware"), ("JeetBot", "threat-actor")])
+    def test_a_real_otx_attribute_gives_an_object_without_description(self, name, stix_type):
+        # Before 2026-10 the object carried the attribute's whole comment, block and pulse text.
+        obj = stix(as_misp_returns(REAL_OTX[name]))
+        assert obj["type"] == stix_type and obj["name"] == name
+        assert "description" not in obj
 
     @pytest.mark.parametrize(
         "case",
@@ -628,3 +784,72 @@ class TestStixImport:
         attr = written("actor", otx_item_before_2026_10("actor", "Dragonfly"))
         _label, _key, query, _params = self._import(stix(attr), "alienvault_otx")
         assert not re.search(r"n\.description = (?!'')", query)
+
+
+# ================================================================ the RUNBOOK repair (docs/RUNBOOK.md)
+RUNBOOK_SECTION = "## Repairing Malware, ThreatActor and Tool descriptions (2026-10)"
+
+
+def runbook_statements() -> list:
+    """The Cypher of the RUNBOOK repair section, block by block: steps 1, 2, 3, 4 and the check."""
+    doc = (TESTS.parent / "docs" / "RUNBOOK.md").read_text()
+    section = doc.split(RUNBOOK_SECTION, 1)[1].split("\n## ", 1)[0]
+    return [block.strip().rstrip(";") for block in re.findall(r"```cypher\n(.*?)```", section, re.S)]
+
+
+def _cypher_patterns(statement: str) -> list:
+    """The patterns of the ``=~`` comparisons in *statement*, as Neo4j reads the string literals."""
+    return [literal.replace("\\\\", "\\") for literal in re.findall(r"=~ '((?:[^'\\]|\\.)*)'", statement)]
+
+
+def _runbook_removes(text: str) -> bool:
+    """Whether steps 1-2 match *text* on a node EdgeGuard created or wrote to (``=~`` is a full match)."""
+    return any(re.fullmatch(p, text) for p in _cypher_patterns(runbook_statements()[1]))
+
+
+class TestRunbookCleanup:
+    def test_step_2_removes_what_step_1_counts(self):
+        count, remove = runbook_statements()[:2]
+        assert count.split("RETURN")[0] == remove.split("REMOVE")[0]
+        assert len(_cypher_patterns(remove)) == 3
+
+    def test_a_placeholder_is_removed_only_from_edgeguards_nodes(self):
+        remove = runbook_statements()[1]
+        guard, _, placeholder = remove.partition("(n.edgeguard_managed = true OR n.edgeguard_enriched = true)")
+        assert placeholder.lstrip().startswith("AND n.description =~ '\\\\s*((Malware|Threat actor|")
+        assert "Threat actor" not in guard
+
+    @pytest.mark.parametrize(
+        ("text", "removed"),
+        [
+            ('MITRE_USES_TECHNIQUES:{"rt":["T1082"],"pid":"68c30a2bd84d2a2fe1fc3f4b"}', True),
+            ('MITRE_USES_TECHNIQUES:{"t":["T10', True),  # a block cut inside its JSON
+            ('Profile\nMITRE_USES_TECHNIQUES:{"t":["T1059"]}', True),
+            ("Malware from alienvault_otx", True),
+            ("Threat actor from mitre_attck", True),
+            ("MITRE ATT&CK technique from mitre_attck", True),
+            ("MITRE ATT&CK tactic", True),
+            ("MITRE ATT&CK tool: Mimikatz", True),
+            ("Threat actor from Iran", False),
+            ("Malware from APT28", False),
+            (DRAGONFLY_TEXT, False),
+            (KATARU_TEXT, False),  # an OTX pulse's text: step 4, on nodes MITRE does not describe
+        ],
+    )
+    def test_what_steps_1_and_2_remove(self, text, removed):
+        assert _runbook_removes(text) is removed
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Malware from threatfox",
+            "Threat actor from unknown",
+            "MITRE ATT&CK tactic",
+            "MITRE ATT&CK tool: Cobalt Strike",
+            "Threat actor from Iran",
+            "Malware from China",
+            "An actor profile",
+        ],
+    )
+    def test_the_placeholders_are_the_ones_the_sync_drops(self, text):
+        assert _runbook_removes(text) is (_entity_comment_description(text, "misp") is None)

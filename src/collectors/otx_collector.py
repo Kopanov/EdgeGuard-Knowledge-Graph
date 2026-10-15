@@ -536,10 +536,11 @@ class OTXCollector:
                 pulse_author = pulse.get("author_name", "")
                 pulse_adversary = pulse.get("adversary", "")
                 pulse_tlp = pulse.get("TLP", "")
-                # 2026-10: the pulse's description is not collected. It describes the report, and it was
+                # 2026-10: the pulse's description is stored on no item. It describes the report, and it was
                 # given only to the malware family and adversary items below, as their description: every
                 # family and adversary a pulse named showed that pulse's text, in place of ATT&CK's where
-                # both describe the entity, depending on which record the sync merged last.
+                # both describe the entity, depending on which record the sync merged last. It still feeds
+                # sector detection above (the whole pulse is scanned), so it decides the zone of every item.
 
                 # PR-M2 §4-F5: read the source's pulse-level timestamps
                 # ONCE at the top of the per-pulse block and use them for
