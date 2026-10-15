@@ -84,8 +84,9 @@ jobs:
   # ── Real Neo4j: the actor alias merge and the explainability writes ───────
   # Mocked sessions cannot show what APOC's mergeNodes does to property types (its "combine" stores
   # equal values as one string), nor run the Cypher that records r.cited_ids. This job runs both on
-  # a throwaway Neo4j with APOC, from the image docker-compose.yml deploys. The password exists only
-  # inside this job's container.
+  # a throwaway Neo4j with APOC, from the image docker-compose.yml deploys, together with the EPSS /
+  # SSVC writes and (2026-10) the merge of an indicator whose MISP last_seen was refreshed. The
+  # password exists only inside this job's container.
   neo4j-integration:
     name: Neo4j integration
     runs-on: ubuntu-latest
@@ -127,7 +128,7 @@ jobs:
           EDGEGUARD_IT_NEO4J_USER: neo4j
           EDGEGUARD_IT_NEO4J_PASSWORD: edgeguard-ci-only
           EDGEGUARD_IT_NEO4J_REQUIRED: "1"
-        run: pytest tests/test_actor_alias_merge_neo4j.py tests/test_explainability_neo4j.py tests/test_cve_epss_ssvc_neo4j.py -v -rs
+        run: pytest tests/test_actor_alias_merge_neo4j.py tests/test_explainability_neo4j.py tests/test_cve_epss_ssvc_neo4j.py tests/test_reobserved_indicator_neo4j.py -v -rs
 
   # ── Docker build + image vulnerability scan ───────────────────────────────
   docker:

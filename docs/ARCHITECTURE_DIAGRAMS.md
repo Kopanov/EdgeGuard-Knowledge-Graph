@@ -212,7 +212,7 @@ gantt
 ```mermaid
 flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_preflight<br/>Health check]
-    B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 4h timeout]
+    B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 6h timeout]
     C --> D[build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL]
     D --> E[run_enrichment_jobs<br/>5 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
@@ -342,7 +342,7 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-10-15 — §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+*Last updated: 2026-10-15 — §5: `run_neo4j_sync` timeout 6h (was 4h). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
 
 *Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
 

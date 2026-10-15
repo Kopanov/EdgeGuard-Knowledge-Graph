@@ -363,7 +363,8 @@ class TestFix3OtxMetaCompletion:
         """run_misp_to_neo4j's OTX-meta read-back must populate
         item['malware_family'] and item['attributed_to']."""
         src = (SRC / "run_misp_to_neo4j.py").read_text()
-        idx = src.find('item["attack_ids"] = otx_meta.get("attack_ids"')
+        # 2026-10: list-valued OTX_META keys are read through ``_meta_list`` (lists only).
+        idx = src.find('item["attack_ids"] = _meta_list(otx_meta, "attack_ids")')
         assert idx != -1, "OTX-meta rehydration block not found"
         # Wider window because the new breadcrumb comment block is ~500 chars
         block = src[idx : idx + 2500]

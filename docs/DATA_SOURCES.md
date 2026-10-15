@@ -16,9 +16,9 @@
 | 3 | CISA KEV | ~500 | ✅ Auto-tagged | Known exploits | ✅ Active |
 | 4 | MITRE ATT&CK | ~300 | N/A | TTPs & relationships | ✅ Active |
 | 5 | VirusTotal | grows by ≤ 400 lookups/day (free-tier budget) | ✅ Auto-tagged | Enrichment of hashes already in MISP (lookups, not a feed) | ✅ Active |
-| 6 | ThreatFox | TBD | ✅ Auto-tagged | Malware IOCs | ✅ Active |
+| 6 | ThreatFox | the IOCs of the last 7 days (7,398 on the 730-day baseline; about 1,100 new per day), ≤ 10,000 per run | ✅ Auto-tagged | Malware IOCs | ✅ Active |
 | 7 | AbuseIPDB | TBD | ✅ Auto-tagged | IP reputation | ✅ Active |
-| 8 | URLhaus | ~500 | ✅ Auto-tagged | Malware URLs | ✅ Active |
+| 8 | URLhaus | the URLs of the last 30 days (34,003 on the 730-day baseline; about 1,130 new per day), ≤ 50,000 per run | ✅ Auto-tagged | Malware URLs | ✅ Active |
 | 9 | Feodo Tracker | 7,607 servers on a baseline (complete history; feed not updated by abuse.ch since 2026-03-04) | ✅ Auto-tagged (keyword detector; Global in practice) | Botnet C&C IPs with malware family | ✅ Active |
 | 10 | SSL Blacklist | ~11,000 (10,964 on 2026-10-12) | ✅ Auto-tagged (keyword detector; Global in practice) | Malware SSL certs | ✅ Active |
 | 11 | Energy Sector | - | - | Placeholder | ❌ Placeholder |
@@ -87,7 +87,7 @@
 ---
 
 ### 3. URLhaus
-**Items:** 491 | **Zone Distribution:** Global 100%
+**Items:** the URLs added in the last 30 days (`csv_recent`; 34,003 on the 730-day baseline of 2026-10-13, about 1,130 new per day), at most `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000) per run | **Zone Distribution:** Global 100%
 
 | Attribute | Value |
 |-----------|-------|
@@ -96,6 +96,8 @@
 | Auth | None (public) |
 | Update | Daily |
 | Classification | ✅ `detect_zones_from_text()` on threat names and tags |
+
+**Per-run cap (2026-10):** the daily run reads the whole 30-day file; until 2026-10 it was cut at `EDGEGUARD_INCREMENTAL_LIMIT` (200), and about 80% of each day's URLs left the window uncollected. The cap `EDGEGUARD_URLHAUS_MAX_PER_RUN` (default 50,000) covers the window with headroom; a run that reaches it keeps the newest URLs by `dateadded` and logs a warning. ThreatFox (the IOCs of the last 7 days, the most `get_iocs` serves; 7,398 on the same baseline) has the same rule with `EDGEGUARD_THREATFOX_MAX_PER_RUN` (default 10,000), newest by `first_seen` ([COLLECTORS.md § 8](COLLECTORS.md#8-global-feed-collector)).
 
 **What we get:**
 - Malware distribution URLs
@@ -323,4 +325,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-15 — FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-15 — ThreatFox and URLhaus rows and § 3: the whole window per run, up to `EDGEGUARD_THREATFOX_MAX_PER_RUN` (10,000) / `EDGEGUARD_URLHAUS_MAX_PER_RUN` (50,000), the newest kept when a cap is reached. Same day: FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

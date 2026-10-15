@@ -34,6 +34,8 @@ from config import (
     MISP_URL,
     SSL_VERIFY,
     apply_misp_http_host_header,
+    misp_refresh_last_seen_days,
+    misp_refresh_max_per_run,
 )
 from cvss_selection import cvss_rating_tag, normalize_attack_vector
 
@@ -185,6 +187,27 @@ def _validate_honest_null(item: Dict[str, Any], source_hint: Optional[str] = Non
 
 # Traffic Light Protocol labels MISP's ``tlp`` taxonomy accepts (TLP 1.0 + 2.0).
 _VALID_TLP = frozenset({"white", "clear", "green", "amber", "amber+strict", "red"})
+# 2026-10: the ladder of ``neo4j_client._tlp_rank_case``, for merges made before an item reaches MISP.
+_TLP_RANK = {"white": 1, "clear": 1, "green": 2, "amber": 3, "amber+strict": 4, "red": 5}
+
+
+def _tlp_level(raw: Any) -> str:
+    """The TLP level written for ``raw``: a known label (``tlp:`` prefix and case ignored),
+    otherwise the deployment default ``config.EDGEGUARD_DEFAULT_TLP``."""
+    from config import EDGEGUARD_DEFAULT_TLP
+
+    level = str(raw or "").strip().lower().replace("tlp:", "")
+    return level if level in _VALID_TLP else EDGEGUARD_DEFAULT_TLP
+
+
+def tlp_rank(raw: Any) -> int:
+    """Rank of the TLP level ``raw`` is written as (2026-10): white / clear 1, green 2, amber 3,
+    amber+strict 4, red 5.
+
+    A value outside the ladder (empty, misspelt) ranks as the deployment default it is written
+    as, so it never displaces a known level that is more restrictive.
+    """
+    return _TLP_RANK.get(_tlp_level(raw), 0)
 
 
 def _tlp_tag(item: Dict[str, Any]) -> str:
@@ -196,13 +219,7 @@ def _tlp_tag(item: Dict[str, Any]) -> str:
     its own level (OTX pulses carry ``pulse_tlp``, or an item may set ``tlp``)
     overrides the default when the value is a known TLP label.
     """
-    from config import EDGEGUARD_DEFAULT_TLP
-
-    raw = item.get("tlp") or item.get("pulse_tlp") or ""
-    level = str(raw).strip().lower().replace("tlp:", "")
-    if level not in _VALID_TLP:
-        level = EDGEGUARD_DEFAULT_TLP
-    return f"tlp:{level}"
+    return f"tlp:{_tlp_level(item.get('tlp') or item.get('pulse_tlp') or '')}"
 
 
 def _attack_domain(item: Dict[str, Any]) -> str:
@@ -627,6 +644,43 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     return (str(attr_type).strip().lower(), value_norm)
 
 
+def _attribute_seen_epoch(attribute: Dict[str, Any]) -> Optional[float]:
+    """When MISP last saw a stored attribute, as epoch seconds (2026-10): its ``last_seen``, or
+    its ``timestamp`` (MISP's last write) when ``last_seen`` is empty or unreadable. None when
+    neither can be read."""
+    raw = attribute.get("last_seen")
+    if raw not in (None, ""):
+        try:
+            parsed = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            pass
+    try:
+        return float(attribute.get("timestamp"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _note_last_seen(
+    seen: Dict[Tuple[str, str], Optional[Tuple[float, str]]], key: Tuple[str, str], attribute: Dict[str, Any]
+) -> None:
+    """Record for ``key`` the stored copy seen most recently, as ``(epoch, uuid)`` (2026-10).
+
+    A source can hold an indicator in several events (pushed on different days before the
+    cross-event check existed); the most recent copy decides whether the indicator needs a
+    refresh, and that copy is the one edited.
+    """
+    uuid = str(attribute.get("uuid") or "").strip()
+    when = _attribute_seen_epoch(attribute)
+    if not uuid or when is None:
+        return
+    current = seen.get(key)
+    if current is None or when > current[0]:
+        seen[key] = (when, uuid)
+
+
 def _strip_non_bmp(text: str) -> str:
     """Drop characters outside the Basic Multilingual Plane (4-byte UTF-8, e.g. emoji).
 
@@ -931,6 +985,10 @@ class MISPWriter:
             "attrs_skipped_existing": 0,
             # Attributes edited in place (NVD incremental runs, 2026-10).
             "attributes_updated": 0,
+            # Re-reported indicators whose stored last_seen was moved (2026-10; also counted in
+            # attributes_updated), and the refresh edits that failed.
+            "attributes_refreshed": 0,
+            "attributes_refresh_failed": 0,
             # Batches MISP answered with HTTP 200 but without an attribute list, so the
             # attempted count could not be verified against the stored event.
             "batches_unverified": 0,
@@ -975,10 +1033,21 @@ class MISPWriter:
         data = response.json()
         return data.get("response") or []
 
-    def _get_existing_source_attribute_keys(self, source_tag: str) -> set:
+    def _get_existing_source_attribute_keys(
+        self,
+        source_tag: str,
+        last_seen_of: Optional[Dict[Tuple[str, str], Optional[Tuple[float, str]]]] = None,
+    ) -> set:
         """Build a set of (MISP attribute type, value) already pushed under
         ANY MISP event tagged with ``source_tag`` — across all events,
         not just one.
+
+        2026-10 (re-reported indicators): ``last_seen_of`` maps the keys of the indicators a push
+        reports to ``None``; for each of those keys that the listing finds, it is set to
+        ``(epoch, uuid)`` of the stored copy seen most recently (``last_seen``, or the MISP
+        ``timestamp`` without one). The rows the listing already reads carry both fields, so this
+        adds no request, and only the keys asked for are kept: memory grows with the push, not with
+        the source.
 
         PR-F7 (Issue #61 quick-fix): the per-event prefetch
         (:meth:`_get_existing_attribute_keys`) misses duplicates across
@@ -1114,7 +1183,10 @@ class MISPWriter:
                 t = a.get("type")
                 v = a.get("value")
                 if t is not None and v is not None and str(v).strip():
-                    keys.add((str(t), str(v)))
+                    key = (str(t), str(v))
+                    keys.add(key)
+                    if last_seen_of is not None and key in last_seen_of:
+                        _note_last_seen(last_seen_of, key, a)
             if len(attrs) < page_limit:
                 break
             page += 1
@@ -2355,6 +2427,13 @@ class MISPWriter:
         Returns:
             Tuple of (successful_count, failed_count)
 
+        2026-10 (re-reported indicators): an indicator the source already holds in MISP is not
+        pushed again, but when its stored ``last_seen`` (or, without one, its MISP timestamp) is
+        older than ``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS`` its ``last_seen`` is moved forward
+        (``_refresh_last_seen``), so the incremental sync reads it again. The counts are
+        ``stats["attributes_refreshed"]`` / ``stats["attributes_refresh_failed"]``; a failed
+        refresh is logged and does not count as a failed push.
+
         PR-N4 — adaptive scaling for MISP-at-scale (closes the on-call
         report from 2026-04-21 where a 730d baseline lost ~11,500 attrs
         across OTX + NVD pushes due to MISP HTTP 500s on large events):
@@ -2414,6 +2493,9 @@ class MISPWriter:
 
         # Group items by (source, date) — zone lives on attribute tags, not event name
         grouped = {}
+        # 2026-10: (type, value) of the indicators each source reports in this push — the
+        # candidates for a last_seen refresh when MISP already holds them.
+        reported_indicators: Dict[str, set] = {}
 
         for item in items:
             source = item.get("tag", "unknown")
@@ -2446,6 +2528,21 @@ class MISPWriter:
 
             if attr:
                 grouped[key].append(attr)
+                if "indicator_type" in item and "value" in item:
+                    reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
+
+        # 2026-10: per resolved source tag, the reported indicators whose stored copy the
+        # cross-event prefetch should describe (see ``_get_existing_source_attribute_keys``).
+        refresh_days = misp_refresh_last_seen_days()
+        refresh_cutoff = time.time() - refresh_days * 86400
+        last_seen_by_tag: Dict[str, Dict[Tuple[str, str], Optional[Tuple[float, str]]]] = {}
+        if refresh_days > 0:
+            for _source, _keys in reported_indicators.items():
+                _lookup = last_seen_by_tag.setdefault(self.SOURCE_TAGS.get(_source, f"source:{_source}"), {})
+                for _key in _keys:
+                    _lookup.setdefault(_key, None)
+        # (type, value) → (stored copy last seen, its uuid, last_seen of the re-reported item)
+        refresh_due: Dict[Tuple[str, str], Tuple[float, str, Optional[str]]] = {}
 
         # Resolve events + prefetch existing (type, value); build work queue (post-filter batch counts).
         total_success = 0
@@ -2521,7 +2618,9 @@ class MISPWriter:
                 if known_source_keys is not None and source_tag in known_source_keys:
                     cross_event_cache[source_tag] = set(known_source_keys[source_tag])
                 else:
-                    cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(source_tag)
+                    cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(
+                        source_tag, last_seen_of=last_seen_by_tag.get(source_tag)
+                    )
             cross_event_keys = cross_event_cache[source_tag]
 
             before_ct = len(unique_attrs)
@@ -2534,6 +2633,14 @@ class MISPWriter:
             # would have missed.
             unique_attrs = [a for a in after_per_event if (a.get("type"), a.get("value")) not in cross_event_keys]
             cross_event_skipped = len(after_per_event) - len(unique_attrs)
+            # 2026-10: a re-reported indicator held in an earlier event whose stored copy was last
+            # seen before the cutoff is refreshed after the pushes (``_refresh_last_seen``).
+            _last_seen = last_seen_by_tag.get(source_tag)
+            if _last_seen and cross_event_skipped:
+                for a in after_per_event:
+                    _seen = _last_seen.get((a.get("type"), a.get("value")))
+                    if _seen is not None and _seen[0] < refresh_cutoff:
+                        refresh_due[(a.get("type"), a.get("value"))] = (_seen[0], _seen[1], a.get("last_seen"))
             skipped_ct = per_event_skipped + cross_event_skipped
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
@@ -2975,20 +3082,89 @@ class MISPWriter:
                 total_success += success
                 total_failed += failed
 
+        refreshed_note = ""
+        if refresh_due:
+            refreshed, _refresh_failed = self._refresh_last_seen(refresh_due, refresh_days, refresh_cutoff)
+            refreshed_note = f"; last_seen refreshed on {refreshed} existing attribute(s)"
+
         # Final summary
         total_elapsed = time.time() - start_time
         if total_success > 0 or total_failed > 0:
             logger.info(
-                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed in {total_elapsed:.1f}s"
+                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{refreshed_note} "
+                f"in {total_elapsed:.1f}s"
             )
         elif total_items > 0:
             logger.info(
-                f"[SKIP] MISP push: 0 new attributes to push ({total_items} items all deduplicated) in {total_elapsed:.1f}s"
+                f"[SKIP] MISP push: 0 new attributes to push ({total_items} items all deduplicated{refreshed_note}) "
+                f"in {total_elapsed:.1f}s"
             )
         else:
             logger.info("[OK] MISP push: no items provided")
 
         return total_success, total_failed
+
+    def _refresh_last_seen(
+        self, due: Dict[Tuple[str, str], Tuple[float, str, Optional[str]]], refresh_days: int, cutoff: float
+    ) -> Tuple[int, int]:
+        """Move ``last_seen`` of stored attributes the source reported again (2026-10).
+
+        ``due`` maps ``(type, value)`` to ``(last seen epoch, uuid)`` of the stored copy and the
+        ``last_seen`` of the re-reported item (None when the source sends none). Each copy gets one
+        ``update_attribute`` edit with ``{"last_seen": ...}`` and nothing else: value, type, tags and
+        comment stay as they are. The new value is the source's own ``last_seen`` when it is later
+        than ``cutoff`` (inside the refresh interval), otherwise the time of this run, when the
+        source listed the indicator; either way it is inside the interval, so the next run does not
+        edit the copy again. MISP stamps the edited attribute and its event with a new timestamp,
+        so the incremental MISP → Neo4j sync reads the attribute again and refreshes
+        ``Indicator.last_updated`` (and the source's ``r.source_reported_last_at``) before
+        ``decay_ioc_confidence`` lowers or retires a node the feed still lists.
+
+        The longest unseen go first, at most ``EDGEGUARD_MISP_REFRESH_MAX_PER_RUN``; the edits are
+        paced like the NVD edits (``EDGEGUARD_MISP_BATCH_THROTTLE_SEC`` after every
+        ``EDITS_PER_THROTTLE``) and check the parent-DAG liveness callback at the same points.
+        Returns ``(refreshed, failed)``; a failure is retried by the next run that reports the
+        indicator, since its stored ``last_seen`` stays old.
+        """
+        ordered = sorted(due.values(), key=lambda entry: entry[0])
+        cap = misp_refresh_max_per_run()
+        deferred = 0
+        if cap and len(ordered) > cap:
+            deferred = len(ordered) - cap
+            ordered = ordered[:cap]
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now_iso = now.isoformat()
+        pause = misp_batch_throttle_seconds()
+        liveness_cb = getattr(self, "liveness_callback", None)
+        refreshed = failed = 0
+        for done, (_seen, uuid, reported) in enumerate(ordered, 1):
+            value = now_iso
+            reported_epoch = _attribute_seen_epoch({"last_seen": reported}) if reported else None
+            if reported_epoch is not None and cutoff < reported_epoch <= now.timestamp():
+                value = str(reported)
+            if self.update_attribute(uuid, {"last_seen": value}):
+                refreshed += 1
+            else:
+                failed += 1
+            if done % EDITS_PER_THROTTLE == 0 and done < len(ordered):
+                if liveness_cb is not None:
+                    liveness_cb()
+                if pause:
+                    time.sleep(pause)
+        self.stats["attributes_refreshed"] = self.stats.get("attributes_refreshed", 0) + refreshed
+        self.stats["attributes_refresh_failed"] = self.stats.get("attributes_refresh_failed", 0) + failed
+        log = logger.warning if failed or deferred else logger.info
+        log(
+            "[REFRESH] %d re-reported indicator(s) last seen in MISP more than %d days ago: "
+            "last_seen refreshed on %d, %d failed, %d left for a later run (EDGEGUARD_MISP_REFRESH_MAX_PER_RUN=%d)",
+            len(due),
+            refresh_days,
+            refreshed,
+            failed,
+            deferred,
+            cap,
+        )
+        return refreshed, failed
 
     @retry_with_backoff(max_retries=4, base_delay=10.0)
     @rate_limited(max_per_second=2.0)
@@ -3164,6 +3340,8 @@ class MISPWriter:
             "errors": 0,
             "attrs_skipped_existing": 0,
             "attributes_updated": 0,
+            "attributes_refreshed": 0,
+            "attributes_refresh_failed": 0,
             "batches_unverified": 0,
             "attributes_unconfirmed": 0,
         }

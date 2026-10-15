@@ -47,7 +47,7 @@ from collectors.collector_utils import (
     retry_with_backoff,
     status_after_misp_push,
 )
-from collectors.misp_writer import MISPWriter
+from collectors.misp_writer import MISPWriter, tlp_rank
 from config import (
     OTX_API_KEY,
     OTX_BASELINE_MAX_PAGES,
@@ -160,6 +160,7 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     contributes its id to ``report_ids`` (``MITRE_USES_TECHNIQUES.rids`` /
     ``OTX_META.report_ids`` on the MISP attribute; the sync groups on
     ``[pulse_id] + report_ids``) and its ATT&CK ids to ``reported_techniques``.
+    The kept item takes the most restrictive ``pulse_tlp`` of the pulses (2026-10).
     """
     # Copy-on-write (Bugbot on PR #134, round 2): ``reported_techniques`` is the pulse's
     # ``pulse_attack_ids`` list object, shared by reference with ``attack_ids`` in
@@ -180,6 +181,11 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
         _extra = [x for x in (dup.get(_list_key) or []) if x not in (kept.get(_list_key) or [])]
         if _extra:
             kept[_list_key] = list(kept.get(_list_key) or []) + _extra
+    # 2026-10: the most restrictive TLP of the pulses that listed the item (white / clear < green <
+    # amber < amber+strict < red, as MISPWriter writes them: ``tlp_rank``). The kept copy's level
+    # used to win, so an IOC listed first by a white pulse and then by an amber one was pushed white.
+    if tlp_rank(dup.get("pulse_tlp")) > tlp_rank(kept.get("pulse_tlp")):
+        kept["pulse_tlp"] = dup.get("pulse_tlp")
 
 
 def _dedupe_pulse_items(processed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
