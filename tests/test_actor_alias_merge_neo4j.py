@@ -147,6 +147,20 @@ def _names(driver):
 
 
 class TestMergeOnNeo4j:
+    def test_apoc_combine_stores_two_equal_lists_as_one_string(self, graph):
+        """Why the merge statement wraps lists: on this database, ``combine`` turns two equal
+        single-element lists into a string, which ``apoc.coll.toSet`` cannot take. If APOC changes
+        this, the test says so; the wrapping stays correct either way."""
+        _, driver = graph
+        with driver.session() as session:
+            record = session.run(
+                "MATCH (c:ThreatActor {name: 'clop'}), (d:ThreatActor {name: 'cl0p'}) "
+                "CALL apoc.refactor.mergeNodes([c, d], {properties: {source: 'combine', `.*`: 'discard'}, "
+                "mergeRels: true, produceSelfRel: false}) YIELD node "
+                "RETURN apoc.meta.cypher.type(node.source) AS source_type, node.source AS source"
+            ).single()
+        assert (record["source_type"], record["source"]) == ("STRING", "alienvault_otx")
+
     def test_two_names_with_the_same_single_source_merge_and_keep_lists(self, graph):
         client, driver = graph
         res = enrichment_jobs.merge_alias_duplicate_actors(client)
