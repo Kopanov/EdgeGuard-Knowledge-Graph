@@ -71,7 +71,6 @@ Fixed to match the ``plain_vulns`` shape.
 
 from __future__ import annotations
 
-import ast
 import os
 import sys
 from pathlib import Path
@@ -92,62 +91,49 @@ os.environ.setdefault("MISP_API_KEY", "test-key-pr-n19")
 
 
 class TestFix1CvePublishedLastModified:
-    def test_merge_cve_extra_props_includes_published(self):
-        """AST pin: merge_cve must conditionally add 'published' to extra_props."""
-        src = (SRC / "neo4j_client.py").read_text()
-        tree = ast.parse(src)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef):
-                for node in cls.body:
-                    if isinstance(node, ast.FunctionDef) and node.name == "merge_cve":
-                        body = ast.unparse(node)
-                        assert 'extra_props["published"]' in body or "extra_props['published']" in body, (
-                            "merge_cve must promote data['published'] to extra_props "
-                            "(PR-N19 Fix #1; Bravo caught NULL c.published on 99K CVEs)"
-                        )
-                        return
-        raise AssertionError("merge_cve not found")
+    """2026-10: the dates reach the node from NVD's record (``nvd_record``) through ``extra_props``,
+    and from any other record only where the node has none (``fill_props``); see
+    ``tests/test_cve_description_source.py``."""
 
-    def test_merge_cve_extra_props_includes_last_modified(self):
-        src = (SRC / "neo4j_client.py").read_text()
-        tree = ast.parse(src)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef):
-                for node in cls.body:
-                    if isinstance(node, ast.FunctionDef) and node.name == "merge_cve":
-                        body = ast.unparse(node)
-                        assert 'extra_props["last_modified"]' in body or "extra_props['last_modified']" in body, (
-                            "merge_cve must promote data['last_modified'] to extra_props (PR-N19 Fix #1)"
-                        )
-                        return
-        raise AssertionError("merge_cve not found")
-
-    def test_merge_cve_behavior_promotes_both_fields(self):
-        """Behavioral pin: invoke merge_cve with data containing
-        published + last_modified; confirm both reach extra_props via
-        merge_node_with_source mock."""
+    @staticmethod
+    def _merge(data: dict) -> dict:
         from neo4j_client import Neo4jClient
 
         c = Neo4jClient.__new__(Neo4jClient)
         c.driver = MagicMock()
         c.merge_node_with_source = MagicMock(return_value=True)
+        assert c.merge_cve(data) is True
+        return c.merge_node_with_source.call_args.kwargs
 
-        data = {
-            "cve_id": "CVE-2021-44228",
+    _DATA = {
+        "cve_id": "CVE-2021-44228",
+        "description": "Log4Shell",
+        "cvss_score": 10.0,
+        "severity": "CRITICAL",
+        "published": "2021-12-10T10:15:09.143",
+        "last_modified": "2024-04-03T17:02:49.887",
+    }
+
+    def test_merge_cve_nvd_record_sets_published_and_last_modified(self):
+        """Behavioral pin: NVD's record passes both dates to extra_props (set on the node)."""
+        kwargs = self._merge({**self._DATA, "nvd_record": True})
+        extra_props = kwargs.get("extra_props") or {}
+        assert extra_props.get("published") == "2021-12-10T10:15:09.143", (
+            f"merge_cve must pass NVD's published to extra_props; got {extra_props.get('published')!r}"
+        )
+        assert extra_props.get("last_modified") == "2024-04-03T17:02:49.887"
+        assert not kwargs.get("fill_props")
+
+    def test_merge_cve_other_record_fills_published_and_last_modified(self):
+        """Behavioral pin: a record that is not NVD's passes both dates to fill_props only."""
+        kwargs = self._merge(dict(self._DATA))
+        assert kwargs["fill_props"] == {
             "description": "Log4Shell",
-            "cvss_score": 10.0,
-            "severity": "CRITICAL",
             "published": "2021-12-10T10:15:09.143",
             "last_modified": "2024-04-03T17:02:49.887",
         }
-        assert c.merge_cve(data) is True
-        # Inspect the extra_props passed to merge_node_with_source.
-        call_kwargs = c.merge_node_with_source.call_args.kwargs
-        extra_props = call_kwargs.get("extra_props", {})
-        assert extra_props.get("published") == "2021-12-10T10:15:09.143", (
-            f"merge_cve must pass published to extra_props; got {extra_props.get('published')!r}"
-        )
-        assert extra_props.get("last_modified") == "2024-04-03T17:02:49.887"
+        extra_props = kwargs.get("extra_props") or {}
+        assert not {"description", "published", "last_modified"} & set(extra_props)
 
 
 # ===========================================================================

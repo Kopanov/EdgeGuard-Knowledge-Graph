@@ -476,7 +476,9 @@
                     'width': 1.5, 'line-color': '#444', 'target-arrow-color': '#444',
                     'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'arrow-scale': 1
                 }},
-                { selector: 'edge[type="USES"]', style: { 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c', 'width': 2 }},
+                // Edge types the API emits (GET /graph/explore); USES was retired in 2026-04.
+                { selector: 'edge[type="INDICATES"]', style: { 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c' }},
+                { selector: 'edge[type="EMPLOYS_TECHNIQUE"]', style: { 'line-color': '#e74c3c', 'target-arrow-color': '#e74c3c', 'width': 2 }},
                 { selector: 'edge[type="BELONGS_TO"]', style: { 'line-color': '#00d4aa', 'target-arrow-color': '#00d4aa', 'line-style': 'dashed', 'width': 1 }},
                 { selector: 'edge[type="IN_TACTIC"]', style: { 'line-color': '#ff9f43', 'target-arrow-color': '#ff9f43', 'line-style': 'dotted' }},
                 { selector: 'edge[type="IN_ZONE"]', style: { 'line-color': '#00d4aa', 'target-arrow-color': '#00d4aa', 'line-style': 'dashed', 'width': 1 }},

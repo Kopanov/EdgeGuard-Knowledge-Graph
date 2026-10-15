@@ -62,6 +62,7 @@ FORWARDED = [
     ("EDGEGUARD_NEO4J_READ_TIMEOUT", "3600"),  # int(os.getenv(...)) — empty would raise
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
     ("EDGEGUARD_CANONICAL_THREAT_ACTORS", None),  # empty = the reference shipped in src/reference/
+    ("EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE", "true"),  # 2026-10 Malware ATT&CK-id twin merge
 ]
 
 

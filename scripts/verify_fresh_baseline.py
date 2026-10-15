@@ -24,7 +24,10 @@ collected by default delivered nothing. Since the revoked-object change of 2026-
 when a Technique node carries an ATT&CK id the revoked-id map lists
 (``src/reference/attack_revoked_ids.json``), or a ThreatActor, Malware or Tool node from MITRE
 is a revoked group or piece of software, and warns when another source's actor still carries a
-revoked group's name.
+revoked group's name. Since the Malware twin fix of 2026-10 it fails when a Malware node from another
+source is still named after an ATT&CK software id (``cobalt strike - s0154``) while the enrichment job
+``merge_malware_attack_twins`` would fold it: into the MITRE Malware node of that id or base name, or,
+for software without one, into the node of its base name.
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -55,14 +58,26 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-# Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b.
+# Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b, and the ATT&CK
+# software ids in malware family names of checks 10a4 / 10a5.
 from attack_revoked import load_revoked_ids  # noqa: E402
+from attack_software_names import (  # noqa: E402
+    CYPHER_BASE_NODES_READ,
+    CYPHER_FOLDED_FAMILIES_READ,
+    CYPHER_SOFTWARE_ID_SUFFIX,
+    CYPHER_SUFFIXED_NAME,
+    attack_software_id,
+    cypher_family_name_variants,
+    folded_family_names,
+    plan_twin_folds,
+    twin_base_names,
+)
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
 BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
@@ -263,6 +278,37 @@ class Report:
 def _one(statement: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     rows = _post(statement, params)
     return rows[0] if rows else {}
+
+
+def _malware_twin_verdict(
+    twins: List[Dict[str, Any]],
+    attack_ids: Dict[str, Optional[str]],
+    software_successors: Mapping[str, str],
+    base_nodes: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Optional[bool], Dict[str, Any]]:
+    """Check 10a5: ``(ok, detail)`` from the twin candidates, the MITRE Malware nodes' ATT&CK ids and
+    the non-MITRE nodes named by a twin's base name.
+
+    Fails when a twin the enrichment job folds (into a MITRE node, or into the node of its base name),
+    or one it cannot decide (ambiguous), is still a node; informational (``None``) when no node carries
+    an ATT&CK software id in its name.
+    """
+    plan = plan_twin_folds(twins, attack_ids, software_successors, base_nodes)
+    foldable = sorted(plan.pairs + plan.base_pairs)
+    detail: Dict[str, Any] = {
+        "nodes_named_with_attack_id": plan.candidates,
+        "foldable_remaining": len(foldable),
+        "foldable_into_base_name": len(plan.base_pairs),
+        "ambiguous": len(plan.ambiguous),
+        "without_target": len(plan.no_target),
+        "examples_foldable": [f"{twin} -> {target}" for target, twin in foldable[:10]],
+        "examples_ambiguous": [f"{twin} -> {targets}" for twin, targets in plan.ambiguous[:10]],
+        "examples_without_target": plan.no_target[:10],
+        "hint": "run the enrichment jobs (merge_malware_attack_twins); see its [MALWARE-TWIN-MERGE] log lines",
+    }
+    if not plan.candidates:
+        return None, detail
+    return not foldable and not plan.ambiguous, detail
 
 
 def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar: bool = False) -> Report:
@@ -562,15 +608,54 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
 
     # 10a4. Pulse-scoped INDICATES (2026-10, regular-update linking): every family a pulse named on an
     #       indicator, whose Malware node exists, has its INDICATES edge (Q9b). Informational only
-    #       while no indicator carries pulse families (pre-change data).
+    #       while no indicator carries pulse families (pre-change data). A family is looked up as Q9b
+    #       looks it up (2026-10): by its name as given and without an ATT&CK software id suffix
+    #       ("Cobalt Strike - S0154" → "cobalt strike"), each through the names the twin merge folded
+    #       into a node ("agenttesla" → "agent tesla", from ``merged_from``; same expression and map).
+    folded_families = folded_family_names(_post(CYPHER_FOLDED_FAMILIES_READ, {"mitre_source": "mitre_attck"}))
     r = _one(
         "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 "
         "UNWIND i.pulse_malware_families AS fam WITH i, toLower(trim(fam)) AS f "
-        "OPTIONAL MATCH (m:Malware {name: f}) WITH i, f, collect(m) AS ms "
+        "OPTIONAL MATCH (m:Malware) WHERE m.name IN " + cypher_family_name_variants("f") + " "
+        "WITH i, f, collect(m) AS ms "
         "RETURN count(*) AS claims, sum(CASE WHEN size(ms) = 0 THEN 1 ELSE 0 END) AS target_missing, "
-        "sum(CASE WHEN size(ms) > 0 AND none(m IN ms WHERE EXISTS { (i)-[:INDICATES]->(m) }) THEN 1 ELSE 0 END) AS edge_missing"
+        "sum(CASE WHEN size(ms) > 0 AND none(m IN ms WHERE EXISTS { (i)-[:INDICATES]->(m) }) THEN 1 ELSE 0 END) AS edge_missing",
+        {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX, "folded_families": folded_families},
     )
     rep.add("pulse_indicates_complete", None if (r.get("claims") or 0) == 0 else r.get("edge_missing") == 0, r)
+
+    # 10a5. Malware twins folded (2026-10): no Malware node from another source is named after an
+    #       ATT&CK software id ("cobalt strike - s0154", the MISP galaxy naming OTX uses), or carries
+    #       such an alias of its own name, when a MITRE Malware node of that id (read from the record
+    #       MITRE delivered) or of that base name exists, or, for software without one (an ATT&CK
+    #       tool), when a node of its base name exists: the enrichment job ``merge_malware_attack_twins``
+    #       folds it into that node. The decision is the job's own (``attack_software_names.
+    #       plan_twin_folds``), so a twin the job leaves (no such node) is reported, not failed; an
+    #       ambiguous one fails (a decision is needed).
+    twins = _post(
+        "MATCH (d:Malware) WHERE d.name IS NOT NULL AND NOT 'mitre_attck' IN coalesce(d.source, []) "
+        "WITH d, CASE WHEN d.aliases IS NULL THEN [] "
+        "WHEN apoc.meta.cypher.type(d.aliases) STARTS WITH 'LIST' THEN d.aliases ELSE [d.aliases] END AS aliases "
+        "WHERE d.name =~ $suffixed OR any(x IN aliases WHERE toString(x) =~ $suffixed) "
+        "RETURN d.name AS name, aliases",
+        {"suffixed": CYPHER_SUFFIXED_NAME},
+    )
+    attack_ids: Dict[str, Optional[str]] = {}
+    if twins:
+        for row in _post(
+            "MATCH (c:Malware) WHERE 'mitre_attck' IN coalesce(c.source, []) "
+            "OPTIONAL MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: 'mitre_attck'}) "
+            "WITH c, head(collect(sf.raw_data)) AS attack_raw RETURN c.name AS name, attack_raw"
+        ):
+            if row.get("name"):
+                attack_ids[row["name"]] = attack_software_id(row.get("attack_raw"), row["name"])
+    bases = twin_base_names(twins)
+    base_nodes: Dict[str, Any] = {}
+    if bases:
+        for row in _post(CYPHER_BASE_NODES_READ, {"bases": bases, "mitre_source": "mitre_attck"}):
+            if row.get("name"):
+                base_nodes[row["name"]] = row.get("aliases")
+    rep.add("malware_attack_twins_folded", *_malware_twin_verdict(twins, attack_ids, revoked.software, base_nodes))
 
     # 10a3. `global` is the "no sector" marker: no TARGETS / AFFECTS edge may point at it (2026-10 audit:
     #       the old graph carried ~270k such edges at confidence 1.0).

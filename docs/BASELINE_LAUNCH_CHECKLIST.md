@@ -231,9 +231,13 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
 0. **Deploy `main` first.** The wipe rebuilds the graph with whatever is checked out,
    so a re-feed on the old checkout produces a graph identical to the one being
    replaced. On the hosted pipeline: `git status` clean and `git diff origin/main`
-   empty (commit or drop any local change first), then `git pull` to `main` after #193
-   and the documentation update that follows it, or later: that state holds the 2026-10
-   relationship, CVE, indicator-type and curated-package changes the re-feed must run with.
+   empty (commit or drop any local change first), then `git pull` to a `main` that holds
+   the CVE description rule (2026-10: NVD's record sets a CVE's `description`, `published`
+   and `last_modified`, any other record only fills them; branch
+   `fix/cve-description-source`), or later: that state holds the 2026-10 relationship,
+   CVE, indicator-type and curated-package changes the re-feed must run with. A `main`
+   after #193 without that rule re-feeds `OTX_META` JSON, OTX pulse names and the text of
+   whichever KEV, OTX or ICS record merged last as CVE descriptions.
    The Airflow base is `apache/airflow:3.3.2-python3.12` (since #140), so back up the
    Airflow metadata DB and rebuild the image — `docker compose build airflow && docker
    compose up -d --force-recreate airflow` — following
@@ -241,6 +245,12 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    `edgeguard version` must print `2026.10.10` (or later) and `edgeguard doctor` must
    report Airflow `3.3.x` with no drift warning; the DAG list must load with zero parse
    errors.
+   A graph that is kept instead of re-fed needs one repair after this deploy (2026-10): the
+   CVE descriptions and dates written before it are those of the record merged last (raw
+   `OTX_META` JSON, OTX pulse names, CISA's KEV text, CISA ICS dates). Remove the descriptions
+   that are metadata blocks or OTX pulse references, then run one full sync
+   (`NEO4J_FULL_SYNC=true` with `force_sync`) as [RUNBOOK § Repairing CVE descriptions and dates](RUNBOOK.md#repairing-cve-descriptions-and-dates-2026-10)
+   describes. The re-feed below needs neither.
 1. **MISP Import Regexp.** In the MISP UI open *Input Filters → Import Regexp*
    and remove (or fix) the rule that rewrites `: Windows ` to `%WINDIR%\`. On the
    2026-09 baseline it mangled 12 ATT&CK entries (`T1047: Windows Management
@@ -254,8 +264,9 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    On the Compose deployment the flags live in `.env` and reach the `airflow`
    container only through the `x-common-env` block of `docker-compose.yml` (added
    October 2026 — a checkout older than that silently ignores them); after changing
-   `.env` run `docker compose up -d airflow`. `EDGEGUARD_DEFAULT_TLP` (`white`) and
-   `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE` (`true`) keep their defaults.
+   `.env` run `docker compose up -d airflow`. `EDGEGUARD_DEFAULT_TLP` (`white`),
+   `EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE` (`true`) and `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`
+   (`true`, 2026-10) keep their defaults.
 3. **Snapshot first.** Take a `neo4j-admin database dump` and a MISP export of the
    old instance before `edgeguard clear` — it is the "before" record for the
    quality numbers and the graph the v0.10 model was benchmarked on.
@@ -316,7 +327,9 @@ fresh re-feed — **and only if the hosted pipeline runs that code**. Before cle
    provenance (extension definition 1.4.0, with the explainability properties); `CVE` nodes carry
    FIRST EPSS (`epss_score`, `epss_percentile`, `epss_score_date`, `epss_model_version`) and
    CISA's SSVC decision from NVD's record (`ssvc_exploitation`, `ssvc_automatable`,
-   `ssvc_technical_impact`), also on the STIX `vulnerability`. A curated package, once imported
+   `ssvc_technical_impact`), also on the STIX `vulnerability`; a CVE's `description`,
+   `published` and `last_modified` are NVD's whenever NVD has a record of it (2026-10; no
+   `OTX_META` JSON, OTX pulse name, KEV text or ICS advisory date in their place). A curated package, once imported
    ([RUNBOOK § Importing a curated package](RUNBOOK.md#importing-a-curated-package-2026-10)),
    adds `EXPLOITS` from actors and malware to CVEs and marks every link it touches with its
    TLP level.
@@ -440,6 +453,7 @@ It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: 
 | Explainability (`translated_links_record_cited_ids`; `actor_merges_recorded` is informational) | every `USES_TECHNIQUE` link from an indicator to the successor of a revoked id in its `attack_ids` names that id in `r.cited_ids`; the count of actors with `merged_from` and of the names folded into them. Informational without such links; fails when the map cannot be read. A graph built before 2026-10 fails it (2026-10-15: 1,218 links, none recorded) |
 | Sub-technique hierarchy (`subtechnique_of_complete`) | every dotted-id `Technique` whose parent exists has a `SUBTECHNIQUE_OF` edge to it (493 on the September graph; 0 missing) |
 | Group → software (`uses_malware_complete`, `uses_tool_complete`) | every MITRE `uses_malware` / `uses_tools` claim whose target node exists has its edge (informational until the MITRE collector of the R6 build has run) |
+| Malware twins (`malware_attack_twins_folded`, 2026-10) | no `Malware` node from another source is named after an ATT&CK software id (`cobalt strike - s0154`, the MISP galaxy naming OTX uses), or carries such an alias of its own name, while the enrichment job `merge_malware_attack_twins` would fold it: into the MITRE `Malware` node of that id (read from the record MITRE delivered) or of that base name, or, for software without one, into the `Malware` node of its base name (`mimikatz - s0002` into `mimikatz`). A twin with neither (an ATT&CK tool no pulse has yet named by its base name) is reported, not failed. One whose id and base name lead to more than one MITRE node fails; the job skips it on every run, so it needs a decision by hand. Informational when no node is named with an id. After one run of the enrichment jobs without failed batches (`errors=0` on the job's `complete` line), only the ambiguous twins and the twins without a target remain, so the check passes when no ambiguous twin remains. Size of the problem on the graph of 2026-10-14: 136 twins holding 16,005 `INDICATES` links (how many of them have a MITRE target was not measured) |
 | Sector coverage (`sector_coverage`, informational) | `ThreatActor` / `Malware` → `Sector` `TARGETS` present for finance, energy, healthcare (2026-10: ~200/100/100 actors and ~750/400/320 malware on the September graph); energy CVEs well above the 234 of the keyword-only vocabulary |
 | ResilMesh conformance | relationship names and directions unchanged; `HAS_CVSS_*` bidirectional |
 | Relationship sources (`relationships_name_their_source`, `provenance_lists_are_lists`) | every EdgeGuard relationship built from the sources has a non-empty `r.sources`; `sources`, `source_refs`, `misp_event_ids` (and node `zone`, `source`) are lists, never strings |
@@ -498,7 +512,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-15 — acceptance table: FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, warning); step 5: EPSS and SSVC on `CVE`, STIX extension definition 1.4.0. Same day: acceptance table: the explainability check (`translated_links_record_cited_ids`, and `actor_merges_recorded` as information); STIX extension definition 1.3.0. Same day: the revoked ATT&CK object checks (`no_revoked_attack_techniques`, `no_revoked_attack_groups`, `no_revoked_attack_software`, and the warning `revoked_group_names_folded`). Same day: acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log); the co-occurrence row checks `match_type` (and the legacy `source_id` / `source_ids`); § [7] step 4: the clean step's 60 minutes, batched relationship deletion, `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the refusal of the collectors after a failed clean; step 5: what changes for consumers (`PART_OF_CAMPAIGN`, relationship provenance, CVE scores, STIX provenance, curated `EXPLOITS`); after #189: the delete timeout is forwarded by `docker-compose.yml` and used by `edgeguard clear misp`; step 0: the minimum is `main` after #193 and the documentation update that follows it (was `ca9cdae`); step 5: `CVE.attack_vector`, IPv6 and certificate-fingerprint indicator types, STIX extension definition 1.2.0, curated TLP. Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — acceptance table: Malware twins (`malware_attack_twins_folded`: twins the job folds into an ATT&CK node or into the node of their base name, what remains after one run); step 2: `EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE` keeps its default. Same day: step 0: the minimum is a `main` that holds the CVE description rule (was `main` after #193 and the documentation update that follows it); the repair also removes OTX pulse references. Same day: step 0: the repair of CVE descriptions and dates on a graph that is kept (cleanup statement, then one full sync); step 5: CVE description and dates are NVD's. Same day: acceptance table: FIRST EPSS and CISA's SSVC (`cve_epss_and_ssvc`, warning); step 5: EPSS and SSVC on `CVE`, STIX extension definition 1.4.0. Same day: acceptance table: the explainability check (`translated_links_record_cited_ids`, and `actor_merges_recorded` as information); STIX extension definition 1.3.0. Same day: the revoked ATT&CK object checks (`no_revoked_attack_techniques`, `no_revoked_attack_groups`, `no_revoked_attack_software`, and the warning `revoked_group_names_folded`). Same day: acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log); the co-occurrence row checks `match_type` (and the legacy `source_id` / `source_ids`); § [7] step 4: the clean step's 60 minutes, batched relationship deletion, `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the refusal of the collectors after a failed clean; step 5: what changes for consumers (`PART_OF_CAMPAIGN`, relationship provenance, CVE scores, STIX provenance, curated `EXPLOITS`); after #189: the delete timeout is forwarded by `docker-compose.yml` and used by `edgeguard clear misp`; step 0: the minimum is `main` after #193 and the documentation update that follows it (was `ca9cdae`); step 5: `CVE.attack_vector`, IPv6 and certificate-fingerprint indicator types, STIX extension definition 1.2.0, curated TLP. Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._

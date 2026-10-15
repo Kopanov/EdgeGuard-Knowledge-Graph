@@ -28,6 +28,7 @@ import re
 import requests
 
 from attack_revoked import load_revoked_ids
+from attack_software_names import split_attack_software_id
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
@@ -518,10 +519,15 @@ class MISPCollector:
                     elif "mitre-malware" in tag_name.lower():
                         malware_name = tag_name.split("=")[-1].strip('"') if "=" in tag_name else tag_name
                         if malware_name and malware_name != tag_name:
+                            # 2026-10: the galaxy names its clusters "<name> - S####"; the node is the
+                            # family's, named without the ATT&CK id, which stays as an alias.
+                            galaxy_name = malware_name
+                            malware_name, _attack_software_id = split_attack_software_id(galaxy_name)
                             processed.append(
                                 {
                                     "node_type": "malware",
                                     "name": malware_name,
+                                    "aliases": [galaxy_name] if _attack_software_id else [],
                                     "malware_types": "",
                                     "family": malware_name,
                                     "description": f"Malware from MISP galaxy: {tag_name}",

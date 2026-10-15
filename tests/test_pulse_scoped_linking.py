@@ -264,7 +264,10 @@ class TestPulseScopedSteps:
         assert "'" not in body, "double quotes only — wrapped in single quotes for apoc.periodic.iterate"
         assert "r.edgeguard_managed = true" in body and "r.misp_event_ids" in body
         skip = _assigned_string("_q9b_skip")
-        assert "NOT EXISTS { MATCH (m:Malware {name: fname}) }" in skip
+        # 2026-10: an orphan is a family none of whose names (as given, without an ATT&CK software id,
+        # each through the names the twin merge folded) is a Malware node; tests/test_malware_attack_twins.py
+        # pins the look-up.
+        assert "WHERE NOT EXISTS { MATCH (m:Malware) WHERE m.name IN apoc.coll.toSet([_fv IN [family, " in skip
 
     def test_q2d_pairs_malware_and_actor_from_the_indicator_lists(self):
         outer = _assigned_string("_q2d_outer")

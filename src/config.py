@@ -1380,3 +1380,8 @@ URLHAUS_MAX_PER_RUN = _env_int("EDGEGUARD_URLHAUS_MAX_PER_RUN", 50000)
 # nothing and would silently disagree with the job). String-level name hygiene
 # for the same problem at ingest lives in ``src/actor_name_hygiene.py`` (no
 # flag — pure helpers).
+#
+# 2026-10: the Malware ATT&CK-id twin merge (``enrichment_jobs.merge_malware_attack_twins``,
+# folds "cobalt strike - s0154" into the ATT&CK node "cobalt strike") follows the same rule:
+# ``EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE`` (default ON, ``false`` = dry run) is read at call time,
+# with no constant here. The ingest-side fix is ``src/attack_software_names.py``.
