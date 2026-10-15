@@ -119,9 +119,17 @@ def _step_2d(client) -> dict:
     reference = canonical_threat_actors.load_canonical_reference()
     several = build_relationships._reports_naming_several_actors(client, reference)
     params = build_relationships._attribution_params(several, reference)
+    # The link statement also takes the ATT&CK software id pattern and the folded Malware names.
+    link_params = {**params, **build_relationships._software_id_params(client)}
     stats: dict = {}
     assert build_relationships._safe_run_batched(
-        client, "linked", assigned_query("_q2d_outer"), assigned_query("_q2d_inner"), stats, "linked", params=params
+        client,
+        "linked",
+        assigned_query("_q2d_outer"),
+        assigned_query("_q2d_inner"),
+        stats,
+        "linked",
+        params=link_params,
     )
     assert build_relationships._remove_several_actor_attributions(client, stats, params)
     return {

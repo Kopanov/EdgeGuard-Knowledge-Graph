@@ -43,6 +43,7 @@ from build_rel_queries import assigned_queries  # noqa: E402
 import attack_revoked  # noqa: E402
 import build_relationships  # noqa: E402
 import stix_exporter  # noqa: E402
+from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX  # noqa: E402
 from neo4j_client import Neo4jClient  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync, _curated_claim_rows  # noqa: E402
 
@@ -183,20 +184,30 @@ class TestBuildRelationships:
         parent_step = [(q, p) for q, p in technique_steps if "SUBTECHNIQUE_OF" in q]
         assert len(parent_step) == 1 and parent_step[0][1] is None, "step 1b takes no map"
         assert all(p == {"iterate_params": expected} for q, p in technique_steps if "SUBTECHNIQUE_OF" not in q)
-        # Other steps take no map, except step 2d, which takes the attribution parameters (2026-10).
+        # Other steps take no map, except (2026-10) steps 9b and 2d, which take the ATT&CK software id
+        # pattern and the folded Malware names (none here: the fake client's read returns no Malware
+        # row), and step 2d's statements, which take the attribution parameters.
         from build_rel_queries import assigned_query
 
         import build_relationships
 
-        step_2d = [assigned_query(n) for n in ("_q2d_outer", "_q2d_remove_outer", "_q2d_trim_outer")]
+        software_id_params = {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX, "folded_families": {}}
         attribution_keys = set(build_relationships._attribution_params([], None))
+        link_2d = assigned_query("_q2d_outer")
+        cleanup_2d = [assigned_query(n) for n in ("_q2d_remove_outer", "_q2d_trim_outer")]
         others = [(q, p) for q, p in iterate if ":Technique {mitre_id:" not in q]
-        assert any(any(o in q for o in step_2d) for q, _p in others), "step 2d ran"
+        seen = {"2d": 0, "9b": 0}
         for q, p in others:
-            if any(o in q for o in step_2d):
-                assert set(p["iterate_params"]) == attribution_keys, "step 2d: the attribution parameters"
-            else:
-                assert p is None, "other steps take no map"
+            if link_2d in q:
+                seen["2d"] += 1
+                assert set(p["iterate_params"]) == attribution_keys | set(software_id_params), "step 2d link"
+                assert {k: p["iterate_params"][k] for k in software_id_params} == software_id_params
+            elif any(o in q for o in cleanup_2d):
+                assert set(p["iterate_params"]) == attribution_keys, "step 2d cleanup"
+            elif p is not None:
+                seen["9b"] += 1
+                assert p == {"iterate_params": software_id_params}, "step 9b"
+        assert seen == {"2d": 1, "9b": 1}, seen
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 

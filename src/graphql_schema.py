@@ -11,6 +11,12 @@ with the ResilMesh / ISIM GraphQL conventions:
 Field names are snake_case here (Python convention); Strawberry auto-converts
 to camelCase in the GraphQL SDL, matching the ISIM GraphQL style.
 
+2026-10: every type that maps an EdgeGuard node carries ``tlp`` — the node's TLP level as
+stored (``n.tlp``: clear / white / green / amber / amber+strict / red; the most restrictive
+level any source gave), null when the node has none (the STIX export then applies
+``EDGEGUARD_DEFAULT_TLP``). The CVSS sub-types are parts of a CVE and carry no level of their
+own; the CVE's ``tlp`` applies.
+
 Port: 4001  (mirrors ISIM's GraphQL port for consistency in ResilMesh deployments)
 """
 
@@ -122,6 +128,8 @@ class CVE:
     uuid: Optional[str] = None
     source: Optional[List[str]] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     first_imported_at: Optional[str] = None
     # PR (S5): source-truthful observation times — populated when the
     # source is on the reliable allowlist (see source_truthful_timestamps.py).
@@ -140,9 +148,12 @@ class CVE:
 
 @strawberry.type(
     description=(
-        "Vulnerability instance node — shared with ISIM. "
-        "status is LIST OF STRING per ResilMesh schema (e.g. ['active'], ['rejected']). "
-        "Links to CVE via REFERS_TO relationship. "
+        "Vulnerability entry returned by the vulnerabilities list — shared with ISIM. "
+        "Since 2026-10 the list reads the CVE nodes the MISP to Neo4j sync writes (it read the "
+        "Vulnerability label, which the sync does not write, and was always empty). "
+        "status is LIST OF STRING per ResilMesh schema (NVD's record status, ['active'] or ['rejected']). "
+        "cvss_score and severity come from the CVE's first CVSS (v3.1, v3.0, v2, v4.0), named by "
+        "cvss_version; without any CVSS the score and version are null and the severity UNKNOWN. "
         "misp_event_ids[] lists every MISP event that has observed this vulnerability."
     )
 )
@@ -152,7 +163,13 @@ class Vulnerability:
     status: Optional[List[str]] = None
     severity: Optional[str] = None
     cvss_score: Optional[float] = None
+    # 2026-10: which CVSS version cvss_score is ("3.1", "3.0", "2.0" or "4.0"), and NVD's
+    # publication date of the CVE.
+    cvss_version: Optional[str] = None
+    published: Optional[str] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     edgeguard_managed: Optional[bool] = None
     # Deterministic per-node UUID — same value across local + cloud Neo4j
     # for the same logical entity, and equal to the UUID portion of the
@@ -195,6 +212,8 @@ class Indicator:
     indicator_type: str
     confidence_score: Optional[float] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     active: Optional[bool] = None
     source: Optional[List[str]] = None
     last_updated: Optional[str] = None
@@ -238,6 +257,8 @@ class ThreatActor:
     primary_motivation: Optional[str] = None
     resource_level: Optional[str] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     confidence_score: Optional[float] = None
     source: Optional[List[str]] = None
     edgeguard_managed: Optional[bool] = None
@@ -262,6 +283,8 @@ class Malware:
     malware_types: Optional[List[str]] = None
     description: Optional[str] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     confidence_score: Optional[float] = None
     source: Optional[List[str]] = None
     edgeguard_managed: Optional[bool] = None
@@ -285,6 +308,8 @@ class Technique:
     description: Optional[str] = None
     tactic_refs: Optional[List[str]] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     confidence_score: Optional[float] = None
     edgeguard_managed: Optional[bool] = None
     # PR (S5) (bugbot LOW): source-truthful + import-wall-clock
@@ -310,6 +335,8 @@ class Tactic:
     tactic_id: str
     name: str
     description: Optional[str] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     edgeguard_managed: Optional[bool] = None
     # PR (S5) (bugbot LOW): source-truthful + import-wall-clock
     # timestamps for API parity. x-mitre-tactic SDOs carry canonical
@@ -333,6 +360,8 @@ class Tool:
     tool_types: Optional[List[str]] = None
     uses_techniques: Optional[List[str]] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     sources: Optional[List[str]] = None
     confidence_score: Optional[float] = None
     edgeguard_managed: Optional[bool] = None
@@ -354,6 +383,8 @@ class Campaign:
     name: str
     description: Optional[str] = None
     zone: Optional[List[str]] = None
+    # 2026-10: the node's TLP level (``n.tlp``); null when the node has none.
+    tlp: Optional[str] = None
     confidence_score: Optional[float] = None
     first_seen: Optional[str] = None
     last_seen: Optional[str] = None

@@ -236,6 +236,15 @@ class TestMispRoundTrip:
         )
         assert _meta(attr["comment"], "OTX_META:")["pa"] == [ok], "a cut pair would name another actor or pulse"
 
+    def test_a_pair_keeps_its_pulse_when_the_family_loses_its_attack_id(self):
+        # Pairs written before the twin fix name "Cobalt Strike - S0154"; the sync reads them by the base
+        # name, both forms, and a three-part pair keeps its pulse.
+        from run_misp_to_neo4j import _pair_without_software_id
+
+        assert _pair_without_software_id("Cobalt Strike - S0154::apt29::p1") == "Cobalt Strike::apt29::p1"
+        assert _pair_without_software_id("Cobalt Strike - S0154::apt29") == "Cobalt Strike::apt29"
+        assert _pair_without_software_id("no separator") == "no separator"
+
     def test_no_mark_no_key(self):
         writer = _writer()
         indicator = writer.create_attribute(
@@ -434,7 +443,11 @@ class TestStep2d:
         }
         assert expected["canonical_actor_names"]["storm-2697"] == "the gentlemen"
         assert "the gentlemen" not in expected["canonical_actor_names"], "a canonical key is not a synonym"
-        assert _step(iterate, "_q2d_outer") == expected, "Storm-2697 is The Gentlemen: p-alias attributes"
+        # The link statement also takes the ATT&CK software id pattern and the folded Malware names.
+        from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX
+
+        link = dict(expected, software_id_suffix=CYPHER_SOFTWARE_ID_SUFFIX, folded_families={})
+        assert _step(iterate, "_q2d_outer") == link, "Storm-2697 is The Gentlemen: p-alias attributes"
         assert _step(iterate, "_q2d_remove_outer") == expected
         assert _step(iterate, "_q2d_trim_outer") == expected
         order = [

@@ -1276,6 +1276,7 @@ class TestMergeCvePromotesResilmeshListProps:
             "ref_tags": None,
             "cpe_type": "a",  # scalar, not a list → not promoted
             "description": "keep me",
+            "nvd_record": True,  # 2026-10: NVD's record sets the description (another record fills it)
         }
         with patch.object(client, "merge_node_with_source", return_value=True) as merge:
             client.merge_cve(data, source_id="nvd")

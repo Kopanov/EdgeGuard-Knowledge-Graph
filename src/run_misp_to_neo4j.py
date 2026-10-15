@@ -36,6 +36,7 @@ import urllib3
 
 from actor_name_hygiene import clean_actor_names
 from attack_revoked import load_revoked_ids
+from attack_software_names import split_attack_software_id
 from canonical_threat_actors import (
     CanonicalReference,
     ReferenceUnavailable,
@@ -478,6 +479,59 @@ def _item_is_vulnerability_sync_bucket(item: Dict) -> bool:
 
 
 _URLHAUS_ENTRY_RE = re.compile(r"urlhaus\.abuse\.ch/url/(\d+)", re.IGNORECASE)
+
+# 2026-10: an attribute comment that is a metadata block — ``NVD_META:``, ``OTX_META:``, ``TF_META:`` or
+# any other ``*_META:`` block, ``MITRE_USES_TECHNIQUES:`` and ``MITRE_TACTIC_PHASES:`` (MISPWriter),
+# ``CURATED_CLAIMS:`` (the curated-package importer). The block is data for the sync, never text for a
+# node; MISPWriter writes an entity's description on the line after a ``MITRE_*`` block's JSON.
+_METADATA_COMMENT_RE = re.compile(
+    r"^\s*(?P<prefix>[A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|"
+    + re.escape(CURATED_CLAIMS_PREFIX.rstrip(":"))
+    + r"):"
+)
+
+# 2026-10: plain vulnerability comments that say where a CVE was seen, not what it is: the OTX
+# collector's pulse reference ("Referenced in OTX pulse: <name>", a ``cve_references`` item) and
+# MISPWriter's placeholder for a CVE item without text ("CVE from <source>"). Neither is a description:
+# taken as one, the first of them to reach a CVE without an NVD record would stay there, since any record
+# but NVD's only fills (``Neo4jClient.merge_cve``), and CISA's KEV text would never replace it. The
+# note stays the comment of the MISP attribute, which the node's ``misp_attribute_ids`` name.
+_CVE_PROVENANCE_NOTE_RE = re.compile(r"^\s*(?:Referenced in OTX pulse:.*|CVE from [^\s|]+\s*)$", re.DOTALL)
+
+
+def _comment_description(raw_comment: Any) -> Optional[str]:
+    """The description an attribute comment gives, or None (2026-10).
+
+    A plain comment is the description. A metadata block (``_METADATA_COMMENT_RE``) gives its own
+    ``description`` field when its JSON has one, else the text MISPWriter writes after the JSON (the
+    entity description that follows a ``MITRE_*`` block), else nothing; its raw text never becomes a
+    description. Before 2026-10 the vulnerability branch stored the whole block: a CVE that an OTX pulse
+    listed as an indicator showed ``OTX_META:{"attack_ids": [...], ...}`` as its description.
+    """
+    if not isinstance(raw_comment, str) or not raw_comment.strip():
+        return None
+    match = _METADATA_COMMENT_RE.match(raw_comment)
+    if not match:
+        return raw_comment
+    rest = raw_comment[match.end() :].lstrip()
+    try:
+        meta, end = json.JSONDecoder().raw_decode(rest)
+    except ValueError:
+        logger.debug("Unreadable %s comment — no description taken from it", match.group("prefix"))
+        return None
+    description = meta.get("description") if isinstance(meta, dict) else None
+    if isinstance(description, str) and description.strip():
+        return description
+    return rest[end:].strip() or None
+
+
+def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
+    """The description a vulnerability attribute's comment gives, or None (2026-10):
+    ``_comment_description``, except a note that says where the CVE was seen (``_CVE_PROVENANCE_NOTE_RE``)."""
+    description = _comment_description(raw_comment)
+    if description is None or _CVE_PROVENANCE_NOTE_RE.match(description):
+        return None
+    return description
 
 
 def _item_source_refs(item: Dict, source: str) -> List[str]:
@@ -1085,6 +1139,46 @@ def _extract_deprecated_tag(tags: List[Dict[str, Any]]) -> bool:
         if isinstance(name, str) and name.strip().lower() == _ATTACK_DEPRECATED_TAG:
             return True
     return False
+
+
+def _dedupe_casefold(values: Any) -> List[str]:
+    """Non-empty strings, de-duplicated case-insensitively, first-seen order (2026-10)."""
+    out: List[str] = []
+    seen: set = set()
+    for value in values:
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
+def _pair_without_software_id(pair: str) -> str:
+    """``"family::adversary"`` or ``"family::adversary::pulse"`` with the family's ATT&CK software id
+    suffix removed (2026-10): ``"Cobalt Strike - S0154::apt29::p1"`` → ``"Cobalt Strike::apt29::p1"``.
+    A pair without the separator is returned unchanged."""
+    family, sep, rest = pair.partition("::")
+    if not sep:
+        return pair
+    return f"{split_attack_software_id(family)[0]}::{rest}"
+
+
+def _pulse_family_lists(otx_meta: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """``OTX_META.mf`` / ``.pa`` as the indicator's ``pulse_malware_families`` /
+    ``pulse_malware_actor_pairs``: stripped, empty entries and pairs without ``::`` dropped.
+
+    2026-10: family names lose an ATT&CK software id suffix (attributes written before carry
+    ``"Cobalt Strike - S0154"``), as the Malware node is named, and the lists are de-duplicated
+    case-insensitively; build_relationships 9b / 2d strip the suffix too, for indicators already on
+    the graph.
+    """
+    families = _dedupe_casefold(
+        split_attack_software_id(str(x))[0] for x in (otx_meta.get("mf") or []) if str(x).strip()
+    )
+    pairs = _dedupe_casefold(
+        _pair_without_software_id(str(x).strip()) for x in (otx_meta.get("pa") or []) if "::" in str(x)
+    )
+    return families, pairs
 
 
 def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
@@ -2377,8 +2471,13 @@ class MISPToNeo4jSync:
                 "spec_version": "2.1",
                 "id": f"vulnerability--{attr_uuid}",
                 "name": value,
-                "description": attr.get("comment", ""),
             }
+            # 2026-10: never a metadata block's raw text (an NVD_META or OTX_META comment) or a note of
+            # where the CVE was seen; a STIX import of this bundle (``run_pipeline``) would store it as the
+            # CVE description.
+            vuln_description = _vulnerability_comment_description(attr.get("comment"))
+            if vuln_description:
+                stix_obj["description"] = vuln_description
             if labels:
                 stix_obj["labels"] = labels
             return _stamp_sdo(stix_obj)
@@ -2703,7 +2802,12 @@ class MISPToNeo4jSync:
         return None
 
     def _extract_malware_from_tags(self, tags: List[Dict]) -> List[str]:
-        """Extract malware family names from MISP tags."""
+        """Extract malware family names from MISP tags.
+
+        2026-10: a galaxy cluster name that carries the ATT&CK software id
+        (``misp-galaxy:mitre-malware="Cobalt Strike - S0154"``) names the family without it, so
+        the row links the node the family is merged under (``split_attack_software_id``).
+        """
         tags = normalize_misp_tag_list(tags)
         malware_list = []
         for tag in tags:
@@ -2715,7 +2819,7 @@ class MISPToNeo4jSync:
                 if '"' in tag_name:
                     parts = tag_name.split('"')
                     if len(parts) >= 2:
-                        malware_list.append(parts[1].strip())
+                        malware_list.append(split_attack_software_id(parts[1])[0])
         return malware_list
 
     def _extract_techniques_from_tags(self, tags: List[Dict]) -> List[Dict]:
@@ -3212,7 +3316,19 @@ class MISPToNeo4jSync:
             # vector string ("N", "L", "A", "P") or "UNKNOWN" from NVD and an invented "NETWORK"
             # from KEV and ICS, and an attribute without NVD_META (OTX) got "NETWORK".
             attack_vector = cvss_attack_vector(nvd_meta)
-            description = nvd_meta.get("description", raw_comment) if nvd_meta else raw_comment
+            # 2026-10: NVD_META's own ``description``; a comment that is another metadata block gives its
+            # own ``description`` field or none, and a note of where the CVE was seen (an OTX pulse
+            # reference, MISPWriter's placeholder) gives none (``_vulnerability_comment_description``).
+            # The raw block used to become the description (an OTX pulse indicator stored its
+            # ``OTX_META`` JSON on the CVE), and an NVD_META without a description, or one that failed to
+            # parse, stored itself.
+            if nvd_meta:
+                _meta_description = nvd_meta.get("description")
+                description = (
+                    _meta_description if isinstance(_meta_description, str) and _meta_description.strip() else None
+                )
+            else:
+                description = _vulnerability_comment_description(raw_comment)
             # CISA's knownRansomwareCampaignUse: in NVD_META of the KEV collector's records since
             # 2026-10; older KEV attributes carry only the ``ransomware:known`` tag.
             known_ransomware_use = nvd_meta.get("known_ransomware_use") or (
@@ -3460,7 +3576,11 @@ class MISPToNeo4jSync:
                 if tag_name.startswith("malware-type:"):
                     malware_types.append(tag_name.replace("malware-type:", ""))
 
-            malware_name = value
+            # 2026-10: a family name that carries its ATT&CK software id ("Cobalt Strike - S0154",
+            # the MISP galaxy naming; OTX attributes written before 2026-10, or another writer) is
+            # merged under the base name, the node ATT&CK delivered, and kept as an alias below.
+            # Merged as given, it became a Malware node of its own beside the ATT&CK one.
+            malware_name, _attack_software_id = split_attack_software_id(value)
 
             raw_comment = attr.get("comment", "") or ""
             uses_techniques: List[str] = []
@@ -3528,6 +3648,8 @@ class MISPToNeo4jSync:
             # attribution — the Q2 Branch-3 path was removed as a forgery
             # vector; only the actor's OWN aliases drive ATTRIBUTED_TO.)
             malware_aliases = _extract_alias_tags(tags)
+            if _attack_software_id and value.lower() not in {a.lower() for a in malware_aliases}:
+                malware_aliases.append(value)
 
             # PR (S5): source-truthful timestamps via allowlist-gated helper.
             _fs_at_source, _ls_at_source = extract_source_truthful_timestamps(attr, source_id, event_info=event_info)
@@ -3539,7 +3661,7 @@ class MISPToNeo4jSync:
                 "malware_types": []
                 if curated_claims is not None
                 else (malware_types if malware_types else ["unknown"]),
-                "family": value,
+                "family": malware_name,
                 "description": description,
                 # 2026-10: a curated attribute is not merged as a node (see sync_to_neo4j)
                 "curated": curated_claims is not None,
@@ -3878,6 +4000,8 @@ class MISPToNeo4jSync:
                 # on every OTX-sourced Indicator → Q9 INDICATES edges
                 # never fired for OTX items (the biggest source).
                 item["malware_family"] = otx_meta.get("malware_family", "")
+                if isinstance(item["malware_family"], str):  # 2026-10: without an ATT&CK software id suffix
+                    item["malware_family"] = split_attack_software_id(item["malware_family"])[0]
                 item["attributed_to"] = otx_meta.get("attributed_to", "")
                 # PR-N13 Fix #5 rehydration: pull ``pulse_id``,
                 # ``indicator_role``, ``is_active`` out of OTX_META now
@@ -3891,11 +4015,11 @@ class MISPToNeo4jSync:
                 rids = [str(x).strip() for x in (otx_meta.get("report_ids") or []) if str(x).strip()]
                 if rids:
                     item["report_ids"] = rids
-                # 2026-10 (regular-update linking): OTX_META.mf / .adv → lists on the indicator.
-                _fams = [str(x).strip() for x in (otx_meta.get("mf") or []) if str(x).strip()]
+                # 2026-10 (regular-update linking): OTX_META.mf / .adv → lists on the indicator
+                # (family names without an ATT&CK software id suffix, see _pulse_family_lists).
+                _fams, _pairs = _pulse_family_lists(otx_meta)
                 if _fams:
                     item["pulse_malware_families"] = _fams
-                _pairs = [str(x).strip() for x in (otx_meta.get("pa") or []) if "::" in str(x)]
                 if _pairs:
                     item["pulse_malware_actor_pairs"] = _pairs
                 # 2026-10: the IOC's pulses whose adversaries are several actors (OTX collector).
