@@ -960,7 +960,9 @@ _NVD_CVSS_VERSIONS = (
 # none (``_set_if_absent_clause``), so NVD's text wins whatever the order in which records are merged.
 # Until 2026-10 the record merged last set them: an OTX pulse indicator of type CVE wrote its raw
 # ``OTX_META`` JSON as the description, an OTX pulse reference "Referenced in OTX pulse: <name>", a KEV
-# record CISA's short description, a CISA ICS record the advisory's dates.
+# record CISA's short description, a CISA ICS record the advisory's dates. On a CVE without NVD's record
+# the first record that fills a property keeps it, also against a later revision of the same source's
+# record (a revised CISA ICS advisory, an edited KEV text): no ranking of the other sources exists yet.
 _CVE_RECORD_TEXT_PROPS = ("description", "published", "last_modified")
 
 
@@ -6386,7 +6388,8 @@ class Neo4jClient:
         through either path gets the same uuid.
 
         ``description`` only fills a node that has none (2026-10), as any record but NVD's does on
-        the MISP path; before, it replaced the stored text and a call without one removed it.
+        the MISP path; before, it replaced the stored text and a call without one removed it. ``status``
+        is set when the call carries one and kept when it does not (2026-10).
         """
         # PR #37 (Bug Hunter Tier S A3): refuse to merge when ``cve_id`` is
         # missing. Previously this defaulted to the sentinel
@@ -6420,7 +6423,7 @@ class Neo4jClient:
                       v.edgeguard_managed = true
         ON MATCH SET v.edgeguard_enriched = CASE WHEN v.edgeguard_managed = true THEN v.edgeguard_enriched ELSE true END
         SET v.name = coalesce(v.name, $name)
-        SET v.status = $status,
+        SET v.status = coalesce($status, v.status),
             v.description = {_set_if_absent_clause("v.description", "$description")},
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
@@ -6452,7 +6455,9 @@ class Neo4jClient:
 
         ``description``, ``published`` and ``last_modified`` only fill a node that has none
         (2026-10): NVD's record, merged by ``merge_cve``, sets them, so a write here never replaces
-        NVD's text, and a call without them no longer removes the stored values.
+        NVD's text, and a call without them no longer removes the stored values. ``cpe_type``,
+        ``result_impacts``, ``ref_tags`` and ``cwe`` are set when the call carries them and kept when
+        it does not (2026-10; a call without them removed NVD's lists).
         """
         cve_id = data.get("cve_id")
         cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
@@ -6463,10 +6468,10 @@ class Neo4jClient:
         SET c.description = {_set_if_absent_clause("c.description", "$description")},
             c.published = {_set_if_absent_clause("c.published", "$published")},
             c.last_modified = {_set_if_absent_clause("c.last_modified", "$last_modified")},
-            c.cpe_type = $cpe_type,
-            c.result_impacts = $result_impacts,
-            c.ref_tags = $ref_tags,
-            c.cwe = $cwe,
+            c.cpe_type = coalesce($cpe_type, c.cpe_type),
+            c.result_impacts = coalesce($result_impacts, c.result_impacts),
+            c.ref_tags = coalesce($ref_tags, c.ref_tags),
+            c.cwe = coalesce($cwe, c.cwe),
             c.tags = {_dedup_concat_clause("c.tags", "[$tag]")},
             c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,

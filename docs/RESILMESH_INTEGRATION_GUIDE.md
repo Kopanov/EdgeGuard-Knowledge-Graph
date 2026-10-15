@@ -126,7 +126,7 @@ client.merge_resilmesh_cve({
 })
 ```
 
-`description`, `published` and `last_modified` only fill a CVE node that has none (2026-10): NVD's record, written by the MISP → Neo4j sync, sets them, so this call never replaces NVD's text and a call without them leaves the stored values in place.
+`description`, `published` and `last_modified` only fill a CVE node that has none (2026-10): NVD's record, written by the MISP → Neo4j sync, sets them, so this call never replaces NVD's text and a call without them leaves the stored values in place. `cpe_type`, `result_impacts`, `ref_tags` and `cwe` are set when the call carries them and kept when it does not (2026-10; a call without them removed NVD's lists).
 
 ---
 
@@ -722,6 +722,6 @@ The integration enables **context-aware threat detection** that combines:
 
 ---
 
-_Last updated: 2026-10-15 — `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
+_Last updated: 2026-10-15 — `merge_resilmesh_cve` keeps `cpe_type`, `result_impacts`, `ref_tags` and `cwe` when a call omits them. Same day: `merge_resilmesh_cve` only fills `description`, `published` and `last_modified`; NVD's record sets them. Prior: 2026-10-11 — documentation review following the interoperability readiness check: the alert-flow steps 8–9, the code example's publish step and the summary now state what is implemented versus planned._
 
 _Prior: 2026-04-28 — PR-N34 fixup of PR-N33 slip: corrected edge name `HAS_CVSSv*` → `HAS_CVSS_v*` (actual edges in `neo4j_client.py:_merge_cvss_node` use underscore + lowercase v + version: `HAS_CVSS_v2 / HAS_CVSS_v30 / HAS_CVSS_v31 / HAS_CVSS_v40`). Per-version mentions in code blocks + verification Cypher all corrected. Prior: 2026-04-26 PR-N33 docs audit (removed calls to deleted `create_cve_has_cvss()` helper, now internal to `merge_cve()` via `_merge_cvss_node`; fixed `RESOLVES_TO` → `INDICATOR_RESOLVES_TO` to avoid ISIM collision). 2026-04-18 PR #41 cleanup pass._

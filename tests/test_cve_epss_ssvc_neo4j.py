@@ -6,7 +6,8 @@ carries CISA's SSVC decision, one where CISA withdrew it, and a KEV record (whic
 after the record went through MISP and the sync (``tests/test_cve_ssvc_from_nvd.py``). The records of
 one CVE from NVD, OTX, the KEV and CISA ICS (real hosted MISP attributes) are merged in several orders:
 NVD's record sets ``description``, ``published`` and ``last_modified``, any other record fills them only
-where the node has none (``tests/test_cve_description_source.py``). Same guards as
+where the node has none, and an OTX pulse reference fills nothing (``tests/test_cve_description_source.py``);
+a ResilMesh-native write keeps the values it does not carry. Same guards as
 ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``, writes only
 nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -197,6 +198,19 @@ def test_cisa_ics_dates_fill_and_nvd_record_replaces_them(client, raw_driver):
     assert _text(raw_driver, "CVE", "CVE-2025-14272") == _expected(nvd)
 
 
+@pytest.mark.parametrize("first", ["pulse_reference", "kev"])
+def test_an_otx_pulse_reference_is_no_description_and_the_kev_text_fills(client, raw_driver, first):
+    # The OTX collector's cve_references item as MISPWriter writes it ("Referenced in OTX pulse: <name>").
+    # Merged first on a CVE without an NVD record, it used to stay, and CISA's KEV text never replaced it.
+    from test_cve_description_source import otx_pulse_reference, synced
+
+    _create(raw_driver, "CVE", "CVE-2015-5477")
+    reference, kev = synced(otx_pulse_reference()), _real_record("CVE-2015-5477__source:CISA-KEV")
+    for item in (reference, kev) if first == "pulse_reference" else (kev, reference):
+        assert client.merge_cve(item, item["tag"])
+    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": kev["description"]}
+
+
 def test_without_nvd_record_an_empty_description_is_filled_and_otx_adds_nothing(client, raw_driver):
     _create(raw_driver, "CVE", "CVE-2015-5477", description="")
     otx, kev = _real_record("CVE-2015-5477__source:AlienVault-OTX"), _real_record("CVE-2015-5477__source:CISA-KEV")
@@ -220,3 +234,16 @@ def test_batch_and_resilmesh_paths_keep_nvd_text(client, raw_driver):
     assert client.merge_resilmesh_cve({"cve_id": "CVE-2025-21042", "description": "partner text"})
     assert client.merge_resilmesh_cve({"cve_id": "CVE-2025-21042"})  # used to remove all three
     assert _text(raw_driver, "CVE", "CVE-2025-21042") == _expected(nvd)
+    # ... and NVD's lists, which a call without them also set to null.
+    lists = ("cwe", "ref_tags", "cpe_type", "result_impacts")
+    assert all(nvd[prop] for prop in lists), "the NVD record carries every list"
+    with raw_driver.session() as session:
+        stored = session.run("MATCH (c:CVE {cve_id: 'CVE-2025-21042'}) RETURN properties(c) AS p").single()["p"]
+    assert {prop: stored.get(prop) for prop in lists} == {prop: nvd[prop] for prop in lists}
+
+    # A ResilMesh-native Vulnerability write without a status keeps the stored one.
+    assert client.merge_resilmesh_vulnerability({"cve_id": "CVE-2025-21042", "status": "open"})
+    assert client.merge_resilmesh_vulnerability({"cve_id": "CVE-2025-21042"})
+    with raw_driver.session() as session:
+        status = session.run("MATCH (v:Vulnerability {cve_id: 'CVE-2025-21042'}) RETURN v.status AS s").single()["s"]
+    assert status == "open"

@@ -9,12 +9,18 @@ ICS record the advisory's dates. Which one a CVE showed depended on the order of
 
 The rule now: NVD's record (``nvd_record``, set by the sync for an NVD attribute with ``NVD_META``) sets
 the three properties; any other record fills them only where the node has none; a comment that is a
-metadata block never becomes a description (``run_misp_to_neo4j._comment_description``).
+metadata block never becomes a description (``run_misp_to_neo4j._comment_description``), and neither
+does a vulnerability comment that only says where the CVE was seen: the OTX pulse reference and
+MISPWriter's "CVE from <source>" placeholder (``_vulnerability_comment_description``). Taken as one, the
+pulse reference was the first text to reach a CVE without an NVD record, and CISA's KEV text could
+then never replace it.
 
 Fixtures are real: the ``misp`` attributes of ``test_cvss_real_payloads.json`` (hosted MISP, read on
 2026-10-14) — CVE-2025-21042 from OTX, NVD and the KEV, CVE-2015-5477 from OTX and the KEV (outside the
-NVD window), CVE-2025-14272 and CVE-2025-7223 from NVD and CISA ICS. Metadata blocks without a real
-attribute are built with MISPWriter's own builders. The same rule on a real Neo4j:
+NVD window), CVE-2025-14272 and CVE-2025-7223 from NVD and CISA ICS. The OTX pulse reference and the
+``MITRE_*`` blocks are written by the OTX collector and MISPWriter's own builders; the remaining blocks
+without a real attribute (``MITRE_TACTIC_PHASES`` without a description, ``CURATED_CLAIMS``, an unknown
+``*_META``) are literals of the same shape. The same rule on a real Neo4j:
 ``tests/test_cve_epss_ssvc_neo4j.py``.
 """
 
@@ -25,7 +31,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -33,16 +39,52 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from test_cve_attack_vector import _otx_cve_item  # noqa: E402  (the OTX collector's cve_references item)
+
 import neo4j_client  # noqa: E402
 from collectors import misp_writer  # noqa: E402
-from run_misp_to_neo4j import _METADATA_COMMENT_RE, MISPToNeo4jSync, _comment_description  # noqa: E402
+from run_misp_to_neo4j import (  # noqa: E402
+    _METADATA_COMMENT_RE,
+    MISPToNeo4jSync,
+    _comment_description,
+    _vulnerability_comment_description,
+)
 
 MISP = json.loads((Path(__file__).resolve().parent / "test_cvss_real_payloads.json").read_text())["misp"]
 RECORD_TEXT = ("description", "published", "last_modified")
+WRITER = misp_writer.MISPWriter.__new__(misp_writer.MISPWriter)
+
+# An OTX malware family and an ATT&CK technique as MISPWriter writes them: the ``MITRE_*`` block, then the
+# entity's description on the next line when it has one.
+OTX_MALWARE = {
+    "name": "Mirai",
+    "malware_types": ["unknown"],
+    "family": "Mirai",
+    "zone": ["global"],
+    "tag": "alienvault_otx",
+    "reported_techniques": ["T1059"],
+    "pulse_id": "6ac84a155bb626a3710179b9",
+}
+MITRE_TECHNIQUE = {
+    "mitre_id": "T1059",
+    "name": "Command and Scripting Interpreter",
+    "tactic_phases": ["execution"],
+    "zone": ["global"],
+    "tag": "mitre_attck",
+}
 
 
 def attribute(key: str) -> dict:
     return copy.deepcopy(MISP[key])
+
+
+def otx_pulse_reference(description: str | None = None) -> dict:
+    """The MISP attribute MISPWriter writes for the OTX collector's ``cve_references`` item (CVE-2015-5477
+    in pulse "BIND TKEY exploitation"); *description* replaces the item's text when given."""
+    item = _otx_cve_item()
+    if description is not None:
+        item["description"] = description
+    return WRITER.create_vulnerability_attribute(item)
 
 
 def synced(attr: dict) -> dict:
@@ -113,10 +155,14 @@ def _apply(node: dict, query: str, params: dict) -> None:
 
 def _merged(*keys: str) -> dict:
     """The CVE node's three properties after ``merge_cve`` of the synced attributes, in order."""
+    return _merged_items(*(synced_key(key) for key in keys))
+
+
+def _merged_items(*items: dict) -> dict:
+    """The CVE node's three properties after ``merge_cve`` of the synced items, in order."""
     client, session = _recording_client()
     node: dict = {}
-    for key in keys:
-        item = synced_key(key)
+    for item in items:
         assert client.merge_cve(item, source_id=item["tag"])
         _apply(node, *_node_statement(session, "CVE"))
     return node
@@ -129,10 +175,10 @@ def _record_text(item: dict) -> dict:
 # ---------------------------------------------------------------- the sync never stores a block
 class TestCommentDescription:
     def test_a_plain_comment_is_the_description(self):
-        # MISPWriter's comment for an OTX pulse reference (no NVD_META: no dates, CVSS or KEV fields).
-        assert _comment_description("Referenced in OTX pulse: Emotet Banking Trojan IOCs") == (
-            "Referenced in OTX pulse: Emotet Banking Trojan IOCs"
-        )
+        # MISPWriter's comment for a vulnerability item without NVD_META that names a vendor and product.
+        plain = "Vendor: ISC | Product: BIND | named in ISC BIND allows remote attackers to cause a denial of service."
+        assert _comment_description(plain) == plain
+        assert _vulnerability_comment_description(plain) == plain
         assert _comment_description("") is None and _comment_description(None) is None
 
     @pytest.mark.parametrize(
@@ -140,12 +186,8 @@ class TestCommentDescription:
         [
             attribute("CVE-2015-5477__source:AlienVault-OTX")["comment"],  # real, "description": ""
             misp_writer._fit_meta_comment("TF_META:", {"malware_family": "Mirai", "threat_type": "botnet_cc"}),
-            "MITRE_USES_TECHNIQUES:"
-            + json.dumps(
-                misp_writer._technique_meta({"uses_techniques": ["T1059"], "pulse_id": "6ac84a155bb626a3710179b9"})
-            )
-            + "\nA description after the block's JSON line",
-            'MITRE_TACTIC_PHASES:{"p": ["execution"]}',
+            WRITER.create_malware_attribute(dict(OTX_MALWARE, description=""))["comment"],
+            WRITER.create_technique_attribute(dict(MITRE_TECHNIQUE, description=""))["comment"],
             'CURATED_CLAIMS:{"c": [{"p": "exploits", "o": "CVE-2015-5477"}]}',
             'FUTURE_FEED_META:{"pulse_name": "x"}',
             attribute("CVE-2015-5477__source:CISA-KEV")["comment"][:120],  # NVD_META cut mid-JSON
@@ -169,6 +211,66 @@ class TestCommentDescription:
     def test_a_block_gives_its_own_description_field(self):
         otx = _with_comment_meta(attribute("CVE-2015-5477__source:AlienVault-OTX"), description="Exploited by FishHub")
         assert _comment_description(otx["comment"]) == "Exploited by FishHub"
+
+    @pytest.mark.parametrize(
+        ("comment", "description"),
+        [
+            (
+                WRITER.create_malware_attribute(dict(OTX_MALWARE, description="Mirai botnet C2 servers"))["comment"],
+                "Mirai botnet C2 servers",
+            ),
+            (
+                WRITER.create_technique_attribute(
+                    dict(MITRE_TECHNIQUE, description="Adversaries may abuse command and script interpreters")
+                )["comment"],
+                "Adversaries may abuse command and script interpreters",
+            ),
+        ],
+        ids=["mitre_uses", "mitre_phases"],
+    )
+    def test_a_mitre_block_gives_the_description_written_after_it(self, comment, description):
+        # MISPWriter writes the entity's description on the line after the block's JSON; the block
+        # itself is never part of it.
+        assert _METADATA_COMMENT_RE.match(comment) and comment.endswith("\n" + description)
+        assert _comment_description(comment) == description
+
+
+class TestProvenanceNotes:
+    """A vulnerability comment that only says where the CVE was seen is no description."""
+
+    def test_the_otx_pulse_reference_and_the_placeholder_as_written(self):
+        assert otx_pulse_reference()["comment"] == "Referenced in OTX pulse: BIND TKEY exploitation"
+        assert otx_pulse_reference(description="")["comment"] == "CVE from alienvault_otx"
+
+    @pytest.mark.parametrize("description", [None, ""], ids=["pulse_reference", "placeholder"])
+    def test_neither_becomes_a_description(self, description):
+        attr = otx_pulse_reference(description)
+        assert _comment_description(attr["comment"]) == attr["comment"], "the generic helper keeps plain text"
+        assert _vulnerability_comment_description(attr["comment"]) is None
+        item = synced(attr)
+        assert item["cve_id"] == "CVE-2015-5477" and item["tag"] == "alienvault_otx"
+        assert item["description"] is None and not item["nvd_record"]
+
+    def test_a_cut_pulse_name_is_still_the_note(self):
+        attr = otx_pulse_reference("Referenced in OTX pulse: " + "x" * 300)
+        assert attr["comment"].endswith("...")  # MISPWriter cuts the item's text at 200 characters
+        assert synced(attr)["description"] is None
+
+    @pytest.mark.parametrize("first", ["pulse_reference", "kev"])
+    def test_cisa_kev_text_fills_a_cve_an_otx_pulse_named_first(self, first):
+        # CVE-2015-5477 on the hosted MISP: only OTX and KEV attributes, no NVD record. Before, the pulse
+        # reference merged first stayed, and the KEV text could never replace it.
+        reference, kev = synced(otx_pulse_reference()), synced_key("CVE-2015-5477__source:CISA-KEV")
+        order = (reference, kev) if first == "pulse_reference" else (kev, reference)
+        assert _merged_items(*order) == {"description": kev["description"]}
+
+    def test_the_stix_vulnerability_carries_neither(self):
+        syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
+        for description in (None, ""):
+            attr = otx_pulse_reference(description)
+            attr["uuid"] = "6f1f2d0e-0000-4000-8000-000000000001"
+            obj = syncer._attribute_to_stix21(attr, "00000000-0000-4000-8000-000000000000", ["global"])
+            assert obj["type"] == "vulnerability" and "description" not in obj
 
 
 class TestSyncedDescription:
@@ -360,3 +462,52 @@ class TestOtherWritePaths:
             ) in query
             # A call without the property used to remove NVD's value (SET to null).
             assert f"{var}.{prop} = ${prop}" not in query
+
+    @pytest.mark.parametrize(
+        ("method", "props"),
+        [
+            ("merge_resilmesh_cve", ("cpe_type", "result_impacts", "ref_tags", "cwe")),
+            ("merge_resilmesh_vulnerability", ("status",)),
+        ],
+    )
+    def test_resilmesh_native_writes_keep_what_the_call_omits(self, method, props):
+        # A call without NVD's lists (or a Vulnerability's status) used to SET them to null.
+        client, session = _recording_client()
+        assert getattr(client, method)({"cve_id": "CVE-2025-21042"})
+        query, params = session.run.call_args_list[-1].args[0], session.run.call_args_list[-1].kwargs
+        var = "c" if method == "merge_resilmesh_cve" else "v"
+        for prop in props:
+            assert f"{var}.{prop} = coalesce(${prop}, {var}.{prop})" in query
+            assert f"{var}.{prop} = ${prop}" not in query
+            assert params[prop] is None
+
+
+# ---------------------------------------------------------------- the opt-in STIX flow
+class TestStixImport:
+    """``run_pipeline.load_stix21_to_neo4j`` (MISP → STIX → Neo4j, ``--stix-flow``): the vulnerability SDO
+    carries no NVD record, so every CVE it names, NVD's included, only fills the description."""
+
+    def test_an_nvd_sdo_only_fills_the_description(self):
+        from run_pipeline import EdgeGuardPipeline
+
+        client, session = _recording_client()
+        pipeline = EdgeGuardPipeline()
+        pipeline.neo4j = client
+        attr = {k: v for k, v in attribute("CVE-2025-21042__source:NVD").items() if k != "_event"}
+        sdo = MISPToNeo4jSync(neo4j_client=MagicMock())._attribute_to_stix21(
+            attr, "00000000-0000-4000-8000-000000000000", ["global"]
+        )
+        sdo["x_edgeguard_source"] = "nvd"  # as the STIX flow stamps the objects of an NVD event
+        with patch.object(client, "merge_cve", wraps=client.merge_cve) as merge_cve:
+            pipeline.load_stix21_to_neo4j({"type": "bundle", "objects": [sdo]})
+        ((data,), kwargs) = merge_cve.call_args
+        assert kwargs["source_id"] == "nvd"
+        assert data["description"] == synced_key("CVE-2025-21042__source:NVD")["description"]
+        assert not data.get("nvd_record")
+        query, params = _node_statement(session, "CVE")
+        assert (
+            "n.description = CASE WHEN n.description IS NULL OR n.description = '' "
+            "THEN $fill_description ELSE n.description END"
+        ) in query
+        assert "n.description = $description" not in query
+        assert params["fill_description"] == data["description"]

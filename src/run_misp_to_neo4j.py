@@ -475,35 +475,56 @@ _URLHAUS_ENTRY_RE = re.compile(r"urlhaus\.abuse\.ch/url/(\d+)", re.IGNORECASE)
 
 # 2026-10: an attribute comment that is a metadata block — ``NVD_META:``, ``OTX_META:``, ``TF_META:`` or
 # any other ``*_META:`` block, ``MITRE_USES_TECHNIQUES:`` and ``MITRE_TACTIC_PHASES:`` (MISPWriter),
-# ``CURATED_CLAIMS:`` (the curated-package importer) — is data for the sync, never text for a node.
+# ``CURATED_CLAIMS:`` (the curated-package importer). The block is data for the sync, never text for a
+# node; MISPWriter writes an entity's description on the line after a ``MITRE_*`` block's JSON.
 _METADATA_COMMENT_RE = re.compile(
     r"^\s*(?P<prefix>[A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|"
     + re.escape(CURATED_CLAIMS_PREFIX.rstrip(":"))
     + r"):"
 )
 
+# 2026-10: plain vulnerability comments that say where a CVE was seen, not what it is: the OTX
+# collector's pulse reference ("Referenced in OTX pulse: <name>", a ``cve_references`` item) and
+# MISPWriter's placeholder for a CVE item without text ("CVE from <source>"). Neither is a description:
+# taken as one, the first of them to reach a CVE without an NVD record would stay there, since any record
+# but NVD's only fills (``Neo4jClient.merge_cve``), and CISA's KEV text would never replace it. The
+# note stays the comment of the MISP attribute, which the node's ``misp_attribute_ids`` name.
+_CVE_PROVENANCE_NOTE_RE = re.compile(r"^\s*(?:Referenced in OTX pulse:.*|CVE from [^\s|]+\s*)$", re.DOTALL)
+
 
 def _comment_description(raw_comment: Any) -> Optional[str]:
     """The description an attribute comment gives, or None (2026-10).
 
-    A plain comment is the description. A metadata block (``_METADATA_COMMENT_RE``) gives only its own
-    ``description`` field, when its JSON has one; its raw text never becomes a description. Before
-    2026-10 the vulnerability branch stored the whole block: a CVE that an OTX pulse listed as an
-    indicator showed ``OTX_META:{"attack_ids": [...], ...}`` as its description.
+    A plain comment is the description. A metadata block (``_METADATA_COMMENT_RE``) gives its own
+    ``description`` field when its JSON has one, else the text MISPWriter writes after the JSON (the
+    entity description that follows a ``MITRE_*`` block), else nothing; its raw text never becomes a
+    description. Before 2026-10 the vulnerability branch stored the whole block: a CVE that an OTX pulse
+    listed as an indicator showed ``OTX_META:{"attack_ids": [...], ...}`` as its description.
     """
     if not isinstance(raw_comment, str) or not raw_comment.strip():
         return None
     match = _METADATA_COMMENT_RE.match(raw_comment)
     if not match:
         return raw_comment
+    rest = raw_comment[match.end() :].lstrip()
     try:
-        # ``raw_decode``: a ``MITRE_*`` block carries text after its JSON line.
-        meta, _end = json.JSONDecoder().raw_decode(raw_comment[match.end() :].lstrip())
+        meta, end = json.JSONDecoder().raw_decode(rest)
     except ValueError:
         logger.debug("Unreadable %s comment — no description taken from it", match.group("prefix"))
         return None
     description = meta.get("description") if isinstance(meta, dict) else None
-    return description if isinstance(description, str) and description.strip() else None
+    if isinstance(description, str) and description.strip():
+        return description
+    return rest[end:].strip() or None
+
+
+def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
+    """The description a vulnerability attribute's comment gives, or None (2026-10):
+    ``_comment_description``, except a note that says where the CVE was seen (``_CVE_PROVENANCE_NOTE_RE``)."""
+    description = _comment_description(raw_comment)
+    if description is None or _CVE_PROVENANCE_NOTE_RE.match(description):
+        return None
+    return description
 
 
 def _item_source_refs(item: Dict, source: str) -> List[str]:
@@ -2377,9 +2398,10 @@ class MISPToNeo4jSync:
                 "id": f"vulnerability--{attr_uuid}",
                 "name": value,
             }
-            # 2026-10: never a metadata block's raw text (an NVD_META or OTX_META comment); a STIX import
-            # of this bundle (``run_pipeline``) would store it as the CVE description.
-            vuln_description = _comment_description(attr.get("comment"))
+            # 2026-10: never a metadata block's raw text (an NVD_META or OTX_META comment) or a note of
+            # where the CVE was seen; a STIX import of this bundle (``run_pipeline``) would store it as the
+            # CVE description.
+            vuln_description = _vulnerability_comment_description(attr.get("comment"))
             if vuln_description:
                 stix_obj["description"] = vuln_description
             if labels:
@@ -3192,16 +3214,18 @@ class MISPToNeo4jSync:
             # from KEV and ICS, and an attribute without NVD_META (OTX) got "NETWORK".
             attack_vector = cvss_attack_vector(nvd_meta)
             # 2026-10: NVD_META's own ``description``; a comment that is another metadata block gives its
-            # own ``description`` field or none (``_comment_description``). The raw block used to become
-            # the description (an OTX pulse indicator stored its ``OTX_META`` JSON on the CVE), and an
-            # NVD_META without a description, or one that failed to parse, stored itself.
+            # own ``description`` field or none, and a note of where the CVE was seen (an OTX pulse
+            # reference, MISPWriter's placeholder) gives none (``_vulnerability_comment_description``).
+            # The raw block used to become the description (an OTX pulse indicator stored its
+            # ``OTX_META`` JSON on the CVE), and an NVD_META without a description, or one that failed to
+            # parse, stored itself.
             if nvd_meta:
                 _meta_description = nvd_meta.get("description")
                 description = (
                     _meta_description if isinstance(_meta_description, str) and _meta_description.strip() else None
                 )
             else:
-                description = _comment_description(raw_comment)
+                description = _vulnerability_comment_description(raw_comment)
             # CISA's knownRansomwareCampaignUse: in NVD_META of the KEV collector's records since
             # 2026-10; older KEV attributes carry only the ``ransomware:known`` tag.
             known_ransomware_use = nvd_meta.get("known_ransomware_use") or (
