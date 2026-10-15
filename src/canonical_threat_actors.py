@@ -16,6 +16,10 @@ larger than ``MAX_REFERENCE_BYTES``, of another ``schema_version`` or inconsiste
 
 The reference is the reviewed authority on the names it lists: an ATT&CK-alias pair whose duplicate
 it marks ambiguous or never_merge, or gives to another actor (or to itself), is not merged.
+
+It also tells how many actors a source report names (``actor_identities``, 2026-10): malware is
+attributed to an actor from an OTX pulse only when the actors the pulse names are one actor
+(``run_misp_to_neo4j``, ``build_relationships`` step 2d, ``scripts/verify_fresh_baseline.py``).
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from node_identity import canonicalize_merge_key, is_placeholder_name
+from relationship_provenance import as_list
 
 REFERENCE_PATH_ENV = "EDGEGUARD_CANONICAL_THREAT_ACTORS"
 DEFAULT_REFERENCE_PATH = Path(__file__).resolve().parent / "reference" / "canonical_threat_actors.json"
@@ -67,6 +72,99 @@ class CanonicalReference:
         if not key or key in self.blocked:
             return None
         return self.owners.get(key)
+
+
+def actor_identities(names: Iterable[Any], reference: Optional[CanonicalReference]) -> FrozenSet[str]:
+    """The distinct actors ``names`` stand for (2026-10, attribution from a source report).
+
+    A name counts as its canonical actor in the reference, so the aliases of one actor are one actor
+    (``Storm-2697`` and ``The Gentlemen``). A name the reference does not resolve (unknown,
+    ambiguous or never_merge) counts as itself, by the ``ThreatActor`` key EdgeGuard writes for it;
+    without a reference every distinct key is an actor of its own. Names without a key (empty, not
+    a string) are left out.
+    """
+    actors: Set[str] = set()
+    for name in names:
+        key = name_key(name)
+        if not key:
+            continue
+        canonical = reference.canonical_for(name) if reference is not None else None
+        actors.add(canonical or key)
+    return frozenset(actors)
+
+
+# 2026-10: the OTX pulses whose actors are several actors, as the graph records them: a pulse's actors
+# are the ThreatActor nodes whose ``pulse_ids`` hold it (``build_relationships`` step 2d, the acceptance
+# check). This finds the pulses a baseline wrote; on regular updates MISP drops an actor it already
+# holds, so the OTX collector decides it per pulse instead (``several_actor_pulses``). One row always:
+# ``reports`` (the pulses naming two or more nodes, with the names) and ``pulses`` (how many pulses any
+# actor records), so an empty answer is a failed read, not "no such pulse".
+# The lists are read through ``as_list``: the actor alias merge's APOC ``combine`` stores two equal
+# one-element lists as a plain string until its normalising statement runs.
+REPORT_ACTORS_QUERY = (
+    "MATCH (a:ThreatActor) WHERE size(" + as_list("a.pulse_ids") + ") > 0 "
+    "UNWIND " + as_list("a.pulse_ids") + " AS pid WITH pid, collect(DISTINCT a.name) AS names "
+    "WITH collect(CASE WHEN size(names) > 1 THEN {pid: pid, names: names} END) AS reports, count(pid) AS pulses "
+    "RETURN reports, pulses"
+)
+# The ``r.source_refs`` entry of an OTX pulse (``source_registry.format_source_ref``).
+OTX_REPORT_REF_PREFIX = "alienvault_otx:"
+# What ``r.sources`` holds on a same-pulse attribution: the feed, or on graphs built before 2026-10-14
+# the evidence name the link carried there.
+REPORT_ATTRIBUTION_FEEDS = ("alienvault_otx", "otx_pulse")
+
+
+def reports_naming_several_actors(
+    rows: Iterable[Mapping[str, Any]], reference: Optional[CanonicalReference]
+) -> List[str]:
+    """The pulse ids of ``{pid, names}`` entries (``REPORT_ACTORS_QUERY``'s ``reports``) whose names are
+    several actors (sorted)."""
+    return sorted(
+        {
+            str(row["pid"])
+            for row in rows
+            if row.get("pid") and len(actor_identities(row.get("names") or [], reference)) > 1
+        }
+    )
+
+
+def canonical_actor_names(reference: Optional[CanonicalReference]) -> Dict[str, str]:
+    """Name key -> canonical key for every name the reference gives to another actor (its synonyms),
+    so a name the actor alias merge folded into its canonical node still finds that node. Empty without
+    a reference."""
+    if reference is None:
+        return {}
+    return {name: key for name, key in reference.owners.items() if name != key and name not in reference.blocked}
+
+
+def attribution_reports_cypher(rel: str) -> str:
+    """Cypher list of the OTX pulse ids a same-pulse attribution ``rel`` rests on: its OTX entries of
+    ``source_refs`` (reads ``$otx_ref_prefix``), and its ``report_ids`` on graphs built before
+    2026-10-14. A list stored as a plain string is read as one entry (``as_list``). No single quotes,
+    so it fits a statement ``apoc.periodic.iterate`` wraps in them."""
+    return (
+        f"[x IN {as_list(rel + '.source_refs')} WHERE x STARTS WITH $otx_ref_prefix "
+        f"| substring(x, size($otx_ref_prefix))] + {as_list(rel + '.report_ids')}"
+    )
+
+
+# 2026-10: the acceptance check ``attribution_from_single_actor_reports`` (scripts/verify_fresh_baseline.py;
+# run on a real Neo4j by tests/test_attribution_single_actor_reports_neo4j.py). Of the same-pulse
+# attributions: how many rest only on pulses naming several actors (``$several``) with no other feed
+# (``$feeds`` are the OTX feed names), how many name such a pulse in their provenance, and how many
+# name no pulse. Reads ``$otx_ref_prefix`` (``attribution_reports_cypher``).
+ATTRIBUTION_CHECK_QUERY = (
+    "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
+    "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true "
+    "WITH r, " + attribution_reports_cypher("r") + " AS reports "
+    "RETURN count(r) AS links, "
+    "sum(CASE WHEN size(reports) > 0 AND all(p IN reports WHERE p IN $several) "
+    "AND all(s IN "
+    + as_list("r.sources")
+    + " WHERE s IN $feeds) THEN 1 ELSE 0 END) AS resting_on_several_actor_reports, "
+    "sum(CASE WHEN any(p IN reports WHERE p IN $several) THEN 1 ELSE 0 END) AS naming_several_actor_reports, "
+    "sum(CASE WHEN size(reports) = 0 THEN 1 ELSE 0 END) AS without_reports"
+)
 
 
 def _require(condition: bool, reason: str) -> None:

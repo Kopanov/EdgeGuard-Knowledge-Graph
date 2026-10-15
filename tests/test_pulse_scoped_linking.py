@@ -100,11 +100,11 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
             "placeholders and case-duplicates dropped, order kept"
         )
         assert ioc["pulse_malware_actor_pairs"] == [
-            "Emotet::apt28",
-            "Emotet::fancy bear",
-            "TrickBot::apt28",
-            "TrickBot::fancy bear",
-        ], "same-pulse family × adversary pairs; the adversary goes through actor hygiene"
+            "Emotet::apt28::p1",
+            "Emotet::fancy bear::p1",
+            "TrickBot::apt28::p1",
+            "TrickBot::fancy bear::p1",
+        ], "same-pulse family × adversary × pulse; the adversary goes through actor hygiene (one actor)"
         malware = next(i for i in items if i.get("type") == "malware" and i["name"] == "Emotet")
         assert "pulse_malware_families" not in malware, "lists live on indicators only"
 
@@ -119,11 +119,13 @@ class TestCollectorStampsPulseFamiliesAndAdversariesOnIndicators:
         assert len(shared) == 1, "one item per IOC per run"
         assert shared[0]["pulse_malware_families"] == ["Emotet", "Mirai"]
         assert shared[0]["pulse_malware_actor_pairs"] == [
-            "Emotet::apt28",
-            "Mirai::lazarus group",
-            "Emotet::lazarus group",
+            "Emotet::apt28::p1",
+            "Mirai::lazarus group::p2",
+            "Emotet::lazarus group::p2",
         ], "pairs stay per pulse: p1 named (Emotet, apt28); p2 named (Mirai, Emotet) with lazarus"
-        assert "Mirai::apt28" not in shared[0]["pulse_malware_actor_pairs"], "no cross-pulse pairing (Bugbot on #145)"
+        assert not any(p.startswith("Mirai::apt28") for p in shared[0]["pulse_malware_actor_pairs"]), (
+            "no cross-pulse pairing (Bugbot on #145)"
+        )
         assert shared[0]["report_ids"] == ["p2"]
         other = next(i for i in items if i.get("value") == "198.51.100.9")
         assert other["pulse_malware_families"] == ["Mirai", "Emotet"], (
@@ -273,11 +275,13 @@ class TestPulseScopedSteps:
         outer = _assigned_string("_q2d_outer")
         assert "UNWIND i.pulse_malware_actor_pairs AS pair RETURN DISTINCT pair" in outer, "one same-pulse pair per row"
         body = _assigned_string("_q2d_inner")
-        assert body.startswith('WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) = 2')
+        assert body.startswith('WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) IN [2, 3]')
         assert "UNWIND fams" not in body and "UNWIND advs" not in body, (
             "no family × adversary cross product (Bugbot on #145)"
         )
-        assert "MATCH (m:Malware {name: fname}) MATCH (a:ThreatActor {name: aname})" in body
+        assert "MATCH (m:Malware {name: fname}) " in body
+        assert "OPTIONAL MATCH (_named:ThreatActor {name: aname}) " in body
+        assert "WITH m, pid, coalesce(_named, _canonical) AS a WHERE a IS NOT NULL " in body
         assert "MERGE (m)-[r:ATTRIBUTED_TO]->(a)" in body
         assert 'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse"' in body
         assert "'" not in body and "aliases" not in body

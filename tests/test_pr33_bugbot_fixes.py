@@ -2125,6 +2125,8 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         #   (2) create_cypher (Step 1)            — .single() = {campaigns: N}
         #   (3) backfill_cypher                   — .single() = {backfilled: N}
         #   (4) link_malware (Step 2)             — .single() = {links: N}
+        #   (4b) prune_malware (Step 2b, 2026-10) — .single() = {pruned: N}
+        #   (4c) settle_runs (Step 2c, 2026-10)   — .single() = {removed: N}
         #   (5) link_indicators_batched (Step 3a) — .single() = {committedOperations, errorMessages, ...}
         #   (6) links_count_query (Step 3a')      — .single() = {links: N}  ← NEW in PR-N21 Bugbot round 1
         #   (7) prune_query (Step 3b)             — .single() = {pruned: N}
@@ -2139,6 +2141,10 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         backfill_result.single.return_value = {"backfilled": 7}
         link_m_result = MagicMock()
         link_m_result.single.return_value = {"links": 0}
+        malware_prune_result = MagicMock()
+        malware_prune_result.single.return_value = {"pruned": 0}
+        runs_result = MagicMock()
+        runs_result.single.return_value = {"removed": 0}
         # PR-N21: link_indicators_batched returns apoc.periodic.iterate
         # output shape. ``errorMessages`` MUST be empty (or falsy) or
         # the impl raises.
@@ -2160,11 +2166,16 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         cleanup_result.single.return_value = {"count": 0}
         reactivated_result = MagicMock()
         reactivated_result.single.return_value = {"count": 0}
+        now_result = MagicMock()
+        now_result.single.return_value = {"now": "2026-10-15T12:00:00Z"}
         sess.run.side_effect = [
+            now_result,  # 0 — the database's clock (2026-10)
             actors_result,  # 1
             create_result,  # 2
             backfill_result,  # 3
             link_m_result,  # 4
+            malware_prune_result,  # 4b — 2026-10 malware membership prune
+            runs_result,  # 4c — 2026-10 RUNS follows attribution
             link_i_result,  # 5 — PR-N21 batched shape
             links_count_result,  # 6 — PR-N21 Bugbot round 1 follow-up
             prune_result,  # 7

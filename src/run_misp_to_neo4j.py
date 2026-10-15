@@ -37,6 +37,12 @@ import urllib3
 from actor_name_hygiene import clean_actor_names
 from attack_revoked import load_revoked_ids
 from attack_software_names import split_attack_software_id
+from canonical_threat_actors import (
+    CanonicalReference,
+    ReferenceUnavailable,
+    actor_identities,
+    load_canonical_reference,
+)
 
 # Import resilience utilities
 from collectors.collector_utils import TransientServerError
@@ -765,6 +771,11 @@ def _dedupe_parsed_items(items: List[Dict]) -> List[Dict]:
                     kept_refs = kept.setdefault("source_refs", [])
                     if ref not in kept_refs:
                         kept_refs.append(ref)
+                # ... and the pulses among them that name several actors (2026-10)
+                for pid in item.get("several_actor_pulses") or []:
+                    kept_several = kept.setdefault("several_actor_pulses", [])
+                    if pid not in kept_several:
+                        kept_several.append(pid)
     _dropped = sum(_dropped_by_reason.values())
     _dupes = len(items) - len(unique_items) - _dropped
     if _dropped or _dupes:
@@ -1143,13 +1154,13 @@ def _dedupe_casefold(values: Any) -> List[str]:
 
 
 def _pair_without_software_id(pair: str) -> str:
-    """``"family::adversary"`` with the family's ATT&CK software id suffix removed (2026-10):
-    ``"Cobalt Strike - S0154::apt29"`` → ``"Cobalt Strike::apt29"``. A pair without the separator, or
-    with more than one (build_relationships step 2d rejects those), is returned unchanged."""
-    family, sep, adversary = pair.partition("::")
-    if not sep or "::" in adversary:
+    """``"family::adversary"`` or ``"family::adversary::pulse"`` with the family's ATT&CK software id
+    suffix removed (2026-10): ``"Cobalt Strike - S0154::apt29::p1"`` → ``"Cobalt Strike::apt29::p1"``.
+    A pair without the separator is returned unchanged."""
+    family, sep, rest = pair.partition("::")
+    if not sep:
         return pair
-    return f"{split_attack_software_id(family)[0]}::{adversary}"
+    return f"{split_attack_software_id(family)[0]}::{rest}"
 
 
 def _pulse_family_lists(otx_meta: Dict[str, Any]) -> Tuple[List[str], List[str]]:
@@ -1370,6 +1381,9 @@ class MISPToNeo4jSync:
             # Items no merge path accepts (unknown type, indicator without a value); reported in
             # the run summary, counted neither as successes nor as errors.
             "items_unroutable": 0,
+            # 2026-10: OTX pulses naming several actors, whose malware was therefore not attributed
+            # to them (``_build_cross_item_relationships``).
+            "reports_with_several_actors": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -1380,6 +1394,25 @@ class MISPToNeo4jSync:
         self._consecutive_conn_failures: int = 0
         # Incremental window for the per-attribute filter (``_attribute_filter_since``); set by ``run()``.
         self._attr_since: Optional[datetime] = None
+        # The canonical threat-actor reference, loaded on first use (``_report_actor_reference``).
+        self._actor_reference: Optional[CanonicalReference] = None
+        self._actor_reference_loaded = False
+
+    def _report_actor_reference(self) -> Optional[CanonicalReference]:
+        """The canonical threat-actor reference that tells how many actors a report names, or
+        ``None`` when it is unavailable (logged once): the actors are then told apart by name, so the
+        aliases of one actor count as several and their report attributes nothing."""
+        if not getattr(self, "_actor_reference_loaded", False):
+            self._actor_reference_loaded = True
+            self._actor_reference = None
+            try:
+                self._actor_reference = load_canonical_reference()
+            except ReferenceUnavailable as exc:
+                logger.warning(
+                    "[ATTRIBUTION] canonical reference unavailable (%s): a report's actors are told apart by name",
+                    exc,
+                )
+        return getattr(self, "_actor_reference", None)
 
     def health_check_misp(self) -> Dict[str, Any]:
         """
@@ -2912,7 +2945,12 @@ class MISPToNeo4jSync:
 
         Relationship kinds produced:
         - Indicator -> INDICATES -> Malware          (same pulse; ``match_type`` ``otx_pulse``, 0.6)
-        - Malware -> ATTRIBUTED_TO -> ThreatActor    (same pulse that names an adversary; ``otx_pulse``, 0.6)
+        - Malware -> ATTRIBUTED_TO -> ThreatActor    (same pulse, when the actors it names are one actor;
+          ``otx_pulse``, 0.6). A pulse that names several actors does not say which malware is whose
+          (2026-10): its malware is attributed to none of them. The aliases of one actor count as one
+          (``canonical_threat_actors.actor_identities``). The OTX collector judges the pulse's whole
+          adversary list and marks such a pulse on its items (``several_actor_pulses``); items
+          written without the mark are judged by the actors the event carries.
         - Indicator -> TARGETS -> Sector, Vulnerability -> AFFECTS -> Sector
           (from each item's own ``zone``; unchanged)
 
@@ -2954,7 +2992,8 @@ class MISPToNeo4jSync:
                 report_id = report_id.strip()
                 if not report_id:
                     continue
-                bucket = by_report.setdefault(report_id, {"indicators": [], "malware": [], "actors": []})
+                bucket = by_report.setdefault(report_id, {"indicators": [], "malware": [], "actors": [], "all": []})
+                bucket["all"].append(item)
                 if item.get("indicator_type") or item.get("type") == "indicator":
                     if item.get("value"):
                         bucket["indicators"].append(item)
@@ -3011,7 +3050,25 @@ class MISPToNeo4jSync:
                     )
 
             # Malware -> ThreatActor (ATTRIBUTED_TO): the pulse names an adversary for
-            # these malware families.
+            # these malware families. Only when the actors it names are one actor (2026-10): a pulse
+            # naming several does not say which family is whose (on the hosted graph of 2026-10-15,
+            # 515 of 3,727 such links came from 29 pulses naming 2 to 7 actors). The OTX collector
+            # decides it on the pulse's whole adversary list and records the pulse in
+            # ``several_actor_pulses`` on every item of it: MISP drops an actor or family it already
+            # holds, so this event may carry only some of the pulse's actors. For items written before
+            # that field existed, the actors of the bucket are judged (all of them, before the cap).
+            if malware_items and bucket["actors"]:
+                several = any(report_id in (item.get("several_actor_pulses") or []) for item in bucket["all"])
+                if not several:
+                    names = [a.get("name") for a in bucket["actors"]]
+                    several = len(actor_identities(names, self._report_actor_reference())) > 1
+                if several:
+                    self.stats["reports_with_several_actors"] += 1
+                    logger.info(
+                        "[ATTRIBUTION] report %s names several actors: its malware is attributed to none of them",
+                        report_id,
+                    )
+                    actors = []
             for malware in malware_items:
                 for actor in actors:
                     relationships.append(
@@ -3397,6 +3454,7 @@ class MISPToNeo4jSync:
             reported_techniques: List[str] = []
             actor_pulse_id = ""
             actor_report_ids: List[str] = []
+            actor_several_actor_pulses: List[str] = []
             actor_uses_malware: List[str] = []
             actor_uses_tools: List[str] = []
             actor_description = raw_comment
@@ -3417,6 +3475,9 @@ class MISPToNeo4jSync:
                         reported_techniques = [str(x) for x in (parsed.get("rt") or [])]
                         actor_pulse_id = str(parsed.get("pid") or "").strip()
                         actor_report_ids = [str(x).strip() for x in (parsed.get("rids") or []) if str(x).strip()]
+                        actor_several_actor_pulses = [
+                            str(x).strip() for x in (parsed.get("sap") or []) if str(x).strip()
+                        ]
                         actor_uses_malware = [str(x).strip() for x in (parsed.get("m") or []) if str(x).strip()]
                         actor_uses_tools = [str(x).strip() for x in (parsed.get("s") or []) if str(x).strip()]
                     elif isinstance(parsed, list):
@@ -3484,6 +3545,7 @@ class MISPToNeo4jSync:
                 "reported_techniques": reported_techniques,
                 "pulse_id": actor_pulse_id,
                 "report_ids": actor_report_ids,
+                "several_actor_pulses": actor_several_actor_pulses,
                 "uses_malware": actor_uses_malware,
                 "uses_tools": actor_uses_tools,
                 # 2026-10: a curated attribute is not merged as a node (see sync_to_neo4j)
@@ -3525,6 +3587,7 @@ class MISPToNeo4jSync:
             reported_techniques: List[str] = []
             malware_pulse_id = ""
             malware_report_ids: List[str] = []
+            malware_several_actor_pulses: List[str] = []
             description = raw_comment
             if raw_comment.strip().startswith("MITRE_USES_TECHNIQUES:"):
                 try:
@@ -3538,6 +3601,7 @@ class MISPToNeo4jSync:
                     reported_techniques = [str(x) for x in (meta.get("rt") or [])]
                     malware_pulse_id = str(meta.get("pid") or "").strip()
                     malware_report_ids = [str(x).strip() for x in (meta.get("rids") or []) if str(x).strip()]
+                    malware_several_actor_pulses = [str(x).strip() for x in (meta.get("sap") or []) if str(x).strip()]
                     description = tail or description
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
@@ -3619,6 +3683,7 @@ class MISPToNeo4jSync:
                 "reported_techniques": reported_techniques,
                 "pulse_id": malware_pulse_id,
                 "report_ids": malware_report_ids,
+                "several_actor_pulses": malware_several_actor_pulses,
                 "relationships": relationships,
             }
             return self._with_provenance(item, relationships)
@@ -3957,6 +4022,10 @@ class MISPToNeo4jSync:
                     item["pulse_malware_families"] = _fams
                 if _pairs:
                     item["pulse_malware_actor_pairs"] = _pairs
+                # 2026-10: the IOC's pulses whose adversaries are several actors (OTX collector).
+                _several = [str(x).strip() for x in (otx_meta.get("sap") or []) if str(x).strip()]
+                if _several:
+                    item["several_actor_pulses"] = _several
                 item["indicator_role"] = otx_meta.get("indicator_role", "")
                 item["is_active"] = otx_meta.get("is_active", True)
 
@@ -4861,6 +4930,9 @@ class MISPToNeo4jSync:
             "report_ids",
             "source_refs",
             "misp_event_id",
+            # 2026-10: a pulse naming several actors attributes nothing; the OTX collector's mark
+            # is the only record of it once MISP has dropped some of the pulse's actors.
+            "several_actor_pulses",
         )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size
@@ -5439,6 +5511,13 @@ class MISPToNeo4jSync:
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
             logger.info(f"Relationships created: {self.stats['relationships_created']}")
+            several_actors = int(self.stats.get("reports_with_several_actors", 0) or 0)
+            if several_actors:
+                logger.info(
+                    "Reports naming several actors, whose malware was attributed to none of them: %d "
+                    "(grep '[ATTRIBUTION]')",
+                    several_actors,
+                )
             curated_attached = int(self.stats.get("curated_claims_attached", 0) or 0)
             curated_unattached = int(self.stats.get("curated_claims_unattached", 0) or 0)
             if curated_attached or curated_unattached:
