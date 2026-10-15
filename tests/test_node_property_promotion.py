@@ -99,8 +99,8 @@ class TestTacticPropertyPromotion:
 
 
 class TestCVEPropertyPromotion:
-    """CVE nodes must have description and attack_vector; cvss_score / severity / cvss_version
-    come from the CVSS sub-nodes (2026-10), not from the record."""
+    """CVE nodes must have description; cvss_score / severity / cvss_version / attack_vector come
+    from the CVSS sub-nodes (2026-10), not from the record."""
 
     def test_cve_promotes_description(self, mock_neo4j_client):
         client, session = mock_neo4j_client
@@ -118,13 +118,17 @@ class TestCVEPropertyPromotion:
         cypher_call = session.run.call_args_list[1]
         cypher_text = cypher_call[0][0]
         assert "n.description = $description" in cypher_text, "CVE.description must be promoted"
-        assert "n.attack_vector = $attack_vector" in cypher_text
         assert "cvss_score" not in cypher_text and "severity" not in cypher_text, (
             "the record's score must not be written: a 0.0 placeholder, a KEV value or OTX's UNKNOWN "
             "used to overwrite the CVSS of another source"
         )
+        assert "attack_vector" not in cypher_text, (
+            "nor its attack vector: NVD's letter, KEV's and OTX's invented NETWORK or UNKNOWN used to "
+            "overwrite another source's value"
+        )
         derive = session.run.call_args_list[-1]
         assert derive[0][0] == neo4j_client_module()._CVE_SCORE_FROM_CVSS_QUERY
+        assert "c.attack_vector = " in derive[0][0]
         assert derive[1]["cve_id"] == "CVE-2024-1234"
 
 

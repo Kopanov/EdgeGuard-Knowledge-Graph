@@ -138,12 +138,13 @@ _CVSS_NLH = {"N": "NONE", "L": "LOW", "H": "HIGH"}
 _CVSS_UI = {"N": "NONE", "R": "REQUIRED"}
 _CVSS_SCOPE = {"U": "UNCHANGED", "C": "CHANGED"}
 
-# Values when an advisory carries no CVSS block (2026-10): no score and severity UNKNOWN. They
-# used to be 7.0 / HIGH, copied from the KEV collector's ransomware-derived values, and were
-# stored as if they were CVSS (246 CVEs on the hosted 730-day baseline).
+# Values when an advisory carries no CVSS block (2026-10): no score, severity UNKNOWN and no
+# attack vector. They used to be 7.0 / HIGH, copied from the KEV collector's ransomware-derived
+# values, and were stored as if they were CVSS (246 CVEs on the hosted 730-day baseline), with an
+# invented attack vector NETWORK (also used for a CVSS block whose vector names none).
 DEFAULT_SEVERITY = UNKNOWN_SEVERITY
 DEFAULT_CVSS_SCORE: Optional[float] = None
-DEFAULT_ATTACK_VECTOR = "NETWORK"
+DEFAULT_ATTACK_VECTOR: Optional[str] = None
 
 DESCRIPTION_MAX_CHARS = 1000
 MAX_AFFECTED_PRODUCTS = 10

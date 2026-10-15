@@ -233,8 +233,9 @@ class TestSro:
         for prop in ("x_edgeguard_match_type", "x_edgeguard_sources", "x_edgeguard_source_refs"):
             assert prop in sx.EDGEGUARD_EXTENSION_PROPERTIES
         definition = sx._extension_definition()
-        assert definition["version"] == "1.1.0"
-        assert definition["modified"].startswith("2026-10-14")
+        # 1.1.0 (2026-10-14) added these; 1.2.0 (2026-10-15) added x_edgeguard_status on vulnerabilities.
+        assert definition["version"] == "1.2.0"
+        assert definition["modified"].startswith("2026-10-15")
 
     @pytest.mark.parametrize(
         "edge, source_type, target_type, stix_type, reversed_",

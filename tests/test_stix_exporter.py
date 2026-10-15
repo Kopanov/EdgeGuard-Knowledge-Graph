@@ -1322,6 +1322,37 @@ def test_every_emitted_extension_property_is_declared():
         assert has_ext_props == (EDGEGUARD_EXTENSION_ID in o.get("extensions", {})), o["id"]
 
 
+def test_a_rejected_cve_exports_its_status_and_parses_strictly():
+    """``CVE.status`` (NVD's record status, written by ``merge_cve`` since 2026-10) is exported as
+    ``x_edgeguard_status``; before, a rejected CVE exported like an active one. Real record: NVD's
+    CVE-2026-22314, rejected (``tests/fixtures/nvd_incremental_2026_10_14.json``)."""
+    import json
+    from pathlib import Path
+
+    fixtures = json.loads(
+        (Path(__file__).resolve().parent / "fixtures" / "nvd_incremental_2026_10_14.json").read_text()
+    )
+    record = fixtures["nvd"]["CVE-2026-22314"]["cve"]
+    assert record["vulnStatus"] == "Rejected"
+    seed = {
+        "cve_id": "CVE-2026-22314",
+        "description": next(d["value"] for d in record["descriptions"] if d["lang"] == "en"),
+        "status": ["rejected"],
+        "edgeguard_managed": True,
+    }
+    rows = [{"seed": seed, "indicators": [], "threats": [], "sectors": []}]
+    bundle = StixExporter(_mk_client(rows)).export_cve("CVE-2026-22314")
+
+    (vulnerability,) = _by_type(bundle, "vulnerability")
+    assert vulnerability["x_edgeguard_status"] == ["rejected"]
+    assert vulnerability["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
+    definition = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
+    assert "x_edgeguard_status" in definition["extension_properties"]
+    assert (definition["version"], definition["modified"][:10]) == ("1.2.0", "2026-10-15")
+    parsed = stix2.parse(bundle)  # strict: allow_custom defaults to False
+    assert next(o for o in parsed.objects if o.type == "vulnerability")["x_edgeguard_status"] == ["rejected"]
+
+
 def test_x_mitre_tactic_is_the_only_remaining_custom_type():
     """Document the known exception: ``_tactic_sdo`` keeps MITRE's
     ``x-mitre-tactic`` custom type (not strictly parseable) and no
