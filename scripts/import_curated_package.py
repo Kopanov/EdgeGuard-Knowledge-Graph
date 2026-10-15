@@ -17,13 +17,18 @@ for example ``2026-10-20_EdgeGuard_CoreIdeas_package.json``::
     }
 
 ``name`` must contain "EdgeGuard" (the MISP→Neo4j sync discovers EdgeGuard events by title).
-``source`` is the package's source (a registered curated source such as ``coreideas``; any
-other name is imported with the label ``curated_other``). ``tlp`` is required: the package's
-TLP level marks the link of every claim (``r.tlp``) and the STIX relationship exported from it.
-``name`` of an entity is the canonical name of the existing node (the package builder aligns
-names). Each claim's ``src`` is the source that asserts it (defaults to the package's source)
-and ``id`` that source's record id. Predicates per subject: see
-``relationship_provenance.CURATED_PREDICATES``.
+``source`` is the package's source and must be a registered curated source
+(``source_type="curated"`` in ``src/source_registry.py``: ``coreideas``, ``misp_galaxy``); its
+``curated_label`` labels the links the claims create (``coreideas_curated``; ``curated_other``
+for a source without one). ``tlp`` is required: the package's TLP level marks the link of every
+claim (``r.tlp``) and the STIX relationship exported from it. ``name`` of an entity is the
+canonical name of the existing node (the package builder aligns names). Each claim's ``src`` is
+the source that asserts it (defaults to the package's source) and ``id`` that source's record
+id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
+
+A claim is rejected (reported, not imported) when its predicate does not fit its subject, it
+has no object, or its source is not a registered curated source: the claim's source goes into
+``r.sources`` / ``r.source_refs`` and the STIX export, so no other name may reach them.
 
 The event is created unpublished, for the creating organisation only, with the tags
 ``EdgeGuard``, the package source's ``source:*`` tag and ``tlp:<level>``. Each entity becomes one
@@ -51,14 +56,20 @@ import os
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from relationship_provenance import CURATED_CLAIMS_PREFIX, CURATED_PREDICATES  # noqa: E402
-from source_registry import canonical_source_id, curated_label_for, get_source  # noqa: E402
+from source_registry import (  # noqa: E402
+    canonical_source_id,
+    curated_label_for,
+    curated_source_ids,
+    get_source,
+    is_curated_source,
+)
 
 KINDS = {"threat_actor": ("ThreatActor", "threat-actor"), "malware": ("Malware", "malware-type")}
 TLP_LEVELS = ("clear", "white", "green", "amber", "amber+strict", "red")
@@ -71,15 +82,26 @@ def _tlp_level(package: Dict[str, Any]) -> str:
     return str(package.get("tlp") or "").strip().lower()
 
 
-def _claim_ok(claim: Any, subject_label: str) -> Tuple[bool, str]:
+def _claim_problem(claim: Any, subject_label: str, default_src: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``(reason, message)`` when ``claim`` cannot be imported for a ``subject_label`` subject, else ``None``.
+
+    ``default_src`` is the package's source, which asserts a claim that names none.
+    """
     if not isinstance(claim, dict):
-        return False, "not an object"
+        return "shape", "not an object"
     predicate = str(claim.get("p") or "").strip().lower()
     if subject_label not in CURATED_PREDICATES.get(predicate, {}):
-        return False, f"predicate {predicate!r} not allowed for {subject_label}"
+        return "predicate", f"predicate {predicate!r} not allowed for {subject_label}"
     if not str(claim.get("o") or "").strip():
-        return False, "no object"
-    return True, ""
+        return "object", "no object"
+    # 2026-10: only a registered curated source may assert a claim — the claim's source goes into
+    # ``r.sources`` / ``r.source_refs`` and the STIX export, so no other name may reach them.
+    source = canonical_source_id(claim.get("src")) or default_src
+    if not is_curated_source(source):
+        return "source", (
+            f"source {source!r} is not a registered curated source (allowed: {', '.join(curated_source_ids())})"
+        )
+    return None
 
 
 def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
@@ -98,7 +120,12 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
     if not source:
         errors.append("missing 'source'")
     elif registered is None:
-        warnings.append(f"source {source!r} is not registered: the claims get the label 'curated_other'")
+        # 2026-10: the package's source asserts every claim that names none, so it must be a
+        # registered curated source as well (before, any name was imported as ``curated_other``).
+        errors.append(
+            f"source {source!r} is not a registered curated source (allowed: {', '.join(curated_source_ids())}); "
+            "register it in src/source_registry.py first"
+        )
     elif registered.source_type != "curated":
         errors.append(f"source {source!r} is a feed ({registered.source_type}), not a curated source")
     tlp = package.get("tlp")
@@ -115,6 +142,7 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
 
     by_predicate: Counter = Counter()
     by_source: Counter = Counter()
+    skipped_by_reason: Counter = Counter()
     seen_subjects = set()
     kept = rejected = 0
     for n, entity in enumerate(entities):
@@ -136,10 +164,11 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
         claims = entity.get("claims") or []
         good = []
         for m, claim in enumerate(claims):
-            ok, why = _claim_ok(claim, KINDS[kind][0])
-            if not ok:
+            problem = _claim_problem(claim, KINDS[kind][0], source)
+            if problem is not None:
                 rejected += 1
-                warnings.append(f"{where}.claims[{m}] skipped: {why}")
+                skipped_by_reason[problem[0]] += 1
+                warnings.append(f"{where}.claims[{m}] skipped: {problem[1]}")
                 continue
             good.append(claim)
             by_predicate[str(claim.get("p")).strip().lower()] += 1
@@ -156,6 +185,7 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
         "entities": len(seen_subjects),
         "claims": kept,
         "claims_skipped": rejected,
+        "claims_skipped_by_reason": dict(skipped_by_reason),
         "by_predicate": dict(by_predicate),
         "by_claim_source": dict(by_source),
     }
@@ -214,7 +244,7 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
         kind = entity.get("kind")
         if kind not in KINDS:
             continue
-        good = [c for c in entity.get("claims") or [] if _claim_ok(c, KINDS[kind][0])[0]]
+        good = [c for c in entity.get("claims") or [] if _claim_problem(c, KINDS[kind][0], source) is None]
         if not good:
             continue
         attributes.append(

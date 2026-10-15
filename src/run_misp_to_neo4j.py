@@ -60,7 +60,15 @@ from node_identity import is_placeholder_name
 from query_pause import query_pause
 from relationship_provenance import CURATED_CLAIM_CONFIDENCE, CURATED_CLAIMS_PREFIX, CURATED_PREDICATES
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
-from source_registry import canonical_source_id, curated_label_for, format_source_ref, misp_tag_to_canonical_map
+from source_registry import (
+    CURATED_OTHER_LABEL,
+    canonical_source_id,
+    curated_label_for,
+    curated_source_ids,
+    format_source_ref,
+    is_curated_source,
+    misp_tag_to_canonical_map,
+)
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
 from source_truthful_timestamps import extract_source_truthful_timestamps
 
@@ -564,6 +572,7 @@ def _curated_claim_rows(
     label = curated_label_for(package_source)
     rows: List[Dict] = []
     skipped = 0
+    unregistered = 0
     for claim in claims:
         target = _CURATED_PREDICATES.get(str(claim.get("p") or "").strip().lower(), {}).get(subject_type)
         obj = str(claim.get("o") or "").strip()
@@ -579,6 +588,13 @@ def _curated_claim_rows(
             skipped += 1
             continue
         source = canonical_source_id(claim.get("src")) or package_source
+        # 2026-10: only a registered curated source may assert a claim (the importer refuses any
+        # other). A claim that still names another source — an event written by hand or by an
+        # older importer — is recorded as ``curated_other``, so no outside name reaches
+        # ``r.sources``, ``r.source_refs`` or the STIX export.
+        if not is_curated_source(source):
+            source = CURATED_OTHER_LABEL
+            unregistered += 1
         ref = format_source_ref(source, claim.get("id"))
         rows.append(
             {
@@ -603,6 +619,15 @@ def _curated_claim_rows(
             subject_type,
             next(iter(subject_key.values()), "?"),
             skipped,
+        )
+    if unregistered:
+        logger.warning(
+            "Curated %s %s: %d claim(s) name a source that is not a registered curated source (%s); recorded as %r",
+            subject_type,
+            next(iter(subject_key.values()), "?"),
+            unregistered,
+            ", ".join(curated_source_ids()),
+            CURATED_OTHER_LABEL,
         )
     return rows
 

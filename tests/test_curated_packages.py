@@ -452,10 +452,15 @@ class TestImportScript:
         errors, _, _ = importer.validate(_package(**overrides))
         assert any(fragment in e for e in errors), errors
 
-    def test_unregistered_source_is_allowed_with_curated_other(self, importer):
-        errors, warnings, summary = importer.validate(_package(source="partner_pkg"))
+    def test_unregistered_package_source_is_refused(self, importer):
+        """2026-10: the package's source asserts every claim that names none, so it must be a
+        registered curated source (it used to be imported as ``curated_other``)."""
+        errors, _, _ = importer.validate(_package(source="partner_pkg"))
+        assert any("'partner_pkg' is not a registered curated source" in e for e in errors), errors
+
+    def test_registered_curated_source_without_a_label_gets_curated_other(self, importer):
+        errors, _, summary = importer.validate(_package(source="misp_galaxy"))
         assert errors == [] and summary["label"] == "curated_other"
-        assert any("not registered" in w for w in warnings)
 
     def test_comment_budget(self, importer):
         many = [{"p": "uses_technique", "o": f"T{n:04d}", "id": "x" * 40} for n in range(1500)]
@@ -490,17 +495,20 @@ class TestImportScript:
             ("EMPLOYS_TECHNIQUE", {"mitre_id": "T1566"}, ["coreideas:c1"])
         ]
 
-    def test_unregistered_package_keeps_its_name_in_r_sources(self, importer):
-        """The sync maps an unknown ``source:*`` tag to ``misp``; the claims carry the name."""
-        package = _package(source="partner_pkg")
-        attr = dict(importer.build_event(package)["Event"]["Attribute"][0], uuid="u-2")
-        assert attr["Tag"] == [{"name": "source:partner_pkg"}, {"name": "tlp:amber"}]
-        event = {"id": "8", "info": package["name"], "Tag": [{"name": "EdgeGuard"}]}
+    def test_sync_records_an_unregistered_claim_source_as_curated_other(self):
+        """Defence in depth (2026-10): an event the importer refuses — written by hand or by an
+        older importer — cannot put its source's name into ``r.sources`` / ``r.source_refs``."""
+        comment = _claims_comment([{"p": "uses_technique", "o": "T1566", "src": "partner_pkg", "id": "c1"}])
+        attr = dict(
+            _attr("threat-actor", "apt29", comment), Tag=[{"name": "source:partner_pkg"}, {"name": "tlp:amber"}]
+        )
+        event = {"id": "8", "info": "2026-10-20_EdgeGuard_partner_package", "Tag": [{"name": "EdgeGuard"}]}
         item, rels = _syncer().parse_attribute(attr, event)
         assert item["tag"] == "misp", "unknown source tags still map to misp at the attribute level"
         assert [(r["source"], r["match_type"], r["source_refs"]) for r in rels] == [
-            ("partner_pkg", "curated_other", ["partner_pkg:c1"])
+            ("curated_other", "curated_other", ["curated_other:c1"])
         ]
+        assert "partner_pkg" not in json.dumps(rels)
 
     @pytest.mark.parametrize(
         "payload",
@@ -771,3 +779,69 @@ class TestCuratedLinkTlp:
         }
         ((query, _rows),) = _client_and_run([rel])[1]
         assert "tlp" not in _merge_clauses(query)[1]
+
+
+# --------------------------------------------------------------------------- who may assert a claim
+class TestClaimSources:
+    """Claim source fix (2026-10): only a registered curated source (``source_type == "curated"``
+    in ``src/source_registry.py``) may assert a claim. Any other name could otherwise reach
+    ``r.sources``, ``r.source_refs`` and the STIX export."""
+
+    def _actor_with(self, *claims):
+        return _package(entities=[{"kind": "threat_actor", "name": "apt29", "claims": list(claims)}])
+
+    def test_registered_curated_sources(self):
+        assert source_registry.curated_source_ids() == ("coreideas", "misp_galaxy")
+        assert source_registry.is_curated_source("CoreIdeas") and source_registry.is_curated_source("misp_galaxy")
+        for name in ("acme_intel", "nvd", "mitre_attck", "misp", "curated_other", "", None):
+            assert not source_registry.is_curated_source(name), name
+
+    @pytest.mark.parametrize("src", ["acme_intel", "nvd", "alienvault_otx", "curated_other"])
+    def test_importer_rejects_a_claim_from_any_other_source(self, importer, src):
+        package = self._actor_with(
+            {"p": "uses_technique", "o": "T1566", "id": "c1"}, {"p": "uses_technique", "o": "T1059", "src": src}
+        )
+        errors, warnings, summary = importer.validate(package)
+        assert errors == []
+        assert (summary["claims"], summary["claims_skipped"]) == (1, 1)
+        assert summary["claims_skipped_by_reason"] == {"source": 1}
+        assert any(f"source {src!r} is not a registered curated source" in w for w in warnings), warnings
+        (attr,) = importer.build_event(package)["Event"]["Attribute"]
+        assert src not in attr["comment"], "a rejected claim never reaches MISP"
+        assert _parse_curated_claims(attr["comment"]) == [
+            {"p": "uses_technique", "o": "T1566", "src": "coreideas", "id": "c1"}
+        ]
+
+    @pytest.mark.parametrize("src", ["coreideas", "CoreIdeas", "misp_galaxy", None])
+    def test_importer_accepts_a_registered_curated_source(self, importer, src):
+        claim = {"p": "uses_technique", "o": "T1566", "id": "c1"}
+        if src is not None:
+            claim["src"] = src
+        errors, _, summary = importer.validate(self._actor_with(claim))
+        assert errors == [] and (summary["claims"], summary["claims_skipped"]) == (1, 0)
+
+    def test_sync_keeps_a_registered_curated_claim_source(self):
+        rows = _curated_claim_rows(
+            [{"p": "uses_technique", "o": "T1566", "src": "misp_galaxy", "id": "u-1"}],
+            "ThreatActor",
+            {"name": "apt29"},
+            "coreideas",
+            "5",
+        )
+        assert [(r["source"], r["source_refs"]) for r in rows] == [("misp_galaxy", ["misp_galaxy:u-1"])]
+
+    @pytest.mark.parametrize("src", ["acme_intel", "nvd", "Mitre_Attck"])
+    def test_sync_records_any_other_claim_source_as_curated_other(self, src, caplog):
+        with caplog.at_level(logging.WARNING, logger="run_misp_to_neo4j"):
+            rows = _curated_claim_rows(
+                [{"p": "uses_technique", "o": "T1566", "src": src, "id": "r-9"}],
+                "ThreatActor",
+                {"name": "apt29"},
+                "coreideas",
+                "5",
+            )
+        assert [(r["source"], r["source_refs"], r["match_type"]) for r in rows] == [
+            ("curated_other", ["curated_other:r-9"], "coreideas_curated")
+        ]
+        assert any("not a registered curated source" in r.getMessage() for r in caplog.records)
+        assert not any(src.lower() in r.getMessage().lower() for r in caplog.records), "the name is not logged"
