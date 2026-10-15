@@ -785,6 +785,51 @@ When the release revokes groups, take a new MISP galaxy dump as well, so that th
 
 **Checking a graph.** `python scripts/verify_fresh_baseline.py` fails when a Technique node carries an id the map lists, a ThreatActor node from MITRE is a revoked group, or a Malware / Tool node from MITRE is revoked software, and warns (`revoked_group_names_folded`) when an actor from another source still bears a revoked group's name: the actor alias merge (enrichment, `[ACTOR-ALIAS-MERGE]` lines) folds such a node into the successor, whose aliases carry the name. On a graph built before 2026-10 both checks fail (2026-10-15: 158 Technique nodes, 6 ThreatActor nodes). MISP keeps the attributes of revoked objects pushed before 2026-10, and a full sync turns them into nodes again; the writer does not re-tag attributes that already exist, so older deprecated objects lack the `attack-status:deprecated` tag. The change takes full effect after a wipe and a new baseline.
 
+## Repairing CVE descriptions and dates (2026-10)
+
+Since 2026-10 a CVE's `description`, `published` and `last_modified` come from NVD's record: a record from any other source (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has none. For a CVE, the sync never takes as its description a comment that is a metadata block (`OTX_META:{...}`, `NVD_META:{...}` or any other `*_META:`; only the block's own `description` field) or a comment that only says where the CVE was seen (the OTX collector's "Referenced in OTX pulse: <name>", MISPWriter's placeholder "CVE from <source>") ([KNOWLEDGE_GRAPH.md](KNOWLEDGE_GRAPH.md), "Evidence labels, report provenance, TLP"). A graph built before 2026-10 keeps what the record merged last wrote. On the CVEs several feeds name, which are the ones a demonstration shows, that is often the raw `OTX_META` JSON of an OTX pulse indicator, "Referenced in OTX pulse: <name>", CISA's short KEV text or a CISA ICS advisory's dates instead of NVD's.
+
+A wipe and a new baseline need none of this. A graph that is kept is repaired once, after the deploy, in this order (each Cypher statement via `docker compose exec neo4j cypher-shell -u neo4j -p $NEO4J_PASSWORD`):
+
+1. **Count** the nodes whose description is a metadata block, an OTX pulse reference or the placeholder (read-only):
+
+   ```cypher
+   MATCH (c)
+   WHERE (c:CVE OR c:Vulnerability)
+     AND c.description =~ '(?s)\\s*(([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*|CVE from [^\\s|]+\\s*)'
+   RETURN labels(c)[0] AS label, count(c) AS nodes;
+   ```
+
+2. **Remove those descriptions.** The full sync in step 3 replaces every description of a CVE that NVD has a record of, but on any other CVE it only fills a missing one, so a stored block or pulse reference would stay and CISA's KEV text could not replace it (on the hosted MISP of 2026-10-14, CVE-2015-5477 had only an OTX and a KEV attribute):
+
+   ```cypher
+   MATCH (c)
+   WHERE (c:CVE OR c:Vulnerability)
+     AND c.description =~ '(?s)\\s*(([A-Z][A-Z0-9_]*_META|Referenced in OTX pulse):.*|CVE from [^\\s|]+\\s*)'
+   REMOVE c.description;
+   ```
+
+3. **One full MISP → Neo4j sync.** An incremental run does not repair the graph: it writes only the attributes changed since the last sync.
+
+   ```bash
+   docker compose exec airflow airflow variables set NEO4J_FULL_SYNC true
+   docker compose exec airflow airflow dags trigger edgeguard_neo4j_sync --conf '{"force_sync": true}'
+   ```
+
+   `run_neo4j_sync` consumes the Variable (sets it back to `false`) and runs a full sync; `force_sync` bypasses `check_sync_needed` ([AIRFLOW_DAGS.md](AIRFLOW_DAGS.md), `edgeguard_neo4j_sync`). Every NVD attribute sets its CVE's description and dates again, and the KEV and CISA ICS records (and an `OTX_META` block's own `description` field, where it has one) fill the descriptions step 2 removed; a CVE that only OTX names keeps none. The run re-merges every attribute in MISP and takes about as long as the full sync of a baseline.
+
+4. **Check.** Step 1 returns no rows, and a CVE that NVD, OTX and the KEV all name shows NVD's text and dates:
+
+   ```cypher
+   MATCH (c:CVE {cve_id: 'CVE-2025-21042'})
+   RETURN c.description, c.published, c.last_modified;
+   // NVD's record (as stored in MISP on 2026-10-14): "Out-of-bounds write in libimagecodec.quram.so prior
+   // to SMR Apr-2025 Release 1 allows remote attackers to execute arbitrary code.",
+   // published 2025-09-12T08:15:44.743000+00:00 (a later NVD update moves last_modified)
+   ```
+
+A CVE without an NVD record keeps the text and dates of the first record that filled them (CISA's KEV text, a CISA ICS advisory), also when that source later revises its record (a revised advisory's `last_modified`, an edited KEV text): no ranking of the other sources exists yet.
+
 ## Retrieving raw MISP data from a Neo4j node
 
 Three complementary retrieval paths exist for every MISP-sourced node
@@ -960,7 +1005,7 @@ means re-runs are safe:
 
 ---
 
-_Last updated: 2026-10-15 — new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — "Repairing CVE descriptions and dates": an OTX pulse reference and the placeholder "CVE from <source>" are no CVE description, and steps 1–2 also remove them; the metadata-block rule is stated for CVEs; a CVE without an NVD record keeps the first record's text and dates when that source revises its record. Same day: new section "Repairing CVE descriptions and dates": a CVE's description and dates come from NVD's record (other records only fill them); a kept graph is repaired by removing descriptions that are metadata blocks, then one full sync (`NEO4J_FULL_SYNC`, `force_sync`). Same day: new section "Canonical threat-actor reference": what the merge logs (including the pairs it skips as ambiguous, conflict, blocked or chain), rebuilding the reference (the ATT&CK aliases come from the record MITRE delivered), and the check at each ATT&CK release; "Rebuilding the ATT&CK revoked-id map" (when and how to rebuild `src/reference/attack_revoked_ids.json`, what happens without it, the acceptance checks for revoked objects) and the curated validation's report of revoked technique ids. Same day: failure mode 7 covers the 2026-10 baseline chain guards (collectors and `full_neo4j_sync` refuse after a failed `baseline_clean` / `baseline_start`, judged by the task states of the run), the clean step's 60-minute limit, batched relationship deletion and `EDGEGUARD_MISP_DELETE_TIMEOUT_SEC`, and the postcheck that fails on Airflow 3 (the PR-N27 skip applies on Airflow 2 only); "Before a 730d baseline run" names the five scheduled DAGs and the CLI wrappers; the acceptance script's provenance checks after the run; curated packages are exposed by the APIs and the STIX export; OTX Cypher examples use the canonical source id `alienvault_otx`; `build_relationships` has 20 steps; the PR-N21 alerts are cited by PR number (the memory-posture heading keeps its title, which an alert annotation and a test cite); after #189: a refused chain task fails without its retry; after #193: the curated exposure paragraph names the TLP marking of exported curated links and that the curated label marks only the links a package created. Prior: 2026-10-14 — "Importing a curated package". Prior: 2026-06-12 — Issue #62 silent-loss gate: documented the COLLECTOR_SUMMARY grep + EDGEGUARD_MISP_MIN_SUCCESS_RATE fail policy in § Post-run summary grep (partial MISP push loss below 0.95 now fails the task RED). Prior: 2026-06-11 — PR #125 docs correction (supersedes the PR-N35 note in § Baseline launch path): edgeguard baseline/fresh-baseline DO exist (PR-C wrappers, no mutex); the lock sentinel is written only by the legacy in-process CLI path, not the DAG; pause procedure extended to all 5 scheduled DAGs incl. edgeguard_neo4j_sync. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _**Container/service names** (BLOCK, PR-N35):_ replaced `edgeguard-airflow-worker` (doesn't exist) with `edgeguard_airflow` (single Airflow standalone container, per `docker-compose.yml:204`) across 15+ command examples; `edgeguard-neo4j` → `edgeguard_neo4j`; `edgeguard-misp` → `<your-misp-container>` (MISP is NOT in the compose stack); `docker compose exec airflow-worker` → `docker compose exec airflow`. Added an explicit container-name table to the deployment-assumption block at the top.
 - _**Baseline launch path** (BLOCK, PR-N35):_ removed the entire Option A "CLI baseline" path (`python -m edgeguard baseline --days 730` / `fresh-baseline`) — those subcommands do NOT exist in `src/edgeguard.py` (verified via `grep "add_parser"`). Promoted the DAG+pause path to Option A. Added a callout explaining the historical CLI path was never shipped at HEAD.
 - _**`--bootstrap-sources` invocation form** (BLOCK, PR-N35):_ flag DOES exist (PR-N18) but `python -m src.neo4j_client …` doesn't work (no `src/__init__.py`). Fixed to `python src/neo4j_client.py --bootstrap-sources`._
