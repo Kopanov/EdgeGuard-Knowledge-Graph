@@ -75,7 +75,7 @@
 | Classification | ✅ Malware family → Finance mapping |
 
 **What we get:**
-- SSL certificate SHA1 fingerprints
+- SSL certificate SHA1 fingerprints, stored as MISP `x509-fingerprint-sha1` attributes and `x509-fingerprint-sha1` Indicators (2026-10; they were typed as file `sha1` hashes before)
 - Malware family name (Vidar, RedLine, etc.)
 - Listing reason
 
@@ -294,4 +294,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-15 — SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

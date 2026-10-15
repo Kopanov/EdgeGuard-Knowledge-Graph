@@ -48,6 +48,7 @@ from config import (
     misp_http_headers_for_pymisp,
 )
 from cvss_selection import CVSS_VERSIONS, cvss_attack_vector, select_cvss
+from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
     Neo4jClient,
@@ -1104,7 +1105,9 @@ class MISPToNeo4jSync:
     # source registered there but missing here was silently synced as ``misp``.
     SOURCE_MAPPING = misp_tag_to_canonical_map()
 
-    # MISP attribute type to EdgeGuard type mapping
+    # MISP attribute type to EdgeGuard type mapping. ``ip-dst`` / ``ip-src`` hold IPv4 and IPv6
+    # addresses alike: ``parse_attribute`` decides by the value (``ioc_normalize.ip_address_type``),
+    # and the ``ipv4`` here applies only to a value that is not an address.
     TYPE_MAPPING = {
         "ip-dst": "ipv4",
         "ip-src": "ipv4",
@@ -1117,6 +1120,8 @@ class MISPToNeo4jSync:
         "sha1": "hash",
         "sha256": "hash",
         "sha512": "hash",
+        # SHA-1 fingerprint of a TLS certificate (SSL Blacklist), not a file hash (2026-10).
+        "x509-fingerprint-sha1": "x509-fingerprint-sha1",
         "email-src": "email",
         "email-dst": "email",
         "vulnerability": "cve",
@@ -2201,14 +2206,24 @@ class MISPToNeo4jSync:
         # do NOT support the `labels` property — only SDOs do.
         # Zone membership is stored in the custom `x_edgeguard_zones` property
         # for SCOs to avoid validation errors when feeding a strict STIX parser.
-        if attr_type in ["ip-dst", "ip-src", "ipv4"]:
-            stix_obj = {"type": "ipv4-addr", "spec_version": "2.1", "id": f"ipv4-addr--{attr_uuid}", "value": value}
+        if attr_type in ["ip-dst", "ip-src", "ipv4", "ipv6"]:
+            # 2026-10: the address decides between ``ipv4-addr`` and ``ipv6-addr``; MISP keeps both
+            # families under ``ip-dst`` / ``ip-src`` (an IPv6 address used to become ``ipv4-addr``).
+            family = ip_address_type(value) or ("ipv6" if attr_type == "ipv6" else "ipv4")
+            sco_type = f"{family}-addr"
+            stix_obj = {"type": sco_type, "spec_version": "2.1", "id": f"{sco_type}--{attr_uuid}", "value": value}
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
             return _x_props(stix_obj)
 
-        elif attr_type == "ipv6":
-            stix_obj = {"type": "ipv6-addr", "spec_version": "2.1", "id": f"ipv6-addr--{attr_uuid}", "value": value}
+        elif attr_type == "x509-fingerprint-sha1":
+            # 2026-10: the SHA-1 fingerprint of a TLS certificate (SSL Blacklist), not a file hash.
+            stix_obj = {
+                "type": "x509-certificate",
+                "spec_version": "2.1",
+                "id": f"x509-certificate--{attr_uuid}",
+                "hashes": {"SHA-1": value},
+            }
             if labels:
                 stix_obj["x_edgeguard_zones"] = labels
             return _x_props(stix_obj)
@@ -2493,10 +2508,10 @@ class MISPToNeo4jSync:
             STIX pattern string or None
         """
         safe = self._escape_stix_value(value)
-        if attr_type in ["ip-dst", "ip-src", "ipv4"]:
-            return f"[ipv4-addr:value = '{safe}']"
-        elif attr_type == "ipv6":
-            return f"[ipv6-addr:value = '{safe}']"
+        if attr_type in ["ip-dst", "ip-src", "ipv4", "ipv6"]:
+            # 2026-10: the address decides the object type (see ``_attribute_to_stix21``).
+            family = ip_address_type(value) or ("ipv6" if attr_type == "ipv6" else "ipv4")
+            return f"[{family}-addr:value = '{safe}']"
         elif attr_type in ["domain", "hostname"]:
             return f"[domain-name:value = '{safe}']"
         elif attr_type == "url":
@@ -3528,6 +3543,10 @@ class MISPToNeo4jSync:
         # Handle indicators (IP, domain, hash, etc.)
         else:
             indicator_type = self.TYPE_MAPPING.get(attr_type, "unknown")
+            if attr_type in MISP_IP_ATTRIBUTE_TYPES:
+                # 2026-10: MISP sends IPv4 and IPv6 addresses as ``ip-dst`` / ``ip-src``, so the
+                # address decides; before, every IPv6 IOC was stored and exported as ``ipv4``.
+                indicator_type = ip_address_type(value) or indicator_type
 
             # Build INDICATES relationships to malware families
             for malware_name in malware_list:

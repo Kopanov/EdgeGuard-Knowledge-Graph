@@ -545,7 +545,7 @@ def _detect_zones_from_attributes(self, attrs):
 ### What It Does
 Collects two abuse.ch feeds historically associated with banking trojans:
 - **Feodo Tracker:** botnet C&C server IPs (QakBot, Emotet, TrickBot, Dridex, BumbleBee, Pikabot) with the malware family, port and online/offline status
-- **SSL Blacklist:** malicious SSL certificate fingerprints (SHA-1) with the listing reason
+- **SSL Blacklist:** SHA-1 fingerprints of malicious TLS certificates with the listing reason, stored as `x509-fingerprint-sha1` indicators (see below)
 
 ### Sources
 - **Feodo (regular runs):** `https://feodotracker.abuse.ch/downloads/ipblocklist.csv` — C2 servers active in the last 30 days
@@ -587,6 +587,15 @@ The keyword detector deliberately contains no malware family names (families are
 
 The source-reported last-seen time matters for campaigns: a Campaign's `last_seen` falls back to the import time for an indicator with no such claim, which would make a botnet that stopped in 2021 look active today.
 
+### SSL Blacklist: what reaches the graph
+Each row is the SHA-1 fingerprint of a TLS certificate seen on malware infrastructure, not a file hash. Since 2026-10 it is collected as `indicator_type: "x509-fingerprint-sha1"`, pushed to MISP under MISP's own attribute type `x509-fingerprint-sha1` (default category *Network activity*) and synced as an `x509-fingerprint-sha1` Indicator; the STIX export pattern is `[x509-certificate:hashes.'SHA-1' = '…']`. Before, the rows were typed `sha1`: MISP `sha1` attributes, `hash` Indicators shared with the file hashes, and `[file:hashes.'SHA-1' = '…']` patterns. A MISP instance or graph loaded before the change keeps those `sha1` attributes and `hash` nodes until it is wiped and re-baselined; MISP does not treat an `x509-fingerprint-sha1` attribute as a duplicate of a `sha1` attribute with the same value.
+
+| Graph element | Value | From |
+|---|---|---|
+| `Indicator {indicator_type: "x509-fingerprint-sha1", value}` | the fingerprint, 40 lower-case hexadecimal characters | `SHA1` |
+| `zone` | keyword detector on the listing reason (`global` in practice); the reason itself is not written to MISP | `Listingreason` |
+| `(Indicator)-[:SOURCED_FROM]->(Source {source_id: "ssl_blacklist"})` | `source_reported_first_at` = the listing date | `Listingdate` |
+
 ### Example Output
 
 ```python
@@ -610,11 +619,11 @@ The source-reported last-seen time matters for campaigns: a Campaign's `last_see
     'tags': ['c2_status:offline', 'port:447', 'port:449', 'family:TrickBot', 'family:Dridex']
 }
 
-# SSL Blacklist Indicator
+# SSL Blacklist Indicator (TLS certificate fingerprint; MISP type x509-fingerprint-sha1)
 {
-    'indicator_type': 'hash',
+    'indicator_type': 'x509-fingerprint-sha1',
     'value': 'a1b2c3d4e5f6...',
-    'zone': ['finance'],  # Array of all matching zones
+    'zone': ['global'],  # Array of all matching zones
     'tag': 'ssl_blacklist',
     'sources': ['ssl_blacklist'],
     'first_seen': '2024-01-10',
@@ -1139,4 +1148,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-15 — § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`. Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
+_Last updated: 2026-10-15 — § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`; § 7 SSL Blacklist: fingerprints are collected as `x509-fingerprint-sha1` (MISP type `x509-fingerprint-sha1`, `[x509-certificate:hashes.'SHA-1' = …]` in STIX) instead of `sha1` file hashes; what reaches the graph. Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._

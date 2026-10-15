@@ -267,9 +267,12 @@ Tracked as separate tickets; do **not** expand this PR:
 - **FU-5: Per-partner API keys & audit log.** See §9.
 - **FU-6: Bundle signing / provenance.** Sign bundles with a JWS so
   ResilMesh can verify EdgeGuard as the origin.
-- **FU-7: Pattern coverage.** `_value_to_stix_pattern` only handles a
-  subset of MISP types. Add coverage for file names, user accounts,
-  registry keys, x509, etc.
+- **FU-7: Pattern coverage.** Partly done: the exporter builds its own
+  patterns (`_build_pattern` in `src/stix_exporter.py`), which cover
+  e-mail addresses, file names and, since 2026-10, TLS certificate
+  fingerprints (`x509-fingerprint-sha1` →
+  `[x509-certificate:hashes.'SHA-1' = …]`). User accounts, registry
+  keys etc. remain.
 - **FU-8: Relationship metadata.** Carry `confidence_score`,
   `match_type`, `created_at` from Neo4j onto the SRO as custom
   properties.
@@ -308,4 +311,4 @@ intentionally does not add Docker fixtures.
 
 ---
 
-_Last updated: 2026-04-26 — PR-N33 docs audit: corrected bundle-id determinism (was "random UUIDv4", actually content-deterministic UUIDv5 over sorted SDO ids); promoted the dev-vs-prod namespace claim from "if it turns out to be a problem we'll fix" to "shipped behavior with import-time parity check between EDGEGUARD_STIX_NAMESPACE and node_identity.EDGEGUARD_NODE_UUID_NAMESPACE"; removed §11 test bullet "Legacy USES rel type still matched" (USES shim was removed in PR-N1, contradicted by RESILMESH_INTEROPERABILITY.md § 3.2.1). Prior: 2026-04-18 PR #41 cleanup._
+_Last updated: 2026-10-15 — FU-7: x509 certificate fingerprint patterns done; file names and e-mail addresses were already covered by `_build_pattern`. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id determinism (was "random UUIDv4", actually content-deterministic UUIDv5 over sorted SDO ids); promoted the dev-vs-prod namespace claim from "if it turns out to be a problem we'll fix" to "shipped behavior with import-time parity check between EDGEGUARD_STIX_NAMESPACE and node_identity.EDGEGUARD_NODE_UUID_NAMESPACE"; removed §11 test bullet "Legacy USES rel type still matched" (USES shim was removed in PR-N1, contradicted by RESILMESH_INTEROPERABILITY.md § 3.2.1). Prior: 2026-04-18 PR #41 cleanup._

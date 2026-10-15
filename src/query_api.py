@@ -339,6 +339,8 @@ class IndicatorTypeEnum(str, Enum):
     sha512 = "sha512"
     email = "email"
     hash = "hash"
+    # TLS certificate fingerprints (SSL Blacklist, 2026-10)
+    x509_fingerprint_sha1 = "x509-fingerprint-sha1"
 
 
 # ============================================================================
@@ -1681,8 +1683,10 @@ def _parse_natural_language(query: str, zone: Optional[str] = None) -> str:
         base_query = "MATCH (n:Indicator)"
 
         if "ip" in query_lower:
+            # Both address families: the sync types IPv6 addresses ``ipv6`` (2026-10).
             base_query += (
-                " WHERE n.indicator_type = 'ipv4' AND (n.edgeguard_managed = true OR n.edgeguard_enriched = true)"
+                " WHERE n.indicator_type IN ['ipv4', 'ipv6']"
+                " AND (n.edgeguard_managed = true OR n.edgeguard_enriched = true)"
             )
         elif "domain" in query_lower:
             base_query += (
