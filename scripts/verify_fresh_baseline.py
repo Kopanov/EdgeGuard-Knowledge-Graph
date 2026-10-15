@@ -63,6 +63,15 @@ if str(_SRC) not in sys.path:
 
 # Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b.
 from attack_revoked import load_revoked_ids  # noqa: E402
+from canonical_threat_actors import (  # noqa: E402
+    OTX_REPORT_REF_PREFIX,
+    REPORT_ACTORS_QUERY,
+    REPORT_ATTRIBUTION_FEEDS,
+    ReferenceUnavailable,
+    attribution_reports_cypher,
+    load_canonical_reference,
+    reports_naming_several_actors,
+)
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
 BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
@@ -689,6 +698,46 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
         r.get("part_of_to_campaign") == 0 and r.get("part_of_campaign_misplaced") == 0,
         r,
     )
+
+    # 13b. Attribution from a source report (2026-10): an OTX pulse that names several actors (the
+    #      aliases of one actor count as one, canonical reference) attributes no malware, so no
+    #      same-pulse attribution rests only on such pulses, unless another feed asserts it too, and
+    #      none names one in its provenance (build_relationships step 2d removes and trims them).
+    #      Informational without the reference: the aliases of one actor cannot be told apart.
+    try:
+        actor_reference = load_canonical_reference()
+    except ReferenceUnavailable as exc:
+        actor_reference = None
+        reference_error = str(exc)
+    several = reports_naming_several_actors(_post(REPORT_ACTORS_QUERY), actor_reference)
+    r = _one(
+        "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) WHERE r.match_type = 'otx_pulse' "
+        "WITH r, " + attribution_reports_cypher("r") + " AS reports "
+        "RETURN count(r) AS links, "
+        "sum(CASE WHEN size(reports) > 0 AND all(p IN reports WHERE p IN $several) "
+        "AND all(s IN coalesce(r.sources, []) WHERE s IN $feeds) THEN 1 ELSE 0 END) AS resting_on_several_actor_reports, "
+        "sum(CASE WHEN any(p IN reports WHERE p IN $several) THEN 1 ELSE 0 END) AS naming_several_actor_reports, "
+        "sum(CASE WHEN size(reports) = 0 THEN 1 ELSE 0 END) AS without_reports",
+        {"several": several, "otx_ref_prefix": OTX_REPORT_REF_PREFIX, "feeds": list(REPORT_ATTRIBUTION_FEEDS)},
+    )
+    r["reports_naming_several_actors"] = len(several)
+    if actor_reference is None:
+        r["reference"] = f"unavailable ({reference_error})"
+        attribution_ok = None
+    else:
+        r["reference"] = actor_reference.version
+        attribution_ok = not r.get("resting_on_several_actor_reports") and not r.get("naming_several_actor_reports")
+    rep.add("attribution_from_single_actor_reports", attribution_ok, r)
+
+    # 13c. Campaign membership follows attribution (2026-10): a malware is part of a campaign only
+    #      while it is attributed to the campaign's actor (build_campaign_nodes step 2b prunes the rest).
+    r = _one(
+        "MATCH (m:Malware)-[r:PART_OF_CAMPAIGN]->(c:Campaign) "
+        "RETURN count(r) AS malware_links, "
+        "sum(CASE WHEN NOT EXISTS { (m)-[:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name}) } "
+        "THEN 1 ELSE 0 END) AS unattributed"
+    )
+    rep.add("campaign_malware_attributed", None if not r.get("malware_links") else r.get("unattributed") == 0, r)
 
     # 14. CVE scores (2026-10): a CVE takes ``cvss_score`` / ``cvss_version`` / ``severity`` from
     #     its CVSS sub-nodes (``_CVSS_SELECTION_ORDER``): with a valid sub-node, the score and

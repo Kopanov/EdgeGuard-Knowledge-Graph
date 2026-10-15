@@ -16,6 +16,10 @@ larger than ``MAX_REFERENCE_BYTES``, of another ``schema_version`` or inconsiste
 
 The reference is the reviewed authority on the names it lists: an ATT&CK-alias pair whose duplicate
 it marks ambiguous or never_merge, or gives to another actor (or to itself), is not merged.
+
+It also tells how many actors a source report names (``actor_identities``, 2026-10): malware is
+attributed to an actor from an OTX pulse only when the actors the pulse names are one actor
+(``run_misp_to_neo4j``, ``build_relationships`` step 2d, ``scripts/verify_fresh_baseline.py``).
 """
 
 from __future__ import annotations
@@ -67,6 +71,63 @@ class CanonicalReference:
         if not key or key in self.blocked:
             return None
         return self.owners.get(key)
+
+
+def actor_identities(names: Iterable[Any], reference: Optional[CanonicalReference]) -> FrozenSet[str]:
+    """The distinct actors ``names`` stand for (2026-10, attribution from a source report).
+
+    A name counts as its canonical actor in the reference, so the aliases of one actor are one actor
+    (``Storm-2697`` and ``The Gentlemen``). A name the reference does not resolve (unknown,
+    ambiguous or never_merge) counts as itself, by the ``ThreatActor`` key EdgeGuard writes for it;
+    without a reference every distinct key is an actor of its own. Names without a key (empty, not
+    a string) are left out.
+    """
+    actors: Set[str] = set()
+    for name in names:
+        key = name_key(name)
+        if not key:
+            continue
+        canonical = reference.canonical_for(name) if reference is not None else None
+        actors.add(canonical or key)
+    return frozenset(actors)
+
+
+# 2026-10: the OTX pulses whose actors are several actors. A pulse's actors are the ThreatActor nodes
+# whose ``pulse_ids`` hold it (``build_relationships`` step 2d, the acceptance check); only pulses
+# naming two or more nodes are read.
+REPORT_ACTORS_QUERY = (
+    "MATCH (a:ThreatActor) WHERE size(coalesce(a.pulse_ids, [])) > 0 "
+    "UNWIND a.pulse_ids AS pid WITH pid, collect(DISTINCT a.name) AS names "
+    "WHERE size(names) > 1 RETURN pid, names"
+)
+# The ``r.source_refs`` entry of an OTX pulse (``source_registry.format_source_ref``).
+OTX_REPORT_REF_PREFIX = "alienvault_otx:"
+# What ``r.sources`` holds on a same-pulse attribution: the feed, or on graphs built before 2026-10-14
+# the evidence name the link carried there.
+REPORT_ATTRIBUTION_FEEDS = ("alienvault_otx", "otx_pulse")
+
+
+def reports_naming_several_actors(
+    rows: Iterable[Mapping[str, Any]], reference: Optional[CanonicalReference]
+) -> List[str]:
+    """The pulse ids of ``REPORT_ACTORS_QUERY`` rows whose names are several actors (sorted)."""
+    return sorted(
+        {
+            str(row["pid"])
+            for row in rows
+            if row.get("pid") and len(actor_identities(row.get("names") or [], reference)) > 1
+        }
+    )
+
+
+def attribution_reports_cypher(rel: str) -> str:
+    """Cypher list of the OTX pulse ids a same-pulse attribution ``rel`` rests on: its OTX entries of
+    ``source_refs`` (reads ``$otx_ref_prefix``), and its ``report_ids`` on graphs built before
+    2026-10-14. No quotes, so it fits a statement ``apoc.periodic.iterate`` wraps in quotes."""
+    return (
+        f"[x IN coalesce({rel}.source_refs, []) WHERE x STARTS WITH $otx_ref_prefix "
+        f"| substring(x, size($otx_ref_prefix))] + coalesce({rel}.report_ids, [])"
+    )
 
 
 def _require(condition: bool, reason: str) -> None:

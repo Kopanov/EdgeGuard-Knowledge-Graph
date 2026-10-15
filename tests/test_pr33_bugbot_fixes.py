@@ -2125,6 +2125,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         #   (2) create_cypher (Step 1)            — .single() = {campaigns: N}
         #   (3) backfill_cypher                   — .single() = {backfilled: N}
         #   (4) link_malware (Step 2)             — .single() = {links: N}
+        #   (4b) prune_malware (Step 2b, 2026-10) — .single() = {pruned: N}
         #   (5) link_indicators_batched (Step 3a) — .single() = {committedOperations, errorMessages, ...}
         #   (6) links_count_query (Step 3a')      — .single() = {links: N}  ← NEW in PR-N21 Bugbot round 1
         #   (7) prune_query (Step 3b)             — .single() = {pruned: N}
@@ -2139,6 +2140,8 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
         backfill_result.single.return_value = {"backfilled": 7}
         link_m_result = MagicMock()
         link_m_result.single.return_value = {"links": 0}
+        malware_prune_result = MagicMock()
+        malware_prune_result.single.return_value = {"pruned": 0}
         # PR-N21: link_indicators_batched returns apoc.periodic.iterate
         # output shape. ``errorMessages`` MUST be empty (or falsy) or
         # the impl raises.
@@ -2165,6 +2168,7 @@ def test_build_campaign_nodes_backfill_heals_null_uuids_runtime():
             create_result,  # 2
             backfill_result,  # 3
             link_m_result,  # 4
+            malware_prune_result,  # 4b — 2026-10 malware membership prune
             link_i_result,  # 5 — PR-N21 batched shape
             links_count_result,  # 6 — PR-N21 Bugbot round 1 follow-up
             prune_result,  # 7

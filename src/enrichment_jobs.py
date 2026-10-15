@@ -491,6 +491,26 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             results["links_created"] += record["links"] if record else 0
             query_pause()
 
+            # Step 2b (2026-10): prune the malware membership that no attribution supports any more.
+            # Step 2 refreshes the link of every malware attributed to a campaign's actor, so a link it
+            # did not touch in this run lost its ATTRIBUTED_TO: removed by build_relationships step 2d
+            # (a pulse naming several actors), or gone with an actor the alias merge folded away. Same
+            # freshness marker as Step 3b.
+            prune_malware = """
+            MATCH (:Malware)-[r:PART_OF_CAMPAIGN]->(:Campaign)
+            WHERE r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)
+            DELETE r
+            RETURN count(r) AS pruned
+            """
+            prune_record = session.run(prune_malware, run_start_at=run_start_at, timeout=NEO4J_READ_TIMEOUT).single()
+            malware_pruned = prune_record["pruned"] if prune_record else 0
+            if malware_pruned:
+                logger.info(
+                    "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges whose attribution is gone", malware_pruned
+                )
+            results["malware_links_pruned"] = malware_pruned
+            query_pause()
+
             # Step 3a: Link active indicators to their campaigns (top 100 per
             # campaign by recency).
             #

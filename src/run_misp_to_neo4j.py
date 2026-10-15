@@ -36,6 +36,12 @@ import urllib3
 
 from actor_name_hygiene import clean_actor_names
 from attack_revoked import load_revoked_ids
+from canonical_threat_actors import (
+    CanonicalReference,
+    ReferenceUnavailable,
+    actor_identities,
+    load_canonical_reference,
+)
 
 # Import resilience utilities
 from collectors.collector_utils import TransientServerError
@@ -1276,6 +1282,9 @@ class MISPToNeo4jSync:
             # Items no merge path accepts (unknown type, indicator without a value); reported in
             # the run summary, counted neither as successes nor as errors.
             "items_unroutable": 0,
+            # 2026-10: OTX pulses naming several actors, whose malware was therefore not attributed
+            # to them (``_build_cross_item_relationships``).
+            "reports_with_several_actors": 0,
             "errors": 0,
             "start_time": None,
             "end_time": None,
@@ -1286,6 +1295,25 @@ class MISPToNeo4jSync:
         self._consecutive_conn_failures: int = 0
         # Incremental window for the per-attribute filter (``_attribute_filter_since``); set by ``run()``.
         self._attr_since: Optional[datetime] = None
+        # The canonical threat-actor reference, loaded on first use (``_report_actor_reference``).
+        self._actor_reference: Optional[CanonicalReference] = None
+        self._actor_reference_loaded = False
+
+    def _report_actor_reference(self) -> Optional[CanonicalReference]:
+        """The canonical threat-actor reference that tells how many actors a report names, or
+        ``None`` when it is unavailable (logged once): the actors are then told apart by name, so the
+        aliases of one actor count as several and their report attributes nothing."""
+        if not getattr(self, "_actor_reference_loaded", False):
+            self._actor_reference_loaded = True
+            self._actor_reference = None
+            try:
+                self._actor_reference = load_canonical_reference()
+            except ReferenceUnavailable as exc:
+                logger.warning(
+                    "[ATTRIBUTION] canonical reference unavailable (%s): a report's actors are told apart by name",
+                    exc,
+                )
+        return getattr(self, "_actor_reference", None)
 
     def health_check_misp(self) -> Dict[str, Any]:
         """
@@ -2808,7 +2836,10 @@ class MISPToNeo4jSync:
 
         Relationship kinds produced:
         - Indicator -> INDICATES -> Malware          (same pulse; ``match_type`` ``otx_pulse``, 0.6)
-        - Malware -> ATTRIBUTED_TO -> ThreatActor    (same pulse that names an adversary; ``otx_pulse``, 0.6)
+        - Malware -> ATTRIBUTED_TO -> ThreatActor    (same pulse, when the actors it names are one actor;
+          ``otx_pulse``, 0.6). A pulse that names several actors does not say which malware is whose
+          (2026-10): its malware is attributed to none of them. The aliases of one actor count as one
+          (``canonical_threat_actors.actor_identities``).
         - Indicator -> TARGETS -> Sector, Vulnerability -> AFFECTS -> Sector
           (from each item's own ``zone``; unchanged)
 
@@ -2907,7 +2938,20 @@ class MISPToNeo4jSync:
                     )
 
             # Malware -> ThreatActor (ATTRIBUTED_TO): the pulse names an adversary for
-            # these malware families.
+            # these malware families. Only when the actors it names are one actor (2026-10): a pulse
+            # naming several does not say which family is whose (on the hosted graph of 2026-10-15,
+            # 515 of 3,727 such links came from 29 pulses naming 2 to 7 actors). Judged on every
+            # actor of the pulse, before the cap.
+            report_actors = actor_identities([a.get("name") for a in bucket["actors"]], self._report_actor_reference())
+            if len(report_actors) > 1:
+                self.stats["reports_with_several_actors"] += 1
+                logger.info(
+                    "[ATTRIBUTION] report %s names %d actors (%s): its malware is attributed to none of them",
+                    report_id,
+                    len(report_actors),
+                    ", ".join(sorted(report_actors)[:8]),
+                )
+                actors = []
             for malware in malware_items:
                 for actor in actors:
                     relationships.append(
@@ -5315,6 +5359,13 @@ class MISPToNeo4jSync:
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
             logger.info(f"Relationships created: {self.stats['relationships_created']}")
+            several_actors = int(self.stats.get("reports_with_several_actors", 0) or 0)
+            if several_actors:
+                logger.info(
+                    "Reports naming several actors, whose malware was attributed to none of them: %d "
+                    "(grep '[ATTRIBUTION]')",
+                    several_actors,
+                )
             curated_attached = int(self.stats.get("curated_claims_attached", 0) or 0)
             curated_unattached = int(self.stats.get("curated_claims_unattached", 0) or 0)
             if curated_attached or curated_unattached:
