@@ -144,6 +144,23 @@ def attribution_reports_cypher(rel: str) -> str:
     )
 
 
+# 2026-10: the acceptance check ``attribution_from_single_actor_reports`` (scripts/verify_fresh_baseline.py;
+# run on a real Neo4j by tests/test_attribution_single_actor_reports_neo4j.py). Of the same-pulse
+# attributions: how many rest only on pulses naming several actors (``$several``) with no other feed
+# (``$feeds`` are the OTX feed names), how many name such a pulse in their provenance, and how many
+# name no pulse. Reads ``$otx_ref_prefix`` (``attribution_reports_cypher``).
+ATTRIBUTION_CHECK_QUERY = (
+    "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
+    "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true "
+    "WITH r, " + attribution_reports_cypher("r") + " AS reports "
+    "RETURN count(r) AS links, "
+    "sum(CASE WHEN size(reports) > 0 AND all(p IN reports WHERE p IN $several) "
+    "AND all(s IN coalesce(r.sources, []) WHERE s IN $feeds) THEN 1 ELSE 0 END) AS resting_on_several_actor_reports, "
+    "sum(CASE WHEN any(p IN reports WHERE p IN $several) THEN 1 ELSE 0 END) AS naming_several_actor_reports, "
+    "sum(CASE WHEN size(reports) = 0 THEN 1 ELSE 0 END) AS without_reports"
+)
+
+
 def _require(condition: bool, reason: str) -> None:
     if not condition:
         raise ReferenceUnavailable(reason)

@@ -64,11 +64,11 @@ if str(_SRC) not in sys.path:
 # Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b.
 from attack_revoked import load_revoked_ids  # noqa: E402
 from canonical_threat_actors import (  # noqa: E402
+    ATTRIBUTION_CHECK_QUERY,
     OTX_REPORT_REF_PREFIX,
     REPORT_ACTORS_QUERY,
     REPORT_ATTRIBUTION_FEEDS,
     ReferenceUnavailable,
-    attribution_reports_cypher,
     load_canonical_reference,
     reports_naming_several_actors,
 )
@@ -712,14 +712,7 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     report_actors = _one(REPORT_ACTORS_QUERY)
     several = reports_naming_several_actors(report_actors.get("reports") or [], actor_reference)
     r = _one(
-        "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
-        "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true "
-        "WITH r, " + attribution_reports_cypher("r") + " AS reports "
-        "RETURN count(r) AS links, "
-        "sum(CASE WHEN size(reports) > 0 AND all(p IN reports WHERE p IN $several) "
-        "AND all(s IN coalesce(r.sources, []) WHERE s IN $feeds) THEN 1 ELSE 0 END) AS resting_on_several_actor_reports, "
-        "sum(CASE WHEN any(p IN reports WHERE p IN $several) THEN 1 ELSE 0 END) AS naming_several_actor_reports, "
-        "sum(CASE WHEN size(reports) = 0 THEN 1 ELSE 0 END) AS without_reports",
+        ATTRIBUTION_CHECK_QUERY,
         {"several": several, "otx_ref_prefix": OTX_REPORT_REF_PREFIX, "feeds": list(REPORT_ATTRIBUTION_FEEDS)},
     )
     r["reports_naming_several_actors"] = len(several)

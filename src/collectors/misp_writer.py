@@ -234,6 +234,9 @@ def _deprecated_tags(item: Dict[str, Any]) -> List[str]:
 # all N ids in `rids`; the earlier 32 cut every link beyond the 33rd pulse (Mirai, Cobalt Strike,
 # AgentTesla appear in hundreds). MISP `comment` is TEXT (64 KB); 500 × ~27 chars ≈ 13 KB.
 _MAX_REPORT_IDS = 500
+# 2026-10: an OTX_META ``pa`` entry, "family::adversary::pulse" (family and adversary up to 128
+# characters each, the pulse id up to 64).
+_MAX_PAIR_CHARS = 128 + 2 + 128 + 2 + 64
 
 
 # Bugbot on PR #144 (High): the OTX_META / TF_META comments were hard-sliced at 4000 characters, so a
@@ -1665,11 +1668,17 @@ class MISPWriter:
                 "indicator_role": indicator.get("indicator_role", ""),
                 "is_active": indicator.get("is_active", True),
                 # 2026-10 (regular-update linking): families named by the pulse(s) that listed this IOC and
-                # the "family::adversary" pairs of the SAME pulse (Q9b / Q2d link from the indicator side;
-                # the family attribute itself is a cross-event duplicate and is never re-pushed). Pruned
-                # below when empty. Kept last: test_pr_n13 pins the key order inside a fixed window.
+                # the "family::adversary::pulse" pairs of the SAME pulse (Q9b / Q2d link from the indicator
+                # side; the family attribute itself is a cross-event duplicate and is never re-pushed).
+                # Pruned below when empty. Kept last: test_pr_n13 pins the key order inside a fixed window.
+                # A pair longer than _MAX_PAIR_CHARS is left out, never cut: a cut pair would name
+                # another actor or another pulse.
                 "mf": [str(x)[:128] for x in (indicator.get("pulse_malware_families") or []) if x][:20],
-                "pa": [str(x)[:260] for x in (indicator.get("pulse_malware_actor_pairs") or []) if x][:50],
+                "pa": [
+                    str(x)
+                    for x in (indicator.get("pulse_malware_actor_pairs") or [])
+                    if x and len(str(x)) <= _MAX_PAIR_CHARS
+                ][:50],
                 # 2026-10: the pulses that listed this IOC whose adversaries are several actors (the
                 # sync attributes no malware from them; never shrunk away, it is a few short ids).
                 "sap": [str(x)[:64] for x in (indicator.get("several_actor_pulses") or []) if x][:_MAX_REPORT_IDS],

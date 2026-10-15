@@ -344,17 +344,45 @@ class TestBuildSteps:
             rp.prov_set("r"),
             rp.inherited_prov_set("r", ["_ind", "_at"]),
             rp.aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at"),
+            rp.inherited_prov_set("r", ["_at"], replace=True),
+            rp.aggregated_prov_set("r", "(i)-[_xi:INDICATES]->(:Malware)", ["_xi"], replace=True),
         ):
             assert "'" not in fragment
+
+    def test_replace_assigns_the_source_links_provenance(self):
+        # 2026-10: a derived link follows the removal and trimming of the links it rests on.
+        added = rp.inherited_prov_set("r", ["_at"])
+        assert "r.source_refs = apoc.coll.toSet(coalesce(r.source_refs, []) + coalesce(_at.source_refs, []))" in added
+        replaced = rp.inherited_prov_set("r", ["_at"], replace=True)
+        assert "r.source_refs = apoc.coll.toSet(coalesce(_at.source_refs, []))" in replaced
+        assert "coalesce(r." not in replaced
+        pattern = "(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor)"
+        agg = rp.aggregated_prov_set("r", pattern, ["_xi", "_xa"], max_events=7, replace=True)
+        assert (
+            "r.source_refs = apoc.coll.toSet(reduce(_acc = [], _x IN "
+            f"[{pattern} | coalesce(_xi.source_refs, []) + coalesce(_xa.source_refs, [])] | _acc + _x))"
+        ) in agg
+        assert agg.endswith("[0..7]") and "coalesce(r." not in agg
+        # the default keeps the accumulating form, byte for byte
+        assert rp.aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at") == (
+            "r_runs.sources = apoc.coll.toSet(coalesce(r_runs.sources, []) + reduce(_acc = [], _x IN "
+            "[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.sources, [])] | _acc + _x)), "
+            "r_runs.source_refs = apoc.coll.toSet(coalesce(r_runs.source_refs, []) + reduce(_acc = [], _x IN "
+            "[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.source_refs, [])] | _acc + _x)), "
+            "r_runs.misp_event_ids = apoc.coll.toSet(coalesce(r_runs.misp_event_ids, []) + reduce(_acc = [], _x IN "
+            f"[(a)<-[_at:ATTRIBUTED_TO]-(:Malware) | coalesce(_at.misp_event_ids, [])] | _acc + _x))[0..{rp.MAX_EVENT_IDS_PER_EDGE}]"
+        )
 
 
 # --------------------------------------------------------------------------- enrichment
 class TestEnrichment:
     def test_campaign_and_bridge_links_inherit_provenance(self):
         src = Path(enrichment_jobs.__file__).read_text()
-        assert 'aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at")' in src
-        assert 'inherited_prov_set("r", ["_at"])' in src
-        assert 'inherited_prov_set("r", ["_ind", "_at"])' in src
+        # 2026-10: replaced on every run, so campaign links name no evidence step 2d removed or trimmed.
+        assert 'aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)' in src
+        assert 'inherited_prov_set("r", ["_at"], replace=True)' in src
+        assert '"(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})",' in src
+        assert '["_xi", "_xa"],' in src
         assert 'prov_with("v", node_feeds("v"))' in src
 
     def test_campaign_links_state_their_evidence(self):

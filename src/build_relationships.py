@@ -892,9 +892,12 @@ def build_relationships():
             f'WHERE fname <> "" AND aname <> "" AND NOT fname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} '
             f"AND NOT aname IN {_PLACEHOLDER_NAMES_CYPHER_LIST} "
             "AND (pid IS NULL OR NOT pid IN $several_actor_reports) "
-            # The adversary as named, or its canonical actor (a name the alias merge folded away).
+            # The adversary as named or, when the alias merge has folded that name away, its
+            # canonical actor: one node, so a pair is judged by the pulses of the node it links.
             "MATCH (m:Malware {name: fname}) "
-            "MATCH (a:ThreatActor) WHERE a.name IN [aname, coalesce($canonical_actor_names[aname], aname)] "
+            "OPTIONAL MATCH (_named:ThreatActor {name: aname}) "
+            "OPTIONAL MATCH (_canonical:ThreatActor {name: coalesce($canonical_actor_names[aname], aname)}) "
+            "WITH m, pid, coalesce(_named, _canonical) AS a WHERE a IS NOT NULL "
             # A pair without a pulse: the pulses naming both ends; not only pulses naming several actors.
             "WITH m, a, pid, [p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared "
             "WHERE pid IS NOT NULL OR size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) "
@@ -933,9 +936,10 @@ def build_relationships():
                 params=attribution_params,
             )
             # Never without the reference: it must not remove a link because the aliases of one actor
-            # count as several.
-            if several_actor_reports and actor_reference is not None:
-                step_2d_ok = _remove_several_actor_attributions(client, stats, attribution_params) and step_2d_ok
+            # count as several. Never after a failed link statement either: a pair in a failed batch
+            # could have given the link a pulse naming one actor (the next run repeats both).
+            if step_2d_ok and several_actor_reports and actor_reference is not None:
+                step_2d_ok = _remove_several_actor_attributions(client, stats, attribution_params)
             query_pause()
         if not step_2d_ok:
             failures += 1

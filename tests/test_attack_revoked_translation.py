@@ -183,9 +183,20 @@ class TestBuildRelationships:
         parent_step = [(q, p) for q, p in technique_steps if "SUBTECHNIQUE_OF" in q]
         assert len(parent_step) == 1 and parent_step[0][1] is None, "step 1b takes no map"
         assert all(p == {"iterate_params": expected} for q, p in technique_steps if "SUBTECHNIQUE_OF" not in q)
-        # Other steps take no map; step 2d takes the pulses naming several actors (2026-10).
-        others = [p for q, p in iterate if ":Technique {mitre_id:" not in q]
-        assert all(p is None or "revoked" not in p["iterate_params"] for p in others), "other steps take no map"
+        # Other steps take no map, except step 2d, which takes the attribution parameters (2026-10).
+        from build_rel_queries import assigned_query
+
+        import build_relationships
+
+        step_2d = [assigned_query(n) for n in ("_q2d_outer", "_q2d_remove_outer", "_q2d_trim_outer")]
+        attribution_keys = set(build_relationships._attribution_params([], None))
+        others = [(q, p) for q, p in iterate if ":Technique {mitre_id:" not in q]
+        assert any(any(o in q for o in step_2d) for q, _p in others), "step 2d ran"
+        for q, p in others:
+            if any(o in q for o in step_2d):
+                assert set(p["iterate_params"]) == attribution_keys, "step 2d: the attribution parameters"
+            else:
+                assert p is None, "other steps take no map"
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
 

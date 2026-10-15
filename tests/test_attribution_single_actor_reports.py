@@ -14,7 +14,7 @@ actor counted as one (canonical threat-actor reference), is applied by:
 * ``build_relationships`` step 2d: it links the pairs carried on indicators only when a pulse naming
   one actor supports them, removes the links an earlier run made from pulses naming several actors,
   and drops such pulses from the provenance of the others;
-* the acceptance script (``tests/test_verify_fresh_baseline.py``).
+* the acceptance script ``scripts/verify_fresh_baseline.py`` (its tests: ``tests/test_verify_fresh_baseline.py``).
 
 The statements on a real Neo4j: ``tests/test_attribution_single_actor_reports_neo4j.py``.
 """
@@ -41,6 +41,7 @@ import json  # noqa: E402
 
 import test_pulse_scoped_linking as _pulse_scoped  # noqa: E402  (its collector harness)
 from build_rel_queries import assigned_query  # noqa: E402
+from test_fresh_baseline_provenance import _bare_syncer  # noqa: E402
 
 import build_relationships  # noqa: E402
 import canonical_threat_actors as cta  # noqa: E402
@@ -205,6 +206,20 @@ class TestMispRoundTrip:
             item, _ = syncer.parse_attribute({**attr, "uuid": "20000000-0000-0000-0000-00000000abcd"}, _EVENT)
             assert item["several_actor_pulses"] == ["p-two"], attr["type"]
 
+    def test_a_pair_too_long_for_its_pulse_id_is_left_out_not_cut(self):
+        pair = "Emotet::" + "x" * 320 + "::6a4fdf500b5e6dffde939998"
+        ok = "Emotet::TA542::6a4fdf500b5e6dffde939998"
+        attr = _writer().create_attribute(
+            {
+                **_OTX,
+                "indicator_type": "ipv4",
+                "value": "203.0.113.5",
+                "pulse_id": "p1",
+                "pulse_malware_actor_pairs": [pair, ok],
+            }
+        )
+        assert _meta(attr["comment"], "OTX_META:")["pa"] == [ok], "a cut pair would name another actor or pulse"
+
     def test_no_mark_no_key(self):
         writer = _writer()
         indicator = writer.create_attribute(
@@ -273,6 +288,31 @@ class TestTheSync:
         assert len(_rels(syncer, other_pulse)["ATTRIBUTED_TO"]) == 1, "the mark is per pulse"
         assert syncer.stats["reports_with_several_actors"] == 2
 
+    @pytest.mark.parametrize("path", ["_process_event_attributes", "_process_large_event_paged"])
+    def test_both_event_paths_keep_the_mark(self, monkeypatch, path):
+        # An event with more changed attributes than _ATTR_PAGE_SIZE is synced page by page, and
+        # its report-scoped links are built from slim copies of the items.
+        monkeypatch.setattr(MISPToNeo4jSync, "_ATTR_PAGE_SIZE", 2)
+        items = _items("p-two", ["Turla"], ["Kazuar"])
+        attrs = [{"uuid": f"u{n}"} for n in range(len(items))]
+
+        def attributions(marked):
+            parsed = {
+                a["uuid"]: dict(i, several_actor_pulses=["p-two"] if marked else [])
+                for a, i in zip(attrs, items, strict=True)
+            }
+            syncer = _bare_syncer()
+            syncer.stats["reports_with_several_actors"] = 0
+            syncer.parse_attribute = lambda attr, event: (dict(parsed[attr["uuid"]], misp_event_id="99"), [])
+            rows: list = []
+            syncer._create_relationships = lambda rels, source_id: (rows.extend(rels), len(rels))[1]
+            syncer._write_cross_item_relationships = lambda rels: (rows.extend(rels), len(rels))[1]
+            getattr(syncer, path)("99", {"Event": {"id": "99"}}, attrs)
+            return [r for r in rows if r["rel_type"] == "ATTRIBUTED_TO"]
+
+        assert len(attributions(marked=False)) == 1, "unmarked: one actor in the event"
+        assert attributions(marked=True) == [], "the collector's mark survives the path"
+
     def test_one_actor_and_the_aliases_of_one_actor_attribute(self):
         syncer = MISPToNeo4jSync(neo4j_client=MagicMock())
         one = _rels(syncer, _items("p-one", ["TA542"], ["Emotet"]))
@@ -339,7 +379,8 @@ def _run_build(
                     return []  # ``Neo4jClient.run`` on a terminal error
                 return [{"reports": [dict(r) for r in report_rows], "pulses": 1530}]
             if "apoc.periodic.iterate" in query:
-                if failing and assigned_query(failing) in query:
+                names = (failing,) if isinstance(failing, str) else (failing or ())
+                if any(assigned_query(n) in query for n in names):
                     return [dict(_APOC_ROW, errorMessages={"neo4j down": 1}, failedBatches=1)]
                 return [dict(_APOC_ROW)]
             return [{"c": 0, "count": 0}]
@@ -411,9 +452,16 @@ class TestStep2d:
         assert ok is False
         assert _step(iterate, "_q2d_remove_outer") is not None and _step(iterate, "_q2d_trim_outer") is None
 
-    def test_step_2d_counts_once_in_the_summary(self, monkeypatch, caplog):
+    def test_a_failed_link_statement_is_not_followed_by_the_removal(self, monkeypatch):
+        # A pair in a failed batch could have given a link a pulse naming one actor.
+        ok, iterate = _run_build(monkeypatch, failing="_q2d_outer")
+        assert ok is False
+        assert _step(iterate, "_q2d_remove_outer") is None and _step(iterate, "_q2d_trim_outer") is None
+
+    @pytest.mark.parametrize("failing", ["_q2d_trim_outer", ("_q2d_remove_outer", "_q2d_trim_outer")])
+    def test_step_2d_counts_once_in_the_summary(self, monkeypatch, caplog, failing):
         with caplog.at_level("INFO", logger="build_relationships"):
-            ok, _iterate = _run_build(monkeypatch, failing="_q2d_trim_outer")
+            ok, _iterate = _run_build(monkeypatch, failing=failing)
         assert ok is False
         assert "failures=1/20" in caplog.text
 
@@ -423,7 +471,10 @@ class TestStep2d:
             'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) IN [2, 3] ',
             'CASE WHEN size(parts) = 3 AND trim(parts[2]) <> "" THEN trim(parts[2]) END AS pid ',
             "AND (pid IS NULL OR NOT pid IN $several_actor_reports) ",
-            "MATCH (a:ThreatActor) WHERE a.name IN [aname, coalesce($canonical_actor_names[aname], aname)] ",
+            "OPTIONAL MATCH (_named:ThreatActor {name: aname}) ",
+            "OPTIONAL MATCH (_canonical:ThreatActor {name: coalesce($canonical_actor_names[aname], aname)}) ",
+            # one node: a pair is judged by the pulses of the node it links
+            "WITH m, pid, coalesce(_named, _canonical) AS a WHERE a IS NOT NULL ",
             "[p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared ",
             "WHERE pid IS NOT NULL OR size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) ",
             "CASE WHEN pid IS NOT NULL THEN [$otx_ref_prefix + pid] ",

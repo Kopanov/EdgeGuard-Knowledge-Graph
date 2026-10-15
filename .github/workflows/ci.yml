@@ -81,11 +81,12 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-  # ── Real Neo4j: the actor alias merge and the explainability writes ───────
+  # ── Real Neo4j: statements whose semantics mocks cannot show ─────────────
   # Mocked sessions cannot show what APOC's mergeNodes does to property types (its "combine" stores
-  # equal values as one string), nor run the Cypher that records r.cited_ids. This job runs both on
-  # a throwaway Neo4j with APOC, from the image docker-compose.yml deploys. The password exists only
-  # inside this job's container.
+  # equal values as one string), nor run the Cypher that records r.cited_ids, the EPSS / SSVC writes
+  # or the attribution cleanup of build_relationships step 2d. This job runs them on a throwaway
+  # Neo4j with APOC, from the image docker-compose.yml deploys. The password exists only inside this
+  # job's container.
   neo4j-integration:
     name: Neo4j integration
     runs-on: ubuntu-latest

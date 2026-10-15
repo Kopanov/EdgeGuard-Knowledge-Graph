@@ -10,8 +10,9 @@ collector since 2026-10, which writes them only for a pulse naming one actor; ``
 the nodes do not record, naming Turla as Venomous Bear, a name the actor alias merge folds into Turla)
 and ``family::adversary`` (written before). Step 2d runs as production runs it (its statements, through
 ``_safe_run_batched``, with the pulses ``_reports_naming_several_actors`` reads, the committed reference
-and ``_attribution_params``), twice. The campaign builder then drops the malware membership whose
-attribution is gone.
+and ``_attribution_params``), twice; the acceptance check runs before and after. The campaign builder
+then drops the malware membership whose attribution is gone, and its links name only the evidence
+that remains.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``,
 writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -52,6 +53,7 @@ CREATE (lb:Malware:{LABEL} {{name: 'lockbit', uuid: 'u-lb', pulse_ids: ['p2']}})
 CREATE (gent:Malware:{LABEL} {{name: 'gentlemen', uuid: 'u-gent', pulse_ids: ['p3']}})
 CREATE (norefs:Malware:{LABEL} {{name: 'norefs', uuid: 'u-norefs'}})
 CREATE (partner:Malware:{LABEL} {{name: 'partner tool', uuid: 'u-partner'}})
+CREATE (carbon:Malware:{LABEL} {{name: 'carbon', uuid: 'u-carbon', pulse_ids: ['p1', 'p2']}})
 CREATE (turla)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p1', 'alienvault_otx:p2']}}]->(otx)
 CREATE (kaz)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p1', 'alienvault_otx:p2']}}]->(otx)
 CREATE (gam)-[:SOURCED_FROM {{source_refs: ['alienvault_otx:p2']}}]->(otx)
@@ -66,6 +68,7 @@ CREATE (gent)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: [
 CREATE (gent)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: ['alienvault_otx:p3']}}]->(st)
 CREATE (norefs)-[:ATTRIBUTED_TO {OTX}, sources: ['alienvault_otx'], source_refs: []}}]->(gam)
 CREATE (partner)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', source_refs: ['alienvault_otx:p2']}}]->(gam)
+CREATE (carbon)-[:ATTRIBUTED_TO {OTX}, sources: ['otx_pulse'], report_ids: ['p1', 'p2']}}]->(turla)
 CREATE (i1:Indicator:{LABEL} {{indicator_type: 'domain', value: 'one.it.example', uuid: 'u-i1', active: true,
         pulse_malware_actor_pairs: ['kazuar::turla::p1']}})
 CREATE (i2:Indicator:{LABEL} {{indicator_type: 'domain', value: 'two.it.example', uuid: 'u-i2', active: true,
@@ -127,6 +130,30 @@ def _attributions(driver) -> dict:
         }
 
 
+def _acceptance(driver, several) -> dict:
+    """The acceptance check ``attribution_from_single_actor_reports``, as the script runs it."""
+    with driver.session() as session:
+        row = session.run(
+            canonical_threat_actors.ATTRIBUTION_CHECK_QUERY,
+            several=several,
+            otx_ref_prefix=canonical_threat_actors.OTX_REPORT_REF_PREFIX,
+            feeds=list(canonical_threat_actors.REPORT_ATTRIBUTION_FEEDS),
+        ).single()
+        return dict(row)
+
+
+def _campaign_refs(driver) -> dict:
+    """``source_refs`` of the campaign links of Turla's campaign."""
+    with driver.session() as session:
+        return {
+            (r["n"], r["t"]): sorted(r["refs"] or [])
+            for r in session.run(
+                "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'turla'}) "
+                "RETURN coalesce(n.name, n.value) AS n, type(r) AS t, r.source_refs AS refs"
+            )
+        }
+
+
 def _campaign_malware(client, driver) -> set:
     enrichment_jobs.build_campaign_nodes(client)
     with driver.session() as session:
@@ -142,9 +169,20 @@ def _campaign_malware(client, driver) -> set:
 def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(client, raw_driver):
     before = _campaign_malware(client, raw_driver)
     assert ("pterolnk", "turla") in before and ("kazuar", "gamaredon group") in before
+    assert "alienvault_otx:p2" in _campaign_refs(raw_driver)[("turla", "RUNS")]
+    # The acceptance check, by hand from the fixture: nine same-pulse links (the partner's is not
+    # EdgeGuard's); three rest only on p2 (kazuar and pterolnk to gamaredon, pterolnk to turla),
+    # six name p2, norefs names no pulse.
+    assert _acceptance(raw_driver, ["p2"]) == {
+        "links": 9,
+        "resting_on_several_actor_reports": 3,
+        "naming_several_actor_reports": 6,
+        "without_reports": 1,
+    }
 
     first = _step_2d(client)
     assert first["several"] == ["p2"], "p3 names two names of one actor"
+    assert (first["removed"], first["trimmed"]) == (3, 3)
     links = _attributions(raw_driver)
     # p2 names two groups: its attributions go, in both provenance forms ...
     for gone in (("kazuar", "gamaredon group"), ("pterolnk", "gamaredon group"), ("pterolnk", "turla")):
@@ -154,6 +192,8 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     # A pair with its pulse: linked to the canonical actor, the pair's pulse as provenance.
     assert links[("lockbit", "turla")] == (["alienvault_otx:p5"], None)
     assert not any(a == "venomous bear" for _m, a in links)
+    # The older provenance form is trimmed too.
+    assert links[("carbon", "turla")] == (None, ["p1"])
     # Kept: another feed asserts it (p2 dropped from its provenance), two names of one actor, no
     # pulse recorded, a partner's link.
     assert links[("lockbit", "gamaredon group")] == (["threatfox:1"], None)
@@ -163,12 +203,24 @@ def test_step_2d_links_removes_and_trims_by_the_pulses_naming_several_actors(cli
     assert links[("partner tool", "gamaredon group")] == (["alienvault_otx:p2"], None)
 
     second = _step_2d(client)
-    # Nothing to remove the second time: neither the pairs written before (their pulses all name
-    # several actors) nor the pair carrying p2 links again.
+    # Nothing to remove the second time: the pairs written before whose recorded pulses all name
+    # several actors are not linked again, and the pair carrying p2 is skipped.
     assert (second["removed"], second["trimmed"]) == (0, 0), "a second run changes nothing"
     assert _attributions(raw_driver) == links, "the pairs on the indicators bring nothing back"
+    assert _acceptance(raw_driver, ["p2"]) == {
+        "links": 7,
+        "resting_on_several_actor_reports": 0,
+        "naming_several_actor_reports": 0,
+        "without_reports": 2,
+    }, "lockbit to gamaredon now rests on ThreatFox alone; norefs names no pulse"
 
     # Campaign membership follows: malware no longer attributed to an actor leaves its campaign.
     after = _campaign_malware(client, raw_driver)
     assert ("pterolnk", "turla") not in after and ("kazuar", "gamaredon group") not in after
     assert ("kazuar", "turla") in after and ("lockbit", "gamaredon group") in after and ("lockbit", "turla") in after
+    assert ("carbon", "turla") in after
+    # ... and the campaign links name only the evidence that remains (replaced, not added to).
+    refs = _campaign_refs(raw_driver)
+    assert refs[("turla", "RUNS")] == ["alienvault_otx:p1", "alienvault_otx:p5"]
+    assert refs[("kazuar", "PART_OF_CAMPAIGN")] == ["alienvault_otx:p1"]
+    assert refs[("one.it.example", "PART_OF_CAMPAIGN")] == ["alienvault_otx:p1"]

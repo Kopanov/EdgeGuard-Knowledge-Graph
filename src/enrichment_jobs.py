@@ -447,8 +447,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
                 // 2026-10 (relationship provenance): the campaign is built from the
                 // actor's ATTRIBUTED_TO links, so RUNS carries their feeds, record ids
-                // and MISP events.
-                {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at")}
+                // and MISP events: those of the current links (replaced, not added to, so
+                // RUNS names no pulse build_relationships step 2d removed or trimmed).
+                {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)}
             RETURN count(DISTINCT c) AS campaigns
             """
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
@@ -492,8 +493,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 r.edgeguard_managed = true,
                 // 2026-10 (explainability): the kind of evidence, and the ATTRIBUTED_TO link's confidence.
                 {_campaign_evidence("r", "_at.confidence_score")},
-                // 2026-10 (relationship provenance): inherited from the ATTRIBUTED_TO link.
-                {inherited_prov_set("r", ["_at"])}
+                // 2026-10 (relationship provenance): that of the ATTRIBUTED_TO link it rests on
+                // (replaced, not added to: it follows the link's trimming).
+                {inherited_prov_set("r", ["_at"], replace=True)}
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
@@ -591,10 +593,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             RETURN batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
                    batch, operations, updateStatistics
             """.replace(
-                # 2026-10 (relationship provenance): inherited from the INDICATES and
-                # ATTRIBUTED_TO links of the path that put the indicator in the campaign.
+                # 2026-10 (relationship provenance): that of the INDICATES and ATTRIBUTED_TO links
+                # of every path from the indicator to the campaign's actor, replaced on each run
+                # (one row per path, so a per-row value would keep only the last path's).
                 "__INHERITED_PROV__",
-                inherited_prov_set("r", ["_ind", "_at"]),
+                aggregated_prov_set(
+                    "r",
+                    "(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})",
+                    ["_xi", "_xa"],
+                    replace=True,
+                ),
             ).replace(
                 # 2026-10 (explainability): the indicator's best path to the campaign's actor, each
                 # path as strong as its weaker link; over every path, so the row order does not matter.

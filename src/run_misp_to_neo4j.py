@@ -4806,6 +4806,9 @@ class MISPToNeo4jSync:
             "report_ids",
             "source_refs",
             "misp_event_id",
+            # 2026-10: a pulse naming several actors attributes nothing; the OTX collector's mark
+            # is the only record of it once MISP has dropped some of the pulse's actors.
+            "several_actor_pulses",
         )
         total_attrs = len(all_attributes)
         num_pages = (total_attrs + page_size - 1) // page_size

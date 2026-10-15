@@ -277,7 +277,8 @@ class TestPulseScopedSteps:
             "no family × adversary cross product (Bugbot on #145)"
         )
         assert "MATCH (m:Malware {name: fname}) " in body
-        assert "MATCH (a:ThreatActor) WHERE a.name IN [aname, coalesce($canonical_actor_names[aname], aname)]" in body
+        assert "OPTIONAL MATCH (_named:ThreatActor {name: aname}) " in body
+        assert "WITH m, pid, coalesce(_named, _canonical) AS a WHERE a IS NOT NULL " in body
         assert "MERGE (m)-[r:ATTRIBUTED_TO]->(a)" in body
         assert 'ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse"' in body
         assert "'" not in body and "aliases" not in body

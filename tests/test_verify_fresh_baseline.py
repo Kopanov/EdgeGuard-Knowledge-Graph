@@ -1050,6 +1050,8 @@ class TestAttributionFromSingleActorReports:
             return rows
 
         _run(vfb, monkeypatch, override=capture)
+        # The statement is shared with the Neo4j integration module, which runs it on a real graph.
+        assert seen["attribution"] == canonical_threat_actors.ATTRIBUTION_CHECK_QUERY
         assert canonical_threat_actors.attribution_reports_cypher("r") in seen["attribution"]
         assert "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true" in seen["attribution"]
         assert "all(s IN coalesce(r.sources, []) WHERE s IN $feeds)" in seen["attribution"]
