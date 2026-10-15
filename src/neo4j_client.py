@@ -19,7 +19,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Add src to path if needed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -467,14 +467,79 @@ class RelationshipBatchResult(int):
     number of rows dropped by batches that failed permanently (non-retryable Neo4j error
     or retries exhausted), so callers can account for the loss instead of treating the
     attempted row count as the written count.
+
+    2026-10 (curated packages): the curated templates MATCH both ends, so a claim whose
+    subject or object is not in the graph writes nothing. ``curated_sent`` counts the curated
+    rows of the batches that ran, ``curated_matched`` those that found both ends (the
+    templates' ``count(r)``), and only the matched ones count in the ``int`` value.
+    ``curated_missing`` is a bounded sample of the ends that were not found, as
+    ``"<Label> '<name or id>'"``.
     """
 
     failed: int
+    curated_sent: int
+    curated_matched: int
+    curated_missing: Tuple[str, ...]
 
-    def __new__(cls, written: int, failed: int = 0) -> "RelationshipBatchResult":
+    def __new__(
+        cls,
+        written: int,
+        failed: int = 0,
+        curated_sent: int = 0,
+        curated_matched: int = 0,
+        curated_missing: Sequence[str] = (),
+    ) -> "RelationshipBatchResult":
         obj = super().__new__(cls, int(written))
         obj.failed = int(failed)
+        obj.curated_sent = int(curated_sent)
+        obj.curated_matched = int(curated_matched)
+        obj.curated_missing = tuple(curated_missing)
         return obj
+
+
+# 2026-10 (curated packages): how many names of missing ends one batch reports.
+CURATED_MISSING_SAMPLE = 20
+
+
+def _curated_matched_count(result: Any, sent: int) -> int:
+    """The ``count(r) AS matched`` a curated template returns, at most ``sent`` (2026-10).
+
+    A driver result always carries it; a result without one (a test double) keeps the earlier
+    reading, every row sent counts as written.
+    """
+    record = result.single() if hasattr(result, "single") else None
+    try:
+        value = record["matched"] if record is not None else None
+    except (KeyError, IndexError, TypeError):
+        value = None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return min(value, sent)
+    return sent
+
+
+# ``(label, key, row field)`` of the subject and the object a curated template MATCHes.
+_CuratedEnds = Tuple[Tuple[str, str, str], Tuple[str, str, str]]
+
+
+def _curated_missing_query(subject: Tuple[str, str, str], obj: Tuple[str, str, str]) -> str:
+    """Read-only Cypher naming the ends a curated template's rows did not find (2026-10).
+
+    ``subject`` / ``obj`` are ``(label, key, row field)`` of the template's two MATCHes. Each
+    returned row has the missing subject and / or object (the other column is null), bounded
+    by ``$limit``.
+    """
+    (s_label, s_key, s_field), (o_label, o_key, o_field) = subject, obj
+    _validate_label(s_label)
+    _validate_label(o_label)
+    return (
+        "UNWIND $rows AS row "
+        f"OPTIONAL MATCH (s:{s_label} {{{s_key}: row.{s_field}}}) "
+        f"OPTIONAL MATCH (o:{o_label} {{{o_key}: row.{o_field}}}) "
+        "WITH row, s, o WHERE s IS NULL OR o IS NULL "
+        f"RETURN CASE WHEN s IS NULL THEN row.{s_field} END AS subject, "
+        f"CASE WHEN o IS NULL THEN row.{o_field} END AS object "
+        "LIMIT $limit"
+    )
 
 
 MAX_RETRIES = 5
@@ -4567,7 +4632,8 @@ class Neo4jClient:
         later group fails. Returns a ``RelationshipBatchResult``: as an ``int`` it is the
         sum of row counts for the groups that were written; its ``failed`` attribute is the
         number of rows belonging to groups that failed permanently (non-retryable error or
-        retries exhausted) and were therefore not written.
+        retries exhausted) and were therefore not written. For the curated templates the sum
+        holds only the rows that found both ends (2026-10, see ``RelationshipBatchResult``).
         """
         if not self.driver or not relationships:
             return RelationshipBatchResult(0)
@@ -4915,6 +4981,11 @@ class Neo4jClient:
         # Rows belonging to groups that failed permanently; surfaced to the caller through
         # ``RelationshipBatchResult.failed`` so the loss is accounted for, not only logged.
         failed = 0
+        # 2026-10 (curated packages): rows sent to / matched by the curated templates, and a
+        # sample of the ends they did not find (``RelationshipBatchResult.curated_*``).
+        curated_sent = 0
+        curated_matched = 0
+        curated_missing: List[str] = []
 
         # Canonical SET clause shared by every batch-relationship template
         # below. Eleven queries used to duplicate the same r.sources /
@@ -5113,13 +5184,15 @@ class Neo4jClient:
         # are rehydrated from MISP tags; matching on them under a curated label would be the
         # forgery vector build_relationships Q2 branch 3 was removed for). Only curated-package
         # rows reach these six templates; their label and confidence are written on creation only
-        # (``_set_clause(curated=True)``).
+        # (``_set_clause(curated=True)``), and each returns ``count(r)``: a claim whose subject or
+        # object is not in the graph matches nothing, and only matched rows count as written.
         q_actor_employs_exact = f"""
         UNWIND $rows AS row
         MATCH (a:ThreatActor {{name: row.actor}})
         MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t)
         {_set_clause("a", "t", curated=True)}
+        RETURN count(r) AS matched
         """
         q_malware_implements_exact = f"""
         UNWIND $rows AS row
@@ -5127,6 +5200,7 @@ class Neo4jClient:
         MATCH (t:Technique {{mitre_id: row.mitre_id}})
         MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t)
         {_set_clause("m", "t", curated=True)}
+        RETURN count(r) AS matched
         """
         q_actor_uses_malware = f"""
         UNWIND $rows AS row
@@ -5134,6 +5208,7 @@ class Neo4jClient:
         MATCH (m:Malware {{name: row.malware}})
         MERGE (a)-[r:USES_MALWARE]->(m)
         {_set_clause("a", "m", curated=True)}
+        RETURN count(r) AS matched
         """
         q_actor_uses_tool = f"""
         UNWIND $rows AS row
@@ -5141,6 +5216,7 @@ class Neo4jClient:
         MATCH (t:Tool {{mitre_id: row.tool}})
         MERGE (a)-[r:USES_TOOL]->(t)
         {_set_clause("a", "t", curated=True)}
+        RETURN count(r) AS matched
         """
         q_actor_exploits = f"""
         UNWIND $rows AS row
@@ -5148,6 +5224,7 @@ class Neo4jClient:
         MATCH (c:CVE {{cve_id: row.cve_id}})
         MERGE (a)-[r:EXPLOITS]->(c)
         {_set_clause("a", "c", curated=True)}
+        RETURN count(r) AS matched
         """
         q_malware_exploits = f"""
         UNWIND $rows AS row
@@ -5155,7 +5232,49 @@ class Neo4jClient:
         MATCH (c:CVE {{cve_id: row.cve_id}})
         MERGE (m)-[r:EXPLOITS]->(c)
         {_set_clause("m", "c", curated=True)}
+        RETURN count(r) AS matched
         """
+
+        # The curated templates by batch label, with the (label, key, row field) of the two ends
+        # each MATCHes: ``_run_rows`` counts their matched rows and names the ends not found.
+        _actor = ("ThreatActor", "name", "subject")
+        _technique = ("Technique", "mitre_id", "mitre_id")
+        _cve = ("CVE", "cve_id", "cve_id")
+        curated_ends: Dict[str, _CuratedEnds] = {
+            "EMPLOYS_TECHNIQUE_curated": (("ThreatActor", "name", "actor"), _technique),
+            "IMPLEMENTS_TECHNIQUE_curated": (("Malware", "name", "entity"), _technique),
+            "USES_MALWARE_curated": (_actor, ("Malware", "name", "malware")),
+            "USES_TOOL_curated": (_actor, ("Tool", "mitre_id", "tool")),
+            "EXPLOITS_actor_cve": (_actor, _cve),
+            "EXPLOITS_malware_cve": (("Malware", "name", "subject"), _cve),
+        }
+
+        def _record_curated(session: Any, label: str, rows: List[Dict], matched: int) -> None:
+            """Count a curated batch; when rows found no link, name the ends that are missing.
+
+            Never raises: the batch is written, and a failed name lookup loses only the sample.
+            """
+            nonlocal curated_sent, curated_matched
+            ends = curated_ends[label]
+            curated_sent += len(rows)
+            curated_matched += matched
+            if matched >= len(rows) or len(curated_missing) >= CURATED_MISSING_SAMPLE:
+                return
+            try:
+                result = session.run(
+                    _curated_missing_query(*ends), rows=rows, limit=CURATED_MISSING_SAMPLE, timeout=_REL_QUERY_TIMEOUT
+                )
+                for record in result:
+                    for (end_label, _key, _field), column in zip(ends, ("subject", "object"), strict=True):
+                        value = record[column]
+                        name = f"{end_label} {str(value)!r}"
+                        if value is not None and name not in curated_missing:
+                            curated_missing.append(name)
+            except Exception as e:
+                logger.warning(
+                    "[CURATED] could not name the missing ends of batch %s: %s: %s", label, type(e).__name__, e
+                )
+            del curated_missing[CURATED_MISSING_SAMPLE:]
 
         def _run_rows(session: Any, label: str, query: str, rows: List[Dict[str, Any]]) -> None:
             nonlocal total, failed
@@ -5181,8 +5300,16 @@ class Neo4jClient:
             last_exc: Optional[BaseException] = None
             for attempt in range(max_retries + 1):
                 try:
-                    session.run(query, rows=rows, timeout=_REL_QUERY_TIMEOUT)
-                    total += len(rows)
+                    result = session.run(query, rows=rows, timeout=_REL_QUERY_TIMEOUT)
+                    if label not in curated_ends:
+                        total += len(rows)
+                        return
+                    # 2026-10 (curated packages): a curated row whose subject or object is not in
+                    # the graph matches nothing, so the template's count(r), not the rows sent,
+                    # is what was written.
+                    matched = _curated_matched_count(result, len(rows))
+                    total += matched
+                    _record_curated(session, label, rows, matched)
                     return
                 except Exception as e:
                     last_exc = e
@@ -5282,10 +5409,10 @@ class Neo4jClient:
                 "Relationship batch: %s of %s rows not written for source %s (permanent batch failures; "
                 "see the [BATCH-PERMANENT-FAILURE] lines above)",
                 failed,
-                total + failed,
+                total + failed + curated_sent - curated_matched,
                 source_id,
             )
-        return RelationshipBatchResult(total, failed)
+        return RelationshipBatchResult(total, failed, curated_sent, curated_matched, curated_missing)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get graph statistics."""

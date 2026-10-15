@@ -50,6 +50,7 @@ from config import (
 from cvss_selection import CVSS_VERSIONS, select_cvss
 from misp_health import MISPHealthCheck
 from neo4j_client import (
+    CURATED_MISSING_SAMPLE,
     Neo4jClient,
     clamp_cvss_score,
     normalize_cve_id_for_graph,
@@ -1179,6 +1180,10 @@ class MISPToNeo4jSync:
             # Relationship rows dropped by permanent Neo4j batch failures
             # (``RelationshipBatchResult.failed``); non-zero fails the run.
             "relationships_failed": 0,
+            # 2026-10 (curated packages): claims that found both ends in the graph, and claims whose
+            # subject or object is not in it (nothing is written for those; see [CURATED]).
+            "curated_claims_attached": 0,
+            "curated_claims_unattached": 0,
             # Items no merge path accepts (unknown type, indicator without a value); reported in
             # the run summary, counted neither as successes nor as errors.
             "items_unroutable": 0,
@@ -4277,6 +4282,8 @@ class MISPToNeo4jSync:
 
         created_count = 0
         failed_rows = 0
+        curated_sent = curated_matched = 0
+        curated_missing: List[str] = []
         total_chunks = (len(relationships) + chunk_sz - 1) // chunk_sz
         for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
@@ -4288,6 +4295,15 @@ class MISPToNeo4jSync:
             chunk_failed = getattr(result, "failed", 0)
             if isinstance(chunk_failed, int) and chunk_failed > 0:
                 failed_rows += chunk_failed
+            # 2026-10 (curated packages): the result counts only the curated claims that found
+            # both ends; the writer reports how many it sent and names some missing ends.
+            chunk_curated = getattr(result, "curated_sent", 0)
+            if isinstance(chunk_curated, int) and chunk_curated > 0:
+                curated_sent += chunk_curated
+                curated_matched += int(getattr(result, "curated_matched", 0) or 0)
+                for name in getattr(result, "curated_missing", ()) or ():
+                    if name not in curated_missing and len(curated_missing) < CURATED_MISSING_SAMPLE:
+                        curated_missing.append(name)
             if total_chunks > 1 and (idx + 1) % 10 == 0:
                 logger.info(
                     "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
@@ -4311,8 +4327,33 @@ class MISPToNeo4jSync:
                 len(relationships),
                 source_id,
             )
+        if curated_sent:
+            self._log_curated_claims(curated_sent, curated_matched, curated_missing)
 
         return created_count
+
+    def _log_curated_claims(self, sent: int, matched: int, missing: List[str]) -> None:
+        """Record and log how many curated claims attached (2026-10).
+
+        A curated claim MATCHes both ends and creates no node, so a claim whose subject or
+        object is not in the graph by its exact name or id writes nothing. Such a claim is
+        not an error (the package may name entities a later baseline lacks); it is counted
+        and logged with a sample of the missing names, never counted as a created link.
+        """
+        unattached = max(0, sent - matched)
+        self.stats["curated_claims_attached"] = int(self.stats.get("curated_claims_attached", 0) or 0) + matched
+        self.stats["curated_claims_unattached"] = int(self.stats.get("curated_claims_unattached", 0) or 0) + unattached
+        if not unattached:
+            logger.info("[CURATED] %d of %d curated claim(s) attached", matched, sent)
+            return
+        logger.warning(
+            "[CURATED] %d of %d curated claim(s) attached; %d did not: subject or object not in the graph "
+            "by exact name or id, nothing written for them. Missing (sample): %s",
+            matched,
+            sent,
+            unattached,
+            ", ".join(missing) or "(names not available)",
+        )
 
     # Attribute page size for streaming large events (prevents OOM on 100K+ attribute events).
     _ATTR_PAGE_SIZE = 5000
@@ -5110,6 +5151,15 @@ class MISPToNeo4jSync:
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
             logger.info(f"Relationships created: {self.stats['relationships_created']}")
+            curated_attached = int(self.stats.get("curated_claims_attached", 0) or 0)
+            curated_unattached = int(self.stats.get("curated_claims_unattached", 0) or 0)
+            if curated_attached or curated_unattached:
+                logger.info(
+                    "Curated package claims: %d attached, %d not attached (subject or object not in the graph; "
+                    "grep '[CURATED]' for the missing names)",
+                    curated_attached,
+                    curated_unattached,
+                )
             relationships_failed = int(self.stats.get("relationships_failed", 0) or 0)
             if relationships_failed:
                 logger.warning(

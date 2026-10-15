@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -28,8 +30,9 @@ if str(_SRC) not in sys.path:
 os.environ.setdefault("NEO4J_PASSWORD", "test-pw-curated-packages")
 os.environ.setdefault("MISP_API_KEY", "test-key-curated-packages")
 
+import neo4j_client  # noqa: E402
 import source_registry  # noqa: E402
-from neo4j_client import Neo4jClient  # noqa: E402
+from neo4j_client import Neo4jClient, RelationshipBatchResult  # noqa: E402
 from relationship_provenance import CURATED_CLAIMS_PREFIX, CURATED_PREDICATES  # noqa: E402
 from run_misp_to_neo4j import MISPToNeo4jSync, _curated_claim_rows, _parse_curated_claims  # noqa: E402
 
@@ -521,3 +524,178 @@ class TestImportScript:
         path.write_text(json.dumps(_package()))
         assert importer.main([str(path)]) == 0
         assert "dry run, nothing written" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- claims that do not attach
+class _GraphSession:
+    """A Neo4j session over a few nodes (``{label: {key value}}``).
+
+    It answers the two queries the curated path depends on the way Neo4j does for exact-key
+    patterns: a curated template's ``count(r)`` (rows whose two MATCHed ends exist) and the
+    missing-ends lookup (the ends that do not). Every other query gets an empty result.
+    """
+
+    _PATTERN = re.compile(r"\(\w+:(\w+) \{(\w+): row\.(\w+)\}\)")
+
+    def __init__(self, nodes):
+        self.nodes = nodes
+        self.queries = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def run(self, query, rows=None, **params):
+        self.queries.append(query)
+        ends = self._PATTERN.findall(query)
+        found = [[row.get(field) in self.nodes.get(label, ()) for label, _key, field in ends] for row in rows or []]
+        if "OPTIONAL MATCH" in query:
+            missing = [
+                {
+                    "subject": None if hits[0] else row[ends[0][2]],
+                    "object": None if hits[1] else row[ends[1][2]],
+                }
+                for row, hits in zip(rows, found, strict=True)
+                if not all(hits)
+            ]
+            return missing[: params["limit"]]
+        result = MagicMock()
+        matched = sum(1 for hits in found if len(hits) == 2 and all(hits))
+        result.single.return_value = {"matched": matched} if "RETURN count(r) AS matched" in query else None
+        return result
+
+
+def _graph_client(nodes):
+    client = Neo4jClient.__new__(Neo4jClient)
+    client.driver = MagicMock()
+    session = _GraphSession(nodes)
+    client.driver.session.return_value = session
+    return client, session
+
+
+GRAPH = {"ThreatActor": {"apt29"}, "Malware": {"emotet"}, "Technique": {"T1566"}, "Tool": set(), "CVE": set()}
+
+
+class TestClaimsThatDoNotAttach:
+    """Invisible misses fix (2026-10): rows sent are not links written. A claim whose subject or
+    object is not in the graph matches nothing; the writer counts only matched curated rows as
+    written and names the missing ends, and the sync logs how many claims attached."""
+
+    CLAIMS = [
+        {"p": "uses_malware", "o": "emotet", "id": "c1"},  # both ends exist: attaches
+        {"p": "uses_malware", "o": "ghostware", "id": "c2"},  # no such malware
+        {"p": "exploits", "o": "CVE-2099-0001", "id": "c3"},  # no such CVE
+        {"p": "uses_tool", "o": "S0002", "id": "c4"},  # no such tool
+    ]
+
+    def test_writer_counts_matched_rows_and_names_the_missing_ends(self):
+        """All six curated templates; three claims find both ends, five do not."""
+
+        def rows(subject_type, name, *claims):
+            return _curated_claim_rows(list(claims), subject_type, {"name": name}, "coreideas", "5")
+
+        batch = (
+            rows("ThreatActor", "apt29", {"p": "uses_technique", "o": "T1566"})  # attaches: no lookup
+            + rows(
+                "ThreatActor", "apt29", {"p": "uses_malware", "o": "emotet"}, {"p": "uses_malware", "o": "ghostware"}
+            )
+            + rows("ThreatActor", "apt-x", {"p": "uses_tool", "o": "S0002"})  # neither end exists
+            + rows("ThreatActor", "apt29", {"p": "exploits", "o": "CVE-2099-0001"})
+            + rows("Malware", "emotet", {"p": "implements_technique", "o": "T1566"})
+            + rows(
+                "Malware",
+                "lockbit",
+                {"p": "implements_technique", "o": "T1486"},
+                {"p": "exploits", "o": "CVE-2017-11882"},
+            )
+        )
+        client, session = _graph_client(GRAPH)
+        result = client.create_misp_relationships_batch(batch, source_id="misp")
+        assert int(result) == 3, "only the claims whose two ends exist are written links"
+        assert (result.curated_sent, result.curated_matched, result.failed) == (8, 3, 0)
+        assert sorted(result.curated_missing) == [
+            "CVE 'CVE-2017-11882'",
+            "CVE 'CVE-2099-0001'",
+            "Malware 'ghostware'",
+            "Malware 'lockbit'",
+            "Technique 'T1486'",
+            "ThreatActor 'apt-x'",
+            "Tool 'S0002'",
+        ]
+        merges = [q for q in session.queries if "MERGE" in q]
+        lookups = [q for q in session.queries if "OPTIONAL MATCH" in q]
+        assert len(merges) == 6 and all("RETURN count(r) AS matched" in q for q in merges)
+        assert len(lookups) == 5, "the name lookup runs only for the batches that fell short"
+        assert not any("MERGE" in q or "SET " in q for q in lookups), "the lookup is read-only"
+
+    def test_feed_rows_still_count_as_sent(self):
+        """Control: the feed templates are unchanged — their rows count as written."""
+        rel = {
+            "rel_type": "INDICATES",
+            "from_type": "Indicator",
+            "from_key": {"value": "1.2.3.4", "indicator_type": "ipv4"},
+            "to_type": "Malware",
+            "to_key": {"name": "emotet"},
+            "confidence": 0.6,
+            "match_type": "otx_pulse",
+        }
+        client, _session = _graph_client(GRAPH)
+        result = client.create_misp_relationships_batch([rel], source_id="misp")
+        assert int(result) == 1 and getattr(result, "curated_sent", 0) == 0
+
+    def test_missing_names_are_bounded(self):
+        claims = [{"p": "uses_malware", "o": f"family-{n:03d}"} for n in range(60)]
+        rows = _curated_claim_rows(claims, "ThreatActor", {"name": "apt29"}, "coreideas", "5")
+        client, _session = _graph_client(GRAPH)
+        result = client.create_misp_relationships_batch(rows, source_id="misp")
+        assert (int(result), result.curated_sent) == (0, 60)
+        assert len(result.curated_missing) == neo4j_client.CURATED_MISSING_SAMPLE
+
+    def test_a_failed_name_lookup_keeps_the_counts(self, caplog):
+        rows = _curated_claim_rows(self.CLAIMS[:2], "ThreatActor", {"name": "apt29"}, "coreideas", "5")
+        client, session = _graph_client(GRAPH)
+        real_run = session.run
+
+        def run(query, rows=None, **params):
+            if "OPTIONAL MATCH" in query:
+                raise RuntimeError("lookup failed")
+            return real_run(query, rows=rows, **params)
+
+        session.run = run
+        with caplog.at_level(logging.WARNING, logger="neo4j_client"):
+            result = client.create_misp_relationships_batch(rows, source_id="misp")
+        assert (int(result), result.curated_sent, result.curated_matched, result.failed) == (1, 2, 1, 0)
+        assert any("could not name the missing ends" in r.getMessage() for r in caplog.records)
+
+    def test_sync_logs_the_claims_that_did_not_attach_and_counts_only_attached_links(self, importer, caplog):
+        """End to end: the importer's event, parsed and written by the sync over the graph above."""
+        package = _package(entities=[{"kind": "threat_actor", "name": "apt29", "claims": self.CLAIMS}])
+        event = importer.build_event(package)["Event"]
+        attributes = [dict(a, uuid=f"u-{n}") for n, a in enumerate(event["Attribute"])]
+        full_event = {"id": "41", "info": event["info"], "Tag": event["Tag"], "Attribute": attributes}
+        client, _session = _graph_client(GRAPH)
+        sync = MISPToNeo4jSync(neo4j_client=client)
+        with caplog.at_level(logging.INFO, logger="run_misp_to_neo4j"):
+            sync._process_event_attributes("41", full_event, attributes)
+        assert sync.stats["relationships_created"] == 1, "unattached claims are not created links"
+        assert (sync.stats["curated_claims_attached"], sync.stats["curated_claims_unattached"]) == (1, 3)
+        (line,) = [r for r in caplog.records if r.getMessage().startswith("[CURATED]")]
+        assert line.levelno == logging.WARNING
+        message = line.getMessage()
+        assert "1 of 4 curated claim(s) attached; 3 did not" in message
+        for name in ("Malware 'ghostware'", "CVE 'CVE-2099-0001'", "Tool 'S0002'"):
+            assert name in message
+
+    def test_sync_logs_at_info_when_every_claim_attached(self, caplog):
+        sync = MISPToNeo4jSync(neo4j_client=MagicMock())
+        sync.neo4j.create_misp_relationships_batch.side_effect = lambda chunk, source_id="misp": (
+            RelationshipBatchResult(len(chunk), curated_sent=len(chunk), curated_matched=len(chunk))
+        )
+        rows = _curated_claim_rows(self.CLAIMS[:1], "ThreatActor", {"name": "apt29"}, "coreideas", "5")
+        with caplog.at_level(logging.INFO, logger="run_misp_to_neo4j"):
+            assert sync._create_relationships(rows, "misp") == 1
+        (line,) = [r for r in caplog.records if r.getMessage().startswith("[CURATED]")]
+        assert line.levelno == logging.INFO and "1 of 1 curated claim(s) attached" in line.getMessage()
+        assert sync.stats["curated_claims_unattached"] == 0
