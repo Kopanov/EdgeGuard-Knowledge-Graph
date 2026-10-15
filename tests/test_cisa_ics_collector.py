@@ -314,8 +314,9 @@ def test_timestamps_omitted_when_advisory_has_no_dates():
 
 
 def test_no_cvss_block_leaves_the_cve_unscored_and_url_is_derived():
-    # 2026-10: no CVSS block → no score and severity UNKNOWN. It used to be 7.0 / HIGH, copied from
-    # the KEV collector's ransomware-derived values, and was stored as if it were CVSS.
+    # 2026-10: no CVSS block → no score, severity UNKNOWN and no attack vector. It used to be 7.0 /
+    # HIGH, copied from the KEV collector's ransomware-derived values, and was stored as if it were
+    # CVSS, with an invented attack vector NETWORK.
     data = copy.deepcopy(SAMPLE_ADVISORY)
     data["document"]["references"] = []
     data["document"]["tracking"]["id"] = "ICSMA-26-223-02"
@@ -324,7 +325,7 @@ def test_no_cvss_block_leaves_the_cve_unscored_and_url_is_derived():
     c = mod.CISAICSCollector(misp_writer=MagicMock())
     items, _ = c.parse_advisory(data, "2026/icsma-26-223-02.json")
     assert items[0]["severity"] == "UNKNOWN" and items[0]["cvss_score"] is None
-    assert items[0]["attack_vector"] == "NETWORK"
+    assert items[0]["attack_vector"] is None
     assert items[0]["cvss_v31_data"] is None and items[0]["cvss_v30_data"] is None
     assert items[0]["reference_urls"] == ["https://www.cisa.gov/news-events/ics-medical-advisories/icsma-26-223-02"]
 

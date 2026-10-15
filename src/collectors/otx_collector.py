@@ -660,8 +660,9 @@ class OTXCollector:
                         "source": [self.tag],
                         "confidence_score": 0.5,
                         "severity": "UNKNOWN",
-                        "cvss_score": None,  # a pulse reference carries no CVSS (0.0 was tagged cvss:low)
-                        "attack_vector": "NETWORK",
+                        # A pulse reference carries no CVSS (0.0 was tagged cvss:low) and no attack
+                        # vector (an invented "NETWORK" was sent until 2026-10).
+                        "cvss_score": None,
                         **pulse_meta,
                     }
                     if pulse_created:
