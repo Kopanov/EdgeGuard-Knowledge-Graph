@@ -53,6 +53,7 @@ for _p in (TESTS.parent / "src", TESTS):
 from test_attack_revoked_objects import _ext, _group, _parse, _rel, _sdo, _software, _technique  # noqa: E402
 
 import neo4j_client  # noqa: E402
+import run_misp_to_neo4j  # noqa: E402
 from collectors import misp_writer  # noqa: E402
 from collectors import otx_collector as oc  # noqa: E402
 from run_misp_to_neo4j import (  # noqa: E402
@@ -853,3 +854,58 @@ class TestRunbookCleanup:
     )
     def test_the_placeholders_are_the_ones_the_sync_drops(self, text):
         assert _runbook_removes(text) is (_entity_comment_description(text, "misp") is None)
+
+
+# ================================================================ PyMISP's own STIX conversion
+class TestPymispStixPath:
+    """``convert_to_stix21`` prefers PyMISP's ``MISPEvent.to_stix2`` when the installed PyMISP has it
+    (the pinned ``pymisp~=2.4`` allows such a version); its objects copy the attribute comment, so
+    they follow the same description rule as the manual conversion."""
+
+    def _convert(self, monkeypatch, objects, info):
+        import pymisp
+
+        class _Event:
+            def load(self, _event):
+                pass
+
+            def to_stix2(self):
+                return [dict(o) for o in objects]
+
+        monkeypatch.setattr(pymisp, "MISPEvent", _Event)
+        syncer = run_misp_to_neo4j.MISPToNeo4jSync.__new__(run_misp_to_neo4j.MISPToNeo4jSync)
+        return syncer.convert_to_stix21({"info": info, "Tag": [], "Attribute": []})["objects"]
+
+    def test_entity_objects_follow_the_description_rule(self, monkeypatch):
+        objects = [
+            {
+                "type": "malware",
+                "id": "malware--1",
+                "name": "kazuar",
+                "description": 'MITRE_USES_TECHNIQUES:{"rt":["T1082"]}',
+            },
+            {
+                "type": "intrusion-set",
+                "id": "intrusion-set--1",
+                "name": "turla",
+                "description": "Threat actor from mitre_attck",
+            },
+            {"type": "tool", "id": "tool--1", "name": "mimikatz", "description": "Mimikatz is a credential dumper."},
+            {"type": "indicator", "id": "indicator--1", "description": 'OTX_META:{"pulse_id":"p1"}', "pattern": "[x]"},
+        ]
+        out = {o["id"]: o for o in self._convert(monkeypatch, objects, "EdgeGuard-mitre_attck-2026-10-15")}
+        assert "description" not in out["malware--1"], "a metadata block is no description"
+        assert "description" not in out["intrusion-set--1"], "MISPWriter's placeholder is no description"
+        assert out["tool--1"]["description"] == "Mimikatz is a credential dumper."
+        assert out["indicator--1"]["description"] == 'OTX_META:{"pulse_id":"p1"}', "only entity objects"
+
+    def test_an_otx_events_entity_text_is_dropped(self, monkeypatch):
+        objects = [
+            {"type": "malware", "id": "malware--2", "name": "kataru", "description": "A pulse about a campaign."}
+        ]
+        out = self._convert(monkeypatch, objects, "EdgeGuard-alienvault_otx-2026-10-09")
+        assert "description" not in out[0], "an OTX pulse's text describes the report"
+
+    def test_the_event_source(self):
+        assert run_misp_to_neo4j._event_source_id("EdgeGuard-alienvault_otx-2026-10-09") == "alienvault_otx"
+        assert run_misp_to_neo4j._event_source_id("Some analyst event") == ""

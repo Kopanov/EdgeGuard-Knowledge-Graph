@@ -564,6 +564,29 @@ _EMBEDDED_METADATA_RE = re.compile(
 _REPORT_TEXT_ENTITY_SOURCES = frozenset({"alienvault_otx"})
 
 
+# 2026-10: the STIX types a Malware, ThreatActor, Technique, Tactic or Tool attribute becomes.
+_ENTITY_STIX_TYPES = frozenset({"malware", "intrusion-set", "threat-actor", "tool", "attack-pattern", "x-mitre-tactic"})
+
+
+def _event_source_id(event_info: Any) -> str:
+    """The source id in an EdgeGuard event name (``EdgeGuard-<source>-<date>``), or ``""``."""
+    parts = str(event_info or "").split("-")
+    return parts[1] if len(parts) >= 3 and parts[0] == "EdgeGuard" else ""
+
+
+def _filter_entity_stix_description(obj: Dict[str, Any], source_id: str) -> None:
+    """In place (2026-10): an entity object's ``description`` follows the rule of the attribute
+    parse (``_entity_comment_description``). PyMISP's own conversion copies the attribute comment,
+    which may be a metadata block, MISPWriter's placeholder or an OTX pulse's text."""
+    if obj.get("type") not in _ENTITY_STIX_TYPES or "description" not in obj:
+        return
+    text = _entity_comment_description(obj.get("description"), source_id)
+    if text:
+        obj["description"] = text
+    else:
+        obj.pop("description", None)
+
+
 def _entity_comment_description(raw_comment: Any, source_id: str) -> Optional[str]:
     """The description a malware, actor, technique, tactic or tool attribute's comment gives, or None (2026-10).
 
@@ -2213,6 +2236,7 @@ class MISPToNeo4jSync:
 
                     if obj_dict:
                         apply_edgeguard_zone_metadata_to_stix_dict(obj_dict, zone_labels)
+                        _filter_entity_stix_description(obj_dict, _event_source_id(event_info))
                         bundle["objects"].append(obj_dict)
 
                 return bundle
