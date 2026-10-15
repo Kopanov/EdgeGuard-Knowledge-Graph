@@ -613,7 +613,31 @@ python scripts/import_curated_package.py PACKAGE.json          # validate: summa
 python scripts/import_curated_package.py PACKAGE.json --push   # create the MISP event (MISP_URL / MISP_API_KEY)
 ```
 
-The event is unpublished and visible to the creating organisation only. A fresh baseline removes it with the other EdgeGuard events: import it again afterwards. To take the layer out without a re-feed, delete the event in MISP and remove the links whose `r.sources` hold only the package's sources.
+The validation refuses the package (errors block `--push`) when its `source` is not a registered curated source (`coreideas`, `misp_galaxy`; `source_type="curated"` in `src/source_registry.py`) or when it has no `tlp`. It rejects a single claim — listed as a warning, counted under `claims_skipped_by_reason` in the summary, never written to MISP — when the claim's source is not a registered curated source, its object id is malformed (technique `T1234` / `T1234.123`, tool `S1234`, CVE `CVE-YYYY-NNNN`), its predicate does not fit its subject, or it has no object. The package's TLP level is tagged on the event and on every attribute; it marks each claim's link (`r.tlp`) and the STIX relationship exported from it.
+
+The event is unpublished and visible to the creating organisation only. A fresh baseline removes it with the other EdgeGuard events: import it again afterwards.
+
+**After the sync.** A claim attaches only when both its subject and its object exist by exact canonical name or id. A link the claim creates gets the package's curated label (`coreideas_curated`) at 0.85; a link that already exists keeps its label and confidence and gains the claim's provenance. Each write logs `[CURATED] <attached> of <sent> curated claim(s) attached` (WARNING, with a sample of the missing names, when some did not attach), and the run summary adds `Curated package claims: <n> attached, <m> not attached`. Claims that did not attach are not errors and are not counted as relationships created.
+
+**Removing the layer without a re-feed.** Delete the package's event in MISP, then run on Neo4j (replace `<event id>` with the package's MISP event id, printed by `--push`):
+
+```cypher
+// 1. The links the package created: they carry its curated label.
+MATCH ()-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_MALWARE|USES_TOOL|EXPLOITS]->()
+WHERE r.match_type IN ['coreideas_curated', 'curated_other']
+DELETE r;
+
+// 2. Its entries on the links it did not create (those keep another source's label).
+MATCH ()-[r:EMPLOYS_TECHNIQUE|IMPLEMENTS_TECHNIQUE|USES_MALWARE|USES_TOOL|EXPLOITS]->()
+WHERE any(s IN coalesce(r.sources, []) WHERE s IN ['coreideas', 'misp_galaxy', 'curated_other'])
+SET r.sources = [s IN r.sources WHERE NOT s IN ['coreideas', 'misp_galaxy', 'curated_other']],
+    r.source_refs = [x IN coalesce(r.source_refs, [])
+                     WHERE NOT split(x, ':')[0] IN ['coreideas', 'misp_galaxy', 'curated_other']],
+    r.misp_event_ids = [e IN coalesce(r.misp_event_ids, []) WHERE e <> '<event id>']
+REMOVE r.tlp;
+```
+
+Only curated claims set `r.tlp`, so step 2 removes it. A link the package created and another source asserted afterwards (an OTX pulse naming the same technique, say) still carries the curated label and is deleted in step 1; the relationship build and a full sync (`NEO4J_FULL_SYNC=true`) recreate it from that source's data. To remove one package of several, delete its event, remove the layer as above and run a full sync, which writes the remaining packages' claims again. To leave the layer out of a shared dataset without removing it, filter on `r.sources`, not on `r.match_type` (`docs/KNOWLEDGE_GRAPH.md`, "Curated packages").
 
 ## Retrieving raw MISP data from a Neo4j node
 
