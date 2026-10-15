@@ -48,7 +48,7 @@ FORWARDED = [
     ("EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES", "25"),
     ("EDGEGUARD_DEFAULT_TLP", "white"),
     ("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true"),  # incremental sync writes only changed attributes
-    ("EDGEGUARD_NEO4J_READ_TIMEOUT", "900"),  # int(os.getenv(...)) — empty would raise
+    ("EDGEGUARD_NEO4J_READ_TIMEOUT", "1200"),  # int(os.getenv(...)) — empty would raise
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
 ]
 

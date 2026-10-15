@@ -429,7 +429,9 @@ def _confidence_respect_calibrator(value) -> str:
 NEO4J_CONNECTION_TIMEOUT = 60  # seconds
 # seconds; 120 s was too low for a 441K-node graph and 300 s for the 730-day "Indicator -> Malware
 # (family match)" link query (289 s on 2026-10-13, 316 s with MalwareBazaar and ATT&CK for ICS added).
-NEO4J_READ_TIMEOUT = int(os.getenv("EDGEGUARD_NEO4J_READ_TIMEOUT", "900"))
+# 2026-10: 1200 s (was 900): headroom for the larger graph of a 730-day baseline; a statement that
+# runs longer is aborted by the server and logged as ``[NEO4J-TIMEOUT]`` (``_TimeoutSession``).
+NEO4J_READ_TIMEOUT = int(os.getenv("EDGEGUARD_NEO4J_READ_TIMEOUT", "1200"))
 _REL_QUERY_TIMEOUT = 60  # seconds — shorter timeout for relationship UNWIND to fail fast on lock contention
 
 # Every column ``apoc.periodic.iterate`` yields that a caller needs to judge a batched step.
@@ -1248,6 +1250,67 @@ def _reactivation_clauses(var: str, indent: str = "") -> str:
     )
 
 
+def _statement_head(query: Any) -> str:
+    """The first characters of a Cypher statement, whitespace collapsed, for a log line."""
+    text = getattr(query, "text", query)
+    return " ".join(str(text).split())[:160]
+
+
+def _log_if_timed_out(exc: BaseException, timeout: Optional[float], statement: str) -> None:
+    """Log once when ``exc`` is the server aborting a statement at its transaction timeout (2026-10).
+
+    The driver raises the error when the result is read, so the statement and its limit are named
+    here: without this line the task log carried only the server's generic termination message.
+    """
+    code = str(getattr(exc, "code", "") or "")
+    if "TransactionTimedOut" not in code or getattr(exc, "_edgeguard_timeout_logged", False):
+        return
+    try:
+        exc._edgeguard_timeout_logged = True  # type: ignore[attr-defined]
+    except Exception:  # an exception type without a __dict__ is logged every time it passes
+        pass
+    logger.error(
+        "[NEO4J-TIMEOUT] the server aborted a statement at its %s s transaction timeout: %s — pipeline "
+        "statements use EDGEGUARD_NEO4J_READ_TIMEOUT (now %d s); raise it if the statement is expected "
+        "to run longer",
+        f"{timeout:.0f}" if timeout is not None else "?",
+        statement,
+        NEO4J_READ_TIMEOUT,
+    )
+
+
+class _TimeoutResult:
+    """Result proxy: a timeout raised while the result is read is logged (``_log_if_timed_out``)."""
+
+    __slots__ = ("_inner", "_timeout", "_statement")
+
+    def __init__(self, inner: Any, timeout: float, statement: str) -> None:
+        self._inner = inner
+        self._timeout = timeout
+        self._statement = statement
+
+    def __iter__(self) -> Any:
+        try:
+            yield from self._inner
+        except Exception as e:
+            _log_if_timed_out(e, self._timeout, self._statement)
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def _call(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return attr(*args, **kwargs)
+            except Exception as e:
+                _log_if_timed_out(e, self._timeout, self._statement)
+                raise
+
+        return _call
+
+
 class _TimeoutSession:
     """Session proxy: a ``timeout=`` keyword on ``run()`` becomes a real transaction timeout.
 
@@ -1259,18 +1322,28 @@ class _TimeoutSession:
     classifier and the circuit breaker then see. Every other attribute is delegated unchanged.
     """
 
-    __slots__ = ("_inner", "_cm")
+    __slots__ = ("_inner", "_cm", "_last")
 
     def __init__(self, session: Any) -> None:
         self._inner = session
         self._cm: Any = None
+        self._last: Optional[Tuple[float, str]] = None  # (timeout, statement) of the last timed statement
 
     def run(self, query: Any, parameters: Optional[Dict[str, Any]] = None, *, timeout: Any = None, **kwargs: Any):
         if timeout is not None and isinstance(query, str):
             query = Query(query, timeout=float(timeout))
+        if timeout is None:
+            return self._inner.run(query, parameters, **kwargs)
+        statement = _statement_head(query)
+        self._last = (float(timeout), statement)
         # Not a call site: the timeout now travels inside the Query object (see the module's
         # scan test, which requires ``timeout=`` on every real ``session.run`` caller).
-        return self._inner.run(query, parameters, **kwargs)
+        try:
+            result = self._inner.run(query, parameters, **kwargs)
+        except Exception as e:
+            _log_if_timed_out(e, float(timeout), statement)
+            raise
+        return _TimeoutResult(result, float(timeout), statement)
 
     def __enter__(self) -> "_TimeoutSession":
         # Delegate to whatever the inner context manager yields (a real Session yields itself;
@@ -1284,7 +1357,12 @@ class _TimeoutSession:
     def __exit__(self, *exc: Any) -> Any:
         manager = self._cm if self._cm is not None else self._inner
         self._cm = None
-        return manager.__exit__(*exc)
+        try:
+            return manager.__exit__(*exc)
+        except Exception as e:  # a result left unread is consumed on close, where its timeout surfaces
+            if self._last is not None:
+                _log_if_timed_out(e, *self._last)
+            raise
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
