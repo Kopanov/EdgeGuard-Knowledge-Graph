@@ -13,8 +13,12 @@ Every defect was confirmed on main before the fix:
 * GraphQL types had no ``tlp``.
 * ``md5`` / ``sha1`` / ``sha256`` / ``sha512`` filters compared ``indicator_type`` exactly; the
   sync stores every file digest as ``hash``.
-* ``/search/indicator`` related nodes: undirected, ``LIMIT 10``, no ``ORDER BY``, no type.
+* ``/search/indicator`` related nodes: undirected, ``LIMIT 10``, no ``ORDER BY``, no type, and
+  matched on the value alone (the neighbours of every type that stores it); the caller's type
+  was ignored.
 * The Wazuh CDB export kept the alphabetically first 50,000 entries without saying so.
+* The Graph Explorer guide and README had readers open the page from disk, which the default
+  CORS allowlist refuses; the demo page stated relationship directions no writer creates.
 
 What Cypher itself decides (ordering, ``=~``, directions) is checked on a real Neo4j in
 ``tests/test_export_paths_neo4j.py``.
@@ -28,17 +32,31 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+from unittest.mock import MagicMock
 
 import pytest
 import stix2
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
 os.environ.setdefault("NEO4J_USER", "neo4j")
 os.environ.setdefault("NEO4J_PASSWORD", "test-password")
 os.environ.setdefault("EDGEGUARD_ENV", "dev")
+
+from stub_cleanup import clear_graphql_api_magicmock_stubs  # noqa: E402
+
+# These tests need the driver's real ``neo4j.time`` classes. ``tests/test_graphql_api.py`` stubs
+# ``neo4j`` with mocks when it is collected first; the modules below then cache the mocks at import
+# (``source_truthful_timestamps._NEO4J_TEMPORAL_TYPES``, ``query_api._neo4j_time``). Only in that
+# case are the stubs removed and those modules imported afresh, so the usual collection order keeps
+# the module objects every other test module already holds.
+if any(isinstance(m, MagicMock) for k, m in list(sys.modules.items()) if k == "neo4j" or k.startswith("neo4j.")):
+    clear_graphql_api_magicmock_stubs()
+    for _cached in ("source_truthful_timestamps", "stix_exporter", "query_api", "graphql_api"):
+        sys.modules.pop(_cached, None)
 
 from fastapi.testclient import TestClient  # noqa: E402
 from neo4j.time import Date as Neo4jDate  # noqa: E402
@@ -651,11 +669,16 @@ _RELATED_ROWS = [
 ]
 
 
+# The seed lookup of ``/search/indicator`` and the element id of the node it returns.
+_SEED_MARKER = "RETURN n, elementId(n) AS element_id"
+_SEED_ID = "4:0f3c9a52-7c1e-4d7b-9a51-2f1d3b8e6a10:42"
+
+
 class TestSearchRelated:
     def test_related_nodes_carry_type_and_direction_in_the_same_order(self, monkeypatch):
         session = _Session(
             [
-                ("RETURN n ORDER BY n.indicator_type LIMIT 1", _Result(single={"n": _INDICATOR})),
+                (_SEED_MARKER, _Result(single={"n": _INDICATOR, "element_id": _SEED_ID})),
                 ("UNWIND range(0, size(rows) - 1) AS position", _Result(_RELATED_ROWS)),
             ]
         )
@@ -673,16 +696,40 @@ class TestSearchRelated:
             {"relationship_type": "EXPLOITS", "direction": "outgoing", "labels": ["CVE", "Vulnerability"]},
             {"relationship_type": "INVOLVES", "direction": "incoming", "labels": ["Alert"]},
         ]
+        # The related lookup is bound to the node returned as ``indicator``, not to every node that
+        # stores the value under another type.
         query, params = session.calls[1]
         assert params == {
-            "value": "203.0.113.5",
+            "element_id": _SEED_ID,
             "zone": "energy",
             "per_kind": 10,
             "timeout": query_api._NEO4J_QUERY_TIMEOUT,
         }
 
+    @pytest.mark.parametrize(
+        "body, preferred",
+        [
+            ({"value": "203.0.113.5"}, "ipv4"),  # inferred from the value
+            ({"value": "2CBDEEB34862D4F0A40AABCC3236B891", "indicator_type": "md5"}, "hash"),  # the graph type
+            ({"value": "ab" * 20, "indicator_type": "x509-fingerprint-sha1"}, "x509-fingerprint-sha1"),
+            ({"value": "ab" * 20, "indicator_type": "hash"}, "hash"),
+        ],
+    )
+    def test_the_node_of_the_resolved_type_answers(self, monkeypatch, body, preferred):
+        """One value may be stored under several types: the caller's type (mapped to the graph type,
+        or inferred) ranks first, then the lowest type. The caller's type was ignored before."""
+        session = _Session([(_SEED_MARKER, _Result(single={"n": _INDICATOR, "element_id": _SEED_ID}))])
+        resp = _rest(monkeypatch, session).post("/search/indicator", json=body)
+        assert resp.status_code == 200, resp.text
+        seed_query, seed_params = session.calls[0]
+        assert seed_params["preferred_type"] == preferred
+        assert "ORDER BY CASE WHEN n.indicator_type = $preferred_type THEN 0 ELSE 1 END, n.indicator_type" in seed_query
+        assert session.calls[1][1]["element_id"] == _SEED_ID
+
     def test_query_is_directed_ordered_and_bounded_per_kind(self):
         q = query_api._SEARCH_RELATED_CYPHER
+        assert "MATCH (n:Indicator)-[r]-(related)\n    WHERE elementId(n) = $element_id" in q
+        assert "$value" not in q
         assert "CASE WHEN startNode(r) = n THEN 'outgoing' ELSE 'incoming' END AS direction" in q
         priority = q[q.index("CASE kind") : q.index("END AS priority")]
         order = [
@@ -805,12 +852,24 @@ class TestDocumentation:
         assert "campaigns" in summary and "indicators" not in summary
         assert "campaigns" in query_api.ActorSummaryResponse.model_fields
 
+    def test_the_default_cors_allowlist_stays_narrow_everywhere(self):
+        """Every place that sets the default allowlist — both APIs, the compose default and the
+        example ``.env`` — lists the same two origins: no wildcard, no ``null`` origin."""
+        defaults = {
+            "src/query_api.py": r'os\.getenv\("EDGEGUARD_CORS_ORIGINS", "([^"]*)"\)',
+            "src/graphql_api.py": r'os\.getenv\("EDGEGUARD_CORS_ORIGINS", "([^"]*)"\)',
+            "docker-compose.yml": r"EDGEGUARD_CORS_ORIGINS: \$\{EDGEGUARD_CORS_ORIGINS:-([^}]*)\}",
+            ".env.example": r"(?m)^EDGEGUARD_CORS_ORIGINS=(.*)$",
+        }
+        for rel, pattern in defaults.items():
+            found = re.findall(pattern, (ROOT / rel).read_text())
+            assert len(found) == 1, (rel, found)
+            origins = [o.strip() for o in found[0].split(",")]
+            assert origins == ["http://localhost", "http://localhost:3000"], (rel, origins)
+            assert not any("*" in o or o.lower() == "null" for o in origins), (rel, origins)
+
     def test_the_explorer_is_served_from_an_allowed_origin(self):
-        """The default allowlist stays narrow; the guide serves the page from one of its origins."""
-        default = [o.strip() for o in "http://localhost,http://localhost:3000".split(",")]
-        src = (ROOT / "src" / "query_api.py").read_text()
-        assert 'os.getenv("EDGEGUARD_CORS_ORIGINS", "http://localhost,http://localhost:3000")' in src
-        assert "*" not in default and "null" not in default
+        """The guide, README and the demo page serve the page from an origin in the allowlist."""
         guide = (ROOT / "docs" / "GRAPH_EXPLORER.md").read_text()
         assert "--bind 127.0.0.1 --directory docs" in guide and "python3 -m http.server 3000" in guide
         assert "http://localhost:3000/visualization.html" in guide
@@ -818,3 +877,67 @@ class TestDocumentation:
         assert "Or serve it via any static file server." not in guide
         assert "MATCH (i:Indicator)-[:INDICATES]->(m:Malware)" in guide
         assert "WHERE type(r) IN ['INDICATES', 'DROPS']" not in guide
+        readme = (ROOT / "README.md").read_text()
+        assert "open docs/visualization.html in browser" not in readme
+        explorer_line = next(line for line in readme.splitlines() if line.startswith("Graph Explorer       →"))
+        assert "http://localhost:3000/visualization.html" in explorer_line
+        assert "python3 -m http.server 3000 --bind 127.0.0.1 --directory docs" in explorer_line
+        demo = (ROOT / "docs" / "demo.html").read_text()
+        assert "a page opened from disk is refused" in demo and "EDGEGUARD_CORS_ORIGINS" in demo
+
+    def test_a_port_in_use_by_grafana_has_a_documented_alternative(self):
+        """The monitoring stack binds Grafana to the explorer's default port; the guide, README and
+        the example ``.env`` give another port and the origin to append."""
+        compose = (ROOT / "docker-compose.monitoring.yml").read_text()
+        assert '"127.0.0.1:3000:3000"' in compose, "premise: Grafana holds 127.0.0.1:3000"
+        guide = (ROOT / "docs" / "GRAPH_EXPLORER.md").read_text()
+        assert "python3 -m http.server 3001 --bind 127.0.0.1 --directory docs" in guide
+        assert "EDGEGUARD_CORS_ORIGINS=http://localhost,http://localhost:3000,http://localhost:3001" in guide
+        assert "http://localhost:3001/visualization.html" in guide
+        readme = (ROOT / "README.md").read_text()
+        assert "python3 -m http.server 3001 --bind 127.0.0.1 --directory docs" in readme
+        assert "append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`" in readme
+        assert "http://localhost:3001" in (ROOT / ".env.example").read_text()
+
+    def test_the_guide_says_limit_caps_rows_not_nodes(self):
+        guide = (ROOT / "docs" / "GRAPH_EXPLORER.md").read_text()
+        assert "Maximum nodes returned" not in guide and "controls how many nodes the API returns" not in guide
+        limit_row = next(line for line in guide.splitlines() if line.startswith("| `limit` |"))
+        assert "Maximum rows the view reads, not nodes" in limit_row and "`stats.nodes` can exceed `limit`" in limit_row
+        description = query_api.app.openapi()["paths"]["/graph/explore"]["get"]["parameters"]
+        (limit,) = [p for p in description if p["name"] == "limit"]
+        assert "Max rows the view reads" in limit["description"]
+
+    def test_the_guide_names_the_label_that_carries_the_cve_score(self):
+        guide = (ROOT / "docs" / "GRAPH_EXPLORER.md").read_text()
+        assert "so CISA KEV fields on CVE nodes are found" not in guide
+        assert "The MISP → Neo4j sync writes :CVE nodes, which carry the score, the" in guide
+
+    def test_the_demo_page_states_the_written_directions(self):
+        """``(Malware)-[:ATTRIBUTED_TO]->(ThreatActor)``, ``(Indicator)-[:INDICATES]->(Malware)`` and
+        ``(ThreatActor)-[:EMPLOYS_TECHNIQUE]->(Technique)``, as ``build_relationships`` writes them."""
+        demo = (ROOT / "docs" / "demo.html").read_text()
+        rows = dict(re.findall(r"<td>([A-Z_]+)</td>\s*<td>([^<]+)</td>", demo))
+        assert rows["ATTRIBUTED_TO"] == "Malware → ThreatActor"
+        assert rows["INDICATES"] == "Indicator → Malware / Vulnerability"
+        assert rows["EMPLOYS_TECHNIQUE"] == "ThreatActor → Technique"
+        assert "USES" not in rows
+        assert "— Indicator → Malware</span>" not in demo
+        build = (ROOT / "src" / "build_relationships.py").read_text()
+        assert "MERGE (m)-[r:ATTRIBUTED_TO]->(a)" in build and "MERGE (i)-[r:INDICATES]->(m)" in build
+
+    def test_the_stix_export_docstring_names_what_stix_types_returns(self, monkeypatch):
+        """The route's OpenAPI description and ``/stix/types`` describe the same neighbourhoods."""
+        data = _rest(monkeypatch, _Session()).get("/stix/types").json()
+        doc = " ".join((query_api.stix_export.__doc__ or "").split())
+        for object_type in data["object_types"]:
+            for relationship in set(re.findall(r"\b[A-Z][A-Z_]{4,}\b", object_type["returns"])):
+                assert relationship in doc, (object_type["name"], relationship)
+        assert "attributed malware + employed techniques + campaigns" not in doc
+        assert "indicators that exploit it + affected sectors" not in doc
+
+    def test_technical_spec_names_the_current_extension_definition(self):
+        spec = (ROOT / "docs" / "TECHNICAL_SPEC.md").read_text()
+        row = next(line for line in spec.splitlines() if line.startswith("| GET | `/stix/export/"))
+        assert f"extension definition {stix_exporter._EXTENSION_VERSION}" in row
+        assert "now 1.2.0" not in row

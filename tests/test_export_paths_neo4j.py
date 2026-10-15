@@ -8,7 +8,8 @@ runs the export paths against it:
 * the STIX exports of nodes whose timestamps were written with ``datetime()`` (they answered
   HTTP 500: the driver's ``isoformat()`` prints nine fractional digits, stix2 accepts six);
 * the Graph Explorer's default view on ``(Indicator)-[:INDICATES]->(Malware)``;
-* ``/search/indicator``: related nodes by kind, typed, directed, bounded per kind;
+* ``/search/indicator``: related nodes by kind, typed, directed, bounded per kind, and those of
+  the indicator returned when one value is stored under two types;
 * the Wazuh CDB export: newest entries first under the cap, nulls last, ties by key;
 * md5 / sha1 / sha256 / sha512 filters on the stored ``hash`` indicators;
 * GraphQL ``vulnerabilities`` on ``:CVE`` (the README example) and ``tlp``.
@@ -221,6 +222,44 @@ def test_search_returns_related_nodes_by_kind_typed_and_bounded(rest):
     ]
     assert "Malware" in body["relationships"][0]["labels"]
     assert body == rest.post("/search/indicator", json={"value": "203.0.113.5"}).json(), "stable across calls"
+
+
+# One value under two types: a ``hash`` node from before 2026-10 (SSL Blacklist fingerprints were
+# file hashes) and the ``x509-fingerprint-sha1`` node the collector writes now. Only the certificate
+# node indicates the family of the listing (the SSL Blacklist row of
+# tests/test_ip_family_and_certificate_fingerprint_types.py: "Dridex C&C").
+_FINGERPRINT = "0123456789abcdef0123456789abcdef01234567"
+TWIN_FIXTURE = f"""
+CREATE (:Indicator:{LABEL} {{indicator_type: 'hash', value: '{_FINGERPRINT}', uuid: 'u-twin-hash',
+        edgeguard_managed: true, zone: ['finance']}})
+CREATE (x:Indicator:{LABEL} {{indicator_type: 'x509-fingerprint-sha1', value: '{_FINGERPRINT}', uuid: 'u-twin-x509',
+        edgeguard_managed: true, zone: ['finance']}})
+CREATE (d:Malware:{LABEL} {{name: 'dridex', uuid: 'u-dridex', edgeguard_managed: true}})
+CREATE (x)-[:INDICATES {{sources: ['ssl_blacklist'], confidence_score: 0.9}}]->(d)
+"""
+
+
+def test_search_returns_the_related_nodes_of_the_indicator_it_returns(raw_driver, rest):
+    """The related lookup matched every node that stores the value: a search answered with the
+    ``hash`` node listed the certificate node's malware as an ``outgoing`` INDICATES of it."""
+    with raw_driver.session() as session:
+        session.run(TWIN_FIXTURE)
+
+    def search(**body):
+        resp = rest.post("/search/indicator", json={"value": _FINGERPRINT.upper(), **body})
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    typed = search(indicator_type="x509-fingerprint-sha1")
+    assert typed["indicator"]["indicator_type"] == "x509-fingerprint-sha1"
+    assert [n["name"] for n in typed["related"]] == ["dridex"]
+    assert typed["relationships"] == [
+        {"relationship_type": "INDICATES", "direction": "outgoing", "labels": sorted(["Malware", LABEL])}
+    ]
+    for body in ({"indicator_type": "hash"}, {"indicator_type": "sha1"}, {}):  # {}: inferred as hash
+        legacy = search(**body)
+        assert legacy["indicator"]["indicator_type"] == "hash", body
+        assert legacy["related"] == [] and legacy["relationships"] == [], body
 
 
 # ---------------------------------------------------------------------------

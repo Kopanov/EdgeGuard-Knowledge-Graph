@@ -232,8 +232,8 @@ class TestReadersExposeCreatedOrEnriched:
         """Bugbot on #147: the seed's neighbours must pass the same ownership filter, or
         ``/search/indicator`` would serialise partner topology EdgeGuard never touched."""
         src = (_SRC / "query_api.py").read_text()
-        # 2026-10: the lookup is directed and typed (``_SEARCH_RELATED_CYPHER``).
-        start = src.index("MATCH (n:Indicator {value: $value})-[r]-(related)")
+        # 2026-10: the lookup is directed, typed and bound to the node found (``_SEARCH_RELATED_CYPHER``).
+        start = src.index("MATCH (n:Indicator)-[r]-(related)")
         block = src[start : src.index("RETURN row.node AS related", start)]
         assert "(related.edgeguard_managed = true OR related.edgeguard_enriched = true)" in block
 

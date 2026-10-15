@@ -648,11 +648,15 @@ async def query_threats(request: Request, q: ThreatQuery):
 # and any other label (the alphabetically first label names the kind) — and ordered inside a kind
 # by relationship type, direction and natural key, at most ``$per_kind`` per kind. The final
 # ``ORDER BY`` carries each row's position in its kind, so the order does not depend on how the
-# runtime streams the unwound lists.
+# runtime streams the unwound lists. The lookup is bound to the node the route returns
+# (``$element_id``): one value may be stored under several types, and matching on the value alone
+# mixed in the neighbours of the other types' nodes, with a direction relative to a node the
+# response does not contain.
 _SEARCH_RELATED_PER_KIND = 10
 _SEARCH_RELATED_CYPHER = """
-    MATCH (n:Indicator {value: $value})-[r]-(related)
-    WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
+    MATCH (n:Indicator)-[r]-(related)
+    WHERE elementId(n) = $element_id
+      AND (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
       AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
       AND (related.edgeguard_managed = true OR related.edgeguard_enriched = true)
     WITH DISTINCT related, type(r) AS relationship_type,
@@ -694,7 +698,10 @@ async def search_indicator(request: Request, s: IndicatorSearch):
     Returns the indicator and related threats/entities: ``related`` holds the related nodes'
     properties and ``relationships`` (2026-10) the relationship type and direction of each, in
     the same order — Malware, ThreatActor and CVE / Vulnerability before Technique, Campaign,
-    Sector and other labels, at most ``_SEARCH_RELATED_PER_KIND`` per kind.
+    Sector and other labels, at most ``_SEARCH_RELATED_PER_KIND`` per kind. When the value is
+    stored under several types, the indicator of the resolved type answers (``indicator_type``
+    mapped to the graph type, or the type inferred from the value), otherwise the lowest type;
+    ``related`` and ``relationships`` are that indicator's.
     """
     _require_neo4j()
 
@@ -705,7 +712,7 @@ async def search_indicator(request: Request, s: IndicatorSearch):
         # write-side MERGE keys — the SAME shared path the alert enrichment
         # uses, so a value that enriches on ingest also resolves on search.
         # Raw value stays echoed in the response.
-        _resolved_type, normalized_value = canonicalize_lookup(
+        resolved_type, normalized_value = canonicalize_lookup(
             s.indicator_type.value if s.indicator_type else None,
             s.value,
         )
@@ -722,16 +729,27 @@ async def search_indicator(request: Request, s: IndicatorSearch):
         with neo4j_client.driver.session() as session:
             # Find the indicator
             # 2026-10 readiness check: ``zone`` was accepted and echoed but never applied.
-            # One value may be stored under several types ((indicator_type, value) is the key);
-            # the lowest type answers, so repeated searches return the same node.
+            # One value may be stored under several types ((indicator_type, value) is the key).
+            # 2026-10: the node of the resolved type answers (the type the caller gave, mapped to
+            # the graph type — md5 → hash — or the one inferred from the value), otherwise the
+            # lowest type, so repeated searches return the same node; the caller's type was
+            # ignored before.
             zone_value = s.zone.value if s.zone else None
             query = """
                 MATCH (n:Indicator {value: $value})
                 WHERE (n.edgeguard_managed = true OR n.edgeguard_enriched = true)
                   AND ($zone IS NULL OR $zone IN coalesce(n.zone, []))
-                RETURN n ORDER BY n.indicator_type LIMIT 1
+                RETURN n, elementId(n) AS element_id
+                ORDER BY CASE WHEN n.indicator_type = $preferred_type THEN 0 ELSE 1 END, n.indicator_type
+                LIMIT 1
             """
-            result = session.run(query, value=normalized_value, zone=zone_value, timeout=_NEO4J_QUERY_TIMEOUT)
+            result = session.run(
+                query,
+                value=normalized_value,
+                zone=zone_value,
+                preferred_type=resolved_type,
+                timeout=_NEO4J_QUERY_TIMEOUT,
+            )
             record = result.single()
 
             if not record:
@@ -744,12 +762,12 @@ async def search_indicator(request: Request, s: IndicatorSearch):
 
             indicator = _node_props(record["n"])
 
-            # Find related entities (2026-10: directed, typed and in a stable order; see
-            # ``_SEARCH_RELATED_CYPHER``).
+            # Find related entities (2026-10: of the node found, directed, typed and in a stable
+            # order; see ``_SEARCH_RELATED_CYPHER``).
             related_rows = list(
                 session.run(
                     _SEARCH_RELATED_CYPHER,
-                    value=normalized_value,
+                    element_id=record["element_id"],
                     zone=zone_value,
                     per_kind=_SEARCH_RELATED_PER_KIND,
                     timeout=_NEO4J_QUERY_TIMEOUT,
@@ -1163,7 +1181,16 @@ async def graph_explore(
     request: Request,
     view: GraphView = Query(GraphView.attacks, description="Graph view to render"),
     zone: Optional[ZoneEnum] = Query(default=None, description="Filter by zone"),
-    limit: int = Query(default=100, ge=10, le=500, description="Max nodes to return"),
+    # 2026-10: the description said "Max nodes"; LIMIT applies to the rows each view reads.
+    limit: int = Query(
+        default=100,
+        ge=10,
+        le=500,
+        description=(
+            "Max rows the view reads ((indicator, malware) or (actor, technique) pairs, indicators, CVEs); "
+            "sector and tactic nodes come on top, so the node count can exceed it"
+        ),
+    ),
 ):
     """
     Return Cytoscape.js-formatted graph data for the interactive visualization.
@@ -1532,13 +1559,26 @@ async def stix_export(
     Supported ``object_type`` values:
 
     - ``indicator`` — ``identifier`` is the indicator value (IP, domain,
-      hash, URL, …). Returns the indicator + its 1-hop neighbourhood.
+      hash, URL, …). Returns the indicator + 1 hop: INDICATES malware,
+      EXPLOITS CVEs, USES_TECHNIQUE techniques, TARGETS sectors,
+      PART_OF_CAMPAIGN campaigns.
     - ``actor`` — ``identifier`` is a ThreatActor name or alias. Returns
-      actor + attributed malware + employed techniques + campaigns.
+      the actor + attributed malware (ATTRIBUTED_TO), EMPLOYS_TECHNIQUE
+      techniques, the IMPLEMENTS_TECHNIQUE techniques of the attributed
+      malware, RUNS campaigns, USES_MALWARE malware, USES_TOOL tools,
+      EXPLOITS CVEs, TARGETS sectors.
     - ``technique`` — ``identifier`` is a MITRE ATT&CK ID (e.g. ``T1055``).
-      Returns the technique + everything that uses it.
+      Returns the technique + actors (EMPLOYS_TECHNIQUE), malware and tools
+      (IMPLEMENTS_TECHNIQUE), indicators (USES_TECHNIQUE), parent technique
+      and sub-techniques (SUBTECHNIQUE_OF).
     - ``cve`` — ``identifier`` is a CVE ID (e.g. ``CVE-2021-44228``).
-      Returns the CVE + indicators that exploit it + affected sectors.
+      Returns the CVE + exploiting indicators, threat actors and malware
+      (EXPLOITS) + affected sectors (AFFECTS).
+
+    The same neighbourhoods are listed by ``GET /stix/types`` (``returns``),
+    with the STIX relationship each graph relationship becomes
+    (``relationship_mappings``; 2026-10, the bullets above described the
+    neighbourhoods before the 2026-10 relationships).
 
     The ``identifier`` segment uses the FastAPI ``:path`` converter so it
     can capture values containing slashes (e.g. URL indicators like
