@@ -35,8 +35,9 @@ def test_dag_imports_trigger_rule_from_the_3_3_path_with_fallback():
 
 def test_dag_imports_exceptions_from_the_task_sdk_with_fallback():
     src = (_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
-    new = src.index("from airflow.sdk.exceptions import AirflowException, AirflowSkipException")
-    old = src.index("from airflow.exceptions import AirflowException, AirflowSkipException")
+    names = "AirflowException, AirflowFailException, AirflowSkipException"
+    new = src.index(f"from airflow.sdk.exceptions import {names}")
+    old = src.index(f"from airflow.exceptions import {names}")
     assert new < old and "except ImportError" in src[new:old]
 
 

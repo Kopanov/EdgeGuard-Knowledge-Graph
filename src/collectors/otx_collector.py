@@ -423,6 +423,14 @@ class OTXCollector:
                     time.sleep(2)  # OTX free tier: 30 req/min → 2 s between page fetches
 
                 pulses = all_pulses
+                if page > max_pages and consecutive_empty == 0:
+                    # 2026-10: the last page was full, so older pulses of the window were not read.
+                    logger.warning(
+                        "OTX baseline stopped at its page ceiling (EDGEGUARD_OTX_BASELINE_MAX_PAGES=%d, %d pulses): "
+                        "pulses older than the last page read were not collected; raise the ceiling to read them",
+                        max_pages,
+                        len(all_pulses),
+                    )
                 if not pulses:
                     logger.warning(
                         "OTX baseline returned 0 pulses for %s-day window — verify API key and OTX connectivity",

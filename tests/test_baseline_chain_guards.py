@@ -181,3 +181,17 @@ def test_the_clean_step_outlasts_two_large_event_deletes():
 
     ep = _import_dag_module()
     assert ep.baseline_clean_task.execution_timeout >= timedelta(minutes=60)
+
+
+def test_a_refusal_fails_the_task_without_its_retry():
+    """A retry would refuse again: the guards raise AirflowFailException (no retry)."""
+    ep = _import_dag_module()
+    stale = MagicMock()
+    stale.dag_id, stale.run_id = "edgeguard_baseline", "manual__1"
+    stale.get_task_states.return_value = {"manual__1": {"baseline_start": "upstream_failed"}}
+    with pytest.raises(ep.AirflowFailException):
+        ep._require_baseline_start({"ti": stale}, "cisa")
+    no_states = MagicMock(spec=["xcom_pull"])
+    no_states.xcom_pull.return_value = None
+    with pytest.raises(ep.AirflowFailException):
+        ep._require_baseline_start({"ti": no_states}, "cisa")
