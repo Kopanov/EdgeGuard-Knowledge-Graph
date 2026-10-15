@@ -232,6 +232,18 @@ class TestMergeBehaviour:
         assert merged_from < merge_call
         assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["merged_from"] == "combine"
         assert "merged_from" in enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
+        # Collapsed parallel edges: cited ids are combined like the other provenance lists (and
+        # wrapped back into a list with them), and every edge of a group first takes the strongest
+        # evidence (out- and incoming), since mergeNodes keeps one edge's scalars.
+        assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["cited_ids"] == "combine"
+        assert "cited_ids" in enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
+        assert "cited_ids" not in enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
+        out_block = query.index(enrichment_jobs._strongest_on_parallel_edges("out"))
+        in_block = query.index(enrichment_jobs._strongest_on_parallel_edges("in"))
+        assert out_block < merge_call and in_block < merge_call
+        block = enrichment_jobs._strongest_on_parallel_edges("out")
+        assert "ORDER BY coalesce(e.confidence_score, -1.0) DESC" in block
+        assert "SET e.confidence_score = best.confidence_score, e.match_type = best.match_type" in block
 
     def test_every_list_property_is_wrapped_back_into_a_list_in_the_merge_statement(self):
         # 2026-10: "combine" stores equal values as one string (two OTX nodes of one actor both hold

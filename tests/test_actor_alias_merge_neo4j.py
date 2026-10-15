@@ -69,6 +69,16 @@ CREATE (cl0p)-[:USES_TECHNIQUE {{sources: ['alienvault_otx'], source_refs: ['ali
         misp_event_ids: ['2'], src_uuid: 'u-cl0p', trg_uuid: 'u-t'}}]->(t)
 CREATE (clop)-[:SOURCED_FROM {{source: 'alienvault_otx', src_uuid: 'u-clop'}}]->(otx)
 CREATE (cl0p)-[:SOURCED_FROM {{source: 'alienvault_otx', src_uuid: 'u-cl0p'}}]->(otx)
+CREATE (ps:Technique:{LABEL} {{mitre_id: 'T1059.001', uuid: 'u-ps'}})
+CREATE (clop)-[:EMPLOYS_TECHNIQUE {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        source_refs: ['alienvault_otx:p3'], src_uuid: 'u-clop', trg_uuid: 'u-ps'}}]->(ps)
+CREATE (cl0p)-[:EMPLOYS_TECHNIQUE {{match_type: 'coreideas_curated', confidence_score: 0.85, sources: ['coreideas'],
+        source_refs: ['coreideas:c1'], cited_ids: ['T1086'], src_uuid: 'u-cl0p', trg_uuid: 'u-ps'}}]->(ps)
+CREATE (dropper:Malware:{LABEL} {{name: 'clop dropper', uuid: 'u-dropper'}})
+CREATE (dropper)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx'],
+        src_uuid: 'u-dropper', trg_uuid: 'u-clop'}}]->(clop)
+CREATE (dropper)-[:ATTRIBUTED_TO {{match_type: 'malware_family', confidence_score: 0.7, sources: ['threatfox'],
+        src_uuid: 'u-dropper', trg_uuid: 'u-cl0p'}}]->(cl0p)
 CREATE (fb)-[:SOURCED_FROM {{source: 'alienvault_otx', src_uuid: 'u-fb'}}]->(otx)
 CREATE (apt28)-[:SOURCED_FROM {{source: 'mitre_attck', src_uuid: 'u-apt28'}}]->(mitre)
 """
@@ -230,6 +240,32 @@ class TestMergeOnNeo4j:
             "RETURN count(r) AS n, head(collect(r.source)) AS source",
         )
         assert sourced == {"n": 1, "source": "alienvault_otx"}  # the scalar source id stays a scalar
+
+    def test_collapsed_edges_keep_the_strongest_evidence_and_every_cited_id(self, graph):
+        """Parallel edges of the canonical and a duplicate collapse into one: it keeps the union of
+        their provenance lists, cited ids included, and the strongest evidence's label and
+        confidence, here the duplicate's (outgoing and incoming alike)."""
+        client, driver = graph
+        enrichment_jobs.merge_alias_duplicate_actors(client)
+        employs = _one(
+            driver,
+            "MATCH (:ThreatActor {name: 'clop'})-[r:EMPLOYS_TECHNIQUE]->(:Technique {mitre_id: 'T1059.001'}) "
+            "RETURN count(r) AS n, head(collect(r.match_type)) AS match_type, head(collect(r.confidence_score)) AS confidence, "
+            "head(collect(r.sources)) AS sources, head(collect(r.source_refs)) AS refs, head(collect(r.cited_ids)) AS cited",
+        )
+        assert employs["n"] == 1
+        assert (employs["match_type"], employs["confidence"]) == ("coreideas_curated", 0.85)
+        assert sorted(employs["sources"]) == ["alienvault_otx", "coreideas"]
+        assert sorted(employs["refs"]) == ["alienvault_otx:p3", "coreideas:c1"]
+        assert employs["cited"] == ["T1086"]
+        attributed = _one(
+            driver,
+            "MATCH (:Malware {name: 'clop dropper'})-[r:ATTRIBUTED_TO]->(:ThreatActor {name: 'clop'}) "
+            "RETURN count(r) AS n, head(collect(r.match_type)) AS match_type, head(collect(r.confidence_score)) AS confidence, "
+            "head(collect(r.sources)) AS sources",
+        )
+        assert (attributed["n"], attributed["match_type"], attributed["confidence"]) == (1, "malware_family", 0.7)
+        assert sorted(attributed["sources"]) == ["alienvault_otx", "threatfox"]
 
     def test_a_second_run_merges_nothing(self, graph):
         client, driver = graph
