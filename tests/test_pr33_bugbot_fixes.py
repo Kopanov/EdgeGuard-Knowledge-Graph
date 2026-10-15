@@ -2978,3 +2978,21 @@ def test_ci_lint_config_includes_scripts_directory():
         "CI ruff format --check must include scripts/"
     )
     assert "mypy src/ scripts/" in ci_content, "CI mypy must include scripts/"
+
+
+def test_ci_and_make_lint_the_airflow_plugins_too():
+    """2026-10: ``plugins/edgeguard_dag_run_state.py`` (the listener that marks the DAG run in progress)
+    runs in the scheduler and the API server, and neither CI nor ``make lint`` linted ``plugins/``;
+    ``make lint`` also skipped ``scripts/``, which CI lints."""
+    import os
+
+    root = os.path.join(os.path.dirname(__file__), "..")
+    with open(os.path.join(root, ".github", "workflows", "ci.yml")) as fh:
+        ci_content = fh.read()
+    assert "ruff check src/ dags/ tests/ scripts/ plugins/" in ci_content
+    assert "ruff format --check src/ dags/ tests/ scripts/ plugins/" in ci_content
+    with open(os.path.join(root, "Makefile")) as fh:
+        makefile = fh.read()
+    lint = makefile.split("\nlint:\n", 1)[1].split("\n\n", 1)[0]
+    assert "ruff check src/ dags/ tests/ scripts/ plugins/" in lint
+    assert "ruff format --check src/ dags/ tests/ scripts/ plugins/" in lint

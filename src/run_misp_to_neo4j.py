@@ -2634,14 +2634,20 @@ class MISPToNeo4jSync:
                 if tag_name.startswith("malware-type:"):
                     malware_types.append(tag_name.replace("malware-type:", "").strip())
 
+            # 2026-10: named by the base name as ``parse_attribute`` names the node ("Cobalt Strike" for
+            # "Cobalt Strike - S0154"), the original kept as an alias. A STIX import of this bundle
+            # (``run_pipeline``) made the suffixed name a Malware node beside the ATT&CK one.
+            malware_name, attack_software_id = split_attack_software_id(value)
             stix_obj = {
                 "type": "malware",
                 "spec_version": "2.1",
                 "id": f"malware--{attr_uuid}",
-                "name": value,
+                "name": malware_name,
                 "is_family": True,
                 "malware_types": malware_types if malware_types else ["trojan"],
             }
+            if attack_software_id and malware_name != value:
+                stix_obj["aliases"] = [value]
             if labels:
                 stix_obj["labels"] = labels
             return _stamp_sdo(_with_entity_description(stix_obj))
@@ -3854,10 +3860,14 @@ class MISPToNeo4jSync:
                     phases_json = raw_comment.split("MITRE_TACTIC_PHASES:", 1)[1].strip()
                     json_part = phases_json.split("\n", 1)[0]
                     parsed = json.loads(json_part)
-                    if isinstance(parsed, dict):
-                        tactic_phases = parsed.get("p", [])
-                    elif isinstance(parsed, list):
-                        tactic_phases = parsed
+                    # 2026-10: through the META guards of the other blocks. ``{"p": "initial-access"}``
+                    # became a string of phases, and a list holding a map, a list or a null reached the
+                    # node property, which Neo4j refuses (the whole batch failed). A bare list, which no
+                    # writer produces, is still read; only its strings and numbers are kept.
+                    if isinstance(parsed, list):
+                        tactic_phases = _scalar_strings(parsed)
+                    else:
+                        tactic_phases = _meta_list(_meta_object(parsed, "MITRE_TACTIC_PHASES", attr_misp_uuid), "p")
                 except (ValueError, IndexError):
                     logger.warning("Unreadable MITRE_TACTIC_PHASES block for technique %s — no tactics taken", mitre_id)
 

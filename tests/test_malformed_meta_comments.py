@@ -242,3 +242,40 @@ def test_stix_tool_with_a_well_formed_comment_is_converted_as_before():
     assert stix["description"] == "Credential dumper."
     stix = _syncer()._attribute_to_stix21(_tool('MITRE_USES_TECHNIQUES:["T1003",{"x":1}]'), "ev", ["global"])
     assert stix["x_edgeguard_uses_techniques"] == ["T1003"], "the older bare-list form, as parse_attribute reads it"
+
+
+def _technique(comment: str) -> dict:
+    return {
+        "type": "text",
+        "value": "T1059: Command and Scripting Interpreter",
+        "uuid": UUID,
+        "comment": comment,
+        "Tag": [{"name": 'mitre-attack:technique="T1059"'}],
+    }
+
+
+@pytest.mark.parametrize(
+    "payload, phases",
+    [
+        ('{"p":"execution"}', []),
+        ('{"p":["execution",{"x":1},null,3,["y"]]}', ["execution", "3"]),
+        ('{"p":["execution","persistence"]}', ["execution", "persistence"]),
+        ('["execution",{"x":1}]', ["execution"]),
+        ("null", []),
+        ('"execution"', []),
+    ],
+    ids=["string-p", "mixed-list", "well-formed", "bare-list", "null", "string"],
+)
+def test_technique_tactic_phases_are_read_through_the_meta_guards(payload, phases, caplog):
+    """2026-10: the ``MITRE_TACTIC_PHASES`` block of a technique went straight to ``tactic_phases``:
+    ``{"p":"execution"}`` gave a string, and a list holding a map or a null reached the node property,
+    which Neo4j refuses for the whole batch."""
+    with caplog.at_level(logging.WARNING):
+        item, _ = _syncer().parse_attribute(
+            _technique(f"MITRE_TACTIC_PHASES:{payload}\nAdversaries may abuse interpreters."), _MITRE_EVENT
+        )
+    assert item is not None and item["mitre_id"] == "T1059"
+    assert item["tactic_phases"] == phases
+    assert item["description"] == "Adversaries may abuse interpreters."
+    if payload in ("null", '"execution"'):
+        assert any("[META]" in r.message and UUID in r.message for r in caplog.records)
