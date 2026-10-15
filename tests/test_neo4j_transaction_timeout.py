@@ -186,7 +186,6 @@ class TestTimeoutIsLogged:
             result.single()
         (line,) = _timeout_lines(caplog)
         assert "1200 s" in line and "MATCH (n) RETURN count(n) AS c" in line
-        assert "EDGEGUARD_NEO4J_READ_TIMEOUT" in line
 
     def test_a_timeout_raised_while_iterating_is_logged(self, caplog):
         session = nc._TimeoutSession(_SessionWith(_RaisingResult(_TimedOut("terminated"))))
@@ -217,3 +216,30 @@ class TestTimeoutIsLogged:
     def test_without_a_timeout_the_result_is_returned_unchanged(self):
         result = object()
         assert nc._TimeoutSession(_SessionWith(result)).run("RETURN 1") is result
+
+    def test_the_message_names_the_limit_that_applied(self, caplog):
+        nc._log_if_timed_out(_TimedOut("a"), float(nc.NEO4J_READ_TIMEOUT), "MATCH (a) RETURN a")
+        nc._log_if_timed_out(_TimedOut("b"), float(nc._REL_QUERY_TIMEOUT), "UNWIND $rows AS row MERGE (x)")
+        nc._log_if_timed_out(_TimedOut("c"), 300.0, "MATCH (s) RETURN s")
+        pipeline, batch, api = _timeout_lines(caplog)
+        assert "EDGEGUARD_NEO4J_READ_TIMEOUT" in pipeline
+        assert "_REL_QUERY_TIMEOUT" in batch and "EDGEGUARD_NEO4J_READ_TIMEOUT" not in batch
+        assert "REST and STIX" in api and "EDGEGUARD_NEO4J_READ_TIMEOUT" not in api
+
+    def test_a_timeout_raised_by_the_next_run_is_logged_against_the_previous_statement(self, caplog):
+        class _UnreadThenTimeout:
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, query, parameters=None, **kwargs):
+                self.calls += 1
+                if self.calls == 2:  # the driver reads the first, unread result here
+                    raise _TimedOut("terminated")
+                return object()
+
+        session = nc._TimeoutSession(_UnreadThenTimeout())
+        session.run("UNWIND $rows AS row MERGE (a)-[r:USES]->(b)", timeout=600)
+        with pytest.raises(_TimedOut):
+            session.run("MATCH (n) RETURN count(n)", timeout=3600)
+        (line,) = _timeout_lines(caplog)
+        assert "600 s" in line and "UNWIND $rows AS row MERGE" in line and "count(n)" not in line

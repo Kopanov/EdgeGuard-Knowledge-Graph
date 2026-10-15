@@ -1273,13 +1273,17 @@ def _log_if_timed_out(exc: BaseException, timeout: Optional[float], statement: s
         exc._edgeguard_timeout_logged = True  # type: ignore[attr-defined]
     except Exception:  # an exception type without a __dict__ is logged every time it passes
         pass
+    if timeout is not None and timeout == float(NEO4J_READ_TIMEOUT):
+        setting = "EDGEGUARD_NEO4J_READ_TIMEOUT; raise it if the statement is expected to run longer"
+    elif timeout is not None and timeout == float(_REL_QUERY_TIMEOUT):
+        setting = "the relationship-batch limit (_REL_QUERY_TIMEOUT in src/neo4j_client.py)"
+    else:
+        setting = "the limit its caller sets (REST and STIX queries: 300 s)"
     logger.error(
-        "[NEO4J-TIMEOUT] the server aborted a statement at its %s s transaction timeout: %s — pipeline "
-        "statements use EDGEGUARD_NEO4J_READ_TIMEOUT (now %d s); raise it if the statement is expected "
-        "to run longer",
+        "[NEO4J-TIMEOUT] the server aborted a statement at its %s s transaction timeout: %s — set by %s",
         f"{timeout:.0f}" if timeout is not None else "?",
         statement,
-        NEO4J_READ_TIMEOUT,
+        setting,
     )
 
 
@@ -1339,14 +1343,16 @@ class _TimeoutSession:
         if timeout is None:
             return self._inner.run(query, parameters, **kwargs)
         statement = _statement_head(query)
-        self._last = (float(timeout), statement)
         # Not a call site: the timeout now travels inside the Query object (see the module's
         # scan test, which requires ``timeout=`` on every real ``session.run`` caller).
         try:
             result = self._inner.run(query, parameters, **kwargs)
         except Exception as e:
-            _log_if_timed_out(e, float(timeout), statement)
+            # The driver reads an unread earlier result before it runs the next statement, so a
+            # timeout raised here belongs to the previous statement when there is one.
+            _log_if_timed_out(e, *(self._last or (float(timeout), statement)))
             raise
+        self._last = (float(timeout), statement)
         return _TimeoutResult(result, float(timeout), statement)
 
     def __enter__(self) -> "_TimeoutSession":
