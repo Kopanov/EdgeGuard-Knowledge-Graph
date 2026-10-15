@@ -215,7 +215,9 @@ the API pod at deploy time and is omitted if unset.
 
 All `x_edgeguard_*` properties (source-truthful and import timestamps,
 `x_edgeguard_zones`, MISP traceability, NVD / CISA KEV enrichment on
-`vulnerability`, the relationship provenance on SROs, the identity
+`vulnerability` (since 2026-10-15, definition version 1.2.0, also NVD's
+record status `x_edgeguard_status`: `["rejected"]` or `["active"]`),
+the relationship provenance on SROs, the identity
 provenance above) are **top-level
 extension properties** of the STIX 2.1 extension
 `extension-definition--a9516685-381e-5b4f-9bd4-5cad8c3b1511`
@@ -342,4 +344,4 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-15 — § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`). Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
+_Last updated: 2026-10-15 — `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`). Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._

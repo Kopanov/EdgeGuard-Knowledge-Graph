@@ -47,7 +47,7 @@ from config import (
     get_sector_cutoff_date,
     misp_http_headers_for_pymisp,
 )
-from cvss_selection import CVSS_VERSIONS, select_cvss
+from cvss_selection import CVSS_VERSIONS, cvss_attack_vector, select_cvss
 from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
@@ -3030,12 +3030,13 @@ class MISPToNeo4jSync:
                     value,
                     _rejected_scores,
                 )
-            if nvd_meta:
-                description = nvd_meta.get("description", raw_comment)
-                attack_vector = nvd_meta.get("attack_vector") or "UNKNOWN"
-            else:
-                description = raw_comment
-                attack_vector = "NETWORK"
+            # 2026-10: the attack vector of the CVSS payload that gives the score, in NVD's words, and
+            # None without CVSS (``cvss_selection.cvss_attack_vector``). NVD_META's own
+            # ``attack_vector`` is not read: copies written before 2026-10 hold a letter of the
+            # vector string ("N", "L", "A", "P") or "UNKNOWN" from NVD and an invented "NETWORK"
+            # from KEV and ICS, and an attribute without NVD_META (OTX) got "NETWORK".
+            attack_vector = cvss_attack_vector(nvd_meta)
+            description = nvd_meta.get("description", raw_comment) if nvd_meta else raw_comment
             # CISA's knownRansomwareCampaignUse: in NVD_META of the KEV collector's records since
             # 2026-10; older KEV attributes carry only the ``ransomware:known`` tag.
             known_ransomware_use = nvd_meta.get("known_ransomware_use") or (

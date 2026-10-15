@@ -35,7 +35,7 @@ from config import (
     SSL_VERIFY,
     apply_misp_http_host_header,
 )
-from cvss_selection import cvss_rating_tag
+from cvss_selection import cvss_rating_tag, normalize_attack_vector
 
 # PR-N4: Prometheus metrics for permanent-failure counter + adaptive-
 # backoff trigger. Optional import so MISPWriter can run in environments
@@ -482,12 +482,16 @@ def nvd_meta_digest(meta: Dict[str, Any]) -> str:
     """Digest of an ``NVD_META`` payload, for telling a changed CVE from an unchanged one.
 
     ``last_modified`` is left out: NVD moves it for changes to data EdgeGuard does not store
-    (translations, SSVC, CNA product data), and such a change needs no MISP edit. A key whose value
-    is empty (``""``, ``None``, ``[]``, ``{}``) counts as absent, so a key a later EdgeGuard
-    version adds with an empty value does not make every stored copy look changed.
+    (translations, SSVC, CNA product data), and such a change needs no MISP edit. ``attack_vector``
+    is left out too (2026-10): it is derived from the CVSS payloads, which the digest covers, and
+    copies written before 2026-10 hold a letter (``N``) or ``UNKNOWN`` where the item now has NVD's
+    word, so every stored copy would have looked changed. A key whose value is empty (``""``,
+    ``None``, ``[]``, ``{}``) counts as absent, so a key a later EdgeGuard version adds with an
+    empty value does not make every stored copy look changed.
     """
     data = json.loads(json.dumps(meta, default=str))
     data.pop("last_modified", None)
+    data.pop("attack_vector", None)
     data = {key: value for key, value in data.items() if value not in ("", None, [], {})}
     for key in _NVD_META_UNORDERED_KEYS:
         value = data.get(key)
@@ -1787,7 +1791,10 @@ class MISPWriter:
             "cpe_type": vuln.get("cpe_type", []),
             "result_impacts": vuln.get("result_impacts", []),
             "affected_products": vuln.get("affected_products", []),
-            "attack_vector": vuln.get("attack_vector", "UNKNOWN"),
+            # 2026-10: NVD's word for the attack vector of the CVSS that gives the score, null without
+            # one (``cvss_selection``); it was "UNKNOWN" for an item without one. The sync derives the
+            # attack vector from the CVSS payloads below and does not read this key.
+            "attack_vector": normalize_attack_vector(vuln.get("attack_vector")),
             "cvss_v40_data": vuln.get("cvss_v40_data"),
             "cvss_v31_data": vuln.get("cvss_v31_data"),
             "cvss_v30_data": vuln.get("cvss_v30_data"),

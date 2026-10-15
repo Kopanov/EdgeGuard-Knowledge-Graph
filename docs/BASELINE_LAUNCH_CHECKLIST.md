@@ -398,7 +398,8 @@ the baseline record:
 python scripts/verify_fresh_baseline.py --json > baseline_acceptance.json
 ```
 
-It exits non-zero when any of these fail:
+It exits non-zero when any of these fail. A warning (`[WARN]`; in the JSON `ok: false` with
+`mandatory: false`) is reported and leaves the exit code unchanged:
 
 | Check | Expected |
 |---|---|
@@ -408,7 +409,7 @@ It exits non-zero when any of these fail:
 | NVD-sourced `CVE` nodes carrying `cwe` / `ref_tags` / `cpe_type` / `result_impacts` | judged only on CVEs published > 45 days ago (NVD assigns reference tags and CPE configurations during analysis, weeks after publication — day-old CVEs have neither); thresholds 50 / 20 / 20 / 50 %; measured 2026-10-10 on the 730-day event: 93 / 57 / 58 / 91 %. Informational when fewer than 100 analysed CVEs are present (short smoke baselines) |
 | `T1047`, `T1021.006`, `T1543.003`, `T1222.001`, `T1546.003`, Tool `S0005` | present (requires the MISP Import Regexp fix before re-import) |
 | `ThreatActor` names containing `,` or ` and ` | 0 |
-| `tlp` property | on every EdgeGuard node |
+| `tlp` property (`tlp_on_every_node`) | on every EdgeGuard node parsed from a MISP attribute. Since 2026-10 the sync gives an attribute without a `tlp:` tag the level `EDGEGUARD_DEFAULT_TLP` and logs `[TLP] MISP attribute <uuid> has no tlp: tag`, so lost tags show in the sync log, not in this check |
 | `edgeguard_managed` | on every node EdgeGuard created and every EdgeGuard edge; a node a partner created first that EdgeGuard wrote to carries `edgeguard_enriched = true` instead |
 | ICS (when `EDGEGUARD_ENABLE_MITRE_ICS`) | techniques with `attack_domain = 'ics'` link only to ICS tactics |
 | CISA ICS (when `EDGEGUARD_ENABLE_CISA_ICS`) | `Source {source_id: 'cisa_ics'}` present with `SOURCED_FROM` edges |
@@ -417,6 +418,12 @@ It exits non-zero when any of these fail:
 | Group → software (`uses_malware_complete`, `uses_tool_complete`) | every MITRE `uses_malware` / `uses_tools` claim whose target node exists has its edge (informational until the MITRE collector of the R6 build has run) |
 | Sector coverage (`sector_coverage`, informational) | `ThreatActor` / `Malware` → `Sector` `TARGETS` present for finance, energy, healthcare (2026-10: ~200/100/100 actors and ~750/400/320 malware on the September graph); energy CVEs well above the 234 of the keyword-only vocabulary |
 | ResilMesh conformance | relationship names and directions unchanged; `HAS_CVSS_*` bidirectional |
+| Relationship sources (`relationships_name_their_source`, `provenance_lists_are_lists`) | every EdgeGuard relationship built from the sources has a non-empty `r.sources`; `sources`, `source_refs`, `misp_event_ids` (and node `zone`, `source`) are lists, never strings |
+| Provenance per relationship type (`relationship_provenance_complete`) | every EdgeGuard edge carries what its writers guarantee: `sources`, `source_refs`, `misp_event_ids` and `match_type` on the links built by `build_relationships` and the sync; the three lists on `RUNS`, `PART_OF_CAMPAIGN`, `REFERS_TO` (enrichment jobs, no evidence label); `sources` and `misp_event_ids` on `HAS_CVSS_*`; `source` (a string), `source_refs` and `misp_event_ids` on `SOURCED_FROM`. Presence is judged: an empty `misp_event_ids` list is legitimate (a link whose records name no MISP event) and only counted per type |
+| Dropped relationship keys (`no_legacy_relationship_properties`) | no relationship of an EdgeGuard type carries `source_id`, `source_ids` or `report_ids` (other types are listed, never failed on); every `Source` node keeps `source_id`, its key |
+| Campaign membership (`campaign_membership_is_part_of_campaign`) | no `PART_OF` ends at a `Campaign`; every `PART_OF_CAMPAIGN` runs from a `Malware` or `Indicator` to a `Campaign`. `PART_OF` stays ResilMesh's (IP → Subnet, the OrganizationUnit hierarchy) |
+| CVE scores (`cve_score_from_cvss`) | an EdgeGuard `CVE` with a CVSS sub-node whose `base_score` is in [0, 10] has the `cvss_score` / `cvss_version` of the sub-node selected in the order 3.1, 3.0, 2.0, 4.0 and a CVSS rating as `severity`; a `CVE` without one has a null score and version and `severity = 'UNKNOWN'`. Informational while there is no CVE |
+| Per-source presence (`default_sources_delivered`, **warning**) | the `SOURCED_FROM` count of every `Source` node is listed; a source collected by default (`cisa_kev`, `mitre_attck`, `nvd`, `urlhaus`, `feodo_tracker`, `ssl_blacklist`) with none is a warning — look at that collector's task in the baseline run (an upstream outage skips it without failing the run). Keyed sources without data (`alienvault_otx`, `virustotal`, `threatfox`, `abuseipdb`: skipped by design without a key) and the flag-guarded ones (`cisa_ics`, `malwarebazaar`) are only listed |
 
 ### GraphRAG readiness verification (post-#126)
 
@@ -466,7 +473,7 @@ live graph via [`scripts/run_cypher_catalog_http.py`](../scripts/run_cypher_cata
 
 ---
 
-_Last updated: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
+_Last updated: 2026-10-15 — acceptance table: the data contracts of the 2026-10 relationship-provenance, campaign-membership and CVE-score changes (`relationship_provenance_complete`, `no_legacy_relationship_properties`, `campaign_membership_is_part_of_campaign`, `cve_score_from_cvss`), the per-source presence warning (`default_sources_delivered`), the rows of the existing provenance checks, and where lost TLP tags now show (the sync log). Prior: 2026-10-12 — § [7] steps 2 and 6: MalwareBazaar as the third flag-guarded source (enable after acceptance, one at a time, `--require-malwarebazaar`); acceptance table row. Prior: 2026-10-10 (later) — § [7] step 2/6: flags reach the airflow container only via compose `x-common-env` (added), additive baseline after enabling CISA ICS, `MITRE_FORCE_REFETCH` for ICS. Earlier the same day — § [7]: deploy `main` (`ca9cdae`, Airflow 3.3.2 image rebuild) before the wipe, backup-gate env, DAG pause pointer, hand-back step with the three new relationship types. Prior: 2026-06-12 — added "GraphRAG readiness verification" to § After the run: post-baseline checks for the PR #126 write-side fixes (aliases, KEV markers) + the build_relationships edge types absent from the pre-June snapshot. Prior: 2026-06-11 — PR #125 docs correction: the lock sentinel is NOT written by the baseline DAG (PR-F2 de-scope, Issue #57) — manual pausing is the ONLY mutex on the DAG path, and the pause list now covers all 5 scheduled DAGs (added edgeguard_neo4j_sync); CLI wrappers exist (PR-C) but trigger the same DAG. Prior: 2026-04-28 — PR-N35 Tier-1 + PR-N36 follow-up:_
 - _Item `[4]` description (PR-N35): "CLI vs DAG+pause" → "DAG-only at HEAD" (the
   CLI baseline subcommand referenced in older RUNBOOK versions doesn't
   exist in `src/edgeguard.py` — verified by `grep "add_parser"`)._

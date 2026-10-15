@@ -25,6 +25,7 @@ from typing import Dict, List
 import requests
 import urllib3
 
+from baseline_clean import misp_delete_read_timeout_sec
 from config import MISP_API_KEY, MISP_URL, apply_misp_http_host_header
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -109,10 +110,12 @@ class MISPClearer:
             True if deleted successfully, False otherwise
         """
         try:
+            # MISP deletes an event's attributes inside the request; a 150,000-attribute event
+            # outlasts 30 s (2026-10, see baseline_clean.misp_delete_read_timeout_sec).
             response = self.session.delete(
                 f"{self.url}/events/{event_id}",
                 verify=self.verify_ssl,
-                timeout=30,
+                timeout=(15, misp_delete_read_timeout_sec()),
                 allow_redirects=True,  # MISP may return 302 on successful DELETE
             )
 

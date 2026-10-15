@@ -34,7 +34,12 @@ except ImportError:
 # src/node_identity.py for the namespace, canonicalization rules, and the
 # per-label natural-key map.
 import source_registry  # noqa: E402  — single-source-of-truth for SOURCES dict (chip 5a refactor)
-from cvss_selection import CVSS_VERSIONS, QUALITATIVE_SEVERITIES, UNKNOWN_SEVERITY  # noqa: E402
+from cvss_selection import (  # noqa: E402
+    ATTACK_VECTOR_SPELLINGS,
+    CVSS_VERSIONS,
+    QUALITATIVE_SEVERITIES,
+    UNKNOWN_SEVERITY,
+)
 from cvss_selection import clamp_cvss_score as clamp_cvss_score  # noqa: E402  — re-export (moved 2026-10)
 from ioc_normalize import (
     canonicalize_lookup,  # noqa: E402  — alert-path (type, value) parity with the sync vocabulary (post-#126 hardening)
@@ -815,16 +820,39 @@ def _cve_severity_from_best_cypher() -> str:
     )
 
 
-# 2026-10: a CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` come from its CVSS
-# sub-nodes, never from the record being merged (see ``cvss_selection``). Derived after every
-# ``merge_cve``, so the result does not depend on which source's record arrives last, and a CVE
-# without CVSS loses any score an older run stored (null score, severity UNKNOWN).
+def _attack_vector_word_cypher(expr: str) -> str:
+    """Cypher expression for NVD's word of the attack-vector spelling in ``expr``
+    (``cvss_selection.ATTACK_VECTOR_SPELLINGS``, any case); null for any other value."""
+    whens = " ".join(f"WHEN '{spelling}' THEN '{word}'" for spelling, word in ATTACK_VECTOR_SPELLINGS.items())
+    return f"CASE toUpper(trim(toStringOrNull({expr}))) {whens} ELSE null END"
+
+
+def _cve_attack_vector_from_best_cypher() -> str:
+    """Cypher expression for the attack vector of ``best`` (see ``_cve_cvss_selection_cypher``);
+    mirrors ``cvss_selection.payload_attack_vector``: the field of best's version (``attack_vector``
+    of CVSS 3.x, ``access_vector`` of CVSS 2), else the ``AV`` metric of its ``vector_string`` (a
+    CVSS 4.0 sub-node stores only the vector string), as NVD's word; null without CVSS."""
+    fields = " ".join(f"WHEN '{v.version}' THEN best[0].{v.vector_field}" for v in CVSS_VERSIONS if v.vector_field)
+    stated = _attack_vector_word_cypher(f"CASE best[1] {fields} END")
+    metric = (
+        "head([m IN split(trim(toStringOrNull(best[0].vector_string)), '/') "
+        "WHERE m STARTS WITH 'AV:' | substring(m, 3)])"
+    )
+    return f"CASE WHEN best IS NULL THEN null ELSE coalesce({stated}, {_attack_vector_word_cypher(metric)}) END"
+
+
+# 2026-10: a CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector`` come
+# from its CVSS sub-nodes, never from the record being merged (see ``cvss_selection``). Derived
+# after every ``merge_cve``, so the result does not depend on which source's record arrives last,
+# and a CVE without CVSS loses any score or attack vector an older run stored (null score and
+# attack vector, severity UNKNOWN).
 _CVE_SCORE_FROM_CVSS_QUERY = (
     "MATCH (c:CVE {cve_id: $cve_id})\n"
     f"{_cve_cvss_selection_cypher('c')}\n"
     "SET c.cvss_score = best[0].base_score,\n"
     "    c.cvss_version = best[1],\n"
-    f"    c.severity = {_cve_severity_from_best_cypher()}"
+    f"    c.severity = {_cve_severity_from_best_cypher()},\n"
+    f"    c.attack_vector = {_cve_attack_vector_from_best_cypher()}"
 )
 
 
@@ -2798,8 +2826,8 @@ class Neo4jClient:
         After merging the CVE, creates CVSS sub-nodes (v4.0 / v3.1 / v3.0 / v2) when
         ``cvss_v40_data`` / ``cvss_v31_data`` / ``cvss_v30_data`` / ``cvss_v2_data`` are present,
         with matching ``HAS_CVSS_*`` relationships (ResilMesh schema), then sets the node's
-        ``cvss_score`` / ``severity`` / ``cvss_version`` from those sub-nodes (2026-10; the
-        record's own ``cvss_score`` / ``severity`` are not written).
+        ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector`` from those sub-nodes
+        (2026-10; the record's own ``cvss_score`` / ``severity`` / ``attack_vector`` are not written).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -2832,12 +2860,11 @@ class Neo4jClient:
             extra_props["known_ransomware_use"] = str(data["known_ransomware_use"])
         if data.get("description"):
             extra_props["description"] = data["description"]
-        # 2026-10: ``cvss_score`` and ``severity`` are not taken from the record — they are derived
-        # from the CVSS sub-nodes below (``_set_cve_score_from_cvss``). The record's values were
-        # whatever its source sent: a 0.0 placeholder read back as 3.0 / LOW, a ransomware-derived
-        # KEV value, or "UNKNOWN" from a source without scores, and the last record merged won.
-        if data.get("attack_vector"):
-            extra_props["attack_vector"] = data["attack_vector"]
+        # 2026-10: ``cvss_score``, ``severity`` and ``attack_vector`` are not taken from the record —
+        # they are derived from the CVSS sub-nodes below (``_set_cve_score_from_cvss``). The record's
+        # values were whatever its source sent: a 0.0 placeholder read back as 3.0 / LOW, a
+        # ransomware-derived KEV value, "UNKNOWN" from a source without scores, a vector-string
+        # letter ("N") from NVD or an invented "NETWORK" from KEV and OTX, and the last record merged won.
         # PR-N19 Fix #1 (post-baseline 2026-04-22, from Bravo's
         # baseline-run audit): promote NVD ``published`` +
         # ``last_modified`` to node properties. Pre-PR-N19 the data
@@ -2958,8 +2985,10 @@ class Neo4jClient:
             return False
 
     def _set_cve_score_from_cvss(self, cve_id: str) -> bool:
-        """Set the CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` from its CVSS
-        sub-nodes (v3.1 → v3.0 → v2 → v4.0); no CVSS → null score and version, severity UNKNOWN.
+        """Set the CVE node's ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector``
+        from its CVSS sub-nodes (v3.1 → v3.0 → v2 → v4.0); no CVSS → null score, version and attack
+        vector, severity UNKNOWN. The attack vector is that of the sub-node that gives the score,
+        in NVD's words (``cvss_selection.payload_attack_vector``).
 
         Runs after every ``merge_cve`` (2026-10), whichever source the record came from, so a
         record without CVSS (OTX, KEV, an NVD record awaiting analysis) cannot erase another
