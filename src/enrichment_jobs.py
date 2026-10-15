@@ -1069,6 +1069,10 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "tags": "combine",
     "uses_techniques": "combine",
     "reported_techniques": "combine",
+    # 2026-10: the software lists (ATT&CK ``uses`` and pulse families) were "discard" by the
+    # wildcard, so a folded duplicate's claims were lost from the canonical node
+    "uses_malware": "combine",
+    "uses_tools": "combine",
     "misp_event_ids": "combine",
     "misp_attribute_ids": "combine",
     "pulse_ids": "combine",

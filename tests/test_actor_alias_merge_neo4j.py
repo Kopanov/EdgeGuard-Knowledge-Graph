@@ -52,9 +52,9 @@ CREATE (apt28:ThreatActor:{LABEL} {{name: 'apt28', uuid: 'u-apt28', source: ['mi
         aliases: ['APT28', 'Fancy Bear'], zone: ['global']}})
 CREATE (fb:ThreatActor:{LABEL} {{name: 'fancy bear', uuid: 'u-fb', source: ['alienvault_otx'], zone: ['global']}})
 CREATE (clop:ThreatActor:{LABEL} {{name: 'clop', uuid: 'u-clop', source: ['alienvault_otx'], zone: ['global'],
-        pulse_ids: ['p1']}})
+        pulse_ids: ['p1'], uses_malware: ['clop ransomware']}})
 CREATE (cl0p:ThreatActor:{LABEL} {{name: 'cl0p', uuid: 'u-cl0p', source: ['alienvault_otx'], zone: ['global'],
-        pulse_ids: ['p1']}})
+        pulse_ids: ['p1'], uses_malware: ['clop dropper'], uses_tools: ['S0002']}})
 CREATE (medusa:ThreatActor:{LABEL} {{name: 'medusa', uuid: 'u-medusa', source: ['alienvault_otx']}})
 CREATE (mg:ThreatActor:{LABEL} {{name: 'medusa group', uuid: 'u-mg', source: ['mitre_attck'], aliases: ['Medusa']}})
 CREATE (apt29:ThreatActor:{LABEL} {{name: 'apt29', uuid: 'u-apt29', source: ['mitre_attck'], aliases: ['UNC2452']}})
@@ -189,8 +189,10 @@ class TestMergeOnNeo4j:
         clop = _one(
             driver,
             "MATCH (a:ThreatActor {name: 'clop'}) RETURN a.source AS source, a.zone AS zone, "
-            "a.aliases AS aliases, a.pulse_ids AS pulse_ids, a.uuid AS uuid, a.merged_from AS merged_from",
+            "a.aliases AS aliases, a.pulse_ids AS pulse_ids, a.uuid AS uuid, a.merged_from AS merged_from, "
+            "a.uses_malware AS uses_malware, a.uses_tools AS uses_tools",
         )
+        clop["uses_malware"] = sorted(clop["uses_malware"])  # APOC keeps the canonical's entries first
         assert clop == {
             "source": ["alienvault_otx"],
             "zone": ["global"],
@@ -198,6 +200,8 @@ class TestMergeOnNeo4j:
             "pulse_ids": ["p1"],
             "uuid": "u-clop",
             "merged_from": ["cl0p"],  # explainability: the nodes this job folded in, apart from aliases
+            "uses_malware": ["clop dropper", "clop ransomware"],  # the duplicate's claims are kept
+            "uses_tools": ["S0002"],  # a single list ("combine" of one side) stays a list
         }
         apt28 = _one(
             driver,

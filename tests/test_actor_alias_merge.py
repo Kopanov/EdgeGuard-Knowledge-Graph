@@ -236,6 +236,25 @@ class TestMergeBehaviour:
         # wrapped back into a list with them), and every edge of a group first takes the strongest
         # evidence (out- and incoming), since mergeNodes keeps one edge's scalars.
         assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["cited_ids"] == "combine"
+        # Every list property an actor node carries is combined (2026-10-15, hosted graph: aliases,
+        # misp_attribute_ids, misp_event_ids, pulse_ids, reported_techniques, source, tags,
+        # uses_malware, uses_techniques, uses_tools, zone), never dropped by the wildcard.
+        for prop in (
+            "aliases",
+            "misp_attribute_ids",
+            "misp_event_ids",
+            "pulse_ids",
+            "reported_techniques",
+            "source",
+            "tags",
+            "uses_malware",
+            "uses_techniques",
+            "uses_tools",
+            "zone",
+            "merged_from",
+        ):
+            assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY[prop] == "combine", prop
+            assert prop in enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS, prop
         assert "cited_ids" in enrichment_jobs._ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS
         assert "cited_ids" not in enrichment_jobs._ACTOR_ALIAS_MERGE_LIST_PROPS
         out_block = query.index(enrichment_jobs._strongest_on_parallel_edges("out"))
