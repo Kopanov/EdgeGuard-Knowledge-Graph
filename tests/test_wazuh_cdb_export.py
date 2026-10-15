@@ -158,10 +158,12 @@ class TestFilters:
 
     def test_capped_query(self, monkeypatch):
         session = _install(monkeypatch, [])
-        client.get("/export/wazuh/cdb")
+        resp = client.get("/export/wazuh/cdb")
         query, params = session.calls[0]
-        assert "LIMIT $cap" in query
+        # 2026-10: newest first, one row beyond the cap to detect a cut list.
+        assert "ORDER BY (n.last_updated IS NULL), n.last_updated DESC, key LIMIT $cap + 1" in query
         assert params["cap"] == query_api._CDB_EXPORT_MAX_ENTRIES
+        assert resp.headers["X-EdgeGuard-Truncated"] == "false"
 
 
 class TestCveCdbFormat:

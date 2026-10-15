@@ -4,7 +4,7 @@ Interactive browser-based visualization for the EdgeGuard knowledge graph. Built
 
 **File:** [`docs/visualization.html`](visualization.html)
 **API endpoint:** `GET /graph/explore`
-**Last updated:** 2026-04-26 — PR-N33 docs audit: clarified that the "Malware (default)" view's API enum value is `attacks` (was confusing — heading said "Malware" but the API parameter says `attacks`). Prior: 2026-03-27.
+**Last updated:** 2026-10-15 — Quick Start: when the monitoring stack's Grafana holds port 3000, serve `docs/` on port 3001 and append `http://localhost:3001` to `EDGEGUARD_CORS_ORIGINS`; `limit` caps the rows each view reads, not the nodes; the CVE view's Cypher comment says which label carries the score and KEV fields (`:CVE`). Same day: the default view (`attacks`) matches `(Indicator)-[:INDICATES]->(Malware)`, the direction every writer creates (it matched the reverse direction and a `DROPS` type that nothing writes, and was always empty); edges point the way the graph relationship does and are listed once; Quick Start serves the page from an origin the default CORS allowlist accepts (opening the file directly is refused) and says how to add a presenter's origin with `EDGEGUARD_CORS_ORIGINS`; edge style table matches the page. Prior: 2026-04-26 — PR-N33 docs audit: clarified that the "Malware (default)" view's API enum value is `attacks` (was confusing — heading said "Malware" but the API parameter says `attacks`). Prior: 2026-03-27.
 
 ---
 
@@ -27,17 +27,50 @@ If your deployment uses Neo4j Enterprise or Aura, Bloom can be used alongside or
    uvicorn src.query_api:app --host 127.0.0.1 --port 8000
    ```
 
-2. **Open the explorer** in your browser:
+2. **Serve the explorer from an allowed origin.** The page calls the API from the browser, so the
+   API must list the page's origin in its CORS allowlist, `EDGEGUARD_CORS_ORIGINS` (default
+   `http://localhost,http://localhost:3000`). A page opened directly from disk has the origin
+   `null` and is refused, and so is any other static server whose origin is not in the list. With
+   the default list, serve `docs/` on port 3000:
+   ```bash
+   python3 -m http.server 3000 --bind 127.0.0.1 --directory docs
    ```
-   docs/visualization.html
+   and open **`http://localhost:3000/visualization.html`** — with the host name `localhost`:
+   the origin is compared as a string, so `http://127.0.0.1:3000` is a different origin and is
+   refused.
+
+   **Presenting from another origin** (another port, host name or machine): add that origin to
+   the allowlist instead of widening it — never `*`, never `null`. In `.env`, keep the defaults and
+   append the presenter's origin exactly as the browser's address bar shows it (scheme, host,
+   port; no path, no trailing slash):
+   ```bash
+   EDGEGUARD_CORS_ORIGINS=http://localhost,http://localhost:3000,https://demo.example.org
    ```
-   Or serve it via any static file server.
+   then restart the API (`docker compose up -d api`; `docker-compose.yml` forwards the variable to
+   both APIs) or, without Docker, export the variable before starting `uvicorn`. The list is read
+   once at start-up.
+
+   **When Grafana holds port 3000.** The optional monitoring stack (`make monitoring`,
+   `docker-compose.monitoring.yml`) binds Grafana to `127.0.0.1:3000`. The command above then
+   stops with *Address already in use*, and `http://localhost:3000/visualization.html` answers
+   with Grafana's own 404 page. Serve `docs/` on another port and append that origin to the
+   allowlist (the default stays as it is):
+   ```bash
+   python3 -m http.server 3001 --bind 127.0.0.1 --directory docs
+   ```
+   ```bash
+   # .env
+   EDGEGUARD_CORS_ORIGINS=http://localhost,http://localhost:3000,http://localhost:3001
+   ```
+   then restart the API as above and open **`http://localhost:3001/visualization.html`**.
 
 3. **Connect** by entering:
    - **API URL:** `http://localhost:8000` (or your deployment URL)
    - **API Key:** your `EDGEGUARD_API_KEY` value
 
    Credentials are saved in `localStorage` for convenience — the explorer auto-reconnects on next visit.
+   **Connect** calls `GET /health`, which answers 503 while Neo4j is unavailable; the explorer then
+   reports the status code instead of loading a view.
 
 ---
 
@@ -47,20 +80,22 @@ The explorer offers four pre-built views, each running a different Cypher query 
 
 ### Malware (API enum value: `attacks` — the default)
 
-**What it shows:** Malware families linked to their indicators (IOCs), grouped by target sector.
+**What it shows:** Indicators (IOCs) linked to the malware families they indicate, and each indicator's sectors.
 
-**Layout:** Top-down hierarchical (dagre) — malware at the top, indicators in the middle, sector triangles at the bottom.
+**Layout:** Top-down hierarchical (dagre). Edges point the way the graph relationship does —
+indicator → malware (`INDICATES`) and indicator → sector — so the indicators form the top row and
+the malware families and sector triangles the row below.
 
 **Use case:** "Which malware families are targeting our sector? What IOCs should we block?"
 
 **Cypher pattern:**
 ```cypher
-MATCH (m:Malware)-[r]->(i:Indicator)
-WHERE type(r) IN ['INDICATES', 'DROPS']
--- Note: the legacy filter included 'USES', but USES never connected
--- Malware→Indicator in our schema; it only ever went X→Technique.
--- That generic USES was split into EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE
--- in 2026-04; neither points to Indicator.
+MATCH (i:Indicator)-[:INDICATES]->(m:Malware)
+-- Both ends EdgeGuard-created or enriched; zone filter on the indicator.
+-- 2026-10: every writer (build_relationships, the MISP → Neo4j sync, the
+-- alert path) creates (Indicator)-[:INDICATES]->(Malware). The view
+-- matched (Malware)-[INDICATES|DROPS]->(Indicator) before — a direction
+-- and a DROPS type that nothing writes — and was always empty.
 ```
 
 ### Actors
@@ -106,7 +141,10 @@ ORDER BY n.confidence_score DESC
 ```cypher
 MATCH (n)
 WHERE (n:Vulnerability OR n:CVE) AND n.cve_id IS NOT NULL
--- Coalesces data from both labels so CISA KEV fields on CVE nodes are found
+-- The MISP → Neo4j sync writes :CVE nodes, which carry the score, the
+-- severity and the CISA KEV fields (merge_cve); :Vulnerability nodes come
+-- only from the per-item fallback and the alert path. Both labels are read
+-- and grouped by cve_id, so a CVE / Vulnerability pair is one node.
 ```
 
 ---
@@ -117,7 +155,7 @@ WHERE (n:Vulnerability OR n:CVE) AND n.cve_id IS NOT NULL
 |---------|--------------|
 | **View buttons** (Malware / Actors / Indicators / CVEs) | Switch between graph views |
 | **Zone filter** | Restrict to a single zone (healthcare, energy, finance, global) or show all |
-| **Node limit** | 50 / 100 / 200 / 500 — controls how many nodes the API returns |
+| **Node limit** | 50 / 100 / 200 / 500 — the `limit` the API applies to the rows each view reads (see `limit` under *API Endpoint*); the graph can hold more nodes than the limit |
 | **Search box** | Type to highlight matching nodes; non-matching nodes dim to 15% opacity |
 | **Fit** | Zoom to fit all nodes in the viewport |
 | **Layout** | Re-run the layout algorithm (useful after filtering or when nodes overlap) |
@@ -140,20 +178,26 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
 |-----------|------|---------|-------------|
 | `view` | `attacks` \| `actors` \| `indicators` \| `vulnerabilities` | `attacks` | Which graph view to load |
 | `zone` | `healthcare` \| `energy` \| `finance` \| `global` | *(all)* | Filter nodes by zone |
-| `limit` | `10`–`500` | `100` | Maximum nodes returned |
+| `limit` | `10`–`500` | `100` | Maximum rows the view reads, not nodes: (indicator, malware) pairs in `attacks`, (actor, technique) pairs in `actors` (before the tactics are added), indicators in `indicators`, CVEs in `vulnerabilities`. Sector and tactic nodes come on top, so `stats.nodes` can exceed `limit` |
 
 **Response format** (Cytoscape.js-native):
 ```json
 {
   "nodes": [
-    {"data": {"id": "malware:Emotet", "label": "Emotet", "type": "malware", "family": "Emotet"}}
+    {"data": {"id": "malware:emotet", "label": "emotet", "type": "malware", "family": "emotet"}},
+    {"data": {"id": "indicator:203.0.113.5", "label": "203.0.113.5", "type": "indicator", "sector": "finance"}}
   ],
   "edges": [
-    {"data": {"source": "malware:Emotet", "target": "indicator:192.168.1.1", "type": "INDICATES"}}
+    {"data": {"source": "indicator:203.0.113.5", "target": "malware:emotet", "type": "INDICATES"}}
   ],
   "stats": {"nodes": 42, "edges": 67}
 }
 ```
+
+Edges named after a graph relationship (`INDICATES`, `EMPLOYS_TECHNIQUE`, `IN_TACTIC`) point the
+way the relationship does. `BELONGS_TO` (indicator → sector) and `IN_ZONE` (CVE → sector) are not
+graph relationships: they draw the node's `zone` property as a link to a sector node. Each
+(source, target, type) edge is listed once (2026-10).
 
 **Authentication:** requires `X-API-Key` header (same key as all other API endpoints).
 
@@ -173,9 +217,10 @@ GET /graph/explore?view={view}&zone={zone}&limit={limit}
 
 | Edge Type | Style | Color |
 |-----------|-------|-------|
-| `EMPLOYS_TECHNIQUE` / `IMPLEMENTS_TECHNIQUE` / `USES_TECHNIQUE` | Solid, thick | Red |
-| `BELONGS_TO` / `IN_ZONE` | Dashed | Teal |
-| `IN_TACTIC` | Dotted | Orange |
+| `INDICATES` (indicator → malware) | Solid | Red |
+| `EMPLOYS_TECHNIQUE` (actor → technique) | Solid, thick | Red |
+| `BELONGS_TO` / `IN_ZONE` (node → sector, from the `zone` property) | Dashed | Teal |
+| `IN_TACTIC` (technique → tactic) | Dotted | Orange |
 
 ---
 
