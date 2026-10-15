@@ -72,7 +72,8 @@ Export hardening (2026-10):
   (the fixed identifiers from the specification, as shipped in
   ``stix2.TLP_*``) are included when referenced, and every SDO carries
   ``object_marking_refs`` derived from the node's ``tlp`` property; SROs
-  inherit the most restrictive marking of their two endpoints.
+  carry the most restrictive marking of their two endpoints and of the
+  relationship's own ``tlp`` (curated-package links, 2026-10).
 - **Patterns.** Indicator patterns are built in this module from the
   STIX 2.1 patterning grammar: ``email-addr``, ``file:hashes`` keyed by
   the detected algorithm, ``x509-certificate:hashes`` for TLS certificate
@@ -468,6 +469,32 @@ def _most_restrictive_marking(*marking_ids: Optional[str]) -> str:
     if not known:
         return _default_tlp_marking_id()
     return max(known, key=lambda m: _TLP_RANK_BY_ID[m])
+
+
+def _relationship_marking_ref(rel: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The TLP marking id of a graph relationship's own ``tlp``; ``None`` when it has none (2026-10).
+
+    Curated-package links carry the package's level in ``r.tlp``: the link and the provenance on
+    it are as restricted as the package, whatever the endpoints' markings. A level outside the
+    ladder is exported as TLP:AMBER, like an unrecognised node level.
+    """
+    raw = (rel or {}).get("tlp")
+    level = str(raw).strip().lower() if raw is not None else ""
+    if not level:
+        return None
+    marking = _TLP_MARKING_BY_LEVEL.get(level)
+    if marking is None:
+        logger.warning(
+            "[stix-export] Unrecognised TLP level %r on an exported relationship; marking the SRO TLP:AMBER", raw
+        )
+        return stix2.TLP_AMBER.id
+    return marking.id
+
+
+def _relationship_tlp_rank(level: str) -> int:
+    """Rank of a relationship TLP level on the marking ladder (0 when it has none)."""
+    marking_id = _relationship_marking_ref({"tlp": level})
+    return _TLP_RANK_BY_ID.get(marking_id, 0) if marking_id else 0
 
 
 # STIX 2.1 ``industry-sector-ov`` values for EdgeGuard zones. ``global``
@@ -1989,7 +2016,8 @@ class StixExporter:
         ``_SRO_BY_EDGE`` (see the table for the rationale per pair);
         pairs absent from the table are emitted as ``related-to`` in graph
         direction. The SRO carries ``created_by_ref`` and the most
-        restrictive ``object_marking_refs`` of its two endpoints.
+        restrictive ``object_marking_refs`` of its two endpoints and, since
+        2026-10, of the relationship's own ``tlp`` (curated-package links).
 
         ``rel_props`` (2026-10) are the graph relationship's properties: the SRO
         then also carries its ``confidence`` (0–100), its record ids as
@@ -2012,10 +2040,14 @@ class StixExporter:
             relationship_type, reverse = mapping
         if reverse:
             source_ref, target_ref = target_ref, source_ref
-        marking_by_id = getattr(self, "_marking_by_id", {})
-        marking = _most_restrictive_marking(marking_by_id.get(source_ref), marking_by_id.get(target_ref))
-        stix_id = _deterministic_id("relationship", f"{source_ref}|{relationship_type}|{target_ref}")
         rel = rel_props or {}
+        marking_by_id = getattr(self, "_marking_by_id", {})
+        # 2026-10 (curated packages, TLP fix): a curated link carries the package's level in
+        # ``r.tlp``; taking only the endpoints' markings exported such links as TLP:WHITE.
+        marking = _most_restrictive_marking(
+            marking_by_id.get(source_ref), marking_by_id.get(target_ref), _relationship_marking_ref(rel)
+        )
+        stix_id = _deterministic_id("relationship", f"{source_ref}|{relationship_type}|{target_ref}")
         optional: Dict[str, Any] = {}
         confidence = rel.get("confidence_score")
         if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) and 0 <= confidence <= 1:
@@ -2165,8 +2197,9 @@ def _merge_rel_props(rels: Any) -> Dict[str, Any]:
     ``CVE`` / ``Vulnerability`` nodes share one STIX id, and ``ATTRIBUTED_TO`` and
     ``USES_MALWARE`` both become ``intrusion-set uses malware``. The merged map carries the
     union of ``sources`` / ``source_refs`` / ``misp_event_ids``, the highest
-    ``confidence_score`` and the ``match_type`` of the strongest edge (on a tie, the
-    alphabetically first), so the result does not depend on row order.
+    ``confidence_score``, the ``match_type`` of the strongest edge (on a tie, the
+    alphabetically first) and the most restrictive ``tlp``, so the result does not depend on
+    row order.
     """
     if isinstance(rels, dict):
         return dict(rels)
@@ -2189,6 +2222,11 @@ def _merge_rel_props(rels: Any) -> Dict[str, Any]:
     match_types = _match_types(strongest) or _match_types(maps)
     if match_types:
         merged["match_type"] = match_types[0]
+    # 2026-10 (curated packages): a link's own TLP — the SRO is as restricted as its most
+    # restricted edge (a curated edge to one CVE twin, a feed edge to the other).
+    levels = sorted({str(r["tlp"]).strip().lower() for r in maps if str(r.get("tlp") or "").strip()})
+    if levels:
+        merged["tlp"] = max(levels, key=_relationship_tlp_rank)
     return merged
 
 
@@ -2290,6 +2328,13 @@ def _merge_relationship(existing: Dict[str, Any], incoming: Dict[str, Any]) -> N
                 props[prop] = sro[key]
         return props
 
+    # 2026-10 (curated packages, TLP fix): the merged SRO keeps the more restrictive marking of the
+    # two — a curated edge (``r.tlp``) and a feed edge can become the same SRO.
+    existing["object_marking_refs"] = [
+        _most_restrictive_marking(
+            *(existing.get("object_marking_refs") or []), *(incoming.get("object_marking_refs") or [])
+        )
+    ]
     merged = _merge_rel_props([_as_rel_props(existing), _as_rel_props(incoming)])
     for key in ("confidence", "external_references", "x_edgeguard_match_type") + tuple(
         key for _prop, key, _cap in _SRO_PROVENANCE_LISTS

@@ -120,7 +120,10 @@ property (`white`/`clear` → TLP:WHITE, `green`, `amber`, `red`;
 `amber+strict` has no STIX 2.1 built-in and is exported as TLP:RED;
 an unrecognised level is exported as TLP:AMBER; a node without `tlp`
 receives the deployment default `EDGEGUARD_DEFAULT_TLP`). Relationship
-objects inherit the most restrictive marking of their two endpoints.
+objects carry the most restrictive marking of their two endpoints and of
+the relationship's own `tlp`: a curated-package link carries the
+package's level, so it is never exported less restricted than the
+package, whatever its endpoints' markings.
 
 Each SDO built from a Neo4j node with zone tags carries
 `x_edgeguard_zones: ["healthcare", "global", ...]`. Filter bundles by

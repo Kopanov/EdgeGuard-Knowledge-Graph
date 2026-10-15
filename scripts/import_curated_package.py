@@ -17,27 +17,41 @@ for example ``2026-10-20_EdgeGuard_CoreIdeas_package.json``::
     }
 
 ``name`` must contain "EdgeGuard" (the MISP→Neo4j sync discovers EdgeGuard events by title).
-``source`` is the package's source (a registered curated source such as ``coreideas``; any
-other name is imported with the label ``curated_other``). ``name`` of an entity is the
-canonical name of the existing node (the package builder aligns names). Each claim's ``src``
-is the source that asserts it (defaults to the package's source) and ``id`` that source's
-record id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
+``source`` is the package's source and must be a registered curated source
+(``source_type="curated"`` in ``src/source_registry.py``: ``coreideas``, ``misp_galaxy``); its
+``curated_label`` labels the links the claims create (``coreideas_curated``; ``curated_other``
+for a source without one). ``tlp`` is required: the package's TLP level marks the link of every
+claim (``r.tlp``) and the STIX relationship exported from it. ``name`` of an entity is the
+canonical name of the existing node (the package builder aligns names). Each claim's ``src`` is
+the source that asserts it (defaults to the package's source) and ``id`` that source's record
+id. Predicates per subject: see ``relationship_provenance.CURATED_PREDICATES``.
+
+A claim is rejected (reported, not imported) when its predicate does not fit its subject, it
+has no object, its object id is malformed (technique ``T1234`` / ``T1234.123``, tool ``S1234``,
+CVE ``CVE-YYYY-NNNN``; upper or lower case, as the sync matches them upper-case), or its source is
+not a registered curated source: the claim's source goes into ``r.sources`` / ``r.source_refs``
+and the STIX export, so no other name may reach them.
 
 The event is created unpublished, for the creating organisation only, with the tags
-``EdgeGuard`` and the package source's ``source:*`` tag (plus ``tlp:<level>`` when given). Each
-entity becomes one ``threat-actor`` / ``malware-type`` attribute whose comment carries its
-claims (``CURATED_CLAIMS:{...}``). The sync turns every claim into a relationship labelled
-with the package's curated label at confidence 0.85, MATCHing both ends; the attribute itself
-is not merged as a node, so a package never creates nodes and never changes the node it names. Removing the layer later = deleting the
-event and re-feeding.
+``EdgeGuard``, the package source's ``source:*`` tag and ``tlp:<level>``. Each entity becomes one
+``threat-actor`` / ``malware-type`` attribute, tagged with the same source and TLP, whose comment
+carries its claims (``CURATED_CLAIMS:{...}``). The sync turns every claim into a relationship,
+MATCHing both ends: a link the claim creates gets the package's curated label at confidence
+0.85, an existing link keeps its label and confidence and gains the claim's provenance. The
+attribute itself is not merged as a node, so a package never creates nodes and never changes
+the node it names. Removing the layer: see ``docs/RUNBOOK.md``, "Importing a curated package".
 
 Usage::
 
-    python scripts/import_curated_package.py PACKAGE.json            # validate and summarise
-    python scripts/import_curated_package.py PACKAGE.json --push     # create the MISP event
+    python scripts/import_curated_package.py PACKAGE.json                 # validate and summarise
+    python scripts/import_curated_package.py PACKAGE.json --check-graph   # + which claims would attach
+    python scripts/import_curated_package.py PACKAGE.json --push          # create the MISP event
 
 ``--push`` reads ``MISP_URL`` / ``MISP_API_KEY`` (and ``EDGEGUARD_SSL_VERIFY``) like the
-collectors, and refuses to create a second event with the same name.
+collectors, and refuses to create a second event with the same name. ``--check-graph`` reads
+``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD`` (and ``NEO4J_DATABASE``) and only reads the
+graph: per predicate, it reports the valid claims whose subject or object is not there by the
+exact name or id the sync matches on (such a claim attaches to nothing).
 """
 
 from __future__ import annotations
@@ -45,33 +59,69 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from node_identity import canonicalize_merge_key  # noqa: E402
 from relationship_provenance import CURATED_CLAIMS_PREFIX, CURATED_PREDICATES  # noqa: E402
-from source_registry import canonical_source_id, curated_label_for, get_source  # noqa: E402
+from source_registry import (  # noqa: E402
+    canonical_source_id,
+    curated_label_for,
+    curated_source_ids,
+    get_source,
+    is_curated_source,
+)
 
 KINDS = {"threat_actor": ("ThreatActor", "threat-actor"), "malware": ("Malware", "malware-type")}
 TLP_LEVELS = ("clear", "white", "green", "amber", "amber+strict", "red")
 # The MISP comment column holds 64 KB; keep a margin for the JSON wrapper.
 COMMENT_BUDGET = 60_000
+# 2026-10: the id format of a claim's object, by object label, with the form shown in messages.
+# Checked on the id as the sync keys it (trimmed, upper-case); a malformed id can match no node.
+ID_FORMATS = {
+    "Technique": (re.compile(r"T\d{4}(\.\d{3})?", re.ASCII), "T1234 or T1234.123"),
+    "Tool": (re.compile(r"S\d{4}", re.ASCII), "S1234"),
+    "CVE": (re.compile(r"CVE-\d{4}-\d{4,}", re.ASCII), "CVE-YYYY-NNNN"),
+}
 
 
-def _claim_ok(claim: Any, subject_label: str) -> Tuple[bool, str]:
+def _tlp_level(package: Dict[str, Any]) -> str:
+    """The package's TLP level, lower-case (``""`` when it states none)."""
+    return str(package.get("tlp") or "").strip().lower()
+
+
+def _claim_problem(claim: Any, subject_label: str, default_src: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``(reason, message)`` when ``claim`` cannot be imported for a ``subject_label`` subject, else ``None``.
+
+    ``default_src`` is the package's source, which asserts a claim that names none.
+    """
     if not isinstance(claim, dict):
-        return False, "not an object"
+        return "shape", "not an object"
     predicate = str(claim.get("p") or "").strip().lower()
     if subject_label not in CURATED_PREDICATES.get(predicate, {}):
-        return False, f"predicate {predicate!r} not allowed for {subject_label}"
-    if not str(claim.get("o") or "").strip():
-        return False, "no object"
-    return True, ""
+        return "predicate", f"predicate {predicate!r} not allowed for {subject_label}"
+    obj = str(claim.get("o") or "").strip()
+    if not obj:
+        return "object", "no object"
+    object_label = CURATED_PREDICATES[predicate][subject_label][1]
+    id_format = ID_FORMATS.get(object_label)
+    if id_format is not None and not id_format[0].fullmatch(obj.upper()):
+        return "id", f"{object_label} id {obj!r} is malformed (expected {id_format[1]})"
+    # 2026-10: only a registered curated source may assert a claim — the claim's source goes into
+    # ``r.sources`` / ``r.source_refs`` and the STIX export, so no other name may reach them.
+    source = canonical_source_id(claim.get("src")) or default_src
+    if not is_curated_source(source):
+        return "source", (
+            f"source {source!r} is not a registered curated source (allowed: {', '.join(curated_source_ids())})"
+        )
+    return None
 
 
 def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
@@ -90,11 +140,20 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
     if not source:
         errors.append("missing 'source'")
     elif registered is None:
-        warnings.append(f"source {source!r} is not registered: the claims get the label 'curated_other'")
+        # 2026-10: the package's source asserts every claim that names none, so it must be a
+        # registered curated source as well (before, any name was imported as ``curated_other``).
+        errors.append(
+            f"source {source!r} is not a registered curated source (allowed: {', '.join(curated_source_ids())}); "
+            "register it in src/source_registry.py first"
+        )
     elif registered.source_type != "curated":
         errors.append(f"source {source!r} is a feed ({registered.source_type}), not a curated source")
     tlp = package.get("tlp")
-    if tlp is not None and str(tlp).lower() not in TLP_LEVELS:
+    # 2026-10: the level is required — it marks every claim's link (``r.tlp``) and the STIX
+    # relationship built from it, so a package without one would export as the default.
+    if tlp is None or not str(tlp).strip():
+        errors.append(f"missing 'tlp': a curated package must state its TLP level ({', '.join(TLP_LEVELS)})")
+    elif _tlp_level(package) not in TLP_LEVELS:
         errors.append(f"tlp {tlp!r} is not one of {', '.join(TLP_LEVELS)}")
     entities = package.get("entities")
     if not isinstance(entities, list) or not entities:
@@ -103,6 +162,7 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
 
     by_predicate: Counter = Counter()
     by_source: Counter = Counter()
+    skipped_by_reason: Counter = Counter()
     seen_subjects = set()
     kept = rejected = 0
     for n, entity in enumerate(entities):
@@ -124,10 +184,11 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
         claims = entity.get("claims") or []
         good = []
         for m, claim in enumerate(claims):
-            ok, why = _claim_ok(claim, KINDS[kind][0])
-            if not ok:
+            problem = _claim_problem(claim, KINDS[kind][0], source)
+            if problem is not None:
                 rejected += 1
-                warnings.append(f"{where}.claims[{m}] skipped: {why}")
+                skipped_by_reason[problem[0]] += 1
+                warnings.append(f"{where}.claims[{m}] skipped: {problem[1]}")
                 continue
             good.append(claim)
             by_predicate[str(claim.get("p")).strip().lower()] += 1
@@ -144,6 +205,7 @@ def validate(package: Any) -> Tuple[List[str], List[str], Dict[str, Any]]:
         "entities": len(seen_subjects),
         "claims": kept,
         "claims_skipped": rejected,
+        "claims_skipped_by_reason": dict(skipped_by_reason),
         "by_predicate": dict(by_predicate),
         "by_claim_source": dict(by_source),
     }
@@ -191,14 +253,18 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
     registered = get_source(source) if source else None
     source_tag = registered.misp_tag if registered else f"source:{source}"
     event_tags = [{"name": "EdgeGuard"}, {"name": source_tag}]
-    if package.get("tlp"):
-        event_tags.append({"name": f"tlp:{str(package['tlp']).lower()}"})
+    # 2026-10: the TLP tag goes on every attribute as well as on the event — the sync reads an
+    # attribute's own tags, and the level marks each claim's link (``r.tlp``) and its STIX SRO.
+    attribute_tags = [{"name": source_tag}]
+    if _tlp_level(package):
+        event_tags.append({"name": f"tlp:{_tlp_level(package)}"})
+        attribute_tags.append({"name": f"tlp:{_tlp_level(package)}"})
     attributes = []
     for entity in package.get("entities") or []:
         kind = entity.get("kind")
         if kind not in KINDS:
             continue
-        good = [c for c in entity.get("claims") or [] if _claim_ok(c, KINDS[kind][0])[0]]
+        good = [c for c in entity.get("claims") or [] if _claim_problem(c, KINDS[kind][0], source) is None]
         if not good:
             continue
         attributes.append(
@@ -207,7 +273,7 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
                 "value": str(entity["name"]).strip(),
                 "comment": _comment(good, source),
                 "to_ids": False,
-                "Tag": [{"name": source_tag}],
+                "Tag": [dict(tag) for tag in attribute_tags],
             }
         )
     return {
@@ -221,6 +287,102 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
             "Attribute": attributes,
         }
     }
+
+
+# 2026-10 (--check-graph): rows per lookup query, and missing names reported per predicate.
+CHECK_BATCH = 1000
+CHECK_SAMPLE = 10
+
+
+def _check_rows(package: Dict[str, Any]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    """The valid claims by ``(predicate, subject label)``, keyed as the sync matches them.
+
+    Names are NFC-normalised, trimmed and lower-cased (``canonicalize_merge_key``, as the batch
+    writer does); ATT&CK and CVE ids are trimmed and upper-cased (as the sync does).
+    """
+    source = canonical_source_id(package.get("source"))
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for entity in package.get("entities") or []:
+        if not isinstance(entity, dict) or entity.get("kind") not in KINDS:
+            continue
+        subject_label = KINDS[entity["kind"]][0]
+        subject = canonicalize_merge_key(subject_label, {"name": str(entity.get("name") or "")})["name"]
+        if not subject:
+            continue
+        for claim in entity.get("claims") or []:
+            if _claim_problem(claim, subject_label, source) is not None:
+                continue
+            predicate = str(claim["p"]).strip().lower()
+            _rel_type, object_label, key = CURATED_PREDICATES[predicate][subject_label]
+            obj = str(claim["o"]).strip()
+            obj = canonicalize_merge_key(object_label, {"name": obj})["name"] if key == "name" else obj.upper()
+            rows = groups.setdefault((predicate, subject_label), [])
+            rows.append({"i": len(rows), "s": subject, "o": obj})
+    return groups
+
+
+def _check_query(subject_label: str, object_label: str, object_key: str) -> str:
+    """Read-only Cypher: for each row, whether its subject and its object exist (exact key)."""
+    return (
+        "UNWIND $rows AS row "
+        f"OPTIONAL MATCH (s:{subject_label} {{name: row.s}}) "
+        f"OPTIONAL MATCH (o:{object_label} {{{object_key}: row.o}}) "
+        "RETURN row.i AS i, s IS NOT NULL AS subject_found, o IS NOT NULL AS object_found"
+    )
+
+
+def check_graph(
+    package: Dict[str, Any], run_query: Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]
+) -> Dict[str, Any]:
+    """Which of a valid package's claims would attach (2026-10, ``--check-graph``).
+
+    ``run_query(cypher, rows)`` runs a read-only query and returns its records as dicts. Per
+    ``"<predicate> (<subject label>)"``: the claims, how many find both ends, how many lack the
+    subject / the object (a claim can lack both), and up to ``CHECK_SAMPLE`` missing names each.
+    """
+    report: Dict[str, Any] = {}
+    total = attach = 0
+    for (predicate, subject_label), rows in _check_rows(package).items():
+        _rel_type, object_label, key = CURATED_PREDICATES[predicate][subject_label]
+        query = _check_query(subject_label, object_label, key)
+        found: Dict[int, Tuple[bool, bool]] = {}
+        for start in range(0, len(rows), CHECK_BATCH):
+            for record in run_query(query, rows[start : start + CHECK_BATCH]):
+                had_s, had_o = found.get(record["i"], (False, False))
+                found[record["i"]] = (had_s or bool(record["subject_found"]), had_o or bool(record["object_found"]))
+        no_subject = [r["s"] for r in rows if not found.get(r["i"], (False, False))[0]]
+        no_object = [r["o"] for r in rows if not found.get(r["i"], (False, False))[1]]
+        attached = sum(1 for r in rows if found.get(r["i"], (False, False)) == (True, True))
+        report[f"{predicate} ({subject_label})"] = {
+            "claims": len(rows),
+            "attach": attached,
+            "subject_missing": len(no_subject),
+            "object_missing": len(no_object),
+            "missing_subjects": sorted(set(no_subject))[:CHECK_SAMPLE],
+            "missing_objects": sorted(set(no_object))[:CHECK_SAMPLE],
+        }
+        total += len(rows)
+        attach += attached
+    return {"claims": total, "attach": attach, "do_not_attach": total - attach, "by_predicate": report}
+
+
+def _neo4j_reader() -> Optional[Tuple[Any, Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]]]:
+    """``(driver, run_query)`` over read-only sessions, or ``None`` without a password."""
+    from neo4j import READ_ACCESS, GraphDatabase  # deferred: only --check-graph needs the driver
+
+    password = os.environ.get("NEO4J_PASSWORD")
+    if not password:
+        print("NEO4J_PASSWORD (with NEO4J_URI / NEO4J_USER) must be set for --check-graph", file=sys.stderr)
+        return None
+    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    driver = GraphDatabase.driver(uri, auth=(os.environ.get("NEO4J_USER", "neo4j"), password))
+    database = os.environ.get("NEO4J_DATABASE") or None
+
+    def run_query(cypher: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        with driver.session(database=database, default_access_mode=READ_ACCESS) as session:
+            return [record.data() for record in session.run(cypher, rows=rows)]
+
+    return driver, run_query
 
 
 def _push(event: Dict[str, Any]) -> int:
@@ -251,7 +413,13 @@ def _push(event: Dict[str, Any]) -> int:
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("package", type=Path, help="the package JSON file")
-    parser.add_argument("--push", action="store_true", help="create the MISP event (default: validate only)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--push", action="store_true", help="create the MISP event (default: validate only)")
+    mode.add_argument(
+        "--check-graph",
+        action="store_true",
+        help="also report, per predicate, the claims whose subject or object is not in Neo4j (read-only)",
+    )
     args = parser.parse_args(argv)
     try:
         package = json.loads(args.package.read_text(encoding="utf-8"))
@@ -268,6 +436,15 @@ def main(argv: List[str] | None = None) -> int:
         print(f"error: {err}", file=sys.stderr)
     if errors:
         return 1
+    if args.check_graph:
+        reader = _neo4j_reader()
+        if reader is None:
+            return 2
+        driver, run_query = reader
+        try:
+            print(json.dumps({"check_graph": check_graph(package, run_query)}, indent=2, ensure_ascii=False))
+        finally:
+            driver.close()
     if not args.push:
         print("valid — dry run, nothing written (add --push to create the MISP event)")
         return 0

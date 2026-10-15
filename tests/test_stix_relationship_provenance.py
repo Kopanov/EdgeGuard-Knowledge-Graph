@@ -424,3 +424,91 @@ class TestBundles:
         }
         (sro,) = _sros(_exporter(row).export_indicator("1.2.3.4"))
         assert sro["relationship_type"] == "indicates" and "x_edgeguard_sources" not in sro
+
+
+# --------------------------------------------------------------------------- the link's own TLP
+AMBER_CURATED = dict(CURATED, tlp="amber")
+
+
+class TestRelationshipTlp:
+    """TLP fix (2026-10): an SRO is as restricted as the most restricted of its two endpoints and
+    of the link's own ``tlp`` (curated-package links carry the package's level in ``r.tlp``).
+    It used to take its endpoints' markings only, so a curated link between TLP:WHITE nodes was
+    exported as TLP:WHITE."""
+
+    ACTOR = sx._deterministic_id("intrusion-set", "apt29")
+    MALWARE = sx._deterministic_id("malware", "cozycar")
+
+    def _exporter_with_marked_ends(self, actor=stix2.TLP_WHITE, malware=stix2.TLP_WHITE):
+        exporter = _exporter({})
+        exporter._marking_by_id = {self.ACTOR: actor.id, self.MALWARE: malware.id}
+        return exporter
+
+    @pytest.mark.parametrize(
+        "ends, rel_tlp, expected",
+        [
+            ((stix2.TLP_WHITE, stix2.TLP_WHITE), "amber", stix2.TLP_AMBER),
+            ((stix2.TLP_WHITE, stix2.TLP_GREEN), "amber+strict", stix2.TLP_RED),
+            ((stix2.TLP_RED, stix2.TLP_WHITE), "amber", stix2.TLP_RED),
+            ((stix2.TLP_WHITE, stix2.TLP_GREEN), None, stix2.TLP_GREEN),
+            ((stix2.TLP_WHITE, stix2.TLP_WHITE), "clear", stix2.TLP_WHITE),
+            ((stix2.TLP_WHITE, stix2.TLP_WHITE), "not-a-level", stix2.TLP_AMBER),
+        ],
+    )
+    def test_sro_takes_the_most_restrictive_of_its_ends_and_the_link(self, ends, rel_tlp, expected):
+        exporter = self._exporter_with_marked_ends(*ends)
+        rel = dict(CURATED, tlp=rel_tlp) if rel_tlp is not None else CURATED
+        sro = exporter._edge_to_sro("USES_MALWARE", self.ACTOR, self.MALWARE, rel)
+        assert sro["object_marking_refs"] == [expected.id]
+
+    def test_merging_two_edges_keeps_the_more_restrictive_marking_in_either_order(self):
+        markings = []
+        for first, second in ((OTX_ATTRIBUTION, AMBER_CURATED), (AMBER_CURATED, OTX_ATTRIBUTION)):
+            exporter = self._exporter_with_marked_ends()
+            objects: Dict[str, Dict[str, Any]] = {}
+            # ATTRIBUTED_TO (a feed edge) and USES_MALWARE (a curated claim) are one SRO
+            exporter._add(objects, exporter._edge_to_sro("ATTRIBUTED_TO", self.MALWARE, self.ACTOR, first))
+            exporter._add(objects, exporter._edge_to_sro("USES_MALWARE", self.ACTOR, self.MALWARE, second))
+            (merged,) = objects.values()
+            markings.append(merged["object_marking_refs"])
+        assert markings == [[stix2.TLP_AMBER.id], [stix2.TLP_AMBER.id]]
+
+    def test_edges_behind_one_sro_keep_the_most_restrictive_tlp(self):
+        assert sx._merge_rel_props([AMBER_CURATED, OTX_ATTRIBUTION])["tlp"] == "amber"
+        assert sx._merge_rel_props([OTX_ATTRIBUTION, AMBER_CURATED])["tlp"] == "amber"
+        assert sx._merge_rel_props([dict(CURATED, tlp="RED"), AMBER_CURATED])["tlp"] == "red"
+        assert "tlp" not in sx._merge_rel_props([CURATED, OTX_ATTRIBUTION])
+
+    def test_actor_bundle_marks_the_curated_link_amber(self):
+        white = {"tlp": "white"}
+        row = {
+            "seed": {"name": "apt29", **white},
+            "malware": [],
+            "actor_tech": [_pair({"mitre_id": "T1566", "name": "Phishing", **white}, MITRE)],
+            "mal_tech": [],
+            "campaigns": [],
+            "uses_malware": [],
+            "tools": [],
+            "exploits": [_pair({"cve_id": "CVE-2023-42793", **white}, AMBER_CURATED)],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_threat_actor("apt29")
+        stix2.parse(json.dumps(bundle), allow_custom=True)
+        objects = _by_type(bundle)
+        marking = {objects[s["target_ref"]]["type"]: s["object_marking_refs"] for s in _sros(bundle)}
+        assert marking == {"vulnerability": [stix2.TLP_AMBER.id], "attack-pattern": [stix2.TLP_WHITE.id]}
+        assert stix2.TLP_AMBER.id in objects, "the bundle carries the marking definition it references"
+
+    def test_cve_bundle_marks_a_curated_edge_to_one_twin(self):
+        row = {
+            "seed": {"cve_id": "CVE-2023-4966", "tlp": "white"},
+            "indicators": [],
+            "threats": [
+                {"n": {"name": "lockbit", "tlp": "white"}, "r": [OTX_ATTRIBUTION, AMBER_CURATED], "kind": "Malware"}
+            ],
+            "sectors": [],
+        }
+        bundle = _exporter(row).export_cve("CVE-2023-4966")
+        stix2.parse(json.dumps(bundle), allow_custom=True)
+        (sro,) = _sros(bundle)
+        assert sro["object_marking_refs"] == [stix2.TLP_AMBER.id]

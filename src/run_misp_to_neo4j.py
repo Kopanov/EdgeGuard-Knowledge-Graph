@@ -51,6 +51,7 @@ from cvss_selection import CVSS_VERSIONS, cvss_attack_vector, select_cvss
 from ioc_normalize import MISP_IP_ATTRIBUTE_TYPES, ip_address_type
 from misp_health import MISPHealthCheck
 from neo4j_client import (
+    CURATED_MISSING_SAMPLE,
     Neo4jClient,
     clamp_cvss_score,
     normalize_cve_id_for_graph,
@@ -60,7 +61,15 @@ from node_identity import is_placeholder_name
 from query_pause import query_pause
 from relationship_provenance import CURATED_CLAIM_CONFIDENCE, CURATED_CLAIMS_PREFIX, CURATED_PREDICATES
 from resilience import check_service_health, get_circuit_breaker, record_collection_failure, record_collection_success
-from source_registry import canonical_source_id, curated_label_for, format_source_ref, misp_tag_to_canonical_map
+from source_registry import (
+    CURATED_OTHER_LABEL,
+    canonical_source_id,
+    curated_label_for,
+    curated_source_ids,
+    format_source_ref,
+    is_curated_source,
+    misp_tag_to_canonical_map,
+)
 from source_truthful_timestamps import coerce_iso as _coerce_to_iso
 from source_truthful_timestamps import extract_source_truthful_timestamps
 
@@ -502,11 +511,12 @@ def _item_source_refs(item: Dict, source: str) -> List[str]:
 #
 # ``p`` is the predicate, ``o`` the object's key (ATT&CK id, malware name, Tool S-id, CVE id),
 # ``src`` the source that asserts the claim (defaults to the package's source) and ``id`` that
-# source's record id. Every claim becomes a relationship labelled with the package's curated
-# label (``coreideas_curated``, else ``curated_other``) at 0.85, written with MATCH on both
-# ends. A curated attribute is not merged as a node (``sync_to_neo4j`` skips it): a package
-# never creates nodes and never changes the node it names. The item still carries no
-# description, types, zones or TLP, so nothing leaks if it ever reached a merge.
+# source's record id. Every claim becomes a relationship written with MATCH on both ends: a link
+# the claim creates is labelled with the package's curated label (``coreideas_curated``, else
+# ``curated_other``) at 0.85; a link that already exists keeps its label and confidence and
+# gains the claim's provenance. A curated attribute is not merged as a node (``sync_to_neo4j``
+# skips it): a package never creates nodes and never changes the node it names. The item still
+# carries no description, types, zones or TLP, so nothing leaks if it ever reached a merge.
 _CURATED_MAX_CLAIMS_PER_ATTRIBUTE = 2000
 _CURATED_PREDICATES = CURATED_PREDICATES
 
@@ -537,13 +547,33 @@ def _parse_curated_claims(raw_comment: str) -> Optional[List[Dict]]:
     return [c for c in claims[:_CURATED_MAX_CLAIMS_PER_ATTRIBUTE] if isinstance(c, dict)]
 
 
+def _curated_claims_tlp(tags: List[Dict[str, Any]], event_info: Dict, ref: str = "") -> str:
+    """The TLP level of a curated attribute's claims (2026-10): its own ``tlp:`` tag, else the event's.
+
+    The importer tags every curated attribute with the package's level; an event imported
+    before that carries the level on the event only. With neither, the deployment default
+    applies (``_extract_tlp_tag``). The level marks each claim's link (``r.tlp``), so the STIX
+    relationship is as restricted as the package.
+    """
+    return _extract_tlp_tag(list(tags) + normalize_misp_tag_list(event_info.get("Tag", [])), ref)
+
+
 def _curated_claim_rows(
-    claims: List[Dict], subject_type: str, subject_key: Dict[str, str], package_source: str, evt_id: str
+    claims: List[Dict],
+    subject_type: str,
+    subject_key: Dict[str, str],
+    package_source: str,
+    evt_id: str,
+    tlp: str = "",
 ) -> List[Dict]:
-    """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``)."""
+    """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``).
+
+    ``tlp`` is the package's TLP level (``_curated_claims_tlp``), carried on every row.
+    """
     label = curated_label_for(package_source)
     rows: List[Dict] = []
     skipped = 0
+    unregistered = 0
     for claim in claims:
         target = _CURATED_PREDICATES.get(str(claim.get("p") or "").strip().lower(), {}).get(subject_type)
         obj = str(claim.get("o") or "").strip()
@@ -559,6 +589,13 @@ def _curated_claim_rows(
             skipped += 1
             continue
         source = canonical_source_id(claim.get("src")) or package_source
+        # 2026-10: only a registered curated source may assert a claim (the importer refuses any
+        # other). A claim that still names another source — an event written by hand or by an
+        # older importer — is recorded as ``curated_other``, so no outside name reaches
+        # ``r.sources``, ``r.source_refs`` or the STIX export.
+        if not is_curated_source(source):
+            source = CURATED_OTHER_LABEL
+            unregistered += 1
         ref = format_source_ref(source, claim.get("id"))
         rows.append(
             {
@@ -574,6 +611,7 @@ def _curated_claim_rows(
                 "misp_event_id": evt_id,
                 # exact canonical names on both ends — never alias matching (see the writer)
                 "exact_names": True,
+                "tlp": tlp or None,
             }
         )
     if skipped:
@@ -582,6 +620,15 @@ def _curated_claim_rows(
             subject_type,
             next(iter(subject_key.values()), "?"),
             skipped,
+        )
+    if unregistered:
+        logger.warning(
+            "Curated %s %s: %d claim(s) name a source that is not a registered curated source (%s); recorded as %r",
+            subject_type,
+            next(iter(subject_key.values()), "?"),
+            unregistered,
+            ", ".join(curated_source_ids()),
+            CURATED_OTHER_LABEL,
         )
     return rows
 
@@ -1183,6 +1230,10 @@ class MISPToNeo4jSync:
             # Relationship rows dropped by permanent Neo4j batch failures
             # (``RelationshipBatchResult.failed``); non-zero fails the run.
             "relationships_failed": 0,
+            # 2026-10 (curated packages): claims that found both ends in the graph, and claims whose
+            # subject or object is not in it (nothing is written for those; see [CURATED]).
+            "curated_claims_attached": 0,
+            "curated_claims_unattached": 0,
             # Items no merge path accepts (unknown type, indicator without a value); reported in
             # the run summary, counted neither as successes nor as errors.
             "items_unroutable": 0,
@@ -3192,7 +3243,14 @@ class MISPToNeo4jSync:
             if curated_claims is not None:
                 actor_description = ""
                 relationships.extend(
-                    _curated_claim_rows(curated_claims, "ThreatActor", {"name": actor_name}, source_id, _evt_id)
+                    _curated_claim_rows(
+                        curated_claims,
+                        "ThreatActor",
+                        {"name": actor_name},
+                        source_id,
+                        _evt_id,
+                        tlp=_curated_claims_tlp(tags, event_info, attr_misp_uuid),
+                    )
                 )
 
             # Build EMPLOYS_TECHNIQUE relationships to techniques.
@@ -3299,7 +3357,14 @@ class MISPToNeo4jSync:
                 description = ""
                 malware_types = []
                 relationships.extend(
-                    _curated_claim_rows(curated_claims, "Malware", {"name": malware_name}, source_id, _evt_id)
+                    _curated_claim_rows(
+                        curated_claims,
+                        "Malware",
+                        {"name": malware_name},
+                        source_id,
+                        _evt_id,
+                        tlp=_curated_claims_tlp(tags, event_info, attr_misp_uuid),
+                    )
                 )
 
             # Build ATTRIBUTED_TO relationship to threat actor
@@ -4296,6 +4361,8 @@ class MISPToNeo4jSync:
 
         created_count = 0
         failed_rows = 0
+        curated_sent = curated_matched = 0
+        curated_missing: List[str] = []
         total_chunks = (len(relationships) + chunk_sz - 1) // chunk_sz
         for idx, start in enumerate(range(0, len(relationships), chunk_sz)):
             chunk = relationships[start : start + chunk_sz]
@@ -4307,6 +4374,15 @@ class MISPToNeo4jSync:
             chunk_failed = getattr(result, "failed", 0)
             if isinstance(chunk_failed, int) and chunk_failed > 0:
                 failed_rows += chunk_failed
+            # 2026-10 (curated packages): the result counts only the curated claims that found
+            # both ends; the writer reports how many it sent and names some missing ends.
+            chunk_curated = getattr(result, "curated_sent", 0)
+            if isinstance(chunk_curated, int) and chunk_curated > 0:
+                curated_sent += chunk_curated
+                curated_matched += int(getattr(result, "curated_matched", 0) or 0)
+                for name in getattr(result, "curated_missing", ()) or ():
+                    if name not in curated_missing and len(curated_missing) < CURATED_MISSING_SAMPLE:
+                        curated_missing.append(name)
             if total_chunks > 1 and (idx + 1) % 10 == 0:
                 logger.info(
                     "  Relationship batch progress: %s/%s chunks (%s%%), %s created so far",
@@ -4330,8 +4406,33 @@ class MISPToNeo4jSync:
                 len(relationships),
                 source_id,
             )
+        if curated_sent:
+            self._log_curated_claims(curated_sent, curated_matched, curated_missing)
 
         return created_count
+
+    def _log_curated_claims(self, sent: int, matched: int, missing: List[str]) -> None:
+        """Record and log how many curated claims attached (2026-10).
+
+        A curated claim MATCHes both ends and creates no node, so a claim whose subject or
+        object is not in the graph by its exact name or id writes nothing. Such a claim is
+        not an error (the package may name entities a later baseline lacks); it is counted
+        and logged with a sample of the missing names, never counted as a created link.
+        """
+        unattached = max(0, sent - matched)
+        self.stats["curated_claims_attached"] = int(self.stats.get("curated_claims_attached", 0) or 0) + matched
+        self.stats["curated_claims_unattached"] = int(self.stats.get("curated_claims_unattached", 0) or 0) + unattached
+        if not unattached:
+            logger.info("[CURATED] %d of %d curated claim(s) attached", matched, sent)
+            return
+        logger.warning(
+            "[CURATED] %d of %d curated claim(s) attached; %d did not: subject or object not in the graph "
+            "by exact name or id, nothing written for them. Missing (sample): %s",
+            matched,
+            sent,
+            unattached,
+            ", ".join(missing) or "(names not available)",
+        )
 
     # Attribute page size for streaming large events (prevents OOM on 100K+ attribute events).
     _ATTR_PAGE_SIZE = 5000
@@ -5129,6 +5230,15 @@ class MISPToNeo4jSync:
             logger.info(f"Actors synced: {self.stats['actors_synced']}")
             logger.info(f"Techniques synced: {self.stats['techniques_synced']}")
             logger.info(f"Relationships created: {self.stats['relationships_created']}")
+            curated_attached = int(self.stats.get("curated_claims_attached", 0) or 0)
+            curated_unattached = int(self.stats.get("curated_claims_unattached", 0) or 0)
+            if curated_attached or curated_unattached:
+                logger.info(
+                    "Curated package claims: %d attached, %d not attached (subject or object not in the graph; "
+                    "grep '[CURATED]' for the missing names)",
+                    curated_attached,
+                    curated_unattached,
+                )
             relationships_failed = int(self.stats.get("relationships_failed", 0) or 0)
             if relationships_failed:
                 logger.warning(

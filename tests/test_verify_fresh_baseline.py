@@ -631,11 +631,15 @@ class _Record(dict):
 
 
 class _Result:
+    def __init__(self, matched: int = 0):
+        self.matched = matched
+
     def __iter__(self):
         return iter([{"name": "apt29"}])
 
     def single(self):
-        return _Record()
+        # The curated templates return ``count(r)`` as ``matched``; every row of a batch matches here.
+        return _Record(matched=self.matched)
 
 
 class _RecordingSession:
@@ -650,7 +654,8 @@ class _RecordingSession:
 
     def run(self, query, *args, **kwargs):
         self.queries.append(query)
-        return _Result()
+        rows = kwargs.get("rows")
+        return _Result(len(rows) if isinstance(rows, list) else 0)
 
 
 class TestContractIsWhatTheWritersWrite:

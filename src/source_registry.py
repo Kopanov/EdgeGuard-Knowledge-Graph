@@ -709,8 +709,10 @@ def misp_tag_to_canonical_map() -> Dict[str, str]:
     return out
 
 
-# Evidence label of a curated claim whose package source has no ``curated_label`` (a curated
-# feed nobody registered): the claim keeps a closed-list label, its ``r.sources`` the real name.
+# Evidence label of a curated claim whose package source has no ``curated_label``. Also the name
+# under which the sync records a claim source that is not a registered curated source
+# (``is_curated_source``) in ``r.sources`` / ``r.source_refs`` (2026-10): the labels and the
+# source names of the curated layer both come from closed lists.
 CURATED_OTHER_LABEL = "curated_other"
 
 
@@ -722,6 +724,22 @@ def curated_label_for(source: Optional[str]) -> str:
     """
     src = get_source(source) if source else None
     return (src.curated_label if src and src.curated_label else None) or CURATED_OTHER_LABEL
+
+
+def curated_source_ids() -> Tuple[str, ...]:
+    """Canonical ids of the registered curated sources, in registry order (2026-10)."""
+    return tuple(src.canonical_id for src in _REGISTRY if src.source_type == "curated")
+
+
+def is_curated_source(name: Optional[str]) -> bool:
+    """True when ``name`` (id or alias) is a registered curated source (2026-10).
+
+    Only these may assert a curated claim: ``scripts/import_curated_package.py`` refuses a claim
+    from any other source, and the sync records one that still arrives under
+    ``CURATED_OTHER_LABEL``, so no other name reaches ``r.sources`` or the STIX export.
+    """
+    src = get_source(name) if name else None
+    return src is not None and src.source_type == "curated"
 
 
 def canonical_source_id(name: Optional[str]) -> Optional[str]:
