@@ -318,8 +318,10 @@ _PROVENANCE_OBJECTS_CREATED = "2026-10-11T00:00:00.000Z"
 # 1.3.0 (2026-10-15): explainability. x_edgeguard_cited_ids on SROs (the ATT&CK ids the sources
 #   cited that ATT&CK revoked into the target technique) and x_edgeguard_merged_from on
 #   intrusion-sets (the names of the actor nodes EdgeGuard folded into this one).
-_EXTENSION_MODIFIED = "2026-10-15T00:00:00.000Z"
-_EXTENSION_VERSION = "1.3.0"
+# 1.4.0 (2026-10-15): FIRST EPSS and CISA's SSVC decision points on vulnerabilities. ``modified`` is
+#   later than that of 1.3.0, as STIX versioning requires of a new version of an object.
+_EXTENSION_MODIFIED = "2026-10-15T12:00:00.000Z"
+_EXTENSION_VERSION = "1.4.0"
 _EXTENSION_SCHEMA_URL = (
     "https://github.com/Kopanov/EdgeGuard-Knowledge-Graph/blob/main/docs/RESILMESH_QUICKSTART_STIX.md"
     "#edgeguard-extension-definition"
@@ -349,6 +351,18 @@ _VULNERABILITY_PROMOTED_FIELDS: Tuple[Tuple[str, str], ...] = (
     # 2026-10: NVD's record status, ["rejected"] or ["active"]; without it a rejected CVE exported
     # like an active one.
     ("status", "x_edgeguard_status"),
+    # 2026-10: FIRST EPSS (``cve_feed_enrichment``): the probability of exploitation in the next 30
+    # days, its percentile, the date of the scores and the model; CISA's SSVC decision points from
+    # NVD's record, with the SSVC version and the time of CISA's decision.
+    ("epss_score", "x_edgeguard_epss_score"),
+    ("epss_percentile", "x_edgeguard_epss_percentile"),
+    ("epss_score_date", "x_edgeguard_epss_score_date"),
+    ("epss_model_version", "x_edgeguard_epss_model_version"),
+    ("ssvc_exploitation", "x_edgeguard_ssvc_exploitation"),
+    ("ssvc_automatable", "x_edgeguard_ssvc_automatable"),
+    ("ssvc_technical_impact", "x_edgeguard_ssvc_technical_impact"),
+    ("ssvc_version", "x_edgeguard_ssvc_version"),
+    ("ssvc_timestamp", "x_edgeguard_ssvc_timestamp"),
 )
 
 # Every top-level ``x_edgeguard_*`` property the exporter can emit. The

@@ -240,9 +240,10 @@ class TestSro:
             assert prop in sx.EDGEGUARD_EXTENSION_PROPERTIES
         definition = sx._extension_definition()
         # 1.1.0 (2026-10-14) added the provenance; 1.2.0 (2026-10-15) x_edgeguard_status on
-        # vulnerabilities; 1.3.0 (2026-10-15) the explainability properties.
-        assert definition["version"] == "1.3.0"
-        assert definition["modified"].startswith("2026-10-15")
+        # vulnerabilities; 1.3.0 (2026-10-15) the explainability properties; 1.4.0 (2026-10-15) EPSS
+        # and CISA's SSVC on vulnerabilities.
+        assert definition["version"] == "1.4.0"
+        assert definition["modified"] == "2026-10-15T12:00:00.000Z"
 
     def test_a_link_a_revoked_id_led_to_carries_the_cited_ids(self):
         actor = sx._deterministic_id("intrusion-set", "apt29")

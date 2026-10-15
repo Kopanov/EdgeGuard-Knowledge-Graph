@@ -711,6 +711,25 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     defects = ("scored_without_score", "score_not_from_cvss", "unscored_with_score")
     rep.add("cve_score_from_cvss", None if not r.get("cves") else all(r.get(k) == 0 for k in defects), r)
 
+    # 14b. FIRST EPSS and CISA's SSVC on CVE nodes (2026-10). EPSS comes from the enrichment job, which
+    #      skips an unavailable feed without failing the run: CVE nodes without any EPSS are a warning.
+    #      One score date is expected; more mean a run stopped before clearing, or a short feed that was
+    #      not used to clear. SSVC comes with NVD's records, for the CVEs CISA has decided on; reported.
+    r = _one(
+        "MATCH (c:CVE) RETURN count(c) AS cves, count(c.epss_score) AS with_epss, "
+        "count(DISTINCT c.epss_score_date) AS epss_score_dates, max(c.epss_score_date) AS latest_epss_score_date, "
+        "sum(CASE WHEN c.ssvc_exploitation IS NOT NULL OR c.ssvc_automatable IS NOT NULL "
+        "OR c.ssvc_technical_impact IS NOT NULL THEN 1 ELSE 0 END) AS with_ssvc, "
+        "sum(CASE WHEN c.ssvc_exploitation = 'active' THEN 1 ELSE 0 END) AS ssvc_exploitation_active"
+    )
+    epss_ok = None if not r.get("cves") else (r.get("with_epss") or 0) > 0
+    if epss_ok is False:
+        r["hint"] = (
+            "no CVE node has EPSS: EDGEGUARD_ENABLE_EPSS is false or the feed was unavailable; "
+            "the enrichment task log has an [EPSS] line"
+        )
+    rep.add("cve_epss_and_ssvc", epss_ok, r, mandatory=False)
+
     # 15. Per-source presence (2026-10): the ``SOURCED_FROM`` count of every ``Source`` node (the
     #     rows of 12c; alias nodes such as ``otx`` or ``cisa`` are listed too). A source collected by
     #     default that delivered nothing is a warning, not a failure: an upstream outage skips its

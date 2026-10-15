@@ -33,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -204,6 +205,59 @@ def iter_nvd_lastmod_spans(
     ``lastModStartDate`` / ``lastModEndDate`` share the 120-day limit of the publication dates.
     """
     return list(reversed(list(iter_nvd_published_windows(start, end, max_days))))
+
+
+# 2026-10: CISA's SSVC decision points, as NVD relays them from the CISA-ADP container of the CVE
+# record (``metrics.ssvcV203``; CISA's Vulnrichment program). They travel with the record through
+# MISP (``NVD_META``) and are set on the CVE node from NVD's record only
+# (``Neo4jClient._replace_nvd_owned_cve_data``), so a value NVD withdraws is removed.
+CISA_ADP_NVD_SOURCE = "134c704f-9b21-4f2e-91b3-4a467353bcc0"
+_SSVC_METRIC_RE = re.compile(r"ssvcV\d+")
+SSVC_DECISION_POINTS = {
+    # NVD option key -> (node property suffix, allowed values)
+    "exploitation": ("exploitation", frozenset({"none", "poc", "active"})),
+    "automatable": ("automatable", frozenset({"yes", "no"})),
+    "technicalImpact": ("technical_impact", frozenset({"partial", "total"})),
+}
+
+
+def cisa_ssvc(metrics: Any) -> Optional[Dict[str, str]]:
+    """CISA's SSVC decision points of an NVD record's ``metrics``, or None when it has none.
+
+    Returns ``{"exploitation", "automatable", "technical_impact", "version", "timestamp"}`` (a
+    decision point outside its allowed values is left out), from the CISA-ADP entry with the latest
+    timestamp. Other providers' entries and malformed shapes are ignored; never raises.
+    """
+    if not isinstance(metrics, dict):
+        return None
+    entries = [
+        e
+        for key, value in metrics.items()
+        if isinstance(key, str) and _SSVC_METRIC_RE.fullmatch(key) and isinstance(value, list)
+        for e in value
+        if isinstance(e, dict) and e.get("source") == CISA_ADP_NVD_SOURCE and isinstance(e.get("ssvcData"), dict)
+    ]
+    best: Optional[Dict[str, str]] = None
+    for entry in entries:
+        data = entry["ssvcData"]
+        options = data.get("options")
+        out: Dict[str, str] = {}
+        for option in options if isinstance(options, list) else []:
+            if not isinstance(option, dict):
+                continue
+            for key, value in option.items():
+                if key in SSVC_DECISION_POINTS and isinstance(value, str):
+                    field, allowed = SSVC_DECISION_POINTS[key]
+                    if value.strip().lower() in allowed:
+                        out[field] = value.strip().lower()
+        if not out:
+            continue
+        for meta in ("version", "timestamp"):
+            if isinstance(data.get(meta), str) and data[meta].strip():
+                out[meta] = data[meta].strip()[:64]
+        if best is None or out.get("timestamp", "") > best.get("timestamp", ""):
+            best = out
+    return best
 
 
 def configurations_to_zone_text(configurations: Optional[List[Any]]) -> str:
@@ -1289,6 +1343,8 @@ class NVDCollector:
             "cisa_required_action": cisa_required_action,
             "cisa_vulnerability_name": cisa_vulnerability_name,
             "version_constraints": version_constraints,
+            # 2026-10: CISA's SSVC decision points (``cisa_ssvc``), None when the record has none
+            "ssvc": cisa_ssvc(metrics),
         }
 
     def collect(

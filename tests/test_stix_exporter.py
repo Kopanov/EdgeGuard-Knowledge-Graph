@@ -1348,9 +1348,40 @@ def test_a_rejected_cve_exports_its_status_and_parses_strictly():
     assert vulnerability["extensions"] == {EDGEGUARD_EXTENSION_ID: {"extension_type": "toplevel-property-extension"}}
     definition = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
     assert "x_edgeguard_status" in definition["extension_properties"]
-    assert (definition["version"], definition["modified"][:10]) == ("1.3.0", "2026-10-15")
+    assert (definition["version"], definition["modified"][:10]) == ("1.4.0", "2026-10-15")
     parsed = stix2.parse(bundle)  # strict: allow_custom defaults to False
     assert next(o for o in parsed.objects if o.type == "vulnerability")["x_edgeguard_status"] == ["rejected"]
+
+
+def test_vulnerability_exports_epss_and_cisa_ssvc():
+    """2026-10: FIRST EPSS (``enrich_cve_epss``) and CISA's SSVC decision points (from NVD's record)
+    reach the ``vulnerability`` as declared extension properties (definition 1.4.0); ``epss_updated_at``
+    is EdgeGuard's write time, not data, and stays in the graph."""
+    seed = {
+        "cve_id": "CVE-2021-44228",
+        "edgeguard_managed": True,
+        "epss_score": 0.97565,
+        "epss_percentile": 0.99999,
+        "epss_score_date": "2026-10-11T12:00:25Z",
+        "epss_model_version": "v2026.06.15",
+        "epss_updated_at": "2026-10-15T08:00:00Z",
+        "ssvc_exploitation": "active",
+        "ssvc_automatable": "yes",
+        "ssvc_technical_impact": "total",
+        "ssvc_version": "2.0.3",
+        "ssvc_timestamp": "2025-02-04T14:25:34.416117Z",
+    }
+    rows = [{"seed": seed, "indicators": [], "threats": [], "sectors": []}]
+    bundle = StixExporter(_mk_client(rows)).export_cve("CVE-2021-44228")
+    (vulnerability,) = _by_type(bundle, "vulnerability")
+    expected = {f"x_edgeguard_{key}": value for key, value in seed.items() if key.startswith(("epss_", "ssvc_"))}
+    del expected["x_edgeguard_epss_updated_at"]
+    assert {
+        k: v for k, v in vulnerability.items() if k.startswith(("x_edgeguard_epss", "x_edgeguard_ssvc"))
+    } == expected
+    definition = next(o for o in bundle["objects"] if o["type"] == "extension-definition")
+    assert set(expected) <= set(definition["extension_properties"])
+    stix2.parse(bundle)  # strict: every emitted property is declared
 
 
 def test_x_mitre_tactic_is_the_only_remaining_custom_type():

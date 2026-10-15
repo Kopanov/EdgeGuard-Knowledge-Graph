@@ -494,7 +494,8 @@ def nvd_meta_digest(meta: Dict[str, Any]) -> str:
     """Digest of an ``NVD_META`` payload, for telling a changed CVE from an unchanged one.
 
     ``last_modified`` is left out: NVD moves it for changes to data EdgeGuard does not store
-    (translations, SSVC, CNA product data), and such a change needs no MISP edit. ``attack_vector``
+    (translations, CNA product data), and such a change needs no MISP edit. CISA's SSVC decision
+    points (``ssvc``, 2026-10) are stored, so a change to them is a change of the CVE. ``attack_vector``
     is left out too (2026-10): it is derived from the CVSS payloads, which the digest covers, and
     copies written before 2026-10 hold a letter (``N``) or ``UNKNOWN`` where the item now has NVD's
     word, so every stored copy would have looked changed. A key whose value is empty (``""``,
@@ -1838,6 +1839,9 @@ class MISPWriter:
             # active, polluting downstream triage queues.
             "version_constraints": vuln.get("version_constraints", []),
             "status": vuln.get("status", []),
+            # 2026-10: CISA's SSVC decision points from NVD's record (``nvd_collector.cisa_ssvc``):
+            # {"exploitation", "automatable", "technical_impact", "version", "timestamp"} or None.
+            "ssvc": vuln.get("ssvc"),
         }
         has_nvd_meta = any(
             [

@@ -1267,6 +1267,16 @@ EDGEGUARD_DEFAULT_TLP = os.getenv("EDGEGUARD_DEFAULT_TLP", "white").strip().lowe
 # and OFF by default: the daily DAG task returns a skipped status (success,
 # 0 items) until an operator sets ``EDGEGUARD_ENABLE_CISA_ICS=true``.
 ENABLE_CISA_ICS = _env_bool("EDGEGUARD_ENABLE_CISA_ICS", "false")
+
+# FIRST EPSS: a post-sync enrichment job in ``src/cve_feed_enrichment.py`` (the one source written
+# straight to Neo4j; see that module). Default on; a feed outage is logged and skipped. CISA's SSVC
+# decision points come with the NVD records (``nvd_collector``), not from a feed of their own.
+ENABLE_EPSS = _env_bool("EDGEGUARD_ENABLE_EPSS", "true")
+# FIRST EPSS daily gzip CSV, at the address FIRST documents (it redirects to the day's file).
+EPSS_URL = os.getenv("EPSS_URL") or "https://epss.empiricalsecurity.com/epss_scores-current.csv.gz"
+# Abort the EPSS download beyond this many compressed bytes, or after this many seconds.
+EPSS_MAX_BYTES = _env_int("EPSS_MAX_BYTES", 64 * 1024 * 1024)
+EPSS_DOWNLOAD_DEADLINE_SEC = _env_int("EPSS_DOWNLOAD_DEADLINE_SEC", 300)
 # Raw base URL of the ``csaf_files/OT/white/`` folder (must end with "/";
 # ``index.txt`` and ``changes.csv`` live directly under it).
 CISA_ICS_BASE_URL = os.getenv(
