@@ -1,10 +1,11 @@
 """A refreshed MISP attribute on a real Neo4j (2026-10): what the sync does with it.
 
-``MISPWriter`` moves the ``last_seen`` of an indicator a source reports again
-(``tests/test_misp_reobserved_indicator_refresh.py``). The edited attribute is parsed as the sync
-parses it and merged with ``merge_indicators_batch`` onto a node that decay retired: the node's
-``last_updated`` moves, the decay retirement is lifted, ``first_imported_at`` and the source's
-first-seen claim stay where they were, and the source's last-seen claim takes the refreshed date.
+``MISPWriter`` edits the stored copy of an indicator a source reports again
+(``tests/test_misp_reobserved_indicator_refresh.py``): MISP stamps it anew and the source's dates
+stay. The edited attribute is parsed as the sync parses it and merged with
+``merge_indicators_batch`` onto a node that decay retired: the node's ``last_updated`` moves, the
+decay retirement is lifted, and ``first_imported_at`` and both claims of the source stay where they
+were.
 Same guards as ``tests/test_actor_alias_merge_neo4j.py``: runs only with
 ``EDGEGUARD_IT_NEO4J_URI``, writes only nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -61,7 +62,8 @@ def client(raw_driver):
 
 
 def _edited_attribute(refreshed: datetime) -> dict:
-    """The stored Feodo Tracker attribute after the refresh, as MISP 2.5 lists it."""
+    """The stored Feodo Tracker attribute after the refresh, as MISP 2.5 lists it: a new timestamp,
+    the source's ``first_seen`` / ``last_seen`` unchanged."""
     return {
         "id": "1203",
         "event_id": "41",
@@ -72,7 +74,7 @@ def _edited_attribute(refreshed: datetime) -> dict:
         "timestamp": str(int(refreshed.timestamp())),
         "comment": 'TF_META:{"malware_family": "Emotet", "last_seen": "2024-06-01", "last_online": "2024-06-01"}',
         "first_seen": "2024-05-01T10:00:00.000000+00:00",
-        "last_seen": refreshed.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00"),
+        "last_seen": "2024-06-01T00:00:00.000000+00:00",
         "value": "203.0.113.10",
         "Tag": [{"name": "source:Feodo-Tracker"}, {"name": "tlp:white"}, {"name": "zone:Global"}],
     }
@@ -99,4 +101,6 @@ def test_the_refreshed_attribute_moves_last_updated_and_lifts_the_decay_retireme
     assert row["fi"].to_native() == datetime(2025, 9, 1, tzinfo=timezone.utc), "first import stays"
     assert row["active"] is True and row["ra"] is None and row["rb"] is None and row["tier"] is None
     assert row["first_at"].to_native() == datetime(2024, 5, 1, 10, tzinfo=timezone.utc), "first-seen claim stays"
-    assert row["last_at"].to_native() == refreshed, "the refreshed last-seen claim is the latest"
+    assert row["last_at"].to_native() == datetime(2024, 6, 1, tzinfo=timezone.utc), (
+        "the last-seen claim stays the source's, not the time of the refresh"
+    )

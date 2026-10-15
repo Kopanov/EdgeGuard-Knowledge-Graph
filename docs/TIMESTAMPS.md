@@ -140,18 +140,15 @@ populates the MISP 2.4.120+ native fields:
 
 - `Attribute.first_seen` ← item's `first_seen` (passed through `coerce_iso`)
 - `Attribute.last_seen`  ← item's `last_seen` (passed through `coerce_iso`)
-- **Re-reported indicators (2026-10):** when a source lists an indicator MISP already holds for
-  it and the stored `last_seen` (or, without one, `Attribute.timestamp`) is older than
-  `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` (default 30), `MISPWriter.push_items` moves
-  `Attribute.last_seen` forward — and nothing else: to the item's `last_seen` when that lies
-  inside the interval, otherwise to the time of the collector run. The second case is the one
-  place Concept 2 holds a time EdgeGuard observed rather than a field the source sent: the
-  source's listing of the indicator at that time. It is written only while the source lists the
-  indicator, never as a substitute for a missing claim of a new item (Invariant 1 is unchanged
-  for new attributes). Through the MAX-CASE below it becomes `r.source_reported_last_at` for the
-  allowlisted sources; for Feodo Tracker and URLhaus, whose Concept 2 is `last_online`, the latest
-  claim of a refreshed indicator can therefore be a listing date rather than a last-online date.
-  Concept 1 does not move. See [COLLECTORS.md](COLLECTORS.md#re-reported-indicators-2026-10).
+- **Re-reported indicators (2026-10):** when a collector run reports an indicator MISP already
+  holds for its source and MISP last wrote the stored copy (`Attribute.timestamp`) more than
+  `EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS` ago (default 30), `MISPWriter.push_items` edits the copy
+  so that MISP writes a new `Attribute.timestamp`, which brings it into the next incremental sync.
+  The edit sends `Attribute.last_seen` and nothing else: the item's `last_seen` when it is later
+  than the stored one, otherwise the stored value unchanged. Concept 2 therefore holds only dates
+  the source sent: a refresh never writes the time of a run into it (Invariant 1 holds for
+  edited attributes too), and Concept 1 does not move. See
+  [COLLECTORS.md](COLLECTORS.md#re-reported-indicators-2026-10).
 
 **These are the source-truthful ones.** Do NOT confuse with:
 

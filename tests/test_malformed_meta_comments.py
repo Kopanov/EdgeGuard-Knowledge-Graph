@@ -9,7 +9,10 @@ parse: the event failed, the run failed, and every later incremental run failed 
 event. ``{"t":"T1059"}`` gave ``uses_techniques`` ``['T', '1', '0', '5', '9']``.
 
 Now a value other than a JSON object counts as no metadata (warning with the attribute UUID),
-list-valued keys accept only lists, and well-formed comments parse exactly as before.
+list-valued keys accept only lists, and well-formed comments parse exactly as before. The lists
+keep only their strings and numbers (numbers as strings): they become node properties, and Neo4j
+refuses a property list holding a map, a list, a null or mixed types, which failed the whole
+batch. The STIX conversion reads a tool's comment the same way.
 """
 
 from __future__ import annotations
@@ -161,3 +164,81 @@ def test_one_malformed_attribute_no_longer_fails_its_event():
     assert parsed == 3 and errors == 0
     assert sorted(i["value"] for i in written) == ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
     assert syncer.stats["events_processed"] == 1
+
+
+def test_otx_list_elements_that_neo4j_cannot_store_are_dropped():
+    """``n.attack_ids`` / ``n.targeted_countries`` are node properties: a list holding a map or mixed
+    types failed the indicator batch (and the run). Strings stay as they are, numbers become strings."""
+    comment = (
+        'OTX_META:{"pulse_id":"p1","attack_ids":[{"id":"T1059"},"T1566",["T1071"],null,true],'
+        '"targeted_countries":["DE",5],"pulse_tags":[{"t":"c2"}],"otx_industries":["Finance",2.5],'
+        '"report_ids":["p2",{"id":"p3"}],"mf":[["Emotet"],"Qakbot"]}'
+    )
+    item, _ = _syncer().parse_attribute(_ioc(comment), _OTX_EVENT)
+    assert item["attack_ids"] == ["T1566"]
+    assert item["targeted_countries"] == ["DE", "5"]
+    assert item["pulse_tags"] == [] and item["otx_industries"] == ["Finance", "2.5"]
+    assert item["report_ids"] == ["p2"] and item["pulse_malware_families"] == ["Qakbot"]
+    for key in ("attack_ids", "targeted_countries", "pulse_tags", "otx_industries", "report_ids"):
+        assert all(isinstance(x, str) for x in item[key]), f"{key}: one type only, as Neo4j stores it"
+
+
+def test_technique_lists_of_actors_malware_and_tools_keep_only_scalars():
+    noisy = '["T1059",{"id":"T1071"},null,["T1003"]]'
+    actor = {
+        "type": "threat-actor",
+        "value": "APT28",
+        "uuid": UUID,
+        "comment": f'MITRE_USES_TECHNIQUES:{{"t":{noisy},"rt":{noisy}}}\nRussian group.',
+        "Tag": [],
+    }
+    item, _ = _syncer().parse_attribute(actor, _MITRE_EVENT)
+    assert item["uses_techniques"] == ["T1059"] and item["reported_techniques"] == ["T1059"]
+
+    actor["comment"] = f"MITRE_USES_TECHNIQUES:{noisy}\nRussian group."  # the older bare-list form
+    item, _ = _syncer().parse_attribute(actor, _MITRE_EVENT)
+    assert item["uses_techniques"] == ["T1059"]
+
+    item, _ = _syncer().parse_attribute(
+        _malware(f'MITRE_USES_TECHNIQUES:{{"t":{noisy}}}\nBanking trojan.'), _MITRE_EVENT
+    )
+    assert item["uses_techniques"] == ["T1059"]
+
+    tool = {
+        "type": "text",
+        "value": "S0002: Mimikatz",
+        "uuid": UUID,
+        "comment": f"MITRE_USES_TECHNIQUES:{noisy}",
+        "Tag": [],
+    }
+    item, _ = _syncer().parse_attribute(tool, _MITRE_EVENT)
+    assert item["uses_techniques"] == ["T1059"]
+
+
+def _tool(comment: str) -> dict:
+    return {"type": "text", "value": "S0002: Mimikatz", "uuid": UUID, "comment": comment, "Tag": []}
+
+
+@pytest.mark.parametrize(
+    "payload", ["null", "1", '"T1059"', '{"t":"T1059"}'], ids=["null", "number", "string", "t-string"]
+)
+def test_stix_tool_with_a_malformed_comment_is_converted_without_techniques(payload):
+    """``_attribute_to_stix21`` read the tool's comment with ``meta.get`` and caught no
+    ``AttributeError``: ``null`` dropped the whole event from the STIX conversion, and
+    ``{"t":"T1059"}`` gave one technique per character."""
+    stix = _syncer()._attribute_to_stix21(
+        _tool(f"MITRE_USES_TECHNIQUES:{payload}\nCredential dumper."), "ev", ["global"]
+    )
+    assert stix is not None and stix["type"] == "tool" and stix["name"] == "Mimikatz"
+    assert "x_edgeguard_uses_techniques" not in stix
+    assert stix["description"] == "Credential dumper."
+
+
+def test_stix_tool_with_a_well_formed_comment_is_converted_as_before():
+    stix = _syncer()._attribute_to_stix21(
+        _tool('MITRE_USES_TECHNIQUES:{"t":["T1003","T1059"]}\nCredential dumper.'), "ev", ["global"]
+    )
+    assert stix["x_edgeguard_uses_techniques"] == ["T1003", "T1059"]
+    assert stix["description"] == "Credential dumper."
+    stix = _syncer()._attribute_to_stix21(_tool('MITRE_USES_TECHNIQUES:["T1003",{"x":1}]'), "ev", ["global"])
+    assert stix["x_edgeguard_uses_techniques"] == ["T1003"], "the older bare-list form, as parse_attribute reads it"

@@ -4,8 +4,10 @@
 ``sync.run()``. When that attempt failed (or hit the task's execution timeout), Airflow retried
 the task (``retries=2``); the retry found the flag cleared, ran incrementally, stamped the state
 file, and the repair the operator asked for was silently incomplete. The flag is now cleared only
-after a successful full sync, and the task's limit matches the baseline DAG's full sync (6 h)
-instead of 4 h, which a full sync of a 730-day MISP (about 6 h) could exceed.
+after a successful full sync. Because it then persists until a full sync succeeds, the task's
+limit is 8 h (was 4 h; a full sync of a 730-day MISP takes about 6 h), the DAG run's limit covers
+every task failing on all attempts, and the last failed attempt alerts that incremental syncs are
+suspended while the flag stays set.
 
 The DAG module is imported as Airflow would import it; the Variable store and
 ``MISPToNeo4jSync`` are stand-ins.
@@ -19,6 +21,7 @@ import logging
 import sys
 from datetime import datetime, timedelta, timezone
 from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -169,18 +172,61 @@ def test_an_incremental_run_never_touches_the_flag(dag_module, env):
     assert "NEO4J_FULL_SYNC" not in _Variables.store
 
 
-def test_the_sync_task_has_the_baseline_full_sync_limit(dag_module):
-    sync_limit = dag_module.run_neo4j_sync_task.execution_timeout
-    assert sync_limit == dag_module.baseline_full_sync_task.execution_timeout == timedelta(hours=6)
+def test_the_sync_task_limit_leaves_margin_above_the_full_sync_estimate(dag_module):
+    """About 6 h for a full sync of a 730-day MISP (the baseline task's limit). A requested full sync
+    keeps its flag until it succeeds, so a limit at the estimate could fail every attempt of every run."""
+    assert dag_module.run_neo4j_sync_task.execution_timeout == timedelta(hours=8)
+    assert dag_module.run_neo4j_sync_task.execution_timeout > dag_module.baseline_full_sync_task.execution_timeout
 
-    retries = dag_module.run_neo4j_sync_task.retries
-    retry_delay = dag_module.run_neo4j_sync_task.retry_delay
-    worst = (
-        (retries + 1) * sync_limit
-        + retries * retry_delay
-        + dag_module.build_relationships_task.execution_timeout
-        + dag_module.enrichment_task.execution_timeout
+
+def test_the_dag_run_limit_covers_every_task_failing_on_all_attempts(dag_module):
+    """The method docs/AIRFLOW_DAGS.md states for every DAG: execution_timeout × (1 + retries) +
+    retries × retry_delay, summed over the sequential chain, plus 20%."""
+    dag = dag_module.neo4j_sync_dag
+    assert all(len(task.downstream_list) <= 1 for task in dag.tasks), "one sequential chain"
+    worst = sum(
+        (task.execution_timeout * (1 + task.retries) + task.retry_delay * task.retries for task in dag.tasks),
+        timedelta(0),
     )
-    assert dag_module.neo4j_sync_dag.dagrun_timeout >= worst, (
-        "the DAG run limit must let a full sync that times out twice still reach the relationship build"
+    assert dag.dagrun_timeout >= worst * 1.2
+
+
+def _failure_context(dag_module):
+    return {
+        "dag": dag_module.neo4j_sync_dag,
+        "task_instance": SimpleNamespace(task_id="run_neo4j_sync"),
+        "exception": "Neo4j sync failed: scripted failure",
+    }
+
+
+def test_the_last_failed_attempt_alerts_while_the_request_is_pending(dag_module, env, monkeypatch, caplog):
+    common = MagicMock()
+    errors = MagicMock()
+    monkeypatch.setattr(dag_module, "_on_task_failure", common)
+    monkeypatch.setattr(dag_module, "ENABLE_PROMETHEUS_METRICS", True)
+    monkeypatch.setattr(dag_module, "PROMETHEUS_AVAILABLE", True)
+    monkeypatch.setattr(dag_module, "PIPELINE_ERRORS", errors, raising=False)
+    callbacks = dag_module.run_neo4j_sync_task.on_failure_callback
+    assert dag_module._on_neo4j_sync_failure in (callbacks if isinstance(callbacks, list) else [callbacks])
+
+    with caplog.at_level(logging.ERROR):
+        dag_module._on_neo4j_sync_failure(_failure_context(dag_module))
+    common.assert_called_once()
+    assert any(
+        r.levelno == logging.ERROR
+        and "NEO4J_FULL_SYNC is still true" in r.message
+        and "no incremental sync runs" in r.message
+        and "airflow variables set NEO4J_FULL_SYNC false" in r.message
+        for r in caplog.records
     )
+    errors.labels.assert_called_once_with(
+        task="run_neo4j_sync", error_type="full_sync_request_pending", source="edgeguard_neo4j_sync"
+    )
+
+    caplog.clear()
+    errors.reset_mock()
+    _Variables.store = {"NEO4J_FULL_SYNC": "false"}
+    with caplog.at_level(logging.ERROR):
+        dag_module._on_neo4j_sync_failure(_failure_context(dag_module))
+    assert not any("NEO4J_FULL_SYNC is still true" in r.message for r in caplog.records)
+    errors.labels.assert_not_called()

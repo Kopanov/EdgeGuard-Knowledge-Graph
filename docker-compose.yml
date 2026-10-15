@@ -124,11 +124,13 @@ x-common-env: &common-env
   # OTX page ceilings (50 pulses per page); a baseline that reaches its ceiling logs a warning.
   EDGEGUARD_OTX_BASELINE_MAX_PAGES: ${EDGEGUARD_OTX_BASELINE_MAX_PAGES:-200}
   EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES: ${EDGEGUARD_OTX_INCREMENTAL_MAX_PAGES:-25}
-  # Re-reported indicators (2026-10, src/collectors/misp_writer.py): last_seen of an indicator a
-  # source reports again is refreshed when older than this many days (0 = off), at most
-  # EDGEGUARD_MISP_REFRESH_MAX_PER_RUN edits per run (0 = no cap). Defaults mirror src/config.py.
+  # Re-reported indicators (2026-10, src/collectors/misp_writer.py): the stored copy of an
+  # indicator a source reports again is edited when MISP last wrote it more than this many days ago
+  # (0 = off), at most EDGEGUARD_MISP_REFRESH_MAX_PER_RUN edits (0 = no cap) and
+  # EDGEGUARD_MISP_REFRESH_MAX_SECONDS seconds (0 = no limit) per run. Defaults mirror src/config.py.
   EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS: ${EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS:-30}
   EDGEGUARD_MISP_REFRESH_MAX_PER_RUN: ${EDGEGUARD_MISP_REFRESH_MAX_PER_RUN:-2000}
+  EDGEGUARD_MISP_REFRESH_MAX_SECONDS: ${EDGEGUARD_MISP_REFRESH_MAX_SECONDS:-600}
   # Incremental MISP -> Neo4j sync writes only attributes changed in the window
   # (src/run_misp_to_neo4j.py). false = whole-event behaviour.
   EDGEGUARD_SYNC_ATTRIBUTE_FILTER: ${EDGEGUARD_SYNC_ATTRIBUTE_FILTER:-true}

@@ -58,6 +58,7 @@ FORWARDED = [
     ("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true"),  # incremental sync writes only changed attributes
     ("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", "30"),  # 2026-10 last_seen refresh of re-reported indicators
     ("EDGEGUARD_MISP_REFRESH_MAX_PER_RUN", "2000"),
+    ("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", "600"),
     ("EDGEGUARD_NEO4J_READ_TIMEOUT", "3600"),  # int(os.getenv(...)) — empty would raise
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
     ("EDGEGUARD_CANONICAL_THREAT_ACTORS", None),  # empty = the reference shipped in src/reference/

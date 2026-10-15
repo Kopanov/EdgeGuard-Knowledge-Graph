@@ -1394,6 +1394,41 @@ def _clear_full_sync_request() -> None:
         )
 
 
+def _on_neo4j_sync_failure(context):
+    """``on_failure_callback`` of ``run_neo4j_sync`` (2026-10): the common failure handling
+    (``_on_task_failure``), then an alert when the Airflow Variable ``NEO4J_FULL_SYNC`` is still set.
+
+    Airflow calls it once the task has failed for good (its retries spent, a timeout included; a
+    retry calls ``on_retry_callback`` instead). The Variable is cleared only after a successful full
+    sync, so while it stays set every scheduled run is a full sync again and no incremental sync
+    runs. The alert says so and how to clear it; it is logged at ERROR, sent to Slack when enabled
+    and counted as ``edgeguard_pipeline_errors_total{error_type="full_sync_request_pending"}``.
+    """
+    _on_task_failure(context)
+    try:
+        pending = str(Variable.get("NEO4J_FULL_SYNC", "false")).strip().lower() == "true"
+    except Exception as e:
+        logger.warning("Could not read the Airflow Variable NEO4J_FULL_SYNC after the sync failed: %s", e)
+        return
+    if not pending:
+        return
+    message = (
+        "NEO4J_FULL_SYNC is still true after the requested full sync failed on its last attempt: every "
+        "scheduled run of edgeguard_neo4j_sync is a full sync again and no incremental sync runs until "
+        "one succeeds. Fix the cause named in the run_neo4j_sync log, or resume incremental syncs with "
+        "'airflow variables set NEO4J_FULL_SYNC false' (docs/RUNBOOK.md, 'Requesting a full MISP → Neo4j sync')"
+    )
+    logger.error("[ALERT] %s", message)
+    if ENABLE_SLACK_ALERTS:
+        send_slack_alert(f"[CRITICAL] {message}")
+    if ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE:
+        dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+        try:
+            PIPELINE_ERRORS.labels(task="run_neo4j_sync", error_type="full_sync_request_pending", source=dag_id).inc()
+        except Exception as e:
+            logger.warning(f"Failed to record the pending full sync request metric: {e}")
+
+
 def run_neo4j_sync(**context):
     """Run the Neo4j sync pipeline."""
     import json
@@ -1857,10 +1892,13 @@ neo4j_sync_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    # 2026-10: worst case of a full sync that times out twice: 3 attempts × 6 h + 2 retry delays of
-    # 5 min, then build_relationships (5 h) and the enrichment jobs (5 h) ≈ 28 h 10 min; 32 h (the
-    # baseline DAG's limit) leaves room for the checks. The DAG fires every 3 days (max_active_runs=1).
-    dagrun_timeout=timedelta(hours=32),
+    # 2026-10 (was 22 h): worst case as for the other DAGs, every task of the chain failing on all
+    # three attempts (execution_timeout × 3 + 2 retry delays of 5 min): check_sync_needed and
+    # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (8 h limit), build_relationships and
+    # run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
+    # A requested full sync keeps its flag until it succeeds, so it may need all three attempts. With
+    # max_active_runs=1 a long run only delays the next scheduled one, which then checks the interval.
+    dagrun_timeout=timedelta(hours=68),
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
@@ -1910,11 +1948,15 @@ neo4j_preflight_task = PythonOperator(
 run_neo4j_sync_task = PythonOperator(
     task_id="run_neo4j_sync",
     python_callable=run_neo4j_sync,
-    # 2026-10: 6 h, the limit of the baseline DAG's ``full_neo4j_sync`` task, because this task runs a
-    # full sync too (first run, or NEO4J_FULL_SYNC=true), estimated at about 6 h on a 730-day MISP
-    # (see the baseline DAG's dagrun_timeout comment). At 4 h such a sync timed out and its retries
-    # ran incrementally. Incremental runs take minutes; the limit only bounds a hung one.
-    execution_timeout=timedelta(hours=6),
+    # 2026-10: 8 h (was 4 h). This task runs a full sync too (first run, or NEO4J_FULL_SYNC=true),
+    # estimated at about 6 h on a 730-day MISP (the baseline DAG's ``full_neo4j_sync`` has 6 h, see the
+    # baseline dagrun_timeout comment). At 4 h such a sync timed out and its retries ran incrementally;
+    # now the request is kept until a full sync succeeds, so a limit at the estimate itself could fail
+    # every attempt of every scheduled run. 8 h is the estimate plus a third. Incremental runs take
+    # minutes; the limit only bounds a hung one.
+    execution_timeout=timedelta(hours=8),
+    # 2026-10: after the last attempt, alert when NEO4J_FULL_SYNC is still set (incremental syncs suspended).
+    on_failure_callback=_on_neo4j_sync_failure,
     dag=neo4j_sync_dag,
 )
 

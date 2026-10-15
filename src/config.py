@@ -660,25 +660,38 @@ MISP_CROSS_EVENT_DEDUP = _env_bool("EDGEGUARD_MISP_CROSS_EVENT_DEDUP", "true")
 # already holds in MISP, so an IOC a feed keeps listing was never written again: the incremental
 # sync reads only attributes whose MISP timestamp moved, ``Indicator.last_updated`` stayed at the
 # first import, and ``decay_ioc_confidence`` lowered the node at 90 / 180 days and retired it at
-# 365 while the feed still listed it. ``MISPWriter.push_items`` now moves the stored attribute's
-# ``last_seen`` when the source reports the indicator again and the stored date is older than the
-# interval below. Read per call so Airflow tasks and tests pick up the environment at run time.
+# 365 while the feed still listed it. ``MISPWriter.push_items`` now edits the stored attribute when
+# the source reports the indicator again and MISP last wrote it longer ago than the interval
+# below; the edit moves MISP's timestamp and keeps the source's dates (see
+# ``MISPWriter._refresh_stored_copies``). Read per call so Airflow tasks and tests pick up the
+# environment at run time.
 
 
 def misp_refresh_last_seen_days() -> int:
     """``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS`` (default 30; ``0`` = no refresh): a re-reported
-    indicator whose stored ``last_seen`` (or, without one, its MISP timestamp) is older than this
-    gets its ``last_seen`` moved forward: to the source's own ``last_seen`` when that lies inside
-    the interval, otherwise to the run's time. 30 days stays well inside decay's first tier
-    (90 days) and bounds the edits to one per indicator per 30 days."""
+    indicator whose stored copy MISP last wrote (attribute ``timestamp``) more than this many days
+    ago is edited once: its ``last_seen`` becomes the source's claim when that is later than the
+    stored one and otherwise stays as it is, and MISP stamps the attribute anew. The edit resets
+    the timestamp the decision reads, so a copy is edited at most once per interval; 30 days stays
+    well inside decay's first tier (90 days)."""
     return max(0, _env_int("EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS", 30))
 
 
 def misp_refresh_max_per_run() -> int:
     """``EDGEGUARD_MISP_REFRESH_MAX_PER_RUN`` (default 2000; ``0`` = no cap): attribute edits one
-    ``push_items`` call makes at most for re-reported indicators, the longest unseen first. Each is
-    one MISP request; the rest wait for a later run that reports them again."""
+    ``push_items`` call makes at most for re-reported indicators, the longest unwritten first. Each
+    is one MISP request; the rest wait for a later run that reports them again."""
     return max(0, _env_int("EDGEGUARD_MISP_REFRESH_MAX_PER_RUN", 2000))
+
+
+def misp_refresh_max_seconds() -> int:
+    """``EDGEGUARD_MISP_REFRESH_MAX_SECONDS`` (default 600; ``0`` = no limit): wall-clock time one
+    ``push_items`` call spends on refresh edits at most. No edit starts after it is spent; the rest
+    wait for a later run. 10 minutes is a sixth of the shortest collector task limit (1 hour:
+    ``collect_otx``, ``collect_cisa``, ``collect_virustotal``). An edit in flight is not
+    interrupted, so a run can exceed it by one edit's attempts (``MISPWriter._post_with_retries``:
+    three, with a 600 s read timeout each)."""
+    return max(0, _env_int("EDGEGUARD_MISP_REFRESH_MAX_SECONDS", 600))
 
 
 # OTX incremental: first-run / no-checkpoint lookback; overlap subtracted from stored cursor to avoid gaps.

@@ -1033,14 +1033,29 @@ def _meta_object(parsed: Any, prefix: str, ref: str = "") -> Dict[str, Any]:
     return {}
 
 
-def _meta_list(meta: Dict[str, Any], key: str) -> List[Any]:
-    """``meta[key]`` when it is a JSON list, otherwise ``[]`` (2026-10).
+def _scalar_strings(values: List[Any]) -> List[str]:
+    """The strings and numbers of a JSON list, numbers as strings; other elements dropped (2026-10).
+
+    The lists reach node properties (``n.attack_ids``, ``n.targeted_countries``, ``uses_techniques``),
+    and Neo4j refuses a property list holding a map, a list, a null or mixed types: the whole
+    ``UNWIND`` batch then failed, and with it the run and every later incremental run. The lists
+    MISPWriter writes hold strings only and pass unchanged.
+    """
+    return [
+        x if isinstance(x, str) else str(x)
+        for x in values
+        if isinstance(x, str) or (isinstance(x, (int, float)) and not isinstance(x, bool))
+    ]
+
+
+def _meta_list(meta: Dict[str, Any], key: str) -> List[str]:
+    """``meta[key]`` when it is a JSON list, as ``_scalar_strings``; otherwise ``[]`` (2026-10).
 
     A string such as ``"T1059"`` in a list-valued key is ignored instead of being iterated into
     its characters (``T``, ``1``, ``0``, ``5``, ``9``).
     """
     value = meta.get(key)
-    return value if isinstance(value, list) else []
+    return _scalar_strings(value) if isinstance(value, list) else []
 
 
 def _extract_tlp_tag(tags: List[Dict[str, Any]], ref: str = "") -> str:
@@ -2487,8 +2502,15 @@ class MISPToNeo4jSync:
                         nl = rest.find("\n")
                         json_part = rest if nl < 0 else rest[:nl]
                         tail = (rest[nl + 1 :].strip() if nl >= 0 else "") or ""
-                        meta = json.loads(json_part)
-                        uses_techniques = [str(x) for x in (meta.get("t") or [])]
+                        parsed = json.loads(json_part)
+                        # 2026-10: read as ``parse_attribute`` reads a tool's comment: an object's
+                        # "t" list, or the older bare list; any other JSON value is no metadata
+                        # (``.get`` on it raised and dropped the whole event from the conversion).
+                        if isinstance(parsed, list):
+                            uses_techniques = _scalar_strings(parsed)
+                        else:
+                            meta = _meta_object(parsed, "MITRE_USES_TECHNIQUES", attr_uuid)
+                            uses_techniques = _meta_list(meta, "t")
                         description = tail or description
                     except (ValueError, TypeError, json.JSONDecodeError):
                         pass
@@ -3335,7 +3357,7 @@ class MISPToNeo4jSync:
                         actor_uses_malware = [str(x).strip() for x in _meta_list(parsed, "m") if str(x).strip()]
                         actor_uses_tools = [str(x).strip() for x in _meta_list(parsed, "s") if str(x).strip()]
                     elif isinstance(parsed, list):
-                        uses_techniques = parsed
+                        uses_techniques = _scalar_strings(parsed)
                 except (ValueError, IndexError):
                     actor_description = raw_comment
 
@@ -3670,7 +3692,7 @@ class MISPToNeo4jSync:
                     if isinstance(parsed, dict):
                         uses_techniques = _meta_list(parsed, "t")  # 2026-10: lists only
                     elif isinstance(parsed, list):
-                        uses_techniques = parsed
+                        uses_techniques = _scalar_strings(parsed)
                 except (ValueError, IndexError):
                     description = raw_comment
             else:
