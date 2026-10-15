@@ -609,11 +609,14 @@ Any non-zero on #1–#4 = regression; file issue.
 A curated package (JSON, e.g. `2026-10-20_EdgeGuard_CoreIdeas_package.json`) adds claims about existing actors and malware as one MISP event; the next MISP→Neo4j sync turns them into relationships (see `docs/KNOWLEDGE_GRAPH.md`, "Curated packages"). Import it after the baseline, since its claims attach only to nodes that exist.
 
 ```bash
-python scripts/import_curated_package.py PACKAGE.json          # validate: summary, warnings, errors
-python scripts/import_curated_package.py PACKAGE.json --push   # create the MISP event (MISP_URL / MISP_API_KEY)
+python scripts/import_curated_package.py PACKAGE.json                 # validate: summary, warnings, errors
+python scripts/import_curated_package.py PACKAGE.json --check-graph   # + per predicate, claims that would not attach
+python scripts/import_curated_package.py PACKAGE.json --push          # create the MISP event (MISP_URL / MISP_API_KEY)
 ```
 
 The validation refuses the package (errors block `--push`) when its `source` is not a registered curated source (`coreideas`, `misp_galaxy`; `source_type="curated"` in `src/source_registry.py`) or when it has no `tlp`. It rejects a single claim — listed as a warning, counted under `claims_skipped_by_reason` in the summary, never written to MISP — when the claim's source is not a registered curated source, its object id is malformed (technique `T1234` / `T1234.123`, tool `S1234`, CVE `CVE-YYYY-NNNN`), its predicate does not fit its subject, or it has no object. The package's TLP level is tagged on the event and on every attribute; it marks each claim's link (`r.tlp`) and the STIX relationship exported from it.
+
+`--check-graph` only reads Neo4j (`NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD`, optionally `NEO4J_DATABASE`). For each predicate it reports how many valid claims find both ends by the exact name or id the sync matches on, how many lack their subject or their object, and a sample of the missing names, so the package can be aligned with the graph before `--push`.
 
 The event is unpublished and visible to the creating organisation only. A fresh baseline removes it with the other EdgeGuard events: import it again afterwards.
 

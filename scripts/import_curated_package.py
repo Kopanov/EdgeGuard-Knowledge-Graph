@@ -43,11 +43,15 @@ the node it names. Removing the layer: see ``docs/RUNBOOK.md``, "Importing a cur
 
 Usage::
 
-    python scripts/import_curated_package.py PACKAGE.json            # validate and summarise
-    python scripts/import_curated_package.py PACKAGE.json --push     # create the MISP event
+    python scripts/import_curated_package.py PACKAGE.json                 # validate and summarise
+    python scripts/import_curated_package.py PACKAGE.json --check-graph   # + which claims would attach
+    python scripts/import_curated_package.py PACKAGE.json --push          # create the MISP event
 
 ``--push`` reads ``MISP_URL`` / ``MISP_API_KEY`` (and ``EDGEGUARD_SSL_VERIFY``) like the
-collectors, and refuses to create a second event with the same name.
+collectors, and refuses to create a second event with the same name. ``--check-graph`` reads
+``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD`` (and ``NEO4J_DATABASE``) and only reads the
+graph: per predicate, it reports the valid claims whose subject or object is not there by the
+exact name or id the sync matches on (such a claim attaches to nothing).
 """
 
 from __future__ import annotations
@@ -59,12 +63,13 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from node_identity import canonicalize_merge_key  # noqa: E402
 from relationship_provenance import CURATED_CLAIMS_PREFIX, CURATED_PREDICATES  # noqa: E402
 from source_registry import (  # noqa: E402
     canonical_source_id,
@@ -284,6 +289,102 @@ def build_event(package: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# 2026-10 (--check-graph): rows per lookup query, and missing names reported per predicate.
+CHECK_BATCH = 1000
+CHECK_SAMPLE = 10
+
+
+def _check_rows(package: Dict[str, Any]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    """The valid claims by ``(predicate, subject label)``, keyed as the sync matches them.
+
+    Names are NFC-normalised, trimmed and lower-cased (``canonicalize_merge_key``, as the batch
+    writer does); ATT&CK and CVE ids are trimmed and upper-cased (as the sync does).
+    """
+    source = canonical_source_id(package.get("source"))
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for entity in package.get("entities") or []:
+        if not isinstance(entity, dict) or entity.get("kind") not in KINDS:
+            continue
+        subject_label = KINDS[entity["kind"]][0]
+        subject = canonicalize_merge_key(subject_label, {"name": str(entity.get("name") or "")})["name"]
+        if not subject:
+            continue
+        for claim in entity.get("claims") or []:
+            if _claim_problem(claim, subject_label, source) is not None:
+                continue
+            predicate = str(claim["p"]).strip().lower()
+            _rel_type, object_label, key = CURATED_PREDICATES[predicate][subject_label]
+            obj = str(claim["o"]).strip()
+            obj = canonicalize_merge_key(object_label, {"name": obj})["name"] if key == "name" else obj.upper()
+            rows = groups.setdefault((predicate, subject_label), [])
+            rows.append({"i": len(rows), "s": subject, "o": obj})
+    return groups
+
+
+def _check_query(subject_label: str, object_label: str, object_key: str) -> str:
+    """Read-only Cypher: for each row, whether its subject and its object exist (exact key)."""
+    return (
+        "UNWIND $rows AS row "
+        f"OPTIONAL MATCH (s:{subject_label} {{name: row.s}}) "
+        f"OPTIONAL MATCH (o:{object_label} {{{object_key}: row.o}}) "
+        "RETURN row.i AS i, s IS NOT NULL AS subject_found, o IS NOT NULL AS object_found"
+    )
+
+
+def check_graph(
+    package: Dict[str, Any], run_query: Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]
+) -> Dict[str, Any]:
+    """Which of a valid package's claims would attach (2026-10, ``--check-graph``).
+
+    ``run_query(cypher, rows)`` runs a read-only query and returns its records as dicts. Per
+    ``"<predicate> (<subject label>)"``: the claims, how many find both ends, how many lack the
+    subject / the object (a claim can lack both), and up to ``CHECK_SAMPLE`` missing names each.
+    """
+    report: Dict[str, Any] = {}
+    total = attach = 0
+    for (predicate, subject_label), rows in _check_rows(package).items():
+        _rel_type, object_label, key = CURATED_PREDICATES[predicate][subject_label]
+        query = _check_query(subject_label, object_label, key)
+        found: Dict[int, Tuple[bool, bool]] = {}
+        for start in range(0, len(rows), CHECK_BATCH):
+            for record in run_query(query, rows[start : start + CHECK_BATCH]):
+                had_s, had_o = found.get(record["i"], (False, False))
+                found[record["i"]] = (had_s or bool(record["subject_found"]), had_o or bool(record["object_found"]))
+        no_subject = [r["s"] for r in rows if not found.get(r["i"], (False, False))[0]]
+        no_object = [r["o"] for r in rows if not found.get(r["i"], (False, False))[1]]
+        attached = sum(1 for r in rows if found.get(r["i"], (False, False)) == (True, True))
+        report[f"{predicate} ({subject_label})"] = {
+            "claims": len(rows),
+            "attach": attached,
+            "subject_missing": len(no_subject),
+            "object_missing": len(no_object),
+            "missing_subjects": sorted(set(no_subject))[:CHECK_SAMPLE],
+            "missing_objects": sorted(set(no_object))[:CHECK_SAMPLE],
+        }
+        total += len(rows)
+        attach += attached
+    return {"claims": total, "attach": attach, "do_not_attach": total - attach, "by_predicate": report}
+
+
+def _neo4j_reader() -> Optional[Tuple[Any, Callable[[str, List[Dict[str, Any]]], List[Dict[str, Any]]]]]:
+    """``(driver, run_query)`` over read-only sessions, or ``None`` without a password."""
+    from neo4j import READ_ACCESS, GraphDatabase  # deferred: only --check-graph needs the driver
+
+    password = os.environ.get("NEO4J_PASSWORD")
+    if not password:
+        print("NEO4J_PASSWORD (with NEO4J_URI / NEO4J_USER) must be set for --check-graph", file=sys.stderr)
+        return None
+    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    driver = GraphDatabase.driver(uri, auth=(os.environ.get("NEO4J_USER", "neo4j"), password))
+    database = os.environ.get("NEO4J_DATABASE") or None
+
+    def run_query(cypher: str, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        with driver.session(database=database, default_access_mode=READ_ACCESS) as session:
+            return [record.data() for record in session.run(cypher, rows=rows)]
+
+    return driver, run_query
+
+
 def _push(event: Dict[str, Any]) -> int:
     from pymisp import MISPEvent, PyMISP  # deferred: the dry run needs no MISP client
 
@@ -312,7 +413,13 @@ def _push(event: Dict[str, Any]) -> int:
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("package", type=Path, help="the package JSON file")
-    parser.add_argument("--push", action="store_true", help="create the MISP event (default: validate only)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--push", action="store_true", help="create the MISP event (default: validate only)")
+    mode.add_argument(
+        "--check-graph",
+        action="store_true",
+        help="also report, per predicate, the claims whose subject or object is not in Neo4j (read-only)",
+    )
     args = parser.parse_args(argv)
     try:
         package = json.loads(args.package.read_text(encoding="utf-8"))
@@ -329,6 +436,15 @@ def main(argv: List[str] | None = None) -> int:
         print(f"error: {err}", file=sys.stderr)
     if errors:
         return 1
+    if args.check_graph:
+        reader = _neo4j_reader()
+        if reader is None:
+            return 2
+        driver, run_query = reader
+        try:
+            print(json.dumps({"check_graph": check_graph(package, run_query)}, indent=2, ensure_ascii=False))
+        finally:
+            driver.close()
     if not args.push:
         print("valid — dry run, nothing written (add --push to create the MISP event)")
         return 0

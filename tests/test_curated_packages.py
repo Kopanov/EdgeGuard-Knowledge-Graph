@@ -919,3 +919,103 @@ class TestClaimIds:
         )
         (attr,) = importer.build_event(package)["Event"]["Attribute"]
         assert [c["o"] for c in _parse_curated_claims(attr["comment"])] == ["S0002"]
+
+
+# --------------------------------------------------------------------------- --check-graph
+def _graph_reader(nodes, calls=None):
+    """``run_query`` for ``check_graph`` over ``{label: {key value}}``, answering the lookup as Neo4j
+    answers OPTIONAL MATCH on an exact key."""
+    pattern = re.compile(r"\((\w+):(\w+) \{(\w+): row\.(\w+)\}\)")
+
+    def run_query(cypher, rows):
+        if calls is not None:
+            calls.append((cypher, list(rows)))
+        (s_label, _sk, s_field), (o_label, _ok, o_field) = [m[1:] for m in pattern.findall(cypher)]
+        return [
+            {
+                "i": row["i"],
+                "subject_found": row[s_field] in nodes.get(s_label, ()),
+                "object_found": row[o_field] in nodes.get(o_label, ()),
+            }
+            for row in rows
+        ]
+
+    return run_query
+
+
+class TestCheckGraph:
+    """``--check-graph`` (2026-10): read-only, per predicate, the claims whose subject or object is
+    not in the graph by the exact name or id the sync matches on."""
+
+    PACKAGE = _package(
+        entities=[
+            {
+                "kind": "threat_actor",
+                "name": " APT29 ",
+                "claims": [
+                    {"p": "uses_technique", "o": "t1566"},  # both ends exist (keys normalised)
+                    {"p": "uses_malware", "o": "Emotet"},  # both ends exist
+                    {"p": "uses_malware", "o": "ghostware"},  # object missing
+                    {"p": "exploits", "o": "CVE-2099-0001"},  # object missing
+                    {"p": "uses_tool", "o": "S2"},  # malformed: not checked (not imported)
+                ],
+            },
+            {"kind": "threat_actor", "name": "apt-x", "claims": [{"p": "uses_technique", "o": "T1566"}]},
+            {"kind": "malware", "name": "lockbit", "claims": [{"p": "implements_technique", "o": "T1486"}]},
+        ]
+    )
+
+    def test_report_per_predicate(self, importer):
+        calls = []
+        report = importer.check_graph(self.PACKAGE, _graph_reader(GRAPH, calls))
+        assert (report["claims"], report["attach"], report["do_not_attach"]) == (6, 2, 4)
+        by = report["by_predicate"]
+        assert by["uses_technique (ThreatActor)"] == {
+            "claims": 2,
+            "attach": 1,
+            "subject_missing": 1,
+            "object_missing": 0,
+            "missing_subjects": ["apt-x"],
+            "missing_objects": [],
+        }
+        assert by["uses_malware (ThreatActor)"]["missing_objects"] == ["ghostware"]
+        assert by["exploits (ThreatActor)"]["missing_objects"] == ["CVE-2099-0001"]
+        assert by["implements_technique (Malware)"]["missing_subjects"] == ["lockbit"]
+        assert by["implements_technique (Malware)"]["missing_objects"] == ["T1486"]
+        assert "uses_tool (ThreatActor)" not in by, "a rejected claim is not checked"
+        for cypher, _rows in calls:
+            assert not re.search(r"\b(MERGE|CREATE|SET|DELETE|REMOVE)\b", cypher), "the check only reads"
+
+    def test_large_groups_are_looked_up_in_batches(self, importer, monkeypatch):
+        monkeypatch.setattr(importer, "CHECK_BATCH", 2)
+        claims = [{"p": "uses_technique", "o": f"T{n:04d}"} for n in range(1564, 1569)]
+        package = _package(entities=[{"kind": "threat_actor", "name": "apt29", "claims": claims}])
+        calls = []
+        report = importer.check_graph(package, _graph_reader(GRAPH, calls))
+        assert [len(rows) for _cypher, rows in calls] == [2, 2, 1]
+        assert report["by_predicate"]["uses_technique (ThreatActor)"]["attach"] == 1, "only T1566 exists"
+
+    def test_main_prints_the_report_and_writes_nothing(self, importer, monkeypatch, tmp_path, capsys):
+        driver = MagicMock()
+        monkeypatch.setattr(importer, "_neo4j_reader", lambda: (driver, _graph_reader(GRAPH)))
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(self.PACKAGE))
+        assert importer.main([str(path), "--check-graph"]) == 0
+        out = capsys.readouterr().out
+        report = json.loads(out[out.index('{\n  "check_graph"') : out.rindex("}") + 1])["check_graph"]
+        assert report["do_not_attach"] == 4
+        assert "dry run, nothing written" in out
+        driver.close.assert_called_once()
+
+    def test_check_graph_and_push_are_exclusive(self, importer, tmp_path):
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(_package()))
+        with pytest.raises(SystemExit):
+            importer.main([str(path), "--check-graph", "--push"])
+
+    def test_without_a_password_nothing_is_checked(self, importer, monkeypatch, tmp_path, capsys):
+        monkeypatch.delenv("NEO4J_PASSWORD", raising=False)
+        path = tmp_path / "pkg.json"
+        path.write_text(json.dumps(_package()))
+        assert importer.main([str(path), "--check-graph"]) == 2
+        assert "NEO4J_PASSWORD" in capsys.readouterr().err
