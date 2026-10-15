@@ -242,7 +242,7 @@ Target: complete before the next 730-day baseline attempt.
 - `src/graphql_api.py` (port 4001)
 
 **Failure modes illuminated:**
-- `host.docker.internal` scrape path on Mac vs Linux
+- Prometheus scrape path: `metrics:8001` over `edgeguard_net` (2026-10; `host.docker.internal` reached the loopback-only publish on Docker Desktop but not on Linux)
 - MISP API TLS vs plain-HTTP config drift
 - Airflow `postgres` metadata vs SQLite default (PR #45)
 - Which restart policy maps to which SLO
@@ -313,4 +313,4 @@ This keeps the cost of lying in a diagram at exactly "CI fails," which is the on
 
 ---
 
-_Last updated: 2026-10-15 — wording only: use case 2 and one failure-mode label no longer name review tools. Prior: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._
+_Last updated: 2026-10-15 — deployment topology: the Prometheus scrape path is `metrics:8001` over `edgeguard_net`. Same day: wording only: use case 2 and one failure-mode label no longer name review tools. Prior: 2026-04-28 — PR-J1 SHIPPED `tests/test_architecture_flow_pins.py` (v1: env vars + CLI subcommands + container names + src/*.py file paths). Replaced the PR-N33 "pin-test doesn't yet exist" callout with the active "pin-test enforces these claims" status. The first run surfaced 4 real drift items the audit train (PR-N33 → PR-N36) missed — most notably a stale `python -m edgeguard baseline` block in `README.md` that nobody had cross-verified. Prior: 2026-04-26 PR-N33 docs audit (aspirational status callout)._

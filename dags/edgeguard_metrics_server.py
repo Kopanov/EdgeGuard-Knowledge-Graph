@@ -267,5 +267,7 @@ generate_test_metrics_task >> health_check_task
 
 2. Optional: trigger **edgeguard_metrics_helpers** manually after the server is up — **generate_test_metrics** then **health_check**.
 
-3. Prometheus: scrape **host.docker.internal:8001** — see **prometheus/prometheus.yml**.
+3. Prometheus: the repository configuration scrapes the `metrics` compose service as **metrics:8001**
+   over edgeguard_net (2026-10). For a server started by this DAG on a bare-metal host, point the
+   target at **host.docker.internal:8001** — see the comment in **prometheus/prometheus.yml**.
 """

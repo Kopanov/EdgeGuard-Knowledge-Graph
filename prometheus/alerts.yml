@@ -46,6 +46,15 @@ groups:
       #   edgeguard_low_freq     8 h       -> nvd
       #   edgeguard_daily        24 h      -> mitre, cisa_ics, abuseipdb, threatfox, urlhaus, feodo, sslbl
       #                                       malwarebazaar (2026-10, flag-guarded)
+      #   edgeguard_neo4j_sync   72 h      -> misp_to_neo4j (2026-10; stamped by
+      #                                       src/run_misp_to_neo4j.py at connect and on a clean
+      #                                       run, by the scheduled and the baseline sync). Not
+      #                                       mapped before, it fell to the 26 h catch-all below
+      #                                       and fired about 46 h of every 72 h. 145 h = twice the
+      #                                       interval plus one hour; the 3-day cron with its 71 h
+      #                                       guard leaves up to 120 h (leap-year February) or 143 h
+      #                                       (after a baseline sync) between two syncs, see
+      #                                       EdgeGuardNeo4jSyncStale.
       - record: edgeguard:collector_max_stale_seconds
         expr: |
           label_replace(vector(7200), "source", "otx", "", "")
@@ -60,6 +69,7 @@ groups:
           or label_replace(vector(93600), "source", "feodo", "", "")
           or label_replace(vector(93600), "source", "sslbl", "", "")
           or label_replace(vector(93600), "source", "malwarebazaar", "", "")
+          or label_replace(vector(522000), "source", "misp_to_neo4j", "", "")
 
       - alert: EdgeGuardCollectionStale
         expr: |
@@ -109,17 +119,28 @@ groups:
         # sources and reintroduces the silent-alert bug we just fixed.
         # `max == 1` correctly expresses "is this source healthy in any
         # zone" without depending on zone cardinality.
+        #
+        # 2026-10: a run answered with HTTP 304 (MITRE's conditional GET, every day the bundle is
+        # unchanged) and a skipped run (no API key, not in EDGEGUARD_COLLECT_SOURCES, a baseline
+        # in progress, a transient error) both add 0 and keep the source healthy, so the alert
+        # fired about 26 h after every baseline for sources that had nothing to collect. The
+        # `unless` leaves out the sources whose most recent run was `not_modified` or `skipped`
+        # (edgeguard_collector_last_run_outcome); a source whose last run succeeded and collected
+        # nothing (`empty`) still fires. Access-denied skips have their own alert
+        # (EdgeGuardSourceAccessDenied).
         expr: |
           sum by (source) (increase(edgeguard_indicators_collected_total[26h])) == 0
           and on (source)
           max by (source) (edgeguard_source_health) == 1
+          unless on (source)
+          max by (source) (edgeguard_collector_last_run_outcome{outcome=~"not_modified|skipped"}) == 1
         for: 30m
         labels:
           severity: warning
           component: collector
         annotations:
           summary: "No indicators collected from {{ $labels.source }}"
-          description: "{{ $labels.source }} has not collected any indicators in the last hour."
+          description: "{{ $labels.source }} has not collected any indicators in the last 26 hours, and its last run was neither skipped nor answered with 'not modified'."
 
       - alert: EdgeGuardSourceAccessDenied
         # A collector whose provider refuses the request (HTTP 401/403: a rejected or revoked
@@ -209,7 +230,7 @@ groups:
           component: monitoring
         annotations:
           summary: "EdgeGuard metrics endpoint is not being scraped"
-          description: "Prometheus cannot reach the EdgeGuard /metrics endpoint. Check EDGEGUARD_ENABLE_METRICS, that the metrics server is running on port 8001, and that host.docker.internal resolves (extra_hosts: host-gateway on Linux)."
+          description: "Prometheus cannot reach the EdgeGuard /metrics endpoint (metrics:8001). Check that the `metrics` compose service is running and that the monitoring stack was started together with docker-compose.yml (make monitoring), so Prometheus is attached to edgeguard_net."
 
       - alert: EdgeGuardMISPUnhealthy
         # check_type="workers" is optional in misp_health (degraded, not unhealthy)
@@ -257,8 +278,22 @@ groups:
         # depending on eval semantics. Use a dedicated
         # `edgeguard_neo4j_sync_last_success_timestamp` gauge
         # stamped at end of each successful sync.
+        #
+        # 2026-10: 72 h fired about 23 h at most month ends. The schedule is the day-of-month cron
+        # `0 3 */3 * *` (days 1, 4, ..., 28, 31) and should_run_neo4j_sync skips a fire less than
+        # 71 h after the previous sync started, so the fire 24 h after the 31st (or after
+        # 28 February) is skipped and the next sync starts 96 h after the previous one; after
+        # 28 February of a leap year the gap is 120 h. A baseline's full sync also stamps the
+        # gauge and restarts the 71 h guard, which leaves up to 143 h until the next scheduled
+        # sync starts. The gauge is written when a sync ends, so the next sync's duration adds to
+        # the gap: up to 22 h (its dagrun_timeout) after a 120 h gap, less after a baseline, whose
+        # full sync outlasts an incremental one. 144 h (two intervals) covers these gaps; `for: 1h`
+        # adds the margin. A failed sync is reported by its failed task; this alert reports syncs
+        # that stop happening. The schedule is unchanged: a daily cron or a 3-day timedelta would
+        # change when syncs run, not only how they are watched. Assumes the default
+        # NEO4J_SYNC_INTERVAL of 72 h; tests/test_monitoring_signals.py simulates the schedule.
         expr: |
-          time() - edgeguard_neo4j_sync_last_success_timestamp > 259200
+          time() - edgeguard_neo4j_sync_last_success_timestamp > 518400
           and edgeguard_neo4j_sync_last_success_timestamp > 0
         for: 1h
         labels:
@@ -266,7 +301,7 @@ groups:
           component: neo4j
         annotations:
           summary: "Neo4j sync is stale"
-          description: "No Neo4j sync has completed in over 72 hours."
+          description: "No MISP to Neo4j sync has completed in over 144 hours (two 3-day sync intervals)."
 
       - alert: EdgeGuardDAGRunFailures
         expr: |
@@ -279,33 +314,66 @@ groups:
           summary: "DAG {{ $labels.dag_id }} has multiple failures"
           description: "DAG {{ $labels.dag_id }} has had more than 3 failures in the last hour."
 
-      - alert: EdgeGuardDAGRunStuck
+      # 2026-10: the longest a run of each DAG may be in progress: its dagrun_timeout plus 15
+      # minutes. Airflow fails a run at its dagrun_timeout and the DAG-level failure callback then
+      # clears the in-progress mark, so a mark older than this means a run Airflow did not end (a
+      # stalled scheduler or DAG processor) or an end callback that did not run.
+      #   edgeguard_pipeline     5 h 30 min    edgeguard_daily        8 h 30 min
+      #   edgeguard_medium_freq  5 h           edgeguard_neo4j_sync   22 h
+      #   edgeguard_low_freq     8 h 30 min    edgeguard_baseline     32 h
+      - record: edgeguard:dag_run_max_seconds
         expr: |
-          (
-            edgeguard_dag_run_start_timestamp > 0
-            and (time() - edgeguard_dag_run_start_timestamp) > 3600
-            and changes(edgeguard_dag_run_start_timestamp[30m]) == 0
-          )
+          label_replace(vector(20700), "dag_id", "edgeguard_pipeline", "", "")
+          or label_replace(vector(18900), "dag_id", "edgeguard_medium_freq", "", "")
+          or label_replace(vector(31500), "dag_id", "edgeguard_low_freq", "", "")
+          or label_replace(vector(31500), "dag_id", "edgeguard_daily", "", "")
+          or label_replace(vector(80100), "dag_id", "edgeguard_neo4j_sync", "", "")
+          or label_replace(vector(116100), "dag_id", "edgeguard_baseline", "", "")
+
+      - alert: EdgeGuardDAGRunStuck
+        # 2026-10: the gauge holds the start time of the run in progress (set by every task's
+        # on_execute_callback, 0 once the DAG-level success or failure callback ran). Before, it
+        # was refreshed on every task success and never cleared, so this alert fired from one hour
+        # after a run until the DAG's next run, and permanently after the baseline.
+        expr: |
+          (time() - (edgeguard_dag_run_in_progress_start_timestamp > 0))
+            > on (dag_id) group_left ()
+          edgeguard:dag_run_max_seconds
         for: 5m
         labels:
           severity: critical
           component: pipeline
         annotations:
-          summary: "DAG run {{ $labels.dag_id }} appears stuck"
-          description: "DAG {{ $labels.dag_id }} has had no task progress in over 1 hour (gauge unchanged for 30m)."
+          summary: "DAG run {{ $labels.dag_id }} has been in progress too long"
+          description: "A run of {{ $labels.dag_id }} has been in progress for {{ $value | humanizeDuration }}, longer than its dagrun_timeout plus 15 minutes. Airflow did not end it: check the scheduler and the DAG processor (the run end callback clears this mark)."
+
+      # 2026-10: the longest normal gap between two task successes of each DAG: one schedule
+      # interval plus the DAG's dagrun_timeout (the next run's first task can succeed at most one
+      # interval after the previous run started, and no single task outlasts the timeout).
+      #   edgeguard_pipeline     */30 min  + 5 h 30 min  =  6 h
+      #   edgeguard_medium_freq  4 h       + 5 h         =  9 h
+      #   edgeguard_low_freq     8 h       + 8 h 30 min  = 16 h 30 min
+      # A single 6 h limit fired about 1.5 h of every 8 h for edgeguard_low_freq. edgeguard_daily
+      # has EdgeGuardDailyDAGStale; edgeguard_neo4j_sync is watched by EdgeGuardNeo4jSyncStale;
+      # edgeguard_baseline is manual.
+      - record: edgeguard:dag_max_success_gap_seconds
+        expr: |
+          label_replace(vector(21600), "dag_id", "edgeguard_pipeline", "", "")
+          or label_replace(vector(32400), "dag_id", "edgeguard_medium_freq", "", "")
+          or label_replace(vector(59400), "dag_id", "edgeguard_low_freq", "", "")
 
       - alert: EdgeGuardDAGLastSuccessStale
         expr: |
-          edgeguard_dag_last_success_timestamp > 0
-          and (time() - edgeguard_dag_last_success_timestamp) > 21600
-          and edgeguard_dag_last_success_timestamp{dag_id!~"edgeguard_daily|edgeguard_neo4j_sync|edgeguard_baseline"}
+          (time() - (edgeguard_dag_last_success_timestamp > 0))
+            > on (dag_id) group_left ()
+          edgeguard:dag_max_success_gap_seconds
         for: 15m
         labels:
           severity: warning
           component: pipeline
         annotations:
-          summary: "No successful {{ $labels.dag_id }} run in 6 hours"
-          description: "Last successful run of {{ $labels.dag_id }} was over 6 hours ago. Only applies to high/medium-frequency DAGs."
+          summary: "No successful {{ $labels.dag_id }} task for longer than its schedule allows"
+          description: "The last successful task of {{ $labels.dag_id }} finished {{ $value | humanizeDuration }} ago, more than one schedule interval plus the DAG's dagrun_timeout. Applies to edgeguard_pipeline, edgeguard_medium_freq and edgeguard_low_freq."
 
       - alert: EdgeGuardDailyDAGStale
         expr: |
@@ -839,7 +907,7 @@ groups:
           )
           and on()
           (
-            max_over_time(edgeguard_dag_run_start_timestamp{dag_id="edgeguard_baseline"}[8h])
+            max_over_time(edgeguard_dag_run_in_progress_start_timestamp{dag_id="edgeguard_baseline"}[8h])
               > (time() - (6 * 60 * 60))
           )
         for: 10m

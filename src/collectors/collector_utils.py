@@ -354,6 +354,7 @@ def make_status(
     skipped: bool = False,
     skip_reason: Optional[str] = None,
     skip_reason_class: Optional[str] = None,
+    not_modified: bool = False,
 ) -> Dict[str, Any]:
     """Return a standardised collector status dictionary.
 
@@ -370,6 +371,9 @@ def make_status(
                  (e.g. missing API key). Use with ``success=True`` and ``count=0``.
         skip_reason: Human-readable reason for operators (logs / UI).
         skip_reason_class: Short label for metrics (e.g. ``missing_abuseipdb_key``).
+        not_modified: If True, the source answered a conditional request with HTTP 304: the run
+                 succeeded and there was nothing new (2026-10; the DAG records it as
+                 ``not_modified``, not as a run that collected nothing).
 
     Returns:
         Dict suitable for use as a task return value in Airflow or as a
@@ -390,6 +394,8 @@ def make_status(
         result["skip_reason"] = skip_reason
     if skip_reason_class is not None:
         result["skip_reason_class"] = skip_reason_class
+    if not_modified:
+        result["not_modified"] = True
     return result
 
 

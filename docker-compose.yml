@@ -14,7 +14,8 @@
 #   docker compose up -d                     # start all services
 #   docker compose logs -f graphql           # tail a specific service
 #
-# For Prometheus + Grafana monitoring:
+# For Prometheus + Grafana monitoring (both files in one command: Prometheus joins edgeguard_net
+# below and scrapes the `metrics` service by name; the monitoring file alone is rejected):
 #   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 #
 # Required environment variables (see .env.example):
@@ -489,10 +490,12 @@ services:
     command: ["python", "-m", "src.metrics_exporter"]
     working_dir: /opt/airflow
     ports:
-      - "127.0.0.1:8001:8001"   # prometheus/prometheus.yml scrapes host.docker.internal:8001
+      # Host loopback only, for local access (curl http://localhost:8001/metrics). Prometheus
+      # does not use this publish: it scrapes metrics:8001 over edgeguard_net (2026-10).
+      - "127.0.0.1:8001:8001"
     environment:
       PROMETHEUS_MULTIPROC_DIR: /opt/airflow/metrics_multiproc
-      EDGEGUARD_METRICS_HOST: 0.0.0.0   # inside the container; the host mapping above is loopback-only
+      EDGEGUARD_METRICS_HOST: 0.0.0.0   # inside the container: reachable by the port publish and by Prometheus on edgeguard_net
       EDGEGUARD_METRICS_PORT: "8001"
       PYTHONPATH: /opt/airflow/src
     volumes:

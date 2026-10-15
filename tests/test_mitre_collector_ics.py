@@ -444,6 +444,25 @@ def test_enterprise_304_skips_ics_fetch(collector, monkeypatch):
     assert calls == [ENT_URL]
 
 
+def test_enterprise_304_status_is_flagged_not_modified(collector, monkeypatch):
+    """2026-10: the DAG records a 304 run as ``not_modified``, not as a run that collected
+    nothing, so EdgeGuardNoIndicatorsCollected no longer fires for an unchanged bundle."""
+    monkeypatch.setattr(mc, "ENABLE_MITRE_ICS", False)
+    monkeypatch.setattr(mc, "MITRE_USE_CONDITIONAL_GET", True)
+    monkeypatch.setattr(mc, "get_source_incremental", lambda *_a, **_k: {"mitre_bundle_etag": '"v1"'})
+    monkeypatch.delenv("MITRE_FORCE_REFETCH", raising=False)
+    monkeypatch.setattr(mc, "request_with_rate_limit_retries", _fake_http([], ent_status=304))
+
+    status = collector.collect(push_to_misp=True, baseline=False)
+
+    assert status["success"] is True and status["count"] == 0 and status["not_modified"] is True
+    collector.misp_writer.push_items.assert_not_called()
+
+    monkeypatch.setattr(mc, "request_with_rate_limit_retries", _fake_http([]))
+    changed = collector.collect(push_to_misp=True, baseline=False)
+    assert changed["success"] is True and "not_modified" not in changed
+
+
 def test_download_stix_bundle_defaults_to_enterprise_url(monkeypatch):
     seen = []
 

@@ -649,8 +649,8 @@ class TestSourcePins:
     def test_compose_publishes_metrics_port_loopback(self):
         src = _read("docker-compose.yml")
         assert '"127.0.0.1:8001:8001"' in src, (
-            "without the 8001 mapping, prometheus.yml's host.docker.internal:8001 "
-            "scrape target can never connect — all alert rules stay inert"
+            "the loopback 8001 mapping gives host access to the metrics service "
+            "(Prometheus scrapes metrics:8001 over edgeguard_net since 2026-10)"
         )
         assert 'EDGEGUARD_METRICS_HOST: "127.0.0.1"' not in src, (
             "the metrics host must be parameterized (a hardcoded container-loopback "

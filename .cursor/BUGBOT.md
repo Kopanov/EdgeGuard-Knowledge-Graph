@@ -955,6 +955,10 @@ The `default_args` dict must include `on_failure_callback` pointing to `_on_task
 
 The `default_args` dict must include `on_success_callback` pointing to `_on_task_success`. This updates the `edgeguard_dag_last_success_timestamp` Prometheus gauge for stuck-run detection. Without it, the `EdgeGuardDAGLastSuccessStale` alert becomes dead code. Flag removal of this callback.
 
+### DAG runs must mark and clear the in-progress gauge (2026-10)
+
+`default_args` must include `on_execute_callback` pointing to `_on_task_execute` (sets `edgeguard_dag_run_in_progress_start_timestamp` to the run's start), and every `DAG(...)` in `dags/edgeguard_pipeline.py` must pass `on_success_callback=_on_dag_run_end` and `on_failure_callback=_on_dag_run_end` (sets it to 0 when the run ends). Flag a new DAG without both DAG-level callbacks, any code that sets `DAG_RUN_START` on task success, and a new DAG missing from the `edgeguard:dag_run_max_seconds` recording rule in `prometheus/alerts.yml`.
+
 ### Baseline DAG must have `is_paused_upon_creation=False`
 
 `edgeguard_baseline` must set `is_paused_upon_creation=False`. Without this, manual triggers silently queue forever because Airflow starts DAGs paused by default. The `schedule_interval=None` already prevents automatic execution. Flag removal of this setting.
@@ -978,7 +982,7 @@ if self.neo4j.merge_vulnerability(item, ...):
 
 ### Prometheus stuck-run alerts require gauge wiring
 
-The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_start_timestamp` and `edgeguard_dag_last_success_timestamp` gauges being set by the DAG code. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback` or the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.
+The `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale` alerts in `prometheus/alerts.yml` depend on `edgeguard_dag_run_in_progress_start_timestamp` (2026-10; formerly `edgeguard_dag_run_start_timestamp`) and `edgeguard_dag_last_success_timestamp` gauges being set by the DAG code. If these gauges are defined but never `.set()`, the alerts are dead code. Flag removal of `on_success_callback`, `on_execute_callback`, the DAG-level `_on_dag_run_end` callbacks or the `DAG_LAST_SUCCESS`/`DAG_RUN_START` gauge definitions without also removing the corresponding alerts.
 
 ---
 

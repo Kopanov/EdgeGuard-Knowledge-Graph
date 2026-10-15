@@ -348,7 +348,8 @@ class MITRECollector:
                     )
                 MITRE_CIRCUIT_BREAKER.record_success()
                 if push_to_misp:
-                    return self._return_status(True, 0, None, 0)
+                    # 2026-10: flagged so the DAG's metrics tell "unchanged" from "collected nothing".
+                    return make_status("mitre", True, count=0, not_modified=True)
                 return []
 
             objects = bundle.get("objects", [])

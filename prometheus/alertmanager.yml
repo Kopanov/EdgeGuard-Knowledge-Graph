@@ -7,10 +7,14 @@ global:
   smtp_from: 'alertmanager@edgeguard.local'
   smtp_auth_username: ''
   smtp_auth_password: ''
-  # Placeholder. Alertmanager does not expand environment variables: set the Slack webhook URL
-  # here (or render this file at deploy time) before notifications can be delivered. The
-  # receivers below are placeholders until then (README, In Progress / Planned).
-  slack_api_url: ''
+  # 2026-10: the Slack incoming-webhook URL is read from a file, so this configuration loads
+  # without any secret. With `slack_api_url: ''` Alertmanager v0.28 refused the configuration at
+  # startup (unsupported scheme) and restarted in a loop under the `alerts` profile. The file is
+  # read when a Slack notification is sent: put the URL on one line in
+  # prometheus/secrets/slack_api_url (mounted read-only at /etc/alertmanager/secrets by
+  # docker-compose.monitoring.yml, ignored by git). Until it exists, Slack deliveries fail and are
+  # logged; the other receivers are unaffected. Every slack_configs entry below inherits this file.
+  slack_api_url_file: '/etc/alertmanager/secrets/slack_api_url'
 
 # Templates for notifications
 templates:

@@ -1,7 +1,8 @@
 """Monitoring wiring quick wins (2026-10 production-readiness check).
 
 Cadence-aware stale alerts via a recording rule, an endpoint-down alert, no scrape jobs pointing at
-exporters that do not exist, the Linux-resolvable scrape host, and a registry cross-check that
+exporters that do not exist, the scrape path to the ``metrics`` service over the shared application
+network, an Alertmanager configuration that loads without secrets, and a registry cross-check that
 every ``edgeguard_*`` metric an alert expression references is defined.
 """
 
@@ -20,6 +21,8 @@ _ROOT = Path(__file__).resolve().parent.parent
 _RULES = yaml.safe_load((_ROOT / "prometheus" / "alerts.yml").read_text())
 _SCRAPE = yaml.safe_load((_ROOT / "prometheus" / "prometheus.yml").read_text())
 _MON_COMPOSE = yaml.safe_load((_ROOT / "docker-compose.monitoring.yml").read_text())
+_APP_COMPOSE = yaml.safe_load((_ROOT / "docker-compose.yml").read_text())
+_ALERTMANAGER = yaml.safe_load((_ROOT / "prometheus" / "alertmanager.yml").read_text())
 
 # Every collector the scheduled DAGs run (dags/edgeguard_pipeline.py run_collector_with_metrics names).
 _SCHEDULED_SOURCES = {
@@ -36,6 +39,9 @@ _SCHEDULED_SOURCES = {
     "sslbl": 93600,
     "malwarebazaar": 93600,  # 2026-10, flag-guarded daily task
 }
+
+# Sources stamped outside run_collector_with_metrics (2026-10): the MISP to Neo4j sync, every 72 h.
+_SYNC_SOURCES = {"misp_to_neo4j": 522000}
 
 
 def _rules():
@@ -58,9 +64,21 @@ def test_dag_collectors_match_the_dag_module():
 
 def test_recording_rule_maps_every_scheduled_source_to_twice_its_cadence():
     expr = _rule("edgeguard:collector_max_stale_seconds", key="record")["expr"]
-    pairs = re.findall(r'label_replace\(vector\((\d+)\), "source", "([a-z_]+)"', expr)
+    # Source names may contain digits (misp_to_neo4j); every branch of the expression must parse.
+    pairs = re.findall(r'label_replace\(vector\((\d+)\), "source", "([a-z0-9_]+)"', expr)
+    assert len(pairs) == expr.count("label_replace(")
     mapped = {source: int(seconds) for seconds, source in pairs}
-    assert mapped == _SCHEDULED_SOURCES
+    assert mapped == {**_SCHEDULED_SOURCES, **_SYNC_SOURCES}
+
+
+def test_misp_to_neo4j_staleness_follows_the_sync_interval():
+    """2026-10: unmapped, the series fell to the 26 h catch-all and fired about 46 h of every 72 h."""
+    sync_src = (_ROOT / "src" / "run_misp_to_neo4j.py").read_text()
+    assert sync_src.count('record_collection_success("misp_to_neo4j")') >= 2, "the series the map covers"
+    # Twice the 72 h interval plus one hour, at least the longest normal gap between two syncs (143 h
+    # after a baseline sync; see tests/test_monitoring_signals.py for the schedule simulation).
+    assert _SYNC_SOURCES["misp_to_neo4j"] == 2 * 72 * 3600 + 3600
+    assert _SYNC_SOURCES["misp_to_neo4j"] > 143 * 3600
 
 
 def test_stale_alert_joins_on_the_recording_rule_and_has_a_catch_all():
@@ -90,9 +108,89 @@ def test_no_active_scrape_job_without_an_exporter():
     assert not {"airflow", "neo4j", "misp-health"} & jobs
 
 
-def test_prometheus_service_resolves_the_host_on_linux():
+def _edgeguard_targets():
+    job = next(j for j in _SCRAPE["scrape_configs"] if j["job_name"] == "edgeguard")
+    return [t for cfg in job["static_configs"] for t in cfg["targets"]]
+
+
+def test_edgeguard_scrape_target_is_the_metrics_service_by_name():
+    """2026-10: host.docker.internal:8001 was refused on Linux (the publish is 127.0.0.1 only)."""
+    assert _edgeguard_targets() == ["metrics:8001"]
+    metrics = _APP_COMPOSE["services"]["metrics"]
+    assert metrics["environment"]["EDGEGUARD_METRICS_PORT"] == "8001"
+    assert metrics["environment"]["EDGEGUARD_METRICS_HOST"] == "0.0.0.0", "reachable from peer containers"
+    assert metrics["ports"] == ["127.0.0.1:8001:8001"], "the loopback publish stays for local access"
+
+
+def test_prometheus_shares_the_application_network_with_the_metrics_service():
     prom = _MON_COMPOSE["services"]["prometheus"]
+    assert "edgeguard_net" in prom["networks"] and "edgeguard_monitoring" in prom["networks"]
+    assert "edgeguard_net" in _APP_COMPOSE["services"]["metrics"]["networks"]
+    assert "edgeguard_net" in _APP_COMPOSE["networks"]
+    # Declared once, in docker-compose.yml: a second declaration in the monitoring file would be merged
+    # into it (an `external: true` next to driver/ipam is rejected by Compose; a bare entry diverges).
+    assert "edgeguard_net" not in _MON_COMPOSE["networks"]
+    # Kept for the optional host targets commented out in prometheus.yml.
     assert "host.docker.internal:host-gateway" in prom.get("extra_hosts", [])
+
+
+def _undeclared_networks(*documents):
+    services: dict = {}
+    declared: set = set()
+    for doc in documents:
+        for name, service in doc.get("services", {}).items():
+            services.setdefault(name, set()).update(service.get("networks", []) or [])
+        declared |= set(doc.get("networks", {}) or {})
+    return {(name, net) for name, nets in services.items() for net in nets if net not in declared}
+
+
+def test_the_monitoring_file_resolves_only_together_with_the_application_file():
+    """Started together (make monitoring) every network resolves; alone, Compose refuses the file."""
+    assert _undeclared_networks(_APP_COMPOSE, _MON_COMPOSE) == set()
+    assert _undeclared_networks(_MON_COMPOSE) == {("prometheus", "edgeguard_net")}
+    makefile = (_ROOT / "Makefile").read_text()
+    target = makefile.split("\nmonitoring: .env\n", 1)[1].split("\n\n", 1)[0]
+    assert "-f docker-compose.yml -f docker-compose.monitoring.yml up -d" in target
+
+
+def _slack_url_sources(config: dict) -> list:
+    """(receiver, problem) for every Slack config that cannot load or has no URL source."""
+    problems = []
+    glob = config.get("global") or {}
+    if "slack_api_url" in glob and not str(glob["slack_api_url"] or "").startswith(("https://", "http://")):
+        problems.append(("global", "slack_api_url is not an http(s) URL"))
+    global_source = str(glob.get("slack_api_url") or "").startswith(("https://", "http://")) or bool(
+        glob.get("slack_api_url_file")
+    )
+    for receiver in config.get("receivers", []):
+        for slack in receiver.get("slack_configs", []) or []:
+            url = str(slack.get("api_url") or "")
+            if "api_url" in slack and not url.startswith(("https://", "http://")):
+                problems.append((receiver["name"], "api_url is not an http(s) URL"))
+            if not (url.startswith(("https://", "http://")) or slack.get("api_url_file") or global_source):
+                problems.append((receiver["name"], "no api_url, api_url_file or global Slack URL source"))
+    return problems
+
+
+def test_alertmanager_slack_configs_load_without_a_secret_in_the_file():
+    """2026-10: `slack_api_url: ''` made Alertmanager v0.28 exit at startup (unsupported scheme)."""
+    receivers_with_slack = [r["name"] for r in _ALERTMANAGER["receivers"] if r.get("slack_configs")]
+    assert receivers_with_slack, "the check below must have Slack configs to inspect"
+    assert _slack_url_sources(_ALERTMANAGER) == []
+    # The shape that crash-looped, and Slack configs with no URL source at all, are both reported.
+    broken = {**_ALERTMANAGER, "global": {**_ALERTMANAGER["global"], "slack_api_url": ""}}
+    broken["global"].pop("slack_api_url_file", None)
+    assert ("global", "slack_api_url is not an http(s) URL") in _slack_url_sources(broken)
+    assert {name for name, _ in _slack_url_sources(broken)} >= set(receivers_with_slack)
+
+
+def test_alertmanager_secret_file_is_mounted_and_never_committed():
+    path = _ALERTMANAGER["global"]["slack_api_url_file"]
+    mounts = _MON_COMPOSE["services"]["alertmanager"]["volumes"]
+    secret_mounts = [m for m in mounts if m.split(":")[1] == os.path.dirname(path)]
+    assert secret_mounts == ["./prometheus/secrets:/etc/alertmanager/secrets:ro"]
+    ignore = (_ROOT / "prometheus" / "secrets" / ".gitignore").read_text().split()
+    assert "*" in ignore and "!.gitignore" in ignore
 
 
 def test_every_edgeguard_metric_in_alert_expressions_is_defined():

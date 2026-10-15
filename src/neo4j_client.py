@@ -25,7 +25,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from neo4j import GraphDatabase, NotificationDisabledCategory, Query
+    from neo4j import READ_ACCESS, GraphDatabase, NotificationDisabledCategory, Query
     from neo4j import exceptions as neo4j_exceptions
 except ImportError:
     raise ImportError("neo4j package not installed. Run: pip install neo4j")
@@ -613,6 +613,32 @@ def _validate_label(label: str) -> str:
             f"Cypher injection guard: '{label}' is not an allowed node label. Allowed: {sorted(_ALLOWED_NODE_LABELS)}"
         )
     return label
+
+
+# The threat-intelligence labels EdgeGuard writes, counted by ``get_stats`` (one count each) and,
+# with ``Source``, by ``count_nodes_by_label`` for the ``edgeguard_neo4j_nodes`` gauge (2026-10).
+# The ResilMesh topology labels in _ALLOWED_NODE_LABELS belong to the shared graph and are not
+# counted here.
+_STATS_NODE_LABELS: Tuple[str, ...] = (
+    "Vulnerability",
+    "Indicator",
+    "CVE",
+    "Malware",
+    "ThreatActor",
+    "Technique",
+    "Tactic",
+    "Campaign",
+    "Tool",
+    "Sector",
+    "CVSSv2",
+    "CVSSv30",
+    "CVSSv31",
+    "CVSSv40",
+    "Alert",
+)
+NODE_COUNT_LABELS: Tuple[str, ...] = _STATS_NODE_LABELS + ("Source",)
+# A count per label is answered from the store's count statistics, not a scan.
+_NODE_COUNT_TIMEOUT_SEC = 60
 
 
 # Compiled regex for validating Cypher property/relationship names.
@@ -5609,6 +5635,29 @@ class Neo4jClient:
             )
         return RelationshipBatchResult(total, failed, curated_sent, curated_matched, curated_missing)
 
+    def count_nodes_by_label(self, labels: Sequence[str] = NODE_COUNT_LABELS) -> Dict[str, int]:
+        """Node count per label, in one read-only query (2026-10, for the ``edgeguard_neo4j_nodes`` gauge).
+
+        One ``MATCH (n:Label) RETURN count(n)`` branch per label, joined with ``UNION ALL``, so the
+        server answers every branch from its count statistics. Unlike ``get_stats`` (which reports
+        0 for a label it failed to count), this raises on any failure, including a missing or
+        unexpected row: a caller that exports the counts must never export a count it did not read.
+        """
+        if not self.driver:
+            raise RuntimeError("Neo4j is not connected")
+        wanted = [_validate_label(label) for label in labels]
+        if not wanted:
+            return {}
+        query = "\nUNION ALL\n".join(
+            f"MATCH (n:{label}) RETURN '{label}' AS label, count(n) AS count" for label in wanted
+        )
+        with self.driver.session(default_access_mode=READ_ACCESS) as session:
+            result = session.run(query, timeout=_NODE_COUNT_TIMEOUT_SEC)
+            counts = {str(record["label"]): int(record["count"]) for record in result}
+        if set(counts) != set(wanted):
+            raise RuntimeError(f"node count query returned labels {sorted(counts)}, expected {sorted(wanted)}")
+        return counts
+
     def get_stats(self) -> Dict[str, Any]:
         """Get graph statistics."""
         if not self.driver:
@@ -5619,23 +5668,7 @@ class Neo4jClient:
         try:
             with self.driver.session() as session:
                 # Count nodes by type (labels must stay in _ALLOWED_NODE_LABELS)
-                for label in [
-                    "Vulnerability",
-                    "Indicator",
-                    "CVE",
-                    "Malware",
-                    "ThreatActor",
-                    "Technique",
-                    "Tactic",
-                    "Campaign",
-                    "Tool",
-                    "Sector",
-                    "CVSSv2",
-                    "CVSSv30",
-                    "CVSSv31",
-                    "CVSSv40",
-                    "Alert",
-                ]:
+                for label in _STATS_NODE_LABELS:
                     try:
                         _validate_label(label)
                         result = session.run(f"MATCH (n:{label}) RETURN count(n) as count", timeout=NEO4J_READ_TIMEOUT)

@@ -30,7 +30,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | **Documentation** | ✅ Ready | 20+ docs updated to match current code |
 | **Production CLI** | ✅ Ready | 16 commands: `preflight`, `stats --full`, `dag status/kill`, `checkpoint status/clear`, `doctor`, `heal`, `validate`, `monitor` |
 | **Security Hardening** | ✅ Ready | Input sanitization, injection guards, SSL, rate limiting |
-| **Monitoring/Metrics** | ⚠️ Partially | Metrics of every Airflow task process are served by the `metrics` compose service on **8001** (loopback, 2026-10); alert rules evaluate in Prometheus; **Alertmanager receivers are placeholders** (no notification is delivered until a Slack webhook or mailbox is configured and the configuration is rendered); Grafana dashboard. |
+| **Monitoring/Metrics** | ⚠️ Partially | Metrics of every Airflow task process are served by the `metrics` compose service on **8001** (loopback publish for local access; Prometheus scrapes `metrics:8001` over `edgeguard_net`, 2026-10); alert rules evaluate in Prometheus; Alertmanager loads without secrets and delivers to Slack once `prometheus/secrets/slack_api_url` is provided (2026-10); **the e-mail and PagerDuty receivers are placeholders** (no notification is delivered until a webhook, mailbox or rendered key is configured); Grafana dashboard. |
 | **CI/CD Pipeline** | ✅ Ready | GitHub Actions: lint, type-check, unit tests, Docker build, security scan |
 | **Automated Code Review** | ✅ Ready | Automated review on every pull request, with project-specific review rules |
 
@@ -184,7 +184,7 @@ The core pipeline is functional, well-documented, and CI-verified. All CI jobs p
 | Start full stack (Neo4j + Airflow + Postgres + REST + GraphQL) | `docker compose up -d` (root compose). **MISP is NOT in this compose** — run/connect to a separate MISP deployment via `MISP_URL`. | Required |
 | Run **launch-day pre-flight** | `EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh` — see [BASELINE_LAUNCH_CHECKLIST.md](BASELINE_LAUNCH_CHECKLIST.md) | Before first baseline |
 | Run baseline (first run) | Trigger Airflow DAG `edgeguard_baseline` (Airflow UI or `airflow dags trigger edgeguard_baseline`) — see [AIRFLOW_DAGS.md](AIRFLOW_DAGS.md) | First run |
-| Start monitoring stack | `docker compose -f docker-compose.monitoring.yml up -d` | Recommended |
+| Start monitoring stack | `make monitoring` (= `docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d`; both files, one Compose project) | Recommended |
 
 **Docker Compose (full stack):** root `docker-compose.yml` runs Airflow with **PostgreSQL** metadata (`airflow_postgres`). See `docs/AIRFLOW_DAGS.md` if DAG runs appear stuck.
 
@@ -220,8 +220,8 @@ EDGEGUARD_PREFLIGHT_STRICT=1 ./scripts/preflight_baseline.sh
 #    build_relationships + run_enrichment_jobs — see AIRFLOW_DAGS.md.
 airflow dags trigger edgeguard_baseline
 
-# 5. Start monitoring
-docker compose -f docker-compose.monitoring.yml up -d
+# 5. Start monitoring (both files: Prometheus joins edgeguard_net to scrape metrics:8001)
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
 ```
 
 Airflow runs as `airflow standalone` inside the compose stack (Airflow 3.x;
@@ -244,4 +244,4 @@ For the **launch-day pre-flight pass** that the operator must walk through befor
 
 ---
 
-*Last updated: 2026-10-15 — wording only: automated code review is described without naming the tool. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*
+*Last updated: 2026-10-15 — monitoring: the stack starts with both compose files (Prometheus scrapes `metrics:8001` over `edgeguard_net`); Alertmanager loads without secrets, Slack via `prometheus/secrets/slack_api_url`. Same day: wording only: automated code review is described without naming the tool. Prior: 2026-04-28 — PR-N35 Tier-1 docs audit: corrected "Start full stack (Neo4j + Airflow + MISP)" → "(Neo4j + Airflow + Postgres + REST + GraphQL)" — MISP is NOT in the EdgeGuard compose stack and must be deployed separately. Added explicit `MISP_URL` callout in the Quick-Start block. Prior: 2026-04-26 PR-N33 docs audit (replaced obsolete `src/neo4j/docker-compose.yml` + `--baseline` flag + `airflow webserver` commands; removed stale "Upgrade to Airflow 3.x" TODO); 2026-04-06 collector dedup env vars; 2026-03-17 CI/checklist.*

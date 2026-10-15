@@ -239,6 +239,7 @@ try:
         get_metrics_server,
         record_collection,
         record_collection_duration,
+        record_collector_outcome,
         record_collector_skip,
         record_dag_run,
         record_misp_push,
@@ -386,8 +387,8 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
             multiprocess_mode="mostrecent",
         )
         DAG_RUN_START = Gauge(
-            "edgeguard_dag_run_start_timestamp",
-            "Unix timestamp when the current DAG run started (0 = idle)",
+            "edgeguard_dag_run_in_progress_start_timestamp",
+            "Unix timestamp at which the DAG run in progress started (0 = no run in progress)",
             ["dag_id"],
             multiprocess_mode="mostrecent",
         )
@@ -409,7 +410,7 @@ if not METRICS_SERVER_AVAILABLE:
 
 
 def record_indicators(source: str, zone: str, count: int, status: str = "success"):
-    """Record collected indicators."""
+    """Record collected indicators (standalone mode; with metrics_server, ``record_collection`` does it)."""
     if PROMETHEUS_AVAILABLE:
         INDICATORS_COLLECTED.labels(source=source, zone=zone, status=status).inc(count)
 
@@ -430,6 +431,58 @@ def record_neo4j_nodes(node_type: str, count: int, zone: str = "all"):
     """Record Neo4j node counts."""
     if PROMETHEUS_AVAILABLE:
         NEO4J_NODES.labels(label=node_type, zone=zone).set(count)
+
+
+def record_neo4j_node_counts() -> bool:
+    """Export the node count of every label EdgeGuard writes to ``edgeguard_neo4j_nodes`` (2026-10).
+
+    Called after a successful MISP→Neo4j sync (scheduled and baseline). One read-only query
+    (``Neo4jClient.count_nodes_by_label``), recorded through ``record_neo4j_nodes`` with
+    ``zone="all"``: one series per label, so ``sum(edgeguard_neo4j_nodes)`` is the node total that
+    EdgeGuardNeo4jNodesLow and the dashboard read, and EdgeGuardNeo4jLabelDropBig compares each label
+    with its own value a day earlier. Before, the sync task passed attributes MISPToNeo4jSync does
+    not have and every label was recorded as 0. A failed count logs a warning and leaves the gauges
+    at their previous values; it never records 0. Returns True when the counts were recorded.
+    """
+    if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
+        return False
+    client = None
+    try:
+        from neo4j_client import Neo4jClient
+
+        client = Neo4jClient()
+        if not client.connect():
+            raise RuntimeError("could not connect to Neo4j")
+        counts = client.count_nodes_by_label()
+        for label, count in counts.items():
+            record_neo4j_nodes(label, count)
+    except Exception as e:
+        logger.warning("Neo4j node counts not recorded; edgeguard_neo4j_nodes keeps its previous values: %s", e)
+        return False
+    finally:
+        if client is not None:
+            client.close()
+    logger.info("Neo4j node counts recorded: %s", counts)
+    return True
+
+
+def _record_successful_sync_metrics(duration: float) -> None:
+    """Duration, last-success stamp and node counts after a successful MISP→Neo4j sync (2026-10).
+
+    Shared by the scheduled sync and the baseline's full sync, so EdgeGuardNeo4jSyncStale counts the
+    baseline as a sync. Never raises: a metrics failure must not fail a sync that has completed.
+    """
+    try:
+        if METRICS_SERVER_AVAILABLE:
+            # record_neo4j_sync observes the duration histogram and stamps the last-success gauge.
+            # The local record_neo4j_sync_duration writes the same histogram, so it runs only without
+            # metrics_server; before 2026-10 both ran and every sync was observed twice.
+            record_neo4j_sync(node_counts={}, duration=duration)
+        else:
+            record_neo4j_sync_duration(duration)
+    except Exception as e:
+        logger.warning("Neo4j sync duration / last-success metrics not recorded: %s", e)
+    record_neo4j_node_counts()
 
 
 def record_error(task: str, error_type: str, source: str = ""):
@@ -537,17 +590,53 @@ def _on_task_success(context):
     Sets DAG_LAST_SUCCESS on every task completion so the
     EdgeGuardDAGLastSuccessStale alert can detect DAGs where no task
     has succeeded recently (covers both partial and full failures).
-    Also refreshes DAG_RUN_START to show the DAG is actively progressing.
+    2026-10: it no longer touches DAG_RUN_START. Refreshed on every task success and never cleared,
+    that gauge made EdgeGuardDAGRunStuck fire from one hour after a run until the DAG's next run
+    (permanently after the baseline); the run start is now set by ``_on_task_execute`` and cleared
+    by ``_on_dag_run_end``.
     """
     if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
         return
     dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
-    now = time.time()
     try:
-        DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(now)
-        DAG_RUN_START.labels(dag_id=dag_id).set(now)  # keeps refreshing while DAG is active
+        DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(time.time())
     except Exception as e:
         logger.warning(f"Failed to record success metric for {dag_id}: {e}")
+
+
+def _on_task_execute(context):
+    """Callback before every task executes — marks its DAG run as in progress (2026-10).
+
+    Sets DAG_RUN_START to the start time of the task's DAG run. Every task of a run writes the same
+    value (the run's ``start_date``), so the mark is in place from the first task on and is
+    restored when a cleared task resumes a run that had ended. ``_on_dag_run_end`` sets it to 0.
+    """
+    if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
+        return
+    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    dag_run = context.get("dag_run")
+    started = getattr(dag_run, "start_date", None)
+    try:
+        DAG_RUN_START.labels(dag_id=dag_id).set(started.timestamp() if started is not None else time.time())
+    except Exception as e:
+        logger.warning(f"Failed to record the run start of {dag_id}: {e}")
+
+
+def _on_dag_run_end(context):
+    """DAG-level success and failure callback — the DAG run is no longer in progress (2026-10).
+
+    Airflow calls it once when a run ends, whether it succeeded, failed or exceeded its
+    ``dagrun_timeout`` (on Airflow 3 inside the DAG processor, whose processes write to the same
+    multi-process metrics directory). The 0 written here is newer than every task's start mark, so
+    the ``mostrecent`` merge reports the DAG as idle until a task of the next run starts.
+    """
+    if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
+        return
+    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+    try:
+        DAG_RUN_START.labels(dag_id=dag_id).set(0)
+    except Exception as e:
+        logger.warning(f"Failed to clear the run start of {dag_id}: {e}")
 
 
 # Default arguments
@@ -560,6 +649,7 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "on_failure_callback": _on_task_failure,
     "on_success_callback": _on_task_success,
+    "on_execute_callback": _on_task_execute,  # 2026-10: marks the DAG run in progress
 }
 
 # ================================================================================
@@ -787,6 +877,7 @@ def run_collector_with_metrics(
             record_collection(collector_name, "global", 0, "skipped")
             record_collection_duration(collector_name, "global", duration)
             record_collector_skip(collector_name, "baseline_in_progress")
+            record_collector_outcome(collector_name, "skipped")
         return result
 
     if not is_collector_enabled_by_allowlist(collector_name):
@@ -804,6 +895,7 @@ def run_collector_with_metrics(
             record_collection_duration(collector_name, "global", duration)
             record_misp_push(collector_name, "global", result.get("event_count", 1), 0, duration)
             record_collector_skip(collector_name, "collector_disabled_by_config")
+            record_collector_outcome(collector_name, "skipped")
             task_duration = time.time() - task_start
             record_task_duration(f"collect_{collector_name}", "edgeguard_pipeline", task_duration)
         set_source_health(collector_name, "global", True)
@@ -848,6 +940,7 @@ def run_collector_with_metrics(
             record_dag_run("edgeguard_pipeline", "failure")
             if METRICS_SERVER_AVAILABLE:
                 record_collection(collector_name, "global", 0, "failed")
+                record_collector_outcome(collector_name, "failed")
             set_source_health(collector_name, "global", False)
             raise AirflowException(msg)
 
@@ -864,6 +957,7 @@ def run_collector_with_metrics(
             record_dag_run("edgeguard_pipeline", "failure")
             if METRICS_SERVER_AVAILABLE:
                 record_collection(collector_name, "global", 0, "failed")
+                record_collector_outcome(collector_name, "failed")
             # Always 3-arg: matches metrics_server.set_source_health(source, zone, healthy)
             set_source_health(collector_name, "global", False)
             raise AirflowException(err)
@@ -871,25 +965,30 @@ def run_collector_with_metrics(
         if isinstance(result, dict):
             # Record success metrics
             duration = time.time() - start_time
-            record_misp_push_duration(collector_name, duration)
             record_dag_run("edgeguard_pipeline", "success")
 
             count = result.get("count", result.get("total", 0))
             zone = result.get("zone", "global")
             if isinstance(zone, list):
                 zone = zone[0] if zone else "global"
-            record_indicators(collector_name, zone, count)
 
             skipped = result.get("skipped") is True
             skip_reason = result.get("skip_reason", "optional source skipped")
+            # 2026-10: a conditional GET answered with HTTP 304 (MITRE) is a successful run with
+            # nothing new, not a run that collected nothing; it keeps its own status and outcome.
+            not_modified = not skipped and result.get("not_modified") is True
 
             set_source_health(collector_name, zone, True)
             if not skipped:
                 set_last_success_timestamp(collector_name)
 
             # Record enhanced metrics — use status=skipped for optional collectors without API keys
-            collection_status = "skipped" if skipped else "success"
+            collection_status = "skipped" if skipped else ("not_modified" if not_modified else "success")
             if METRICS_SERVER_AVAILABLE:
+                # 2026-10: one increment of edgeguard_indicators_collected_total per run.
+                # record_collection writes the same counter as the local record_indicators (and
+                # record_misp_push the same histogram as record_misp_push_duration); both pairs ran
+                # here before, so every collected count was added twice in the compose deployment.
                 record_collection(collector_name, zone, count, collection_status)
                 record_collection_duration(collector_name, zone, duration)
                 record_misp_push(collector_name, zone, result.get("event_count", 1), count, duration)
@@ -898,6 +997,15 @@ def run_collector_with_metrics(
                         collector_name,
                         result.get("skip_reason_class", "optional_source"),
                     )
+                    outcome = "skipped"
+                elif not_modified:
+                    outcome = "not_modified"
+                else:
+                    outcome = "collected" if count else "empty"
+                record_collector_outcome(collector_name, outcome)
+            else:
+                record_indicators(collector_name, zone, count, collection_status)
+                record_misp_push_duration(collector_name, duration)
 
             if skipped and str(result.get("skip_reason_class", "")).endswith("_auth_denied"):
                 # The provider refused the request (HTTP 401/403): a rejected or revoked API key, or a
@@ -974,6 +1082,10 @@ def run_collector_with_metrics(
                     record_collector_skip(collector_name, "parent_dag_aborted")
                 except Exception as me:  # noqa: BLE001
                     logger.debug(f"metric emit failed (parent_dag_aborted skip-reason): {me}")
+                try:
+                    record_collector_outcome(collector_name, "skipped")
+                except Exception as me:  # noqa: BLE001
+                    logger.debug(f"metric emit failed (parent_dag_aborted outcome): {me}")
             return make_skipped_optional_source(
                 collector_name,
                 skip_reason=f"parent dag_run state={e.state!r} — orphan-process safeguard aborted cleanly (PR-F6)",
@@ -1041,6 +1153,7 @@ def run_collector_with_metrics(
                 _safe(record_collection, collector_name, "global", 0, "skipped")
                 _safe(record_collection_duration, collector_name, "global", duration)
                 _safe(record_collector_skip, collector_name, "transient_external_error")
+                _safe(record_collector_outcome, collector_name, "skipped")
             log_block = _format_failure_log_block(collector_name, e, classification="transient", duration_s=duration)
             logger.warning(log_block)
             try:
@@ -1065,6 +1178,7 @@ def run_collector_with_metrics(
         if METRICS_SERVER_AVAILABLE:
             _safe(record_pipeline_error, f"collect_{collector_name}", type(e).__name__, collector_name)
             _safe(record_collection, collector_name, "global", 0, "failed")
+            _safe(record_collector_outcome, collector_name, "failed")
         log_block = _format_failure_log_block(collector_name, e, classification="catastrophic", duration_s=duration)
         logger.error(log_block)
         try:
@@ -1467,19 +1581,9 @@ def run_neo4j_sync(**context):
 
         if success:
             duration = time.time() - start_time
-            record_neo4j_sync_duration(duration)
-
-            # Record enhanced metrics
+            # 2026-10: duration once, last-success stamp, and node counts read from the graph.
+            _record_successful_sync_metrics(duration)
             if METRICS_SERVER_AVAILABLE:
-                record_neo4j_sync(
-                    node_counts={
-                        "Indicator": getattr(sync, "indicator_count", 0),
-                        "Threat": getattr(sync, "threat_count", 0),
-                        "Sector": getattr(sync, "sector_count", 0),
-                        "Country": getattr(sync, "country_count", 0),
-                    },
-                    duration=duration,
-                )
                 record_task_duration("run_neo4j_sync", "edgeguard_pipeline", time.time() - task_start)
 
             try:
@@ -1543,6 +1647,10 @@ dag = DAG(
     catchup=False,
     max_active_runs=1,  # Prevent pile-up if a run is slow
     dagrun_timeout=timedelta(hours=5, minutes=30),  # Worst-case: 4h25m (OTX retries) + buffer
+    # 2026-10: clear the in-progress mark (edgeguard_dag_run_in_progress_start_timestamp) when the
+    # run ends, whatever the outcome; the same two callbacks are set on every DAG below.
+    on_success_callback=_on_dag_run_end,
+    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "high-frequency"],
 )
 
@@ -1621,6 +1729,8 @@ medium_freq_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=5),  # Worst-case: 4h (CISA/VT retries) + buffer
+    on_success_callback=_on_dag_run_end,
+    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "medium-frequency"],
 )
 
@@ -1669,6 +1779,8 @@ low_freq_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (NVD retries) + buffer
+    on_success_callback=_on_dag_run_end,
+    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "low-frequency"],
 )
 
@@ -1709,6 +1821,8 @@ daily_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (8 collectors parallel + retries) + buffer
+    on_success_callback=_on_dag_run_end,
+    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1826,6 +1940,8 @@ neo4j_sync_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=22),  # Worst-case: 18h (full sync + rels + enrich, all with retries)
+    on_success_callback=_on_dag_run_end,
+    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
@@ -2081,6 +2197,8 @@ baseline_dag = DAG(
     # retries=1 (inherited from default_args) — they're short and
     # transient-flake-prone, so a single retry is cheap and well-justified.
     dagrun_timeout=timedelta(hours=32),
+    on_success_callback=_on_dag_run_end,
+    on_failure_callback=_on_dag_run_end,
     is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )
@@ -2676,6 +2794,9 @@ def run_baseline_full_sync(**context):
         )
         raise AirflowException(f"Baseline full MISP→Neo4j sync failed: {detail}")
     logger.info("[BASELINE] Full sync complete")
+    # 2026-10: the full sync is a successful sync for the monitoring as well: duration, the
+    # last-success stamp read by EdgeGuardNeo4jSyncStale, and the node counts of the loaded graph.
+    _record_successful_sync_metrics((datetime.now(timezone.utc) - sync_started_at).total_seconds())
     # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
     # sync after the baseline (no file) or treated every attribute since the previous baseline as
     # changed (a stale file), the same work the baseline gets 6 h for, within its own 4 h limit.
