@@ -174,6 +174,20 @@ _EPSS_SSVC_ROW = {
 }
 
 
+# 2026-10: pulses naming two or more actor nodes. The first are two groups, the second two names of
+# one actor (aliases in the canonical reference), so only the first names several actors.
+_REPORT_ACTOR_ROWS = [
+    {"pid": "68cd617b3eb5b1212d11643d", "names": ["gamaredon", "turla"]},
+    {"pid": "6a189defc88ad66cd0a9d87d", "names": ["the gentlemen", "storm-2697"]},
+]
+_ATTRIBUTION_ROW = {
+    "links": 3212,
+    "resting_on_several_actor_reports": 0,
+    "naming_several_actor_reports": 0,
+    "without_reports": 129,
+}
+
+
 # Check 10a5 (2026-10, Malware twins): the non-MITRE Malware nodes named with an ATT&CK software id
 # and the MITRE Malware nodes with the record MITRE delivered (the ``raw_data`` of their SOURCED_FROM
 # edge: the sync item without its key property). On a correct graph the only twin left is one whose
@@ -209,6 +223,12 @@ _GRAPH_FOLDED_MALWARE = (
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
+    if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in s:
+        return [{"reports": [dict(x) for x in _REPORT_ACTOR_ROWS], "pulses": 1530}]
+    if "AS resting_on_several_actor_reports" in s:
+        return [dict(_ATTRIBUTION_ROW)]
+    if "AS unattributed" in s:
+        return [{"malware_links": 1600, "unattributed": 0}]
     if "d.name =~ $suffixed" in s:
         return [dict(r) for r in _GRAPH_MALWARE_TWINS]
     if "AS attack_raw" in s:
@@ -979,6 +999,112 @@ class TestEpssAndSsvc:
             "c.ssvc_technical_impact IS NOT NULL",
         ):
             assert fragment in seen["st"]
+
+
+class TestAttributionFromSingleActorReports:
+    """2026-10: an OTX pulse naming several actors attributes no malware (the aliases of one actor
+    count as one), and a malware is part of a campaign only while attributed to its actor."""
+
+    def test_a_correct_graph_passes_and_aliases_count_as_one_actor(self, vfb, monkeypatch):
+        seen = {}
+
+        def capture(st, rows):
+            if "AS resting_on_several_actor_reports" in st:
+                seen["st"] = st
+            return rows
+
+        monkeypatch.setattr(vfb, "_post", lambda st, params=None, timeout=180: _record(seen, st, params, capture))
+        rep = vfb.run_checks(False, False)
+        c = _check(rep, "attribution_from_single_actor_reports")
+        assert c["ok"] is True and c["mandatory"] is True
+        assert c["detail"]["reports_naming_several_actors"] == 1
+        assert seen["params"]["several"] == ["68cd617b3eb5b1212d11643d"], "Storm-2697 is The Gentlemen"
+        assert seen["params"]["feeds"] == ["alienvault_otx", "otx_pulse"]
+        assert _check(rep, "campaign_malware_attributed")["ok"] is True
+
+    @pytest.mark.parametrize("column", ["resting_on_several_actor_reports", "naming_several_actor_reports"])
+    def test_an_attribution_resting_on_or_naming_such_a_pulse_fails(self, vfb, monkeypatch, column):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [dict(rows[0], **{column: 70})] if "AS resting_on_several_actor_reports" in st else rows
+            ),
+        )
+        assert [c["check"] for c in rep.failed] == ["attribution_from_single_actor_reports"]
+
+    def test_without_the_reference_it_is_informational(self, vfb, monkeypatch):
+        import canonical_threat_actors
+
+        def unavailable(*_a, **_k):
+            raise canonical_threat_actors.ReferenceUnavailable("test: not found")
+
+        monkeypatch.setattr(vfb, "load_canonical_reference", unavailable)
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [dict(rows[0], resting_on_several_actor_reports=4)]
+                if "AS resting_on_several_actor_reports" in st
+                else rows
+            ),
+        )
+        c = _check(rep, "attribution_from_single_actor_reports")
+        assert c["ok"] is None and "unavailable" in c["detail"]["reference"] and rep.failed == []
+
+    def test_a_malware_member_without_attribution_fails(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [dict(rows[0], unattributed=3)] if "AS unattributed" in st else rows,
+        )
+        assert [c["check"] for c in rep.failed] == ["campaign_malware_attributed"]
+
+    def test_no_pulse_recorded_on_any_actor_is_informational(self, vfb, monkeypatch):
+        # Nothing to judge: a pass would be vacuous.
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: (
+                [{"reports": [], "pulses": 0}] if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in st else rows
+            ),
+        )
+        assert _check(rep, "attribution_from_single_actor_reports")["ok"] is None
+
+    def test_no_malware_member_is_informational(self, vfb, monkeypatch):
+        rep = _run(
+            vfb,
+            monkeypatch,
+            override=lambda st, rows: [{"malware_links": 0, "unattributed": 0}] if "AS unattributed" in st else rows,
+        )
+        assert _check(rep, "campaign_malware_attributed")["ok"] is None
+
+    def test_query_shape(self, vfb, monkeypatch):
+        import canonical_threat_actors
+
+        seen = {}
+
+        def capture(st, rows):
+            if "AS resting_on_several_actor_reports" in st:
+                seen["attribution"] = st
+            if "AS unattributed" in st:
+                seen["campaign"] = st
+            return rows
+
+        _run(vfb, monkeypatch, override=capture)
+        # The statement is shared with the Neo4j integration module, which runs it on a real graph.
+        assert seen["attribution"] == canonical_threat_actors.ATTRIBUTION_CHECK_QUERY
+        assert canonical_threat_actors.attribution_reports_cypher("r") in seen["attribution"]
+        assert "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true" in seen["attribution"]
+        assert "THEN r.sources ELSE [r.sources] END WHERE s IN $feeds)" in seen["attribution"]
+        assert "(m)-[:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})" in seen["campaign"]
+
+
+def _record(seen, statement, params, override):
+    if "AS resting_on_several_actor_reports" in statement:
+        seen["params"] = dict(params or {})
+    rows = _healthy_rows(statement, params or {})
+    return override(statement, rows)
 
 
 class TestCampaignMembership:

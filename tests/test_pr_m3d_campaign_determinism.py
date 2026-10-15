@@ -300,6 +300,7 @@ class TestPruneQueryReceivesRunStartAt:
                 "pruned": 5,  # non-zero so the "pruned X" log fires
                 "count": 0,
                 "campaigns": 0,
+                "removed": 0,
             }
             # For queries that return iterable results (qualifying_actors_query)
             result.__iter__ = lambda s: iter([])

@@ -329,7 +329,7 @@ sources assert it; 2026-10), not folded into a single multiplier.
 ### 5.2 Relationship Quality
 
 - **EMPLOYS_TECHNIQUE / IMPLEMENTS_TECHNIQUE**: High quality - direct from MITRE STIX `uses` relationships. The split into attribution (actor→technique) and capability (malware/tool→technique) was made in 2026-04 to disambiguate the two semantics for Cypher queries and LLM/GraphRAG retrieval; both collapse back to STIX `uses` on export.
-- **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse. Whole-event co-occurrence attribution (one malware → up to 152 actors) was removed 2026-10
+- **ATTRIBUTED_TO**: Exact (1.0) when the malware's own `attributed_to` names the actor; medium (0.6, `otx_pulse`) when malware and actor are named in the same OTX pulse and the pulse's actors are one actor (2026-10-15: a pulse naming several actors does not say which malware is whose and attributes nothing; aliases of one actor count as one). Whole-event co-occurrence attribution (one malware → up to 152 actors) was removed 2026-10
 - **EXPLOITS**: High quality - deterministic CVE ID match (confidence 1.0)
 - **INDICATES**: Medium quality - same OTX pulse (0.6, `otx_pulse`) or malware_family name match (0.8). The 0.5 whole-event co-occurrence level no longer exists (2026-10)
 - **RESOLVES_TO**: Requires external DNS data (not yet implemented)
