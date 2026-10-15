@@ -249,6 +249,10 @@ def build_campaign_nodes(neo4j_client) -> Dict:
       Malware     -[:PART_OF_CAMPAIGN]-> Campaign
       Indicator   -[:PART_OF_CAMPAIGN]-> Campaign  (sampled — up to 100 per campaign)
 
+    The links follow attribution (2026-10): a malware link whose ATTRIBUTED_TO is gone is pruned
+    (Step 2b), a RUNS whose actor has no attribution left is removed (Step 2c), and every link's
+    provenance is replaced on each run by that of the links it currently rests on.
+
     ``PART_OF_CAMPAIGN`` was ``PART_OF`` until 2026-10: ResilMesh uses ``PART_OF`` for its own
     asset model (IP → Subnet, the OrganizationUnit hierarchy), and in the shared database one
     relationship name must have one meaning.
@@ -287,6 +291,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
 
     try:
         with neo4j_client.driver.session() as session:
+            # 2026-10: the prunes (Steps 2b and 3b) compare ``r.updated_at``, which the server's
+            # ``datetime()`` stamps, with ``run_start_at``: read it from the same clock, so a worker
+            # clock ahead of the database's can never make this run's edges look stale.
+            now_record = session.run("RETURN toString(datetime()) AS now", timeout=NEO4J_READ_TIMEOUT).single()
+            try:
+                server_now = now_record["now"] if now_record is not None else None
+            except (KeyError, TypeError):
+                server_now = None
+            if isinstance(server_now, str) and server_now:
+                run_start_at = server_now
             # Pre-fetch the names of every qualifying ThreatActor so we can
             # compute deterministic Campaign uuids in Python (Campaign name is
             # ``"<actor> Campaign"``). Without this, the MERGE below would
@@ -449,8 +463,9 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
                 // 2026-10 (relationship provenance): the campaign is built from the
                 // actor's ATTRIBUTED_TO links, so RUNS carries their feeds, record ids
-                // and MISP events.
-                {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at")}
+                // and MISP events: those of the current links (replaced, not added to, so
+                // RUNS names no pulse build_relationships step 2d removed or trimmed).
+                {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)}
             RETURN count(DISTINCT c) AS campaigns
             """
             result = session.run(create_cypher, campaign_uuids=campaign_uuids, timeout=NEO4J_READ_TIMEOUT)
@@ -494,13 +509,55 @@ def build_campaign_nodes(neo4j_client) -> Dict:
                 r.edgeguard_managed = true,
                 // 2026-10 (explainability): the kind of evidence, and the ATTRIBUTED_TO link's confidence.
                 {_campaign_evidence("r", "_at.confidence_score")},
-                // 2026-10 (relationship provenance): inherited from the ATTRIBUTED_TO link.
-                {inherited_prov_set("r", ["_at"])}
+                // 2026-10 (relationship provenance): that of the ATTRIBUTED_TO link it rests on
+                // (replaced, not added to: it follows the link's trimming).
+                {inherited_prov_set("r", ["_at"], replace=True)}
             RETURN count(*) AS links
             """
             result = session.run(link_malware, timeout=NEO4J_READ_TIMEOUT)
             record = result.single()
             results["links_created"] += record["links"] if record else 0
+            query_pause()
+
+            # Step 2b (2026-10): prune the malware membership that no attribution supports any more.
+            # Step 2 refreshes the link of every malware attributed to a campaign's actor, so a link it
+            # did not touch in this run lost its ATTRIBUTED_TO: removed by build_relationships step 2d
+            # (a pulse naming several actors), or gone with an actor the alias merge folded away. Same
+            # freshness marker as Step 3b.
+            prune_malware = """
+            MATCH (:Malware)-[r:PART_OF_CAMPAIGN]->(:Campaign)
+            WHERE r.updated_at IS NULL OR r.updated_at < datetime($run_start_at)
+            DELETE r
+            RETURN count(r) AS pruned
+            """
+            prune_record = session.run(prune_malware, run_start_at=run_start_at, timeout=NEO4J_READ_TIMEOUT).single()
+            malware_pruned = prune_record["pruned"] if prune_record else 0
+            if malware_pruned:
+                logger.info(
+                    "[CAMPAIGN] pruned %d malware PART_OF_CAMPAIGN edges whose attribution is gone", malware_pruned
+                )
+            results["malware_links_pruned"] = malware_pruned
+            query_pause()
+
+            # Step 2c (2026-10): RUNS follows attribution too. Step 1 rewrites RUNS only for actors
+            # that still qualify (attributed malware and an active indicator); every other RUNS is
+            # settled here: removed when the actor has no ATTRIBUTED_TO left (the campaign then
+            # retires in Step 4), otherwise its evidence and provenance are recomputed from the
+            # actor's current attributions. Either way RUNS names no link step 2d removed or trimmed.
+            settle_runs = f"""
+            MATCH (a:ThreatActor)-[r_runs:RUNS]->(:Campaign)
+            WITH a, r_runs, EXISTS {{ (a)<-[:ATTRIBUTED_TO]-(:Malware) }} AS attributed
+            FOREACH (_ IN CASE WHEN attributed THEN [] ELSE [1] END | DELETE r_runs)
+            FOREACH (_ IN CASE WHEN attributed THEN [1] ELSE [] END |
+                SET {_campaign_evidence("r_runs", _strongest("[(a)<-[_ac:ATTRIBUTED_TO]-(:Malware) | _ac.confidence_score]"))},
+                    {aggregated_prov_set("r_runs", "(a)<-[_at:ATTRIBUTED_TO]-(:Malware)", "_at", replace=True)})
+            RETURN sum(CASE WHEN attributed THEN 0 ELSE 1 END) AS removed
+            """
+            runs_record = session.run(settle_runs, timeout=NEO4J_READ_TIMEOUT).single()
+            runs_removed = runs_record["removed"] if runs_record else 0
+            if runs_removed:
+                logger.info("[CAMPAIGN] removed %d RUNS edges whose actor has no attribution left", runs_removed)
+            results["runs_removed"] = runs_removed
             query_pause()
 
             # Step 3a: Link active indicators to their campaigns (top 100 per
@@ -573,10 +630,16 @@ def build_campaign_nodes(neo4j_client) -> Dict:
             RETURN batches, total, errorMessages, failedBatches, failedOperations, wasTerminated,
                    batch, operations, updateStatistics
             """.replace(
-                # 2026-10 (relationship provenance): inherited from the INDICATES and
-                # ATTRIBUTED_TO links of the path that put the indicator in the campaign.
+                # 2026-10 (relationship provenance): that of the INDICATES and ATTRIBUTED_TO links
+                # of every path from the indicator to the campaign's actor, replaced on each run
+                # (one row per path, so a per-row value would keep only the last path's).
                 "__INHERITED_PROV__",
-                inherited_prov_set("r", ["_ind", "_at"]),
+                aggregated_prov_set(
+                    "r",
+                    "(i)-[_xi:INDICATES]->(:Malware)-[_xa:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})",
+                    ["_xi", "_xa"],
+                    replace=True,
+                ),
             ).replace(
                 # 2026-10 (explainability): the indicator's best path to the campaign's actor, each
                 # path as strong as its weaker link; over every path, so the row order does not matter.

@@ -156,17 +156,26 @@ def test_campaign_links_state_their_evidence_and_its_strength(client, raw_driver
         enrichment_jobs.build_campaign_nodes(client)
         with raw_driver.session() as session:
             session.run(f"MATCH (c:Campaign) SET c:{LABEL}")  # removed with the fixture
-            rows = {
-                (r["from"], r["type"]): (r["label"], r["confidence"])
-                for r in session.run(
+            found = list(
+                session.run(
                     "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'fin7'}) "
                     "RETURN coalesce(n.name, n.value) AS from, type(r) AS type, r.match_type AS label, "
-                    "r.confidence_score AS confidence"
+                    "r.confidence_score AS confidence, r.sources AS sources"
                 )
-            }
+            )
+            rows = {(r["from"], r["type"]): (r["label"], r["confidence"]) for r in found}
+            sources = {(r["from"], r["type"]): sorted(r["sources"] or []) for r in found}
         assert rows == {
             ("fin7", "RUNS"): ("campaign_grouping", 0.95),
             ("carbanak", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.6),
             ("griffon", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.95),
             ("fin7.example", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.6),
+        }
+        # Provenance (2026-10): the indicator's link carries that of every path to the actor
+        # (INDICATES and ATTRIBUTED_TO through carbanak and through griffon), not the last row's.
+        assert sources == {
+            ("fin7", "RUNS"): ["alienvault_otx", "mitre_attck"],
+            ("carbanak", "PART_OF_CAMPAIGN"): ["alienvault_otx"],
+            ("griffon", "PART_OF_CAMPAIGN"): ["mitre_attck"],
+            ("fin7.example", "PART_OF_CAMPAIGN"): ["alienvault_otx", "mitre_attck", "threatfox"],
         }

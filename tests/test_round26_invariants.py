@@ -430,7 +430,9 @@ def test_build_relationships_summary_denominator_matches_query_count():
     2026-10 sector-focus build added 7c / 7d (ThreatActor / Malware → Sector)
     and the R6 builds added 1b (SUBTECHNIQUE_OF) and 2b / 2c (USES_MALWARE /
     USES_TOOL), so there are now 20 batched link steps (2d / 9b pulse-scoped, 2026-10) (1, 1b, 2, 2b, 2c, 3a,
-    3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10). The SUMMARY / partial-success
+    3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10). Step 2d also removes the same-pulse attributions
+    resting only on pulses that name several actors and trims the others (2026-10); that runs in
+    ``_remove_several_actor_attributions`` and counts with the step. The SUMMARY / partial-success
     denominators must follow that count.
 
     Pin by counting _safe_run_batched calls in build_relationships() and
@@ -445,7 +447,8 @@ def test_build_relationships_summary_denominator_matches_query_count():
 
     call_count = src.count("_safe_run_batched(")
     assert call_count == 20, (
-        f"expected 18 _safe_run_batched calls in build_relationships() (1, 1b, 2, 2b, 2c, 3a, 3b, 5, 5b, 6, 6b, 7a, 7b, 7c, 7d, 8, 9, 10); "
+        f"expected 20 _safe_run_batched calls in build_relationships() (1, 1b, 2, 2b, 2c, 2d, 3a, 3b, 5, 5b, 6, "
+        f"6b, 7a, 7b, 7c, 7d, 8, 9, 9b, 10); "
         f"got {call_count}. If you added/removed a link query, also update the denominators below."
     )
     assert f"failures=%d/{call_count}" in src, (

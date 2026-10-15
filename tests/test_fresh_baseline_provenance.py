@@ -298,17 +298,19 @@ class TestCrossItemBuilderReportScope:
         monkeypatch.setattr(MISPToNeo4jSync, "_MAX_REPORT_INDICATORS", 3)
         monkeypatch.setattr(MISPToNeo4jSync, "_MAX_REPORT_MALWARE", 2)
         monkeypatch.setattr(MISPToNeo4jSync, "_MAX_REPORT_ACTORS", 1)
+        # Two names of one actor (canonical reference): a pulse naming two different actors would
+        # attribute nothing (2026-10, tests/test_attribution_single_actor_reports.py).
         items = (
             [_ind(f"10.0.0.{i}") for i in range(5)]
             + [_mal(f"M{i}") for i in range(3)]
-            + [_act(f"A{i}") for i in range(2)]
+            + [_act(name) for name in ("The Gentlemen", "Storm-2697")]
         )
         rels = _by_type(syncer._build_cross_item_relationships(items))
         assert len(rels["INDICATES"]) == 3 * 2
         assert len(rels["ATTRIBUTED_TO"]) == 2 * 1
         assert {r["from_key"]["value"] for r in rels["INDICATES"]} == {"10.0.0.0", "10.0.0.1", "10.0.0.2"}
         assert {r["to_key"]["name"] for r in rels["INDICATES"]} == {"M0", "M1"}
-        assert {r["to_key"]["name"] for r in rels["ATTRIBUTED_TO"]} == {"A0"}
+        assert {r["to_key"]["name"] for r in rels["ATTRIBUTED_TO"]} == {"The Gentlemen"}
 
     def test_caps_apply_per_report_not_across_reports(self, syncer, monkeypatch):
         monkeypatch.setattr(MISPToNeo4jSync, "_MAX_REPORT_MALWARE", 1)

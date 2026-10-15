@@ -36,6 +36,7 @@ from baseline_checkpoint import (
     get_source_incremental,
     update_source_incremental,
 )
+from canonical_threat_actors import ReferenceUnavailable, actor_identities, load_canonical_reference
 
 # Shared utilities
 from collectors.collector_utils import (
@@ -117,15 +118,21 @@ _PULSE_NAME_PLACEHOLDERS = frozenset({"", "unknown", "n/a", "none", "null", "-"}
 _NON_FILE_HASH_TYPES = frozenset({"FileHash-IMPHASH", "FileHash-PEHASH", "JA3", "SSLCertFingerprint"})
 
 
-def _pulse_actor_pairs(families: List[str], adversaries: List[str]) -> List[str]:
-    """``"family::adversary"`` for every family × adversary named by ONE pulse. Encoding the pair
+def _pulse_actor_pairs(families: List[str], adversaries: List[str], pulse_id: Any = None) -> List[str]:
+    """``"family::adversary::pulse"`` for every family × adversary named by ONE pulse. Encoding the pair
     (Bugbot on PR #145) keeps the same-pulse guarantee when the lists of several pulses are unioned on a
-    shared IOC — two flat lists would cross-link a family from pulse A with an actor from pulse B."""
+    shared IOC — two flat lists would cross-link a family from pulse A with an actor from pulse B. The
+    pulse id (2026-10) is the link's provenance in ``build_relationships`` step 2d: MISP drops an actor
+    or family it already holds, so the nodes do not record a later pulse that names them. Without a
+    pulse id the pair is ``"family::adversary"`` (pairs written before 2026-10 have that form)."""
+    pid = str(pulse_id).strip() if pulse_id is not None else ""
+    if "::" in pid:
+        pid = ""
     out: List[str] = []
     for fam in families:
         for adv in adversaries:
             if fam and adv and "::" not in fam and "::" not in adv:
-                out.append(f"{fam}::{adv}")
+                out.append(f"{fam}::{adv}::{pid}" if pid else f"{fam}::{adv}")
             if len(out) >= _MAX_PULSE_PAIRS:
                 return out
     return out
@@ -195,9 +202,10 @@ def _fold_duplicate_pulse_item(kept: Dict[str, Any], dup: Dict[str, Any]) -> Non
     extra_tids = [t for t in (dup.get("reported_techniques") or []) if t not in (kept.get("reported_techniques") or [])]
     if extra_tids:
         kept["reported_techniques"] = list(kept.get("reported_techniques") or []) + extra_tids
-    # Families / adversaries of every pulse that listed the IOC (copy-on-write as above), and the
-    # names a malware item was given (2026-10: "Cobalt Strike - S0154" next to "Cobalt Strike").
-    for _list_key in ("pulse_malware_families", "pulse_malware_actor_pairs", "aliases"):
+    # Families / adversaries of every pulse that listed the IOC, the pulses among them that name
+    # several actors, and the names a malware item was given (2026-10: "Cobalt Strike - S0154" next
+    # to "Cobalt Strike") (copy-on-write as above).
+    for _list_key in ("pulse_malware_families", "pulse_malware_actor_pairs", "several_actor_pulses", "aliases"):
         _extra = [x for x in (dup.get(_list_key) or []) if x not in (kept.get(_list_key) or [])]
         if _extra:
             kept[_list_key] = list(kept.get(_list_key) or []) + _extra
@@ -257,6 +265,25 @@ class OTXCollector:
 
         # Get circuit breaker for this collector
         self.circuit_breaker = OTX_CIRCUIT_BREAKER
+        # The canonical threat-actor reference, loaded on first use (``_report_actor_reference``).
+        self._actor_reference = None
+        self._actor_reference_loaded = False
+
+    def _report_actor_reference(self):
+        """The canonical threat-actor reference that tells whether a pulse's adversaries are one actor,
+        or ``None`` when it is unavailable (logged once): the names are then told apart as written, so
+        the aliases of one actor count as several and the pulse attributes nothing."""
+        if not getattr(self, "_actor_reference_loaded", False):
+            self._actor_reference_loaded = True
+            self._actor_reference = None
+            try:
+                self._actor_reference = load_canonical_reference()
+            except ReferenceUnavailable as exc:
+                logger.warning(
+                    "[ATTRIBUTION] canonical reference unavailable (%s): a pulse's adversaries are told apart by name",
+                    exc,
+                )
+        return getattr(self, "_actor_reference", None)
 
     @staticmethod
     def _max_pulse_modified_iso(pulses: List[Dict]) -> Optional[str]:
@@ -606,10 +633,22 @@ class OTXCollector:
                 # Shared metadata dict for all items from this pulse
                 # 2026-10 (regular-update linking): computed once per pulse, stamped on each IOC below.
                 pulse_family_names = _pulse_family_names(pulse.get("malware_families", []))
-                pulse_actor_names = clean_actor_names(pulse_adversary or "")[:_MAX_PULSE_ADVERSARIES]
-                pulse_actor_pairs = _pulse_actor_pairs(pulse_family_names, pulse_actor_names)
+                # 2026-10: a pulse whose adversaries are several actors does not say which family is
+                # whose, so it attributes nothing: no family::adversary pairs, and every item of it
+                # records the pulse in ``several_actor_pulses`` for the sync. Decided here, on the whole
+                # adversary list (the aliases of one actor count as one, canonical reference): MISP
+                # drops an actor or family it already holds, so downstream a later pulse is incomplete.
+                pulse_all_actor_names = clean_actor_names(pulse_adversary or "")
+                pulse_several_actors = len(actor_identities(pulse_all_actor_names, self._report_actor_reference())) > 1
+                pulse_actor_names = pulse_all_actor_names[:_MAX_PULSE_ADVERSARIES]
+                pulse_actor_pairs = (
+                    []
+                    if pulse_several_actors
+                    else _pulse_actor_pairs(pulse_family_names, pulse_actor_names, pulse.get("id"))
+                )
                 pulse_meta = {
                     "pulse_id": pulse.get("id"),
+                    "several_actor_pulses": [str(pulse.get("id"))] if pulse_several_actors and pulse.get("id") else [],
                     "pulse_name": pulse.get("name", "")[:100],
                     "pulse_tags": pulse_tags[:20],
                     "pulse_references": pulse_references,

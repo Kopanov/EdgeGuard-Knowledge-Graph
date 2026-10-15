@@ -111,7 +111,7 @@ Auth:    Configured via environment variables
   last_online: STRING,               // URLhaus and Feodo: last date the source saw it online
   // OTX report-scoped linking (names reported by the same pulse; build_relationships steps 2d and 9b)
   pulse_malware_families: LIST,      // malware families named by the OTX pulse(s) that listed the IOC (2026-10: without an ATT&CK software id suffix; step 9b looks older entries up by the name as given and without it, each through the names in a Malware node's merged_from)
-  pulse_malware_actor_pairs: LIST,   // "family::adversary" pairs named by the same pulse (2026-10: the family without the suffix; step 2d looks older pairs up as 9b does)
+  pulse_malware_actor_pairs: LIST,   // "family::adversary::pulse" pairs named by the same pulse ("family::adversary" before 2026-10-15; 2026-10: the family without the suffix; step 2d looks older pairs up as 9b does)
   // AbuseIPDB enrichment
   abuse_categories: LIST,            // Abuse category IDs
   // OTX enrichment
@@ -498,7 +498,7 @@ Auth:    Configured via environment variables
 |--------------|------|-----|------------|
 | `EMPLOYS_TECHNIQUE` | ThreatActor / Campaign | Technique | **Attribution.** `confidence_score` + `match_type` per evidence: `mitre_explicit` (0.95, `uses_techniques`) or `otx_pulse` (0.6, `reported_techniques`, 2026-10); curated-package claims: see below the table; `created_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` (`build_relationships.py` Q5/Q5b). *Split from a generic `USES` in 2026-04.* |
 | `IMPLEMENTS_TECHNIQUE` | Malware / Tool | Technique | **Capability.** Same properties as `EMPLOYS_TECHNIQUE`; `mitre_explicit` (0.95) via `uses_techniques`, `otx_pulse` (0.6) via `reported_techniques` (`build_relationships.py` Q6/Q6b/Q10); curated-package claims: see below the table. |
-| `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path, the pulse in `source_refs[]`); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
+| `ATTRIBUTED_TO` | Malware | ThreatActor | `match_type='exact'` (1.0, Q2) or `match_type='otx_pulse'` (0.6, sync path and Q2d, the pulse in `source_refs[]`; only from a pulse whose actors are one actor, 2026-10-15); `created_at`/`imported_at`, `updated_at`, `edgeguard_managed`, `src_uuid`, `trg_uuid` |
 | `INDICATES` | Indicator | Malware | `match_type='otx_pulse'` (0.6, same OTX pulse, sync path) **or** `match_type='malware_family'` (0.8, Q9; `sources[]` names the indicator's feeds that carry family labels); `edgeguard_managed`. The `misp_cooccurrence` level (0.5) is no longer written (2026-10); `calibrate_cooccurrence_confidence` only touches legacy edges |
 | `EXPLOITS` | Indicator | `Vulnerability` or `CVE` | `confidence_score` 1.0, `match_type='cve_tag'` |
 | `EXPLOITS` | ThreatActor / Malware | `CVE` | 2026-10, curated packages only: `match_type` = the package's curated label (`coreideas_curated` / `curated_other`), `confidence_score` 0.85 (both written when the claim creates the link), `tlp` = the package's TLP level |

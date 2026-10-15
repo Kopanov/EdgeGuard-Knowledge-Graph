@@ -98,6 +98,7 @@ class _Session:
                 "campaigns": 1,
                 "backfilled": 0,
                 "links": 0,
+                "removed": 0,
                 "pruned": 0,
                 "count": 0,
                 "linked": 0,
