@@ -645,8 +645,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "edgeguard_neo4j_nodes",
-          "legendFormat": "{{label}} ({{zone}})",
+          "expr": "edgeguard_neo4j_nodes{zone=\"all\"}",
+          "legendFormat": "{{label}}",
           "range": true,
           "refId": "A"
         }

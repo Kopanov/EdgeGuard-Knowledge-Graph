@@ -605,13 +605,14 @@ DAG_LAST_SUCCESS = Gauge(
     multiprocess_mode="mostrecent",
 )
 
-# 2026-10: the start time of the DAG run in progress, 0 when none is. Every task sets it to its
-# run's start_date when it begins (on_execute_callback) and the DAG-level success and failure
-# callbacks set it to 0 when the run ends; with ``mostrecent`` the newest write of any process wins.
-# Before, it was refreshed on every task success and never cleared, so EdgeGuardDAGRunStuck fired
-# from one hour after a run until the DAG's next run (permanently after the baseline). The series
-# name changed with the meaning: values the former ``edgeguard_dag_run_start_timestamp`` left in
-# the metrics directory are not read by any rule.
+# 2026-10: the start time of the DAG run in progress, 0 when none is. Written by the Airflow
+# listener plugin plugins/edgeguard_dag_run_state.py: the scheduler's run-started hook sets the
+# run's start_date, the run-succeeded and run-failed hooks (scheduler, and API server for a run
+# marked by hand) set 0; with ``mostrecent`` the newest write of any process wins. Before, it was
+# refreshed on every task success and never cleared, so EdgeGuardDAGRunStuck fired from one hour
+# after a run until the DAG's next run (permanently after the baseline). The series name changed
+# with the meaning: values the former ``edgeguard_dag_run_start_timestamp`` left in the metrics
+# directory are not read by any rule.
 DAG_RUN_START = Gauge(
     "edgeguard_dag_run_in_progress_start_timestamp",
     "Unix timestamp at which the DAG run in progress started (0 = no run in progress)",

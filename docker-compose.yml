@@ -365,6 +365,10 @@ services:
       # psycopg2 driver is bundled in the official apache/airflow image
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_POSTGRES_USER:-airflow}:${AIRFLOW_POSTGRES_PASSWORD:-airflow}@airflow_postgres:5432/${AIRFLOW_POSTGRES_DB:-airflow}
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      # 2026-10: the repository's plugins/ (mounted below). The listener plugin
+      # edgeguard_dag_run_state marks each DAG run in progress for Prometheus from the scheduler's
+      # and the API server's DAG run hooks (edgeguard_dag_run_in_progress_start_timestamp).
+      AIRFLOW__CORE__PLUGINS_FOLDER: /opt/airflow/plugins
       AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
       # Long collectors (e.g. NVD 15–30+ min) exceed Airflow's default zombie threshold (~600s).
       AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD: ${AIRFLOW__SCHEDULER__SCHEDULER_ZOMBIE_TASK_THRESHOLD:-3600}
@@ -441,6 +445,7 @@ services:
     volumes:
       - ./dags:/opt/airflow/dags:ro
       - ./src:/opt/airflow/src:ro
+      - ./plugins:/opt/airflow/plugins:ro   # 2026-10: Airflow listener plugin (AIRFLOW__CORE__PLUGINS_FOLDER)
       - airflow_logs:/opt/airflow/logs
       - airflow_db:/opt/airflow
       - metrics_multiproc:/opt/airflow/metrics_multiproc

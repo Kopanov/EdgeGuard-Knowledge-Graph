@@ -167,7 +167,7 @@ To import manually:
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `edgeguard_neo4j_nodes` | Gauge | `label`, `zone` | Node count of each label EdgeGuard writes, with `zone="all"`, read from the graph after every successful sync (scheduled and baseline) by one read-only query (`Neo4jClient.count_nodes_by_label`). A failed count logs a warning and keeps the previous values. Before 2026-10 every sync set four labels to 0 under `zone="unknown"`; those series stay at 0 in the metrics directory until the `metrics_multiproc` volume is recreated |
+| `edgeguard_neo4j_nodes` | Gauge | `label`, `zone` | Node count of each label EdgeGuard writes, with `zone="all"`, read from the graph by one read-only query (`Neo4jClient.count_nodes_by_label`) after every successful scheduled sync, after the enrichment of the sync DAG, and after the baseline's enrichment (not after its full sync: before the enrichment a fresh baseline has no Campaign nodes). A label without nodes is recorded as `0`. A failed count logs a warning and keeps the previous values. Before 2026-10 every sync set four labels to 0 under `zone="unknown"`; those series stay at 0 in the metrics directory until the `metrics_multiproc` volume is recreated, and the per-label panels read `zone="all"` only |
 | `edgeguard_neo4j_relationships` | Gauge | `rel_type` | Relationship counts |
 | `edgeguard_neo4j_sync_duration_seconds` | Histogram | - | Neo4j sync duration (one observation per sync since 2026-10) |
 | `edgeguard_neo4j_sync_last_success_timestamp` | Gauge | - | End of the last successful MISP→Neo4j sync, scheduled or baseline (`EdgeGuardNeo4jSyncStale`) |
@@ -190,7 +190,7 @@ To import manually:
 | `edgeguard_pipeline_errors_total` | Counter | `task`, `error_type`, `source` | Error count |
 | `edgeguard_dag_runs_total` | Counter | `dag_id`, `status`, `run_type` | DAG run count |
 | `edgeguard_dag_run_duration_seconds` | Histogram | `dag_id` | DAG run duration |
-| `edgeguard_dag_run_in_progress_start_timestamp` | Gauge | `dag_id` | 2026-10: start time of the DAG run in progress, `0` when no run is in progress. Every task sets it to its run's start (`on_execute_callback`); the DAG-level success and failure callbacks set it to `0` when the run ends. It replaces `edgeguard_dag_run_start_timestamp`, which was refreshed on every task success and never cleared; values the former series left in the metrics directory are read by no rule |
+| `edgeguard_dag_run_in_progress_start_timestamp` | Gauge | `dag_id` | 2026-10: start time of the DAG run in progress, `0` when no run is in progress. Written by the Airflow listener plugin `plugins/edgeguard_dag_run_state.py` (see [DAG run in progress](#dag-run-in-progress)): the scheduler sets the run's start when it starts a run, and sets `0` when it ends one (also at the `dagrun_timeout`); the API server sets `0` when a run is marked failed or successful by hand. It replaces `edgeguard_dag_run_start_timestamp`, which was refreshed on every task success and never cleared; values the former series left in the metrics directory are read by no rule |
 | `edgeguard_dag_last_success_timestamp` | Gauge | `dag_id` | Time of the last successful task of the DAG |
 
 ### MISP Sync Event Accounting
@@ -364,8 +364,9 @@ record_neo4j_sync(node_counts={}, duration=30.0)
 ```
 
 The DAG records both through `_record_successful_sync_metrics(duration)` after the scheduled sync and
-after the baseline's full sync; its `record_neo4j_node_counts()` then reads the node count of every
-label from the graph and sets `edgeguard_neo4j_nodes{label, zone="all"}`.
+after the baseline's full sync. Its `record_neo4j_node_counts()` reads the node count of every label
+from the graph and sets `edgeguard_neo4j_nodes{label, zone="all"}`: after the scheduled sync, after the
+sync DAG's enrichment, and for the baseline only after its enrichment, when the graph is complete.
 
 ### Recording Pipeline Errors
 
@@ -412,6 +413,37 @@ Methods 1 and 2 below describe the single-process server and apply to bare-metal
 `PROMETHEUS_MULTIPROC_DIR`.
 
 If the directory cannot be created or written (for example a volume mounted with the wrong ownership), the process logs an ERROR, removes `PROMETHEUS_MULTIPROC_DIR` from its own environment and keeps in-process metrics, so DAG parsing and task imports never fail because of metrics. The image creates `/opt/airflow/metrics_multiproc` owned by the `airflow` user so the named volume inherits writable ownership on first mount.
+
+### DAG run in progress
+
+`edgeguard_dag_run_in_progress_start_timestamp{dag_id}` (read by `EdgeGuardDAGRunStuck`) is written
+by the Airflow listener plugin `plugins/edgeguard_dag_run_state.py` (2026-10), not by the DAG code.
+`docker-compose.yml` mounts `./plugins` at `/opt/airflow/plugins` and sets
+`AIRFLOW__CORE__PLUGINS_FOLDER` to it; `docker compose exec airflow airflow plugins` lists
+`edgeguard_dag_run_state` when it is loaded.
+
+| Hook | Called by | Value |
+|------|-----------|-------|
+| `on_dag_run_running` | the scheduler, when it starts a run (a cleared run included) | the run's `start_date` |
+| `on_dag_run_success` / `on_dag_run_failed` | the scheduler, when it ends a run (also at the `dagrun_timeout`) | `0` |
+| `on_dag_run_success` / `on_dag_run_failed` | the API server, when a run is marked successful or failed by hand: UI "Mark run as …", `PATCH /api/v2/dags/{dag_id}/dagRuns/{run_id}`, `python src/edgeguard.py dag kill` | `0` |
+
+The scheduler calls its hooks in the scheduling loop, in order, so a run's end is written before the
+next run of the same DAG starts. The first 2026-10 version used DAG-level success and failure
+callbacks: Airflow 3 runs none of them when a run's state is set through the UI or the API, and the
+DAG processor runs them asynchronously, so a late callback could clear the mark of the next run.
+
+The hooks write only in the multi-process mode (`PROMETHEUS_MULTIPROC_DIR`): the scheduler and the
+API server are not the process that serves `/metrics`. While a listener plugin is loaded, Airflow
+refuses a DAG with a deferrable task that sets `end_from_trigger=True`; no EdgeGuard task does.
+
+A run **deleted** while in progress fires no hook; its mark stays until the DAG's next run starts.
+To clear it at once (here for the baseline):
+
+```bash
+docker compose exec airflow python -c \
+  "from metrics_server import DAG_RUN_START; DAG_RUN_START.labels(dag_id='edgeguard_baseline').set(0)"
+```
 
 ### Method 1: Separate Metrics DAG (Recommended)
 
@@ -481,7 +513,7 @@ list (including the disk, inode and `build_relationships` alerts), grep
 | `EdgeGuardCircuitBreakerOpen` | Circuit open | critical |
 | `EdgeGuardServiceDown` | Health check fail | critical |
 | `EdgeGuardDAGRunFailures` | >3 failures/hour | warning |
-| `EdgeGuardDAGRunStuck` | A DAG run in progress longer than its `dagrun_timeout` plus 15 minutes (`edgeguard:dag_run_max_seconds`; pipeline 5 h 45 min, medium 5 h 15 min, low and daily 8 h 45 min, Neo4j sync 22 h 15 min, baseline 32 h 15 min). Airflow fails a run at its timeout and the DAG-level failure callback clears the mark, so the alert means a run Airflow did not end. Before 2026-10 it fired from one hour after a run until the DAG's next run (permanently after the baseline) | critical |
+| `EdgeGuardDAGRunStuck` | A DAG run marked in progress longer than its `dagrun_timeout` plus 15 minutes (`edgeguard:dag_run_max_seconds`; pipeline 5 h 45 min, medium 5 h 15 min, low and daily 8 h 45 min, Neo4j sync 22 h 15 min, baseline 32 h 15 min). The scheduler fails a run at its timeout and its listener hook clears the mark; a run marked failed or successful by hand (UI, `PATCH dagRuns`, `edgeguard dag kill`) is cleared by the API server's hook. The alert therefore means a run the scheduler did not end, a run deleted while in progress, or a listener plugin that is not loaded (see [DAG run in progress](#dag-run-in-progress)). Before 2026-10 it fired from one hour after a run until the DAG's next run (permanently after the baseline) | critical |
 | `EdgeGuardDAGLastSuccessStale` | No successful task for longer than one schedule interval plus the DAG's `dagrun_timeout` (`edgeguard:dag_max_success_gap_seconds`: `edgeguard_pipeline` 6 h, `edgeguard_medium_freq` 9 h, `edgeguard_low_freq` 16 h 30 min). The single 6 h limit fired about 1.5 h of every 8 h for `edgeguard_low_freq`. `edgeguard_daily` has `EdgeGuardDailyDAGStale` (25 h) | warning |
 | `EdgeGuardNeo4jSyncStale` | No MISP→Neo4j sync (scheduled or baseline) completed in 144 hours, two 3-day intervals. The cron `0 3 */3 * *` with its 71 h guard skips the fire after the 31st and after 28 February (96 h gaps; 120 h after 28 February of a leap year), and a baseline sync can leave 143 h until the next scheduled sync; the former 72 h limit fired about 23 h at most month ends | warning |
 | `EdgeGuardContainerRestartLoop` | >3 container restarts in 1 hour (requires cAdvisor) | critical |
@@ -491,7 +523,7 @@ list (including the disk, inode and `build_relationships` alerts), grep
 | `EdgeGuardMispBatchPermanentFailure` | MISP push 5xx exhausted retries | critical |
 | `EdgeGuardMispSustainedBackoff` | MISP push backoff fired >1× in 15m | warning |
 | `EdgeGuardMispEventAttributesTruncated` | PR-N24 H3 — event attribute count exceeded `MAX_EVENT_ATTRIBUTES`; deferred to end of sync | warning |
-| `EdgeGuardBuildRelationshipsSilentDeath` | PR-N21 — no `build_rels_completions` for 6h after baseline start | critical |
+| `EdgeGuardBuildRelationshipsSilentDeath` | PR-N21 — no `build_rels_completions` for 6 h while a task of `edgeguard_baseline` succeeded in the last 6 h (`edgeguard_dag_last_success_timestamp{dag_id="edgeguard_baseline"}`; 2026-10, the series the former `edgeguard_dag_run_start_timestamp` held) | critical |
 | `EdgeGuardApocBatchPartial` | PR-N21 — apoc.periodic.iterate reported per-row errors | warning |
 | **`EdgeGuardMispFetchFallbackActive`** | **PR-N31** — `sum by (branch) (rate(...{outcome="engaged"}[10m])) > 0` for 10m. Sustained engagement of the PyMISP / requests-restSearch fallback signals the primary `/events/index` is broken. | warning |
 | **`EdgeGuardMispFetchFallbackHardError`** | **PR-N31** — `sum by (branch) (rate(...{outcome="hard_error"}[5m])) > 0` for 1m. The `_MispFallbackHardError` sentinel raised in `src/run_misp_to_neo4j.py` (errors-payload, unexpected-shape, non-200 mid-pagination, or cap-hit). The dagrun has already failed (PR-N29 H1: `retries=0` on critical chain). | **critical** |
@@ -517,8 +549,9 @@ To deliver to Slack:
 ```bash
 # One line: the incoming-webhook URL. prometheus/secrets/ is ignored by git except its .gitignore.
 printf '%s\n' 'https://hooks.slack.com/services/…' > prometheus/secrets/slack_api_url
-# The Alertmanager image runs as uid 65534 (nobody); the file must be readable by it.
-sudo chown 65534 prometheus/secrets/slack_api_url && chmod 0400 prometheus/secrets/slack_api_url
+# The Alertmanager image runs as uid 65534 (nobody); the file must be readable by it. chmod first:
+# after the chown only root may change the mode.
+chmod 0400 prometheus/secrets/slack_api_url && sudo chown 65534 prometheus/secrets/slack_api_url
 docker compose -f docker-compose.yml -f docker-compose.monitoring.yml --profile alerts up -d alertmanager
 ```
 
@@ -534,14 +567,17 @@ until it is rendered) are still placeholders to replace for a deployment.
 Prometheus loads alert rules at startup. After you edit `prometheus/alerts.yml`:
 
 ```bash
-# Validate the rules first (syntax + expression).
-docker compose exec prometheus promtool check rules /etc/prometheus/alerts.yml
+# Validate the rules first (syntax + expression). Both files: the prometheus service is defined in
+# docker-compose.monitoring.yml only.
+docker compose -f docker-compose.yml -f docker-compose.monitoring.yml exec prometheus \
+  promtool check rules /etc/prometheus/alerts.yml
 
 # Hot-reload without restarting Prometheus (requires --web.enable-lifecycle).
 curl -X POST http://localhost:9090/-/reload
 ```
 
-If `--web.enable-lifecycle` is not set, restart the container: `docker compose restart prometheus`.
+If `--web.enable-lifecycle` is not set, restart the container:
+`docker compose -f docker-compose.yml -f docker-compose.monitoring.yml restart prometheus`.
 
 ### Custom Alerts
 
@@ -670,6 +706,6 @@ docker volume rm <project>_prometheus_data <project>_grafana_data <project>_aler
 
 ---
 
-_Last updated: 2026-10-15 — monitoring signals: Prometheus scrapes `metrics:8001` over `edgeguard_net` and the monitoring stack starts together with `docker-compose.yml` (upgrade and cleanup commands adjusted); Alertmanager reads the Slack URL from `prometheus/secrets/slack_api_url`; `edgeguard_neo4j_nodes` read from the graph after every sync; `edgeguard_dag_run_in_progress_start_timestamp` and `edgeguard_collector_last_run_outcome`; per-DAG limits for `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale`, `EdgeGuardNoIndicatorsCollected` without 304 and skipped runs, `misp_to_neo4j` in the staleness map, `EdgeGuardNeo4jSyncStale` at 144 h. Same day: wording only: the PR-N21 alerts are cited by PR number, without personal names. Prior: 2026-04-26 — PR-N33 docs audit: replaced the "11-row" alert table snapshot with a "operator-relevant subset" table + pointer to `prometheus/alerts.yml` as canonical source (30+ rules at HEAD); added the two PR-N31 fallback alerts + several other 2026-04 additions; reframed "the last three" narrative paragraph as a per-PR-train summary. Added `edgeguard_misp_fetch_fallback_active_total` Counter (labels: `branch`, `outcome`) to the implicit metrics inventory.
+_Last updated: 2026-10-15 — DAG run in progress marked by the listener plugin `plugins/edgeguard_dag_run_state.py` (scheduler and API server hooks; a run marked failed by hand is cleared; command to clear the mark of a deleted run); node counts after the enrichment (baseline: only then) and a label without nodes recorded as 0; `EdgeGuardBuildRelationshipsSilentDeath` reads the latest successful baseline task; promtool and restart commands with both compose files; `chmod` before `chown` for the Slack secret. Same day: monitoring signals: Prometheus scrapes `metrics:8001` over `edgeguard_net` and the monitoring stack starts together with `docker-compose.yml` (upgrade and cleanup commands adjusted); Alertmanager reads the Slack URL from `prometheus/secrets/slack_api_url`; `edgeguard_neo4j_nodes` read from the graph after every sync; `edgeguard_dag_run_in_progress_start_timestamp` and `edgeguard_collector_last_run_outcome`; per-DAG limits for `EdgeGuardDAGRunStuck` and `EdgeGuardDAGLastSuccessStale`, `EdgeGuardNoIndicatorsCollected` without 304 and skipped runs, `misp_to_neo4j` in the staleness map, `EdgeGuardNeo4jSyncStale` at 144 h. Same day: wording only: the PR-N21 alerts are cited by PR number, without personal names. Prior: 2026-04-26 — PR-N33 docs audit: replaced the "11-row" alert table snapshot with a "operator-relevant subset" table + pointer to `prometheus/alerts.yml` as canonical source (30+ rules at HEAD); added the two PR-N31 fallback alerts + several other 2026-04 additions; reframed "the last three" narrative paragraph as a per-PR-train summary. Added `edgeguard_misp_fetch_fallback_active_total` Counter (labels: `branch`, `outcome`) to the implicit metrics inventory.
 
 Prior: 2026-04-19 chips 5b + 5e added five new source-truthful counters: `edgeguard_source_truthful_claim_accepted_total` / `_dropped_total` / `_coerce_rejected_total` / `_future_clamp_total` (PR #42, observability for the per-source first_seen / last_seen pipeline shipped in PR #41) plus `edgeguard_source_truthful_creator_rejected_total` (PR #44, fires when the MISP tag-impersonation defense refuses a source-truthful claim). 2026-03-24: repo **`prometheus/prometheus.yml`** scrapes EdgeGuard metrics at **`host.docker.internal:8001`** (not 8000 REST). Metrics server default port **8001**._

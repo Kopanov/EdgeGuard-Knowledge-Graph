@@ -310,7 +310,6 @@ if ENABLE_PROMETHEUS_METRICS and METRICS_SERVER_AVAILABLE:
     try:
         from metrics_server import (
             DAG_LAST_SUCCESS,
-            DAG_RUN_START,
             INDICATORS_COLLECTED,
             MISP_PUSH_DURATION,
             NEO4J_NODES,
@@ -379,16 +378,12 @@ if ENABLE_PROMETHEUS_METRICS and not METRICS_SERVER_AVAILABLE and not PROMETHEUS
         # Note: edgeguard_last_success_timestamp is already registered by resilience.py
         # (imported above). Do NOT re-register here to avoid duplicate timeseries error.
 
-        # DAG-level stuck-run detection
+        # DAG-level stuck-run detection. The run in progress mark
+        # (edgeguard_dag_run_in_progress_start_timestamp) is written by the listener plugin
+        # plugins/edgeguard_dag_run_state.py in the multi-process mode only (2026-10).
         DAG_LAST_SUCCESS = Gauge(
             "edgeguard_dag_last_success_timestamp",
             "Unix timestamp of last successful DAG run (0 = never succeeded)",
-            ["dag_id"],
-            multiprocess_mode="mostrecent",
-        )
-        DAG_RUN_START = Gauge(
-            "edgeguard_dag_run_in_progress_start_timestamp",
-            "Unix timestamp at which the DAG run in progress started (0 = no run in progress)",
             ["dag_id"],
             multiprocess_mode="mostrecent",
         )
@@ -436,13 +431,15 @@ def record_neo4j_nodes(node_type: str, count: int, zone: str = "all"):
 def record_neo4j_node_counts() -> bool:
     """Export the node count of every label EdgeGuard writes to ``edgeguard_neo4j_nodes`` (2026-10).
 
-    Called after a successful MISP→Neo4j sync (scheduled and baseline). One read-only query
-    (``Neo4jClient.count_nodes_by_label``), recorded through ``record_neo4j_nodes`` with
-    ``zone="all"``: one series per label, so ``sum(edgeguard_neo4j_nodes)`` is the node total that
-    EdgeGuardNeo4jNodesLow and the dashboard read, and EdgeGuardNeo4jLabelDropBig compares each label
-    with its own value a day earlier. Before, the sync task passed attributes MISPToNeo4jSync does
-    not have and every label was recorded as 0. A failed count logs a warning and leaves the gauges
-    at their previous values; it never records 0. Returns True when the counts were recorded.
+    Called after a successful scheduled MISP→Neo4j sync and after a successful enrichment step of
+    the sync DAG and of the baseline (the baseline counts only after its enrichment, see
+    ``run_baseline_enrichment``). One read-only query (``Neo4jClient.count_nodes_by_label``),
+    recorded through ``record_neo4j_nodes`` with ``zone="all"``: one series per label, so
+    ``sum(edgeguard_neo4j_nodes)`` is the node total that EdgeGuardNeo4jNodesLow and the dashboard
+    read, and EdgeGuardNeo4jLabelDropBig compares each label with its own value a day earlier. A label
+    without nodes is recorded as 0. Before, the sync task passed attributes MISPToNeo4jSync does not
+    have and every label was recorded as 0. A failed count logs a warning and leaves the gauges at
+    their previous values; it never records a count it did not read. Returns True when recorded.
     """
     if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
         return False
@@ -466,11 +463,13 @@ def record_neo4j_node_counts() -> bool:
     return True
 
 
-def _record_successful_sync_metrics(duration: float) -> None:
-    """Duration, last-success stamp and node counts after a successful MISP→Neo4j sync (2026-10).
+def _record_successful_sync_metrics(duration: float, *, node_counts: bool = True) -> None:
+    """Duration, last-success stamp and (optionally) node counts after a successful MISP→Neo4j sync (2026-10).
 
     Shared by the scheduled sync and the baseline's full sync, so EdgeGuardNeo4jSyncStale counts the
-    baseline as a sync. Never raises: a metrics failure must not fail a sync that has completed.
+    baseline as a sync. The baseline passes ``node_counts=False``: its graph is complete only after
+    build_relationships and the enrichment (Campaign nodes are created there). Never raises: a
+    metrics failure must not fail a sync that has completed.
     """
     try:
         if METRICS_SERVER_AVAILABLE:
@@ -482,7 +481,8 @@ def _record_successful_sync_metrics(duration: float) -> None:
             record_neo4j_sync_duration(duration)
     except Exception as e:
         logger.warning("Neo4j sync duration / last-success metrics not recorded: %s", e)
-    record_neo4j_node_counts()
+    if node_counts:
+        record_neo4j_node_counts()
 
 
 def record_error(task: str, error_type: str, source: str = ""):
@@ -590,10 +590,10 @@ def _on_task_success(context):
     Sets DAG_LAST_SUCCESS on every task completion so the
     EdgeGuardDAGLastSuccessStale alert can detect DAGs where no task
     has succeeded recently (covers both partial and full failures).
-    2026-10: it no longer touches DAG_RUN_START. Refreshed on every task success and never cleared,
-    that gauge made EdgeGuardDAGRunStuck fire from one hour after a run until the DAG's next run
-    (permanently after the baseline); the run start is now set by ``_on_task_execute`` and cleared
-    by ``_on_dag_run_end``.
+    2026-10: it no longer touches the run start gauge. Refreshed on every task success and never
+    cleared, that gauge made EdgeGuardDAGRunStuck fire from one hour after a run until the DAG's next
+    run (permanently after the baseline). The run in progress is now marked by the listener plugin
+    plugins/edgeguard_dag_run_state.py, from the scheduler's and the API server's DAG run hooks.
     """
     if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
         return
@@ -602,41 +602,6 @@ def _on_task_success(context):
         DAG_LAST_SUCCESS.labels(dag_id=dag_id).set(time.time())
     except Exception as e:
         logger.warning(f"Failed to record success metric for {dag_id}: {e}")
-
-
-def _on_task_execute(context):
-    """Callback before every task executes — marks its DAG run as in progress (2026-10).
-
-    Sets DAG_RUN_START to the start time of the task's DAG run. Every task of a run writes the same
-    value (the run's ``start_date``), so the mark is in place from the first task on and is
-    restored when a cleared task resumes a run that had ended. ``_on_dag_run_end`` sets it to 0.
-    """
-    if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
-        return
-    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
-    dag_run = context.get("dag_run")
-    started = getattr(dag_run, "start_date", None)
-    try:
-        DAG_RUN_START.labels(dag_id=dag_id).set(started.timestamp() if started is not None else time.time())
-    except Exception as e:
-        logger.warning(f"Failed to record the run start of {dag_id}: {e}")
-
-
-def _on_dag_run_end(context):
-    """DAG-level success and failure callback — the DAG run is no longer in progress (2026-10).
-
-    Airflow calls it once when a run ends, whether it succeeded, failed or exceeded its
-    ``dagrun_timeout`` (on Airflow 3 inside the DAG processor, whose processes write to the same
-    multi-process metrics directory). The 0 written here is newer than every task's start mark, so
-    the ``mostrecent`` merge reports the DAG as idle until a task of the next run starts.
-    """
-    if not (ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE):
-        return
-    dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
-    try:
-        DAG_RUN_START.labels(dag_id=dag_id).set(0)
-    except Exception as e:
-        logger.warning(f"Failed to clear the run start of {dag_id}: {e}")
 
 
 # Default arguments
@@ -649,7 +614,6 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
     "on_failure_callback": _on_task_failure,
     "on_success_callback": _on_task_success,
-    "on_execute_callback": _on_task_execute,  # 2026-10: marks the DAG run in progress
 }
 
 # ================================================================================
@@ -1647,10 +1611,6 @@ dag = DAG(
     catchup=False,
     max_active_runs=1,  # Prevent pile-up if a run is slow
     dagrun_timeout=timedelta(hours=5, minutes=30),  # Worst-case: 4h25m (OTX retries) + buffer
-    # 2026-10: clear the in-progress mark (edgeguard_dag_run_in_progress_start_timestamp) when the
-    # run ends, whatever the outcome; the same two callbacks are set on every DAG below.
-    on_success_callback=_on_dag_run_end,
-    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "high-frequency"],
 )
 
@@ -1729,8 +1689,6 @@ medium_freq_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=5),  # Worst-case: 4h (CISA/VT retries) + buffer
-    on_success_callback=_on_dag_run_end,
-    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "medium-frequency"],
 )
 
@@ -1779,8 +1737,6 @@ low_freq_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (NVD retries) + buffer
-    on_success_callback=_on_dag_run_end,
-    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "low-frequency"],
 )
 
@@ -1821,8 +1777,6 @@ daily_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=8, minutes=30),  # Worst-case: 7h (8 collectors parallel + retries) + buffer
-    on_success_callback=_on_dag_run_end,
-    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "misp", "daily"],
 )
 
@@ -1940,8 +1894,6 @@ neo4j_sync_dag = DAG(
     catchup=False,
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=22),  # Worst-case: 18h (full sync + rels + enrich, all with retries)
-    on_success_callback=_on_dag_run_end,
-    on_failure_callback=_on_dag_run_end,
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
@@ -2133,6 +2085,9 @@ def run_enrichment_jobs(**context):
         raise AirflowException(f"Enrichment failed: {e}")
     finally:
         client.close()
+    # 2026-10: refresh the node counts recorded after the sync with the Campaign nodes the
+    # enrichment creates.
+    record_neo4j_node_counts()
 
 
 build_relationships_task = PythonOperator(
@@ -2197,8 +2152,6 @@ baseline_dag = DAG(
     # retries=1 (inherited from default_args) — they're short and
     # transient-flake-prone, so a single retry is cheap and well-justified.
     dagrun_timeout=timedelta(hours=32),
-    on_success_callback=_on_dag_run_end,
-    on_failure_callback=_on_dag_run_end,
     is_paused_upon_creation=False,  # Must be unpaused so manual triggers execute immediately
     tags=["threat-intel", "edgeguard", "baseline", "manual"],
 )
@@ -2794,9 +2747,11 @@ def run_baseline_full_sync(**context):
         )
         raise AirflowException(f"Baseline full MISP→Neo4j sync failed: {detail}")
     logger.info("[BASELINE] Full sync complete")
-    # 2026-10: the full sync is a successful sync for the monitoring as well: duration, the
-    # last-success stamp read by EdgeGuardNeo4jSyncStale, and the node counts of the loaded graph.
-    _record_successful_sync_metrics((datetime.now(timezone.utc) - sync_started_at).total_seconds())
+    # 2026-10: the full sync is a successful sync for the monitoring as well: duration and the
+    # last-success stamp read by EdgeGuardNeo4jSyncStale. The node counts wait for the end of the
+    # enrichment (run_baseline_enrichment): after a fresh baseline the graph has no Campaign nodes
+    # yet at this point, and a 0 recorded here would fire EdgeGuardNeo4jLabelDropBig.
+    _record_successful_sync_metrics((datetime.now(timezone.utc) - sync_started_at).total_seconds(), node_counts=False)
     # 2026-10: the scheduled sync derives its window from this file. Without a stamp it ran a full
     # sync after the baseline (no file) or treated every attribute since the previous baseline as
     # changed (a stale file), the same work the baseline gets 6 h for, within its own 4 h limit.
@@ -2830,6 +2785,10 @@ def run_baseline_enrichment(**context):
         raise AirflowException(f"Baseline enrichment failed: {e}")
     finally:
         client.close()
+    # 2026-10: the baseline's node counts, taken when the graph is complete (after the full sync,
+    # build_relationships and the enrichment). A failed enrichment records none and the gauges keep
+    # their previous values.
+    record_neo4j_node_counts()
     # XCom marker read by assert_baseline_postconditions on Airflow 3 (2026-10-12).
     return {"enriched": True}
 

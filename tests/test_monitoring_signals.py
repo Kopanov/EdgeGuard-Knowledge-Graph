@@ -3,7 +3,8 @@
 * Node gauges: ``edgeguard_neo4j_nodes`` was set to 0 after every sync (the sync task read
   attributes ``MISPToNeo4jSync`` does not have); the counts are now read from the graph.
 * DAG run state: the start gauge was refreshed on every task success and never cleared, so
-  ``EdgeGuardDAGRunStuck`` fired after every run. It now marks the run in progress only.
+  ``EdgeGuardDAGRunStuck`` fired after every run. It now marks the run in progress only, from the
+  Airflow listener plugin ``plugins/edgeguard_dag_run_state.py`` (scheduler and API server hooks).
 * Alert thresholds that fired on a normal schedule: the per-DAG last-success limit, the 304 and
   skipped collector runs, the MISP to Neo4j sync staleness at month ends.
 * Collection counter: every collector run added its count twice to
@@ -11,7 +12,8 @@
 
 The DAG callables run for real; only Neo4j, MISP and the Airflow Variable store are replaced.
 The multi-process tests record in child processes against a temporary metrics directory, the way
-the Airflow task processes and the ``metrics`` service of the compose deployment do.
+the Airflow task processes, the scheduler, the API server and the ``metrics`` service of the
+compose deployment do; the listener tests load the plugin through Airflow's own plugin manager.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ sys.path.insert(0, str(_SRC))
 import metrics_exporter  # noqa: E402
 import metrics_server  # noqa: E402
 import neo4j_client  # noqa: E402
-from collectors.collector_utils import make_status  # noqa: E402
+from collectors.collector_utils import make_skipped_optional_source, make_status  # noqa: E402
 
 _RULES = yaml.safe_load((_ROOT / "prometheus" / "alerts.yml").read_text())
 _DAG_IDS = {
@@ -117,7 +119,6 @@ def compose_metrics(dag_module, monkeypatch, tmp_path):
     monkeypatch.setattr(dag_module, "ENABLE_PROMETHEUS_METRICS", True)
     monkeypatch.setattr(dag_module, "PROMETHEUS_AVAILABLE", True)
     for name in (
-        "DAG_RUN_START",
         "DAG_LAST_SUCCESS",
         "NEO4J_NODES",
         "INDICATORS_COLLECTED",
@@ -151,7 +152,7 @@ class _FakeSession:
 
     def run(self, query, parameters=None, **kwargs):
         self._queries.append((query, kwargs))
-        return iter(self._rows)
+        return iter(self._rows(query) if callable(self._rows) else self._rows)
 
 
 class _FakeDriver:
@@ -162,6 +163,9 @@ class _FakeDriver:
         self.sessions.append(kwargs)
         return _FakeSession(self.rows, self.queries)
 
+    def close(self):
+        self.closed = True
+
 
 def _client_with_rows(rows):
     """A client whose driver is the production timeout proxy around a recording fake driver."""
@@ -169,6 +173,33 @@ def _client_with_rows(rows):
     fake = _FakeDriver(rows)
     client.driver = neo4j_client._TimeoutDriver(fake)
     return client, fake
+
+
+_COUNT_THEN_NAME = re.compile(r"^MATCH \(n:(\w+)\) WITH count\(n\) AS c RETURN '(\w+)' AS label, c AS count$")
+_NAME_IN_AGGREGATION = re.compile(r"^MATCH \(n:(\w+)\) RETURN '(\w+)' AS label, count\(n\) AS count$")
+
+
+def _cypher_count_rows(store: dict):
+    """Rows Cypher returns for a ``UNION ALL`` of per-label count branches, from ``store`` (label -> nodes).
+
+    An aggregation without a grouping key yields one row even on empty input; one whose RETURN also
+    projects a literal (``RETURN 'Alert' AS label, count(n)``) groups by it and yields no row when
+    no node matches. Any other branch shape fails the test.
+    """
+
+    def rows(statement) -> list:
+        out = []
+        for branch in (b.strip() for b in statement.text.split("UNION ALL")):
+            if m := _COUNT_THEN_NAME.match(branch):
+                out.append({"label": m.group(2), "count": store.get(m.group(1), 0)})
+            elif m := _NAME_IN_AGGREGATION.match(branch):
+                if store.get(m.group(1), 0):
+                    out.append({"label": m.group(2), "count": store[m.group(1)]})
+            else:
+                raise AssertionError(f"unexpected count branch: {branch!r}")
+        return out
+
+    return rows
 
 
 class TestNodeCountQuery:
@@ -185,10 +216,31 @@ class TestNodeCountQuery:
         assert statement.timeout and statement.timeout > 0, "a server-side transaction timeout"
         query = statement.text
         branches = [b.strip() for b in query.split("UNION ALL")]
-        assert branches == [f"MATCH (n:{label}) RETURN '{label}' AS label, count(n) AS count" for label in labels]
+        assert branches == [
+            f"MATCH (n:{label}) WITH count(n) AS c RETURN '{label}' AS label, c AS count" for label in labels
+        ]
         assert not re.search(r"\b(CREATE|MERGE|SET|DELETE|REMOVE|DETACH)\b", query)
-        assert set(labels) == set(neo4j_client._STATS_NODE_LABELS) | {"Source"}
         assert {"Indicator", "Vulnerability", "CVE", "Malware", "ThreatActor", "Technique", "Source"} <= set(labels)
+
+    def test_a_label_without_nodes_is_counted_as_zero(self):
+        """Alert has no nodes in the compose deployment, Campaign none before the first enrichment.
+
+        With the label as a literal next to count(n) in one RETURN, Cypher returned no row for them,
+        the row check raised, and no count was ever recorded.
+        """
+        store = {label: 100 + i for i, label in enumerate(neo4j_client.NODE_COUNT_LABELS)}
+        store.update(Alert=0, Campaign=0)
+        client, _ = _client_with_rows(_cypher_count_rows(store))
+
+        assert client.count_nodes_by_label() == store
+
+        # The fake follows Cypher for the former shape too: those labels would have no row.
+        former = SimpleNamespace(
+            text="\nUNION ALL\n".join(
+                f"MATCH (n:{label}) RETURN '{label}' AS label, count(n) AS count" for label in ("Alert", "Indicator")
+            )
+        )
+        assert _cypher_count_rows(store)(former) == [{"label": "Indicator", "count": store["Indicator"]}]
 
     def test_missing_rows_and_no_connection_raise_instead_of_reporting_zero(self):
         labels = neo4j_client.NODE_COUNT_LABELS
@@ -286,7 +338,30 @@ class TestNodeGauges:
         assert node_reads == [1]
         assert _sample("edgeguard_neo4j_nodes", {"label": "Indicator", "zone": "unknown"}) == 55, "no 0 written"
 
-    def test_baseline_full_sync_counts_as_a_sync(self, dag_module, compose_metrics, monkeypatch):
+    def test_a_label_without_nodes_is_recorded_as_zero(self, dag_module, compose_metrics, monkeypatch):
+        """End to end through the real client and query: a label without nodes (Alert in the compose
+        deployment) is recorded as 0 instead of failing the whole count."""
+        store = {label: 50 + i for i, label in enumerate(neo4j_client.NODE_COUNT_LABELS)}
+        store["Alert"] = 0
+        metrics_server.NEO4J_NODES.labels(label="Alert", zone="all").set(9)
+
+        class _Client(neo4j_client.Neo4jClient):
+            def __init__(self, *args, **kwargs):
+                super().__init__(uri="bolt://unused:7687", user="neo4j", password="x")
+                self.driver = neo4j_client._TimeoutDriver(_FakeDriver(_cypher_count_rows(store)))
+
+            def connect(self):
+                return True
+
+        _install_client(monkeypatch, _Client)
+
+        assert dag_module.record_neo4j_node_counts() is True
+
+        assert _sample("edgeguard_neo4j_nodes", {"label": "Alert", "zone": "all"}) == 0
+        assert _sample("edgeguard_neo4j_nodes", {"label": "Indicator", "zone": "all"}) == store["Indicator"]
+
+    def test_baseline_full_sync_counts_as_a_sync_without_node_counts(self, dag_module, compose_metrics, monkeypatch):
+        """The full sync stamps the sync; the node counts wait for the enrichment (no Campaign yet)."""
         self._fake_sync(monkeypatch)
         monkeypatch.setattr(dag_module, "_require_baseline_start", lambda *args, **kwargs: None)
         node_reads = []
@@ -298,7 +373,47 @@ class TestNodeGauges:
 
         assert _sample("edgeguard_neo4j_sync_last_success_timestamp") >= started
         assert _sample("edgeguard_neo4j_sync_duration_seconds_count") == observed + 1
-        assert node_reads == [1]
+        assert node_reads == []
+
+    def _fake_enrichment(self, monkeypatch, events, error=None):
+        def run_all_enrichment_jobs(client):
+            events.append("enrichment")
+            if error is not None:
+                raise error
+            return {"campaigns": 3}
+
+        class _Client:
+            def connect(self):
+                return True
+
+            def close(self):
+                events.append("closed")
+
+        monkeypatch.setitem(
+            sys.modules, "enrichment_jobs", SimpleNamespace(run_all_enrichment_jobs=run_all_enrichment_jobs)
+        )
+        _install_client(monkeypatch, _Client)
+
+    @pytest.mark.parametrize("task", ["run_baseline_enrichment", "run_enrichment_jobs"])
+    def test_counts_are_taken_after_a_successful_enrichment(self, dag_module, compose_metrics, monkeypatch, task):
+        events = []
+        self._fake_enrichment(monkeypatch, events)
+        monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: events.append("counts") or True)
+
+        getattr(dag_module, task)()
+
+        assert events == ["enrichment", "closed", "counts"]
+
+    @pytest.mark.parametrize("task", ["run_baseline_enrichment", "run_enrichment_jobs"])
+    def test_a_failed_enrichment_records_no_counts(self, dag_module, compose_metrics, monkeypatch, task):
+        events = []
+        self._fake_enrichment(monkeypatch, events, error=RuntimeError("campaign builder failed"))
+        monkeypatch.setattr(dag_module, "record_neo4j_node_counts", lambda: events.append("counts") or True)
+
+        with pytest.raises(Exception, match="nrichment failed"):
+            getattr(dag_module, task)()
+
+        assert "counts" not in events
 
     def test_failed_sync_records_nothing(self, dag_module, compose_metrics, monkeypatch):
         self._fake_sync(monkeypatch, success=False)
@@ -313,9 +428,51 @@ class TestNodeGauges:
         assert (_sample("edgeguard_neo4j_sync_duration_seconds_count") or 0.0) == observed
 
 
+def _dashboard_node_panels() -> dict:
+    dashboard = json.loads((_ROOT / "grafana" / "dashboards" / "edgeguard-overview.json").read_text())
+
+    def walk(panels):
+        for panel in panels:
+            yield panel
+            yield from walk(panel.get("panels", []))
+
+    return {
+        panel["title"]: [(t["expr"], t.get("legendFormat")) for t in panel.get("targets", [])]
+        for panel in walk(dashboard["panels"])
+        if any("edgeguard_neo4j_nodes" in t.get("expr", "") for t in panel.get("targets", []))
+    }
+
+
+def test_dashboard_reads_the_per_label_series_the_sync_records():
+    """The zone="unknown" series the former code left at 0 stay in the metrics directory: a panel
+    without the zone filter drew them as flat zero lines next to the real counts."""
+    panels = _dashboard_node_panels()
+    assert panels["Neo4j Node Counts by Label"] == [('edgeguard_neo4j_nodes{zone="all"}', "{{label}}")]
+    assert panels["Neo4j Node Count Change (24 h) by Label"] == [
+        ('edgeguard_neo4j_nodes{zone="all"} - (edgeguard_neo4j_nodes{zone="all"} offset 1d)', "{{label}}")
+    ]
+    assert panels["Neo4j Total Nodes"] == [("sum(edgeguard_neo4j_nodes)", "Total Nodes")], "zeros add nothing"
+
+
 # ---------------------------------------------------------------------------
 # DAG run in progress
 # ---------------------------------------------------------------------------
+
+
+_PLUGIN = _ROOT / "plugins" / "edgeguard_dag_run_state.py"
+
+
+@pytest.fixture()
+def run_state_listener(monkeypatch):
+    """The plugin's listener, from the plugins-folder file loaded the way Airflow's plugin manager
+    loads it (module named after the file, registered in ``sys.modules`` before it runs)."""
+    spec = importlib.util.spec_from_file_location(_PLUGIN.stem, _PLUGIN)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    spec.loader.exec_module(module)
+    (listener,) = module.EdgeGuardDagRunStatePlugin.listeners
+    return SimpleNamespace(module=module, listener=listener)
 
 
 def _in_progress(dag_id: str):
@@ -329,35 +486,71 @@ def _callbacks(value) -> list:
 
 
 class TestDagRunInProgress:
-    def test_a_task_marks_the_run_start_and_the_run_end_clears_it(self, dag_module, compose_metrics):
+    def test_the_run_hooks_mark_a_started_run_and_clear_it_when_it_ends(
+        self, run_state_listener, monkeypatch, tmp_path
+    ):
+        # The hooks write only in the multi-process mode; the values land in this process's registry.
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        listener = run_state_listener.listener
         start = datetime(2026, 10, 15, 2, 0, tzinfo=timezone.utc)
-        dag = SimpleNamespace(dag_id="edgeguard_daily")
+        run = SimpleNamespace(dag_id="edgeguard_daily", run_id="scheduled__probe", start_date=start)
 
-        dag_module._on_task_execute({"dag": dag, "dag_run": SimpleNamespace(start_date=start)})
+        listener.on_dag_run_running(dag_run=run, msg="started")
         assert _in_progress("edgeguard_daily") == start.timestamp()
-
-        dag_module._on_task_success({"dag": dag})
-        assert _in_progress("edgeguard_daily") == start.timestamp(), "a task success no longer moves the mark"
-        assert _sample("edgeguard_dag_last_success_timestamp", {"dag_id": "edgeguard_daily"}) > start.timestamp()
-
-        dag_module._on_dag_run_end({"dag": dag, "run_id": "scheduled__2026-10-15T02:00:00+00:00", "reason": "success"})
+        listener.on_dag_run_failed(dag_run=run, msg="Dag Run's state was manually set to `failed`.")
         assert _in_progress("edgeguard_daily") == 0
 
-    def test_every_dag_marks_its_runs_and_clears_the_mark_when_a_run_ends(self, dag_module, dags):
+        restarted = SimpleNamespace(
+            dag_id="edgeguard_daily", run_id="scheduled__probe", start_date=start + timedelta(hours=1)
+        )
+        listener.on_dag_run_running(dag_run=restarted, msg="started")
+        assert _in_progress("edgeguard_daily") == restarted.start_date.timestamp()
+        listener.on_dag_run_success(dag_run=restarted, msg="success")
+        assert _in_progress("edgeguard_daily") == 0
+
+    def test_outside_the_multi_process_mode_the_hooks_write_nothing(self, run_state_listener, monkeypatch):
+        """The scheduler's own registry is served by nothing; only the shared directory reaches Prometheus."""
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+        metrics_server.DAG_RUN_START.labels(dag_id="probe_no_multiproc").set(123)
+
+        run_state_listener.listener.on_dag_run_failed(dag_run=SimpleNamespace(dag_id="probe_no_multiproc"), msg="x")
+
+        assert _in_progress("probe_no_multiproc") == 123
+
+    def test_a_metrics_failure_never_reaches_the_scheduler(self, run_state_listener, monkeypatch, caplog):
+        def unwritable():
+            raise OSError("metrics directory is read-only")
+
+        monkeypatch.setattr(run_state_listener.module, "_run_start_gauge", unwritable)
+        run = SimpleNamespace(dag_id="edgeguard_daily", start_date=None)
+
+        with caplog.at_level(logging.WARNING):
+            run_state_listener.listener.on_dag_run_running(dag_run=run, msg="started")
+            run_state_listener.listener.on_dag_run_failed(dag_run=run, msg="timed_out")
+
+        assert sum("in-progress mark of edgeguard_daily not written" in r.getMessage() for r in caplog.records) == 2
+
+    def test_the_compose_deployment_loads_the_plugin(self):
+        airflow = yaml.safe_load((_ROOT / "docker-compose.yml").read_text())["services"]["airflow"]
+        folder = airflow["environment"]["AIRFLOW__CORE__PLUGINS_FOLDER"]
+        assert f"./{_PLUGIN.parent.name}:{folder}:ro" in airflow["volumes"]
+        assert airflow["environment"]["PROMETHEUS_MULTIPROC_DIR"], "the hooks write in the multi-process mode only"
+
+    def test_no_dag_or_task_callback_writes_the_mark(self, dag_module, dags):
+        """A DAG-level end callback runs late in the DAG processor and can clear the next run's mark,
+        and none runs when a run is marked failed by hand; the listener hooks are the only writer."""
+        assert "DAG_RUN_START" not in (_DAGS / "edgeguard_pipeline.py").read_text()
         for dag in dags.values():
-            assert _callbacks(dag.on_success_callback) == [dag_module._on_dag_run_end], dag.dag_id
-            assert _callbacks(dag.on_failure_callback) == [dag_module._on_dag_run_end], dag.dag_id
             assert dag.tasks, dag.dag_id
             for task in dag.tasks:
-                assert dag_module._on_task_execute in _callbacks(task.on_execute_callback), task.task_id
+                # DAG_LAST_SUCCESS (EdgeGuardDAGLastSuccessStale, EdgeGuardBuildRelationshipsSilentDeath).
                 assert dag_module._on_task_success in _callbacks(task.on_success_callback), task.task_id
 
-    def test_the_former_series_is_no_longer_read_or_written(self, dag_module):
-        alerts = (_ROOT / "prometheus" / "alerts.yml").read_text()
-        assert "edgeguard_dag_run_start_timestamp" not in alerts
+    def test_the_former_series_is_no_longer_read_or_written(self):
+        exprs = [r["expr"] for g in _RULES["groups"] for r in g["rules"]]
+        assert exprs and not any("edgeguard_dag_run_start_timestamp" in e for e in exprs)
         assert metrics_server.DAG_RUN_START._name == "edgeguard_dag_run_in_progress_start_timestamp"
-        src = (_DAGS / "edgeguard_pipeline.py").read_text()
-        assert '"edgeguard_dag_run_start_timestamp"' not in src
+        assert '"edgeguard_dag_run_start_timestamp"' not in (_DAGS / "edgeguard_pipeline.py").read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +611,27 @@ class TestDagAlerts:
         assert "> 90000" in daily and _longest_interval(scheduled["edgeguard_daily"].schedule) < 90000
 
 
+class TestBuildRelationshipsSilentDeath:
+    def test_reads_the_latest_successful_baseline_task(self, dag_module, compose_metrics):
+        """The rule needs "a baseline task succeeded in the last 6 h". The in-progress mark holds the
+        run's start time while build_relationships runs many hours later, so with it the rule fired
+        only in the first 6 h of a baseline and never once build_relationships could have died."""
+        expr = _norm(_rule("EdgeGuardBuildRelationshipsSilentDeath")["expr"])
+        assert expr == (
+            "( absent(edgeguard_build_relationships_completions_total) OR "
+            "rate(edgeguard_build_relationships_completions_total[6h]) == 0 ) "
+            "and on() ( "
+            'max_over_time(edgeguard_dag_last_success_timestamp{dag_id="edgeguard_baseline"}[8h]) '
+            "> (time() - (6 * 60 * 60)) )"
+        )
+        # Every successful baseline task moves the series to its completion time.
+        dag_module._on_task_success({"dag": SimpleNamespace(dag_id="edgeguard_baseline")})
+        first = _sample("edgeguard_dag_last_success_timestamp", {"dag_id": "edgeguard_baseline"})
+        time.sleep(0.01)
+        dag_module._on_task_success({"dag": SimpleNamespace(dag_id="edgeguard_baseline")})
+        assert _sample("edgeguard_dag_last_success_timestamp", {"dag_id": "edgeguard_baseline"}) > first
+
+
 def _write_state(state_dir: Path, last_sync: datetime) -> None:
     state_dir.mkdir(mode=0o700, exist_ok=True)
     (state_dir / "edgeguard_last_neo4j_sync.json").write_text(json.dumps({"last_sync": last_sync.isoformat()}))
@@ -438,18 +652,36 @@ def _sync_starts(dag_module, state_dir: Path, fires: list, last_start: datetime)
     return starts
 
 
+def _simulate_sync_schedule(dag_module, schedule: str, state_dir: Path) -> SimpleNamespace:
+    """Sync starts of the 3-day cron through the real cadence guard, 2025-2032 (two leap years).
+
+    ``gaps``: hours between consecutive scheduled sync starts. ``after_baseline``: hours from a
+    baseline's full sync (which restarts the guard) to the next scheduled sync start, for a baseline
+    starting at every hour of January and February 2027.
+    """
+    fires = _cron_fires(schedule, datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2033, 1, 1, tzinfo=timezone.utc))
+    starts = _sync_starts(dag_module, state_dir, fires[1:], fires[0] + timedelta(minutes=1))
+    after_baseline = []
+    for hour in range(0, 24 * 31 * 2, 1):
+        baseline_start = datetime(2027, 1, 1, tzinfo=timezone.utc) + timedelta(hours=hour, minutes=7)
+        upcoming = [f for f in fires if f > baseline_start][:4]
+        first = _sync_starts(dag_module, state_dir, upcoming, baseline_start)[0]
+        after_baseline.append((first - baseline_start).total_seconds() / 3600)
+    return SimpleNamespace(
+        starts=starts,
+        gaps=[(b - a).total_seconds() / 3600 for a, b in pairwise(starts)],
+        after_baseline=after_baseline,
+    )
+
+
 class TestSyncStaleness:
     def test_threshold_covers_the_longest_gap_of_the_three_day_schedule(
         self, dag_module, dags, compose_metrics, tmp_path
     ):
         sync_dag = dags["edgeguard_neo4j_sync"]
         assert sync_dag.schedule == "0 3 */3 * *"
-        state_dir = tmp_path / "state"
-        fires = _cron_fires(
-            sync_dag.schedule, datetime(2025, 1, 1, tzinfo=timezone.utc), datetime(2033, 1, 1, tzinfo=timezone.utc)
-        )
-        starts = _sync_starts(dag_module, state_dir, fires[1:], fires[0] + timedelta(minutes=1))
-        gaps = [(b - a).total_seconds() / 3600 for a, b in pairwise(starts)]
+        sim = _simulate_sync_schedule(dag_module, sync_dag.schedule, tmp_path / "state")
+        starts, gaps = sim.starts, sim.gaps
         assert round(max(gaps)) == 120, "28 February to 4 March in a leap year"
         non_leap = [
             (b - a).total_seconds() / 3600 for a, b in pairwise(starts) if a.year not in (2028, 2032) or a.month != 2
@@ -457,15 +689,8 @@ class TestSyncStaleness:
         assert round(max(non_leap)) == 96, "the fire after the 31st is skipped by the 71 h guard"
         month_end_gaps_2027 = [g for a, g in zip(starts[:-1], gaps, strict=True) if a.year == 2027 and g > 73]
         assert len(month_end_gaps_2027) >= 8, "the former 72 h limit fired at most month ends"
-
         # A baseline's full sync restarts the guard: the next scheduled sync may be one fire later.
-        after_baseline = []
-        for hour in range(0, 24 * 31 * 2, 1):
-            baseline_start = datetime(2027, 1, 1, tzinfo=timezone.utc) + timedelta(hours=hour, minutes=7)
-            upcoming = [f for f in fires if f > baseline_start][:4]
-            first = _sync_starts(dag_module, state_dir, upcoming, baseline_start)[0]
-            after_baseline.append((first - baseline_start).total_seconds() / 3600)
-        assert 142 < max(after_baseline) < 144
+        assert 142 < max(sim.after_baseline) < 144
 
         expr = _norm(_rule("EdgeGuardNeo4jSyncStale")["expr"])
         assert expr == (
@@ -476,8 +701,18 @@ class TestSyncStaleness:
         timeout_h = sync_dag.dagrun_timeout.total_seconds() / 3600
         # The stamp is written when a sync ends, so the next sync may take up to its timeout longer.
         assert max(gaps) + timeout_h <= threshold_h
-        assert max(after_baseline) <= threshold_h
+        assert max(sim.after_baseline) <= threshold_h
         assert _rule("EdgeGuardNeo4jSyncStale")["for"] == "1h"
+
+    def test_misp_to_neo4j_staleness_covers_the_longest_gap_between_two_syncs(
+        self, dag_module, dags, compose_metrics, tmp_path
+    ):
+        """``misp_to_neo4j`` is stamped when a sync connects (and again on a clean run), so two
+        stamps are at most one start-to-start gap apart; the 26 h catch-all fired 46 h of every 72 h."""
+        sim = _simulate_sync_schedule(dag_module, dags["edgeguard_neo4j_sync"].schedule, tmp_path / "state")
+        longest_s = max(max(sim.gaps), max(sim.after_baseline)) * 3600
+        limit_s = _label_map("edgeguard:collector_max_stale_seconds", "source")["misp_to_neo4j"]
+        assert longest_s < limit_s <= longest_s + 3 * 3600, "covers the longest gap, with at most 3 h margin"
 
 
 class TestCollectorOutcomes:
@@ -499,11 +734,13 @@ class TestCollectorOutcomes:
     @pytest.mark.parametrize(
         "result, outcome, status",
         [
-            ({"success": True, "count": 7}, "collected", "success"),
-            ({"success": True, "count": 0}, "empty", "success"),
-            ({"success": True, "count": 0, "not_modified": True}, "not_modified", "not_modified"),
+            (make_status("probe_collected", True, count=7), "collected", "success"),
+            (make_status("probe_empty", True, count=0), "empty", "success"),
+            (make_status("probe_not_modified", True, count=0, not_modified=True), "not_modified", "not_modified"),
             (
-                {"success": True, "count": 0, "skipped": True, "skip_reason_class": "missing_probe_key"},
+                make_skipped_optional_source(
+                    "probe_skipped", skip_reason="no API key configured", skip_reason_class="missing_probe_key"
+                ),
                 "skipped",
                 "skipped",
             ),
@@ -512,14 +749,14 @@ class TestCollectorOutcomes:
     def test_a_run_records_its_outcome_and_adds_its_count_once(
         self, dag_module, compose_metrics, result, outcome, status
     ):
-        source = f"probe_{outcome}"
+        source = result["source"]
 
         class _Collector:
             def __init__(self, misp_writer=None, **kwargs):
                 pass
 
             def collect(self, limit=None, push_to_misp=True):
-                return {"source": source, "failed": 0, **result}
+                return dict(result)
 
         labels = {"source": source, "zone": "global", "status": status}
         before = _sample("edgeguard_indicators_collected_total", labels) or 0.0
@@ -540,7 +777,7 @@ class TestCollectorOutcomes:
                 pass
 
             def collect(self, limit=None, push_to_misp=True):
-                return {"source": "probe_failed", "success": False, "count": 0, "failed": 3}
+                return make_status("probe_failed", False, count=0, failed=3)
 
         with pytest.raises(Exception, match="success=false"):
             dag_module.run_collector_with_metrics("probe_failed", _Failing, MagicMock(), limit=10)
@@ -549,6 +786,70 @@ class TestCollectorOutcomes:
         monkeypatch.setattr(dag_module, "is_collector_enabled_by_allowlist", lambda name: False)
         dag_module.run_collector_with_metrics("probe_disabled", _Failing, MagicMock(), limit=10)
         assert _sample("edgeguard_collector_last_run_outcome", {"source": "probe_disabled", "outcome": "skipped"}) == 1
+
+    @staticmethod
+    def _outcomes(source: str) -> dict:
+        return {
+            o: _sample("edgeguard_collector_last_run_outcome", {"source": source, "outcome": o})
+            for o in metrics_server.COLLECTOR_RUN_OUTCOMES
+        }
+
+    @pytest.mark.parametrize(
+        "path, outcome",
+        [
+            ("baseline_in_progress", "skipped"),
+            ("not_a_status_dict", "failed"),
+            ("parent_dag_aborted", "skipped"),
+            ("transient_external_error", "skipped"),
+            ("catastrophic_error", "failed"),
+        ],
+    )
+    def test_every_other_exit_path_records_its_outcome(self, dag_module, compose_metrics, monkeypatch, path, outcome):
+        """Each path overwrites the previous outcome; a path that wrote none would leave ``collected``."""
+        import baseline_lock
+        from parent_dag_liveness import AbortedByDagFailureException
+
+        source = f"probe_path_{path}"
+        metrics_server.record_collector_outcome(source, "collected")
+        monkeypatch.setattr(dag_module, "send_slack_alert", lambda *args, **kwargs: None)
+
+        def collect():
+            if path == "not_a_status_dict":
+                return []  # the shape a collector returns with push_to_misp=False
+            if path == "parent_dag_aborted":
+                raise AbortedByDagFailureException("edgeguard_baseline", "manual__probe", "failed")
+            if path == "transient_external_error":
+                raise ConnectionError("Connection reset by peer")
+            if path == "catastrophic_error":
+                raise TypeError("unsupported operand type(s) for +: 'int' and 'NoneType'")
+            return make_status(source, True, count=7)
+
+        class _Collector:
+            def __init__(self, misp_writer=None, **kwargs):
+                pass
+
+            def collect(self, limit=None, push_to_misp=True):
+                return collect()
+
+        if path == "baseline_in_progress":
+            assert baseline_lock.acquire_baseline_lock() is True  # an in-process baseline holds the lock
+        try:
+            if path == "not_a_status_dict":
+                with pytest.raises(dag_module.AirflowException, match="expected a status dict"):
+                    dag_module.run_collector_with_metrics(source, _Collector, MagicMock(), limit=10)
+            elif path == "catastrophic_error":
+                with pytest.raises(TypeError, match="unsupported operand"):
+                    dag_module.run_collector_with_metrics(source, _Collector, MagicMock(), limit=10)
+            else:
+                result = dag_module.run_collector_with_metrics(source, _Collector, MagicMock(), limit=10)
+                assert result["skipped"] is True and result["skip_reason_class"] == path
+        finally:
+            if path == "baseline_in_progress":
+                baseline_lock.release_baseline_lock()
+
+        assert self._outcomes(source) == {
+            o: (1.0 if o == outcome else 0.0) for o in metrics_server.COLLECTOR_RUN_OUTCOMES
+        }
 
     def test_no_indicators_alert_leaves_out_not_modified_and_skipped_sources(self):
         expr = _norm(_rule("EdgeGuardNoIndicatorsCollected")["expr"])
@@ -568,29 +869,21 @@ class TestCollectorOutcomes:
 _CHILD = r"""
 import json
 import sys
-from datetime import datetime, timezone
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 sys.path[:0] = [sys.argv[1], sys.argv[2]]
 import edgeguard_pipeline as ep
 
-step = sys.argv[3]
-dag = SimpleNamespace(dag_id="edgeguard_daily")
-if step == "collect":
-    class Probe:
-        def __init__(self, misp_writer=None, **kwargs):
-            pass
 
-        def collect(self, limit=None, push_to_misp=True):
-            return {"source": "o8_probe", "success": True, "count": 7, "failed": 0}
+class Probe:
+    def __init__(self, misp_writer=None, **kwargs):
+        pass
 
-    ep.run_collector_with_metrics("o8_probe", Probe, MagicMock(), limit=10)
-elif step == "start":
-    started = datetime.fromtimestamp(float(sys.argv[4]), timezone.utc)
-    ep._on_task_execute({"dag": dag, "dag_run": SimpleNamespace(start_date=started)})
-elif step == "end":
-    ep._on_dag_run_end({"dag": dag, "run_id": "scheduled__probe", "reason": "success"})
+    def collect(self, limit=None, push_to_misp=True):
+        return {"source": "o8_probe", "success": True, "count": 7, "failed": 0}
+
+
+ep.run_collector_with_metrics("o8_probe", Probe, MagicMock(), limit=10)
 flags = {
     "enabled": ep.ENABLE_PROMETHEUS_METRICS,
     "prometheus": ep.PROMETHEUS_AVAILABLE,
@@ -600,8 +893,72 @@ flags = {
 print("FLAGS=" + json.dumps(flags))
 """
 
+# A scheduler or API server process: Airflow's listener manager loads the plugins folder named by
+# AIRFLOW__CORE__PLUGINS_FOLDER, then each step changes the run's state the way Airflow does and
+# calls the hook through Airflow's own code. After every step the process prints the mark as the
+# ``metrics`` service would serve it (aggregated from the shared directory).
+_LISTENER_CHILD = r"""
+import json
+import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
-def _run_child(tmp_path: Path, metrics_dir: Path, *args: str) -> None:
+sys.path.insert(0, sys.argv[1])
+from airflow.api_fastapi.core_api.datamodels.dag_run import DagRunMutableStates
+from airflow.api_fastapi.core_api.services.public import dag_run as dag_run_service
+from airflow.listeners.listener import get_listener_manager
+from airflow.models.dagrun import DagRun
+from airflow.utils.state import DagRunState
+from prometheus_client import generate_latest
+from prometheus_client.parser import text_string_to_metric_families
+
+import metrics_exporter
+
+listeners = sorted(type(p).__module__ for p in get_listener_manager().pm.get_plugins())
+print("LISTENERS=" + json.dumps(listeners))
+dag_id = sys.argv[2]
+run = DagRun(dag_id=dag_id, run_id="manual__probe", run_type="manual")
+
+
+def mark():
+    text = generate_latest(metrics_exporter.build_registry(None)).decode()
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            if sample.name == "edgeguard_dag_run_in_progress_start_timestamp" and sample.labels == {"dag_id": dag_id}:
+                return sample.value
+    return None
+
+
+def set_state_in_database(*, dag, run_id, commit, session):
+    # The database update of mark_tasks.set_dag_run_state_to_*; the listener call stays Airflow's.
+    return [], []
+
+
+for step in sys.argv[3:]:
+    action, _, arg = step.partition("=")
+    if action == "scheduler_start":
+        # SchedulerJobRunner._start_queued_dagruns: RUNNING with start_date now, then the hook.
+        run.state = DagRunState.RUNNING
+        run.start_date = datetime.fromtimestamp(float(arg), timezone.utc)
+        run.notify_dagrun_state_changed(msg="started")
+    elif action == "scheduler_end":
+        # DagRun.update_state, or the scheduler's dagrun_timeout branch for a failed run.
+        run.state = DagRunState(arg)
+        run.notify_dagrun_state_changed(msg="timed_out" if arg == "failed" else "success")
+    elif action == "api":
+        # PATCH /api/v2/dags/{dag_id}/dagRuns/{run_id} {"state": arg}: UI "Mark run as ...", `edgeguard dag kill`.
+        dag_run_service.set_dag_run_state_to_failed = set_state_in_database
+        dag_run_service.set_dag_run_state_to_success = set_state_in_database
+        dag_run_service.patch_dag_run_state(
+            dag=SimpleNamespace(dag_id=dag_id), dag_run=run, state=DagRunMutableStates(arg), session=None
+        )
+    else:
+        raise SystemExit(f"unknown step {step}")
+    print("MARK=" + json.dumps(mark()))
+"""
+
+
+def _child_env(tmp_path: Path, metrics_dir: Path) -> dict:
     env = dict(
         os.environ,
         PROMETHEUS_MULTIPROC_DIR=str(metrics_dir),
@@ -611,9 +968,13 @@ def _run_child(tmp_path: Path, metrics_dir: Path, *args: str) -> None:
         EDGEGUARD_BASELINE_LOCK_PATH=str(tmp_path / "no_such.lock"),
     )
     env.pop("EDGEGUARD_COLLECT_SOURCES", None)
+    return env
+
+
+def _run_child(tmp_path: Path, metrics_dir: Path) -> None:
     proc = subprocess.run(
-        [sys.executable, "-c", _CHILD, str(_DAGS), str(_SRC), *args],
-        env=env,
+        [sys.executable, "-c", _CHILD, str(_DAGS), str(_SRC)],
+        env=_child_env(tmp_path, metrics_dir),
         capture_output=True,
         text=True,
         timeout=300,
@@ -626,6 +987,28 @@ def _run_child(tmp_path: Path, metrics_dir: Path, *args: str) -> None:
         "metrics_server": True,
         "multiprocess": True,
     }, "the child must run in the compose metrics mode"
+
+
+def _run_listener_child(tmp_path: Path, metrics_dir: Path, dag_id: str, *steps: str) -> list:
+    """Run ``steps`` in a new Airflow process with the repository's plugins folder; the marks after each."""
+    env = _child_env(tmp_path, metrics_dir)
+    env.update(
+        AIRFLOW_HOME=str(tmp_path / "airflow_home"),
+        AIRFLOW__CORE__PLUGINS_FOLDER=str(_PLUGIN.parent),
+        AIRFLOW__CORE__LOAD_EXAMPLES="false",
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", _LISTENER_CHILD, str(_SRC), dag_id, *steps],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    lines = proc.stdout.splitlines()
+    listeners = [json.loads(line[len("LISTENERS=") :]) for line in lines if line.startswith("LISTENERS=")]
+    assert listeners == [[_PLUGIN.stem]], "Airflow loaded the plugin from the plugins folder"
+    return [json.loads(line[len("MARK=") :]) for line in lines if line.startswith("MARK=")]
 
 
 def _aggregate(metrics_dir: Path) -> dict:
@@ -642,11 +1025,11 @@ def _value(values: dict, name: str, **labels) -> float | None:
 
 
 class TestMultiProcess:
-    def test_one_run_adds_its_count_once_and_the_run_mark_follows_the_newest_write(self, tmp_path):
+    def test_one_run_adds_its_count_once(self, tmp_path):
         metrics_dir = tmp_path / "metrics_multiproc"
         metrics_dir.mkdir()
 
-        _run_child(tmp_path, metrics_dir, "collect")
+        _run_child(tmp_path, metrics_dir)
         values = _aggregate(metrics_dir)
         collected = _value(
             values, "edgeguard_indicators_collected_total", source="o8_probe", zone="global", status="success"
@@ -655,14 +1038,27 @@ class TestMultiProcess:
         assert _value(values, "edgeguard_misp_push_duration_seconds_count", source="o8_probe") == 1.0
         assert _value(values, "edgeguard_collector_last_run_outcome", source="o8_probe", outcome="collected") == 1.0
 
-        first_start = datetime(2026, 10, 15, 2, 0, tzinfo=timezone.utc).timestamp()
-        _run_child(tmp_path, metrics_dir, "start", str(first_start))
-        mark = "edgeguard_dag_run_in_progress_start_timestamp"
-        assert _value(_aggregate(metrics_dir), mark, dag_id="edgeguard_daily") == first_start
+    def test_the_scheduler_and_the_api_server_keep_the_run_mark(self, tmp_path):
+        """Each step runs in the process Airflow runs it in, so the ``mostrecent`` merge is exercised.
 
-        _run_child(tmp_path, metrics_dir, "end")  # the DAG processor, another process
-        assert _value(_aggregate(metrics_dir), mark, dag_id="edgeguard_daily") == 0.0
+        A run marked failed by hand goes through the API server, which runs no DAG-level callback:
+        with the former callbacks the mark kept the run's start and EdgeGuardDAGRunStuck fired once
+        the start was older than the limit, until the DAG's next run.
+        """
+        metrics_dir = tmp_path / "metrics_multiproc"
+        metrics_dir.mkdir()
+        dag_id = "edgeguard_baseline"
+        start = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc).timestamp()
 
-        next_start = first_start + 86400
-        _run_child(tmp_path, metrics_dir, "start", str(next_start))
-        assert _value(_aggregate(metrics_dir), mark, dag_id="edgeguard_daily") == next_start
+        assert _run_listener_child(tmp_path, metrics_dir, dag_id, f"scheduler_start={start}") == [start]
+        assert _run_listener_child(tmp_path, metrics_dir, dag_id, "api=failed") == [0.0]
+
+        later = start + 3 * 86400
+        steps = (f"scheduler_start={later}", "scheduler_end=failed", f"scheduler_start={later + 3600}")
+        assert _run_listener_child(tmp_path, metrics_dir, dag_id, *steps) == [later, 0.0, later + 3600]
+        assert _run_listener_child(tmp_path, metrics_dir, dag_id, "api=success") == [0.0]
+
+        last = later + 7 * 86400
+        steps = (f"scheduler_start={last}", "scheduler_end=success")
+        assert _run_listener_child(tmp_path, metrics_dir, dag_id, *steps) == [last, 0.0]
+        assert _value(_aggregate(metrics_dir), "edgeguard_dag_run_in_progress_start_timestamp", dag_id=dag_id) == 0.0

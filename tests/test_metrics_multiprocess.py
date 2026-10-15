@@ -49,7 +49,9 @@ class TestGaugeSemantics:
     def test_dag_gauges_are_mostrecent(self):
         src = (_ROOT / "dags" / "edgeguard_pipeline.py").read_text()
         calls = [m.start() for m in re.finditer(r"\b_?Gauge\(", src)]
-        assert len(calls) >= 6
+        # 2026-10: five; the DAG module no longer defines the run start gauge (the listener plugin
+        # writes metrics_server's DAG_RUN_START).
+        assert len(calls) >= 5
         for start in calls:
             window = src[start : start + 400]
             assert 'multiprocess_mode="mostrecent"' in window, window[:120]

@@ -71,14 +71,11 @@ def test_recording_rule_maps_every_scheduled_source_to_twice_its_cadence():
     assert mapped == {**_SCHEDULED_SOURCES, **_SYNC_SOURCES}
 
 
-def test_misp_to_neo4j_staleness_follows_the_sync_interval():
-    """2026-10: unmapped, the series fell to the 26 h catch-all and fired about 46 h of every 72 h."""
+def test_misp_to_neo4j_is_the_series_the_sync_stamps():
+    """2026-10: unmapped, the series fell to the 26 h catch-all and fired about 46 h of every 72 h. The
+    mapped limit is checked against the simulated sync schedule in tests/test_monitoring_signals.py."""
     sync_src = (_ROOT / "src" / "run_misp_to_neo4j.py").read_text()
     assert sync_src.count('record_collection_success("misp_to_neo4j")') >= 2, "the series the map covers"
-    # Twice the 72 h interval plus one hour, at least the longest normal gap between two syncs (143 h
-    # after a baseline sync; see tests/test_monitoring_signals.py for the schedule simulation).
-    assert _SYNC_SOURCES["misp_to_neo4j"] == 2 * 72 * 3600 + 3600
-    assert _SYNC_SOURCES["misp_to_neo4j"] > 143 * 3600
 
 
 def test_stale_alert_joins_on_the_recording_rule_and_has_a_catch_all():

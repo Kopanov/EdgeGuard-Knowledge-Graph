@@ -637,7 +637,7 @@ _STATS_NODE_LABELS: Tuple[str, ...] = (
     "Alert",
 )
 NODE_COUNT_LABELS: Tuple[str, ...] = _STATS_NODE_LABELS + ("Source",)
-# A count per label is answered from the store's count statistics, not a scan.
+# Server-side limit of the node count query (one count per label, no property access).
 _NODE_COUNT_TIMEOUT_SEC = 60
 
 
@@ -5638,10 +5638,14 @@ class Neo4jClient:
     def count_nodes_by_label(self, labels: Sequence[str] = NODE_COUNT_LABELS) -> Dict[str, int]:
         """Node count per label, in one read-only query (2026-10, for the ``edgeguard_neo4j_nodes`` gauge).
 
-        One ``MATCH (n:Label) RETURN count(n)`` branch per label, joined with ``UNION ALL``, so the
-        server answers every branch from its count statistics. Unlike ``get_stats`` (which reports
-        0 for a label it failed to count), this raises on any failure, including a missing or
-        unexpected row: a caller that exports the counts must never export a count it did not read.
+        One branch per label, joined with ``UNION ALL``. Each branch counts first and names the label
+        afterwards (``MATCH (n:Label) WITH count(n) AS c RETURN 'Label' AS label, c AS count``): an
+        aggregation without a grouping key returns one row even when no node matches, so a label
+        without nodes is reported as 0. Written as ``RETURN 'Label' AS label, count(n)``, the literal
+        would be a grouping key, and a label without nodes would return no row at all. Unlike
+        ``get_stats`` (which reports 0 for a label it failed to count), this raises on any failure,
+        including a missing or unexpected row: a caller that exports the counts must never export a
+        count it did not read.
         """
         if not self.driver:
             raise RuntimeError("Neo4j is not connected")
@@ -5649,7 +5653,7 @@ class Neo4jClient:
         if not wanted:
             return {}
         query = "\nUNION ALL\n".join(
-            f"MATCH (n:{label}) RETURN '{label}' AS label, count(n) AS count" for label in wanted
+            f"MATCH (n:{label}) WITH count(n) AS c RETURN '{label}' AS label, c AS count" for label in wanted
         )
         with self.driver.session(default_access_mode=READ_ACCESS) as session:
             result = session.run(query, timeout=_NODE_COUNT_TIMEOUT_SEC)

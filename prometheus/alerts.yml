@@ -315,9 +315,10 @@ groups:
           description: "DAG {{ $labels.dag_id }} has had more than 3 failures in the last hour."
 
       # 2026-10: the longest a run of each DAG may be in progress: its dagrun_timeout plus 15
-      # minutes. Airflow fails a run at its dagrun_timeout and the DAG-level failure callback then
-      # clears the in-progress mark, so a mark older than this means a run Airflow did not end (a
-      # stalled scheduler or DAG processor) or an end callback that did not run.
+      # minutes. The scheduler fails a run at its dagrun_timeout and its run-failed listener hook
+      # (plugins/edgeguard_dag_run_state.py) clears the in-progress mark at once, so a mark older
+      # than this means a run the scheduler did not end (a stalled scheduler), a deleted run, or a
+      # listener plugin that is not loaded.
       #   edgeguard_pipeline     5 h 30 min    edgeguard_daily        8 h 30 min
       #   edgeguard_medium_freq  5 h           edgeguard_neo4j_sync   22 h
       #   edgeguard_low_freq     8 h 30 min    edgeguard_baseline     32 h
@@ -331,10 +332,13 @@ groups:
           or label_replace(vector(116100), "dag_id", "edgeguard_baseline", "", "")
 
       - alert: EdgeGuardDAGRunStuck
-        # 2026-10: the gauge holds the start time of the run in progress (set by every task's
-        # on_execute_callback, 0 once the DAG-level success or failure callback ran). Before, it
-        # was refreshed on every task success and never cleared, so this alert fired from one hour
-        # after a run until the DAG's next run, and permanently after the baseline.
+        # 2026-10: the gauge holds the start time of the run in progress, set by the scheduler's
+        # run-started listener hook and set to 0 by the run-succeeded and run-failed hooks, which
+        # the scheduler calls when it ends a run (also at the dagrun_timeout) and the API server
+        # calls when a run is marked failed or successful by hand (UI, PATCH dagRuns,
+        # `edgeguard dag kill`). Before, it was refreshed on every task success and never cleared,
+        # so this alert fired from one hour after a run until the DAG's next run, and permanently
+        # after the baseline.
         expr: |
           (time() - (edgeguard_dag_run_in_progress_start_timestamp > 0))
             > on (dag_id) group_left ()
@@ -345,7 +349,7 @@ groups:
           component: pipeline
         annotations:
           summary: "DAG run {{ $labels.dag_id }} has been in progress too long"
-          description: "A run of {{ $labels.dag_id }} has been in progress for {{ $value | humanizeDuration }}, longer than its dagrun_timeout plus 15 minutes. Airflow did not end it: check the scheduler and the DAG processor (the run end callback clears this mark)."
+          description: "A run of {{ $labels.dag_id }} has been marked in progress for {{ $value | humanizeDuration }}, longer than its dagrun_timeout plus 15 minutes, so the scheduler did not end it. Check the scheduler, and that the listener plugin edgeguard_dag_run_state is loaded (`airflow plugins`). A run deleted while in progress also leaves the mark: docs/PROMETHEUS_SETUP.md gives the command that clears it."
 
       # 2026-10: the longest normal gap between two task successes of each DAG: one schedule
       # interval plus the DAG's dagrun_timeout (the next run's first task can succeed at most one
@@ -899,6 +903,14 @@ groups:
         # Fix: ``and on()`` — ignore ALL labels on the join, since what
         # matters here is simply "both conditions true in the same
         # evaluation step" not "same series."
+        #
+        # 2026-10: the right side reads the time of the latest successful
+        # task of the baseline DAG (edgeguard_dag_last_success_timestamp,
+        # stamped by _on_task_success), the value the former
+        # edgeguard_dag_run_start_timestamp held. That series now marks
+        # the run in progress with the run's start time, which stays at
+        # the start while build_relationships runs many hours later, so it
+        # cannot express "a baseline task succeeded in the last 6 h".
         expr: |
           (
             absent(edgeguard_build_relationships_completions_total)
@@ -907,7 +919,7 @@ groups:
           )
           and on()
           (
-            max_over_time(edgeguard_dag_run_in_progress_start_timestamp{dag_id="edgeguard_baseline"}[8h])
+            max_over_time(edgeguard_dag_last_success_timestamp{dag_id="edgeguard_baseline"}[8h])
               > (time() - (6 * 60 * 60))
           )
         for: 10m
@@ -915,11 +927,11 @@ groups:
           severity: critical
           component: build_relationships
         annotations:
-          summary: "build_relationships may have died silently — no SUMMARY emitted for 6h after baseline start"
+          summary: "build_relationships may have died silently — no SUMMARY emitted for 6h while the baseline progresses"
           description: |
             The ``edgeguard_build_relationships_completions_total`` counter
-            has not incremented for 6 hours despite the
-            ``edgeguard_baseline`` DAG starting within the last 8h.
+            has not incremented for 6 hours although a task of the
+            ``edgeguard_baseline`` DAG succeeded within the last 6 hours.
             build_relationships emits this counter ONLY when it reaches
             the ``[BUILD_RELATIONSHIPS SUMMARY]`` log line — absence =
             subprocess died before reaching the end.
