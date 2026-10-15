@@ -489,7 +489,9 @@ _METADATA_COMMENT_RE = re.compile(
 # taken as one, the first of them to reach a CVE without an NVD record would stay there, since any record
 # but NVD's only fills (``Neo4jClient.merge_cve``), and CISA's KEV text would never replace it. The
 # note stays the comment of the MISP attribute, which the node's ``misp_attribute_ids`` name.
-_CVE_PROVENANCE_NOTE_RE = re.compile(r"^\s*(?:Referenced in OTX pulse:.*|CVE from [^\s|]+\s*)$", re.DOTALL)
+# The placeholder names a source id (lowercase, as MISPWriter writes the item's tag), so a text such as
+# "CVE from Microsoft" is kept (2026-10, the rule the entity placeholders follow).
+_CVE_PROVENANCE_NOTE_RE = re.compile(r"^\s*(?:Referenced in OTX pulse:.*|CVE from [a-z0-9_-]+\s*)$", re.DOTALL)
 
 
 def _comment_description(raw_comment: Any) -> Optional[str]:
