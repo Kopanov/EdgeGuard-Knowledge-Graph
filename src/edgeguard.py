@@ -221,6 +221,27 @@ def check_circuit_breakers():
     return True, "Circuit breakers: OK (in-memory, reset on restart)"
 
 
+def _doctor_airflow_reachable(retry_delay: float = 10) -> bool:
+    """True when Airflow answers its health check; one retry after ``retry_delay`` seconds.
+
+    Goes through ``airflow_client.airflow_health``, which uses ``/api/v2/monitor/health`` on
+    Airflow 3 and ``/health`` on Airflow 2 (``AIRFLOW_API_VERSION``). Airflow 3 answers 404 on
+    ``/health``, so probing that path directly reported a healthy Airflow as unreachable.
+    """
+    import time
+
+    import airflow_client as ac
+
+    for attempt in range(2):
+        health = ac.airflow_health()
+        if "error" not in health:
+            return True
+        if attempt == 0:
+            info(f"Airflow health check failed ({health['error']}) — retrying in {retry_delay:g}s (may be starting)...")
+            time.sleep(retry_delay)
+    return False
+
+
 def cmd_doctor(args):
     """Run comprehensive diagnostics."""
     section("EdgeGuard Doctor - Diagnostics")
@@ -342,29 +363,10 @@ def cmd_doctor(args):
     # Test Airflow (retry once after 5s if first attempt fails — handles restarts)
     info("Testing Airflow webserver...")
     airflow_url = os.getenv("AIRFLOW_WEBSERVER_URL", "http://localhost:8082")
-    airflow_ok = False
-    for _attempt in range(2):
-        try:
-            import requests
-
-            resp = requests.get(f"{airflow_url}/health", timeout=10)
-            if resp.status_code == 200:
-                ok(f"Airflow webserver reachable at {airflow_url}")
-                airflow_ok = True
-                break
-            else:
-                if _attempt == 0:
-                    info(f"Airflow returned {resp.status_code} — retrying in 10s (may be starting)...")
-                    import time
-
-                    time.sleep(10)
-        except Exception:
-            if _attempt == 0:
-                info("Airflow not reachable — retrying in 10s (may be starting)...")
-                import time
-
-                time.sleep(10)
-    if not airflow_ok:
+    airflow_ok = _doctor_airflow_reachable()
+    if airflow_ok:
+        ok(f"Airflow webserver reachable at {airflow_url}")
+    else:
         err(f"Airflow webserver not reachable at {airflow_url} after retry — scheduled DAGs will not run")
         info("  Common causes:")
         info("  - Stale PID file: rm /opt/airflow/airflow-webserver.pid && restart container")
