@@ -102,6 +102,8 @@ from urllib.parse import quote
 
 import stix2
 
+from attack_revoked import load_revoked_ids
+
 logger = logging.getLogger(__name__)
 
 # Per-collection bound on related nodes in an export (see the module
@@ -1125,12 +1127,26 @@ class StixExporter:
         of throwaway rows under the naive query shape. Aggregating at
         each step bounds the row count by the size of one collection at
         a time.
+
+        2026-10: a technique id ATT&CK revoked (``T1086``) is answered with the bundle of its
+        successor (``T1059.001``): the graph keeps no node for a revoked technique, and the links
+        feeds made to the old id are on the successor (``attack_revoked``).
         """
         # PR (S5) (Red Team H1 + Prod #1 + Perf F1): clear
         # the per-export-call source-aggregate cache so subsequent
         # bundles never see stale aggregates from a prior export.
         self._reset_export_cache()
         limit = _clamp_limit(limit)
+        successor = load_revoked_ids().technique_successor(mitre_id)
+        if successor is not None:
+            # A request parameter: logged at DEBUG, and only as the normalised id that matched the
+            # map (an ATT&CK id pattern), never the raw value (no line can be injected).
+            logger.debug(
+                "STIX export: technique %s is a revoked ATT&CK id; exporting its successor %s",
+                str(mitre_id).strip().upper(),
+                successor,
+            )
+            mitre_id = successor
         # ``Technique.mitre_id`` is unique, so the seed is a single row
         # without an explicit LIMIT 1.
         rows = self._run(

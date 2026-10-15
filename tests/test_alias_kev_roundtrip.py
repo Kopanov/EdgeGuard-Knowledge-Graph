@@ -310,35 +310,55 @@ class TestCollapsedTypeCaseCanonicalization:
 
 
 class TestMitreMalwareAliasExtraction:
-    def test_malware_item_dict_assigns_aliases_from_x_mitre_aliases(self):
-        """Source pin (parsing is inline in collect(), no isolatable method
-        to drive — so pin the exact assignment, not just substring presence
-        which a comment could satisfy). ATT&CK malware SDOs carry aliases
-        ONLY in x_mitre_aliases (the plain `aliases` key is intrusion-set
-        only), so the malware item dict must read the extension field with
-        the documented fallback."""
-        import re as _re
+    """Driven through ``MITRECollector._parse_bundle`` (2026-10: the parser is a method of its own,
+    so the source pins on the item dicts became behaviour checks)."""
 
-        with open(os.path.join(_SRC, "collectors", "mitre_collector.py")) as fh:
-            src = fh.read()
-        idx = src.find("malware.append(")
-        assert idx > 0
-        block = src[idx : idx + 1200]
-        # The actual code line: "aliases": obj.get("x_mitre_aliases", []) or obj.get("aliases", [])
-        assert _re.search(r'"aliases"\s*:\s*obj\.get\(\s*"x_mitre_aliases"', block), (
-            "malware item dict must assign aliases from obj.get('x_mitre_aliases', ...)"
+    @staticmethod
+    def _parse(objects):
+        from collectors.mitre_collector import ATTACK_DOMAIN_ENTERPRISE, ENTERPRISE_KILL_CHAIN_NAME, MITRECollector
+
+        collector = MITRECollector(misp_writer=MagicMock())
+        return collector._parse_bundle(
+            objects, domain=ATTACK_DOMAIN_ENTERPRISE, kill_chain_name=ENTERPRISE_KILL_CHAIN_NAME
         )
+
+    def test_malware_item_dict_assigns_aliases_from_x_mitre_aliases(self):
+        """ATT&CK malware SDOs carry aliases ONLY in x_mitre_aliases (the plain `aliases` key is
+        intrusion-set only), so the malware item reads the extension field, with the plain key as
+        the fallback."""
+        parsed = self._parse(
+            [
+                {"type": "malware", "id": "malware--a", "name": "PoisonIvy", "x_mitre_aliases": ["PoisonIvy", "Breut"]},
+                {"type": "malware", "id": "malware--b", "name": "Other", "aliases": ["Other", "Alt"]},
+                # Both keys: the extension field wins (the plain key is not ATT&CK's for software).
+                {
+                    "type": "malware",
+                    "id": "malware--c",
+                    "name": "Both",
+                    "x_mitre_aliases": ["Both", "Ext"],
+                    "aliases": ["Both", "Plain"],
+                },
+            ]
+        )
+        by_name = {m["name"]: m["aliases"] for m in parsed["malware"]}
+        assert by_name == {
+            "PoisonIvy": ["PoisonIvy", "Breut"],
+            "Other": ["Other", "Alt"],
+            "Both": ["Both", "Ext"],
+        }
 
     def test_actor_item_dict_keeps_plain_aliases(self):
-        """Counterpart pin: intrusion-sets DO use the plain `aliases` key —
-        the actor branch must not be switched to x_mitre_aliases."""
-        import re as _re
-
-        with open(os.path.join(_SRC, "collectors", "mitre_collector.py")) as fh:
-            src = fh.read()
-        idx = src.find("actors.append(")
-        assert idx > 0
-        block = src[idx : idx + 1200]
-        assert _re.search(r'"aliases"\s*:\s*obj\.get\(\s*"aliases"', block), (
-            "actor item dict must keep obj.get('aliases', ...) (intrusion-set key)"
+        """Counterpart: intrusion-sets DO use the plain `aliases` key — the actor branch must not
+        be switched to x_mitre_aliases."""
+        parsed = self._parse(
+            [
+                {
+                    "type": "intrusion-set",
+                    "id": "intrusion-set--a",
+                    "name": "APT29",
+                    "aliases": ["APT29", "Cozy Bear"],
+                    "x_mitre_aliases": ["not-an-actor-alias"],
+                }
+            ]
         )
+        assert [a["aliases"] for a in parsed["actors"]] == [["APT29", "Cozy Bear"]]

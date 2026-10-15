@@ -280,7 +280,8 @@ class TestBuildRelationshipsWiring:
 
         calls = []
 
-        def fake_batched(client, label, outer, inner, stats, key, batch_size=5000, skip_query=None):
+        # ``params``: the technique steps pass the revoked ATT&CK ids as ``$revoked`` (2026-10).
+        def fake_batched(client, label, outer, inner, stats, key, batch_size=5000, skip_query=None, params=None):
             calls.append((label, key, skip_query is not None))
             stats[key] = 0
             return True

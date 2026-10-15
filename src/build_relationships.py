@@ -82,6 +82,13 @@ CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 # was built from (``r.sources``), their record ids (``r.source_refs``) and the MISP events
 # that carried them (``r.misp_event_ids``), read from the subject node's per-source
 # ``SOURCED_FROM`` edges. Contract and fragments: ``relationship_provenance``.
+# Revoked ATT&CK technique ids (2026-10): every step that MATCHes a Technique by an id a feed names
+# translates the id to its successor first, ``coalesce($revoked[toString(tid)], tid)`` — OTX pulses
+# still cite ids ATT&CK has replaced (``T1086`` → ``T1059.001``). ``toString`` keeps a non-string
+# list entry from failing the batch (a map lookup by a number raises). The map is read once per run
+# and passed to those steps (and to their orphan counts) as the ``$revoked`` parameter; see
+# ``attack_revoked``. Step 1b (sub-technique → parent) is not translated: see its comment.
+from attack_revoked import technique_successors as _technique_successors  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
 from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
@@ -266,6 +273,8 @@ def _safe_run_batched(
 
     ``params`` (optional dict) is passed to ``apoc.periodic.iterate`` as its
     ``params`` config, so both the outer and inner query can read ``$<key>``.
+    The pre-count and ``skip_query`` receive the same parameters (2026-10: the
+    technique steps' orphan counts read ``$revoked`` like their inner queries).
 
     If ``skip_query`` is provided (a Cypher string returning a single
     column ``c``), it is run BEFORE the apoc batch and is expected to
@@ -285,7 +294,7 @@ def _safe_run_batched(
     skip_count = None
     if skip_query is not None:
         try:
-            skip_result = client.run(skip_query)
+            skip_result = client.run(skip_query, params) if params is not None else client.run(skip_query)
             if skip_result:
                 skip_count = skip_result[0].get("c", 0)
         except Exception as exp_err:
@@ -302,7 +311,7 @@ def _safe_run_batched(
     outer_count = None
     try:
         outer_count_query = f"CALL {{ {outer_query} }} RETURN count(*) AS c"
-        count_result = client.run(outer_count_query)
+        count_result = client.run(outer_count_query, params) if params is not None else client.run(outer_count_query)
         if count_result:
             outer_count = count_result[0].get("c", 0)
             logger.info(
@@ -462,6 +471,9 @@ def build_relationships():
 
     stats = {}
     failures = 0
+    # 2026-10: ``$revoked`` for the steps that MATCH a Technique by id (1b, 5, 5b, 6, 6b, 8, 10).
+    # A missing or invalid map is an empty map: ids are matched as given, the run goes on.
+    revoked_params = {"revoked": _technique_successors()}
 
     try:
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
@@ -489,6 +501,10 @@ def build_relationships():
         # sub-techniques of lateral movement over remote services" had no path.
         # Domain guard: ids never collide across Enterprise (T1xxx) and ICS (T0xxx), but
         # the guard keeps a future dotted ICS id from reaching an Enterprise parent.
+        # 2026-10: the parent id is NOT translated through the revoked-id map. A live sub-technique's
+        # id holds its parent's id, and ATT&CK never revokes the parent of a live sub-technique; only
+        # a revoked sub-technique has a revoked parent, and that parent's successor is not its parent
+        # (T1562.004 under T1562 would become a sub-technique of T1685, T1562's successor).
         logger.info("[LINK] 1b/20 Technique → Technique (SUBTECHNIQUE_OF)...")
         _q1b_outer = 'MATCH (s:Technique) WHERE s.mitre_id CONTAINS "." RETURN s'
         _q1b_inner = (
@@ -507,7 +523,12 @@ def build_relationships():
             + ", r.src_uuid = coalesce(r.src_uuid, s.uuid), r.trg_uuid = coalesce(r.trg_uuid, p.uuid)"
         )
         if not _safe_run_batched(
-            client, "Technique → Technique (SUBTECHNIQUE_OF)", _q1b_outer, _q1b_inner, stats, "subtechnique_of"
+            client,
+            "Technique → Technique (SUBTECHNIQUE_OF)",
+            _q1b_outer,
+            _q1b_inner,
+            stats,
+            "subtechnique_of",
         ):
             failures += 1
         query_pause()
@@ -872,7 +893,7 @@ def build_relationships():
         _inner = (
             "WITH $a AS a "
             + _prov_with("a", _MITRE_FEEDS)
-            + "UNWIND a.uses_techniques AS tid WITH a, tid, "
+            + "UNWIND a.uses_techniques AS tid WITH a, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -881,7 +902,7 @@ def build_relationships():
         _q5_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.uses_techniques, [])) > 0 "
             "UNWIND a.uses_techniques AS tid "
-            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -892,6 +913,7 @@ def build_relationships():
             stats,
             "employs_technique_explicit",
             skip_query=_q5_skip,
+            params=revoked_params,
         ):
             failures += 1
         query_pause()
@@ -908,7 +930,7 @@ def build_relationships():
         _inner = (
             "WITH $a AS a "
             + _prov_with("a", _OTX_FEEDS)
-            + "UNWIND a.reported_techniques AS tid WITH a, tid, "
+            + "UNWIND a.reported_techniques AS tid WITH a, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (a)-[r:EMPLOYS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -917,7 +939,7 @@ def build_relationships():
         _q5b_skip = (
             "MATCH (a:ThreatActor) WHERE size(coalesce(a.reported_techniques, [])) > 0 "
             "UNWIND a.reported_techniques AS tid "
-            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -928,6 +950,7 @@ def build_relationships():
             stats,
             "employs_technique_reported",
             skip_query=_q5b_skip,
+            params=revoked_params,
         ):
             failures += 1
         query_pause()
@@ -941,7 +964,7 @@ def build_relationships():
         _inner = (
             "WITH $m AS m "
             + _prov_with("m", _MITRE_FEEDS)
-            + "UNWIND m.uses_techniques AS tid WITH m, tid, "
+            + "UNWIND m.uses_techniques AS tid WITH m, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -950,7 +973,7 @@ def build_relationships():
         _q6_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.uses_techniques, [])) > 0 "
             "UNWIND m.uses_techniques AS tid "
-            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -961,6 +984,7 @@ def build_relationships():
             stats,
             "malware_implements_technique",
             skip_query=_q6_skip,
+            params=revoked_params,
         ):
             failures += 1
         query_pause()
@@ -973,7 +997,7 @@ def build_relationships():
         _inner = (
             "WITH $m AS m "
             + _prov_with("m", _OTX_FEEDS)
-            + "UNWIND m.reported_techniques AS tid WITH m, tid, "
+            + "UNWIND m.reported_techniques AS tid WITH m, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (m)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.6, r.match_type = "otx_pulse", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -982,7 +1006,7 @@ def build_relationships():
         _q6b_skip = (
             "MATCH (m:Malware) WHERE size(coalesce(m.reported_techniques, [])) > 0 "
             "UNWIND m.reported_techniques AS tid "
-            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -993,6 +1017,7 @@ def build_relationships():
             stats,
             "malware_implements_technique_reported",
             skip_query=_q6b_skip,
+            params=revoked_params,
         ):
             failures += 1
         query_pause()
@@ -1187,7 +1212,7 @@ def build_relationships():
         _q8_inner = (
             "WITH $i AS i "
             + _prov_with("i", _OTX_FEEDS)
-            + "UNWIND i.attack_ids AS tech_id WITH i, tech_id, "
+            + "UNWIND i.attack_ids AS tech_id WITH i, coalesce($revoked[toString(tech_id)], tech_id) AS tech_id, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tech_id}) MERGE (i)-[r:USES_TECHNIQUE]->(t) ON CREATE SET r.confidence_score = 0.85, r.match_type = "otx_attack_ids", r.created_at = datetime() SET r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1196,7 +1221,8 @@ def build_relationships():
         _q8_skip = (
             "MATCH (i:Indicator) WHERE size(coalesce(i.attack_ids, [])) > 0 "
             "UNWIND i.attack_ids AS tech_id "
-            "WITH tech_id WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tech_id}) } "
+            "WITH coalesce($revoked[toString(tech_id)], tech_id) AS tech_id "
+            "WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tech_id}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1207,6 +1233,7 @@ def build_relationships():
             stats,
             "indicator_uses_technique",
             skip_query=_q8_skip,
+            params=revoked_params,
         ):
             failures += 1
         query_pause()
@@ -1431,7 +1458,7 @@ def build_relationships():
         _inner = (
             "WITH $tool AS tool "
             + _prov_with("tool", _MITRE_FEEDS)
-            + "UNWIND tool.uses_techniques AS tid WITH tool, tid, "
+            + "UNWIND tool.uses_techniques AS tid WITH tool, coalesce($revoked[toString(tid)], tid) AS tid, "
             + _PROV_VARS
             + ' MATCH (t:Technique {mitre_id: tid}) MERGE (tool)-[r:IMPLEMENTS_TECHNIQUE]->(t) ON CREATE SET r.created_at = datetime() SET r.confidence_score = 0.95, r.match_type = "mitre_explicit", r.updated_at = datetime(), r.edgeguard_managed = true, '
             + _prov_set()
@@ -1440,7 +1467,7 @@ def build_relationships():
         _q10_skip = (
             "MATCH (tool:Tool) WHERE size(coalesce(tool.uses_techniques, [])) > 0 "
             "UNWIND tool.uses_techniques AS tid "
-            "WITH tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
+            "WITH coalesce($revoked[toString(tid)], tid) AS tid WHERE NOT EXISTS { MATCH (t:Technique {mitre_id: tid}) } "
             "RETURN count(*) AS c"
         )
         if not _safe_run_batched(
@@ -1451,6 +1478,7 @@ def build_relationships():
             stats,
             "tool_implements_technique",
             skip_query=_q10_skip,
+            params=revoked_params,
         ):
             failures += 1
         query_pause()

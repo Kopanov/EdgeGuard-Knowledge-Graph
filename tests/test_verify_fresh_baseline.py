@@ -109,9 +109,59 @@ def vfb():
     return mod
 
 
+# Check 9b (2026-10, revoked ATT&CK objects): the Technique ids, the ThreatActor nodes and the
+# Malware / Tool nodes (canonical name, sources) of a correct graph. The dispatcher answers the three
+# queries from these with the ids / names the check passes, as Neo4j would.
+_GRAPH_TECHNIQUES = ("T1059", "T1059.001", "T1566.001", "T1574.001", "T1685", "T0800")
+_GRAPH_ACTORS = (
+    ("apt29", ("mitre_attck", "alienvault_otx")),
+    ("oilrig", ("mitre_attck",)),
+    ("magic hound", ("mitre_attck",)),
+    ("conti team", ("alienvault_otx",)),
+)
+_GRAPH_SOFTWARE = (
+    ("poisonivy", ("mitre_attck",)),
+    ("ngrok", ("mitre_attck",)),  # a revoked software's name that its successor also bears
+    ("mimikatz", ("mitre_attck", "alienvault_otx")),
+    ("darkmoon", ("alienvault_otx",)),  # another source's name: not judged
+)
+
+
+def _revoked_technique_rows(params: Dict[str, Any], techniques=_GRAPH_TECHNIQUES) -> List[Dict[str, Any]]:
+    hits = [t for t in techniques if t in set(params["ids"])]
+    return [{"techniques": len(techniques), "revoked_ids": len(hits), "examples": hits[:10]}]
+
+
+def _revoked_group_rows(params: Dict[str, Any], actors=_GRAPH_ACTORS) -> List[Dict[str, Any]]:
+    names = set(params["names"])
+    revoked = [(n, src) for n, src in actors if n.strip().lower() in names]
+    return [
+        {
+            "mitre_actors": sum(1 for _n, src in actors if "mitre_attck" in src),
+            "revoked_groups_from_mitre": sum(1 for _n, src in revoked if "mitre_attck" in src),
+            "revoked_names_other_sources": sum(1 for _n, src in revoked if "mitre_attck" not in src),
+            "examples_from_mitre": [n for n, src in revoked if "mitre_attck" in src][:10],
+            "examples_other_sources": [n for n, src in revoked if "mitre_attck" not in src][:10],
+        }
+    ]
+
+
+def _revoked_software_rows(params: Dict[str, Any], software=_GRAPH_SOFTWARE) -> List[Dict[str, Any]]:
+    names = set(params["names"])
+    mitre = [n for n, src in software if "mitre_attck" in src]  # the query keeps MITRE nodes only
+    revoked = [n for n in mitre if n.strip().lower() in names]
+    return [{"mitre_software": len(mitre), "revoked_software": len(revoked), "examples": revoked[:10]}]
+
+
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
+    if "AS revoked_ids" in s:
+        return _revoked_technique_rows(params)
+    if "AS revoked_groups_from_mitre" in s:
+        return _revoked_group_rows(params)
+    if "AS revoked_software" in s:
+        return _revoked_software_rows(params)
     if "apoc.meta.stats" in s:
         return [{"nodeCount": 10, "relCount": 10, "labels": {}, "relTypesCount": {}}]
     if "misp_cooccurrence" in s:
@@ -1032,3 +1082,128 @@ class TestWarningLevel:
         result = json.loads(out)
         c = next(x for x in result["checks"] if x["check"] == "default_sources_delivered")
         assert code == 0 and result["passed"] is True and c["ok"] is False and c["mandatory"] is False
+
+
+# --------------------------------------------------------------------------- 9b. revoked ATT&CK objects
+def _run_with_graph(
+    vfb, monkeypatch, techniques=_GRAPH_TECHNIQUES, actors=_GRAPH_ACTORS, software=_GRAPH_SOFTWARE, seen=None
+):
+    """``run_checks`` on the healthy rows, with check 9b answered from ``techniques`` / ``actors`` /
+    ``software``."""
+
+    def fake_post(statement, params=None, timeout=180):
+        params = params or {}
+        if seen is not None:
+            seen.append((statement, params))
+        if "AS revoked_ids" in statement:
+            return _revoked_technique_rows(params, techniques)
+        if "AS revoked_groups_from_mitre" in statement:
+            return _revoked_group_rows(params, actors)
+        if "AS revoked_software" in statement:
+            return _revoked_software_rows(params, software)
+        return _healthy_rows(statement, params)
+
+    monkeypatch.setattr(vfb, "_post", fake_post)
+    return vfb.run_checks(False, False, False)
+
+
+class TestRevokedAttackObjects:
+    """Check 9b (2026-10): no Technique node carries an id the revoked-id map lists, no ThreatActor node
+    from MITRE is a revoked group (mandatory); an actor another source named after a revoked group is a
+    warning (the actor alias merge folds it into the successor). Judged with the committed map."""
+
+    def test_a_correct_graph_passes(self, vfb, monkeypatch):
+        rep = _run_with_graph(vfb, monkeypatch)
+        for name in (
+            "no_revoked_attack_techniques",
+            "no_revoked_attack_groups",
+            "revoked_group_names_folded",
+            "no_revoked_attack_software",
+        ):
+            assert _check(rep, name)["ok"] is True, name
+        assert rep.failed == [] and rep.warnings == []
+
+    def test_revoked_software_from_mitre_fails(self, vfb, monkeypatch):
+        """The hosted graph of 2026-10-15: ``darkmoon`` from MITRE (revoked into PoisonIvy)."""
+        rep = _run_with_graph(vfb, monkeypatch, software=_GRAPH_SOFTWARE + (("darkmoon", ("mitre_attck",)),))
+        c = _check(rep, "no_revoked_attack_software")
+        assert c["ok"] is False and c["mandatory"] is True and c["detail"]["examples"] == ["darkmoon"]
+        assert [x["check"] for x in rep.failed] == ["no_revoked_attack_software"]
+
+    def test_a_revoked_technique_node_fails(self, vfb, monkeypatch):
+        rep = _run_with_graph(vfb, monkeypatch, techniques=_GRAPH_TECHNIQUES + ("T1086", "T1562.001"))
+        c = _check(rep, "no_revoked_attack_techniques")
+        assert c["ok"] is False and c["mandatory"] is True
+        assert c["detail"]["revoked_ids"] == 2 and set(c["detail"]["examples"]) == {"T1086", "T1562.001"}
+        assert [x["check"] for x in rep.failed] == ["no_revoked_attack_techniques"]
+
+    def test_a_revoked_group_from_mitre_fails(self, vfb, monkeypatch):
+        """The hosted graph of 2026-10-15: ``unc2452`` from MITRE (and OTX), 31 links."""
+        actors = _GRAPH_ACTORS + (("unc2452", ("mitre_attck", "alienvault_otx")),)
+        rep = _run_with_graph(vfb, monkeypatch, actors=actors)
+        c = _check(rep, "no_revoked_attack_groups")
+        assert c["ok"] is False and c["detail"]["revoked_groups_from_mitre"] == 1
+        assert [x["check"] for x in rep.failed] == ["no_revoked_attack_groups"]
+
+    def test_an_actor_another_source_named_after_a_revoked_group_is_a_warning(self, vfb, monkeypatch):
+        actors = _GRAPH_ACTORS + (("charming kitten", ("alienvault_otx",)),)
+        rep = _run_with_graph(vfb, monkeypatch, actors=actors)
+        assert _check(rep, "no_revoked_attack_groups")["ok"] is True
+        c = _check(rep, "revoked_group_names_folded")
+        assert c["ok"] is False and c["mandatory"] is False
+        assert c["detail"]["examples_other_sources"] == ["charming kitten"] and not c["detail"]["examples_from_mitre"]
+        assert rep.failed == [] and [x["check"] for x in rep.warnings] == ["revoked_group_names_folded"]
+
+    def test_informational_without_attack_data_rather_than_a_vacuous_pass(self, vfb, monkeypatch):
+        rep = _run_with_graph(
+            vfb,
+            monkeypatch,
+            techniques=(),
+            actors=(("conti team", ("alienvault_otx",)),),
+            software=(("darkmoon", ("alienvault_otx",)),),
+        )
+        for name in (
+            "no_revoked_attack_techniques",
+            "no_revoked_attack_groups",
+            "revoked_group_names_folded",
+            "no_revoked_attack_software",
+        ):
+            assert _check(rep, name)["ok"] is None, name
+
+    def test_the_committed_map_is_what_the_check_asks_for(self, vfb, monkeypatch):
+        import attack_revoked
+
+        seen: List[Any] = []
+        _run_with_graph(vfb, monkeypatch, seen=seen)
+        (tech_stmt, tech_params), (group_stmt, group_params), (soft_stmt, soft_params) = [
+            (s, p)
+            for s, p in seen
+            if "AS revoked_ids" in s or "AS revoked_groups_from_mitre" in s or "AS revoked_software" in s
+        ]
+        revoked = attack_revoked.load_revoked_ids()
+        assert revoked.loaded and tech_params["ids"] == sorted(revoked.techniques)
+        assert {"T1086", "T1562", "T1574.002"} <= set(tech_params["ids"])
+        assert "t.mitre_id IN $ids" in tech_stmt and "count(t) AS techniques" in tech_stmt
+        assert set(group_params["names"]) == {
+            "apt34",
+            "charming kitten",
+            "dragonfly 2.0",
+            "monsoon",
+            "stolen pencil",
+            "unc2452",
+        }
+        assert "toLower(trim(a.name)) IN $names" in group_stmt
+        assert "'mitre_attck' IN coalesce(a.source, [])" in group_stmt
+        # ngrok is left out: its successor (the tool ngrok) bears the same name
+        assert soft_params["names"] == ["darkmoon"]
+        assert "(n:Malware OR n:Tool) AND 'mitre_attck' IN coalesce(n.source, [])" in soft_stmt
+
+    def test_an_unreadable_map_fails_the_checks(self, vfb, monkeypatch, tmp_path):
+        import attack_revoked
+
+        missing = tmp_path / "attack_revoked_ids.json"
+        monkeypatch.setattr(vfb, "load_revoked_ids", lambda: attack_revoked.load_revoked_ids(missing))
+        rep = _run_with_graph(vfb, monkeypatch)
+        failed = {c["check"]: c["detail"] for c in rep.failed}
+        assert set(failed) == {"no_revoked_attack_techniques", "no_revoked_attack_groups", "no_revoked_attack_software"}
+        assert failed["no_revoked_attack_techniques"]["problem"] == "file not found"

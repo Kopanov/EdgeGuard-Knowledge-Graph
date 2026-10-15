@@ -35,6 +35,7 @@ import requests
 import urllib3
 
 from actor_name_hygiene import clean_actor_names
+from attack_revoked import load_revoked_ids
 
 # Import resilience utilities
 from collectors.collector_utils import TransientServerError
@@ -568,12 +569,15 @@ def _curated_claim_rows(
 ) -> List[Dict]:
     """Relationship rows for one curated subject's claims (see ``CURATED_CLAIMS_PREFIX``).
 
-    ``tlp`` is the package's TLP level (``_curated_claims_tlp``), carried on every row.
+    ``tlp`` is the package's TLP level (``_curated_claims_tlp``), carried on every row. A technique
+    id ATT&CK revoked is translated to its successor (2026-10, ``attack_revoked``) and logged.
     """
     label = curated_label_for(package_source)
+    revoked = load_revoked_ids()
     rows: List[Dict] = []
     skipped = 0
     unregistered = 0
+    translated: List[str] = []
     for claim in claims:
         target = _CURATED_PREDICATES.get(str(claim.get("p") or "").strip().lower(), {}).get(subject_type)
         obj = str(claim.get("o") or "").strip()
@@ -585,6 +589,10 @@ def _curated_claim_rows(
             obj = normalize_cve_id_for_graph(obj) or ""
         elif key == "mitre_id":
             obj = obj.upper()
+            successor = revoked.technique_successor(obj) if to_type == "Technique" else None
+            if successor is not None:
+                translated.append(f"{obj} -> {successor}")
+                obj = successor
         if not obj:
             skipped += 1
             continue
@@ -620,6 +628,14 @@ def _curated_claim_rows(
             subject_type,
             next(iter(subject_key.values()), "?"),
             skipped,
+        )
+    if translated:
+        logger.info(
+            "Curated %s %s: %d claim(s) name a technique id ATT&CK revoked, linked to its successor (%s)",
+            subject_type,
+            next(iter(subject_key.values()), "?"),
+            len(translated),
+            ", ".join(sorted(set(translated))[:10]),
         )
     if unregistered:
         logger.warning(
@@ -1035,6 +1051,24 @@ def _extract_attack_domain_tag(tags: List[Dict[str, Any]]) -> str:
             if domain in ("enterprise", "ics", "mobile"):
                 return domain
     return "enterprise"
+
+
+# 2026-10: written by ``MISPWriter`` (``misp_writer.ATTACK_DEPRECATED_TAG``) on an item ATT&CK
+# deprecated (``x_mitre_deprecated``: retired, no successor).
+_ATTACK_DEPRECATED_TAG = "attack-status:deprecated"
+
+
+def _extract_deprecated_tag(tags: List[Dict[str, Any]]) -> bool:
+    """True when the attribute carries the ``attack-status:deprecated`` tag (2026-10).
+
+    The item then carries ``deprecated: True`` and the merge sets ``n.deprecated = true`` on
+    the node: a deprecated ATT&CK object keeps its node and links, marked so consumers can filter.
+    """
+    for tag in tags:
+        name = tag.get("name", "") if isinstance(tag, dict) else str(tag)
+        if isinstance(name, str) and name.strip().lower() == _ATTACK_DEPRECATED_TAG:
+            return True
+    return False
 
 
 def _extract_alias_tags(tags: List[Dict[str, Any]]) -> List[str]:
@@ -2647,7 +2681,29 @@ class MISPToNeo4jSync:
         return malware_list
 
     def _extract_techniques_from_tags(self, tags: List[Dict]) -> List[Dict]:
-        """Extract MITRE technique IDs and names from MISP tags."""
+        """Extract MITRE technique IDs and names from MISP tags.
+
+        2026-10: an id ATT&CK revoked is translated to its successor (``attack_revoked``), so the
+        ``EMPLOYS_TECHNIQUE`` row it becomes lands on the technique that exists; ``name`` stays the
+        tag's. Two tags that translate to the same id give one entry.
+        """
+        techniques = self._extract_technique_tags(tags)
+        revoked = load_revoked_ids()
+        out: List[Dict] = []
+        seen = set()
+        for technique in techniques:
+            successor = revoked.technique_successor(technique["mitre_id"])
+            if successor is not None:
+                logger.debug("Technique tag %s is a revoked ATT&CK id; using %s", technique["mitre_id"], successor)
+                technique = {**technique, "mitre_id": successor}
+            if technique["mitre_id"] in seen:
+                continue
+            seen.add(technique["mitre_id"])
+            out.append(technique)
+        return out
+
+    def _extract_technique_tags(self, tags: List[Dict]) -> List[Dict]:
+        """The technique ids and names the MISP tags name, as written (no translation)."""
         tags = normalize_misp_tag_list(tags)
         techniques = []
         for tag in tags:
@@ -3289,6 +3345,7 @@ class MISPToNeo4jSync:
                 "type": "actor",
                 "name": actor_name,
                 "aliases": actor_aliases,
+                "deprecated": _extract_deprecated_tag(tags),  # 2026-10: ATT&CK x_mitre_deprecated
                 "description": actor_description,
                 "uses_techniques": uses_techniques,
                 "reported_techniques": reported_techniques,
@@ -3397,6 +3454,7 @@ class MISPToNeo4jSync:
                 "type": "malware",
                 "name": malware_name,
                 "aliases": malware_aliases,
+                "deprecated": _extract_deprecated_tag(tags),  # 2026-10: ATT&CK x_mitre_deprecated
                 "malware_types": []
                 if curated_claims is not None
                 else (malware_types if malware_types else ["unknown"]),
@@ -3433,6 +3491,13 @@ class MISPToNeo4jSync:
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
 
+            # 2026-10: a technique ATT&CK revoked (an id the revoked-id map lists) is not a node any
+            # more; the MITRE collector stopped writing it, and an attribute written before that would
+            # bring the node back. Links that cite the id land on its successor (build_relationships).
+            if load_revoked_ids().technique_successor(mitre_id) is not None:
+                logger.debug("Skipping technique attribute %s: a revoked ATT&CK id", mitre_id)
+                return None, []
+
             platforms = []
             for tag in tags:
                 tag_name = tag.get("name", "")
@@ -3468,6 +3533,7 @@ class MISPToNeo4jSync:
             item = {
                 "type": "technique",
                 "attack_domain": _extract_attack_domain_tag(tags),  # 2026-10: enterprise | ics
+                "deprecated": _extract_deprecated_tag(tags),  # 2026-10: ATT&CK x_mitre_deprecated
                 "mitre_id": mitre_id,
                 "name": name,
                 "description": technique_description,
@@ -3509,6 +3575,7 @@ class MISPToNeo4jSync:
             item = {
                 "type": "tactic",
                 "attack_domain": _extract_attack_domain_tag(tags),  # 2026-10: enterprise | ics
+                "deprecated": _extract_deprecated_tag(tags),  # 2026-10: ATT&CK x_mitre_deprecated
                 "mitre_id": mitre_id,
                 "name": name,
                 "shortname": shortname,
@@ -3588,6 +3655,7 @@ class MISPToNeo4jSync:
                 "type": "tool",
                 "mitre_id": mitre_id,
                 "name": name,
+                "deprecated": _extract_deprecated_tag(tags),  # 2026-10: ATT&CK x_mitre_deprecated
                 "description": description,
                 "zone": zones,
                 "tag": source_id,

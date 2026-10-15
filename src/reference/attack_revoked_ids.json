@@ -1,0 +1,1193 @@
+{
+  "name": "attack_revoked_ids",
+  "version": "2026.10.15",
+  "generated_at": "2026-10-15T07:35:58Z",
+  "description": "Revoked MITRE ATT&CK ids and the id that replaces each (techniques, groups, software). EdgeGuard translates a revoked technique id to its successor wherever a feed names a technique by id (src/attack_revoked.py).",
+  "generator": "scripts/build_attack_revoked_ids.py",
+  "notices": {
+    "misp_galaxy": "Built from the MITRE galaxies of MISP (https://github.com/MISP/misp-galaxy). The galaxy JSON files are dual-licensed under CC0 1.0 Universal and a BSD 2-Clause licence; this map uses them under CC0 1.0.",
+    "mitre_attack": "© The MITRE Corporation. This work is reproduced and distributed with the permission of The MITRE Corporation."
+  },
+  "inputs": [
+    {
+      "file": "misp_galaxy_mitre-attack-pattern_20261013.json",
+      "galaxy": "mitre-attack-pattern",
+      "galaxy_name": "MITRE ATT&CK Techniques",
+      "galaxy_version": "20",
+      "misp_version": "2.5.45",
+      "captured_at": "2026-10-13T00:34:24+02:00",
+      "clusters": 1401,
+      "revoked_clusters": 210,
+      "sha256": "0fcf8504d6eb480aeb78b64f3d5a852b068df49522b32470909ac7574bf403eb"
+    },
+    {
+      "file": "misp_galaxy_mitre-ics-groups_20261013.json",
+      "galaxy": "mitre-ics-groups",
+      "galaxy_name": "MITRE ATT&CK ICS Groups",
+      "galaxy_version": "3",
+      "misp_version": "2.5.45",
+      "captured_at": "2026-10-13T00:32:42+02:00",
+      "clusters": 10,
+      "revoked_clusters": 0,
+      "sha256": "50452f7b6919416e93170b7220ec39bb50d014fae2401aef272121554a783d61"
+    },
+    {
+      "file": "misp_galaxy_mitre-ics-software_20261013.json",
+      "galaxy": "mitre-ics-software",
+      "galaxy_name": "MITRE ATT&CK ICS Software",
+      "galaxy_version": "3",
+      "misp_version": "2.5.45",
+      "captured_at": "2026-10-13T00:33:13+02:00",
+      "clusters": 17,
+      "revoked_clusters": 0,
+      "sha256": "3166688e48ab9ccde6d2a4c7063e4334d099ca8f57f53fac7da91a8378c69fdc"
+    },
+    {
+      "file": "misp_galaxy_mitre-intrusion-set_20261013.json",
+      "galaxy": "mitre-intrusion-set",
+      "galaxy_name": "MITRE ATT&CK Groups",
+      "galaxy_version": "9",
+      "misp_version": "2.5.45",
+      "captured_at": "2026-10-13T00:32:40+02:00",
+      "clusters": 195,
+      "revoked_clusters": 6,
+      "sha256": "721fe3d3de269688c70014aefb67eb7cb5c59aedfc551517c12ee50a959928bd"
+    },
+    {
+      "file": "misp_galaxy_mitre-malware_20261013.json",
+      "galaxy": "mitre-malware",
+      "galaxy_name": "MITRE ATT&CK Malware",
+      "galaxy_version": "8",
+      "misp_version": "2.5.45",
+      "captured_at": "2026-10-13T00:33:00+02:00",
+      "clusters": 854,
+      "revoked_clusters": 2,
+      "sha256": "97aec7cf7df657c159bb9e63e23fe6adb438e665c2ce389a9a189d1e2ad9141a"
+    },
+    {
+      "file": "misp_galaxy_mitre-tool_20261013.json",
+      "galaxy": "mitre-tool",
+      "galaxy_name": "MITRE ATT&CK Tools",
+      "galaxy_version": "9",
+      "misp_version": "2.5.45",
+      "captured_at": "2026-10-13T00:33:14+02:00",
+      "clusters": 97,
+      "revoked_clusters": 0,
+      "sha256": "4b0b7f30bbe0e0cc2f2a073ccfba720c7e90f011ff5b709b7da15888d959fae1"
+    }
+  ],
+  "counts": {
+    "techniques": 210,
+    "groups": 6,
+    "software": 2,
+    "via_chain": 3,
+    "excluded": 0
+  },
+  "excluded": [],
+  "notes": [],
+  "techniques": {
+    "T0803": {
+      "name": "Block Command Message",
+      "successor": "T1691.001",
+      "successor_name": "Command Message"
+    },
+    "T0804": {
+      "name": "Block Reporting Message",
+      "successor": "T1691.002",
+      "successor_name": "Reporting Message"
+    },
+    "T0805": {
+      "name": "Block Serial COM",
+      "successor": "T1695.001",
+      "successor_name": "Serial COM"
+    },
+    "T0812": {
+      "name": "Default Credentials",
+      "successor": "T1694.001",
+      "successor_name": "Default Credentials"
+    },
+    "T0839": {
+      "name": "Module Firmware",
+      "successor": "T1693.002",
+      "successor_name": "Module Firmware"
+    },
+    "T0855": {
+      "name": "Unauthorized Command Message",
+      "successor": "T1692.001",
+      "successor_name": "Command Message"
+    },
+    "T0856": {
+      "name": "Spoof Reporting Message",
+      "successor": "T1692.002",
+      "successor_name": "Reporting Message"
+    },
+    "T0857": {
+      "name": "System Firmware",
+      "successor": "T1693.001",
+      "successor_name": "System Firmware"
+    },
+    "T0891": {
+      "name": "Hardcoded Credentials",
+      "successor": "T1694.002",
+      "successor_name": "Hardcoded Credentials"
+    },
+    "T1002": {
+      "name": "Data Compressed",
+      "successor": "T1560",
+      "successor_name": "Archive Collected Data"
+    },
+    "T1004": {
+      "name": "Winlogon Helper DLL",
+      "successor": "T1547.004",
+      "successor_name": "Winlogon Helper DLL"
+    },
+    "T1009": {
+      "name": "Binary Padding",
+      "successor": "T1027.001",
+      "successor_name": "Binary Padding"
+    },
+    "T1013": {
+      "name": "Port Monitors",
+      "successor": "T1547.010",
+      "successor_name": "Port Monitors"
+    },
+    "T1015": {
+      "name": "Accessibility Features",
+      "successor": "T1546.008",
+      "successor_name": "Accessibility Features"
+    },
+    "T1017": {
+      "name": "Application Deployment Software",
+      "successor": "T1072",
+      "successor_name": "Software Deployment Tools"
+    },
+    "T1019": {
+      "name": "System Firmware",
+      "successor": "T1542.001",
+      "successor_name": "System Firmware"
+    },
+    "T1022": {
+      "name": "Data Encrypted",
+      "successor": "T1560",
+      "successor_name": "Archive Collected Data"
+    },
+    "T1023": {
+      "name": "Shortcut Modification",
+      "successor": "T1547.009",
+      "successor_name": "Shortcut Modification"
+    },
+    "T1024": {
+      "name": "Custom Cryptographic Protocol",
+      "successor": "T1573",
+      "successor_name": "Encrypted Channel"
+    },
+    "T1028": {
+      "name": "Windows Remote Management",
+      "successor": "T1021.006",
+      "successor_name": "Windows Remote Management"
+    },
+    "T1031": {
+      "name": "Modify Existing Service",
+      "successor": "T1543.003",
+      "successor_name": "Windows Service"
+    },
+    "T1032": {
+      "name": "Standard Cryptographic Protocol",
+      "successor": "T1573",
+      "successor_name": "Encrypted Channel"
+    },
+    "T1035": {
+      "name": "Service Execution",
+      "successor": "T1569.002",
+      "successor_name": "Service Execution"
+    },
+    "T1038": {
+      "name": "DLL Search Order Hijacking",
+      "successor": "T1574.001",
+      "successor_name": "DLL"
+    },
+    "T1042": {
+      "name": "Change Default File Association",
+      "successor": "T1546.001",
+      "successor_name": "Change Default File Association"
+    },
+    "T1044": {
+      "name": "File System Permissions Weakness",
+      "successor": "T1574.010",
+      "successor_name": "Services File Permissions Weakness"
+    },
+    "T1045": {
+      "name": "Software Packing",
+      "successor": "T1027.002",
+      "successor_name": "Software Packing"
+    },
+    "T1050": {
+      "name": "New Service",
+      "successor": "T1543.003",
+      "successor_name": "Windows Service"
+    },
+    "T1053.001": {
+      "name": "At (Linux)",
+      "successor": "T1053.002",
+      "successor_name": "At"
+    },
+    "T1054": {
+      "name": "Indicator Blocking",
+      "successor": "T1685",
+      "successor_name": "Disable or Modify Tools"
+    },
+    "T1058": {
+      "name": "Service Registry Permissions Weakness",
+      "successor": "T1574.011",
+      "successor_name": "Services Registry Permissions Weakness"
+    },
+    "T1060": {
+      "name": "Registry Run Keys / Startup Folder",
+      "successor": "T1547.001",
+      "successor_name": "Registry Run Keys / Startup Folder"
+    },
+    "T1063": {
+      "name": "Security Software Discovery",
+      "successor": "T1518.001",
+      "successor_name": "Security Software Discovery"
+    },
+    "T1065": {
+      "name": "Uncommonly Used Port",
+      "successor": "T1571",
+      "successor_name": "Non-Standard Port"
+    },
+    "T1066": {
+      "name": "Indicator Removal from Tools",
+      "successor": "T1027.005",
+      "successor_name": "Indicator Removal from Tools"
+    },
+    "T1067": {
+      "name": "Bootkit",
+      "successor": "T1542.003",
+      "successor_name": "Bootkit"
+    },
+    "T1070.001": {
+      "name": "Clear Windows Event Logs",
+      "successor": "T1685.005",
+      "successor_name": "Clear Windows Event Logs"
+    },
+    "T1070.002": {
+      "name": "Clear Linux or Mac System Logs",
+      "successor": "T1685.006",
+      "successor_name": "Clear Linux or Mac System Logs"
+    },
+    "T1073": {
+      "name": "DLL Side-Loading",
+      "successor": "T1574.001",
+      "successor_name": "DLL",
+      "via": [
+        "T1574.002"
+      ]
+    },
+    "T1075": {
+      "name": "Pass the Hash",
+      "successor": "T1550.002",
+      "successor_name": "Pass the Hash"
+    },
+    "T1076": {
+      "name": "Remote Desktop Protocol",
+      "successor": "T1021.001",
+      "successor_name": "Remote Desktop Protocol"
+    },
+    "T1077": {
+      "name": "Windows Admin Shares",
+      "successor": "T1021.002",
+      "successor_name": "SMB/Windows Admin Shares"
+    },
+    "T1079": {
+      "name": "Multilayer Encryption",
+      "successor": "T1573",
+      "successor_name": "Encrypted Channel"
+    },
+    "T1081": {
+      "name": "Credentials in Files",
+      "successor": "T1552.001",
+      "successor_name": "Credentials In Files"
+    },
+    "T1084": {
+      "name": "Windows Management Instrumentation Event Subscription",
+      "successor": "T1546.003",
+      "successor_name": "Windows Management Instrumentation Event Subscription"
+    },
+    "T1085": {
+      "name": "Rundll32",
+      "successor": "T1218.011",
+      "successor_name": "Rundll32"
+    },
+    "T1086": {
+      "name": "PowerShell",
+      "successor": "T1059.001",
+      "successor_name": "PowerShell"
+    },
+    "T1088": {
+      "name": "Bypass User Account Control",
+      "successor": "T1548.002",
+      "successor_name": "Bypass User Account Control"
+    },
+    "T1089": {
+      "name": "Disabling Security Tools",
+      "successor": "T1685",
+      "successor_name": "Disable or Modify Tools"
+    },
+    "T1093": {
+      "name": "Process Hollowing",
+      "successor": "T1055.012",
+      "successor_name": "Process Hollowing"
+    },
+    "T1094": {
+      "name": "Custom Command and Control Protocol",
+      "successor": "T1095",
+      "successor_name": "Non-Application Layer Protocol"
+    },
+    "T1096": {
+      "name": "NTFS File Attributes",
+      "successor": "T1564.004",
+      "successor_name": "NTFS File Attributes"
+    },
+    "T1097": {
+      "name": "Pass the Ticket",
+      "successor": "T1550.003",
+      "successor_name": "Pass the Ticket"
+    },
+    "T1099": {
+      "name": "Timestomp",
+      "successor": "T1070.006",
+      "successor_name": "Timestomp"
+    },
+    "T1100": {
+      "name": "Web Shell",
+      "successor": "T1505.003",
+      "successor_name": "Web Shell"
+    },
+    "T1101": {
+      "name": "Security Support Provider",
+      "successor": "T1547.005",
+      "successor_name": "Security Support Provider"
+    },
+    "T1103": {
+      "name": "AppInit DLLs",
+      "successor": "T1546.010",
+      "successor_name": "AppInit DLLs"
+    },
+    "T1107": {
+      "name": "File Deletion",
+      "successor": "T1070.004",
+      "successor_name": "File Deletion"
+    },
+    "T1109": {
+      "name": "Component Firmware",
+      "successor": "T1542.002",
+      "successor_name": "Component Firmware"
+    },
+    "T1116": {
+      "name": "Code Signing",
+      "successor": "T1553.002",
+      "successor_name": "Code Signing"
+    },
+    "T1117": {
+      "name": "Regsvr32",
+      "successor": "T1218.010",
+      "successor_name": "Regsvr32"
+    },
+    "T1118": {
+      "name": "InstallUtil",
+      "successor": "T1218.004",
+      "successor_name": "InstallUtil"
+    },
+    "T1121": {
+      "name": "Regsvcs/Regasm",
+      "successor": "T1218.009",
+      "successor_name": "Regsvcs/Regasm"
+    },
+    "T1122": {
+      "name": "Component Object Model Hijacking",
+      "successor": "T1546.015",
+      "successor_name": "Component Object Model Hijacking"
+    },
+    "T1126": {
+      "name": "Network Share Connection Removal",
+      "successor": "T1070.005",
+      "successor_name": "Network Share Connection Removal"
+    },
+    "T1128": {
+      "name": "Netsh Helper DLL",
+      "successor": "T1546.007",
+      "successor_name": "Netsh Helper DLL"
+    },
+    "T1130": {
+      "name": "Install Root Certificate",
+      "successor": "T1553.004",
+      "successor_name": "Install Root Certificate"
+    },
+    "T1131": {
+      "name": "Authentication Package",
+      "successor": "T1547.002",
+      "successor_name": "Authentication Package"
+    },
+    "T1138": {
+      "name": "Application Shimming",
+      "successor": "T1546.011",
+      "successor_name": "Application Shimming"
+    },
+    "T1139": {
+      "name": "Bash History",
+      "successor": "T1552.003",
+      "successor_name": "Shell History"
+    },
+    "T1141": {
+      "name": "Input Prompt",
+      "successor": "T1056.002",
+      "successor_name": "GUI Input Capture"
+    },
+    "T1142": {
+      "name": "Keychain",
+      "successor": "T1555.001",
+      "successor_name": "Keychain"
+    },
+    "T1143": {
+      "name": "Hidden Window",
+      "successor": "T1564.003",
+      "successor_name": "Hidden Window"
+    },
+    "T1144": {
+      "name": "Gatekeeper Bypass",
+      "successor": "T1553.001",
+      "successor_name": "Gatekeeper Bypass"
+    },
+    "T1145": {
+      "name": "Private Keys",
+      "successor": "T1552.004",
+      "successor_name": "Private Keys"
+    },
+    "T1146": {
+      "name": "Clear Command History",
+      "successor": "T1070.003",
+      "successor_name": "Clear Command History"
+    },
+    "T1147": {
+      "name": "Hidden Users",
+      "successor": "T1564.002",
+      "successor_name": "Hidden Users"
+    },
+    "T1148": {
+      "name": "HISTCONTROL",
+      "successor": "T1690",
+      "successor_name": "Prevent Command History Logging"
+    },
+    "T1150": {
+      "name": "Plist Modification",
+      "successor": "T1647",
+      "successor_name": "Plist File Modification",
+      "via": [
+        "T1547.011"
+      ]
+    },
+    "T1151": {
+      "name": "Space after Filename",
+      "successor": "T1036.006",
+      "successor_name": "Space after Filename"
+    },
+    "T1152": {
+      "name": "Launchctl",
+      "successor": "T1569.001",
+      "successor_name": "Launchctl"
+    },
+    "T1154": {
+      "name": "Trap",
+      "successor": "T1546.005",
+      "successor_name": "Trap"
+    },
+    "T1155": {
+      "name": "AppleScript",
+      "successor": "T1059.002",
+      "successor_name": "AppleScript"
+    },
+    "T1156": {
+      "name": "Malicious Shell Modification",
+      "successor": "T1546.004",
+      "successor_name": "Unix Shell Configuration Modification"
+    },
+    "T1157": {
+      "name": "Dylib Hijacking",
+      "successor": "T1574.004",
+      "successor_name": "Dylib Hijacking"
+    },
+    "T1158": {
+      "name": "Hidden Files and Directories",
+      "successor": "T1564.001",
+      "successor_name": "Hidden Files and Directories"
+    },
+    "T1159": {
+      "name": "Launch Agent",
+      "successor": "T1543.001",
+      "successor_name": "Launch Agent"
+    },
+    "T1160": {
+      "name": "Launch Daemon",
+      "successor": "T1543.004",
+      "successor_name": "Launch Daemon"
+    },
+    "T1161": {
+      "name": "LC_LOAD_DYLIB Addition",
+      "successor": "T1546.006",
+      "successor_name": "LC_LOAD_DYLIB Addition"
+    },
+    "T1162": {
+      "name": "Login Item",
+      "successor": "T1647",
+      "successor_name": "Plist File Modification",
+      "via": [
+        "T1547.011"
+      ]
+    },
+    "T1163": {
+      "name": "Rc.common",
+      "successor": "T1037.004",
+      "successor_name": "RC Scripts"
+    },
+    "T1164": {
+      "name": "Re-opened Applications",
+      "successor": "T1547.007",
+      "successor_name": "Re-opened Applications"
+    },
+    "T1165": {
+      "name": "Startup Items",
+      "successor": "T1037.005",
+      "successor_name": "Startup Items"
+    },
+    "T1166": {
+      "name": "Setuid and Setgid",
+      "successor": "T1548.001",
+      "successor_name": "Setuid and Setgid"
+    },
+    "T1167": {
+      "name": "Securityd Memory",
+      "successor": "T1555.002",
+      "successor_name": "Securityd Memory"
+    },
+    "T1168": {
+      "name": "Local Job Scheduling",
+      "successor": "T1053",
+      "successor_name": "Scheduled Task/Job"
+    },
+    "T1169": {
+      "name": "Sudo",
+      "successor": "T1548.003",
+      "successor_name": "Sudo and Sudo Caching"
+    },
+    "T1170": {
+      "name": "Mshta",
+      "successor": "T1218.005",
+      "successor_name": "Mshta"
+    },
+    "T1171": {
+      "name": "LLMNR/NBT-NS Poisoning and Relay",
+      "successor": "T1557.001",
+      "successor_name": "Name Resolution Poisoning and SMB Relay"
+    },
+    "T1172": {
+      "name": "Domain Fronting",
+      "successor": "T1090.004",
+      "successor_name": "Domain Fronting"
+    },
+    "T1173": {
+      "name": "Dynamic Data Exchange",
+      "successor": "T1559.002",
+      "successor_name": "Dynamic Data Exchange"
+    },
+    "T1174": {
+      "name": "Password Filter DLL",
+      "successor": "T1556.002",
+      "successor_name": "Password Filter DLL"
+    },
+    "T1177": {
+      "name": "LSASS Driver",
+      "successor": "T1547.008",
+      "successor_name": "LSASS Driver"
+    },
+    "T1178": {
+      "name": "SID-History Injection",
+      "successor": "T1134.005",
+      "successor_name": "SID-History Injection"
+    },
+    "T1179": {
+      "name": "Hooking",
+      "successor": "T1056.004",
+      "successor_name": "Credential API Hooking"
+    },
+    "T1180": {
+      "name": "Screensaver",
+      "successor": "T1546.002",
+      "successor_name": "Screensaver"
+    },
+    "T1181": {
+      "name": "Extra Window Memory Injection",
+      "successor": "T1055.011",
+      "successor_name": "Extra Window Memory Injection"
+    },
+    "T1182": {
+      "name": "AppCert DLLs",
+      "successor": "T1546.009",
+      "successor_name": "AppCert DLLs"
+    },
+    "T1183": {
+      "name": "Image File Execution Options Injection",
+      "successor": "T1546.012",
+      "successor_name": "Image File Execution Options Injection"
+    },
+    "T1184": {
+      "name": "SSH Hijacking",
+      "successor": "T1563.001",
+      "successor_name": "SSH Hijacking"
+    },
+    "T1186": {
+      "name": "Process Doppelgänging",
+      "successor": "T1055.013",
+      "successor_name": "Process Doppelgänging"
+    },
+    "T1188": {
+      "name": "Multi-hop Proxy",
+      "successor": "T1090.003",
+      "successor_name": "Multi-hop Proxy"
+    },
+    "T1191": {
+      "name": "CMSTP",
+      "successor": "T1218.003",
+      "successor_name": "CMSTP"
+    },
+    "T1192": {
+      "name": "Spearphishing Link",
+      "successor": "T1566.002",
+      "successor_name": "Spearphishing Link"
+    },
+    "T1193": {
+      "name": "Spearphishing Attachment",
+      "successor": "T1566.001",
+      "successor_name": "Spearphishing Attachment"
+    },
+    "T1194": {
+      "name": "Spearphishing via Service",
+      "successor": "T1566.003",
+      "successor_name": "Spearphishing via Service"
+    },
+    "T1196": {
+      "name": "Control Panel Items",
+      "successor": "T1218.002",
+      "successor_name": "Control Panel"
+    },
+    "T1198": {
+      "name": "SIP and Trust Provider Hijacking",
+      "successor": "T1553.003",
+      "successor_name": "SIP and Trust Provider Hijacking"
+    },
+    "T1206": {
+      "name": "Sudo Caching",
+      "successor": "T1548.003",
+      "successor_name": "Sudo and Sudo Caching"
+    },
+    "T1208": {
+      "name": "Kerberoasting",
+      "successor": "T1558.003",
+      "successor_name": "Kerberoasting"
+    },
+    "T1209": {
+      "name": "Time Providers",
+      "successor": "T1547.003",
+      "successor_name": "Time Providers"
+    },
+    "T1214": {
+      "name": "Credentials in Registry",
+      "successor": "T1552.002",
+      "successor_name": "Credentials in Registry"
+    },
+    "T1215": {
+      "name": "Kernel Modules and Extensions",
+      "successor": "T1547.006",
+      "successor_name": "Kernel Modules and Extensions"
+    },
+    "T1223": {
+      "name": "Compiled HTML File",
+      "successor": "T1218.001",
+      "successor_name": "Compiled HTML File"
+    },
+    "T1400": {
+      "name": "Modify System Partition",
+      "successor": "T1625.001",
+      "successor_name": "System Runtime API Hijacking"
+    },
+    "T1401": {
+      "name": "Device Administrator Permissions",
+      "successor": "T1626.001",
+      "successor_name": "Device Administrator Permissions"
+    },
+    "T1402": {
+      "name": "Broadcast Receivers",
+      "successor": "T1624.001",
+      "successor_name": "Broadcast Receivers"
+    },
+    "T1408": {
+      "name": "Disguise Root/Jailbreak Indicators",
+      "successor": "T1630.003",
+      "successor_name": "Disguise Root/Jailbreak Indicators"
+    },
+    "T1410": {
+      "name": "Network Traffic Capture or Redirection",
+      "successor": "T1638",
+      "successor_name": "Adversary-in-the-Middle"
+    },
+    "T1411": {
+      "name": "Input Prompt",
+      "successor": "T1417.002",
+      "successor_name": "GUI Input Capture"
+    },
+    "T1412": {
+      "name": "Capture SMS Messages",
+      "successor": "T1636.004",
+      "successor_name": "SMS Messages"
+    },
+    "T1415": {
+      "name": "URL Scheme Hijacking",
+      "successor": "T1635.001",
+      "successor_name": "URI Hijacking"
+    },
+    "T1416": {
+      "name": "URI Hijacking",
+      "successor": "T1635.001",
+      "successor_name": "URI Hijacking"
+    },
+    "T1419": {
+      "name": "Device Type Discovery",
+      "successor": "T1426",
+      "successor_name": "System Information Discovery"
+    },
+    "T1425": {
+      "name": "Insecure Third-Party Libraries",
+      "successor": "T1474",
+      "successor_name": "Supply Chain Compromise"
+    },
+    "T1431": {
+      "name": "App Delivered via Web Download",
+      "successor": "T1476",
+      "successor_name": "Deliver Malicious App via Other Means"
+    },
+    "T1432": {
+      "name": "Access Contact List",
+      "successor": "T1636.003",
+      "successor_name": "Contact List"
+    },
+    "T1433": {
+      "name": "Access Call Log",
+      "successor": "T1636.002",
+      "successor_name": "Call Log"
+    },
+    "T1434": {
+      "name": "App Delivered via Email Attachment",
+      "successor": "T1476",
+      "successor_name": "Deliver Malicious App via Other Means"
+    },
+    "T1435": {
+      "name": "Access Calendar Entries",
+      "successor": "T1636.001",
+      "successor_name": "Calendar Entries"
+    },
+    "T1438": {
+      "name": "Exfiltration Over Other Network Medium",
+      "successor": "T1644",
+      "successor_name": "Out of Band Data"
+    },
+    "T1439": {
+      "name": "Eavesdrop on Insecure Network Communication",
+      "successor": "T1638",
+      "successor_name": "Adversary-in-the-Middle"
+    },
+    "T1440": {
+      "name": "Detect App Analysis Environment",
+      "successor": "T1475",
+      "successor_name": "Deliver Malicious App via Authorized App Store"
+    },
+    "T1441": {
+      "name": "Stolen Developer Credentials or Signing Keys",
+      "successor": "T1475",
+      "successor_name": "Deliver Malicious App via Authorized App Store"
+    },
+    "T1442": {
+      "name": "Fake Developer Accounts",
+      "successor": "T1475",
+      "successor_name": "Deliver Malicious App via Authorized App Store"
+    },
+    "T1443": {
+      "name": "Remotely Install Application",
+      "successor": "T1475",
+      "successor_name": "Deliver Malicious App via Authorized App Store"
+    },
+    "T1445": {
+      "name": "Abuse of iOS Enterprise App Signing Key",
+      "successor": "T1476",
+      "successor_name": "Deliver Malicious App via Other Means"
+    },
+    "T1446": {
+      "name": "Device Lockout",
+      "successor": "T1629.002",
+      "successor_name": "Device Lockout"
+    },
+    "T1447": {
+      "name": "Delete Device Data",
+      "successor": "T1630.002",
+      "successor_name": "File Deletion"
+    },
+    "T1448": {
+      "name": "Carrier Billing Fraud",
+      "successor": "T1643",
+      "successor_name": "Generate Traffic from Victim"
+    },
+    "T1450": {
+      "name": "Exploit SS7 to Track Device Location",
+      "successor": "T1430.002",
+      "successor_name": "Impersonate SS7 Nodes"
+    },
+    "T1452": {
+      "name": "Manipulate App Store Rankings or Ratings",
+      "successor": "T1643",
+      "successor_name": "Generate Traffic from Victim"
+    },
+    "T1455": {
+      "name": "Exploit Baseband Vulnerability",
+      "successor": "T1477",
+      "successor_name": "Exploit via Radio Interfaces"
+    },
+    "T1457": {
+      "name": "Malicious Media Content",
+      "successor": "T1456",
+      "successor_name": "Drive-By Compromise"
+    },
+    "T1459": {
+      "name": "Device Unlock Code Guessing or Brute Force",
+      "successor": "T1461",
+      "successor_name": "Lockscreen Bypass"
+    },
+    "T1460": {
+      "name": "Biometric Spoofing",
+      "successor": "T1461",
+      "successor_name": "Lockscreen Bypass"
+    },
+    "T1462": {
+      "name": "Malicious Software Development Tools",
+      "successor": "T1474",
+      "successor_name": "Supply Chain Compromise"
+    },
+    "T1463": {
+      "name": "Manipulate Device Communication",
+      "successor": "T1638",
+      "successor_name": "Adversary-in-the-Middle"
+    },
+    "T1465": {
+      "name": "Rogue Wi-Fi Access Points",
+      "successor": "T1638",
+      "successor_name": "Adversary-in-the-Middle"
+    },
+    "T1466": {
+      "name": "Downgrade to Insecure Protocols",
+      "successor": "T1638",
+      "successor_name": "Adversary-in-the-Middle"
+    },
+    "T1467": {
+      "name": "Rogue Cellular Base Station",
+      "successor": "T1638",
+      "successor_name": "Adversary-in-the-Middle"
+    },
+    "T1468": {
+      "name": "Remotely Track Device Without Authorization",
+      "successor": "T1430.001",
+      "successor_name": "Remote Device Management Services"
+    },
+    "T1472": {
+      "name": "Generate Fraudulent Advertising Revenue",
+      "successor": "T1643",
+      "successor_name": "Generate Traffic from Victim"
+    },
+    "T1473": {
+      "name": "Malicious or Vulnerable Built-in Device Functionality",
+      "successor": "T1474",
+      "successor_name": "Supply Chain Compromise"
+    },
+    "T1478": {
+      "name": "Install Insecure or Malicious Configuration",
+      "successor": "T1632.001",
+      "successor_name": "Code Signing Policy Modification"
+    },
+    "T1483": {
+      "name": "Domain Generation Algorithms",
+      "successor": "T1568.002",
+      "successor_name": "Domain Generation Algorithms"
+    },
+    "T1487": {
+      "name": "Disk Structure Wipe",
+      "successor": "T1561.002",
+      "successor_name": "Disk Structure Wipe"
+    },
+    "T1488": {
+      "name": "Disk Content Wipe",
+      "successor": "T1561.001",
+      "successor_name": "Disk Content Wipe"
+    },
+    "T1492": {
+      "name": "Stored Data Manipulation",
+      "successor": "T1565.001",
+      "successor_name": "Stored Data Manipulation"
+    },
+    "T1493": {
+      "name": "Transmitted Data Manipulation",
+      "successor": "T1565.002",
+      "successor_name": "Transmitted Data Manipulation"
+    },
+    "T1494": {
+      "name": "Runtime Data Manipulation",
+      "successor": "T1565.003",
+      "successor_name": "Runtime Data Manipulation"
+    },
+    "T1500": {
+      "name": "Compile After Delivery",
+      "successor": "T1027.004",
+      "successor_name": "Compile After Delivery"
+    },
+    "T1501": {
+      "name": "Systemd Service",
+      "successor": "T1543.002",
+      "successor_name": "Systemd Service"
+    },
+    "T1502": {
+      "name": "Parent PID Spoofing",
+      "successor": "T1134.004",
+      "successor_name": "Parent PID Spoofing"
+    },
+    "T1503": {
+      "name": "Credentials from Web Browsers",
+      "successor": "T1555.003",
+      "successor_name": "Credentials from Web Browsers"
+    },
+    "T1504": {
+      "name": "PowerShell Profile",
+      "successor": "T1546.013",
+      "successor_name": "PowerShell Profile"
+    },
+    "T1506": {
+      "name": "Web Session Cookie",
+      "successor": "T1550.004",
+      "successor_name": "Web Session Cookie"
+    },
+    "T1507": {
+      "name": "Network Information Discovery",
+      "successor": "T1421",
+      "successor_name": "System Network Connections Discovery"
+    },
+    "T1508": {
+      "name": "Suppress Application Icon",
+      "successor": "T1628.001",
+      "successor_name": "Suppress Application Icon"
+    },
+    "T1510": {
+      "name": "Clipboard Modification",
+      "successor": "T1641.001",
+      "successor_name": "Transmitted Data Manipulation"
+    },
+    "T1514": {
+      "name": "Elevated Execution with Prompt",
+      "successor": "T1548.004",
+      "successor_name": "Elevated Execution with Prompt"
+    },
+    "T1519": {
+      "name": "Emond",
+      "successor": "T1546.014",
+      "successor_name": "Emond"
+    },
+    "T1520": {
+      "name": "Domain Generation Algorithms",
+      "successor": "T1637.001",
+      "successor_name": "Domain Generation Algorithms"
+    },
+    "T1522": {
+      "name": "Cloud Instance Metadata API",
+      "successor": "T1552.005",
+      "successor_name": "Cloud Instance Metadata API"
+    },
+    "T1523": {
+      "name": "Evade Analysis Environment",
+      "successor": "T1633.001",
+      "successor_name": "System Checks"
+    },
+    "T1527": {
+      "name": "Application Access Token",
+      "successor": "T1550.001",
+      "successor_name": "Application Access Token"
+    },
+    "T1536": {
+      "name": "Revert Cloud Instance",
+      "successor": "T1578.004",
+      "successor_name": "Revert Cloud Instance"
+    },
+    "T1540": {
+      "name": "Code Injection",
+      "successor": "T1631.001",
+      "successor_name": "Ptrace System Calls"
+    },
+    "T1547.011": {
+      "name": "Plist Modification",
+      "successor": "T1647",
+      "successor_name": "Plist File Modification"
+    },
+    "T1562": {
+      "name": "Impair Defenses",
+      "successor": "T1685",
+      "successor_name": "Disable or Modify Tools"
+    },
+    "T1562.001": {
+      "name": "Disable or Modify Tools",
+      "successor": "T1685",
+      "successor_name": "Disable or Modify Tools"
+    },
+    "T1562.002": {
+      "name": "Disable Windows Event Logging",
+      "successor": "T1685.001",
+      "successor_name": "Disable or Modify Windows Event Log"
+    },
+    "T1562.003": {
+      "name": "Impair Command History Logging",
+      "successor": "T1690",
+      "successor_name": "Prevent Command History Logging"
+    },
+    "T1562.004": {
+      "name": "Disable or Modify System Firewall",
+      "successor": "T1686",
+      "successor_name": "Disable or Modify System Firewall"
+    },
+    "T1562.006": {
+      "name": "Indicator Blocking",
+      "successor": "T1685",
+      "successor_name": "Disable or Modify Tools"
+    },
+    "T1562.007": {
+      "name": "Disable or Modify Cloud Firewall",
+      "successor": "T1686.001",
+      "successor_name": "Cloud Firewall"
+    },
+    "T1562.008": {
+      "name": "Disable or Modify Cloud Logs",
+      "successor": "T1685.002",
+      "successor_name": "Disable or Modify Cloud Log"
+    },
+    "T1562.009": {
+      "name": "Safe Mode Boot",
+      "successor": "T1688",
+      "successor_name": "Safe Mode Boot"
+    },
+    "T1562.010": {
+      "name": "Downgrade Attack",
+      "successor": "T1689",
+      "successor_name": "Downgrade Attack"
+    },
+    "T1562.011": {
+      "name": "Spoof Security Alerting",
+      "successor": "T1685.003",
+      "successor_name": "Modify or Spoof Tool UI"
+    },
+    "T1562.012": {
+      "name": "Disable or Modify Linux Audit System",
+      "successor": "T1685.004",
+      "successor_name": "Disable or Modify Linux Audit System Log"
+    },
+    "T1562.013": {
+      "name": "Disable or Modify Network Device Firewall",
+      "successor": "T1686.002",
+      "successor_name": "Network Device Firewall"
+    },
+    "T1574.002": {
+      "name": "DLL Side-Loading",
+      "successor": "T1574.001",
+      "successor_name": "DLL"
+    },
+    "T1576": {
+      "name": "Uninstall Malicious Application",
+      "successor": "T1630.001",
+      "successor_name": "Uninstall Malicious Application"
+    },
+    "T1579": {
+      "name": "Keychain",
+      "successor": "T1634.001",
+      "successor_name": "Keychain"
+    },
+    "T1581": {
+      "name": "Geofencing",
+      "successor": "T1627.001",
+      "successor_name": "Geofencing"
+    },
+    "T1605": {
+      "name": "Command-Line Interface",
+      "successor": "T1623.001",
+      "successor_name": "Unix Shell"
+    },
+    "T1618": {
+      "name": "User Evasion",
+      "successor": "T1628.002",
+      "successor_name": "User Evasion"
+    },
+    "T1656": {
+      "name": "Impersonation",
+      "successor": "T1684.001",
+      "successor_name": "Impersonation"
+    },
+    "T1672": {
+      "name": "Email Spoofing",
+      "successor": "T1684.002",
+      "successor_name": "Email Spoofing"
+    }
+  },
+  "groups": {
+    "G0042": {
+      "name": "MONSOON",
+      "successor": "G0040",
+      "successor_name": "Patchwork"
+    },
+    "G0057": {
+      "name": "APT34",
+      "successor": "G0049",
+      "successor_name": "OilRig"
+    },
+    "G0058": {
+      "name": "Charming Kitten",
+      "successor": "G0059",
+      "successor_name": "Magic Hound"
+    },
+    "G0074": {
+      "name": "Dragonfly 2.0",
+      "successor": "G0035",
+      "successor_name": "Dragonfly"
+    },
+    "G0086": {
+      "name": "Stolen Pencil",
+      "successor": "G0094",
+      "successor_name": "Kimsuky"
+    },
+    "G0118": {
+      "name": "UNC2452",
+      "successor": "G0016",
+      "successor_name": "APT29"
+    }
+  },
+  "software": {
+    "S0209": {
+      "name": "Darkmoon",
+      "successor": "S0012",
+      "successor_name": "PoisonIvy"
+    },
+    "S9000": {
+      "name": "Ngrok",
+      "successor": "S0508",
+      "successor_name": "ngrok"
+    }
+  }
+}

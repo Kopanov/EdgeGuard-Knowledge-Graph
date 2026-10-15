@@ -20,7 +20,11 @@ guarantee and none of the dropped ``source_id`` / ``source_ids`` / ``report_ids`
 that campaign membership is ``PART_OF_CAMPAIGN`` (``PART_OF`` stays ResilMesh's), that a
 CVE's ``cvss_score`` / ``cvss_version`` / ``severity`` come from its CVSS sub-nodes, and
 it reports the ``SOURCED_FROM`` count of every ``Source`` node, warning when a source
-collected by default delivered nothing.
+collected by default delivered nothing. Since the revoked-object change of 2026-10 it fails
+when a Technique node carries an ATT&CK id the revoked-id map lists
+(``src/reference/attack_revoked_ids.json``), or a ThreatActor, Malware or Tool node from MITRE
+is a revoked group or piece of software, and warns when another source's actor still carries a
+revoked group's name.
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -50,7 +54,15 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+# Standard library only (no driver, no config): the revoked ATT&CK ids of check 9b.
+from attack_revoked import load_revoked_ids  # noqa: E402
 
 # NEO4J_HTTP is the name docker-compose.yml / .env.example use for the same endpoint.
 BASE = (os.getenv("NEO4J_HTTP_URL") or os.getenv("NEO4J_HTTP") or "https://neo4j.edgeguard.org").rstrip("/")
@@ -385,6 +397,71 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     rep.add("in_tactic_same_domain", r.get("c") == 0, r)
     r = _one("MATCH (t:Technique {attack_domain: 'ics'}) RETURN count(t) AS c")
     rep.add("ics_techniques_present", (r.get("c") or 0) > 0 if require_ics else None, r, mandatory=require_ics)
+
+    # 9b. Revoked ATT&CK objects (2026-10). The MITRE collector skips objects ATT&CK revoked, and a
+    #     revoked technique id a feed names is translated to its successor, so no Technique node
+    #     carries an id the revoked-id map lists, and no ThreatActor node from MITRE is a revoked
+    #     group (judged by name: ATT&CK actors are keyed by name). A node another source named after
+    #     a revoked group (an OTX pulse naming UNC2452) is a warning: the actor alias merge
+    #     (enrichment) folds it into the successor, whose aliases carry the revoked group's name.
+    #     The same holds for software: no Malware or Tool node from MITRE carries a revoked
+    #     software's name. Informational when the graph has no Technique / no MITRE actor / no MITRE
+    #     software; a map that cannot be read fails the checks (nothing to judge by).
+    revoked = load_revoked_ids()
+    if not revoked.loaded:
+        detail = {"map": revoked.path, "problem": revoked.problem}
+        rep.add("no_revoked_attack_techniques", False, detail)
+        rep.add("no_revoked_attack_groups", False, detail)
+        rep.add("no_revoked_attack_software", False, detail)
+    else:
+        r = _one(
+            "MATCH (t:Technique) WITH t, t.mitre_id IN $ids AS is_revoked "
+            "RETURN count(t) AS techniques, sum(CASE WHEN is_revoked THEN 1 ELSE 0 END) AS revoked_ids, "
+            "collect(CASE WHEN is_revoked THEN t.mitre_id END)[..10] AS examples",
+            {"ids": sorted(revoked.techniques)},
+        )
+        r["map_version"] = revoked.version
+        rep.add(
+            "no_revoked_attack_techniques",
+            None if not r.get("techniques") else r.get("revoked_ids") == 0,
+            r,
+        )
+        r = _one(
+            "MATCH (a:ThreatActor) WITH a, 'mitre_attck' IN coalesce(a.source, []) AS from_mitre, "
+            "toLower(trim(a.name)) IN $names AS is_revoked "
+            "RETURN sum(CASE WHEN from_mitre THEN 1 ELSE 0 END) AS mitre_actors, "
+            "sum(CASE WHEN is_revoked AND from_mitre THEN 1 ELSE 0 END) AS revoked_groups_from_mitre, "
+            "sum(CASE WHEN is_revoked AND NOT from_mitre THEN 1 ELSE 0 END) AS revoked_names_other_sources, "
+            "collect(CASE WHEN is_revoked AND from_mitre THEN a.name END)[..10] AS examples_from_mitre, "
+            "collect(CASE WHEN is_revoked AND NOT from_mitre THEN a.name END)[..10] AS examples_other_sources",
+            {"names": sorted({n.strip().lower() for n in revoked.group_names()})},
+        )
+        r["map_version"] = revoked.version
+        mitre_actors = r.get("mitre_actors") or 0
+        rep.add("no_revoked_attack_groups", None if not mitre_actors else r.get("revoked_groups_from_mitre") == 0, r)
+        rep.add(
+            "revoked_group_names_folded",
+            None if not mitre_actors else r.get("revoked_names_other_sources") == 0,
+            {
+                **r,
+                "hint": "an actor another source named after a revoked ATT&CK group is folded into the "
+                "successor by the actor alias merge (enrichment); see its [ACTOR-ALIAS-MERGE] log lines",
+            },
+            mandatory=False,
+        )
+        r = _one(
+            "MATCH (n) WHERE (n:Malware OR n:Tool) AND 'mitre_attck' IN coalesce(n.source, []) "
+            "WITH n, toLower(trim(n.name)) IN $names AS is_revoked "
+            "RETURN count(n) AS mitre_software, sum(CASE WHEN is_revoked THEN 1 ELSE 0 END) AS revoked_software, "
+            "collect(CASE WHEN is_revoked THEN n.name END)[..10] AS examples",
+            {"names": sorted({n.strip().lower() for n in revoked.software_names()})},
+        )
+        r["map_version"] = revoked.version
+        rep.add(
+            "no_revoked_attack_software",
+            None if not r.get("mitre_software") else r.get("revoked_software") == 0,
+            r,
+        )
 
     # 10. CISA ICS advisories (opt-in).
     r = _one(

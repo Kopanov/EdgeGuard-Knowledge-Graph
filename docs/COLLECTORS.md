@@ -379,6 +379,16 @@ Collects threat intelligence from MITRE ATT&CK framework, including:
 - **API Key:** Not required
 - **Format:** STIX 2.1 bundle
 
+### Revoked and deprecated objects (2026-10)
+
+The ATT&CK bundles keep replaced and retired objects. `_parse_bundle` (Enterprise and ICS alike):
+
+- **Revoked** (`revoked: true`, with a `revoked-by` relationship to the successor): skipped, whatever the type. No item, no relationship to or from it (`uses`, `subtechnique-of`, `attributed-to`), so no `uses_techniques` / `uses_malware` / `uses_tools` entry names it. A revoked group's or software's name and aliases are appended to its successor's `aliases` (the successor's own aliases first; a chain A → B → C ends on C): `UNC2452` → `APT29`, `Dragonfly 2.0` → `Dragonfly`, `Stolen Pencil` → `Kimsuky`, `Darkmoon` → `PoisonIvy`. Tool items now carry `aliases` too (`x_mitre_aliases`), but the MISP writer tags aliases of actors and malware only, so a tool's aliases do not reach the graph.
+- **Deprecated** (`x_mitre_deprecated: true`, no successor): kept, with `deprecated: True`; every other item carries `deprecated: False`. The MISP writer tags a deprecated item `attack-status:deprecated`; the sync turns the tag into `n.deprecated = true`.
+- The log line `skipped N revoked ATT&CK objects {...} and M relationships that reach them` gives the counts per bundle.
+
+Feeds that still name a revoked technique id (OTX pulses citing `T1086`) are translated to the successor downstream, with `src/reference/attack_revoked_ids.json` (`src/attack_revoked.py`; see `docs/KNOWLEDGE_GRAPH.md`, "Revoked and deprecated ATT&CK objects"). Groups and software need no map: the bundle names every successor. A revoked technique the map does not list is therefore kept, as before 2026-10, with the warning `[ATTACK-REVOKED] N technique(s) the bundle revokes are not in the revoked-id map (…)`, so the links that cite it are not lost; rebuild the map (`docs/RUNBOOK.md`, "Rebuilding the ATT&CK revoked-id map") and the next run skips it.
+
 ### Zone Detection
 ```python
 def detect_sectors(self, text):
@@ -400,6 +410,7 @@ def detect_sectors(self, text):
     'sources': ['mitre_attck'],
     'platforms': ['Windows', 'macOS', 'Linux'],
     'data_sources': ['Application Log', 'File', 'Network Traffic'],
+    'deprecated': False,  # True for an object ATT&CK deprecated (2026-10); revoked objects are skipped
     'confidence_score': 0.8
 }
 
@@ -407,7 +418,7 @@ def detect_sectors(self, text):
 {
     'type': 'actor',
     'name': 'APT29',
-    'aliases': ['Cozy Bear', 'The Dukes', 'PowerDuke'],
+    'aliases': ['Cozy Bear', 'The Dukes', 'PowerDuke', 'UNC2452', 'StellarParticle'],  # + revoked groups' names
     'description': 'APT29 is a threat group that has been attributed to the Russian government...',
     'zone': ['healthcare', 'finance'],  # Array of all matching zones
     'tag': 'mitre_attck',
@@ -1159,4 +1170,4 @@ Should show populated source-reported timestamps if your upstream provides them.
 
 ---
 
-_Last updated: 2026-10-15 — § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`; § 7 SSL Blacklist: fingerprints are collected as `x509-fingerprint-sha1` (MISP type `x509-fingerprint-sha1`, `[x509-certificate:hashes.'SHA-1' = …]` in STIX) instead of `sha1` file hashes; what reaches the graph; overview: "MISP push: attribute types and characters" (generic hashes typed by digest length, 4-byte characters stripped or the attribute skipped and counted as failed, default TLP at sync for an untagged attribute); § 1 OTX indicator types (non-file hashes not collected, e-mail addresses typed as e-mail); § 3 KEV baseline scope (whole catalogue) and ransomware use without a derived score; the source-truthful helper note no longer names a review tool; after #189: the OTX baseline page ceiling is the forwarded setting `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (removed from the planned list). Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
+_Last updated: 2026-10-15 — MITRE ATT&CK: revoked and deprecated objects (revoked objects skipped, their names given to the successor, a revoked technique the map does not list kept with an `[ATTACK-REVOKED]` warning; deprecated objects kept and marked). Same day: § 2 NVD: every CVSS version NVD supplies is kept; `attack_vector` is NVD's word for the scoring CVSS's attack vector (`None` without CVSS), and the KEV, OTX and ICS records send none; the NVD_META digest ignores `attack_vector`; § 7 SSL Blacklist: fingerprints are collected as `x509-fingerprint-sha1` (MISP type `x509-fingerprint-sha1`, `[x509-certificate:hashes.'SHA-1' = …]` in STIX) instead of `sha1` file hashes; what reaches the graph; overview: "MISP push: attribute types and characters" (generic hashes typed by digest length, 4-byte characters stripped or the attribute skipped and counted as failed, default TLP at sync for an untagged attribute); § 1 OTX indicator types (non-file hashes not collected, e-mail addresses typed as e-mail); § 3 KEV baseline scope (whole catalogue) and ransomware use without a derived score; the source-truthful helper note no longer names a review tool; after #189: the OTX baseline page ceiling is the forwarded setting `EDGEGUARD_OTX_BASELINE_MAX_PAGES` (removed from the planned list). Prior: 2026-10-14 — § 2 NVD incremental runs: a stored lastModified cursor instead of the newest 200 by publication date; stored CVEs NVD changed are edited in MISP; duplicate avoidance describes the cross-event check. Prior: 2026-10-14 — CVE scores: the NVD rule (first CVSS in the order v3.1 → v3.0 → v2 → v4.0, `None` / `UNKNOWN` without CVSS), OTX references, KEV and ICS records without CVSS carry no score (no more ransomware-derived 9.0 / 7.0 or 7.0 default). Prior: 2026-10-12 — § 13 MalwareBazaar collector (flag-guarded abuse.ch source: recent export, sha256 per sample, family label → `INDICATES`), summary and baseline-limit rows. Prior: 2026-04-26 — PR-N33 docs audit: removed all 11 occurrences of the dead `last_updated` key from per-collector example dicts (the doc itself says at L71 "PR-M2 removed `last_updated` from collector emit"; the example dicts were stale and contradicted the rule). Replaced with explanatory comments referencing PR-M2. Prior: 2026-04-18 chip 5a refactor._
