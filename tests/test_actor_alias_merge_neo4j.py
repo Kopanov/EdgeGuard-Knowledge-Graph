@@ -158,6 +158,11 @@ def _one(driver, query, **params):
         return record.data() if record else None
 
 
+def _rows(driver, query, **params):
+    with driver.session() as session:
+        return [r.data() for r in session.run(query, **params)]
+
+
 def _names(driver):
     with driver.session() as session:
         return sorted(r["name"] for r in session.run(f"MATCH (a:ThreatActor:{LABEL}) RETURN a.name AS name"))
@@ -270,6 +275,41 @@ class TestMergeOnNeo4j:
         )
         assert (attributed["n"], attributed["match_type"], attributed["confidence"]) == (1, "malware_family", 0.7)
         assert sorted(attributed["sources"]) == ["alienvault_otx", "threatfox"]
+
+    def test_the_merge_keeps_the_most_restrictive_tlp(self, graph):
+        """TLP is never loosened by a merge (2026-10): an amber duplicate folded into a white
+        canonical leaves it amber, a canonical stricter than its duplicate keeps its level, and a
+        collapsed edge takes the most restrictive ``r.tlp`` of its group; an edge group without one
+        stays without."""
+        client, driver = graph
+        with driver.session() as session:
+            session.run("MATCH (a:ThreatActor {name: 'clop'}) SET a.tlp = 'white'")
+            session.run("MATCH (a:ThreatActor {name: 'cl0p'}) SET a.tlp = 'amber'")
+            session.run("MATCH (a:ThreatActor {name: 'apt28'}) SET a.tlp = 'amber+strict'")
+            session.run("MATCH (a:ThreatActor {name: 'fancy bear'}) SET a.tlp = 'green'")
+            session.run(
+                "MATCH (:ThreatActor {name: 'clop'})-[r:EMPLOYS_TECHNIQUE]->(:Technique {mitre_id: 'T1059.001'}) "
+                "SET r.tlp = 'green'"
+            )
+            session.run(
+                "MATCH (:ThreatActor {name: 'cl0p'})-[r:EMPLOYS_TECHNIQUE]->(:Technique {mitre_id: 'T1059.001'}) "
+                "SET r.tlp = 'amber'"
+            )
+        enrichment_jobs.merge_alias_duplicate_actors(client)
+        tlp = {r["name"]: r["tlp"] for r in _rows(driver, "MATCH (a:ThreatActor) RETURN a.name AS name, a.tlp AS tlp")}
+        assert (tlp["clop"], tlp["apt28"]) == ("amber", "amber+strict")
+        assert "cl0p" not in tlp and "fancy bear" not in tlp
+        employs = _one(
+            driver,
+            "MATCH (:ThreatActor {name: 'clop'})-[r:EMPLOYS_TECHNIQUE]->(:Technique {mitre_id: 'T1059.001'}) "
+            "RETURN count(r) AS n, head(collect(r.tlp)) AS tlp",
+        )
+        assert employs == {"n": 1, "tlp": "amber"}
+        attributed = _one(
+            driver,
+            "MATCH (:Malware {name: 'clop dropper'})-[r:ATTRIBUTED_TO]->(:ThreatActor {name: 'clop'}) RETURN r.tlp AS tlp",
+        )
+        assert attributed == {"tlp": None}
 
     def test_a_second_run_merges_nothing(self, graph):
         client, driver = graph
