@@ -56,7 +56,7 @@
 - IPs, domains, URLs, hashes
 - Malware family names
 - CVE references
-- Pulse descriptions
+- Adversary names (no pulse descriptions: since 2026-10 a pulse's description, which describes the report, is not given to the families and adversaries it names)
 
 **How classified:**
 - Pulse tags searched for keywords (hospital, scada, bank, etc.)
@@ -323,4 +323,4 @@ No malware family is mapped to a sector by name, and no source is hard-coded to 
 
 ---
 
-_Last updated: 2026-10-15 — FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._
+_Last updated: 2026-10-15 — § 1 OTX: pulse descriptions are not collected (they were given to the pulse's families and adversaries as their description). Same day: FIRST EPSS (row 15, § 8b: cadence, writes and clearing, why it bypasses MISP, terms, the address FIRST documents); CISA's SSVC decision points with the NVD records (row 2, § 6). Same day: SSL Blacklist fingerprints are stored as `x509-fingerprint-sha1` (TLS certificate fingerprints), not as file hashes; CISA KEV: ransomware use without a derived score; NVD: CVE score rule and record status. Prior: 2026-10-14 — KEV whole catalogue in baseline mode and the NVD KEV sweep / `EDGEGUARD_NVD_EXTRA_CVE_IDS`; the sector time-range filter removed; NVD incremental runs by lastModified cursor. Prior: 2026-04-26 — PR-N33 docs audit: corrected wrong CISA KEV URL (was a non-existent human page; actual is `feeds/known_exploited_vulnerabilities.json`); corrected MITRE ATT&CK URL (was a non-existent human page; actual is the legacy `mitre/cti` raw GitHub URL the collector hits at HEAD). Prior: 2026-03-28._

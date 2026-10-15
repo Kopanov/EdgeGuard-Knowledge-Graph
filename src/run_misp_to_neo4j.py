@@ -527,6 +527,54 @@ def _vulnerability_comment_description(raw_comment: Any) -> Optional[str]:
     return description
 
 
+# 2026-10: MISPWriter's comment for a malware, actor, technique, tactic or tool item without text — "Malware
+# from <source>", "Threat actor from <source>", "MITRE ATT&CK technique from <source>", "MITRE ATT&CK
+# tactic", "MITRE ATT&CK tool: <name>". It names the writer, not the entity; taken as a description it would
+# keep any later record's text off a node that MITRE does not describe, since such a record only fills.
+_ENTITY_PLACEHOLDER_COMMENT_RE = re.compile(
+    r"^\s*(?:(?:Malware|Threat actor|MITRE ATT&CK technique) from [^\s|]+|MITRE ATT&CK tactic|"
+    r"MITRE ATT&CK tool: [^\n]+)\s*$"
+)
+
+# 2026-10: a metadata block anywhere in a text. The actor and tool branches find a ``MITRE_USES_TECHNIQUES``
+# block anywhere in the comment, ``_comment_description`` only at its start, so a comment with text before
+# the block would otherwise hand the block on as part of the description.
+_EMBEDDED_METADATA_RE = re.compile(
+    r"\b(?:[A-Z][A-Z0-9_]*_META|MITRE_USES_TECHNIQUES|MITRE_TACTIC_PHASES|"
+    + re.escape(CURATED_CLAIMS_PREFIX.rstrip(":"))
+    + r"):\s*[\[{]"
+)
+
+# 2026-10: sources whose malware and actor attributes carry a report's text, not the entity's. Until
+# 2026-10 the OTX collector gave every malware family and adversary of a pulse the pulse's description,
+# which MISPWriter wrote after the attribute's ``MITRE_USES_TECHNIQUES`` block; MISP keeps those attributes,
+# since MISPWriter writes a family or adversary once per source and skips it in later pulses. The OTX
+# collector gives such items no description since then.
+_REPORT_TEXT_ENTITY_SOURCES = frozenset({"alienvault_otx"})
+
+
+def _entity_comment_description(raw_comment: Any, source_id: str) -> Optional[str]:
+    """The description a malware, actor, technique, tactic or tool attribute's comment gives, or None (2026-10).
+
+    ``_comment_description`` (never a metadata block's raw text; the text MISPWriter writes after a
+    ``MITRE_*`` block's JSON), except MISPWriter's placeholder for an item without text
+    (``_ENTITY_PLACEHOLDER_COMMENT_RE``), a text that still holds a metadata block
+    (``_EMBEDDED_METADATA_RE``) and the comment of an attribute from a source in
+    ``_REPORT_TEXT_ENTITY_SOURCES`` (OTX: a pulse's description). Before 2026-10 the malware branch
+    stored a comment that was only a ``MITRE_USES_TECHNIQUES`` block (an OTX family from a pulse without
+    a description) as the Malware description, and the branches that read a block stored the raw comment
+    when it did not parse.
+    """
+    if source_id in _REPORT_TEXT_ENTITY_SOURCES:
+        return None
+    description = _comment_description(raw_comment)
+    if description is None:
+        return None
+    if _ENTITY_PLACEHOLDER_COMMENT_RE.match(description) or _EMBEDDED_METADATA_RE.search(description):
+        return None
+    return description
+
+
 def _item_source_refs(item: Dict, source: str) -> List[str]:
     """The feed's own record ids behind ``item``, each as ``"<source>:<id>"`` (2026-10).
 
@@ -2332,6 +2380,16 @@ class MISPToNeo4jSync:
                         labels.append(f"zone:{zone_name}")
                     break
 
+        def _with_entity_description(stix_obj: dict) -> dict:
+            """2026-10: the description of a threat-actor, malware, attack-pattern, tool or tactic object, as
+            the sync takes it (``_entity_comment_description``): never a metadata block's raw text, a
+            placeholder or an OTX pulse's text, which these objects carried as the raw comment and a STIX
+            import of the bundle (``run_pipeline``) stored on the node. No ``description`` without one."""
+            text = _entity_comment_description(attr.get("comment"), self.extract_source_from_tags(attr_tags))
+            if text:
+                stix_obj["description"] = text
+            return stix_obj
+
         # If no zones found in attribute tags, use event zones
         if not labels and event_zones:
             labels = [f"zone:{zone}" for zone in event_zones]
@@ -2414,12 +2472,11 @@ class MISPToNeo4jSync:
                 "spec_version": "2.1",
                 "id": f"threat-actor--{attr_uuid}",
                 "name": value,
-                "description": attr.get("comment", ""),
                 "threat_actor_types": ["hacker"],
             }
             if labels:
                 stix_obj["labels"] = labels
-            return _stamp_sdo(stix_obj)
+            return _stamp_sdo(_with_entity_description(stix_obj))
 
         elif attr_type == "malware-type":
             # Extract malware family from tags if available
@@ -2434,13 +2491,12 @@ class MISPToNeo4jSync:
                 "spec_version": "2.1",
                 "id": f"malware--{attr_uuid}",
                 "name": value,
-                "description": attr.get("comment", ""),
                 "is_family": True,
                 "malware_types": malware_types if malware_types else ["trojan"],
             }
             if labels:
                 stix_obj["labels"] = labels
-            return _stamp_sdo(stix_obj)
+            return _stamp_sdo(_with_entity_description(stix_obj))
 
         elif attr_type == "text":
             # Check if this is a MITRE technique (format: "T1234: Name" or starts with T followed by digits)
@@ -2472,12 +2528,11 @@ class MISPToNeo4jSync:
                     "spec_version": "2.1",
                     "id": f"attack-pattern--{attr_uuid}",
                     "name": technique_name,
-                    "description": attr.get("comment", ""),
                     "external_references": external_refs,
                 }
                 if labels:
                     stix_obj["labels"] = labels
-                return _stamp_sdo(stix_obj)
+                return _stamp_sdo(_with_entity_description(stix_obj))
 
             # Check if this is a MITRE tool (format: "S0001: Mimikatz")
             #
@@ -2508,16 +2563,13 @@ class MISPToNeo4jSync:
                 tool_name = tool_match.group(2).strip()
                 raw_comment = attr.get("comment", "") or ""
                 uses_techniques = []
-                description = raw_comment
                 if raw_comment.strip().startswith("MITRE_USES_TECHNIQUES:"):
                     try:
                         rest = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].lstrip()
                         nl = rest.find("\n")
                         json_part = rest if nl < 0 else rest[:nl]
-                        tail = (rest[nl + 1 :].strip() if nl >= 0 else "") or ""
                         meta = json.loads(json_part)
                         uses_techniques = [str(x) for x in (meta.get("t") or [])]
-                        description = tail or description
                     except (ValueError, TypeError, json.JSONDecodeError):
                         pass
                 external_refs = [
@@ -2532,14 +2584,13 @@ class MISPToNeo4jSync:
                     "spec_version": "2.1",
                     "id": f"tool--{attr_uuid}",
                     "name": tool_name,
-                    "description": description,
                     "external_references": external_refs,
                 }
                 if labels:
                     stix_obj["labels"] = labels
                 if uses_techniques:
                     stix_obj["x_edgeguard_uses_techniques"] = uses_techniques
-                return _stamp_sdo(stix_obj)
+                return _stamp_sdo(_with_entity_description(stix_obj))
 
             # Check if this is a MITRE tactic (format: "TA0001: Initial Access")
             #
@@ -2579,13 +2630,12 @@ class MISPToNeo4jSync:
                     "spec_version": "2.1",
                     "id": f"x-mitre-tactic--{attr_uuid}",
                     "name": tactic_name,
-                    "description": attr.get("comment", ""),
                     "external_references": tactic_external_refs,
                     "x_edgeguard_mitre_kind": "tactic",
                 }
                 if labels:
                     stix_obj["labels"] = labels
-                return _stamp_sdo(stix_obj)
+                return _stamp_sdo(_with_entity_description(stix_obj))
 
             # Not a MITRE technique/tool/tactic, treat as unknown indicator
             return None
@@ -3353,16 +3403,14 @@ class MISPToNeo4jSync:
             actor_report_ids: List[str] = []
             actor_uses_malware: List[str] = []
             actor_uses_tools: List[str] = []
-            actor_description = raw_comment
+            # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
+            # (``_entity_comment_description``); the comment used to become the description when the
+            # block did not parse.
+            actor_description = _entity_comment_description(raw_comment, source_id) or ""
             if "MITRE_USES_TECHNIQUES:" in raw_comment:
                 try:
                     uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
-                    if "\n" in uses_json:
-                        json_part, actor_description = uses_json.split("\n", 1)
-                        actor_description = actor_description.strip()
-                    else:
-                        json_part = uses_json
-                        actor_description = ""
+                    json_part = uses_json.split("\n", 1)[0]
                     parsed = json.loads(json_part)
                     if isinstance(parsed, dict):
                         uses_techniques = parsed.get("t", [])
@@ -3376,7 +3424,9 @@ class MISPToNeo4jSync:
                     elif isinstance(parsed, list):
                         uses_techniques = parsed
                 except (ValueError, IndexError):
-                    actor_description = raw_comment
+                    logger.warning(
+                        "Unreadable MITRE_USES_TECHNIQUES block for actor %r — no techniques taken", actor_name
+                    )
 
             # 2026-10: a curated package's attribute carries claims, not a profile (see
             # CURATED_CLAIMS_PREFIX); it names the node and must not change it.
@@ -3475,24 +3525,25 @@ class MISPToNeo4jSync:
             reported_techniques: List[str] = []
             malware_pulse_id = ""
             malware_report_ids: List[str] = []
-            description = raw_comment
+            # 2026-10: never the block's raw text, a placeholder or an OTX pulse's text
+            # (``_entity_comment_description``). The comment used to become the description when it was
+            # only the block (``tail or description``: an OTX family from a pulse without a description
+            # stored ``MITRE_USES_TECHNIQUES:{...}``) and when the block did not parse.
+            description = _entity_comment_description(raw_comment, source_id) or ""
             if raw_comment.strip().startswith("MITRE_USES_TECHNIQUES:"):
                 try:
                     rest = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].lstrip()
                     nl = rest.find("\n")
                     json_part = rest if nl < 0 else rest[:nl]
-                    tail = (rest[nl + 1 :].strip() if nl >= 0 else "") or ""
                     meta = json.loads(json_part)
                     uses_techniques = [str(x) for x in (meta.get("t") or [])]
                     # 2026-10: pulse-level ids ("rt") + pulse id ("pid"), see MISPWriter._technique_meta.
                     reported_techniques = [str(x) for x in (meta.get("rt") or [])]
                     malware_pulse_id = str(meta.get("pid") or "").strip()
                     malware_report_ids = [str(x).strip() for x in (meta.get("rids") or []) if str(x).strip()]
-                    description = tail or description
                 except (ValueError, TypeError, json.JSONDecodeError):
                     logger.warning(
-                        "Failed to parse MITRE_USES_TECHNIQUES for malware %r; using raw comment as description",
-                        malware_name,
+                        "Failed to parse MITRE_USES_TECHNIQUES for malware %r; no techniques taken", malware_name
                     )
 
             # 2026-10: curated package claims (see CURATED_CLAIMS_PREFIX) — the node is named, not changed.
@@ -3594,23 +3645,20 @@ class MISPToNeo4jSync:
             # Parse tactic_phases from MITRE_TACTIC_PHASES: comment prefix
             raw_comment = attr.get("comment", "") or ""
             tactic_phases = []
-            technique_description = raw_comment
+            # 2026-10: never the block's raw text or a placeholder (``_entity_comment_description``); the
+            # comment used to become the description when the block did not parse.
+            technique_description = _entity_comment_description(raw_comment, source_id) or ""
             if "MITRE_TACTIC_PHASES:" in raw_comment:
                 try:
                     phases_json = raw_comment.split("MITRE_TACTIC_PHASES:", 1)[1].strip()
-                    if "\n" in phases_json:
-                        json_part, technique_description = phases_json.split("\n", 1)
-                        technique_description = technique_description.strip()
-                    else:
-                        json_part = phases_json
-                        technique_description = ""
+                    json_part = phases_json.split("\n", 1)[0]
                     parsed = json.loads(json_part)
                     if isinstance(parsed, dict):
                         tactic_phases = parsed.get("p", [])
                     elif isinstance(parsed, list):
                         tactic_phases = parsed
                 except (ValueError, IndexError):
-                    technique_description = raw_comment
+                    logger.warning("Unreadable MITRE_TACTIC_PHASES block for technique %s — no tactics taken", mitre_id)
 
             # PR (S5): source-truthful timestamps. Once the MITRE collector
             # commit (8/10) extracts STIX created/modified, these become
@@ -3666,7 +3714,8 @@ class MISPToNeo4jSync:
                 "mitre_id": mitre_id,
                 "name": name,
                 "shortname": shortname,
-                "description": attr.get("comment", ""),
+                # 2026-10: never a placeholder ("MITRE ATT&CK tactic") or a block (``_entity_comment_description``)
+                "description": _entity_comment_description(attr.get("comment"), source_id) or "",
                 "zone": zones,
                 "tag": source_id,
                 "source": [source_id],
@@ -3693,25 +3742,22 @@ class MISPToNeo4jSync:
             # Extract uses_techniques from MITRE_USES_TECHNIQUES comment
             # Format: "MITRE_USES_TECHNIQUES:{"t":["T1059","T1071"]}\nDescription..."
             uses_techniques = []
-            description = ""
             raw_comment = attr.get("comment", "") or ""
+            # 2026-10: never the block's raw text or a placeholder ("MITRE ATT&CK tool: <name>",
+            # ``_entity_comment_description``); the comment used to become the description when the block
+            # did not parse, and the placeholder whenever the tool had no techniques.
+            description = _entity_comment_description(raw_comment, source_id) or ""
             if "MITRE_USES_TECHNIQUES:" in raw_comment:
                 try:
                     uses_json = raw_comment.split("MITRE_USES_TECHNIQUES:", 1)[1].strip()
-                    if "\n" in uses_json:
-                        json_part, description = uses_json.split("\n", 1)
-                        description = description.strip()
-                    else:
-                        json_part = uses_json
+                    json_part = uses_json.split("\n", 1)[0]
                     parsed = json.loads(json_part)
                     if isinstance(parsed, dict):
                         uses_techniques = parsed.get("t", [])
                     elif isinstance(parsed, list):
                         uses_techniques = parsed
                 except (ValueError, IndexError):
-                    description = raw_comment
-            else:
-                description = raw_comment
+                    logger.warning("Unreadable MITRE_USES_TECHNIQUES block for tool %s — no techniques taken", mitre_id)
 
             tool_types = []
             for tag in tags:

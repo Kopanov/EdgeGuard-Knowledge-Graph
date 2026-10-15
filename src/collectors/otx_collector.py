@@ -536,7 +536,10 @@ class OTXCollector:
                 pulse_author = pulse.get("author_name", "")
                 pulse_adversary = pulse.get("adversary", "")
                 pulse_tlp = pulse.get("TLP", "")
-                pulse_description = pulse.get("description", "")
+                # 2026-10: the pulse's description is not collected. It describes the report, and it was
+                # given only to the malware family and adversary items below, as their description: every
+                # family and adversary a pulse named showed that pulse's text, in place of ATT&CK's where
+                # both describe the entity, depending on which record the sync merged last.
 
                 # PR-M2 §4-F5: read the source's pulse-level timestamps
                 # ONCE at the top of the per-pulse block and use them for
@@ -640,7 +643,7 @@ class OTXCollector:
                         "name": mal_name,
                         "malware_types": ["unknown"],
                         "family": mal_name,
-                        "description": pulse_description[:1000],
+                        # 2026-10: no description — the pulse's text describes the report, not the family.
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
@@ -700,7 +703,7 @@ class OTXCollector:
                     actor_item: Dict[str, Any] = {
                         "type": "actor",
                         "name": adversary_name,
-                        "description": pulse_description[:1000],
+                        # 2026-10: no description — the pulse's text describes the report, not the actor.
                         "zone": sectors,
                         "tag": self.tag,
                         "source": [self.tag],
