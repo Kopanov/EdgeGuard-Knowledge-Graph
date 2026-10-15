@@ -613,28 +613,38 @@ class TestDagAlerts:
 
 class TestBuildRelationshipsSilentDeath:
     def test_compares_the_last_sync_with_the_last_completion(self):
-        """build_relationships runs directly after a successful sync (scheduled DAG and baseline) and
-        is limited to 5 h: a sync completed more than 5 h 15 min ago with no completion stamped since
-        is a silent death. The former rule ("no completion in 6 h while a baseline task succeeded in
-        the last 6 h") fired through every collection phase of a baseline."""
+        """build_relationships runs directly after a successful sync (scheduled DAG and baseline): a
+        sync completed longer ago than every attempt can take, with no completion stamped since, is a
+        silent death. The former rule ("no completion in 6 h while a baseline task succeeded in the
+        last 6 h") fired through every collection phase of a baseline."""
         expr = _norm(_rule("EdgeGuardBuildRelationshipsSilentDeath")["expr"])
         assert expr == (
             "( edgeguard_neo4j_sync_last_success_timestamp > on() "
             "(edgeguard_build_relationships_last_completion_timestamp or on() vector(0)) ) "
-            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) > (5 * 60 * 60 + 15 * 60) ) "
-            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) < (24 * 60 * 60) )"
+            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) > (15 * 60 * 60 + 25 * 60) ) "
+            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) < (36 * 60 * 60) )"
         )
         assert "edgeguard_dag_last_success_timestamp" not in expr, "no longer tied to any baseline task"
 
-    def test_the_threshold_exceeds_the_build_relationships_limit(self, dags):
-        limits = {
-            dag_id: task.execution_timeout
+    def test_the_threshold_waits_for_every_attempt(self, dags):
+        """A first attempt killed at its limit is retried: the rule must not page while a retry may still
+        complete. Its threshold is the longest any build_relationships task can take, every attempt and
+        retry delay included, plus 15 minutes."""
+        worst = {
+            dag_id: (task.retries + 1) * task.execution_timeout + task.retries * task.retry_delay
             for dag_id, dag in dags.items()
             for task in dag.tasks
             if task.task_id == "build_relationships"
         }
-        assert set(limits) == {"edgeguard_neo4j_sync", "edgeguard_baseline"}
-        assert all(limit <= timedelta(hours=5) for limit in limits.values()), limits
+        assert set(worst) == {"edgeguard_neo4j_sync", "edgeguard_baseline"}
+        assert not any(
+            task.retry_exponential_backoff
+            for d in dags.values()
+            for task in d.tasks
+            if task.task_id == "build_relationships"
+        )
+        assert max(worst.values()) + timedelta(minutes=15) == timedelta(hours=15, minutes=25), worst
+        assert timedelta(hours=36) > timedelta(hours=15, minutes=25), "the rule has a firing window"
 
     def test_a_completion_stamps_the_gauge(self):
         before = _sample("edgeguard_build_relationships_last_completion_timestamp") or 0

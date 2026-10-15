@@ -1148,7 +1148,8 @@ def record_build_relationships_completion() -> None:
     when ``[BUILD_RELATIONSHIPS SUMMARY]`` is emitted. Absence after a
     baseline starts = silent subprocess death (OOM / SIGKILL). The
     ``EdgeGuardBuildRelationshipsSilentDeath`` alert fires when a sync completed more than
-    5 h 15 min ago and no completion has been stamped since (2026-10)."""
+    15 h 25 min ago (every attempt, retries included, has ended) and no completion has been
+    stamped since (2026-10)."""
     BUILD_RELATIONSHIPS_COMPLETIONS.inc()
     BUILD_RELATIONSHIPS_LAST_COMPLETION.set(time.time())
 

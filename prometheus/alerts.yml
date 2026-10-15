@@ -906,14 +906,17 @@ groups:
         #
         # 2026-10: the rule compares two times instead of a 6-hour window. In
         # both the scheduled sync DAG and the baseline, build_relationships
-        # runs directly after a successful MISP→Neo4j sync and is limited to
-        # 5 h, so a sync that completed more than 5 h 15 min ago with no
-        # build_relationships completion stamped since means the step died
-        # before its SUMMARY line. The former rule ("no completion in 6 h
+        # runs directly after a successful MISP→Neo4j sync. Every attempt is
+        # limited to 5 h; the scheduled DAG retries twice, 5 min apart, so
+        # all attempts end within 15 h 10 min of the sync (the baseline does
+        # not retry). A sync that completed more than 15 h 25 min ago with no
+        # build_relationships completion stamped since means every attempt
+        # died before its SUMMARY line; a failed attempt that a retry may
+        # still repair does not page. The former rule ("no completion in 6 h
         # while a baseline task succeeded in the last 6 h") also fired
         # through every collection phase of a baseline, before
         # build_relationships had started. The rule looks at syncs from the
-        # last 24 h only, so an older sync stamp left in the metrics volume
+        # last 36 h only, so an older sync stamp left in the metrics volume
         # (for example before the completion gauge existed) cannot fire it.
         expr: |
           (
@@ -922,20 +925,21 @@ groups:
           )
           and on()
           (
-            (time() - edgeguard_neo4j_sync_last_success_timestamp) > (5 * 60 * 60 + 15 * 60)
+            (time() - edgeguard_neo4j_sync_last_success_timestamp) > (15 * 60 * 60 + 25 * 60)
           )
           and on()
           (
-            (time() - edgeguard_neo4j_sync_last_success_timestamp) < (24 * 60 * 60)
+            (time() - edgeguard_neo4j_sync_last_success_timestamp) < (36 * 60 * 60)
           )
         for: 10m
         labels:
           severity: critical
           component: build_relationships
         annotations:
-          summary: "build_relationships may have died silently — no SUMMARY since a sync that completed more than 5h15m ago"
+          summary: "build_relationships may have died silently — no SUMMARY since a sync that completed more than 15h25m ago"
           description: |
-            A MISP→Neo4j sync completed more than 5 h 15 min ago and no
+            A MISP→Neo4j sync completed more than 15 h 25 min ago (every
+            build_relationships attempt, retries included, has ended) and no
             build_relationships completion has been stamped since
             (``edgeguard_build_relationships_last_completion_timestamp``).
             build_relationships runs directly after the sync and stamps
