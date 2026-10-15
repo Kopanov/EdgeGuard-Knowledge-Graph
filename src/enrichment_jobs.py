@@ -2,7 +2,7 @@
 """
 EdgeGuard — Post-Sync Enrichment Jobs
 ======================================
-Six graph-quality jobs that run AFTER every MISP→Neo4j sync.
+Seven graph-quality jobs that run AFTER every MISP→Neo4j sync.
 They are designed to be idempotent — safe to re-run at any time.
 
 Jobs
@@ -13,7 +13,10 @@ Jobs
 4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
 5. merge_alias_duplicate_actors — Fold duplicate ThreatActors into their canonical actor (ATT&CK
    aliases and the canonical threat-actor reference, src/reference/canonical_threat_actors.json)
-6. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py; CISA's SSVC
+6. merge_malware_attack_twins — Fold Malware nodes named "<family> - S####" (the ATT&CK software id
+   of the MISP galaxy naming) into the MITRE Malware node of that id, or, for software without one,
+   into the node of the base name (2026-10)
+7. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py; CISA's SSVC
                                comes with the NVD records, not from a job)
 """
 
@@ -22,11 +25,20 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config  # noqa: E402
+from attack_revoked import load_revoked_ids  # noqa: E402
+from attack_software_names import (  # noqa: E402
+    CYPHER_BASE_NODES_READ,
+    CYPHER_SOFTWARE_ID_SUFFIX,
+    CYPHER_SUFFIXED_NAME,
+    attack_software_id,
+    plan_twin_folds,
+    twin_base_names,
+)
 from canonical_threat_actors import (  # noqa: E402
     CanonicalReference,
     MergePlan,
@@ -1193,11 +1205,13 @@ RETURN a.name AS name, a.source AS source
 # must stay one; the node keys (``zone``, ``aliases`` …) do not exist on edges. APOC's
 # ``singleElementAsArray`` option is not used for that reason: it applies to edges too.
 _ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = ("cited_ids", "misp_event_ids", "source_refs", "sources")
+# The ``combine`` lists that exist on edges only; every other ``combine`` key is a node list.
+_ALIAS_MERGE_EDGE_ONLY_PROPS: Tuple[str, ...] = ("sources", "source_refs", "cited_ids")
 _ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
     sorted(
         k
         for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items()
-        if v == "combine" and k not in ("sources", "source_refs", "cited_ids")  # edge-only lists
+        if v == "combine" and k not in _ALIAS_MERGE_EDGE_ONLY_PROPS
     )
 )
 
@@ -1262,75 +1276,119 @@ def _strongest_on_parallel_edges(direction: str) -> str:
 # Parallel edges that collapse keep the union of their provenance lists
 # (``"combine"``) and, set on every edge of the group before the merge, the
 # strongest evidence's label and confidence (``_strongest_on_parallel_edges``).
-_ACTOR_ALIAS_MERGE_APPLY_CYPHER = (
-    """
+# 2026-10: the statements are built per label (``_alias_merge_statements``) so the Malware
+# twin merge (JOB 6) runs the same merge; the actor statements are unchanged.
+def _alias_merge_apply_cypher(
+    label: str, canonical_guard: str, list_props: Tuple[str, ...], duplicate_guard: str = ""
+) -> str:
+    """The merge statement for ``label``: every group's duplicates into its canonical (see above).
+
+    ``canonical_guard`` is the ``WHERE`` that re-checks the canonical ``c`` at merge time; a duplicate
+    is never MITRE-sourced, and also meets ``duplicate_guard`` when one is given (a condition on ``d``
+    and ``c``; the actor merge has none). ``list_props`` are wrapped back into lists after the merge."""
+    duplicate_condition = f"\n  AND {duplicate_guard}" if duplicate_guard else ""
+    return (
+        f"""
 UNWIND $groups AS g
-MATCH (c:ThreatActor {name: g.canonical})
-WHERE $mitre_source IN coalesce(c.source, []) OR c.name IN $reference_canonicals
-MATCH (d:ThreatActor)
+MATCH (c:{label} {{name: g.canonical}})
+WHERE {canonical_guard}
+MATCH (d:{label})
 WHERE d.name IN g.duplicates
   AND d <> c
-  AND NOT $mitre_source IN coalesce(d.source, [])
+  AND NOT $mitre_source IN coalesce(d.source, []){duplicate_condition}
 WITH c, collect(DISTINCT d) AS dups
 WHERE size(dups) > 0
 SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
     c.merged_from = apoc.coll.toSet(coalesce(c.merged_from, []) + [d IN dups | d.name]),
     c.tlp = reduce(_t = c.tlp, _d IN dups | """
-    + _tlp_most_restrictive_clause("_t", "_d.tlp")
-    + """)
+        + _tlp_most_restrictive_clause("_t", "_d.tlp")
+        + """)
 WITH c, size(dups) AS n_dups, dups
 """
-    + _strongest_on_parallel_edges("out")
-    + _strongest_on_parallel_edges("in")
-    + """CALL apoc.refactor.mergeNodes([c] + dups, {
+        + _strongest_on_parallel_edges("out")
+        + _strongest_on_parallel_edges("in")
+        + """CALL apoc.refactor.mergeNodes([c] + dups, {
     properties: $strategy,
     mergeRels: true,
     produceSelfRel: false
 })
 YIELD node
 SET """
-    + ",\n    ".join(f"node.{p} = {_list_or_wrapped('node.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS)
-    + """,
+        + ",\n    ".join(f"node.{p} = {_list_or_wrapped('node.' + p)}" for p in list_props)
+        + """,
     node.last_updated = datetime()
 RETURN sum(n_dups) AS merged, count(node) AS canonicals
 """
-)
+    )
 
-_ACTOR_ALIAS_MERGE_NORMALISE_CYPHER = (
-    "UNWIND $canonicals AS cname\n"
-    "MATCH (c:ThreatActor {name: cname})\n"
-    "SET " + ",\n    ".join(f"c.{p} = {_list_or_wrapped('c.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS) + "\n"
-    "WITH c\n"
-    "MATCH (c)-[r]-()\n"
-    "SET " + ",\n    ".join(f"r.{p} = {_list_or_wrapped('r.' + p)}" for p in _ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS) + "\n"
-    "RETURN count(r) AS normalised_edges"
-)
+
+def _alias_merge_normalise_cypher(label: str, list_props: Tuple[str, ...]) -> str:
+    """Every list property of the canonicals, and the provenance lists of their edges, as lists."""
+    return (
+        "UNWIND $canonicals AS cname\n"
+        f"MATCH (c:{label} {{name: cname}})\n"
+        "SET " + ",\n    ".join(f"c.{p} = {_list_or_wrapped('c.' + p)}" for p in list_props) + "\n"
+        "WITH c\n"
+        "MATCH (c)-[r]-()\n"
+        "SET "
+        + ",\n    ".join(f"r.{p} = {_list_or_wrapped('r.' + p)}" for p in _ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS)
+        + "\n"
+        "RETURN count(r) AS normalised_edges"
+    )
+
 
 # Edges moved over from a duplicate still carry the DUPLICATE's uuid in
 # ``r.src_uuid`` / ``r.trg_uuid`` (cross-environment traceability contract,
 # see node_identity.py). Re-stamp them with the canonical's uuid.
-_ACTOR_ALIAS_MERGE_RESTAMP_OUT_CYPHER = """
+def _alias_merge_restamp_cypher(label: str, direction: str) -> str:
+    """Re-stamp ``r.src_uuid`` (``direction="out"``) or ``r.trg_uuid`` (``"in"``) of the canonicals' edges."""
+    pattern, prop = ("-[r]->()", "src_uuid") if direction == "out" else ("<-[r]-()", "trg_uuid")
+    return f"""
 UNWIND $canonicals AS cname
-MATCH (c:ThreatActor {name: cname})-[r]->()
-WHERE r.src_uuid IS NOT NULL AND r.src_uuid <> c.uuid
-SET r.src_uuid = c.uuid
+MATCH (c:{label} {{name: cname}}){pattern}
+WHERE r.{prop} IS NOT NULL AND r.{prop} <> c.uuid
+SET r.{prop} = c.uuid
 RETURN count(r) AS restamped
 """
-_ACTOR_ALIAS_MERGE_RESTAMP_IN_CYPHER = """
-UNWIND $canonicals AS cname
-MATCH (c:ThreatActor {name: cname})<-[r]-()
-WHERE r.trg_uuid IS NOT NULL AND r.trg_uuid <> c.uuid
-SET r.trg_uuid = c.uuid
-RETURN count(r) AS restamped
-"""
+
+
+class _AliasMergeStatements(NamedTuple):
+    """The four statements of one label's merge, in the order a batch runs them."""
+
+    apply: str
+    restamp_out: str
+    restamp_in: str
+    normalise: str
+
+
+def _alias_merge_statements(
+    label: str, canonical_guard: str, list_props: Tuple[str, ...], duplicate_guard: str = ""
+) -> _AliasMergeStatements:
+    """The merge statements for ``label`` (see ``_alias_merge_apply_cypher`` for the arguments)."""
+    return _AliasMergeStatements(
+        apply=_alias_merge_apply_cypher(label, canonical_guard, list_props, duplicate_guard),
+        restamp_out=_alias_merge_restamp_cypher(label, "out"),
+        restamp_in=_alias_merge_restamp_cypher(label, "in"),
+        normalise=_alias_merge_normalise_cypher(label, list_props),
+    )
+
+
+_ACTOR_ALIAS_MERGE_STATEMENTS = _alias_merge_statements(
+    "ThreatActor",
+    "$mitre_source IN coalesce(c.source, []) OR c.name IN $reference_canonicals",
+    _ACTOR_ALIAS_MERGE_LIST_PROPS,
+)
+_ACTOR_ALIAS_MERGE_APPLY_CYPHER = _ACTOR_ALIAS_MERGE_STATEMENTS.apply
+_ACTOR_ALIAS_MERGE_NORMALISE_CYPHER = _ACTOR_ALIAS_MERGE_STATEMENTS.normalise
+_ACTOR_ALIAS_MERGE_RESTAMP_OUT_CYPHER = _ACTOR_ALIAS_MERGE_STATEMENTS.restamp_out
+_ACTOR_ALIAS_MERGE_RESTAMP_IN_CYPHER = _ACTOR_ALIAS_MERGE_STATEMENTS.restamp_in
 
 
 def _actor_alias_merge_enabled() -> bool:
     """``EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE`` (default ``"true"``). Read at
     call time — not import time — so an operator can flip it between DAG
     runs without a restart (same truthy set as ``config._env_bool``)."""
-    raw = os.getenv(_ACTOR_ALIAS_MERGE_ENV_FLAG, "true")
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    return _env_flag_enabled(_ACTOR_ALIAS_MERGE_ENV_FLAG)
 
 
 def _load_actor_reference() -> Optional[CanonicalReference]:
@@ -1367,6 +1425,98 @@ def _is_apoc_missing_error(exc: BaseException) -> bool:
     if "apoc." in lowered and ("there is no procedure with the name" in lowered or "unknown function" in lowered):
         return True
     return False
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """An enrichment job's on/off flag (default ``"true"``), read at call time — not import time — so
+    an operator can flip it between DAG runs without a restart (same truthy set as ``config._env_bool``)."""
+    raw = os.getenv(name, "true")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _cap_merge_pairs(pairs: List[Tuple[str, str]], cap: int, log_tag: str) -> List[Tuple[str, str]]:
+    """The first ``cap`` pairs (the rest merge on the next run; every merge job is idempotent)."""
+    if len(pairs) <= cap:
+        return pairs
+    logger.warning(
+        "[%s] %d mergeable pairs exceed the per-run cap %d — merging the first %d, the rest on the next run",
+        log_tag,
+        len(pairs),
+        cap,
+        cap,
+    )
+    return pairs[:cap]
+
+
+def _run_alias_merge_batches(
+    session,
+    pairs: List[Tuple[str, str]],
+    *,
+    statements: _AliasMergeStatements,
+    batch_size: int,
+    apply_params: Dict,
+    results: Dict,
+    log_tag: str,
+    canonical_noun: str,
+) -> bool:
+    """Merge ``(canonical, duplicate)`` pairs in batches of ``batch_size`` with one label's
+    ``statements`` (2026-10: shared by the actor alias merge and the Malware twin merge).
+
+    Per batch: the merge statement (one ``mergeNodes`` call per canonical with all of its
+    duplicates), then the uuid re-stamps and the list normalisation of the canonicals. Adds to
+    ``results["merged"]`` and ``results["restamped_edges"]``. A failed batch is logged, counted in
+    ``results["errors"]`` and the next one proceeds. Returns False, with ``results["apoc_missing"] = 1``,
+    when APOC is not installed (nothing more can merge in this run).
+    """
+    batches = [pairs[i : i + batch_size] for i in range(0, len(pairs), batch_size)]
+    for batch_no, batch in enumerate(batches, start=1):
+        grouped: Dict[str, List[str]] = {}
+        for canonical, dup in batch:
+            grouped.setdefault(canonical, []).append(dup)
+        groups = [{"canonical": c, "duplicates": sorted(set(d))} for c, d in sorted(grouped.items())]
+        try:
+            rec = session.run(statements.apply, groups=groups, timeout=NEO4J_READ_TIMEOUT, **apply_params).single()
+            merged = int((rec["merged"] if rec else 0) or 0)
+            results["merged"] += merged
+            canonical_names = [g["canonical"] for g in groups]
+            for restamp_cypher in (statements.restamp_out, statements.restamp_in):
+                rs = session.run(restamp_cypher, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT).single()
+                results["restamped_edges"] += int((rs["restamped"] if rs else 0) or 0)
+            # Lists stay lists (see _ACTOR_ALIAS_MERGE_LIST_PROPS).
+            session.run(statements.normalise, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT)
+            logger.info(
+                "[%s] batch %d/%d: merged %d duplicate(s) into %d %s",
+                log_tag,
+                batch_no,
+                len(batches),
+                merged,
+                len(groups),
+                canonical_noun,
+            )
+        except Exception as batch_err:
+            if _is_apoc_missing_error(batch_err):
+                logger.warning(
+                    "[%s] APOC unavailable (%s) — skipping the merge; install the APOC plugin to enable it. "
+                    "%d pair(s) left untouched.",
+                    log_tag,
+                    batch_err,
+                    len(pairs),
+                )
+                results["apoc_missing"] = 1
+                return False
+            results["errors"] += 1
+            logger.error(
+                "[%s] batch %d/%d FAILED (%d pairs rolled back): %s",
+                log_tag,
+                batch_no,
+                len(batches),
+                len(batch),
+                batch_err,
+                exc_info=True,
+            )
+        if batch_no < len(batches):
+            query_pause()
+    return True
 
 
 def merge_alias_duplicate_actors(neo4j_client) -> Dict:
@@ -1551,77 +1701,22 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
                 )
                 return results
 
-            if len(pairs) > _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN:
-                logger.warning(
-                    "[ACTOR-ALIAS-MERGE] %d mergeable pairs exceed the per-run cap %d — "
-                    "merging the first %d, the rest on the next run",
-                    len(pairs),
-                    _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN,
-                    _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN,
-                )
-                pairs = pairs[:_ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN]
-
-            batches = [
-                pairs[i : i + _ACTOR_ALIAS_MERGE_BATCH_SIZE]
-                for i in range(0, len(pairs), _ACTOR_ALIAS_MERGE_BATCH_SIZE)
-            ]
-            for batch_no, batch in enumerate(batches, start=1):
-                grouped: Dict[str, List[str]] = {}
-                for canonical, dup in batch:
-                    grouped.setdefault(canonical, []).append(dup)
-                groups = [{"canonical": c, "duplicates": sorted(set(d))} for c, d in sorted(grouped.items())]
-                try:
-                    rec = session.run(
-                        _ACTOR_ALIAS_MERGE_APPLY_CYPHER,
-                        groups=groups,
-                        strategy=_ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY,
-                        mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
-                        reference_canonicals=reference_canonicals,
-                        timeout=NEO4J_READ_TIMEOUT,
-                    ).single()
-                    merged = int((rec["merged"] if rec else 0) or 0)
-                    results["merged"] += merged
-                    canonical_names = [g["canonical"] for g in groups]
-                    for restamp_cypher in (
-                        _ACTOR_ALIAS_MERGE_RESTAMP_OUT_CYPHER,
-                        _ACTOR_ALIAS_MERGE_RESTAMP_IN_CYPHER,
-                    ):
-                        rs = session.run(
-                            restamp_cypher, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT
-                        ).single()
-                        results["restamped_edges"] += int((rs["restamped"] if rs else 0) or 0)
-                    # Lists stay lists (see _ACTOR_ALIAS_MERGE_LIST_PROPS).
-                    session.run(
-                        _ACTOR_ALIAS_MERGE_NORMALISE_CYPHER, canonicals=canonical_names, timeout=NEO4J_READ_TIMEOUT
-                    )
-                    logger.info(
-                        "[ACTOR-ALIAS-MERGE] batch %d/%d: merged %d duplicate(s) into %d canonical actor(s)",
-                        batch_no,
-                        len(batches),
-                        merged,
-                        len(groups),
-                    )
-                except Exception as batch_err:
-                    if _is_apoc_missing_error(batch_err):
-                        logger.warning(
-                            "[ACTOR-ALIAS-MERGE] APOC unavailable (%s) — skipping alias merge; "
-                            "install the APOC plugin to enable it. %d pair(s) left untouched.",
-                            batch_err,
-                            len(pairs),
-                        )
-                        results["apoc_missing"] = 1
-                        return results
-                    results["errors"] += 1
-                    logger.error(
-                        "[ACTOR-ALIAS-MERGE] batch %d/%d FAILED (%d pairs rolled back): %s",
-                        batch_no,
-                        len(batches),
-                        len(batch),
-                        batch_err,
-                        exc_info=True,
-                    )
-                if batch_no < len(batches):
-                    query_pause()
+            pairs = _cap_merge_pairs(pairs, _ACTOR_ALIAS_MERGE_MAX_PAIRS_PER_RUN, "ACTOR-ALIAS-MERGE")
+            if not _run_alias_merge_batches(
+                session,
+                pairs,
+                statements=_ACTOR_ALIAS_MERGE_STATEMENTS,
+                batch_size=_ACTOR_ALIAS_MERGE_BATCH_SIZE,
+                apply_params={
+                    "strategy": _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY,
+                    "mitre_source": _ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                    "reference_canonicals": reference_canonicals,
+                },
+                results=results,
+                log_tag="ACTOR-ALIAS-MERGE",
+                canonical_noun="canonical actor(s)",
+            ):
+                return results
     except Exception as e:
         # PR-N21: whole-session failures (driver dead, candidate query
         # broken) must fail loudly — only per-batch and APOC-missing
@@ -1646,16 +1741,270 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 
 
 # ---------------------------------------------------------------------------
+# JOB 6: Malware ATT&CK-id twin merge (2026-10)
+# ---------------------------------------------------------------------------
+# OTX pulses name malware families as the MISP ATT&CK galaxy does, with the ATT&CK software id as
+# a suffix ("Cobalt Strike - S0154"). Until 2026-10 the collector passed such a name through and it
+# became a Malware node of its own ("cobalt strike - s0154") beside the node ATT&CK delivered
+# ("cobalt strike"): on the graph of 2026-10-14, 136 twins held 16,005 INDICATES links, and the
+# ATT&CK Cobalt Strike node showed 55 indicators instead of about 2,078. The collectors and the sync
+# now name the node by the base name (``attack_software_names.split_attack_software_id``); this job
+# folds the twins a graph built before that already holds, so no new baseline is needed.
+#
+# A non-MITRE node whose name, or an alias of its own name, ends with " - S####" folds into the
+# MITRE-sourced Malware node of that ATT&CK id. The MITRE node carries no ``mitre_id``: its id is
+# read from the record MITRE delivered (the ``raw_data`` of its SOURCED_FROM edge to the ATT&CK
+# source, as ``scripts/build_canonical_threat_actors.py`` reads group ids), and when it cannot be
+# read the node of the same base name is the target. A revoked software id is translated to its
+# successor first (``attack_revoked``). A twin whose id and name lead to two MITRE nodes is skipped
+# (``skipped_ambiguous``). ATT&CK software without a MITRE Malware node (chiefly the ATT&CK tools,
+# such as Mimikatz S0002, which are ``Tool`` nodes) has no merge target; since the collectors name a
+# family by its base name, a later pulse creates the non-MITRE node "mimikatz" beside the twin
+# "mimikatz - s0002", and steps 9b / 2d would link every indicator written before to both. Such a
+# twin therefore folds into the non-MITRE node of its base name when that node states no other id
+# (``base_name_targets``); without one it is left as it is and counted (``no_target``) until a later
+# pulse creates it. The merge itself is the actor alias merge's (``_run_alias_merge_batches``), with
+# ``malware_types`` combined too; it runs before ``build_campaign_nodes``.
+
+_MALWARE_TWIN_MERGE_ENV_FLAG = "EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE"
+_MALWARE_TWIN_MERGE_BATCH_SIZE = 200  # (target node, twin) pairs per transaction
+_MALWARE_TWIN_MERGE_MAX_PAIRS_PER_RUN = 2000  # hard cap; the rest waits for the next run
+# The actor merge's strategy plus the one list only Malware nodes carry. ``".*"`` stays the
+# catch-all ("discard").
+_MALWARE_TWIN_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
+    **{k: v for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items() if k != ".*"},
+    "malware_types": "combine",
+    ".*": "discard",
+}
+_MALWARE_TWIN_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
+    sorted(
+        k
+        for k, v in _MALWARE_TWIN_MERGE_PROPERTY_STRATEGY.items()
+        if v == "combine" and k not in _ALIAS_MERGE_EDGE_ONLY_PROPS
+    )
+)
+
+# Non-MITRE Malware nodes whose name or an alias carries an ATT&CK software id (``$suffixed``,
+# ``attack_software_names.CYPHER_SUFFIXED_NAME``). A superset: ``plan_twin_folds`` decides.
+_MALWARE_TWIN_CANDIDATES_CYPHER = (
+    "MATCH (d:Malware)\n"
+    "WHERE d.name IS NOT NULL\n"
+    "  AND NOT $mitre_source IN coalesce(d.source, [])\n"
+    "WITH d, coalesce(" + _list_or_wrapped("d.aliases") + ", []) AS aliases\n"
+    "WHERE d.name =~ $suffixed OR any(x IN aliases WHERE toString(x) =~ $suffixed)\n"
+    "RETURN d.name AS name, aliases\n"
+    "ORDER BY name"
+)
+
+# The MITRE-sourced Malware nodes and the record MITRE delivered for each (its ATT&CK id is read
+# from it in Python, ``attack_software_names.attack_software_id``).
+_MALWARE_TWIN_ATTACK_NODES_CYPHER = """
+MATCH (c:Malware)
+WHERE $mitre_source IN coalesce(c.source, [])
+OPTIONAL MATCH (c)-[sf:SOURCED_FROM]->(:Source {source_id: $mitre_source})
+WITH c, head(collect(sf.raw_data)) AS attack_raw
+RETURN c.name AS name, attack_raw
+"""
+
+# Re-checked at merge time, like the actor merge's guard: the canonical is MITRE-sourced, or a
+# non-MITRE node the plan chose as the base-named target of a twin without a MITRE one
+# (``$base_canonicals``); into such a node only a twin named "<its name> - s####" folds.
+_MALWARE_TWIN_MERGE_STATEMENTS = _alias_merge_statements(
+    "Malware",
+    "$mitre_source IN coalesce(c.source, []) OR c.name IN $base_canonicals",
+    _MALWARE_TWIN_MERGE_LIST_PROPS,
+    duplicate_guard=(
+        '($mitre_source IN coalesce(c.source, []) OR trim(apoc.text.replace(d.name, $software_id_suffix, "")) = c.name)'
+    ),
+)
+
+
+def merge_malware_attack_twins(neo4j_client) -> Dict:
+    """Fold Malware nodes named with an ATT&CK software id into the MITRE node of that id.
+
+    Candidates: Malware nodes that are not MITRE-sourced and whose name, or an alias of their own
+    name, ends with `` - S####`` (``attack_software_names.software_id_claims``). Target: the
+    MITRE-sourced Malware node of that ATT&CK id (read from its ``SOURCED_FROM`` ``raw_data``; a revoked
+    id is translated to its successor), or, when its id cannot be read, the one of the same base
+    name; a twin with two such targets is skipped (``skipped_ambiguous``). A twin named with an id that
+    has no MITRE target folds into the non-MITRE node of its base name when that node states no other
+    id (``base_name_targets``); without one it is left unchanged and counted (``no_target``). The
+    decision is ``plan_twin_folds``.
+
+    The merge is the actor alias merge's: the twin's name joins the target's ``aliases`` and
+    ``merged_from``, ``tlp`` becomes the most restrictive of the group, all relationships move
+    (parallel ones collapse with the strongest evidence and the union of their provenance), their
+    ``src_uuid`` / ``trg_uuid`` are re-stamped, and every list property stays a list. The target keeps
+    its name and uuid. Batched (``_MALWARE_TWIN_MERGE_BATCH_SIZE`` pairs per transaction,
+    ``_MALWARE_TWIN_MERGE_MAX_PAIRS_PER_RUN`` per run) and idempotent.
+
+    Dry run: ``EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false`` logs the pairs and merges nothing. APOC
+    missing (the candidate read and the merge use it): a WARNING and ``apoc_missing = 1``; a failed
+    batch is counted in ``errors``; any other failed read re-raises (PR-N21), as in
+    ``merge_alias_duplicate_actors``.
+
+    Returns ``{candidates, merged, base_name_targets, no_target, skipped_ambiguous, errors,
+    restamped_edges, apoc_missing}``.
+    """
+    if not neo4j_client.driver:
+        logger.error("merge_malware_attack_twins: no Neo4j connection")
+        return {}
+
+    results: Dict = {
+        "candidates": 0,
+        "merged": 0,
+        "base_name_targets": 0,
+        "no_target": 0,
+        "skipped_ambiguous": 0,
+        "errors": 0,
+        "restamped_edges": 0,
+        "apoc_missing": 0,
+    }
+    try:
+        with neo4j_client.driver.session() as session:
+            twins = [
+                {"name": row["name"], "aliases": row["aliases"]}
+                for row in session.run(
+                    _MALWARE_TWIN_CANDIDATES_CYPHER,
+                    mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                    suffixed=CYPHER_SUFFIXED_NAME,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+            ]
+            if not twins:
+                logger.info("[MALWARE-TWIN-MERGE] no Malware node carries an ATT&CK software id in its name")
+                return results
+            attack_ids = {
+                row["name"]: attack_software_id(row["attack_raw"], row["name"])
+                for row in session.run(
+                    _MALWARE_TWIN_ATTACK_NODES_CYPHER,
+                    mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+                if row["name"]
+            }
+            bases = twin_base_names(twins)
+            base_nodes = (
+                {
+                    row["name"]: row["aliases"]
+                    for row in session.run(
+                        CYPHER_BASE_NODES_READ,
+                        bases=bases,
+                        mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    if row["name"]
+                }
+                if bases
+                else {}
+            )
+            plan = plan_twin_folds(twins, attack_ids, load_revoked_ids().software, base_nodes)
+            results["candidates"] = plan.candidates
+            results["base_name_targets"] = len(plan.base_pairs)
+            results["no_target"] = len(plan.no_target)
+            results["skipped_ambiguous"] = len(plan.ambiguous)
+            if plan.base_pairs:
+                logger.info(
+                    "[MALWARE-TWIN-MERGE] %d twin(s) without a MITRE Malware node fold into the node of their "
+                    "base name. Sample (node, twin): %s",
+                    len(plan.base_pairs),
+                    plan.base_pairs[:10],
+                )
+            if plan.no_target:
+                logger.info(
+                    "[MALWARE-TWIN-MERGE] %d node(s) name an ATT&CK software id no MITRE Malware node has, and "
+                    "no node of their base name takes them (left as they are; ATT&CK tools are Tool nodes). "
+                    "Sample: %s",
+                    len(plan.no_target),
+                    plan.no_target[:10],
+                )
+            for twin, targets in plan.ambiguous:
+                logger.warning(
+                    "[MALWARE-TWIN-MERGE] skipping %r — its ATT&CK id and base name lead to %d MITRE nodes %s (ambiguous)",
+                    twin,
+                    len(targets),
+                    targets,
+                )
+            pairs = sorted(plan.pairs + plan.base_pairs)  # (target node name, twin name)
+            if not pairs:
+                logger.info(
+                    "[MALWARE-TWIN-MERGE] no twin with a target (candidates: %d, no target: %d, ambiguous: %d)",
+                    results["candidates"],
+                    results["no_target"],
+                    results["skipped_ambiguous"],
+                )
+                return results
+
+            if not _env_flag_enabled(_MALWARE_TWIN_MERGE_ENV_FLAG):
+                logger.info(
+                    "[MALWARE-TWIN-MERGE] DRY RUN (%s=false): %d mergeable pair(s) (%d into a base-named node), "
+                    "%d without a target, %d ambiguous — merging nothing. Sample (target node, twin): %s",
+                    _MALWARE_TWIN_MERGE_ENV_FLAG,
+                    len(pairs),
+                    results["base_name_targets"],
+                    results["no_target"],
+                    results["skipped_ambiguous"],
+                    pairs[:10],
+                )
+                return results
+
+            pairs = _cap_merge_pairs(pairs, _MALWARE_TWIN_MERGE_MAX_PAIRS_PER_RUN, "MALWARE-TWIN-MERGE")
+            if not _run_alias_merge_batches(
+                session,
+                pairs,
+                statements=_MALWARE_TWIN_MERGE_STATEMENTS,
+                batch_size=_MALWARE_TWIN_MERGE_BATCH_SIZE,
+                apply_params={
+                    "strategy": _MALWARE_TWIN_MERGE_PROPERTY_STRATEGY,
+                    "mitre_source": _ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                    "base_canonicals": sorted({node for node, _twin in plan.base_pairs}),
+                    "software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX,
+                },
+                results=results,
+                log_tag="MALWARE-TWIN-MERGE",
+                canonical_noun="target Malware node(s)",
+            ):
+                return results
+    except Exception as e:
+        # The candidate read lists aliases through APOC functions: without APOC it fails here, before
+        # any merge, and the job reports it as the merge does (a WARNING, ``apoc_missing``).
+        if _is_apoc_missing_error(e):
+            logger.warning(
+                "[MALWARE-TWIN-MERGE] APOC unavailable (%s) — skipping the merge; install the APOC plugin to enable it.",
+                e,
+            )
+            results["apoc_missing"] = 1
+            return results
+        # PR-N21: any other failed read (driver dead, query broken) fails the task loudly; only per-batch
+        # and APOC-missing conditions are handled.
+        logger.error(f"[MALWARE-TWIN-MERGE] merge_malware_attack_twins FAILED: {e}", exc_info=True)
+        raise
+
+    logger.info(
+        "[MALWARE-TWIN-MERGE] complete — candidates=%d merged=%d base_name_targets=%d no_target=%d "
+        "skipped_ambiguous=%d errors=%d restamped_edges=%d",
+        results["candidates"],
+        results["merged"],
+        results["base_name_targets"],
+        results["no_target"],
+        results["skipped_ambiguous"],
+        results["errors"],
+        results["restamped_edges"],
+    )
+    return results
+
+
+# ---------------------------------------------------------------------------
 # CONVENIENCE RUNNER
 # ---------------------------------------------------------------------------
 
 
 def run_all_enrichment_jobs(neo4j_client) -> Dict:
     """
-    Run all six post-sync enrichment jobs in sequence.
+    Run all seven post-sync enrichment jobs in sequence.
 
-    Order matters: ``merge_alias_duplicate_actors`` runs BEFORE
-    ``build_campaign_nodes`` so campaigns are built on merged actors.
+    Order matters: ``merge_alias_duplicate_actors`` and ``merge_malware_attack_twins`` run
+    BEFORE ``build_campaign_nodes`` so campaigns are built on merged actors and malware.
 
     Returns a summary dict for logging/metrics.
     """
@@ -1675,25 +2024,29 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
                 logger.debug("Metrics recording failed", exc_info=True)
         return result
 
-    logger.info("\n[1/6] Vulnerability↔CVE REFERS_TO Bridge...")
+    logger.info("\n[1/7] Vulnerability↔CVE REFERS_TO Bridge...")
     summary["bridge"] = _timed("bridge", bridge_vulnerability_cve, neo4j_client)
 
     # Must precede build_campaign_nodes: campaigns are keyed on actor name.
-    logger.info("\n[2/6] ThreatActor Alias-Duplicate Merge...")
+    logger.info("\n[2/7] ThreatActor Alias-Duplicate Merge...")
     summary["actor_alias_merge"] = _timed("actor_alias_merge", merge_alias_duplicate_actors, neo4j_client)
 
-    logger.info("\n[3/6] Campaign Node Builder...")
+    # 2026-10: also before build_campaign_nodes, so a campaign links the ATT&CK malware node, not a twin.
+    logger.info("\n[3/7] Malware ATT&CK-id Twin Merge...")
+    summary["malware_twin_merge"] = _timed("malware_twin_merge", merge_malware_attack_twins, neo4j_client)
+
+    logger.info("\n[4/7] Campaign Node Builder...")
     summary["campaigns"] = _timed("campaigns", build_campaign_nodes, neo4j_client)
 
-    logger.info("\n[4/6] Co-occurrence Confidence Calibration...")
+    logger.info("\n[5/7] Co-occurrence Confidence Calibration...")
     summary["calibration"] = _timed("calibration", calibrate_cooccurrence_confidence, neo4j_client)
 
-    logger.info("\n[5/6] IOC Confidence Decay...")
+    logger.info("\n[6/7] IOC Confidence Decay...")
     summary["decay"] = _timed("decay", decay_ioc_confidence, neo4j_client)
 
     # FIRST EPSS, the one feed written straight to Neo4j. Flag-off = INFO line, no network call.
     # A feed outage is logged and skipped inside the job (never raises).
-    logger.info("\n[6/6] EPSS scores...")
+    logger.info("\n[7/7] EPSS scores...")
     if config.ENABLE_EPSS:
         summary["epss"] = _timed("epss", enrich_cve_epss, neo4j_client)
     else:
@@ -1701,16 +2054,19 @@ def run_all_enrichment_jobs(neo4j_client) -> Dict:
         summary["epss"] = {"skipped": "disabled"}
 
     # PR #33 round 13: explicit aggregated summary so an operator scanning logs
-    # sees totals from all 6 jobs without grepping each function's output.
+    # sees totals from all 7 jobs without grepping each function's output.
     def _sum(d):
         if isinstance(d, dict):
             return sum(v for v in d.values() if isinstance(v, (int, float)))
         return d if isinstance(d, (int, float)) else 0
 
     logger.info(
-        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s campaigns=%s calibration=%s decay=%s epss=%s",
+        "[ENRICHMENT SUMMARY] bridge=%s actor_alias_merge=%s malware_twin_merge=%s campaigns=%s calibration=%s "
+        "decay=%s epss=%s",
         _sum(summary.get("bridge")),
         _sum(summary.get("actor_alias_merge")),
+        # The twins merged, not a sum of its counts (candidates and twins without a target are no work).
+        _sum({"merged": (summary.get("malware_twin_merge") or {}).get("merged", 0)}),
         _sum(summary.get("campaigns")),
         _sum(summary.get("calibration")),
         _sum(summary.get("decay")),

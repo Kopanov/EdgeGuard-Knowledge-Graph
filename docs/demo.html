@@ -667,10 +667,10 @@
                     <div class="list-item">
                         <span>ATTRIBUTED_TO</span>
                         <span class="count">150</span>
-                        <span style="color: var(--text-dim); font-size: 12px;"> — Indicator → Malware</span>
+                        <span style="color: var(--text-dim); font-size: 12px;"> — Malware → ThreatActor</span>
                     </div>
                     <div class="list-item">
-                        <span>USES</span>
+                        <span>EMPLOYS_TECHNIQUE</span>
                         <span class="count">140</span>
                         <span style="color: var(--text-dim); font-size: 12px;"> — ThreatActor → Technique</span>
                     </div>
@@ -746,19 +746,19 @@
             </thead>
             <tbody>
                 <tr>
-                    <td>USES</td>
+                    <td>EMPLOYS_TECHNIQUE</td>
                     <td>ThreatActor → Technique</td>
                     <td>sources, confidence_score</td>
                 </tr>
                 <tr>
                     <td>ATTRIBUTED_TO</td>
-                    <td>Indicator → Malware</td>
+                    <td>Malware → ThreatActor</td>
                     <td>sources, confidence_score</td>
                 </tr>
                 <tr>
                     <td>INDICATES</td>
-                    <td>Indicator → Vulnerability</td>
-                    <td>sources (Future)</td>
+                    <td>Indicator → Malware / Vulnerability</td>
+                    <td>sources, confidence_score</td>
                 </tr>
                 <tr>
                     <td>RESOLVES_TO</td>
@@ -835,7 +835,7 @@
                     <div class="sample-prop"><div class="sample-prop-label">Target</div><div class="sample-prop-value">Energy, Gov</div></div>
                 </div>
                 <div class="sample-explanation">
-                    <strong>Logic:</strong> Threat actors linked to techniques via USES relationship. When indicator matches APT29's TTPs, EdgeGuard surfaces actor context automatically.
+                    <strong>Logic:</strong> Threat actors linked to techniques via the EMPLOYS_TECHNIQUE relationship. When indicator matches APT29's TTPs, EdgeGuard surfaces actor context automatically.
                 </div>
             </div>
 
@@ -922,6 +922,9 @@
             <a href="visualization.html" target="_blank" style="display: inline-block; background: var(--primary); color: #000; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 16px;">
                 🚀 Open Interactive Visualization
             </a>
+            <div style="font-size: 12px; color: var(--text-dim); margin-top: 8px;">
+                The visualization calls the API from the browser: serve <code>docs/</code> from an origin in <code>EDGEGUARD_CORS_ORIGINS</code> (for example <code>python3 -m http.server 3000 --bind 127.0.0.1 --directory docs</code>); a page opened from disk is refused. See <code>docs/GRAPH_EXPLORER.md</code>.
+            </div>
         </div>
 
         <!-- Alert Enrichment Workflow Demo -->

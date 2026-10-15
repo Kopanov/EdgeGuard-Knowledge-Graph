@@ -838,6 +838,13 @@ def _tlp_most_restrictive_clause(existing: str, incoming: str) -> str:
     return f"CASE WHEN {_tlp_rank_case(incoming)} > {_tlp_rank_case(existing)} THEN {incoming} ELSE {existing} END"
 
 
+def _set_if_absent_clause(existing: str, incoming: str) -> str:
+    """2026-10: keep ``existing`` when it holds a value, else take ``incoming`` (an empty string
+    counts as no value). For text a record may supply but must not replace: a CVE's description
+    and dates from any record but NVD's (``_CVE_RECORD_TEXT_PROPS``)."""
+    return f"CASE WHEN {existing} IS NULL OR {existing} = '' THEN {incoming} ELSE {existing} END"
+
+
 def _dedup_concat_optional_clause(
     prop_ref: str,
     value_expr: str,
@@ -973,6 +980,27 @@ _NVD_CVSS_VERSIONS = (
     ("HAS_CVSS_v30", "cvss_v30_data"),
     ("HAS_CVSS_v2", "cvss_v2_data"),
 )
+
+# 2026-10: the CVE record's text and dates. NVD's record (``nvd_record``) sets them; any other record
+# (CISA KEV, CISA ICS, an OTX pulse, a STIX import, a partner write) fills them only where the node has
+# none (``_set_if_absent_clause``), so NVD's text wins whatever the order in which records are merged.
+# Until 2026-10 the record merged last set them: an OTX pulse indicator of type CVE wrote its raw
+# ``OTX_META`` JSON as the description, an OTX pulse reference "Referenced in OTX pulse: <name>", a KEV
+# record CISA's short description, a CISA ICS record the advisory's dates. On a CVE without NVD's record
+# the first record that fills a property keeps it, also against a later revision of the same source's
+# record (a revised CISA ICS advisory, an edited KEV text): no ranking of the other sources exists yet.
+_CVE_RECORD_TEXT_PROPS = ("description", "published", "last_modified")
+
+
+def _batch_record_text_clauses(node: str, row: str) -> List[str]:
+    """SET items for ``_CVE_RECORD_TEXT_PROPS`` in an UNWIND batch (2026-10): a row from NVD's record
+    (``<row>.nvd_record``) sets the property when it carries a value, any other row fills it."""
+    return [
+        f"{node}.{prop} = CASE WHEN {row}.nvd_record THEN coalesce({row}.{prop}, {node}.{prop}) "
+        f"ELSE {_set_if_absent_clause(f'{node}.{prop}', f'{row}.{prop}')} END"
+        for prop in _CVE_RECORD_TEXT_PROPS
+    ]
+
 
 # 2026-10: CISA's SSVC decision points, which only NVD's record supplies (``nvd_collector.cisa_ssvc``):
 # the record's key -> (node property, allowed values; None = a bounded string).
@@ -2294,7 +2322,13 @@ class Neo4jClient:
 
     @retry_with_backoff(max_retries=3)
     def merge_node_with_source(
-        self, label: str, key_props: Dict, data: Dict, source_id: str, extra_props: Dict = None
+        self,
+        label: str,
+        key_props: Dict,
+        data: Dict,
+        source_id: str,
+        extra_props: Dict = None,
+        fill_props: Optional[Dict] = None,
     ) -> bool:
         """
         Merge a node with proper source tracking.
@@ -2317,6 +2351,8 @@ class Neo4jClient:
             data: Dict of all properties to store
             source_id: The source providing this data
             extra_props: Additional properties to set on the node (beyond standard fields)
+            fill_props: Properties set only where the node has no value (2026-10,
+                ``_set_if_absent_clause``); a key also in ``extra_props`` is set from there
 
         Returns:
             True if successful
@@ -2619,6 +2655,16 @@ class Neo4jClient:
                     else:
                         query += f", n.{prop_name} = ${prop_name}"
                     params_extra[prop_name] = prop_value
+
+            # 2026-10: text a record may supply but must not replace (a CVE's description and dates
+            # from any record but NVD's, ``merge_cve``) is set only where the node has none. The
+            # parameter is prefixed so it cannot collide with a standard parameter of this statement.
+            for prop_name, prop_value in (fill_props or {}).items():
+                _validate_prop_name(prop_name)
+                if prop_name in extra_props or prop_value is None or prop_value == "":
+                    continue
+                query += f", n.{prop_name} = {_set_if_absent_clause(f'n.{prop_name}', f'$fill_{prop_name}')}"
+                params_extra[f"fill_{prop_name}"] = prop_value
 
             if params_extra:
                 key_str = ", ".join(f"{k}={v}" for k, v in key_props.items())
@@ -2960,8 +3006,6 @@ class Neo4jClient:
         data["cve_id"] = cve_id
         key_props = {"cve_id": cve_id}
         extra_props: Dict[str, Any] = {}
-        if data.get("description"):
-            extra_props["description"] = data["description"]
         if data.get("cvss_score") is not None:
             extra_props["cvss_score"] = data["cvss_score"]
         if data.get("severity"):
@@ -2975,11 +3019,15 @@ class Neo4jClient:
         # dates via SOURCED_FROM edges, but the node itself would drop
         # ``published`` / ``last_modified`` without this promotion — exactly
         # the same bug shape PR-N19 Fix #1 closed for ``merge_cve``.
-        if data.get("published"):
-            extra_props["published"] = data["published"]
-        if data.get("last_modified"):
-            extra_props["last_modified"] = data["last_modified"]
-        return self.merge_node_with_source("Vulnerability", key_props, data, source_id, extra_props=extra_props or None)
+        # 2026-10: description and dates as in ``merge_cve`` — set by NVD's record, filled by any other.
+        fill_props: Dict[str, Any] = {}
+        record_text = extra_props if data.get("nvd_record") else fill_props
+        for prop in _CVE_RECORD_TEXT_PROPS:
+            if data.get(prop):
+                record_text[prop] = data[prop]
+        return self.merge_node_with_source(
+            "Vulnerability", key_props, data, source_id, extra_props=extra_props or None, fill_props=fill_props or None
+        )
 
     def merge_indicator(self, data: Dict, source_id: str = "alienvault_otx") -> bool:
         """MERGE an Indicator node with source tracking.
@@ -3053,6 +3101,8 @@ class Neo4jClient:
         with matching ``HAS_CVSS_*`` relationships (ResilMesh schema), then sets the node's
         ``cvss_score`` / ``severity`` / ``cvss_version`` / ``attack_vector`` from those sub-nodes
         (2026-10; the record's own ``cvss_score`` / ``severity`` / ``attack_vector`` are not written).
+        ``description``, ``published`` and ``last_modified`` are set by NVD's record (``nvd_record``)
+        and only filled, where the node has none, by any other record (2026-10).
         """
         cve_id = resolve_vulnerability_cve_id(data)
         if not cve_id:
@@ -3083,8 +3133,6 @@ class Neo4jClient:
         # collector's records only, so an NVD record never overwrites it.
         if data.get("known_ransomware_use"):
             extra_props["known_ransomware_use"] = str(data["known_ransomware_use"])
-        if data.get("description"):
-            extra_props["description"] = data["description"]
         # 2026-10: ``cvss_score``, ``severity`` and ``attack_vector`` are not taken from the record —
         # they are derived from the CVSS sub-nodes below (``_set_cve_score_from_cvss``). The record's
         # values were whatever its source sent: a 0.0 placeholder read back as 3.0 / LOW, a
@@ -3103,10 +3151,16 @@ class Neo4jClient:
         # L5051 correctly writes both; the MISP-sourced path (the
         # one used for the 99,664 CVEs in the 2026-04-22 baseline)
         # did not. Fixes the gap Bravo caught.
-        if data.get("published"):
-            extra_props["published"] = data["published"]
-        if data.get("last_modified"):
-            extra_props["last_modified"] = data["last_modified"]
+        # 2026-10: ``description``, ``published`` and ``last_modified`` are set by NVD's record only
+        # (``nvd_record``, set by the sync for an NVD attribute with NVD_META); any other record fills
+        # them where the node has none (``_CVE_RECORD_TEXT_PROPS``). Before, the record merged last
+        # set them, so a CVE showed OTX's raw pulse JSON, a pulse name or CISA's short text instead of
+        # NVD's description depending on the order of the events in the sync.
+        fill_props: Dict = {}
+        record_text = extra_props if data.get("nvd_record") else fill_props
+        for prop in _CVE_RECORD_TEXT_PROPS:
+            if data.get(prop):
+                record_text[prop] = data[prop]
         # 2026-10 (fresh-baseline PR, ResilMesh conformance finding F2): the four
         # ResilMesh CVE properties ``cwe``, ``ref_tags``, ``cpe_type`` and
         # ``result_impacts`` were rehydrated from NVD_META into the item but never
@@ -3132,7 +3186,9 @@ class Neo4jClient:
             if _status_clean:
                 extra_props["status"] = _status_clean
 
-        ok = self.merge_node_with_source("CVE", key_props, data, source_id, extra_props=extra_props or None)
+        ok = self.merge_node_with_source(
+            "CVE", key_props, data, source_id, extra_props=extra_props or None, fill_props=fill_props or None
+        )
         if not ok:
             return False
         # Create CVSS sub-nodes (ResilMesh schema)
@@ -4246,6 +4302,8 @@ class Neo4jClient:
                         batch_item["affected_products"] = item["affected_products"]
                     if item.get("tlp"):
                         batch_item["tlp"] = str(item["tlp"])  # 2026-10: TLP level from the tlp:<level> MISP tag
+                    # 2026-10: NVD's record sets description and dates; any other record only fills them.
+                    batch_item["nvd_record"] = bool(item.get("nvd_record"))
 
                     batch_data.append(batch_item)
 
@@ -4295,12 +4353,12 @@ class Neo4jClient:
                     // ``coalesce(item.X, n.X)`` shape so partial-item
                     // batches don't clobber previously-set values with
                     // NULL — matches merge_cve's extra_props semantics.
-                    n.description = coalesce(item.description, n.description),
+                    // 2026-10: description and dates as in merge_cve — NVD's record sets them,
+                    // any other record fills them where the node has none.
+                    {", ".join(_batch_record_text_clauses("n", "item"))},
                     n.cvss_score = coalesce(item.cvss_score, n.cvss_score),
                     n.severity = coalesce(item.severity, n.severity),
                     n.attack_vector = coalesce(item.attack_vector, n.attack_vector),
-                    n.published = coalesce(item.published, n.published),
-                    n.last_modified = coalesce(item.last_modified, n.last_modified),
                     n.cisa_exploit_add = coalesce(item.cisa_exploit_add, n.cisa_exploit_add),
                     n.cisa_action_due = coalesce(item.cisa_action_due, n.cisa_action_due),
                     n.cisa_required_action = coalesce(item.cisa_required_action, n.cisa_required_action),
@@ -6365,6 +6423,10 @@ class Neo4jClient:
 
         Stamps the same deterministic n.uuid as the MISP path so a node MERGEd
         through either path gets the same uuid.
+
+        ``description`` only fills a node that has none (2026-10), as any record but NVD's does on
+        the MISP path; before, it replaced the stored text and a call without one removed it. ``status``
+        is set when the call carries one and kept when it does not (2026-10).
         """
         # PR #37 (Bug Hunter Tier S A3): refuse to merge when ``cve_id`` is
         # missing. Previously this defaulted to the sentinel
@@ -6391,15 +6453,15 @@ class Neo4jClient:
         # Indicator + IP merges. Use ``first_imported_at`` (ON CREATE only,
         # never overwritten) instead of the legacy ``first_seen`` field.
         # Source-truthful per-source claims live on SOURCED_FROM edges.
-        query = """
-        MERGE (v:Vulnerability {cve_id: $cve_id})
+        query = f"""
+        MERGE (v:Vulnerability {{cve_id: $cve_id}})
         ON CREATE SET v.uuid = $vuln_uuid,
                       v.first_imported_at = datetime(),
                       v.edgeguard_managed = true
         ON MATCH SET v.edgeguard_enriched = CASE WHEN v.edgeguard_managed = true THEN v.edgeguard_enriched ELSE true END
         SET v.name = coalesce(v.name, $name)
-        SET v.status = $status,
-            v.description = $description,
+        SET v.status = coalesce($status, v.status),
+            v.description = {_set_if_absent_clause("v.description", "$description")},
             v.last_updated = datetime(),
             v.uuid = coalesce(v.uuid, $vuln_uuid)
         """
@@ -6427,6 +6489,12 @@ class Neo4jClient:
         ``merge_cve()`` which sets the same properties plus EdgeGuard
         extensions (CISA KEV, reference_urls). Both produce compatible
         CVE nodes keyed on ``cve_id`` with the same deterministic n.uuid.
+
+        ``description``, ``published`` and ``last_modified`` only fill a node that has none
+        (2026-10): NVD's record, merged by ``merge_cve``, sets them, so a write here never replaces
+        NVD's text, and a call without them no longer removes the stored values. ``cpe_type``,
+        ``result_impacts``, ``ref_tags`` and ``cwe`` are set when the call carries them and kept when
+        it does not (2026-10; a call without them removed NVD's lists).
         """
         cve_id = data.get("cve_id")
         cve_uuid = compute_node_uuid("CVE", {"cve_id": cve_id})
@@ -6434,13 +6502,13 @@ class Neo4jClient:
         MERGE (c:CVE {{cve_id: $cve_id}})
         ON CREATE SET c.uuid = $cve_uuid, c.edgeguard_managed = true
         ON MATCH SET c.edgeguard_enriched = CASE WHEN c.edgeguard_managed = true THEN c.edgeguard_enriched ELSE true END
-        SET c.description = $description,
-            c.published = $published,
-            c.last_modified = $last_modified,
-            c.cpe_type = $cpe_type,
-            c.result_impacts = $result_impacts,
-            c.ref_tags = $ref_tags,
-            c.cwe = $cwe,
+        SET c.description = {_set_if_absent_clause("c.description", "$description")},
+            c.published = {_set_if_absent_clause("c.published", "$published")},
+            c.last_modified = {_set_if_absent_clause("c.last_modified", "$last_modified")},
+            c.cpe_type = coalesce($cpe_type, c.cpe_type),
+            c.result_impacts = coalesce($result_impacts, c.result_impacts),
+            c.ref_tags = coalesce($ref_tags, c.ref_tags),
+            c.cwe = coalesce($cwe, c.cwe),
             c.tags = {_dedup_concat_clause("c.tags", "[$tag]")},
             c.tag = coalesce(c.tag, $tag),
             c.first_seen = CASE WHEN c.first_seen IS NULL THEN datetime() ELSE c.first_seen END,

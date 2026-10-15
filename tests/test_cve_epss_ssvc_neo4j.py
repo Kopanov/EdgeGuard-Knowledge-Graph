@@ -1,9 +1,13 @@
-"""FIRST EPSS and CISA's SSVC on the CVE nodes of a real Neo4j (2026-10).
+"""FIRST EPSS, CISA's SSVC and the CVE record's text on the CVE nodes of a real Neo4j (2026-10).
 
 ``enrich_cve_epss`` runs as the enrichment task runs it, on a node EdgeGuard manages, on one a
 partner created and on one whose CVE has left the feed. ``merge_cve`` writes an NVD record that
 carries CISA's SSVC decision, one where CISA withdrew it, and a KEV record (which never touches it),
-after the record went through MISP and the sync (``tests/test_cve_ssvc_from_nvd.py``). Same guards as
+after the record went through MISP and the sync (``tests/test_cve_ssvc_from_nvd.py``). The records of
+one CVE from NVD, OTX, the KEV and CISA ICS (real hosted MISP attributes) are merged in several orders:
+NVD's record sets ``description``, ``published`` and ``last_modified``, any other record fills them only
+where the node has none, and an OTX pulse reference fills nothing (``tests/test_cve_description_source.py``);
+a ResilMesh-native write keeps the values it does not carry. Same guards as
 ``tests/test_actor_alias_merge_neo4j.py``: runs only with ``EDGEGUARD_IT_NEO4J_URI``, writes only
 nodes labelled ``EdgeGuardIT``, refuses any other node.
 """
@@ -43,6 +47,9 @@ SSVC = ("ssvc_exploitation", "ssvc_automatable", "ssvc_technical_impact", "ssvc_
 FIXTURE = f"""
 CREATE (:Source:{LABEL} {{source_id: 'nvd'}})
 CREATE (:Source:{LABEL} {{source_id: 'cisa'}})
+CREATE (:Source:{LABEL} {{source_id: 'cisa_kev'}})
+CREATE (:Source:{LABEL} {{source_id: 'cisa_ics'}})
+CREATE (:Source:{LABEL} {{source_id: 'alienvault_otx'}})
 CREATE (:CVE:{LABEL} {{cve_id: 'CVE-2021-44228', uuid: 'u-log4shell', edgeguard_managed: true, source: ['nvd']}})
 CREATE (:CVE:{LABEL} {{cve_id: 'CVE-2020-0001', uuid: 'u-partner'}})
 CREATE (:CVE:{LABEL} {{cve_id: 'CVE-1999-0024', uuid: 'u-left', edgeguard_managed: true, source: ['nvd'],
@@ -127,3 +134,116 @@ def test_an_nvd_record_sets_and_withdraws_ssvc_and_another_source_leaves_it(clie
     assert client.merge_cve(nvd_record(with_ssvc=False), "nvd")
     node = _cves(raw_driver)["CVE-2021-44228"]
     assert not [prop for prop in SSVC if prop in node], "a decision CISA withdrew leaves the node"
+
+
+# ---------------------------------------------------------------- the CVE record's text (2026-10)
+RECORD_TEXT = ("description", "published", "last_modified")
+
+
+def _real_record(key: str) -> dict:
+    """A real hosted MISP attribute (``test_cvss_real_payloads.json``) read by the sync, without its
+    CVSS payloads: CVSS sub-nodes are another test's subject, and would be nodes without the test label."""
+    from test_cve_description_source import synced_key
+
+    item = synced_key(key)
+    item.update(cvss_v40_data=None, cvss_v31_data=None, cvss_v30_data=None, cvss_v2_data=None)
+    return item
+
+
+def _create(raw_driver, label: str, cve_id: str, **props) -> None:
+    """The node the merges below write to, with the test label (a MERGE would create one without)."""
+    with raw_driver.session() as session:
+        session.run(f"CREATE (n:{label}:{LABEL} {{cve_id: $cve_id}}) SET n += $props", cve_id=cve_id, props=props)
+
+
+def _text(raw_driver, label: str, cve_id: str) -> dict:
+    with raw_driver.session() as session:
+        props = session.run(f"MATCH (n:{label} {{cve_id: $cve_id}}) RETURN properties(n) AS p", cve_id=cve_id).single()[
+            "p"
+        ]
+    return {prop: props[prop] for prop in RECORD_TEXT if prop in props}
+
+
+def _expected(item: dict) -> dict:
+    return {prop: item[prop] for prop in RECORD_TEXT if item.get(prop)}
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ("NVD", "AlienVault-OTX", "CISA-KEV"),
+        ("AlienVault-OTX", "CISA-KEV", "NVD"),
+        ("CISA-KEV", "NVD", "AlienVault-OTX"),
+    ],
+)
+def test_nvd_record_sets_the_cve_text_and_other_records_only_fill_it(client, raw_driver, order):
+    _create(raw_driver, "CVE", "CVE-2025-21042")
+    for source in order:
+        item = _real_record(f"CVE-2025-21042__source:{source}")
+        assert client.merge_cve(item, item["tag"])
+    nvd = _real_record("CVE-2025-21042__source:NVD")
+    assert _text(raw_driver, "CVE", "CVE-2025-21042") == _expected(nvd), order
+    with raw_driver.session() as session:
+        kev_date = session.run("MATCH (c:CVE {cve_id: 'CVE-2025-21042'}) RETURN c.cisa_exploit_add AS d").single()["d"]
+    assert kev_date == _real_record("CVE-2025-21042__source:CISA-KEV")["cisa_exploit_add"], "the KEV fields still land"
+
+
+def test_cisa_ics_dates_fill_and_nvd_record_replaces_them(client, raw_driver):
+    _create(raw_driver, "CVE", "CVE-2025-14272")
+    ics, nvd = _real_record("CVE-2025-14272__source:CISA-ICS"), _real_record("CVE-2025-14272__source:NVD")
+    assert client.merge_cve(ics, "cisa_ics")
+    assert _text(raw_driver, "CVE", "CVE-2025-14272") == _expected(ics), "alone, the advisory fills the node"
+    assert client.merge_cve(nvd, "nvd")
+    assert client.merge_cve(ics, "cisa_ics")
+    assert _text(raw_driver, "CVE", "CVE-2025-14272") == _expected(nvd)
+
+
+@pytest.mark.parametrize("first", ["pulse_reference", "kev"])
+def test_an_otx_pulse_reference_is_no_description_and_the_kev_text_fills(client, raw_driver, first):
+    # The OTX collector's cve_references item as MISPWriter writes it ("Referenced in OTX pulse: <name>").
+    # Merged first on a CVE without an NVD record, it used to stay, and CISA's KEV text never replaced it.
+    from test_cve_description_source import otx_pulse_reference, synced
+
+    _create(raw_driver, "CVE", "CVE-2015-5477")
+    reference, kev = synced(otx_pulse_reference()), _real_record("CVE-2015-5477__source:CISA-KEV")
+    for item in (reference, kev) if first == "pulse_reference" else (kev, reference):
+        assert client.merge_cve(item, item["tag"])
+    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": kev["description"]}
+
+
+def test_without_nvd_record_an_empty_description_is_filled_and_otx_adds_nothing(client, raw_driver):
+    _create(raw_driver, "CVE", "CVE-2015-5477", description="")
+    otx, kev = _real_record("CVE-2015-5477__source:AlienVault-OTX"), _real_record("CVE-2015-5477__source:CISA-KEV")
+    assert client.merge_cve(otx, "alienvault_otx")
+    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": ""}, "OTX's pulse JSON is not a description"
+    assert client.merge_cve(kev, "cisa_kev")
+    assert client.merge_cve(otx, "alienvault_otx")
+    assert _text(raw_driver, "CVE", "CVE-2015-5477") == {"description": kev["description"]}
+
+
+def test_batch_and_resilmesh_paths_keep_nvd_text(client, raw_driver):
+    _create(raw_driver, "Vulnerability", "CVE-2025-21042")
+    kev, nvd = _real_record("CVE-2025-21042__source:CISA-KEV"), _real_record("CVE-2025-21042__source:NVD")
+    otx = _real_record("CVE-2025-21042__source:AlienVault-OTX")
+    for item in (kev, nvd, otx, kev):
+        assert client.merge_vulnerabilities_batch([dict(item)], source_id=item["tag"]) == (1, 0)
+    assert _text(raw_driver, "Vulnerability", "CVE-2025-21042") == _expected(nvd)
+
+    _create(raw_driver, "CVE", "CVE-2025-21042")
+    assert client.merge_cve(nvd, "nvd")
+    assert client.merge_resilmesh_cve({"cve_id": "CVE-2025-21042", "description": "partner text"})
+    assert client.merge_resilmesh_cve({"cve_id": "CVE-2025-21042"})  # used to remove all three
+    assert _text(raw_driver, "CVE", "CVE-2025-21042") == _expected(nvd)
+    # ... and NVD's lists, which a call without them also set to null.
+    lists = ("cwe", "ref_tags", "cpe_type", "result_impacts")
+    assert all(nvd[prop] for prop in lists), "the NVD record carries every list"
+    with raw_driver.session() as session:
+        stored = session.run("MATCH (c:CVE {cve_id: 'CVE-2025-21042'}) RETURN properties(c) AS p").single()["p"]
+    assert {prop: stored.get(prop) for prop in lists} == {prop: nvd[prop] for prop in lists}
+
+    # A ResilMesh-native Vulnerability write without a status keeps the stored one.
+    assert client.merge_resilmesh_vulnerability({"cve_id": "CVE-2025-21042", "status": "open"})
+    assert client.merge_resilmesh_vulnerability({"cve_id": "CVE-2025-21042"})
+    with raw_driver.session() as session:
+        status = session.run("MATCH (v:Vulnerability {cve_id: 'CVE-2025-21042'}) RETURN v.status AS s").single()["s"]
+    assert status == "open"

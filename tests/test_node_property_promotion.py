@@ -106,6 +106,7 @@ class TestCVEPropertyPromotion:
         client, session = mock_neo4j_client
         data = {
             "cve_id": "CVE-2024-1234",
+            "nvd_record": True,  # 2026-10: NVD's record sets the description; another record fills it
             "description": "A critical buffer overflow vulnerability.",
             "cvss_score": 9.8,
             "severity": "CRITICAL",

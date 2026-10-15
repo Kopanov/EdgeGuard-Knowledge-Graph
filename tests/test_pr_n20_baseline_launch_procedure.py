@@ -32,7 +32,6 @@ the raw MISP data?" (`n.misp_attribute_ids[]` → MISP API).
 
 from __future__ import annotations
 
-import ast
 import os
 import sys
 from pathlib import Path
@@ -306,62 +305,47 @@ class TestFix2PreflightScript:
 
 
 class TestFix3MergeVulnerabilitySymmetry:
-    def test_merge_vulnerability_extra_props_includes_published(self):
-        """AST pin: merge_vulnerability must conditionally add 'published'
-        to extra_props — same shape as PR-N19 Fix #1 on merge_cve."""
-        src = (SRC / "neo4j_client.py").read_text()
-        tree = ast.parse(src)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef):
-                for node in cls.body:
-                    if isinstance(node, ast.FunctionDef) and node.name == "merge_vulnerability":
-                        body = ast.unparse(node)
-                        assert 'extra_props["published"]' in body or "extra_props['published']" in body, (
-                            "merge_vulnerability must promote data['published'] to extra_props "
-                            "(PR-N20 follow-up to PR-N19 Fix #1; single-row NVD path was dropping it)"
-                        )
-                        return
-        raise AssertionError("merge_vulnerability not found")
+    """2026-10: as on ``merge_cve``, NVD's record sets the dates (``extra_props``) and any other
+    record fills them where the node has none (``fill_props``)."""
 
-    def test_merge_vulnerability_extra_props_includes_last_modified(self):
-        src = (SRC / "neo4j_client.py").read_text()
-        tree = ast.parse(src)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef):
-                for node in cls.body:
-                    if isinstance(node, ast.FunctionDef) and node.name == "merge_vulnerability":
-                        body = ast.unparse(node)
-                        assert 'extra_props["last_modified"]' in body or "extra_props['last_modified']" in body, (
-                            "merge_vulnerability must promote data['last_modified'] to extra_props (PR-N20 follow-up to PR-N19 Fix #1)"
-                        )
-                        return
-        raise AssertionError("merge_vulnerability not found")
-
-    def test_merge_vulnerability_behavior_promotes_both_fields(self):
-        """Behavioral pin: invoke merge_vulnerability with data containing
-        published + last_modified; confirm both reach extra_props via the
-        merge_node_with_source mock (same shape as PR-N19 Fix #1's test)."""
+    @staticmethod
+    def _merge(data: dict) -> dict:
         from neo4j_client import Neo4jClient
 
         c = Neo4jClient.__new__(Neo4jClient)
         c.driver = MagicMock()
         c.merge_node_with_source = MagicMock(return_value=True)
+        assert c.merge_vulnerability(data) is True
+        return c.merge_node_with_source.call_args.kwargs
 
-        data = {
-            "cve_id": "CVE-2024-12345",
+    _DATA = {
+        "cve_id": "CVE-2024-12345",
+        "description": "Symmetry test",
+        "cvss_score": 7.5,
+        "severity": "HIGH",
+        "published": "2024-02-14T12:00:00.000",
+        "last_modified": "2024-03-01T08:30:00.000",
+    }
+
+    def test_merge_vulnerability_nvd_record_sets_published_and_last_modified(self):
+        """Behavioral pin: NVD's record passes both dates to extra_props (same shape as merge_cve)."""
+        kwargs = self._merge({**self._DATA, "nvd_record": True})
+        extra_props = kwargs.get("extra_props") or {}
+        assert extra_props.get("published") == "2024-02-14T12:00:00.000", (
+            f"merge_vulnerability must pass NVD's published to extra_props; got {extra_props.get('published')!r}"
+        )
+        assert extra_props.get("last_modified") == "2024-03-01T08:30:00.000"
+        assert extra_props.get("description") == "Symmetry test"
+        assert not kwargs.get("fill_props")
+
+    def test_merge_vulnerability_other_record_fills_published_and_last_modified(self):
+        kwargs = self._merge(dict(self._DATA))
+        assert kwargs["fill_props"] == {
             "description": "Symmetry test",
-            "cvss_score": 7.5,
-            "severity": "HIGH",
             "published": "2024-02-14T12:00:00.000",
             "last_modified": "2024-03-01T08:30:00.000",
         }
-        assert c.merge_vulnerability(data) is True
-        call_kwargs = c.merge_node_with_source.call_args.kwargs
-        extra_props = call_kwargs.get("extra_props", {})
-        assert extra_props.get("published") == "2024-02-14T12:00:00.000", (
-            f"merge_vulnerability must pass published to extra_props; got {extra_props.get('published')!r}"
-        )
-        assert extra_props.get("last_modified") == "2024-03-01T08:30:00.000"
+        assert (kwargs.get("extra_props") or {}).get("cvss_score") == 7.5
 
 
 # ===========================================================================
