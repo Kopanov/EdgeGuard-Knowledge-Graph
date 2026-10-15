@@ -11,7 +11,8 @@ Jobs
 2. build_campaign_nodes   — Group ThreatActor / Malware / Indicator into Campaigns
 3. calibrate_cooccurrence — Adjust INDICATES/EXPLOITS confidence for large MISP feed dumps
 4. bridge_vulnerability_cve — Create REFERS_TO between Vulnerability and CVE nodes
-5. merge_alias_duplicate_actors — Fold alias-duplicate ThreatActors into their MITRE canonical
+5. merge_alias_duplicate_actors — Fold duplicate ThreatActors into their canonical actor (ATT&CK
+   aliases and the canonical threat-actor reference, src/reference/canonical_threat_actors.json)
 """
 
 import logging
@@ -19,10 +20,18 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from canonical_threat_actors import (  # noqa: E402
+    CanonicalReference,
+    MergePlan,
+    ReferenceUnavailable,
+    load_canonical_reference,
+    plan_alias_merges,
+    reference_merge_candidates,
+)
 from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause, apoc_iterate_failures  # noqa: E402
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
@@ -1002,6 +1011,16 @@ def bridge_vulnerability_cve(neo4j_client) -> Dict:
 # ``apoc.refactor.mergeNodes``. It runs BEFORE ``build_campaign_nodes`` so
 # campaigns are materialised on the merged actor.
 #
+# 2026-10: the canonical threat-actor reference (``src/reference/
+# canonical_threat_actors.json``, see ``src/canonical_threat_actors.py``) adds a
+# second rule: a non-MITRE node whose name resolves there to another canonical
+# actor that is a node on the graph folds into that node (``lazarus`` into
+# ``lazarus group``, ``cl0p`` into ``clop``). A MITRE-sourced node is never a
+# duplicate; a duplicate the two rules give different canonicals, and a node
+# that would be both a canonical and a duplicate in one run, are skipped. When
+# the file is missing, unreadable or inconsistent the job logs one warning and
+# runs on ATT&CK aliases alone.
+#
 # String-level hygiene for the SAME problem at ingest (composite / generic
 # names) lives in ``src/actor_name_hygiene.py``.
 # ---------------------------------------------------------------------------
@@ -1089,17 +1108,64 @@ RETURN d.name AS duplicate_name, canonical_names
 ORDER BY duplicate_name
 """
 
+# One read of every ThreatActor node's name and sources: the reference rule's
+# candidates are computed from it in Python (``reference_merge_candidates``).
+_ACTOR_ALIAS_MERGE_ACTORS_CYPHER = """
+MATCH (a:ThreatActor)
+WHERE a.name IS NOT NULL
+RETURN a.name AS name, a.source AS source
+"""
+
+# APOC's ``combine`` keeps a list only when the merged values differ: when the canonical
+# and a duplicate hold the same value (``zone = ["global"]`` on both, or
+# ``r.sources = ["alienvault_otx"]`` on two parallel edges) it stores that one value as a
+# plain string. Found on the 730-day graph (2026-10-14): the 11 MITRE actors that had
+# absorbed an OTX duplicate held ``zone`` as a string, and 21 of their ATTRIBUTED_TO edges
+# held ``r.sources`` as a string. Every ``combine`` property is a list by contract, so the
+# canonical node is wrapped back into lists in the merge statement itself, and the node and
+# all of its edges again after each merge batch.
+# On edges only the provenance lists are lists: ``source`` on a SOURCED_FROM edge is the
+# scalar source id (``combine`` of two parallel edges to the same Source keeps it scalar) and
+# must stay one; the node keys (``zone``, ``aliases`` …) do not exist on edges. APOC's
+# ``singleElementAsArray`` option is not used for that reason: it applies to edges too.
+_ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = ("misp_event_ids", "source_refs", "sources")
+_ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
+    sorted(
+        k
+        for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items()
+        if v == "combine" and k not in ("sources", "source_refs")
+    )
+)
+
+
+def _list_or_wrapped(ref: str) -> str:
+    """Cypher: ``ref`` as a de-duplicated list (``[x]`` for a scalar, null stays null).
+
+    ``apoc.coll.toSet`` alone raises on a string (``Can't coerce String to List``)."""
+    return (
+        f"CASE WHEN {ref} IS NULL THEN NULL "
+        f'WHEN apoc.meta.cypher.type({ref}) STARTS WITH "LIST" THEN apoc.coll.toSet({ref}) '
+        f"ELSE [{ref}] END"
+    )
+
+
 # One ``mergeNodes`` call per canonical with ALL of its duplicates in the
 # batch, so rows of the UNWIND never touch each other's nodes (a duplicate
 # maps to exactly one canonical thanks to the ambiguity guard). The
-# MITRE-side guards are re-checked here so a stale candidate list can never
-# merge two canonical actors. ``c.aliases`` gains the duplicate names BEFORE
-# the merge, as required; ``apoc.coll.toSet`` afterwards de-duplicates what
-# ``"combine"`` produced.
-_ACTOR_ALIAS_MERGE_APPLY_CYPHER = """
+# canonical must be MITRE-sourced or a canonical the reference named in this
+# run (``$reference_canonicals``), and a duplicate is never MITRE-sourced:
+# re-checked here so a stale candidate list can never merge two canonical
+# actors. ``c.aliases`` gains the duplicate names BEFORE the merge, as
+# required. After the merge every list property of the node is wrapped back
+# into a de-duplicated list (``_list_or_wrapped``): two nodes with the same
+# single source (``["alienvault_otx"]`` on both, as for two OTX names of one
+# actor) come out of ``"combine"`` with ``source`` as a string, and
+# ``apoc.coll.toSet`` on that string would roll back the whole batch.
+_ACTOR_ALIAS_MERGE_APPLY_CYPHER = (
+    """
 UNWIND $groups AS g
 MATCH (c:ThreatActor {name: g.canonical})
-WHERE $mitre_source IN coalesce(c.source, [])
+WHERE $mitre_source IN coalesce(c.source, []) OR c.name IN $reference_canonicals
 MATCH (d:ThreatActor)
 WHERE d.name IN g.duplicates
   AND d <> c
@@ -1114,40 +1180,13 @@ CALL apoc.refactor.mergeNodes([c] + dups, {
     produceSelfRel: false
 })
 YIELD node
-SET node.aliases = apoc.coll.toSet(coalesce(node.aliases, [])),
-    node.source = apoc.coll.toSet(coalesce(node.source, [])),
+SET """
+    + ",\n    ".join(f"node.{p} = {_list_or_wrapped('node.' + p)}" for p in _ACTOR_ALIAS_MERGE_LIST_PROPS)
+    + """,
     node.last_updated = datetime()
 RETURN sum(n_dups) AS merged, count(node) AS canonicals
 """
-
-# APOC's ``combine`` keeps a list only when the merged values differ: when the canonical
-# and a duplicate hold the same value (``zone = ["global"]`` on both, or
-# ``r.sources = ["alienvault_otx"]`` on two parallel edges) it stores that one value as a
-# plain string. Found on the 730-day graph (2026-10-14): the 11 MITRE actors that had
-# absorbed an OTX duplicate held ``zone`` as a string, and 21 of their ATTRIBUTED_TO edges
-# held ``r.sources`` as a string. Every ``combine`` property is a list by contract, so the
-# canonical node and all of its edges are wrapped back into lists after each merge batch.
-# On edges only the provenance lists are lists: ``source`` on a SOURCED_FROM edge is the
-# scalar source id (``combine`` of two parallel edges to the same Source keeps it scalar) and
-# must stay one; the node keys (``zone``, ``aliases`` …) do not exist on edges.
-_ACTOR_ALIAS_MERGE_EDGE_LIST_PROPS: Tuple[str, ...] = ("misp_event_ids", "source_refs", "sources")
-_ACTOR_ALIAS_MERGE_LIST_PROPS: Tuple[str, ...] = tuple(
-    sorted(
-        k
-        for k, v in _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY.items()
-        if v == "combine" and k not in ("sources", "source_refs")
-    )
 )
-
-
-def _list_or_wrapped(ref: str) -> str:
-    """Cypher: ``ref`` as a de-duplicated list (``[x]`` for a scalar, null stays null)."""
-    return (
-        f"CASE WHEN {ref} IS NULL THEN NULL "
-        f'WHEN apoc.meta.cypher.type({ref}) STARTS WITH "LIST" THEN apoc.coll.toSet({ref}) '
-        f"ELSE [{ref}] END"
-    )
-
 
 _ACTOR_ALIAS_MERGE_NORMALISE_CYPHER = (
     "UNWIND $canonicals AS cname\n"
@@ -1186,6 +1225,27 @@ def _actor_alias_merge_enabled() -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _load_actor_reference() -> Optional[CanonicalReference]:
+    """The canonical threat-actor reference, or ``None`` (one warning) when it is unavailable.
+    Never raises: a missing or bad file must not fail enrichment."""
+    try:
+        reference = load_canonical_reference()
+    except ReferenceUnavailable as exc:
+        reason = str(exc)
+    except Exception as exc:  # any failure of the optional reference degrades the same way
+        reason = f"{type(exc).__name__}: {exc}"
+    else:
+        logger.info(
+            "[ACTOR-ALIAS-MERGE] canonical reference %s: %d actors (%s)",
+            reference.version,
+            reference.actor_count,
+            reference.path,
+        )
+        return reference
+    logger.warning("[ACTOR-ALIAS-MERGE] canonical reference unavailable (%s); merging by MITRE aliases only", reason)
+    return None
+
+
 def _is_apoc_missing_error(exc: BaseException) -> bool:
     """True when ``exc`` is Neo4j telling us an ``apoc.*`` procedure /
     function does not exist (APOC plugin not installed)."""
@@ -1202,17 +1262,35 @@ def _is_apoc_missing_error(exc: BaseException) -> bool:
 
 
 def merge_alias_duplicate_actors(neo4j_client) -> Dict:
-    """Fold alias-duplicate ThreatActor nodes into their canonical MITRE node.
+    """Fold duplicate ThreatActor nodes into their canonical node.
 
-    Candidate pair = (canonical ``c``, duplicate ``d``) where
-      * ``"mitre_attck" IN c.source`` and NOT ``"mitre_attck" IN d.source``
-        (a MITRE-sourced node is never a duplicate — two canonical actors
-        are never merged);
-      * ``toLower(trim(d.name)) = toLower(trim(x))`` for some ``x IN c.aliases``;
-      * neither name is a placeholder (``_REJECTED_PLACEHOLDER_NAMES``).
+    Two rules propose (canonical ``c``, duplicate ``d``) pairs:
 
-    Ambiguity guard: a duplicate whose name is an alias of MORE THAN ONE
-    canonical actor is skipped and counted (``skipped_ambiguous``).
+    * ATT&CK aliases (Cypher): ``"mitre_attck" IN c.source`` and NOT
+      ``"mitre_attck" IN d.source`` (a MITRE-sourced node is never a duplicate
+      — two canonical actors are never merged), ``toLower(trim(d.name)) =
+      toLower(trim(x))`` for some ``x IN c.aliases``, and neither name is a
+      placeholder (``_REJECTED_PLACEHOLDER_NAMES``). A duplicate whose name is
+      an alias of MORE THAN ONE canonical actor is skipped and counted
+      (``skipped_ambiguous``).
+    * The canonical threat-actor reference (``src/canonical_threat_actors.py``,
+      computed in Python from one read of the graph's actor names and
+      sources): a node that is not MITRE-sourced and whose name resolves,
+      unambiguously and not never_merge, to another canonical key that is a
+      node on the graph (``reference_candidates``). The reference path can be
+      overridden with ``EDGEGUARD_CANONICAL_THREAT_ACTORS``. When the file is
+      missing, unreadable or inconsistent, or its data cannot be applied to
+      the graph's names, the job logs ONE warning and runs on ATT&CK aliases
+      alone.
+
+    A duplicate the two rules give different canonicals is skipped
+    (``skipped_conflict``), and so is a node that would be both a canonical
+    and a duplicate in this run (``skipped_chain``): no chains, no cycles.
+    With the reference loaded it also checks the ATT&CK-alias pairs, since a
+    canonical's ``aliases`` include every name merged into it earlier: a
+    duplicate the reference marks ambiguous or never_merge is skipped
+    (``skipped_blocked``), and one it gives to another actor or keeps as an
+    actor of its own is a conflict.
 
     Merge = ``SET c.aliases += d.name`` then
     ``apoc.refactor.mergeNodes([c, d], {properties: <explicit map>,
@@ -1235,7 +1313,7 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
     leftovers merge on the next run).
 
     Dry run: ``EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE=false`` logs the candidate
-    count and merges nothing.
+    count and the reference pairs, and merges nothing.
 
     APOC missing: logs a WARNING and returns (``apoc_missing = 1``) instead
     of failing the enrichment run. Any other per-batch failure is logged,
@@ -1244,7 +1322,8 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
     whole-session failures re-raise per PR-N21.
 
     Returns ``{candidates, merged, skipped_ambiguous, errors,
-    restamped_edges, apoc_missing}``.
+    restamped_edges, apoc_missing, reference_candidates, skipped_conflict,
+    skipped_chain, skipped_blocked}``.
     """
     if not neo4j_client.driver:
         logger.error("merge_alias_duplicate_actors: no Neo4j connection")
@@ -1257,50 +1336,110 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
         "errors": 0,
         "restamped_edges": 0,
         "apoc_missing": 0,
+        "reference_candidates": 0,
+        "skipped_conflict": 0,
+        "skipped_chain": 0,
+        "skipped_blocked": 0,
     }
     placeholders = sorted(_REJECTED_PLACEHOLDER_NAMES)
+    reference = _load_actor_reference()
 
     try:
         with neo4j_client.driver.session() as session:
-            rows = session.run(
-                _ACTOR_ALIAS_MERGE_CANDIDATES_CYPHER,
-                placeholders=placeholders,
-                mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
-                timeout=NEO4J_READ_TIMEOUT,
-            )
-            pairs: List[Tuple[str, str]] = []  # (canonical_name, duplicate_name)
-            for row in rows:
-                dup_name = row["duplicate_name"]
-                canonical_names = [n for n in (row["canonical_names"] or []) if n]
-                if not dup_name or not canonical_names:
-                    continue
-                if len(canonical_names) > 1:
-                    results["skipped_ambiguous"] += 1
-                    logger.warning(
-                        "[ACTOR-ALIAS-MERGE] skipping %r — alias of %d canonical actors %s (ambiguous)",
-                        dup_name,
-                        len(canonical_names),
-                        sorted(canonical_names),
+            attack_rows = [
+                {"duplicate_name": row["duplicate_name"], "canonical_names": row["canonical_names"]}
+                for row in session.run(
+                    _ACTOR_ALIAS_MERGE_CANDIDATES_CYPHER,
+                    placeholders=placeholders,
+                    mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                    timeout=NEO4J_READ_TIMEOUT,
+                )
+            ]
+            reference_pairs: List[Tuple[str, str]] = []  # (duplicate_name, canonical_name)
+            plan: Optional[MergePlan] = None
+            if reference is not None:
+                graph_actors = [
+                    {"name": row["name"], "source": row["source"]}
+                    for row in session.run(_ACTOR_ALIAS_MERGE_ACTORS_CYPHER, timeout=NEO4J_READ_TIMEOUT)
+                ]
+                try:
+                    reference_pairs = reference_merge_candidates(
+                        reference, graph_actors, mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE
                     )
-                    continue
-                pairs.append((canonical_names[0], dup_name))
-            results["candidates"] = len(pairs) + results["skipped_ambiguous"]
+                    plan = plan_alias_merges(attack_rows, reference_pairs, reference=reference)
+                except Exception as exc:  # the optional reference never fails enrichment
+                    logger.warning(
+                        "[ACTOR-ALIAS-MERGE] canonical reference unavailable (%s: %s); merging by MITRE aliases only",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    reference_pairs, plan = [], None
+            if plan is None:
+                plan = plan_alias_merges(attack_rows, [])
+            for dup_name, canonical_names in plan.ambiguous:
+                logger.warning(
+                    "[ACTOR-ALIAS-MERGE] skipping %r — alias of %d canonical actors %s (ambiguous)",
+                    dup_name,
+                    len(canonical_names),
+                    canonical_names,
+                )
+            for dup_name, canonical_names in plan.conflicts:
+                logger.warning(
+                    "[ACTOR-ALIAS-MERGE] skipping %r — ATT&CK aliases and the canonical reference name "
+                    "different canonical actors %s (conflict)",
+                    dup_name,
+                    canonical_names,
+                )
+            for dup_name, canonical in plan.chains:
+                logger.warning(
+                    "[ACTOR-ALIAS-MERGE] skipping %r -> %r — %r is also a canonical in this run (chain)",
+                    dup_name,
+                    canonical,
+                    dup_name,
+                )
+            for dup_name, canonical in plan.blocked:
+                logger.warning(
+                    "[ACTOR-ALIAS-MERGE] skipping %r -> %r — the canonical reference marks %r ambiguous or "
+                    "never_merge (blocked)",
+                    dup_name,
+                    canonical,
+                    dup_name,
+                )
+            pairs = plan.pairs  # (canonical_name, duplicate_name)
+            results["candidates"] = plan.candidates
+            results["skipped_ambiguous"] = len(plan.ambiguous)
+            results["reference_candidates"] = len(reference_pairs)
+            results["skipped_conflict"] = len(plan.conflicts)
+            results["skipped_chain"] = len(plan.chains)
+            results["skipped_blocked"] = len(plan.blocked)
+            reference_canonicals = plan.reference_canonicals
 
             if not pairs:
                 logger.info(
-                    "[ACTOR-ALIAS-MERGE] no alias-duplicate ThreatActor pairs (ambiguous skipped: %d)",
+                    "[ACTOR-ALIAS-MERGE] no alias-duplicate ThreatActor pairs (ambiguous skipped: %d, "
+                    "conflicts: %d, chains: %d, blocked: %d)",
                     results["skipped_ambiguous"],
+                    results["skipped_conflict"],
+                    results["skipped_chain"],
+                    results["skipped_blocked"],
                 )
                 return results
 
             if not _actor_alias_merge_enabled():
                 logger.info(
-                    "[ACTOR-ALIAS-MERGE] DRY RUN (%s=false): %d mergeable pair(s), %d ambiguous skipped — "
-                    "merging nothing. Sample: %s",
+                    "[ACTOR-ALIAS-MERGE] DRY RUN (%s=false): %d mergeable pair(s) (%d from ATT&CK aliases, %d "
+                    "from the canonical reference), %d ambiguous, %d conflicts, %d chains, %d blocked skipped — "
+                    "merging nothing. Sample: %s. Reference pairs (duplicate -> canonical): %s",
                     _ACTOR_ALIAS_MERGE_ENV_FLAG,
                     len(pairs),
+                    plan.from_attack,
+                    plan.from_reference,
                     results["skipped_ambiguous"],
+                    results["skipped_conflict"],
+                    results["skipped_chain"],
+                    results["skipped_blocked"],
                     pairs[:10],
+                    plan.reference_pairs,
                 )
                 return results
 
@@ -1329,6 +1468,7 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
                         groups=groups,
                         strategy=_ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY,
                         mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                        reference_canonicals=reference_canonicals,
                         timeout=NEO4J_READ_TIMEOUT,
                     ).single()
                     merged = int((rec["merged"] if rec else 0) or 0)
@@ -1382,10 +1522,15 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
         raise
 
     logger.info(
-        "[ACTOR-ALIAS-MERGE] complete — candidates=%d merged=%d skipped_ambiguous=%d errors=%d restamped_edges=%d",
+        "[ACTOR-ALIAS-MERGE] complete — candidates=%d (reference %d) merged=%d skipped_ambiguous=%d "
+        "skipped_conflict=%d skipped_chain=%d skipped_blocked=%d errors=%d restamped_edges=%d",
         results["candidates"],
+        results["reference_candidates"],
         results["merged"],
         results["skipped_ambiguous"],
+        results["skipped_conflict"],
+        results["skipped_chain"],
+        results["skipped_blocked"],
         results["errors"],
         results["restamped_edges"],
     )
