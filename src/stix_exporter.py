@@ -75,8 +75,9 @@ Export hardening (2026-10):
   inherit the most restrictive marking of their two endpoints.
 - **Patterns.** Indicator patterns are built in this module from the
   STIX 2.1 patterning grammar: ``email-addr``, ``file:hashes`` keyed by
-  the detected algorithm, ``file:name``, ``url``, ``domain-name``,
-  ``ipv4-addr`` / ``ipv6-addr``; values are escaped.
+  the detected algorithm, ``x509-certificate:hashes`` for TLS certificate
+  fingerprints, ``file:name``, ``url``, ``domain-name``, ``ipv4-addr`` /
+  ``ipv6-addr`` (chosen by the address, 2026-10); values are escaped.
 - **Relationships and vocabularies.** ``_edge_to_sro`` maps each graph
   edge type to the ``relationship_type`` permitted by the STIX 2.1
   relationship summary table for the (source, target) SDO pair, reversing
@@ -589,6 +590,11 @@ _HASH_ALGORITHM_BY_TYPE: Dict[str, str] = {
     "tlsh": "TLSH",
 }
 _HASH_INDICATOR_TYPES = frozenset(_HASH_ALGORITHM_BY_TYPE) | {"hash"}
+# TLS certificate fingerprints (SSL Blacklist, 2026-10) and the declared hash type of each: a
+# digest of a certificate, so the pattern is on ``x509-certificate``, not on ``file``.
+_X509_FINGERPRINT_HASH_TYPES: Dict[str, str] = {"x509-fingerprint-sha1": "sha1"}
+# IP address types: the declared family applies only when the value is not an address (see
+# ``_build_pattern``).
 _IPV4_TYPES = frozenset({"ipv4", "ip", "ip-src", "ip-dst", "ip-src|port", "ip-dst|port"})
 _IPV6_TYPES = frozenset({"ipv6"})
 _DOMAIN_TYPES = frozenset({"domain", "hostname"})
@@ -607,7 +613,7 @@ def _escape_stix_value(value: str) -> str:
 
 
 def _hash_algorithm(indicator_type: str, value: str) -> str:
-    """Pick the ``file:hashes`` key for a digest.
+    """Pick the ``hashes`` key for a digest (``file`` and ``x509-certificate`` patterns).
 
     The declared type wins when the value matches its format; otherwise
     the format decides (32/40/64/128 hexadecimal characters, SSDEEP and
@@ -639,35 +645,43 @@ def _hash_algorithm(indicator_type: str, value: str) -> str:
 def _build_pattern(indicator_type: Optional[str], value: str) -> str:
     """Build a STIX 2.1 pattern literal for an indicator row.
 
-    Observable mapping (STIX 2.1 section 6): IPv4/IPv6 → ``ipv4-addr`` /
-    ``ipv6-addr``, domain/hostname → ``domain-name``, URL → ``url``,
-    e-mail address → ``email-addr``, digests → ``file:hashes.'<ALGO>'``
-    (algorithm from the declared type or the digest format, see
-    ``_hash_algorithm``), file names → ``file:name``. A blank or
-    unrecognised type is inferred from the value's shape with the shared
-    ``ioc_normalize.infer_indicator_type`` helper; when that fails the
-    pattern uses the custom observable type ``x-edgeguard-observable``,
-    which is valid under the patterning grammar and states that no
-    standard object type applies instead of mislabelling the value.
-    STIX requires a pattern on every Indicator, so this never returns
-    ``None``.
+    Observable mapping (STIX 2.1 section 6): IP addresses → ``ipv4-addr``
+    or ``ipv6-addr`` by the address itself (the declared family applies
+    only to a value that is not an address), domain/hostname →
+    ``domain-name``, URL → ``url``, e-mail address → ``email-addr``,
+    digests → ``file:hashes.'<ALGO>'`` (algorithm from the declared type or
+    the digest format, see ``_hash_algorithm``), TLS certificate
+    fingerprints → ``x509-certificate:hashes.'<ALGO>'``, file names →
+    ``file:name``. A blank or unrecognised type is inferred from the
+    value's shape with the shared ``ioc_normalize.infer_indicator_type``
+    helper; when that fails the pattern uses the custom observable type
+    ``x-edgeguard-observable``, which is valid under the patterning grammar
+    and states that no standard object type applies instead of
+    mislabelling the value. STIX requires a pattern on every Indicator, so
+    this never returns ``None``.
     """
     itype = (indicator_type or "").strip().lower()
     raw = value if isinstance(value, str) else str(value)
     recognised = (
         _HASH_INDICATOR_TYPES | _IPV4_TYPES | _IPV6_TYPES | _DOMAIN_TYPES | _URL_TYPES | _EMAIL_TYPES | _FILENAME_TYPES
     )
-    if itype not in recognised:
+    if itype not in recognised and itype not in _X509_FINGERPRINT_HASH_TYPES:
         from ioc_normalize import infer_indicator_type
 
         itype = infer_indicator_type(raw) or itype
     safe = _escape_stix_value(raw.strip())
-    if itype in _IPV4_TYPES:
+    if itype in _IPV4_TYPES or itype in _IPV6_TYPES:
+        from ioc_normalize import ip_address_type
+
+        # 2026-10: MISP keeps IPv4 and IPv6 under one ``ip-src`` / ``ip-dst`` type, and graphs
+        # synced before then hold IPv6 addresses typed ``ipv4``: the address decides.
+        family = ip_address_type(raw) or ("ipv6" if itype in _IPV6_TYPES else "ipv4")
         # ``ip-src|port`` style values carry a port suffix; the address part is the observable.
         address = safe.split("|", 1)[0]
-        return f"[ipv4-addr:value = '{address}']"
-    if itype in _IPV6_TYPES:
-        return f"[ipv6-addr:value = '{safe}']"
+        return f"[{family}-addr:value = '{address}']"
+    if itype in _X509_FINGERPRINT_HASH_TYPES:
+        algorithm = _hash_algorithm(_X509_FINGERPRINT_HASH_TYPES[itype], raw)
+        return f"[x509-certificate:hashes.'{algorithm}' = '{safe}']"
     if itype in _DOMAIN_TYPES:
         return f"[domain-name:value = '{safe}']"
     if itype in _URL_TYPES:

@@ -477,7 +477,9 @@ class SSLBlacklistCollector:
 
                 results.append(
                     {
-                        "indicator_type": "sha1",  # SSL cert fingerprint
+                        # The SHA-1 fingerprint of a TLS certificate, not of a file (2026-10: was ``sha1``,
+                        # which made it a file-hash Indicator with a ``file:hashes`` STIX pattern).
+                        "indicator_type": "x509-fingerprint-sha1",
                         "value": sha1,
                         "zone": zones,  # zone is now an array
                         "tag": self.tag,

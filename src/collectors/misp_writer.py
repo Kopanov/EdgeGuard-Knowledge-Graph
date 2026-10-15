@@ -823,7 +823,9 @@ class MISPWriter:
     CONNECT_TIMEOUT = 30  # seconds
     READ_TIMEOUT = 300  # seconds — MISP needs time for large events (95K+ attributes)
 
-    # Mapping from EdgeGuard indicator types to MISP attribute types
+    # Mapping from EdgeGuard indicator types to MISP attribute types. MISP's ``ip-dst`` holds
+    # IPv4 and IPv6 addresses alike (there is no IPv6 type); the sync reads the family back
+    # from the value.
     TYPE_MAPPING = {
         "ipv4": "ip-dst",
         "ipv6": "ip-dst",
@@ -837,6 +839,9 @@ class MISPWriter:
         "sha1": "sha1",
         "sha256": "sha256",
         "sha512": "sha512",
+        # SHA-1 fingerprint of a TLS certificate (SSL Blacklist, 2026-10): MISP's own type for it,
+        # so the fingerprint is not stored as the ``sha1`` of a file.
+        "x509-fingerprint-sha1": "x509-fingerprint-sha1",
         "email": "email-src",
         "cve": "vulnerability",
         "filename": "filename",

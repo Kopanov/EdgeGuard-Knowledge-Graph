@@ -126,6 +126,20 @@ Each SDO built from a Neo4j node with zone tags carries
 `x_edgeguard_zones: ["healthcare", "global", ...]`. Filter bundles by
 sector on the ResilMesh side without re-querying the graph.
 
+**Indicator patterns.** The `pattern` of an `indicator` follows the
+node's `indicator_type` (`_build_pattern` in `src/stix_exporter.py`):
+
+| `indicator_type` | Pattern |
+|------------------|---------|
+| `ipv4`, `ipv6` (and the MISP / ResilMesh names `ip`, `ip-src`, `ip-dst`, `ip-src\|port`, `ip-dst\|port`) | `[ipv4-addr:value = '…']` or `[ipv6-addr:value = '…']`, chosen by the address itself (2026-10; the declared family applies only to a value that is not an address); a `\|port` suffix is dropped |
+| `domain`, `hostname` | `[domain-name:value = '…']` |
+| `url` | `[url:value = '…']` |
+| `email` | `[email-addr:value = '…']` |
+| `hash` (every file digest) | `[file:hashes.'<ALGO>' = '…']`, the algorithm (`MD5`, `SHA-1`, `SHA-256`, `SHA-512`, `SSDEEP`, `TLSH`) from the digest; `UNKNOWN` when none fits |
+| `x509-fingerprint-sha1` (SSL Blacklist TLS certificate fingerprints, 2026-10) | `[x509-certificate:hashes.'SHA-1' = '…']` |
+| `filename` | `[file:name = '…']` |
+| anything else | the type inferred from the value's shape, else `[x-edgeguard-observable:value = '…']` |
+
 **MISP traceability (2026-04):** every SDO sourced from a node with
 MISP provenance also carries:
 
@@ -328,4 +342,4 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
+_Last updated: 2026-10-15 — § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`). Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._

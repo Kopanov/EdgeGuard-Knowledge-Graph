@@ -131,7 +131,9 @@ _KNOWN_CASE_SENSITIVE_INDICATOR_TYPES = frozenset(
 # without this, an alert typed "hostname" / "btc" / "regkey" / "email-src"
 # created DUPLICATE nodes (the write side stored domain / bitcoin / registry
 # / email). ``ip`` is resolved by VALUE shape (ipv4 vs ipv6) since one
-# label can't cover both. ``file_hash``/``filehash`` are ResilMesh aliases
+# label can't cover both; so are MISP's ``ip-src`` / ``ip-dst`` (see
+# ``MISP_IP_ATTRIBUTE_TYPES``), whose entries below give the type of a value
+# that is not an address. ``file_hash``/``filehash`` are ResilMesh aliases
 # for "hash". A parity test (tests/test_ioc_normalize_*) pins this against
 # the real TYPE_MAPPING so the two can't silently drift.
 _GRAPH_TYPE_MAP = {
@@ -149,6 +151,8 @@ _GRAPH_TYPE_MAP = {
     "hash": "hash",
     "file_hash": "hash",
     "filehash": "hash",
+    # SHA-1 fingerprint of a TLS certificate (SSL Blacklist), not a file hash (2026-10).
+    "x509-fingerprint-sha1": "x509-fingerprint-sha1",
     "email-src": "email",
     "email-dst": "email",
     "email": "email",
@@ -197,6 +201,8 @@ def _resolve_graph_type(indicator_type: Optional[str], value: str) -> Optional[s
     write side actually stores (via ``_GRAPH_TYPE_MAP``), so read-side
     lookups key the same node. A blank type is inferred from the value
     shape; the special ResilMesh ``"ip"`` is resolved to ipv4/ipv6 by shape;
+    MISP's ``ip-src`` / ``ip-dst`` are resolved by shape the way the sync
+    resolves them (a value that is not an address keeps the mapped type);
     an unmapped type passes through unchanged. Returns ``None`` when nothing
     can be resolved.
     """
@@ -205,6 +211,8 @@ def _resolve_graph_type(indicator_type: Optional[str], value: str) -> Optional[s
         return infer_indicator_type(value) if isinstance(value, str) else None
     if itype == "ip":
         return _classify_ip(refang(value).strip()) if isinstance(value, str) else None
+    if itype in MISP_IP_ATTRIBUTE_TYPES:
+        return ip_address_type(refang(value)) or _GRAPH_TYPE_MAP[itype]
     return _GRAPH_TYPE_MAP.get(itype, itype)
 
 
@@ -325,6 +333,35 @@ def _classify_ip(value: str) -> Optional[str]:
         return "ipv4" if ipaddress.ip_address(candidate).version == 4 else "ipv6"
     except ValueError:
         return None
+
+
+# MISP attribute types that hold IPv4 and IPv6 addresses alike: MISP has no
+# separate IPv6 type, so MISPWriter sends both families as ``ip-dst``. The
+# graph type of such an attribute is decided by its value
+# (:func:`ip_address_type`). Before 2026-10 both mapped to ``ipv4``, and every
+# IPv6 IOC (OTX, AbuseIPDB) was stored and exported as an IPv4 address.
+MISP_IP_ATTRIBUTE_TYPES = frozenset({"ip-src", "ip-dst"})
+
+
+def ip_address_type(value: object) -> Optional[str]:
+    """Return ``'ipv4'`` / ``'ipv6'`` for an IP address value as MISP stores it, else ``None``.
+
+    Accepts a bare address, a CIDR block (MISP's ``ip-src`` / ``ip-dst`` take
+    both), the ``address|port`` value of MISP's ``ip-src|port`` /
+    ``ip-dst|port`` composite types (the address part decides) and a
+    ``%zone`` scope suffix. Validation is the stdlib ``ipaddress`` parser, as
+    in :func:`_classify_ip`, so a value that only looks like an address
+    (``dead:beef``, a MAC address) is not one. Never raises.
+    """
+    if not isinstance(value, str):
+        return None
+    address = value.split("|", 1)[0].strip()
+    if "/" in address:
+        try:
+            return "ipv4" if ipaddress.ip_network(address, strict=False).version == 4 else "ipv6"
+        except ValueError:
+            return None
+    return _classify_ip(address)
 
 
 def infer_indicator_type(value: str) -> Optional[str]:
