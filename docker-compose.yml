@@ -123,6 +123,9 @@ x-common-env: &common-env
   # int() of the value, so compose carries the code default rather than an empty string.
   EDGEGUARD_NEO4J_READ_TIMEOUT: ${EDGEGUARD_NEO4J_READ_TIMEOUT:-900}
   EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE: ${EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE:-true}
+  # Canonical threat-actor reference the actor alias merge reads (src/canonical_threat_actors.py);
+  # empty = the file shipped in src/reference/.
+  EDGEGUARD_CANONICAL_THREAT_ACTORS: ${EDGEGUARD_CANONICAL_THREAT_ACTORS:-}
   # 2026-10 configuration forwarding (production-readiness check): variables read by the code
   # that never reached the containers. Set-but-empty keeps the code default in every case below.
   # Environment name — config.is_production_env() is fail-closed: unset or empty is treated as

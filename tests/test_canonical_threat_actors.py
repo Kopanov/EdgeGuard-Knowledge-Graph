@@ -832,7 +832,6 @@ class TestReport:
             ta("Midnight Blizzard", ["Cozy Bear"]),
             revocations={"G0118": "G0016"},
         )
-        index = gen.build_index(ref)
         rows = gen.load_graph_actors(
             [
                 node("apt29", relationships=100),
@@ -841,7 +840,9 @@ class TestReport:
                 node("cozy bear", source=("alienvault_otx",)),  # resolves to midnight blizzard, not on the graph
             ]
         )
-        assert gen.merge_pairs(index, rows) == [("unc2452 group", "apt29")]
+        lookup = gen.reference_lookup  # the module the actor alias merge uses (src/canonical_threat_actors.py)
+        pairs = lookup.reference_merge_candidates(lookup.validate_reference(ref), rows)
+        assert pairs == [("unc2452 group", "apt29")]
 
     def test_spelling_variants_and_short_forms_are_listed(self, gen):
         ref, stats = build(gen, mitre("Sandworm Team", "G0034"), ta("Black Basta"))

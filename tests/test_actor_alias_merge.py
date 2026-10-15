@@ -17,6 +17,10 @@ non-MITRE duplicates into the MITRE canonical with
   combine, ``.*`` discard — never the ``.*: combine`` wildcard);
 * the job is registered in ``run_all_enrichment_jobs`` BEFORE
   ``build_campaign_nodes``.
+
+These tests pin the ATT&CK-alias rule on its own: the canonical threat-actor
+reference is made unavailable, so the job runs today's rule unchanged. The
+reference rule is tested in ``tests/test_canonical_reference_merge.py``.
 """
 
 from __future__ import annotations
@@ -118,9 +122,11 @@ MUSTANG_PANDA_ROWS = [
 
 
 @pytest.fixture(autouse=True)
-def _quiet_pause_and_flag(monkeypatch):
+def _quiet_pause_and_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
     monkeypatch.delenv(FLAG, raising=False)
+    # No canonical reference: the job falls back to the ATT&CK-alias rule alone.
+    monkeypatch.setenv("EDGEGUARD_CANONICAL_THREAT_ACTORS", str(tmp_path / "missing.json"))
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +262,11 @@ class TestMergeBehaviour:
             "errors": 0,
             "restamped_edges": 0,
             "apoc_missing": 0,
+            "reference_candidates": 0,
+            "skipped_conflict": 0,
+            "skipped_chain": 0,
         }
+        # Without the reference there is no second read of the graph.
         assert len(calls) == 1 and _is_candidate_query(calls[0][0])
 
     def test_no_driver_returns_empty_dict(self):

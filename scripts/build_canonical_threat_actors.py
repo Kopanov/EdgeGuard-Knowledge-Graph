@@ -132,6 +132,7 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import canonical_threat_actors as reference_lookup  # noqa: E402
 from actor_name_hygiene import clean_actor_names  # noqa: E402
 from node_identity import canonicalize_merge_key, is_placeholder_name  # noqa: E402
 
@@ -1359,25 +1360,6 @@ def _strip_triage_suffixes(key: str) -> str:
     return key
 
 
-def merge_pairs(
-    index: Mapping[str, Resolution], graph_rows: Sequence[Mapping[str, Any]], mitre_source: str = MITRE_SOURCE
-) -> List[Tuple[str, str]]:
-    """The ``(duplicate, canonical)`` pairs the reference gives the actor alias merge: a node that
-    is not ATT&CK-sourced and whose name resolves (as a key or synonym, not ambiguous or
-    never_merge) to another canonical key that is a node on the graph."""
-    on_graph = {actor_key(r["name"]) for r in graph_rows}
-    pairs = []
-    for row in graph_rows:
-        if mitre_source in row["source"]:
-            continue
-        key = actor_key(row["name"])
-        res = index.get(key)
-        if res is None or res.actor is None or res.actor == key or res.actor not in on_graph:
-            continue
-        pairs.append((key, res.actor))
-    return sorted(pairs)
-
-
 def build_report(
     reference: Mapping[str, Any],
     stats: BuildStats,
@@ -1460,7 +1442,10 @@ def build_report(
         if k not in attack_actors
     ]
 
-    pairs = merge_pairs(index, rows, mitre_source)
+    # The pairs under the rule the actor alias merge applies (the same function the merge calls).
+    pairs = reference_lookup.reference_merge_candidates(
+        reference_lookup.validate_reference(reference, "built"), rows, mitre_source
+    )
     groups: Dict[str, List[str]] = defaultdict(list)
     for dup, canonical in pairs:
         groups[canonical].append(dup)

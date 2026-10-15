@@ -50,6 +50,7 @@ FORWARDED = [
     ("EDGEGUARD_SYNC_ATTRIBUTE_FILTER", "true"),  # incremental sync writes only changed attributes
     ("EDGEGUARD_NEO4J_READ_TIMEOUT", "900"),  # int(os.getenv(...)) — empty would raise
     ("EDGEGUARD_ENABLE_ACTOR_ALIAS_MERGE", "true"),
+    ("EDGEGUARD_CANONICAL_THREAT_ACTORS", None),  # empty = the reference shipped in src/reference/
 ]
 
 
