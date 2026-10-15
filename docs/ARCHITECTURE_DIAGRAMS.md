@@ -35,7 +35,7 @@ graph TB
         SYNC[MISP-to-Neo4j Sync<br/>Paged streaming + OOM-safe chunking<br/>+ PR-N29 _MispFallbackHardError sentinel<br/>+ PR-N31 MISP_FETCH_FALLBACK_ACTIVE Counter]
         NEO4J[(Neo4j 2026.03<br/>Knowledge Graph<br/>ports 7474 / 7687)]
         BREL["build_relationships<br/>20 link steps → many edge types<br/>incl. INDICATES, EXPLOITS, TARGETS, AFFECTS<br/>+ provenance on every edge: sources, source_refs, misp_event_ids"]
-        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge / EPSS]
+        ENRICH[Enrichment Jobs<br/>Bridge / Campaigns / Calibration /<br/>Decay / Actor alias merge /<br/>Malware twin merge / EPSS]
     end
 
     subgraph APIs
@@ -214,7 +214,7 @@ flowchart LR
     A[check_sync_needed<br/>ShortCircuitOperator] -->|sync needed| B[neo4j_preflight<br/>Health check]
     B --> C[run_neo4j_sync<br/>MISP to Neo4j<br/>up to 4h timeout]
     C --> D[build_relationships<br/>20 link steps → many edge types incl. INDICATES (family + same-pulse), EXPLOITS, TARGETS, AFFECTS, SUBTECHNIQUE_OF, USES_MALWARE / USES_TOOL]
-    D --> E[run_enrichment_jobs<br/>5 post-sync jobs]
+    D --> E[run_enrichment_jobs<br/>7 post-sync jobs]
     E --> F[check_neo4j_quality<br/>Node/edge counts]
 
     A -->|skip: last sync < 72h| SKIP[All downstream<br/>SKIPPED]
@@ -342,7 +342,7 @@ flowchart LR
 
 ---
 
-*Last updated: 2026-10-15 — §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
+*Last updated: 2026-10-15 — enrichment node lists the Malware ATT&CK-id twin merge; §5: seven post-sync jobs (the count said five). Same day: §3: `USES_MALWARE` / `USES_TOOL` start at the `ThreatActor` node (they pointed at an undefined node `A` and drew a second `Tool` node); `EXPLOITS` from actors and malware (curated packages) and `TARGETS` from actors and malware and `AFFECTS` from `CVE` added; the provenance note covers every relationship (`sources`, `source_refs`, `misp_event_ids`), not only the four PR-N26 types; §1 `build_relationships` label likewise. Prior: 2026-10-14 — campaign membership renamed `PART_OF_CAMPAIGN`.*
 
 *Prior: 2026-04-28 — PR-N34 verification pass against code at HEAD. Fixed 6 drift findings:*
 

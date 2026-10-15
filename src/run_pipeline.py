@@ -1655,9 +1655,10 @@ class EdgeGuardPipeline:
                     extra={"degraded": True, "step": "build_relationships"},
                 )
 
-            # Step 5c: post-sync enrichment_jobs (5 jobs: decay, campaigns,
-            # calibrate, bridge_vuln_cve). In-process because each job is
-            # short-running and shares the existing Neo4jClient.
+            # Step 5c: post-sync enrichment_jobs (the seven jobs of
+            # run_all_enrichment_jobs, including the actor alias merge and,
+            # 2026-10, the Malware ATT&CK-id twin merge). In-process because
+            # each job is short-running and shares the existing Neo4jClient.
             logger.info("\n[TARGET] Step 5c: post-sync enrichment_jobs (CLI parity with DAG)...")
             try:
                 from enrichment_jobs import run_all_enrichment_jobs
