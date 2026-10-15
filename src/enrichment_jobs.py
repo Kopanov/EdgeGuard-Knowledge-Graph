@@ -36,7 +36,12 @@ from canonical_threat_actors import (  # noqa: E402
     reference_merge_candidates,
 )
 from cve_feed_enrichment import enrich_cve_epss  # noqa: E402
-from neo4j_client import NEO4J_READ_TIMEOUT, _dedup_concat_clause, apoc_iterate_failures  # noqa: E402
+from neo4j_client import (  # noqa: E402
+    NEO4J_READ_TIMEOUT,
+    _dedup_concat_clause,
+    _tlp_most_restrictive_clause,
+    apoc_iterate_failures,
+)
 from node_identity import _REJECTED_PLACEHOLDER_NAMES, compute_node_uuid  # noqa: E402
 from query_pause import query_pause
 from relationship_provenance import aggregated_prov_set, inherited_prov_set, node_feeds, prov_set, prov_with  # noqa: E402
@@ -1110,6 +1115,8 @@ _ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY: Dict[str, str] = {
     "sophistication": "discard",
     "primary_motivation": "discard",
     "resource_level": "discard",
+    # ``discard`` keeps the canonical's value, which the merge statement first sets to the most
+    # restrictive level of the group (2026-10): TLP is never loosened by a merge.
     "tlp": "discard",
     # node lists (accumulators)
     "aliases": "combine",
@@ -1212,7 +1219,9 @@ def _strongest_on_parallel_edges(direction: str) -> str:
     strongest evidence of the group: the highest ``confidence_score`` and its ``match_type`` (on a
     tie the alphabetically first label). ``mergeNodes`` keeps one edge's scalars ("discard"), so
     without this a weaker canonical edge would replace a stronger duplicate edge, against the rule
-    every writer follows (the stronger evidence keeps the label and the confidence)."""
+    every writer follows (the stronger evidence keeps the label and the confidence). Every edge of a
+    group also takes the most restrictive ``r.tlp`` of the group (2026-10; curated-package links carry
+    one), so a collapsed edge is never marked less restrictively than one of the edges it replaces."""
     pattern = "(n)-[r]->(x)" if direction == "out" else "(n)<-[r]-(x)"
     return (
         "CALL (c, dups) {\n"
@@ -1226,7 +1235,9 @@ def _strongest_on_parallel_edges(direction: str) -> str:
         "    ORDER BY coalesce(e.confidence_score, -1.0) DESC,\n"
         "             CASE WHEN e.match_type IS NULL THEN 1 ELSE 0 END, e.match_type\n"
         "    WITH group, head(collect(e)) AS best\n"
-        "    FOREACH (e IN group | SET e.confidence_score = best.confidence_score, e.match_type = best.match_type)\n"
+        f"    WITH group, best, reduce(_t = null, _e IN group | {_tlp_most_restrictive_clause('_t', '_e.tlp')}) AS tlp\n"
+        "    FOREACH (e IN group | SET e.confidence_score = best.confidence_score, e.match_type = best.match_type,\n"
+        "        e.tlp = tlp)\n"
         f"    RETURN count(*) AS parallel_groups_{direction}\n"
         "}\n"
     )
@@ -1241,7 +1252,9 @@ def _strongest_on_parallel_edges(direction: str) -> str:
 # actors. ``c.aliases`` gains the duplicate names BEFORE the merge, as
 # required, and so does ``c.merged_from`` (explainability, 2026-10: unlike
 # ``aliases``, which also hold every source's aliases, it names only the
-# nodes this job folded in). After the merge every list property of the node is wrapped back
+# nodes this job folded in), and ``c.tlp`` becomes the most restrictive level of the group (2026-10:
+# ``"discard"`` alone kept the canonical's, so an amber duplicate folded into a white canonical
+# would have been exported as white). After the merge every list property of the node is wrapped back
 # into a de-duplicated list (``_list_or_wrapped``): two nodes with the same
 # single source (``["alienvault_otx"]`` on both, as for two OTX names of one
 # actor) come out of ``"combine"`` with ``source`` as a string, and
@@ -1261,7 +1274,10 @@ WHERE d.name IN g.duplicates
 WITH c, collect(DISTINCT d) AS dups
 WHERE size(dups) > 0
 SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
-    c.merged_from = apoc.coll.toSet(coalesce(c.merged_from, []) + [d IN dups | d.name])
+    c.merged_from = apoc.coll.toSet(coalesce(c.merged_from, []) + [d IN dups | d.name]),
+    c.tlp = reduce(_t = c.tlp, _d IN dups | """
+    + _tlp_most_restrictive_clause("_t", "_d.tlp")
+    + """)
 WITH c, size(dups) AS n_dups, dups
 """
     + _strongest_on_parallel_edges("out")

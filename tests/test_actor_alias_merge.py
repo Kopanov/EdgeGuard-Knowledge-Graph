@@ -42,6 +42,7 @@ os.environ.setdefault("NEO4J_PASSWORD", "test-pw-actor-alias-merge")
 os.environ.setdefault("MISP_API_KEY", "test-key-actor-alias-merge")
 
 import enrichment_jobs  # noqa: E402
+import neo4j_client  # noqa: E402
 
 FLAG = enrichment_jobs._ACTOR_ALIAS_MERGE_ENV_FLAG
 
@@ -263,6 +264,15 @@ class TestMergeBehaviour:
         block = enrichment_jobs._strongest_on_parallel_edges("out")
         assert "ORDER BY coalesce(e.confidence_score, -1.0) DESC" in block
         assert "SET e.confidence_score = best.confidence_score, e.match_type = best.match_type" in block
+        # TLP (2026-10): never loosened by a merge. The canonical takes the most restrictive level of
+        # the group before mergeNodes (whose "discard" then keeps it), and so does every edge of a
+        # collapsing group; the ranking is the writers' own (_tlp_most_restrictive_clause).
+        tlp_set = query.index("c.tlp = reduce(_t = c.tlp, _d IN dups | ")
+        assert tlp_set < merge_call
+        assert neo4j_client._tlp_most_restrictive_clause("_t", "_d.tlp") in query
+        assert enrichment_jobs._ACTOR_ALIAS_MERGE_PROPERTY_STRATEGY["tlp"] == "discard"
+        assert neo4j_client._tlp_most_restrictive_clause("_t", "_e.tlp") in block
+        assert "e.tlp = tlp" in block
 
     def test_every_list_property_is_wrapped_back_into_a_list_in_the_merge_statement(self):
         # 2026-10: "combine" stores equal values as one string (two OTX nodes of one actor both hold
