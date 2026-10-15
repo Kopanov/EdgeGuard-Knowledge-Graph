@@ -22,8 +22,9 @@ CVE's ``cvss_score`` / ``cvss_version`` / ``severity`` come from its CVSS sub-no
 it reports the ``SOURCED_FROM`` count of every ``Source`` node, warning when a source
 collected by default delivered nothing. Since the revoked-object change of 2026-10 it fails
 when a Technique node carries an ATT&CK id the revoked-id map lists
-(``src/reference/attack_revoked_ids.json``) or a ThreatActor node from MITRE is a revoked
-group, and warns when another source's actor still carries a revoked group's name.
+(``src/reference/attack_revoked_ids.json``), or a ThreatActor, Malware or Tool node from MITRE
+is a revoked group or piece of software, and warns when another source's actor still carries a
+revoked group's name.
 
 Env:
   NEO4J_HTTP_URL   base URL (default: https://neo4j.edgeguard.org)
@@ -403,13 +404,15 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
     #     group (judged by name: ATT&CK actors are keyed by name). A node another source named after
     #     a revoked group (an OTX pulse naming UNC2452) is a warning: the actor alias merge
     #     (enrichment) folds it into the successor, whose aliases carry the revoked group's name.
-    #     Informational when the graph has no Technique / no MITRE actor; a map that cannot be read
-    #     fails both checks (nothing to judge by).
+    #     The same holds for software: no Malware or Tool node from MITRE carries a revoked
+    #     software's name. Informational when the graph has no Technique / no MITRE actor / no MITRE
+    #     software; a map that cannot be read fails the checks (nothing to judge by).
     revoked = load_revoked_ids()
     if not revoked.loaded:
         detail = {"map": revoked.path, "problem": revoked.problem}
         rep.add("no_revoked_attack_techniques", False, detail)
         rep.add("no_revoked_attack_groups", False, detail)
+        rep.add("no_revoked_attack_software", False, detail)
     else:
         r = _one(
             "MATCH (t:Technique) WITH t, t.mitre_id IN $ids AS is_revoked "
@@ -445,6 +448,19 @@ def run_checks(require_ics: bool, require_cisa_ics: bool, require_malwarebazaar:
                 "successor by the actor alias merge (enrichment); see its [ACTOR-ALIAS-MERGE] log lines",
             },
             mandatory=False,
+        )
+        r = _one(
+            "MATCH (n) WHERE (n:Malware OR n:Tool) AND 'mitre_attck' IN coalesce(n.source, []) "
+            "WITH n, toLower(trim(n.name)) IN $names AS is_revoked "
+            "RETURN count(n) AS mitre_software, sum(CASE WHEN is_revoked THEN 1 ELSE 0 END) AS revoked_software, "
+            "collect(CASE WHEN is_revoked THEN n.name END)[..10] AS examples",
+            {"names": sorted({n.strip().lower() for n in revoked.software_names()})},
+        )
+        r["map_version"] = revoked.version
+        rep.add(
+            "no_revoked_attack_software",
+            None if not r.get("mitre_software") else r.get("revoked_software") == 0,
+            r,
         )
 
     # 10. CISA ICS advisories (opt-in).

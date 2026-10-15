@@ -7,12 +7,19 @@ for PowerShell, which ATT&CK moved to ``T1059.001``. Wherever a feed names a tec
 EdgeGuard translates a revoked id to its successor first, so the link lands on the technique that
 exists:
 
-* ``build_relationships`` — every ``MATCH (t:Technique {mitre_id: …})`` and its orphan count, via
-  the Cypher map parameter ``$revoked`` (``coalesce($revoked[tid], tid)``);
+* ``build_relationships`` — every ``MATCH (t:Technique {mitre_id: …})`` on an id a feed names and
+  its orphan count, via the Cypher map parameter ``$revoked``
+  (``coalesce($revoked[toString(tid)], tid)``); the sub-technique step is not translated (a live
+  sub-technique's parent is never revoked);
 * the MISP→Neo4j sync — technique ids of ``misp-galaxy:mitre-attack-pattern`` tags and of curated
   claims (``run_misp_to_neo4j``), and ``scripts/import_curated_package.py``, which reports each
   translation;
+* the STIX import of the command-line pipeline (``run_pipeline``);
 * the STIX export of a technique (``StixExporter.export_technique``).
+
+The same map decides which revoked techniques are no nodes: the MITRE collector skips a revoked
+technique the map lists and keeps one it does not (so its links survive until the map is rebuilt),
+and the sync and the command-line readers skip a technique id the map lists.
 
 The map is ``src/reference/attack_revoked_ids.json``, built from the MITRE galaxies of MISP by
 ``scripts/build_attack_revoked_ids.py`` (rebuild it at every ATT&CK release; ``docs/RUNBOOK.md``).
@@ -80,8 +87,15 @@ class RevokedAttackIds:
 
         A name a successor group also bears (case ignored) is left out: it names a live group too.
         """
-        live = {self.successor_names[s].casefold() for s in self.groups.values() if self.successor_names.get(s)}
-        return sorted(self.names[g] for g in self.groups if self.names.get(g) and self.names[g].casefold() not in live)
+        return self._revoked_names(self.groups)
+
+    def software_names(self) -> List[str]:
+        """The names of the revoked software (malware and tools), sorted; as ``group_names``."""
+        return self._revoked_names(self.software)
+
+    def _revoked_names(self, section: Mapping[str, str]) -> List[str]:
+        live = {self.successor_names[s].casefold() for s in section.values() if self.successor_names.get(s)}
+        return sorted(self.names[r] for r in section if self.names.get(r) and self.names[r].casefold() not in live)
 
 
 _cache: Dict[str, RevokedAttackIds] = {}

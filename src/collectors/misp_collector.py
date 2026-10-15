@@ -27,6 +27,7 @@ import re
 
 import requests
 
+from attack_revoked import load_revoked_ids
 from config import (
     DEFAULT_SECTOR,
     MISP_API_KEY,
@@ -39,6 +40,12 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _revoked_technique(mitre_id) -> bool:
+    """True for a technique id ATT&CK revoked (2026-10, ``attack_revoked``): it is no node any more,
+    so this reader does not bring it back."""
+    return load_revoked_ids().technique_successor(mitre_id) is not None
 
 
 class MISPCollector:
@@ -444,7 +451,7 @@ class MISPCollector:
                     elif obj_name in ["attack-pattern", "attackpattern", "mitre-attack"]:
                         tech_id = obj_attributes.get("id") or obj_attributes.get("mitre-attack-id") or ""
                         tech_name = obj_attributes.get("name") or obj_attributes.get("summary", "Unknown")
-                        if tech_id or tech_name != "Unknown":
+                        if (tech_id or tech_name != "Unknown") and not _revoked_technique(tech_id):
                             processed.append(
                                 {
                                     "node_type": "technique",
@@ -470,7 +477,7 @@ class MISPCollector:
                     # MITRE ATT&CK Technique tags: "misp-galaxy:mitre-attack-pattern="
                     if "mitre-attack-pattern" in tag_name.lower():
                         technique_data = self.parse_mitre_galaxy_tag(tag_name)
-                        if technique_data:
+                        if technique_data and not _revoked_technique(technique_data.get("id")):
                             processed.append(
                                 {
                                     "node_type": "technique",

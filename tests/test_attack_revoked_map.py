@@ -5,7 +5,7 @@ successor. The builder reads the MITRE galaxies of MISP (each cluster's ``revoke
 names the successor's cluster uuid; the ATT&CK id is the suffix of the cluster value) and writes
 ``src/reference/attack_revoked_ids.json``; the loader reads it once per process for every place a
 feed names a technique by id. Fixtures here are galaxy clusters in the shape of the captured
-``galaxy_clusters/restSearch`` answers (``Core-Ideas_CTI/data/open/raw/misp_galaxy_*``).
+``galaxy_clusters/restSearch`` answers (``<captures>/misp_galaxy_<galaxy>_<YYYYMMDD>.json``).
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def _cluster(uuid, value, revoked_by=(), version="41", external_id=None):
 
 
 def _capture(galaxy, clusters, captured_at="2026-10-13T00:34:24+02:00"):
-    """A capture file as written into ``Core-Ideas_CTI/data/open/raw``."""
+    """A capture file as the RUNBOOK describes it (``misp_galaxy_<galaxy>_<YYYYMMDD>.json``)."""
     return {
         "captured_at": captured_at,
         "source": "misp-galaxy",

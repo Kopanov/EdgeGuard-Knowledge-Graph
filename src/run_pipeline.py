@@ -20,6 +20,7 @@ from typing import Optional
 
 import requests
 
+from attack_revoked import load_revoked_ids
 from collector_allowlist import collect_sources_allowlist_from_env, is_collector_enabled_by_allowlist
 from collector_failure_alerts import report_collector_failure
 from collectors.abuseipdb_collector import AbuseIPDBCollector
@@ -393,6 +394,9 @@ class EdgeGuardPipeline:
 
         objects = stix_bundle.get("objects", [])
         logger.info(f"   Loading {len(objects)} STIX objects into Neo4j...")
+        # 2026-10: a technique id ATT&CK revoked is no node (the MITRE collector skips it); a
+        # relationship that names it lands on its successor (``attack_revoked``).
+        revoked = load_revoked_ids()
 
         # First pass: build ID mapping for relationship resolution
         id_map = {}  # STIX ID -> {type, name, mitre_id}
@@ -424,7 +428,11 @@ class EdgeGuardPipeline:
                     if ext.get("source_name") == "mitre-attack":
                         mitre_id = ext.get("external_id", "")
                         break
-                id_map[stix_id] = {"type": "technique", "name": obj.get("name", ""), "mitre_id": mitre_id}
+                id_map[stix_id] = {
+                    "type": "technique",
+                    "name": obj.get("name", ""),
+                    "mitre_id": revoked.translate_technique(mitre_id),
+                }
             elif obj_type == "x-mitre-tactic":
                 external_refs = obj.get("external_references", [])
                 mitre_id = ""
@@ -577,6 +585,9 @@ class EdgeGuardPipeline:
                         if ref.get("source_name") == "mitre-attack":
                             mitre_id = ref.get("external_id", "")
                             break
+                    if revoked.technique_successor(mitre_id) is not None:
+                        stats["revoked_techniques_skipped"] = stats.get("revoked_techniques_skipped", 0) + 1
+                        continue
 
                     self.neo4j.merge_technique(
                         {

@@ -330,10 +330,22 @@ class TestMitreMalwareAliasExtraction:
             [
                 {"type": "malware", "id": "malware--a", "name": "PoisonIvy", "x_mitre_aliases": ["PoisonIvy", "Breut"]},
                 {"type": "malware", "id": "malware--b", "name": "Other", "aliases": ["Other", "Alt"]},
+                # Both keys: the extension field wins (the plain key is not ATT&CK's for software).
+                {
+                    "type": "malware",
+                    "id": "malware--c",
+                    "name": "Both",
+                    "x_mitre_aliases": ["Both", "Ext"],
+                    "aliases": ["Both", "Plain"],
+                },
             ]
         )
         by_name = {m["name"]: m["aliases"] for m in parsed["malware"]}
-        assert by_name == {"PoisonIvy": ["PoisonIvy", "Breut"], "Other": ["Other", "Alt"]}
+        assert by_name == {
+            "PoisonIvy": ["PoisonIvy", "Breut"],
+            "Other": ["Other", "Alt"],
+            "Both": ["Both", "Ext"],
+        }
 
     def test_actor_item_dict_keeps_plain_aliases(self):
         """Counterpart: intrusion-sets DO use the plain `aliases` key — the actor branch must not

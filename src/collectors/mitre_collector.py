@@ -81,7 +81,8 @@ ICS_KILL_CHAIN_NAME = "mitre-ics-attack"
 # revoked objects of every type (they become neither items nor relationship endpoints) and adds a
 # revoked group's or software's name and aliases to its successor's ``aliases``; deprecated objects
 # are kept with ``deprecated: True``. A feed that still names a revoked technique id is translated
-# to the successor downstream (``attack_revoked``). Measured on the hosted graph (2026-10-15): 158
+# to the successor downstream (``attack_revoked``), so a revoked technique the map does not list yet
+# is kept, with a warning, until the map is rebuilt. Measured on the hosted graph (2026-10-15): 158
 # of 982 Technique nodes and 6 ThreatActor nodes were revoked ATT&CK objects.
 REVOKED_BY = "revoked-by"
 # Object types whose name and aliases a successor inherits (groups and software).
@@ -164,6 +165,37 @@ def _revoked_successor_aliases(objects: list, revoked_ids: set) -> Tuple[dict, d
         names = [obj.get("name", "")] + _object_aliases(obj)
         extra.setdefault(current, []).extend(n for n in names if isinstance(n, str) and n.strip())
     return extra, stats
+
+
+def _attack_external_id(obj: dict) -> str:
+    """The ATT&CK id (``T1086``, ``G0007`` …) in an object's ``external_references``, else ``""``."""
+    for ext in obj.get("external_references") or []:
+        if isinstance(ext, dict) and ext.get("source_name") == "mitre-attack":
+            return str(ext.get("external_id") or "")
+    return ""
+
+
+def _revoked_techniques_without_successor_in_map(objects: list, revoked_ids: set) -> Tuple[set, list]:
+    """Revoked techniques the revoked-id map cannot translate: ``(STIX ids, ATT&CK ids)``.
+
+    Feeds name techniques by id, and only the map (``attack_revoked``) moves an id to its successor
+    downstream. A technique ATT&CK revoked after the map was built would lose every link that cites
+    it if it were skipped, so it is kept (as before 2026-10) until the map is rebuilt. Groups and
+    software need no map: their names travel to the successor through the bundle's ``revoked-by``.
+    """
+    from attack_revoked import load_revoked_ids  # src/ is on sys.path (top of this module)
+
+    revoked_map = load_revoked_ids()
+    stix_ids: set = set()
+    attack_ids: list = []
+    for obj in objects:
+        if obj.get("type") != "attack-pattern" or obj.get("id") not in revoked_ids:
+            continue
+        attack_id = _attack_external_id(obj)
+        if revoked_map.technique_successor(attack_id) is None:
+            stix_ids.add(obj.get("id"))
+            attack_ids.append(attack_id or str(obj.get("id")))
+    return stix_ids, sorted(attack_ids)
 
 
 def _record_ics_failure(exc: BaseException) -> None:
@@ -448,14 +480,29 @@ class MITRECollector:
         Revoked objects (``revoked: true``) of every type are skipped: they become neither items
         nor relationship endpoints, and a revoked group's or software's name and aliases are added
         to its successor's ``aliases`` (the successor is in the same bundle, through the
-        ``revoked-by`` relationship). Deprecated objects (``x_mitre_deprecated: true``) are kept
-        and carry ``deprecated: True``; every other item carries ``deprecated: False``.
+        ``revoked-by`` relationship). The exception is a revoked technique the revoked-id map does
+        not list: feeds cite techniques by id and only the map translates them, so it is kept, with
+        a ``[ATTACK-REVOKED]`` warning, until the map is rebuilt. Deprecated objects
+        (``x_mitre_deprecated: true``) are kept and carry ``deprecated: True``; every other item
+        carries ``deprecated: False``.
 
         Returns:
             dict with keys ``techniques``, ``tactics``, ``actors``, ``malware``,
             ``tools``, ``relationships`` (lists in the same shapes as before).
         """
         revoked_ids = {obj.get("id") for obj in objects if _is_revoked(obj) and obj.get("id")}
+        # A revoked technique the revoked-id map cannot translate is kept until the map is rebuilt.
+        kept_revoked, kept_revoked_ids = _revoked_techniques_without_successor_in_map(objects, revoked_ids)
+        if kept_revoked:
+            logger.warning(
+                "   → [%s] [ATTACK-REVOKED] %d technique(s) the bundle revokes are not in the revoked-id map "
+                "(%s); kept, so the links that cite them are not lost. Rebuild the map "
+                "(scripts/build_attack_revoked_ids.py, docs/RUNBOOK.md).",
+                domain,
+                len(kept_revoked),
+                ", ".join(kept_revoked_ids[:20]) + (" …" if len(kept_revoked_ids) > 20 else ""),
+            )
+            revoked_ids -= kept_revoked
         extra_aliases, alias_stats = _revoked_successor_aliases(objects, revoked_ids)
 
         # Build ID mapping for relationships

@@ -28,7 +28,7 @@ Usage::
     python scripts/build_attack_revoked_ids.py RAW_DIR
     python scripts/build_attack_revoked_ids.py RAW_DIR --version 2026.10.15 --output src/reference/attack_revoked_ids.json
 
-``RAW_DIR`` is the folder of the galaxy captures, e.g. ``Core-Ideas_CTI/data/open/raw``. A folder
+``RAW_DIR`` is the folder of the galaxy captures (``misp_galaxy_<galaxy>_<YYYYMMDD>.json``). A folder
 inside a ``restricted`` tree is refused. See ``docs/RUNBOOK.md``, "Rebuilding the ATT&CK
 revoked-id map", for when to rebuild.
 """

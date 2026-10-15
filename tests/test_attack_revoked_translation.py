@@ -6,8 +6,10 @@ ids (``USES_TECHNIQUE`` 22,278, ``IMPLEMENTS_TECHNIQUE`` 1,772, ``EMPLOYS_TECHNI
 site that matches a Technique by an id a feed names translates the id first, with the committed
 map (``src/reference/attack_revoked_ids.json``, read through ``attack_revoked``):
 
-* ``build_relationships`` — the 13 ``Technique {mitre_id: …}`` matches (7 link steps and their 6
-  orphan counts), through the ``$revoked`` Cypher map parameter;
+* ``build_relationships`` — 12 of its 13 ``Technique {mitre_id: …}`` matches (6 link steps and their
+  6 orphan counts), through the ``$revoked`` Cypher map parameter. The 13th, step 1b (sub-technique
+  → parent), is never translated: a live sub-technique's parent is never revoked, and a revoked
+  parent's successor is not the parent of the revoked sub-techniques under it;
 * the MISP→Neo4j sync — technique ids of ``misp-galaxy:mitre-attack-pattern`` tags;
 * curated claims — the sync's rows and ``scripts/import_curated_package.py``;
 * the STIX export of a technique.
@@ -103,11 +105,16 @@ def _technique_sites() -> List[Tuple[str, str, str]]:
 
 
 class TestBuildRelationships:
-    def test_every_technique_match_translates_its_id_first(self):
+    def test_every_technique_match_but_the_parent_step_translates_its_id_first(self):
         sites = _technique_sites()
         assert len(sites) == 13, [(n, v) for n, v, _ in sites]
-        for name, var, before in sites:
-            assert f"coalesce($revoked[{var}], {var}) AS {var}" in before, f"{name}: {var} is not translated"
+        translated = [(n, v, b) for n, v, b in sites if n != "_q1b_inner"]
+        assert len(translated) == 12
+        for name, var, before in translated:
+            # toString: a map lookup by a number raises and would fail the whole batch
+            assert f"coalesce($revoked[toString({var})], {var}) AS {var}" in before, f"{name}: {var} is not translated"
+        ((_n, parent_var, before_parent),) = [(n, v, b) for n, v, b in sites if n == "_q1b_inner"]
+        assert parent_var == "parent_id" and "$revoked" not in before_parent, "step 1b must not translate the parent"
         assert sorted(n for n, _v, _b in sites if n.endswith("_skip")) == [
             "_q10_skip",
             "_q5_skip",
@@ -115,7 +122,7 @@ class TestBuildRelationships:
             "_q6_skip",
             "_q6b_skip",
             "_q8_skip",
-        ], "the six orphan counts are among the 13"
+        ], "the six orphan counts are among the 12"
 
     @staticmethod
     def _run_build(monkeypatch) -> List[Tuple[str, Optional[Dict[str, Any]]]]:
@@ -157,7 +164,9 @@ class TestBuildRelationships:
         iterate = [(q, p) for q, p in calls if "apoc.periodic.iterate" in q]
         technique_steps = [(q, p) for q, p in iterate if ":Technique {mitre_id:" in q]
         assert len(technique_steps) == 7
-        assert all(p == {"iterate_params": expected} for _q, p in technique_steps)
+        parent_step = [(q, p) for q, p in technique_steps if "SUBTECHNIQUE_OF" in q]
+        assert len(parent_step) == 1 and parent_step[0][1] is None, "step 1b takes no map"
+        assert all(p == {"iterate_params": expected} for q, p in technique_steps if "SUBTECHNIQUE_OF" not in q)
         assert all(p is None for q, p in iterate if ":Technique {mitre_id:" not in q), "other steps take no map"
         counts = [(q, p) for q, p in calls if "apoc.periodic.iterate" not in q and "$revoked" in q]
         assert len(counts) == 6 and all(p == expected for _q, p in counts)
@@ -165,8 +174,12 @@ class TestBuildRelationships:
     def test_a_missing_map_translates_nothing_and_the_build_goes_on(self, monkeypatch, no_map, caplog):
         with caplog.at_level(logging.WARNING, logger="attack_revoked"):
             calls = self._run_build(monkeypatch)
-        technique_steps = [p for q, p in calls if "apoc.periodic.iterate" in q and ":Technique {mitre_id:" in q]
-        assert technique_steps and all(p == {"iterate_params": {"revoked": {}}} for p in technique_steps)
+        technique_steps = [
+            p
+            for q, p in calls
+            if "apoc.periodic.iterate" in q and ":Technique {mitre_id:" in q and "SUBTECHNIQUE_OF" not in q
+        ]
+        assert len(technique_steps) == 6 and all(p == {"iterate_params": {"revoked": {}}} for p in technique_steps)
         assert sum(1 for r in caplog.records if "not translated" in r.getMessage()) == 1
 
 
@@ -330,3 +343,92 @@ def test_all_sites_load_the_map_once(monkeypatch):
     TestStixExport._export("T1086")
     assert reads == [str(attack_revoked.MAP_PATH)]
     json.loads(original(attack_revoked.MAP_PATH))  # the file itself is readable JSON
+
+
+# --------------------------------------------------------------------------- revoked technique nodes stay out
+def _technique_attribute(value: str) -> Dict[str, Any]:
+    return {
+        "type": "text",
+        "value": value,
+        "comment": "",
+        "uuid": "11111111-2222-4333-8444-666666666666",
+        "Tag": [{"name": "source:MITRE"}, {"name": "tlp:white"}],
+    }
+
+
+class TestRevokedTechniqueNodesAreNotRebuilt:
+    """An attribute written before the collector skipped revoked techniques must not bring the node
+    back: the sync and the two readers of the legacy CLI path skip a technique id the map lists."""
+
+    def test_the_sync_skips_a_revoked_technique_attribute(self):
+        item, rels = _syncer().parse_attribute(_technique_attribute("T1086: PowerShell"), _EVENT)
+        assert item is None and rels == []
+        item, _rels = _syncer().parse_attribute(_technique_attribute("T1059.001: PowerShell"), _EVENT)
+        assert item is not None and item["mitre_id"] == "T1059.001"
+
+    def test_without_the_map_the_sync_keeps_it(self, no_map):
+        item, _rels = _syncer().parse_attribute(_technique_attribute("T1086: PowerShell"), _EVENT)
+        assert item is not None and item["mitre_id"] == "T1086"
+
+    def test_the_cli_stix_import_skips_the_node_and_links_the_successor(self):
+        from run_pipeline import EdgeGuardPipeline
+
+        pipeline = EdgeGuardPipeline.__new__(EdgeGuardPipeline)
+        pipeline.neo4j = MagicMock()
+
+        def pattern(stix_id, mitre_id, name):
+            return {
+                "type": "attack-pattern",
+                "id": stix_id,
+                "name": name,
+                "external_references": [{"source_name": "mitre-attack", "external_id": mitre_id}],
+            }
+
+        bundle = {
+            "objects": [
+                pattern("attack-pattern--old", "T1086", "PowerShell"),
+                pattern("attack-pattern--new", "T1059.001", "PowerShell"),
+                {
+                    "type": "threat-actor",
+                    "id": "threat-actor--a",
+                    "name": "APT29",
+                },  # the import reads threat-actor SDOs
+                {
+                    "type": "relationship",
+                    "relationship_type": "uses",
+                    "source_ref": "threat-actor--a",
+                    "target_ref": "attack-pattern--old",
+                },
+            ]
+        }
+        stats = pipeline.load_stix21_to_neo4j(bundle)
+        merged = [c.args[0]["mitre_id"] for c in pipeline.neo4j.merge_technique.call_args_list]
+        assert merged == ["T1059.001"] and stats["revoked_techniques_skipped"] == 1
+        pipeline.neo4j.create_actor_technique_relationship.assert_called_once_with("APT29", "T1059.001")
+
+    def test_the_cli_misp_reader_emits_no_revoked_technique(self):
+        from collectors.misp_collector import MISPCollector
+
+        collector = MISPCollector.__new__(MISPCollector)
+        collector.url, collector.tag = "https://misp.local", "misp"
+        event = {
+            "id": "7",
+            "info": "event",
+            "Tag": [
+                {"name": 'misp-galaxy:mitre-attack-pattern="PowerShell - T1086"'},
+                {"name": 'misp-galaxy:mitre-attack-pattern="PowerShell - T1059.001"'},
+            ],
+            "Attribute": [],
+            "Object": [
+                {"name": "attack-pattern", "Attribute": [{"object_relation": "id", "value": "T1562.001"}]},
+                {"name": "attack-pattern", "Attribute": [{"object_relation": "id", "value": "T1566"}]},
+            ],
+        }
+        index, full = MagicMock(status_code=200), MagicMock(status_code=200)
+        index.json.return_value = [{"id": "7"}]
+        full.json.return_value = {"Event": event}
+        collector.session = MagicMock()
+        collector.session.get.side_effect = [index, full]
+        processed, _active = collector.collect(limit=1)
+        techniques = sorted(i["mitre_id"] for i in processed if i.get("node_type") == "technique")
+        assert techniques == ["T1059.001", "T1566"]

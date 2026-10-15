@@ -3491,6 +3491,13 @@ class MISPToNeo4jSync:
             mitre_id = parts[0]
             name = parts[1] if len(parts) > 1 else ""
 
+            # 2026-10: a technique ATT&CK revoked (an id the revoked-id map lists) is not a node any
+            # more; the MITRE collector stopped writing it, and an attribute written before that would
+            # bring the node back. Links that cite the id land on its successor (build_relationships).
+            if load_revoked_ids().technique_successor(mitre_id) is not None:
+                logger.debug("Skipping technique attribute %s: a revoked ATT&CK id", mitre_id)
+                return None, []
+
             platforms = []
             for tag in tags:
                 tag_name = tag.get("name", "")

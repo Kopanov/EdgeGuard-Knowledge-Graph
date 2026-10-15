@@ -14,6 +14,7 @@ follow the shape of the ATT&CK STIX 2.1 bundle (``mitre/cti`` ``enterprise-attac
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from copy import deepcopy
@@ -23,6 +24,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src"))
 
+import attack_revoked  # noqa: E402
 from collectors import mitre_collector as mc  # noqa: E402
 from collectors.misp_writer import ATTACK_DEPRECATED_TAG, MISPWriter  # noqa: E402
 
@@ -231,7 +233,7 @@ class TestRevokedObjectsAreSkipped:
 
     def test_an_ics_bundle_is_parsed_the_same_way(self):
         ics_live = _technique("attack-pattern--ics-live", "T0800", "Activate Firmware Update Mode")
-        ics_revoked = _technique("attack-pattern--ics-old", "T0834", "Native API", revoked=True)
+        ics_revoked = _technique("attack-pattern--ics-old", "T0803", "Block Command Message", revoked=True)
         for obj in (ics_live, ics_revoked):
             obj["kill_chain_phases"] = [{"kill_chain_name": mc.ICS_KILL_CHAIN_NAME, "phase_name": "execution"}]
             obj["x_mitre_domains"] = ["ics-attack"]
@@ -285,6 +287,43 @@ class TestSuccessorsInheritRevokedNames:
         actors = _by_name(_parse(objects)["actors"])
         assert set(actors) == {"APT29", "Dragonfly"}
         assert actors["APT29"]["aliases"] == ["APT29"] and actors["Dragonfly"]["aliases"] == ["Dragonfly"]
+
+
+# --------------------------------------------------------------------------- the map falls behind
+NEWLY_REVOKED = "attack-pattern--0a1b2c3d-0000-4000-8000-000000001999"
+
+
+class TestRevokedTechniquesTheMapDoesNotList:
+    """Feeds cite techniques by id, and only the revoked-id map translates them downstream. A
+    technique ATT&CK revoked after the map was built is kept until the map is rebuilt, so the links
+    that cite it are not lost; groups and software need no map (their names travel through
+    ``revoked-by``)."""
+
+    def test_it_is_kept_with_its_links_and_a_warning(self, caplog):
+        objects = _bundle()["objects"] + [
+            _technique(NEWLY_REVOKED, "T1999", "Newly Revoked", revoked=True),
+            _rel(30, "uses", APT29, NEWLY_REVOKED),
+        ]
+        with caplog.at_level(logging.WARNING):
+            parsed = _parse(objects)
+        techniques = {t["mitre_id"] for t in parsed["techniques"]}
+        assert "T1999" in techniques and not techniques & REVOKED_TECHNIQUES  # the map lists the others
+        assert "T1999" in _by_name(parsed["actors"])["APT29"]["uses_techniques"]
+        assert ("APT29", "T1999") in {(r["source_name"], r.get("target_mitre_id")) for r in parsed["relationships"]}
+        (line,) = [r.getMessage() for r in caplog.records if "[ATTACK-REVOKED]" in r.getMessage()]
+        assert "1 technique(s)" in line and "T1999" in line
+
+    def test_without_the_map_revoked_techniques_are_kept_and_groups_and_software_are_not(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(attack_revoked, "MAP_PATH", tmp_path / "attack_revoked_ids.json")
+        attack_revoked.reset_cache()
+        try:
+            parsed = _parse()
+        finally:
+            attack_revoked.reset_cache()
+        assert REVOKED_TECHNIQUES <= {t["mitre_id"] for t in parsed["techniques"]}
+        names = {i["name"] for key in ("actors", "malware", "tools") for i in parsed[key]}
+        assert not names & REVOKED_NAMES
+        assert "UNC2452" in _by_name(parsed["actors"])["APT29"]["aliases"]
 
 
 # --------------------------------------------------------------------------- deprecated objects
