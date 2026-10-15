@@ -34,6 +34,9 @@ from config import (
     MISP_URL,
     SSL_VERIFY,
     apply_misp_http_host_header,
+    misp_refresh_last_seen_days,
+    misp_refresh_max_per_run,
+    misp_refresh_max_seconds,
 )
 from cvss_selection import cvss_rating_tag, normalize_attack_vector
 
@@ -185,6 +188,27 @@ def _validate_honest_null(item: Dict[str, Any], source_hint: Optional[str] = Non
 
 # Traffic Light Protocol labels MISP's ``tlp`` taxonomy accepts (TLP 1.0 + 2.0).
 _VALID_TLP = frozenset({"white", "clear", "green", "amber", "amber+strict", "red"})
+# 2026-10: the ladder of ``neo4j_client._tlp_rank_case``, for merges made before an item reaches MISP.
+_TLP_RANK = {"white": 1, "clear": 1, "green": 2, "amber": 3, "amber+strict": 4, "red": 5}
+
+
+def _tlp_level(raw: Any) -> str:
+    """The TLP level written for ``raw``: a known label (``tlp:`` prefix and case ignored),
+    otherwise the deployment default ``config.EDGEGUARD_DEFAULT_TLP``."""
+    from config import EDGEGUARD_DEFAULT_TLP
+
+    level = str(raw or "").strip().lower().replace("tlp:", "")
+    return level if level in _VALID_TLP else EDGEGUARD_DEFAULT_TLP
+
+
+def tlp_rank(raw: Any) -> int:
+    """Rank of the TLP level ``raw`` is written as (2026-10): white / clear 1, green 2, amber 3,
+    amber+strict 4, red 5.
+
+    A value outside the ladder (empty, misspelt) ranks as the deployment default it is written
+    as, so it never displaces a known level that is more restrictive.
+    """
+    return _TLP_RANK.get(_tlp_level(raw), 0)
 
 
 def _tlp_tag(item: Dict[str, Any]) -> str:
@@ -196,13 +220,7 @@ def _tlp_tag(item: Dict[str, Any]) -> str:
     its own level (OTX pulses carry ``pulse_tlp``, or an item may set ``tlp``)
     overrides the default when the value is a known TLP label.
     """
-    from config import EDGEGUARD_DEFAULT_TLP
-
-    raw = item.get("tlp") or item.get("pulse_tlp") or ""
-    level = str(raw).strip().lower().replace("tlp:", "")
-    if level not in _VALID_TLP:
-        level = EDGEGUARD_DEFAULT_TLP
-    return f"tlp:{level}"
+    return f"tlp:{_tlp_level(item.get('tlp') or item.get('pulse_tlp') or '')}"
 
 
 def _attack_domain(item: Dict[str, Any]) -> str:
@@ -569,6 +587,11 @@ def _vulnerability_tag_changes(current: Sequence[str], desired: Sequence[str]) -
 # 100,000 attributes, where the copies of the NVD baseline are.
 EDITS_PER_THROTTLE = 50
 
+# 2026-10: the refresh of re-reported indicators stops after this many failed edits in a row. A
+# failed edit costs up to three attempts with 5 s and 10 s pauses and a read timeout each, so
+# while MISP fails, trying every due edit would outlast the collector task's time limit.
+REFRESH_MAX_CONSECUTIVE_FAILURES = 5
+
 
 def misp_batch_throttle_seconds() -> float:
     """``EDGEGUARD_MISP_BATCH_THROTTLE_SEC`` as ``push_items`` reads it (default 5.0, also for a value
@@ -604,11 +627,23 @@ def _edited_attribute(body: Any) -> Optional[Dict[str, Any]]:
     return attribute
 
 
-def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any]) -> bool:
-    """Whether MISP's answer to an attribute edit shows the comment and the tag changes (tag names
-    compared without case, as MISP resolves them)."""
+def _edit_confirmed(stored: Dict[str, Any], changes: Dict[str, Any], written_after: Optional[float] = None) -> bool:
+    """Whether MISP's answer to an attribute edit shows the comment, the ``last_seen`` (compared to
+    the second, as an instant) and the tag changes (tag names compared without case, as MISP
+    resolves them), and, with ``written_after``, an attribute ``timestamp`` later than it (2026-10:
+    a refresh exists to move that timestamp)."""
     if "comment" in changes and stored.get("comment") != changes["comment"]:
         return False
+    if "last_seen" in changes:
+        sent, kept = _iso_epoch(changes["last_seen"]), _iso_epoch(stored.get("last_seen"))
+        if (sent is None) != (kept is None) or (sent is not None and kept is not None and int(sent) != int(kept)):
+            return False
+    if written_after is not None:
+        try:
+            if float(stored.get("timestamp")) <= written_after:
+                return False
+        except (TypeError, ValueError):
+            return False
     names = {str(tag.get("name")).lower() for tag in stored.get("Tag") or [] if isinstance(tag, dict)}
     for tag in changes.get("Tag") or []:
         if bool(tag.get("deleted")) == (str(tag.get("name")).lower() in names):
@@ -633,6 +668,90 @@ def _attribute_match_key(attribute: Any) -> Optional[Tuple[str, str]]:
     if not value_norm:
         return None
     return (str(attr_type).strip().lower(), value_norm)
+
+
+def _iso_epoch(raw: Any) -> Optional[float]:
+    """An ISO 8601 date as epoch seconds (a date without zone is UTC, as MISP stores it); None when
+    empty or unreadable (2026-10)."""
+    if raw in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+class StoredCopy(NamedTuple):
+    """The stored copy of a re-reported indicator that a refresh would edit (2026-10).
+
+    ``written`` is the attribute's MISP ``timestamp`` (MISP's last write, epoch seconds): the
+    incremental sync re-reads an attribute only when it moves, and decay follows the node's
+    ``last_updated``, which the sync sets. ``first_seen`` / ``last_seen`` are the source's claims
+    as MISP stores them; a refresh keeps them unless the source now claims a later ``last_seen``.
+    """
+
+    written: float
+    uuid: str
+    first_seen: Optional[str]
+    last_seen: Optional[str]
+
+
+# 2026-10: the events ``_get_or_create_event`` creates (``EdgeGuard-{source}-{date}``). Only copies in
+# them are refreshed: the sync reads EdgeGuard's events, and a copy that keeps the source tag in
+# an analyst's or a federated organisation's event is not EdgeGuard's to edit.
+_OWN_EVENT_PREFIX = "EdgeGuard-"
+
+
+def _note_stored_copy(
+    seen: Dict[Tuple[str, str], Optional[StoredCopy]], key: Tuple[str, str], attribute: Dict[str, Any]
+) -> None:
+    """Record for ``key`` the copy in an EdgeGuard event that MISP wrote last (2026-10).
+
+    A source can hold an indicator in several events (pushed on different days before the
+    cross-event check existed); the copy written last decides whether the indicator needs a
+    refresh, and that copy is the one edited. A row whose ``Event.info`` is not an EdgeGuard event
+    name, or without uuid or readable ``timestamp``, is not recorded.
+    """
+    event = attribute.get("Event")
+    info = event.get("info") if isinstance(event, dict) else None
+    if not isinstance(info, str) or not info.startswith(_OWN_EVENT_PREFIX):
+        return
+    uuid = str(attribute.get("uuid") or "").strip()
+    try:
+        written = float(attribute.get("timestamp"))
+    except (TypeError, ValueError):
+        return
+    if not uuid:
+        return
+    current = seen.get(key)
+    if current is None or written > current.written:
+        seen[key] = StoredCopy(
+            written=written,
+            uuid=uuid,
+            first_seen=attribute.get("first_seen") or None,
+            last_seen=attribute.get("last_seen") or None,
+        )
+
+
+def _refreshed_last_seen(stored_copy: StoredCopy, reported: Any, now: float) -> Optional[str]:
+    """The ``last_seen`` a refresh sends for ``stored_copy`` (2026-10): the source's ``reported`` claim when
+    it is later than the stored ``last_seen`` (or, without one, not earlier than the stored
+    ``first_seen``, which MISP requires) and not in the future; otherwise the stored value
+    unchanged, so the field keeps holding what a source claimed and never the time of a run."""
+    reported_at = _iso_epoch(reported)
+    if reported_at is not None and reported_at <= now:
+        stored_at = _iso_epoch(stored_copy.last_seen)
+        if stored_at is not None:
+            if reported_at > stored_at:
+                return str(reported)
+        else:
+            first_at = _iso_epoch(stored_copy.first_seen)
+            if first_at is None or reported_at >= first_at:
+                return str(reported)
+    return stored_copy.last_seen
 
 
 def _strip_non_bmp(text: str) -> str:
@@ -939,6 +1058,12 @@ class MISPWriter:
             "attrs_skipped_existing": 0,
             # Attributes edited in place (NVD incremental runs, 2026-10).
             "attributes_updated": 0,
+            # Re-reported indicators whose stored copy was refreshed (2026-10; also counted in
+            # attributes_updated), the refresh edits that failed, and the due refreshes left for a
+            # later run (per-run cap, time budget, or a stop after consecutive failures).
+            "attributes_refreshed": 0,
+            "attributes_refresh_failed": 0,
+            "attributes_refresh_deferred": 0,
             # Batches MISP answered with HTTP 200 but without an attribute list, so the
             # attempted count could not be verified against the stored event.
             "batches_unverified": 0,
@@ -983,10 +1108,21 @@ class MISPWriter:
         data = response.json()
         return data.get("response") or []
 
-    def _get_existing_source_attribute_keys(self, source_tag: str) -> set:
+    def _get_existing_source_attribute_keys(
+        self,
+        source_tag: str,
+        stored_copy_of: Optional[Dict[Tuple[str, str], Optional[StoredCopy]]] = None,
+    ) -> set:
         """Build a set of (MISP attribute type, value) already pushed under
         ANY MISP event tagged with ``source_tag`` — across all events,
         not just one.
+
+        2026-10 (re-reported indicators): ``stored_copy_of`` maps the keys of the indicators a push
+        reports to ``None``; for each of those keys that the listing finds in an EdgeGuard event,
+        it is set to the ``StoredCopy`` MISP wrote last (uuid, ``timestamp``, ``first_seen``,
+        ``last_seen``). The rows the listing already reads carry these fields and their event's
+        ``info``, so this adds no request, and only the keys asked for are kept: memory grows with
+        the push, not with the source.
 
         PR-F7 (Issue #61 quick-fix): the per-event prefetch
         (:meth:`_get_existing_attribute_keys`) misses duplicates across
@@ -1122,7 +1258,10 @@ class MISPWriter:
                 t = a.get("type")
                 v = a.get("value")
                 if t is not None and v is not None and str(v).strip():
-                    keys.add((str(t), str(v)))
+                    key = (str(t), str(v))
+                    keys.add(key)
+                    if stored_copy_of is not None and key in stored_copy_of:
+                        _note_stored_copy(stored_copy_of, key, a)
             if len(attrs) < page_limit:
                 break
             page += 1
@@ -1939,14 +2078,15 @@ class MISPWriter:
             plans.append((stored, changes))
         return plans
 
-    def update_attribute(self, uuid: str, changes: Dict[str, Any]) -> bool:
+    def update_attribute(self, uuid: str, changes: Dict[str, Any], *, written_after: Optional[float] = None) -> bool:
         """Edit one attribute in place (``POST /attributes/edit/{uuid}``); True when MISP shows the edit.
 
         MISP 2.5 saves the attribute with a new timestamp and moves its event's timestamp
         (``AttributesController::edit`` → ``unpublishEvent``), so the incremental MISP → Neo4j sync
         picks the change up. Tags in ``changes["Tag"]`` are attached, those marked ``deleted``
         detached. A timeout, connection error, HTTP 429 or 5xx is retried twice; MISP's answer must
-        then show the new comment and the tag changes, or the edit counts as failed.
+        then show the new comment, ``last_seen`` and tag changes, and, when ``written_after`` is
+        given, an attribute timestamp later than it (2026-10), or the edit counts as failed.
         """
         uid = sanitize_value(str(uuid), max_length=64)
         if not uid:
@@ -1970,7 +2110,7 @@ class MISPWriter:
         except ValueError:
             body = None
         stored = _edited_attribute(body)
-        if stored is None or not _edit_confirmed(stored, changes):
+        if stored is None or not _edit_confirmed(stored, changes, written_after):
             self.stats["attributes_unconfirmed"] = self.stats.get("attributes_unconfirmed", 0) + 1
             logger.error(
                 "[UNCONFIRMED-EDIT] attribute %s: MISP answered HTTP 200 but its answer does not show the edit", uid
@@ -2373,6 +2513,14 @@ class MISPWriter:
         Returns:
             Tuple of (successful_count, failed_count)
 
+        2026-10 (re-reported indicators): an indicator the source already holds in MISP is not
+        pushed again, but when MISP last wrote its stored copy (the attribute ``timestamp``) more
+        than ``EDGEGUARD_MISP_REFRESH_LAST_SEEN_DAYS`` ago, the copy is edited
+        (``_refresh_stored_copies``) so that MISP stamps it anew and the incremental sync reads it
+        again. The counts are ``stats["attributes_refreshed"]`` / ``["attributes_refresh_failed"]`` /
+        ``["attributes_refresh_deferred"]``; a failed refresh is logged and does not count as a
+        failed push.
+
         PR-N4 — adaptive scaling for MISP-at-scale (closes the on-call
         report from 2026-04-21 where a 730d baseline lost ~11,500 attrs
         across OTX + NVD pushes due to MISP HTTP 500s on large events):
@@ -2432,6 +2580,9 @@ class MISPWriter:
 
         # Group items by (source, date) — zone lives on attribute tags, not event name
         grouped = {}
+        # 2026-10: (type, value) of the indicators each source reports in this push — the
+        # candidates for a last_seen refresh when MISP already holds them.
+        reported_indicators: Dict[str, set] = {}
 
         for item in items:
             source = item.get("tag", "unknown")
@@ -2464,6 +2615,21 @@ class MISPWriter:
 
             if attr:
                 grouped[key].append(attr)
+                if "indicator_type" in item and "value" in item:
+                    reported_indicators.setdefault(source, set()).add((attr.get("type"), attr.get("value")))
+
+        # 2026-10: per resolved source tag, the reported indicators whose stored copy the
+        # cross-event prefetch should describe (see ``_get_existing_source_attribute_keys``).
+        refresh_days = misp_refresh_last_seen_days()
+        refresh_cutoff = time.time() - refresh_days * 86400
+        stored_copies_by_tag: Dict[str, Dict[Tuple[str, str], Optional[StoredCopy]]] = {}
+        if refresh_days > 0:
+            for _source, _keys in reported_indicators.items():
+                _lookup = stored_copies_by_tag.setdefault(self.SOURCE_TAGS.get(_source, f"source:{_source}"), {})
+                for _key in _keys:
+                    _lookup.setdefault(_key, None)
+        # (type, value) → (the stored copy to edit, last_seen of the re-reported item)
+        refresh_due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]] = {}
 
         # Resolve events + prefetch existing (type, value); build work queue (post-filter batch counts).
         total_success = 0
@@ -2539,7 +2705,9 @@ class MISPWriter:
                 if known_source_keys is not None and source_tag in known_source_keys:
                     cross_event_cache[source_tag] = set(known_source_keys[source_tag])
                 else:
-                    cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(source_tag)
+                    cross_event_cache[source_tag] = self._get_existing_source_attribute_keys(
+                        source_tag, stored_copy_of=stored_copies_by_tag.get(source_tag)
+                    )
             cross_event_keys = cross_event_cache[source_tag]
 
             before_ct = len(unique_attrs)
@@ -2552,6 +2720,14 @@ class MISPWriter:
             # would have missed.
             unique_attrs = [a for a in after_per_event if (a.get("type"), a.get("value")) not in cross_event_keys]
             cross_event_skipped = len(after_per_event) - len(unique_attrs)
+            # 2026-10: a re-reported indicator held in an earlier EdgeGuard event whose stored copy
+            # MISP last wrote before the cutoff is refreshed after the pushes (``_refresh_stored_copies``).
+            _copies = stored_copies_by_tag.get(source_tag)
+            if _copies and cross_event_skipped:
+                for a in after_per_event:
+                    _copy = _copies.get((a.get("type"), a.get("value")))
+                    if _copy is not None and _copy.written < refresh_cutoff:
+                        refresh_due[(a.get("type"), a.get("value"))] = (_copy, a.get("last_seen"))
             skipped_ct = per_event_skipped + cross_event_skipped
             if skipped_ct:
                 self.stats["attrs_skipped_existing"] += skipped_ct
@@ -2993,20 +3169,103 @@ class MISPWriter:
                 total_success += success
                 total_failed += failed
 
+        refreshed_note = ""
+        if refresh_due:
+            refreshed, _refresh_failed = self._refresh_stored_copies(refresh_due, refresh_days)
+            refreshed_note = f"; {refreshed} existing attribute(s) refreshed"
+
         # Final summary
         total_elapsed = time.time() - start_time
         if total_success > 0 or total_failed > 0:
             logger.info(
-                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed in {total_elapsed:.1f}s"
+                f"[OK] MISP push complete: {total_success} succeeded, {total_failed} failed{refreshed_note} "
+                f"in {total_elapsed:.1f}s"
             )
         elif total_items > 0:
             logger.info(
-                f"[SKIP] MISP push: 0 new attributes to push ({total_items} items all deduplicated) in {total_elapsed:.1f}s"
+                f"[SKIP] MISP push: 0 new attributes to push ({total_items} items all deduplicated{refreshed_note}) "
+                f"in {total_elapsed:.1f}s"
             )
         else:
             logger.info("[OK] MISP push: no items provided")
 
         return total_success, total_failed
+
+    def _refresh_stored_copies(
+        self, due: Dict[Tuple[str, str], Tuple[StoredCopy, Optional[str]]], refresh_days: int
+    ) -> Tuple[int, int]:
+        """Refresh the stored copies of indicators a source reported again (2026-10).
+
+        ``due`` maps ``(type, value)`` to the ``StoredCopy`` to edit and the ``last_seen`` of the
+        re-reported item (None when the source sends none). Each copy gets one ``update_attribute``
+        edit with ``{"last_seen": ...}`` and nothing else: value, type, tags and comment stay as they
+        are. The value sent is the source's claim when it is later than the stored one, otherwise
+        the stored value unchanged (``_refreshed_last_seen``): the field holds what a source claimed,
+        never the time of a run. The edit exists for its side effect: MISP stamps the attribute and
+        its event with a new timestamp, so the incremental MISP → Neo4j sync reads the attribute
+        again and refreshes ``Indicator.last_updated`` before ``decay_ioc_confidence`` lowers or
+        retires a node the feed still lists, and the next refresh of the copy is due only one
+        interval later. MISP's answer must show a timestamp later than the stored one.
+
+        The longest unwritten go first, at most ``EDGEGUARD_MISP_REFRESH_MAX_PER_RUN``. The edits
+        are paced like the NVD edits (``EDGEGUARD_MISP_BATCH_THROTTLE_SEC`` after every
+        ``EDITS_PER_THROTTLE``) and check the parent-DAG liveness callback at the same points. They
+        stop once ``EDGEGUARD_MISP_REFRESH_MAX_SECONDS`` is spent or after
+        ``REFRESH_MAX_CONSECUTIVE_FAILURES`` failed edits in a row (MISP failing: each failure costs
+        up to three attempts), so the refresh cannot use up the collector task's time limit. What is
+        not attempted is counted as deferred and is due again on the next run that reports it.
+        Returns ``(refreshed, failed)``.
+        """
+        ordered = sorted(due.values(), key=lambda entry: entry[0].written)
+        cap = misp_refresh_max_per_run()
+        budget = misp_refresh_max_seconds()
+        stop_reasons: List[str] = []
+        deferred = 0
+        if cap and len(ordered) > cap:
+            deferred = len(ordered) - cap
+            ordered = ordered[:cap]
+            stop_reasons.append(f"EDGEGUARD_MISP_REFRESH_MAX_PER_RUN={cap}")
+        now = time.time()
+        started = time.monotonic()
+        pause = misp_batch_throttle_seconds()
+        liveness_cb = getattr(self, "liveness_callback", None)
+        refreshed = failed = consecutive_failures = 0
+        for done, (stored_copy, reported) in enumerate(ordered, 1):
+            if budget and done > 1 and time.monotonic() - started >= budget:
+                deferred += len(ordered) - done + 1
+                stop_reasons.append(f"EDGEGUARD_MISP_REFRESH_MAX_SECONDS={budget} spent")
+                break
+            changes = {"last_seen": _refreshed_last_seen(stored_copy, reported, now)}
+            if self.update_attribute(stored_copy.uuid, changes, written_after=stored_copy.written):
+                refreshed += 1
+                consecutive_failures = 0
+            else:
+                failed += 1
+                consecutive_failures += 1
+                if consecutive_failures >= REFRESH_MAX_CONSECUTIVE_FAILURES and done < len(ordered):
+                    deferred += len(ordered) - done
+                    stop_reasons.append(f"stopped after {consecutive_failures} failed edits in a row")
+                    break
+            if done % EDITS_PER_THROTTLE == 0 and done < len(ordered):
+                if liveness_cb is not None:
+                    liveness_cb()
+                if pause:
+                    time.sleep(pause)
+        self.stats["attributes_refreshed"] = self.stats.get("attributes_refreshed", 0) + refreshed
+        self.stats["attributes_refresh_failed"] = self.stats.get("attributes_refresh_failed", 0) + failed
+        self.stats["attributes_refresh_deferred"] = self.stats.get("attributes_refresh_deferred", 0) + deferred
+        log = logger.warning if failed or deferred else logger.info
+        log(
+            "[REFRESH] %d re-reported indicator(s) whose stored copy MISP last wrote more than %d days ago: "
+            "%d refreshed, %d failed, %d left for a later run%s",
+            len(due),
+            refresh_days,
+            refreshed,
+            failed,
+            deferred,
+            f" ({'; '.join(stop_reasons)})" if stop_reasons else "",
+        )
+        return refreshed, failed
 
     @retry_with_backoff(max_retries=4, base_delay=10.0)
     @rate_limited(max_per_second=2.0)
@@ -3182,6 +3441,9 @@ class MISPWriter:
             "errors": 0,
             "attrs_skipped_existing": 0,
             "attributes_updated": 0,
+            "attributes_refreshed": 0,
+            "attributes_refresh_failed": 0,
+            "attributes_refresh_deferred": 0,
             "batches_unverified": 0,
             "attributes_unconfirmed": 0,
         }

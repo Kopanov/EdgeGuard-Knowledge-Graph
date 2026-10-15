@@ -1377,6 +1377,58 @@ def should_run_neo4j_sync(**context):
     return True
 
 
+def _clear_full_sync_request() -> None:
+    """Reset the Airflow Variable ``NEO4J_FULL_SYNC`` after a requested full sync succeeded (2026-10).
+
+    A failure to write the Variable is logged and does not fail the task: the sync itself
+    succeeded, and the flag left set only makes the next scheduled run a full sync again.
+    """
+    try:
+        Variable.set("NEO4J_FULL_SYNC", "false")
+        logger.info("NEO4J_FULL_SYNC cleared after the requested full sync succeeded")
+    except Exception as e:
+        logger.warning(
+            "Could not clear the Airflow Variable NEO4J_FULL_SYNC after a successful full sync (%s) — "
+            "the next scheduled sync runs in full again unless it is set to false",
+            e,
+        )
+
+
+def _on_neo4j_sync_failure(context):
+    """``on_failure_callback`` of ``run_neo4j_sync`` (2026-10): the common failure handling
+    (``_on_task_failure``), then an alert when the Airflow Variable ``NEO4J_FULL_SYNC`` is still set.
+
+    Airflow calls it once the task has failed for good (its retries spent, a timeout included; a
+    retry calls ``on_retry_callback`` instead). The Variable is cleared only after a successful full
+    sync, so while it stays set every scheduled run is a full sync again and no incremental sync
+    runs. The alert says so and how to clear it; it is logged at ERROR, sent to Slack when enabled
+    and counted as ``edgeguard_pipeline_errors_total{error_type="full_sync_request_pending"}``.
+    """
+    _on_task_failure(context)
+    try:
+        pending = str(Variable.get("NEO4J_FULL_SYNC", "false")).strip().lower() == "true"
+    except Exception as e:
+        logger.warning("Could not read the Airflow Variable NEO4J_FULL_SYNC after the sync failed: %s", e)
+        return
+    if not pending:
+        return
+    message = (
+        "NEO4J_FULL_SYNC is still true after the requested full sync failed on its last attempt: every "
+        "scheduled run of edgeguard_neo4j_sync is a full sync again and no incremental sync runs until "
+        "one succeeds. Fix the cause named in the run_neo4j_sync log, or resume incremental syncs with "
+        "'airflow variables set NEO4J_FULL_SYNC false' (docs/RUNBOOK.md, 'Requesting a full MISP → Neo4j sync')"
+    )
+    logger.error("[ALERT] %s", message)
+    if ENABLE_SLACK_ALERTS:
+        send_slack_alert(f"[CRITICAL] {message}")
+    if ENABLE_PROMETHEUS_METRICS and PROMETHEUS_AVAILABLE:
+        dag_id = context.get("dag").dag_id if context.get("dag") else "unknown"
+        try:
+            PIPELINE_ERRORS.labels(task="run_neo4j_sync", error_type="full_sync_request_pending", source=dag_id).inc()
+        except Exception as e:
+            logger.warning(f"Failed to record the pending full sync request metric: {e}")
+
+
 def run_neo4j_sync(**context):
     """Run the Neo4j sync pipeline."""
     import json
@@ -1399,15 +1451,16 @@ def run_neo4j_sync(**context):
 
         # Decide full vs incremental sync:
         # 1. First run ever (no state file) → full sync to catch all MISP history (e.g. after baseline)
-        # 2. Airflow Variable NEO4J_FULL_SYNC="true" → operator-requested full sync (resets flag after)
-        # 3. All other runs → incremental (last 3 days, efficient)
+        # 2. Airflow Variable NEO4J_FULL_SYNC="true" → operator-requested full sync
+        # 3. All other runs → incremental (window derived from the state file below)
+        # 2026-10: the Variable is cleared only after the full sync succeeded (``_clear_full_sync_request``
+        # below). It used to be reset here, before ``sync.run()``: a failed or timed-out attempt then
+        # retried (retries=2) as an incremental run, stamped the state file, and the requested repair
+        # was silently incomplete. A first run needs no flag: the state file is written only on success.
         is_first_run = not os.path.exists(state_file)
         force_full = False
         try:
             force_full = Variable.get("NEO4J_FULL_SYNC", "false").lower() == "true"
-            if force_full:
-                Variable.set("NEO4J_FULL_SYNC", "false")
-                logger.info("NEO4J_FULL_SYNC flag consumed — running full sync")
         except Exception as e:
             logger.debug("Could not read NEO4J_FULL_SYNC Airflow Variable (non-Airflow context): %s", e)
 
@@ -1427,12 +1480,24 @@ def run_neo4j_sync(**context):
             except Exception as e:
                 logger.debug("Could not check SKIP_NEXT_NEO4J_SYNC Variable: %s", e)
 
+        _attempt = getattr(context.get("ti") or context.get("task_instance"), "try_number", None)
         if is_first_run:
-            logger.info("First sync run detected — running full sync to load all MISP history")
+            logger.info(
+                "Sync mode: FULL — first sync run (no state file %s); loading all MISP history (attempt %s)",
+                state_file,
+                _attempt,
+            )
         elif not incremental:
-            logger.info("Full sync requested via NEO4J_FULL_SYNC variable")
+            logger.info(
+                "Sync mode: FULL — requested by the Airflow Variable NEO4J_FULL_SYNC=true; the flag is "
+                "cleared only after this full sync succeeds, so a retry runs in full again (attempt %s)",
+                _attempt,
+            )
         else:
-            logger.info("Running incremental sync (last 3 days)")
+            logger.info(
+                "Sync mode: incremental — state file present and NEO4J_FULL_SYNC not set (attempt %s)",
+                _attempt,
+            )
 
         # Window fix (same bug family as the tolerance fix in
         # should_run_neo4j_sync): derive the incremental fetch window from the
@@ -1496,6 +1561,8 @@ def run_neo4j_sync(**context):
                     state_file,
                     e,
                 )
+            if force_full:
+                _clear_full_sync_request()
             logger.info("Neo4j sync completed successfully")
             record_dag_run("edgeguard_pipeline", "success")
         else:
@@ -1825,7 +1892,13 @@ neo4j_sync_dag = DAG(
     start_date=_DAG_START_DATE,
     catchup=False,
     max_active_runs=1,
-    dagrun_timeout=timedelta(hours=22),  # Worst-case: 18h (full sync + rels + enrich, all with retries)
+    # 2026-10 (was 22 h): worst case as for the other DAGs, every task of the chain failing on all
+    # three attempts (execution_timeout × 3 + 2 retry delays of 5 min): check_sync_needed and
+    # neo4j_health_check 16 min each, run_neo4j_sync 24 h 10 min (8 h limit), build_relationships and
+    # run_enrichment_jobs 15 h 10 min each, check_neo4j_quality 55 min; 55 h 57 min plus 20% ≈ 67 h.
+    # A requested full sync keeps its flag until it succeeds, so it may need all three attempts. With
+    # max_active_runs=1 a long run only delays the next scheduled one, which then checks the interval.
+    dagrun_timeout=timedelta(hours=68),
     tags=["threat-intel", "edgeguard", "neo4j", "sync"],
 )
 
@@ -1875,7 +1948,15 @@ neo4j_preflight_task = PythonOperator(
 run_neo4j_sync_task = PythonOperator(
     task_id="run_neo4j_sync",
     python_callable=run_neo4j_sync,
-    execution_timeout=timedelta(hours=4),
+    # 2026-10: 8 h (was 4 h). This task runs a full sync too (first run, or NEO4J_FULL_SYNC=true),
+    # estimated at about 6 h on a 730-day MISP (the baseline DAG's ``full_neo4j_sync`` has 6 h, see the
+    # baseline dagrun_timeout comment). At 4 h such a sync timed out and its retries ran incrementally;
+    # now the request is kept until a full sync succeeds, so a limit at the estimate itself could fail
+    # every attempt of every scheduled run. 8 h is the estimate plus a third. Incremental runs take
+    # minutes; the limit only bounds a hung one.
+    execution_timeout=timedelta(hours=8),
+    # 2026-10: after the last attempt, alert when NEO4J_FULL_SYNC is still set (incremental syncs suspended).
+    on_failure_callback=_on_neo4j_sync_failure,
     dag=neo4j_sync_dag,
 )
 
