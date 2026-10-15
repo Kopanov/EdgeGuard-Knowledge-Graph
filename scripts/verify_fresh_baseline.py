@@ -139,10 +139,11 @@ PROVENANCE_REL_TYPES = tuple(t for t in EDGEGUARD_REL_TYPES if t not in ("SOURCE
 # keyed by the value itself — so the contract is presence; ``relationships_name_their_source``
 # additionally requires ``sources`` to be non-empty.
 _PROVENANCE_LISTS = ("sources", "source_refs", "misp_event_ids")
-# ``enrichment_jobs``: the campaign links (RUNS, PART_OF_CAMPAIGN) inherit the lists of the links
-# they are built from, the Vulnerability ↔ CVE bridge (REFERS_TO) takes the vulnerability record's;
-# none states an evidence label.
-_INHERITED_REL_TYPES = ("RUNS", "PART_OF_CAMPAIGN", "REFERS_TO")
+# ``enrichment_jobs``: the Vulnerability ↔ CVE bridge (REFERS_TO) takes the vulnerability record's
+# lists and states no evidence label. The campaign links (RUNS, PART_OF_CAMPAIGN) inherit the lists
+# of the links they are built from and, since 2026-10-15, state their evidence
+# (``campaign_grouping``), so they are held to the full contract below.
+_INHERITED_REL_TYPES = ("REFERS_TO",)
 # ``Neo4jClient._merge_cvss_node``: the feed and the MISP event of the score; no record id (the CVE
 # is the record) and no evidence label.
 _CVSS_REL_TYPES = ("HAS_CVSS_v2", "HAS_CVSS_v30", "HAS_CVSS_v31", "HAS_CVSS_v40")

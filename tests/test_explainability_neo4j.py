@@ -128,3 +128,45 @@ def test_the_sync_writer_records_cited_ids_on_technique_rows_only(client, raw_dr
         "MATCH (:ThreatActor {name: 'apt29'})-[r:USES_MALWARE]->(m:Malware) RETURN m.name AS target, r.cited_ids AS cited",
     )
     assert malware == {"cobalt strike": None}, "a row without cited_ids leaves the property absent"
+
+
+CAMPAIGN_FIXTURE = f"""
+CREATE (a:ThreatActor:{LABEL} {{name: 'fin7', uuid: 'u-fin7', source: ['mitre_attck'], tags: ['mitre']}})
+CREATE (carbanak:Malware:{LABEL} {{name: 'carbanak', uuid: 'u-carbanak'}})
+CREATE (griffon:Malware:{LABEL} {{name: 'griffon', uuid: 'u-griffon'}})
+CREATE (carbanak)-[:ATTRIBUTED_TO {{match_type: 'otx_pulse', confidence_score: 0.6, sources: ['alienvault_otx']}}]->(a)
+CREATE (griffon)-[:ATTRIBUTED_TO {{match_type: 'mitre_explicit', confidence_score: 0.95, sources: ['mitre_attck']}}]->(a)
+CREATE (i:Indicator:{LABEL} {{indicator_type: 'domain', value: 'fin7.example', uuid: 'u-fin7-i', active: true,
+        first_imported_at: datetime('2026-10-01T00:00:00Z')}})
+CREATE (i)-[:INDICATES {{match_type: 'malware_family', confidence_score: 0.8, sources: ['threatfox']}}]->(carbanak)
+CREATE (i)-[:INDICATES {{match_type: 'otx_pulse', confidence_score: 0.5, sources: ['alienvault_otx']}}]->(griffon)
+"""
+
+
+def test_campaign_links_state_their_evidence_and_its_strength(client, raw_driver, monkeypatch):
+    """``campaign_grouping`` on every campaign link, with the confidence of the evidence it rests on:
+    RUNS the actor's strongest attribution (0.95); a malware link its ATTRIBUTED_TO (0.6, 0.95); the
+    indicator its best path, each path as strong as its weaker link (max(min(0.8, 0.6), min(0.5, 0.95)) = 0.6)."""
+    import enrichment_jobs
+
+    monkeypatch.setattr(enrichment_jobs, "query_pause", lambda: None)
+    with raw_driver.session() as session:
+        session.run(CAMPAIGN_FIXTURE)
+    for _ in range(2):  # recomputed on every run: the same answer
+        enrichment_jobs.build_campaign_nodes(client)
+        with raw_driver.session() as session:
+            session.run(f"MATCH (c:Campaign) SET c:{LABEL}")  # removed with the fixture
+            rows = {
+                (r["from"], r["type"]): (r["label"], r["confidence"])
+                for r in session.run(
+                    "MATCH (n)-[r:RUNS|PART_OF_CAMPAIGN]->(:Campaign {actor_name: 'fin7'}) "
+                    "RETURN coalesce(n.name, n.value) AS from, type(r) AS type, r.match_type AS label, "
+                    "r.confidence_score AS confidence"
+                )
+            }
+        assert rows == {
+            ("fin7", "RUNS"): ("campaign_grouping", 0.95),
+            ("carbanak", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.6),
+            ("griffon", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.95),
+            ("fin7.example", "PART_OF_CAMPAIGN"): ("campaign_grouping", 0.6),
+        }
