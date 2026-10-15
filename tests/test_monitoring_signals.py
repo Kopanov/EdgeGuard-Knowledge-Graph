@@ -612,24 +612,36 @@ class TestDagAlerts:
 
 
 class TestBuildRelationshipsSilentDeath:
-    def test_reads_the_latest_successful_baseline_task(self, dag_module, compose_metrics):
-        """The rule needs "a baseline task succeeded in the last 6 h". The in-progress mark holds the
-        run's start time while build_relationships runs many hours later, so with it the rule fired
-        only in the first 6 h of a baseline and never once build_relationships could have died."""
+    def test_compares_the_last_sync_with_the_last_completion(self):
+        """build_relationships runs directly after a successful sync (scheduled DAG and baseline) and
+        is limited to 5 h: a sync completed more than 5 h 15 min ago with no completion stamped since
+        is a silent death. The former rule ("no completion in 6 h while a baseline task succeeded in
+        the last 6 h") fired through every collection phase of a baseline."""
         expr = _norm(_rule("EdgeGuardBuildRelationshipsSilentDeath")["expr"])
         assert expr == (
-            "( absent(edgeguard_build_relationships_completions_total) OR "
-            "rate(edgeguard_build_relationships_completions_total[6h]) == 0 ) "
-            "and on() ( "
-            'max_over_time(edgeguard_dag_last_success_timestamp{dag_id="edgeguard_baseline"}[8h]) '
-            "> (time() - (6 * 60 * 60)) )"
+            "( edgeguard_neo4j_sync_last_success_timestamp > on() "
+            "(edgeguard_build_relationships_last_completion_timestamp or on() vector(0)) ) "
+            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) > (5 * 60 * 60 + 15 * 60) ) "
+            "and on() ( (time() - edgeguard_neo4j_sync_last_success_timestamp) < (24 * 60 * 60) )"
         )
-        # Every successful baseline task moves the series to its completion time.
-        dag_module._on_task_success({"dag": SimpleNamespace(dag_id="edgeguard_baseline")})
-        first = _sample("edgeguard_dag_last_success_timestamp", {"dag_id": "edgeguard_baseline"})
+        assert "edgeguard_dag_last_success_timestamp" not in expr, "no longer tied to any baseline task"
+
+    def test_the_threshold_exceeds_the_build_relationships_limit(self, dags):
+        limits = {
+            dag_id: task.execution_timeout
+            for dag_id, dag in dags.items()
+            for task in dag.tasks
+            if task.task_id == "build_relationships"
+        }
+        assert set(limits) == {"edgeguard_neo4j_sync", "edgeguard_baseline"}
+        assert all(limit <= timedelta(hours=5) for limit in limits.values()), limits
+
+    def test_a_completion_stamps_the_gauge(self):
+        before = _sample("edgeguard_build_relationships_last_completion_timestamp") or 0
         time.sleep(0.01)
-        dag_module._on_task_success({"dag": SimpleNamespace(dag_id="edgeguard_baseline")})
-        assert _sample("edgeguard_dag_last_success_timestamp", {"dag_id": "edgeguard_baseline"}) > first
+        metrics_server.record_build_relationships_completion()
+        after = _sample("edgeguard_build_relationships_last_completion_timestamp")
+        assert after is not None and after > before and abs(after - time.time()) < 5
 
 
 def _write_state(state_dir: Path, last_sync: datetime) -> None:

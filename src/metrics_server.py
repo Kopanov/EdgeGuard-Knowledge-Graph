@@ -580,6 +580,15 @@ BUILD_RELATIONSHIPS_COMPLETIONS = Counter(
     "Absence after a baseline started = silent subprocess death (OOM / SIGKILL).",
 )
 
+# 2026-10: when build_relationships last completed. EdgeGuardBuildRelationshipsSilentDeath compares it
+# with the last successful MISP→Neo4j sync, which build_relationships follows in both the scheduled
+# sync DAG and the baseline.
+BUILD_RELATIONSHIPS_LAST_COMPLETION = Gauge(
+    "edgeguard_build_relationships_last_completion_timestamp",
+    "Unix timestamp (seconds) of the last build_relationships run that reached its [BUILD_RELATIONSHIPS SUMMARY] line.",
+    multiprocess_mode="mostrecent",
+)
+
 APOC_BATCH_PARTIAL = Counter(
     "edgeguard_apoc_batch_partial_total",
     "APOC periodic.iterate batches that reported partial success (non-empty "
@@ -1138,9 +1147,10 @@ def record_build_relationships_completion() -> None:
     """PR-N21 Bravo-ops: call once per successful build_relationships run,
     when ``[BUILD_RELATIONSHIPS SUMMARY]`` is emitted. Absence after a
     baseline starts = silent subprocess death (OOM / SIGKILL). The
-    ``EdgeGuardBuildRelationshipsSilentDeath`` alert fires on 6h of
-    zero-rate after baseline kickoff."""
+    ``EdgeGuardBuildRelationshipsSilentDeath`` alert fires when a sync completed more than
+    5 h 15 min ago and no completion has been stamped since (2026-10)."""
     BUILD_RELATIONSHIPS_COMPLETIONS.inc()
+    BUILD_RELATIONSHIPS_LAST_COMPLETION.set(time.time())
 
 
 def record_apoc_batch_partial(step: str) -> None:

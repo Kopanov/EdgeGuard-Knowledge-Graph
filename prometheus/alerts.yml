@@ -904,36 +904,43 @@ groups:
         # matters here is simply "both conditions true in the same
         # evaluation step" not "same series."
         #
-        # 2026-10: the right side reads the time of the latest successful
-        # task of the baseline DAG (edgeguard_dag_last_success_timestamp,
-        # stamped by _on_task_success), the value the former
-        # edgeguard_dag_run_start_timestamp held. That series now marks
-        # the run in progress with the run's start time, which stays at
-        # the start while build_relationships runs many hours later, so it
-        # cannot express "a baseline task succeeded in the last 6 h".
+        # 2026-10: the rule compares two times instead of a 6-hour window. In
+        # both the scheduled sync DAG and the baseline, build_relationships
+        # runs directly after a successful MISP→Neo4j sync and is limited to
+        # 5 h, so a sync that completed more than 5 h 15 min ago with no
+        # build_relationships completion stamped since means the step died
+        # before its SUMMARY line. The former rule ("no completion in 6 h
+        # while a baseline task succeeded in the last 6 h") also fired
+        # through every collection phase of a baseline, before
+        # build_relationships had started. The rule looks at syncs from the
+        # last 24 h only, so an older sync stamp left in the metrics volume
+        # (for example before the completion gauge existed) cannot fire it.
         expr: |
           (
-            absent(edgeguard_build_relationships_completions_total)
-            OR
-            rate(edgeguard_build_relationships_completions_total[6h]) == 0
+            edgeguard_neo4j_sync_last_success_timestamp
+              > on() (edgeguard_build_relationships_last_completion_timestamp or on() vector(0))
           )
           and on()
           (
-            max_over_time(edgeguard_dag_last_success_timestamp{dag_id="edgeguard_baseline"}[8h])
-              > (time() - (6 * 60 * 60))
+            (time() - edgeguard_neo4j_sync_last_success_timestamp) > (5 * 60 * 60 + 15 * 60)
+          )
+          and on()
+          (
+            (time() - edgeguard_neo4j_sync_last_success_timestamp) < (24 * 60 * 60)
           )
         for: 10m
         labels:
           severity: critical
           component: build_relationships
         annotations:
-          summary: "build_relationships may have died silently — no SUMMARY emitted for 6h while the baseline progresses"
+          summary: "build_relationships may have died silently — no SUMMARY since a sync that completed more than 5h15m ago"
           description: |
-            The ``edgeguard_build_relationships_completions_total`` counter
-            has not incremented for 6 hours although a task of the
-            ``edgeguard_baseline`` DAG succeeded within the last 6 hours.
-            build_relationships emits this counter ONLY when it reaches
-            the ``[BUILD_RELATIONSHIPS SUMMARY]`` log line — absence =
+            A MISP→Neo4j sync completed more than 5 h 15 min ago and no
+            build_relationships completion has been stamped since
+            (``edgeguard_build_relationships_last_completion_timestamp``).
+            build_relationships runs directly after the sync and stamps
+            the gauge ONLY when it reaches the
+            ``[BUILD_RELATIONSHIPS SUMMARY]`` log line — no stamp =
             subprocess died before reaching the end.
 
             Common causes (ranked by likelihood):
