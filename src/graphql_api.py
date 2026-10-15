@@ -55,7 +55,7 @@ from graphql_schema import (
     Vulnerability,
     VulnerabilityFilter,
 )
-from ioc_normalize import normalize_cve_id
+from ioc_normalize import indicator_type_filter, normalize_cve_id
 from neo4j_client import NEO4J_READ_TIMEOUT, Neo4jClient
 from package_meta import package_version
 
@@ -258,6 +258,7 @@ def _resolve_cve(client: Neo4jClient, cve_id: str) -> Optional[CVE]:
         uuid=c.get("uuid"),
         source=_neo4j_list(c.get("source")),
         zone=_neo4j_list(c.get("zone")),
+        tlp=c.get("tlp"),
         first_imported_at=str(c["first_imported_at"]) if c.get("first_imported_at") else None,
         last_updated=str(c["last_updated"]) if c.get("last_updated") else None,
         last_imported_from=c.get("last_imported_from"),
@@ -352,11 +353,15 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
         conditions.append("n.cvss_score >= $min_cvss")
 
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    # 2026-10: the MISP → Neo4j sync writes every vulnerability as ``:CVE`` (``merge_cve``);
+    # ``:Vulnerability`` is written only by the per-item fallback and the alert path, so this list
+    # read a label the sync does not write and answered []. Ties on the score go by cve_id so
+    # pages are stable.
     query = f"""
-    MATCH (n:Vulnerability)
+    MATCH (n:CVE)
     {where}
     RETURN n
-    ORDER BY coalesce(n.cvss_score, -1) DESC
+    ORDER BY coalesce(n.cvss_score, -1) DESC, n.cve_id
     SKIP $offset LIMIT $limit
     """
     results = []
@@ -378,8 +383,12 @@ def _resolve_vulnerabilities(client: Neo4jClient, f: VulnerabilityFilter) -> Lis
                     description=n.get("description"),
                     status=_neo4j_list(n.get("status")),
                     severity=n.get("severity"),
+                    # Null for a CVE without CVSS (2026-10): never a placeholder score.
                     cvss_score=n.get("cvss_score"),
+                    cvss_version=n.get("cvss_version"),
+                    published=str(n["published"]) if n.get("published") else None,
                     zone=_neo4j_list(n.get("zone")),
+                    tlp=n.get("tlp"),
                     edgeguard_managed=n.get("edgeguard_managed"),
                     uuid=n.get("uuid"),
                     source=_neo4j_list(n.get("source")),
@@ -403,8 +412,14 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
         conditions.append("$zone IN n.zone")
         params["zone"] = f.zone
     if f.indicator_type is not strawberry.UNSET and f.indicator_type:
+        # 2026-10: md5 / sha1 / sha256 / sha512 select the ``hash`` nodes of that digest length
+        # (the graph stores every file digest as ``hash``); same rule as the REST filters.
+        graph_type, value_pattern = indicator_type_filter(f.indicator_type)
         conditions.append("n.indicator_type = $indicator_type")
-        params["indicator_type"] = f.indicator_type
+        params["indicator_type"] = graph_type
+        if value_pattern is not None:
+            conditions.append("n.value =~ $indicator_value_pattern")
+            params["indicator_value_pattern"] = value_pattern
     if f.active_only:
         conditions.append("n.active = true")
     if f.min_confidence > 0:
@@ -434,6 +449,7 @@ def _resolve_indicators(client: Neo4jClient, f: IndicatorFilter) -> List[Indicat
                     indicator_type=n.get("indicator_type", ""),
                     confidence_score=n.get("confidence_score"),
                     zone=_neo4j_list(n.get("zone")),
+                    tlp=n.get("tlp"),
                     active=n.get("active"),
                     source=_neo4j_list(n.get("source")),
                     last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
@@ -517,7 +533,12 @@ class Query:
         # to the raw input when no CVE id is recognized.
         return _resolve_cve(_get_client(), normalize_cve_id(cve_id) or cve_id)
 
-    @strawberry.field(description="List vulnerabilities with optional zone / status / CVSS filters.")
+    @strawberry.field(
+        description=(
+            "List vulnerabilities (the CVE nodes EdgeGuard created or enriched) with optional zone / status / "
+            "CVSS filters, highest score first."
+        )
+    )
     def vulnerabilities(
         self,
         filter: Optional[VulnerabilityFilter] = strawberry.UNSET,
@@ -551,6 +572,7 @@ class Query:
                 primary_motivation=n.get("primary_motivation"),
                 resource_level=n.get("resource_level"),
                 zone=_neo4j_list(n.get("zone")),
+                tlp=n.get("tlp"),
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
@@ -579,6 +601,7 @@ class Query:
                 malware_types=_neo4j_list(n.get("malware_types")),
                 description=n.get("description"),
                 zone=_neo4j_list(n.get("zone")),
+                tlp=n.get("tlp"),
                 confidence_score=n.get("confidence_score"),
                 source=_neo4j_list(n.get("source")),
                 edgeguard_managed=n.get("edgeguard_managed"),
@@ -607,6 +630,7 @@ class Query:
                 is_subtechnique=n.get("is_subtechnique"),
                 tactic_refs=_neo4j_list(n.get("tactic_phases")),
                 zone=_neo4j_list(n.get("zone")),
+                tlp=n.get("tlp"),
                 confidence_score=n.get("confidence_score"),
                 edgeguard_managed=n.get("edgeguard_managed"),
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
@@ -630,6 +654,7 @@ class Query:
                 tactic_id=n.get("mitre_id", ""),
                 name=n.get("name", ""),
                 description=n.get("description"),
+                tlp=n.get("tlp"),
                 edgeguard_managed=n.get("edgeguard_managed"),
                 first_imported_at=str(n["first_imported_at"]) if n.get("first_imported_at") else None,
                 last_updated=str(n["last_updated"]) if n.get("last_updated") else None,
@@ -652,6 +677,7 @@ class Query:
                 name=n.get("name", ""),
                 description=n.get("description"),
                 zone=_neo4j_list(n.get("zone")),
+                tlp=n.get("tlp"),
                 confidence_score=n.get("confidence_score"),
                 first_seen=str(n.get("first_seen")) if n.get("first_seen") else None,
                 last_seen=str(n.get("last_seen")) if n.get("last_seen") else None,
@@ -706,6 +732,7 @@ class Query:
                         tool_types=_neo4j_list(n.get("tool_types")),
                         uses_techniques=_neo4j_list(n.get("uses_techniques")),
                         zone=_neo4j_list(n.get("zone")),
+                        tlp=n.get("tlp"),
                         sources=_neo4j_list(n.get("source")),
                         confidence_score=n.get("confidence_score"),
                         edgeguard_managed=n.get("edgeguard_managed"),

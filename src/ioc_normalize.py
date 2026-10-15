@@ -179,6 +179,25 @@ _GRAPH_TYPE_MAP = {
 _HEX_HASH_LENGTHS = frozenset({32, 40, 64, 128})
 _HEX_VALUE_RE = re.compile(r"[0-9a-fA-F]+")
 
+# 2026-10: hexadecimal length of each digest type a caller may filter indicators by. The graph
+# stores every file digest as ``hash`` (``_GRAPH_TYPE_MAP``), so a filter on ``md5`` / ``sha1`` /
+# ``sha256`` / ``sha512`` that compared ``indicator_type`` exactly never matched a node.
+HEX_DIGEST_LENGTH_BY_TYPE = {"md5": 32, "sha1": 40, "sha256": 64, "sha512": 128}
+
+
+def indicator_type_filter(indicator_type: str) -> tuple[str, Optional[str]]:
+    """``(graph indicator_type, value pattern or None)`` for a requested indicator-type filter.
+
+    A digest type (``md5`` / ``sha1`` / ``sha256`` / ``sha512``, any case) selects the ``hash``
+    nodes whose value is a hexadecimal string of that digest's length: the pattern is meant for
+    Cypher ``=~``, which matches the whole value. Every other type is compared as given (``hash``
+    included, which keeps selecting every stored file digest) and has no pattern.
+    """
+    length = HEX_DIGEST_LENGTH_BY_TYPE.get(indicator_type.strip().lower())
+    if length is None:
+        return indicator_type, None
+    return "hash", f"[0-9A-Fa-f]{{{length}}}"
+
 
 def _blank_type_to_none(indicator_type: Optional[str]) -> Optional[str]:
     """Collapse every "no type given" form to ``None``: actual ``None``,

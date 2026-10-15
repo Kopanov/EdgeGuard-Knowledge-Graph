@@ -32,8 +32,15 @@ curl -s -H "X-API-Key: $EDGEGUARD_API_KEY" \
 ```
 
 Returns the list of supported `object_type` values, their primary
-relation, and a working example identifier per type. Hit this first —
-every other endpoint in the exporter is discoverable from it.
+relation, what each export walks (`returns`, every graph relationship
+at `depth=2`), and a working example identifier per type. Since 2026-10
+`relationship_mappings` lists the STIX relationship each graph
+relationship becomes (in graph direction: `graph_relationship`,
+`graph_source`, `graph_target`; the SRO: `source`, `relationship_type`,
+`target`, reversed where STIX 2.1 models the pair the other way round),
+taken from the exporter's own table; a pair not listed is exported as
+`related-to`. Hit this first — every other endpoint in the exporter is
+discoverable from it.
 
 Abbreviated response:
 
@@ -49,6 +56,12 @@ Abbreviated response:
     {"name": "actor",     "example": "APT28",   "primary_relation": "intrusion-set uses malware"},
     {"name": "technique", "example": "T1059",   "primary_relation": "actors uses technique"},
     {"name": "cve",       "example": "CVE-2021-44228", "primary_relation": "indicators related-to CVE"}
+  ],
+  "relationship_mappings": [
+    {"graph_relationship": "ATTRIBUTED_TO", "graph_source": "malware", "graph_target": "intrusion-set",
+     "relationship_type": "uses", "source": "intrusion-set", "target": "malware"},
+    {"graph_relationship": "INDICATES", "graph_source": "indicator", "graph_target": "malware",
+     "relationship_type": "indicates", "source": "indicator", "target": "malware"}
   ]
 }
 ```
@@ -372,4 +385,4 @@ for the full node/relationship mapping across both sides.
 
 ---
 
-_Last updated: 2026-10-15 — FIRST EPSS and CISA's SSVC decision points on `vulnerability` (extension definition 1.4.0). Same day: explainability: `x_edgeguard_cited_ids` on SROs and `x_edgeguard_merged_from` on intrusion-sets (extension definition 1.3.0). Same day: `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`); relationship-type paragraph lists the 2026-10 mappings (`USES_MALWARE` / `USES_TOOL`, `EXPLOITS` from actors and malware, actor / malware `TARGETS`, `PART_OF_CAMPAIGN`, `subtechnique-of`) and the relationships not exported as SROs; bounds on `external_references` (20) and `x_edgeguard_source_refs` (200); extension definition versions (1.1.0: relationship provenance; 1.2.0: `x_edgeguard_status`). Prior: 2026-10-14 — every relationship exported with its provenance (`confidence`, `external_references`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`), curated-package claims included; `depth` table extended. Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._
+_Last updated: 2026-10-15 — `/stix/types`: each `returns` names the 2026-10 relationships, and `relationship_mappings` lists the graph relationship → STIX relationship table; STIX timestamps of nodes the sync wrote with `datetime()` carry at most six fractional digits (the nine the driver printed made every such export fail with HTTP 500). Same day: FIRST EPSS and CISA's SSVC decision points on `vulnerability` (extension definition 1.4.0). Same day: explainability: `x_edgeguard_cited_ids` on SROs and `x_edgeguard_merged_from` on intrusion-sets (extension definition 1.3.0). Same day: `x_edgeguard_status` on `vulnerability` (NVD's record status; extension definition 1.2.0); § 4 indicator pattern table: IP patterns take `ipv4-addr` / `ipv6-addr` from the address (IPv6 indicators synced as `ipv4` were exported as `ipv4-addr`); SSL Blacklist certificate fingerprints export as `[x509-certificate:hashes.'SHA-1' = …]` (were `file:hashes`); relationship-type paragraph lists the 2026-10 mappings (`USES_MALWARE` / `USES_TOOL`, `EXPLOITS` from actors and malware, actor / malware `TARGETS`, `PART_OF_CAMPAIGN`, `subtechnique-of`) and the relationships not exported as SROs; bounds on `external_references` (20) and `x_edgeguard_source_refs` (200); extension definition versions (1.1.0: relationship provenance; 1.2.0: `x_edgeguard_status`). Prior: 2026-10-14 — every relationship exported with its provenance (`confidence`, `external_references`, `x_edgeguard_match_type`, `x_edgeguard_sources`, `x_edgeguard_source_refs`, `x_edgeguard_misp_event_ids`), curated-package claims included; `depth` table extended. Prior: 2026-10-12 — export hardening: `?limit=` per-collection bound (default 100, maximum 500), case-insensitive actor lookup, TLP `marking-definition` objects and `object_marking_refs`, provenance moved from the bundle to the producer `identity` with the `x_edgeguard_*` properties declared by an `extension-definition` (strict `stix2.parse` passes), STIX 2.1 relationship-table mapping and `industry-sector-ov` sectors. Prior: 2026-04-26 — PR-N33 docs audit: corrected bundle-id claim (was "random UUIDv4 per request", actually content-deterministic UUIDv5 over sorted SDO ids — `uuid5(EDGEGUARD_STIX_NAMESPACE, sha256(sorted_ids))`); documented `EDGEGUARD_DETERMINISTIC_BUNDLE` env knob for `generated_at` freezing. Prior: 2026-04-17._

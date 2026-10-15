@@ -84,7 +84,12 @@ Export hardening (2026-10):
   relationship summary table for the (source, target) SDO pair, reversing
   direction where the specification models the pair the other way round;
   unknown pairs fall back to ``related-to``. Sector identities use the
-  ``industry-sector-ov`` vocabulary.
+  ``industry-sector-ov`` vocabulary. ``stix_relationship_mappings`` lists
+  the table for ``GET /stix/types``.
+- **Timestamps.** Node timestamps written with Cypher ``datetime()`` reach
+  the exporter as ``neo4j.time.DateTime``; ``_iso_str`` converts them to
+  Python values and ``_stix_ts`` cuts any fraction beyond six digits, the
+  most ``stix2`` accepts (nine digits made every such export fail).
 """
 
 from __future__ import annotations
@@ -157,6 +162,9 @@ _GIT_SHA = os.environ.get("EDGEGUARD_GIT_SHA", "")
 # of truth — bug fix in one place propagates to all callers.
 from source_truthful_timestamps import iso_str as _iso_str  # noqa: E402
 
+# 2026-10: the digits after the sixth fractional digit of an ISO-8601 time of day (``_stix_ts``).
+_STIX_EXCESS_FRACTION_RE = re.compile(r"(T\d{2}:\d{2}:\d{2}\.\d{6})\d+")
+
 
 def _producer_created_modified(props: Dict[str, Any]) -> Dict[str, str]:
     """Return ``{created, modified}`` kwargs for stix2 SDK constructors,
@@ -204,9 +212,16 @@ def _stix_ts(s: Optional[str]) -> Optional[str]:
     disappears from the bundle. Fix: parse and normalize to UTC ``Z``
     form. If parsing fails, fall back to passthrough so the existing
     error surfaces at the stix2 layer rather than swallowing here.
+
+    2026-10: fractional seconds beyond six digits are cut to six (stix2
+    3.0.2 accepts at most six). ``_iso_str`` already converts driver
+    temporals to Python values, which print at most six; the cut keeps a
+    nanosecond string from any other path (a stored ISO string, a driver
+    value outside Python's range) from failing the whole export.
     """
     if not s:
         return s
+    s = _STIX_EXCESS_FRACTION_RE.sub(r"\1", s, count=1)
     if s.endswith("+00:00"):
         return s[:-6] + "Z"
     if s.endswith("Z"):
@@ -590,6 +605,31 @@ _SRO_BY_EDGE: Dict[Tuple[str, str, str], Tuple[str, bool]] = {
     ("PART_OF_CAMPAIGN", "malware", "campaign"): ("uses", True),
     ("PART_OF_CAMPAIGN", "indicator", "campaign"): ("indicates", False),
 }
+
+
+def stix_relationship_mappings() -> List[Dict[str, str]]:
+    """``_SRO_BY_EDGE`` as rows for the ``GET /stix/types`` discovery answer (2026-10).
+
+    ``graph_source`` / ``graph_target`` are the STIX types of the graph relationship's endpoints in
+    graph direction; ``source`` / ``target`` are the SRO's, reversed where the specification models
+    the pair the other way round. Derived from the table itself, so the discovery answer cannot
+    drift from what ``_edge_to_sro`` emits; a pair absent from the table is exported as
+    ``related-to`` in graph direction.
+    """
+    rows: List[Dict[str, str]] = []
+    for (edge_type, graph_source, graph_target), (relationship_type, reverse) in sorted(_SRO_BY_EDGE.items()):
+        rows.append(
+            {
+                "graph_relationship": edge_type,
+                "graph_source": graph_source,
+                "graph_target": graph_target,
+                "relationship_type": relationship_type,
+                "source": graph_target if reverse else graph_source,
+                "target": graph_source if reverse else graph_target,
+            }
+        )
+    return rows
+
 
 # Relationship provenance on SROs (2026-10). Graph relationships carry ``sources`` (who
 # asserts them), ``source_refs`` (``"<source>:<record id>"``), ``misp_event_ids`` and
