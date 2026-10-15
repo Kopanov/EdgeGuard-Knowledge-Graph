@@ -379,6 +379,16 @@ Collects threat intelligence from MITRE ATT&CK framework, including:
 - **API Key:** Not required
 - **Format:** STIX 2.1 bundle
 
+### Revoked and deprecated objects (2026-10)
+
+The ATT&CK bundles keep replaced and retired objects. `_parse_bundle` (Enterprise and ICS alike):
+
+- **Revoked** (`revoked: true`, with a `revoked-by` relationship to the successor): skipped, whatever the type. No item, no relationship to or from it (`uses`, `subtechnique-of`, `attributed-to`), so no `uses_techniques` / `uses_malware` / `uses_tools` entry names it. A revoked group's or software's name and aliases are appended to its successor's `aliases` (the successor's own aliases first; a chain A → B → C ends on C): `UNC2452` → `APT29`, `Dragonfly 2.0` → `Dragonfly`, `Stolen Pencil` → `Kimsuky`, `Darkmoon` → `PoisonIvy`. Tool items now carry `aliases` too (`x_mitre_aliases`), but the MISP writer tags aliases of actors and malware only, so a tool's aliases do not reach the graph.
+- **Deprecated** (`x_mitre_deprecated: true`, no successor): kept, with `deprecated: True`; every other item carries `deprecated: False`. The MISP writer tags a deprecated item `attack-status:deprecated`; the sync turns the tag into `n.deprecated = true`.
+- The log line `skipped N revoked ATT&CK objects {...} and M relationships that reach them` gives the counts per bundle.
+
+Feeds that still name a revoked technique id (OTX pulses citing `T1086`) are translated to the successor downstream, with `src/reference/attack_revoked_ids.json` (`src/attack_revoked.py`; see `docs/KNOWLEDGE_GRAPH.md`, "Revoked and deprecated ATT&CK objects"). The collector itself needs no map: the bundle names every successor.
+
 ### Zone Detection
 ```python
 def detect_sectors(self, text):
@@ -400,6 +410,7 @@ def detect_sectors(self, text):
     'sources': ['mitre_attck'],
     'platforms': ['Windows', 'macOS', 'Linux'],
     'data_sources': ['Application Log', 'File', 'Network Traffic'],
+    'deprecated': False,  # True for an object ATT&CK deprecated (2026-10); revoked objects are skipped
     'confidence_score': 0.8
 }
 
@@ -407,7 +418,7 @@ def detect_sectors(self, text):
 {
     'type': 'actor',
     'name': 'APT29',
-    'aliases': ['Cozy Bear', 'The Dukes', 'PowerDuke'],
+    'aliases': ['Cozy Bear', 'The Dukes', 'PowerDuke', 'UNC2452', 'StellarParticle'],  # + revoked groups' names
     'description': 'APT29 is a threat group that has been attributed to the Russian government...',
     'zone': ['healthcare', 'finance'],  # Array of all matching zones
     'tag': 'mitre_attck',
