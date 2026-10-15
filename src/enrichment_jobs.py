@@ -14,7 +14,8 @@ Jobs
 5. merge_alias_duplicate_actors — Fold duplicate ThreatActors into their canonical actor (ATT&CK
    aliases and the canonical threat-actor reference, src/reference/canonical_threat_actors.json)
 6. merge_malware_attack_twins — Fold Malware nodes named "<family> - S####" (the ATT&CK software id
-   of the MISP galaxy naming) into the MITRE Malware node of that id (2026-10)
+   of the MISP galaxy naming) into the MITRE Malware node of that id, or, for software without one,
+   into the node of the base name (2026-10)
 7. enrich_cve_epss          — FIRST EPSS scores onto CVE nodes (cve_feed_enrichment.py; CISA's SSVC
                                comes with the NVD records, not from a job)
 """
@@ -30,7 +31,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config  # noqa: E402
 from attack_revoked import load_revoked_ids  # noqa: E402
-from attack_software_names import CYPHER_SUFFIXED_NAME, attack_software_id, plan_twin_folds  # noqa: E402
+from attack_software_names import (  # noqa: E402
+    CYPHER_BASE_NODES_READ,
+    CYPHER_SOFTWARE_ID_SUFFIX,
+    CYPHER_SUFFIXED_NAME,
+    attack_software_id,
+    plan_twin_folds,
+    twin_base_names,
+)
 from canonical_threat_actors import (  # noqa: E402
     CanonicalReference,
     MergePlan,
@@ -1270,11 +1278,15 @@ def _strongest_on_parallel_edges(direction: str) -> str:
 # strongest evidence's label and confidence (``_strongest_on_parallel_edges``).
 # 2026-10: the statements are built per label (``_alias_merge_statements``) so the Malware
 # twin merge (JOB 6) runs the same merge; the actor statements are unchanged.
-def _alias_merge_apply_cypher(label: str, canonical_guard: str, list_props: Tuple[str, ...]) -> str:
+def _alias_merge_apply_cypher(
+    label: str, canonical_guard: str, list_props: Tuple[str, ...], duplicate_guard: str = ""
+) -> str:
     """The merge statement for ``label``: every group's duplicates into its canonical (see above).
 
     ``canonical_guard`` is the ``WHERE`` that re-checks the canonical ``c`` at merge time; a duplicate
-    is never MITRE-sourced. ``list_props`` are wrapped back into lists after the merge."""
+    is never MITRE-sourced, and also meets ``duplicate_guard`` when one is given (a condition on ``d``
+    and ``c``; the actor merge has none). ``list_props`` are wrapped back into lists after the merge."""
+    duplicate_condition = f"\n  AND {duplicate_guard}" if duplicate_guard else ""
     return (
         f"""
 UNWIND $groups AS g
@@ -1283,7 +1295,7 @@ WHERE {canonical_guard}
 MATCH (d:{label})
 WHERE d.name IN g.duplicates
   AND d <> c
-  AND NOT $mitre_source IN coalesce(d.source, [])
+  AND NOT $mitre_source IN coalesce(d.source, []){duplicate_condition}
 WITH c, collect(DISTINCT d) AS dups
 WHERE size(dups) > 0
 SET c.aliases = apoc.coll.toSet(coalesce(c.aliases, []) + [d IN dups | d.name]),
@@ -1349,10 +1361,12 @@ class _AliasMergeStatements(NamedTuple):
     normalise: str
 
 
-def _alias_merge_statements(label: str, canonical_guard: str, list_props: Tuple[str, ...]) -> _AliasMergeStatements:
+def _alias_merge_statements(
+    label: str, canonical_guard: str, list_props: Tuple[str, ...], duplicate_guard: str = ""
+) -> _AliasMergeStatements:
     """The merge statements for ``label`` (see ``_alias_merge_apply_cypher`` for the arguments)."""
     return _AliasMergeStatements(
-        apply=_alias_merge_apply_cypher(label, canonical_guard, list_props),
+        apply=_alias_merge_apply_cypher(label, canonical_guard, list_props, duplicate_guard),
         restamp_out=_alias_merge_restamp_cypher(label, "out"),
         restamp_in=_alias_merge_restamp_cypher(label, "in"),
         normalise=_alias_merge_normalise_cypher(label, list_props),
@@ -1742,14 +1756,18 @@ def merge_alias_duplicate_actors(neo4j_client) -> Dict:
 # read from the record MITRE delivered (the ``raw_data`` of its SOURCED_FROM edge to the ATT&CK
 # source, as ``scripts/build_canonical_threat_actors.py`` reads group ids), and when it cannot be
 # read the node of the same base name is the target. A revoked software id is translated to its
-# successor first (``attack_revoked``). A twin without such a node is left as it is and counted
-# (``no_target``: ATT&CK tools such as Mimikatz S0002 are ``Tool`` nodes, never merge targets); a
-# twin whose id and name lead to two MITRE nodes is skipped (``skipped_ambiguous``). The merge
-# itself is the actor alias merge's (``_run_alias_merge_batches``), with ``malware_types`` combined
-# too; it runs before ``build_campaign_nodes``.
+# successor first (``attack_revoked``). A twin whose id and name lead to two MITRE nodes is skipped
+# (``skipped_ambiguous``). ATT&CK software without a MITRE Malware node (chiefly the ATT&CK tools,
+# such as Mimikatz S0002, which are ``Tool`` nodes) has no merge target; since the collectors name a
+# family by its base name, a later pulse creates the non-MITRE node "mimikatz" beside the twin
+# "mimikatz - s0002", and steps 9b / 2d would link every indicator written before to both. Such a
+# twin therefore folds into the non-MITRE node of its base name when that node states no other id
+# (``base_name_targets``); without one it is left as it is and counted (``no_target``) until a later
+# pulse creates it. The merge itself is the actor alias merge's (``_run_alias_merge_batches``), with
+# ``malware_types`` combined too; it runs before ``build_campaign_nodes``.
 
 _MALWARE_TWIN_MERGE_ENV_FLAG = "EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE"
-_MALWARE_TWIN_MERGE_BATCH_SIZE = 200  # (MITRE node, twin) pairs per transaction
+_MALWARE_TWIN_MERGE_BATCH_SIZE = 200  # (target node, twin) pairs per transaction
 _MALWARE_TWIN_MERGE_MAX_PAIRS_PER_RUN = 2000  # hard cap; the rest waits for the next run
 # The actor merge's strategy plus the one list only Malware nodes carry. ``".*"`` stays the
 # catch-all ("discard").
@@ -1788,9 +1806,16 @@ WITH c, head(collect(sf.raw_data)) AS attack_raw
 RETURN c.name AS name, attack_raw
 """
 
-# The canonical must be MITRE-sourced (re-checked at merge time, like the actor merge's guard).
+# Re-checked at merge time, like the actor merge's guard: the canonical is MITRE-sourced, or a
+# non-MITRE node the plan chose as the base-named target of a twin without a MITRE one
+# (``$base_canonicals``); into such a node only a twin named "<its name> - s####" folds.
 _MALWARE_TWIN_MERGE_STATEMENTS = _alias_merge_statements(
-    "Malware", "$mitre_source IN coalesce(c.source, [])", _MALWARE_TWIN_MERGE_LIST_PROPS
+    "Malware",
+    "$mitre_source IN coalesce(c.source, []) OR c.name IN $base_canonicals",
+    _MALWARE_TWIN_MERGE_LIST_PROPS,
+    duplicate_guard=(
+        '($mitre_source IN coalesce(c.source, []) OR trim(apoc.text.replace(d.name, $software_id_suffix, "")) = c.name)'
+    ),
 )
 
 
@@ -1801,21 +1826,25 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
     name, ends with `` - S####`` (``attack_software_names.software_id_claims``). Target: the
     MITRE-sourced Malware node of that ATT&CK id (read from its ``SOURCED_FROM`` ``raw_data``; a revoked
     id is translated to its successor), or, when its id cannot be read, the one of the same base
-    name (``plan_twin_folds``). A twin without a target is left unchanged and counted
-    (``no_target``); a twin with two targets is skipped (``skipped_ambiguous``).
+    name; a twin with two such targets is skipped (``skipped_ambiguous``). A twin named with an id that
+    has no MITRE target folds into the non-MITRE node of its base name when that node states no other
+    id (``base_name_targets``); without one it is left unchanged and counted (``no_target``). The
+    decision is ``plan_twin_folds``.
 
-    The merge is the actor alias merge's: the twin's name joins the MITRE node's ``aliases`` and
+    The merge is the actor alias merge's: the twin's name joins the target's ``aliases`` and
     ``merged_from``, ``tlp`` becomes the most restrictive of the group, all relationships move
     (parallel ones collapse with the strongest evidence and the union of their provenance), their
-    ``src_uuid`` / ``trg_uuid`` are re-stamped, and every list property stays a list. The MITRE node
-    keeps its name and uuid. Batched (``_MALWARE_TWIN_MERGE_BATCH_SIZE`` pairs per transaction,
+    ``src_uuid`` / ``trg_uuid`` are re-stamped, and every list property stays a list. The target keeps
+    its name and uuid. Batched (``_MALWARE_TWIN_MERGE_BATCH_SIZE`` pairs per transaction,
     ``_MALWARE_TWIN_MERGE_MAX_PAIRS_PER_RUN`` per run) and idempotent.
 
     Dry run: ``EDGEGUARD_ENABLE_MALWARE_TWIN_MERGE=false`` logs the pairs and merges nothing. APOC
-    missing: a WARNING and ``apoc_missing = 1``; a failed batch is counted in ``errors``; a failed
-    read re-raises (PR-N21), as in ``merge_alias_duplicate_actors``.
+    missing (the candidate read and the merge use it): a WARNING and ``apoc_missing = 1``; a failed
+    batch is counted in ``errors``; any other failed read re-raises (PR-N21), as in
+    ``merge_alias_duplicate_actors``.
 
-    Returns ``{candidates, merged, no_target, skipped_ambiguous, errors, restamped_edges, apoc_missing}``.
+    Returns ``{candidates, merged, base_name_targets, no_target, skipped_ambiguous, errors,
+    restamped_edges, apoc_missing}``.
     """
     if not neo4j_client.driver:
         logger.error("merge_malware_attack_twins: no Neo4j connection")
@@ -1824,6 +1853,7 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
     results: Dict = {
         "candidates": 0,
         "merged": 0,
+        "base_name_targets": 0,
         "no_target": 0,
         "skipped_ambiguous": 0,
         "errors": 0,
@@ -1853,14 +1883,38 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
                 )
                 if row["name"]
             }
-            plan = plan_twin_folds(twins, attack_ids, load_revoked_ids().software)
+            bases = twin_base_names(twins)
+            base_nodes = (
+                {
+                    row["name"]: row["aliases"]
+                    for row in session.run(
+                        CYPHER_BASE_NODES_READ,
+                        bases=bases,
+                        mitre_source=_ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                        timeout=NEO4J_READ_TIMEOUT,
+                    )
+                    if row["name"]
+                }
+                if bases
+                else {}
+            )
+            plan = plan_twin_folds(twins, attack_ids, load_revoked_ids().software, base_nodes)
             results["candidates"] = plan.candidates
+            results["base_name_targets"] = len(plan.base_pairs)
             results["no_target"] = len(plan.no_target)
             results["skipped_ambiguous"] = len(plan.ambiguous)
+            if plan.base_pairs:
+                logger.info(
+                    "[MALWARE-TWIN-MERGE] %d twin(s) without a MITRE Malware node fold into the node of their "
+                    "base name. Sample (node, twin): %s",
+                    len(plan.base_pairs),
+                    plan.base_pairs[:10],
+                )
             if plan.no_target:
                 logger.info(
-                    "[MALWARE-TWIN-MERGE] %d node(s) name an ATT&CK software id no MITRE Malware node has "
-                    "(left as they are; ATT&CK tools are Tool nodes). Sample: %s",
+                    "[MALWARE-TWIN-MERGE] %d node(s) name an ATT&CK software id no MITRE Malware node has, and "
+                    "no node of their base name takes them (left as they are; ATT&CK tools are Tool nodes). "
+                    "Sample: %s",
                     len(plan.no_target),
                     plan.no_target[:10],
                 )
@@ -1871,10 +1925,10 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
                     len(targets),
                     targets,
                 )
-            pairs = plan.pairs  # (MITRE node name, twin name)
+            pairs = sorted(plan.pairs + plan.base_pairs)  # (target node name, twin name)
             if not pairs:
                 logger.info(
-                    "[MALWARE-TWIN-MERGE] no twin with a MITRE target (candidates: %d, no target: %d, ambiguous: %d)",
+                    "[MALWARE-TWIN-MERGE] no twin with a target (candidates: %d, no target: %d, ambiguous: %d)",
                     results["candidates"],
                     results["no_target"],
                     results["skipped_ambiguous"],
@@ -1883,10 +1937,11 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
 
             if not _env_flag_enabled(_MALWARE_TWIN_MERGE_ENV_FLAG):
                 logger.info(
-                    "[MALWARE-TWIN-MERGE] DRY RUN (%s=false): %d mergeable pair(s), %d without a target, "
-                    "%d ambiguous — merging nothing. Sample (MITRE node, twin): %s",
+                    "[MALWARE-TWIN-MERGE] DRY RUN (%s=false): %d mergeable pair(s) (%d into a base-named node), "
+                    "%d without a target, %d ambiguous — merging nothing. Sample (target node, twin): %s",
                     _MALWARE_TWIN_MERGE_ENV_FLAG,
                     len(pairs),
+                    results["base_name_targets"],
                     results["no_target"],
                     results["skipped_ambiguous"],
                     pairs[:10],
@@ -1902,23 +1957,35 @@ def merge_malware_attack_twins(neo4j_client) -> Dict:
                 apply_params={
                     "strategy": _MALWARE_TWIN_MERGE_PROPERTY_STRATEGY,
                     "mitre_source": _ACTOR_ALIAS_MERGE_MITRE_SOURCE,
+                    "base_canonicals": sorted({node for node, _twin in plan.base_pairs}),
+                    "software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX,
                 },
                 results=results,
                 log_tag="MALWARE-TWIN-MERGE",
-                canonical_noun="MITRE Malware node(s)",
+                canonical_noun="target Malware node(s)",
             ):
                 return results
     except Exception as e:
-        # PR-N21: a failed read (driver dead, query broken) fails the task loudly; only per-batch and
-        # APOC-missing conditions are handled above.
+        # The candidate read lists aliases through APOC functions: without APOC it fails here, before
+        # any merge, and the job reports it as the merge does (a WARNING, ``apoc_missing``).
+        if _is_apoc_missing_error(e):
+            logger.warning(
+                "[MALWARE-TWIN-MERGE] APOC unavailable (%s) — skipping the merge; install the APOC plugin to enable it.",
+                e,
+            )
+            results["apoc_missing"] = 1
+            return results
+        # PR-N21: any other failed read (driver dead, query broken) fails the task loudly; only per-batch
+        # and APOC-missing conditions are handled.
         logger.error(f"[MALWARE-TWIN-MERGE] merge_malware_attack_twins FAILED: {e}", exc_info=True)
         raise
 
     logger.info(
-        "[MALWARE-TWIN-MERGE] complete — candidates=%d merged=%d no_target=%d skipped_ambiguous=%d errors=%d "
-        "restamped_edges=%d",
+        "[MALWARE-TWIN-MERGE] complete — candidates=%d merged=%d base_name_targets=%d no_target=%d "
+        "skipped_ambiguous=%d errors=%d restamped_edges=%d",
         results["candidates"],
         results["merged"],
+        results["base_name_targets"],
         results["no_target"],
         results["skipped_ambiguous"],
         results["errors"],

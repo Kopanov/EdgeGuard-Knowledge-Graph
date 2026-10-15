@@ -132,12 +132,14 @@ def _pulse_actor_pairs(families: List[str], adversaries: List[str]) -> List[str]
 
 
 def _family_entry_name(entry: Any) -> str:
-    """The name of one ``malware_families`` entry: a string, or a ``{"name": ...}`` /
-    ``{"display_name": ...}`` object; ``""`` for anything else."""
+    """The name of one ``malware_families`` entry: a string, or an object named by ``name``,
+    ``display_name`` or, last, ``id`` (OTX gives a malware family the family name as its id, the
+    ``/malware/<id>`` path; no recorded pulse in the repository carries an object entry, so all three
+    keys are read); ``""`` for anything else."""
     if isinstance(entry, str):
         return entry.strip()
     if isinstance(entry, dict):
-        for key in ("name", "display_name"):
+        for key in ("name", "display_name", "id"):
             value = entry.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()

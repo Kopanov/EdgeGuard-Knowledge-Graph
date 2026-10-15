@@ -9,6 +9,7 @@ to prevent false positives (e.g., "APT" matching "AP").
 
 import os
 import sys
+from typing import Any, Dict
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -95,7 +96,10 @@ CRITICAL_MAX_EVENT_IDS_PER_EDGE = 200
 
 
 from attack_revoked import technique_successors as _technique_successors  # noqa: E402
+from attack_software_names import CYPHER_FOLDED_FAMILIES_READ as _FOLDED_FAMILIES_READ  # noqa: E402
 from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX as _SOFTWARE_ID_SUFFIX  # noqa: E402
+from attack_software_names import cypher_family_name_variants as _family_name_variants  # noqa: E402
+from attack_software_names import folded_family_names as _folded_family_names  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
 from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
@@ -109,17 +113,30 @@ from relationship_provenance import prov_with as _prov_with  # noqa: E402
 # name, but indicators written before carry the suffixed names in ``pulse_malware_families`` /
 # ``pulse_malware_actor_pairs``, and a graph built before holds a twin node of that name until the
 # enrichment job ``merge_malware_attack_twins`` folds it. Steps 9b and 2d therefore look a family up
-# by its name as given and by its name without the id. The pattern travels as the ``$software_id_suffix``
-# parameter (``attack_software_names.CYPHER_SOFTWARE_ID_SUFFIX``), so the statements, wrapped in
-# single quotes for ``apoc.periodic.iterate``, need no escaped backslashes.
-_SOFTWARE_ID_PARAMS = {"software_id_suffix": _SOFTWARE_ID_SUFFIX}
+# by its name as given and by its name without the id, each through the names that job folded into a
+# node (``_family_name_variants``, ``attack_software_names.cypher_family_name_variants``): once
+# "agenttesla" is folded into the ATT&CK node "agent tesla", no node of that name exists, and a later
+# pulse that names the family is a MISP cross-event duplicate whose indicators would find no node.
+# The pattern and the map travel as the ``$software_id_suffix`` / ``$folded_families`` parameters, so
+# the statements, wrapped in single quotes for ``apoc.periodic.iterate``, need no escaped backslashes.
+_MITRE_SOURCE_ID = "mitre_attck"
 
 
-def _family_name_variants(var: str) -> str:
-    """Cypher list: the canonical family name ``var`` and, when it ends with an ATT&CK software id,
-    the name without it (``"cobalt strike - s0154"`` → ``["cobalt strike - s0154", "cobalt strike"]``;
-    one entry otherwise). Reads the ``$software_id_suffix`` parameter."""
-    return f'apoc.coll.toSet([{var}, trim(apoc.text.replace({var}, $software_id_suffix, ""))])'
+def _software_id_params(client) -> Dict[str, Any]:
+    """``$software_id_suffix`` and ``$folded_families`` of steps 9b and 2d (2026-10).
+
+    The map is read once per run from the ``merged_from`` lists of the ``Malware`` nodes
+    (``attack_software_names.folded_family_names``). A failed read is an empty map: the steps then
+    look families up by name only, as before the twin merge, and the run goes on."""
+    try:
+        rows = client.run(_FOLDED_FAMILIES_READ, parameters={"mitre_source": _MITRE_SOURCE_ID})
+        folded = _folded_family_names(row for row in rows or [] if isinstance(row, dict))
+    except Exception as e:
+        logger.warning("[LINK] folded Malware names unavailable (%s): steps 9b / 2d look families up by name", e)
+        folded = {}
+    if folded:
+        logger.info("[LINK] %d folded Malware name(s) resolve to the node they were merged into", len(folded))
+    return {"software_id_suffix": _SOFTWARE_ID_SUFFIX, "folded_families": folded}
 
 
 def _cited_set(var: str) -> str:
@@ -508,6 +525,9 @@ def build_relationships():
     # 2026-10: ``$revoked`` for the steps that MATCH a Technique by id (1b, 5, 5b, 6, 6b, 8, 10).
     # A missing or invalid map is an empty map: ids are matched as given, the run goes on.
     revoked_params = {"revoked": _technique_successors()}
+    # 2026-10: ``$software_id_suffix`` / ``$folded_families`` for the steps that look a Malware node up
+    # by a pulse's family name (2d, 9b).
+    software_id_params = _software_id_params(client)
 
     try:
         # 1. Technique → Tactic (IN_TACTIC) — kill-chain phase match
@@ -770,8 +790,9 @@ def build_relationships():
             "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_actor_pairs, [])) > 0 "
             "UNWIND i.pulse_malware_actor_pairs AS pair RETURN DISTINCT pair"
         )
-        # 2026-10: the family by its name as given and without an ATT&CK software id (see
-        # ``_family_name_variants``): pairs written before name "Cobalt Strike - S0154".
+        # 2026-10: the family by its name as given and without an ATT&CK software id, each through
+        # the names the twin merge folded (see ``_family_name_variants``): pairs written before name
+        # "Cobalt Strike - S0154".
         _q2d_inner = (
             'WITH $pair AS pair WITH split(pair, "::") AS parts WHERE size(parts) = 2 '
             "WITH toLower(trim(parts[0])) AS family, toLower(trim(parts[1])) AS aname "
@@ -805,7 +826,7 @@ def build_relationships():
             _q2d_inner,
             stats,
             "attributed_to_pulse",
-            params=_SOFTWARE_ID_PARAMS,
+            params=software_id_params,
         ):
             failures += 1
         query_pause()
@@ -1464,8 +1485,10 @@ def build_relationships():
         # node. Report-scoped evidence: ``otx_pulse`` 0.6, ON CREATE only, so the IOC-level
         # ``malware_family`` claim (Q9, 0.8) is never downgraded. Canonical lower-case name only —
         # never ``m.aliases`` (untrusted, PR-N14). 2026-10: by the name as given and without an
-        # ATT&CK software id (``_family_name_variants``), so an indicator written before, which names
-        # "Cobalt Strike - S0154", links the ATT&CK node "cobalt strike".
+        # ATT&CK software id, each through the names the twin merge folded (``_family_name_variants``;
+        # ``merged_from`` is written only by the merge jobs), so an indicator written before, which
+        # names "Cobalt Strike - S0154", links the ATT&CK node "cobalt strike", and one that names
+        # "AgentTesla" after "agenttesla" was folded links "agent tesla".
         logger.info("[LINK] 9b/20 Indicator → Malware (named in the same OTX pulse)...")
         _q9b_outer = "MATCH (i:Indicator) WHERE size(coalesce(i.pulse_malware_families, [])) > 0 RETURN i"
         _q9b_inner = (
@@ -1501,7 +1524,7 @@ def build_relationships():
             stats,
             "indicates_pulse",
             skip_query=_q9b_skip,
-            params=_SOFTWARE_ID_PARAMS,
+            params=software_id_params,
         ):
             failures += 1
         query_pause()

@@ -177,7 +177,8 @@ _EPSS_SSVC_ROW = {
 # Check 10a5 (2026-10, Malware twins): the non-MITRE Malware nodes named with an ATT&CK software id
 # and the MITRE Malware nodes with the record MITRE delivered (the ``raw_data`` of their SOURCED_FROM
 # edge: the sync item without its key property). On a correct graph the only twin left is one whose
-# id no MITRE Malware node has: Mimikatz S0002 is an ATT&CK tool.
+# id no MITRE Malware node has and whose base name no other node carries: Mimikatz S0002 is an ATT&CK
+# tool. The MITRE nodes hold the names the twin merge folded (``merged_from``, read for check 10a4).
 def _mitre_malware_raw(name: str, attack_id: str) -> str:
     return json.dumps(
         {
@@ -198,6 +199,11 @@ _GRAPH_MITRE_MALWARE = (
     {"name": "poisonivy", "attack_raw": _mitre_malware_raw("PoisonIvy", "S0012")},
     {"name": "agent tesla", "attack_raw": None},
 )
+_GRAPH_FOLDED_MALWARE = (
+    {"name": "cobalt strike", "merged_from": ["cobalt strike - s0154"], "mitre": True},
+    {"name": "agent tesla", "merged_from": ["agenttesla"], "mitre": True},
+    {"name": "poisonivy", "merged_from": None, "mitre": True},
+)
 
 
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -207,6 +213,10 @@ def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]
         return [dict(r) for r in _GRAPH_MALWARE_TWINS]
     if "AS attack_raw" in s:
         return [dict(r) for r in _GRAPH_MITRE_MALWARE]
+    if "m.merged_from AS merged_from" in s:
+        return [dict(r) for r in _GRAPH_FOLDED_MALWARE]
+    if "b.name IN $bases" in s:
+        return []
     if "AS ssvc_exploitation_active" in s:
         return [dict(_EPSS_SSVC_ROW)]
     if "AS recorded" in s:
@@ -1353,10 +1363,12 @@ class TestMalwareTwinsFolded:
     id or base name exists. The decision is the enrichment job's (``plan_twin_folds``)."""
 
     @staticmethod
-    def _run_with(vfb, monkeypatch, twins, seen=None):
+    def _run_with(vfb, monkeypatch, twins, seen=None, base_rows=()):
         def override(statement, rows):
             if seen is not None:
                 seen.append(statement)
+            if "b.name IN $bases" in statement:
+                return [dict(b) for b in base_rows]
             return [dict(t) for t in twins] if "d.name =~ $suffixed" in statement else rows
 
         return _run(vfb, monkeypatch, override)
@@ -1365,8 +1377,21 @@ class TestMalwareTwinsFolded:
         rep = _run(vfb, monkeypatch)
         check = _check(rep, "malware_attack_twins_folded")
         assert check["ok"] is True
-        assert check["detail"]["without_mitre_target"] == 1
+        assert check["detail"]["without_target"] == 1
         assert check["detail"]["examples_without_target"] == ["mimikatz - s0002"]
+
+    def test_a_twin_without_a_mitre_node_beside_the_node_of_its_base_name_fails(self, vfb, monkeypatch):
+        # A later pulse created "mimikatz": the job folds the twin into it (steps 9b / 2d link both).
+        rep = self._run_with(
+            vfb,
+            monkeypatch,
+            [dict(t) for t in _GRAPH_MALWARE_TWINS],
+            base_rows=[{"name": "mimikatz", "aliases": ["Mimikatz - S0002"]}],
+        )
+        check = _check(rep, "malware_attack_twins_folded")
+        assert check["ok"] is False and check["mandatory"] is True
+        assert (check["detail"]["foldable_into_base_name"], check["detail"]["without_target"]) == (1, 0)
+        assert check["detail"]["examples_foldable"] == ["mimikatz - s0002 -> mimikatz"]
 
     @pytest.mark.parametrize(
         "twin, target",
@@ -1396,7 +1421,13 @@ class TestMalwareTwinsFolded:
         assert not any("AS attack_raw" in st for st in seen)
 
     def test_query_shape(self, vfb, monkeypatch):
-        from attack_software_names import CYPHER_SOFTWARE_ID_SUFFIX, CYPHER_SUFFIXED_NAME
+        from attack_software_names import (
+            CYPHER_BASE_NODES_READ,
+            CYPHER_FOLDED_FAMILIES_READ,
+            CYPHER_SOFTWARE_ID_SUFFIX,
+            CYPHER_SUFFIXED_NAME,
+            cypher_family_name_variants,
+        )
 
         seen: List[Any] = []
 
@@ -1411,7 +1442,15 @@ class TestMalwareTwinsFolded:
         assert "NOT 'mitre_attck' IN coalesce(d.source, [])" in twin_st
         ((attack_st, _p),) = [(st, p) for st, p in seen if "AS attack_raw" in st]
         assert "(c)-[sf:SOURCED_FROM]->(:Source {source_id: 'mitre_attck'})" in attack_st
-        # Check 10a4 looks a family up as step 9b does: as given and without the ATT&CK software id.
+        ((_base_st, base_params),) = [(st, p) for st, p in seen if st == CYPHER_BASE_NODES_READ]
+        assert base_params == {"bases": ["mimikatz"], "mitre_source": "mitre_attck"}
+        # Check 10a4 looks a family up as step 9b does: as given and without the ATT&CK software id,
+        # each through the names the twin merge folded (the same expression, the same map).
+        ((_folded_st, folded_params),) = [(st, p) for st, p in seen if st == CYPHER_FOLDED_FAMILIES_READ]
+        assert folded_params == {"mitre_source": "mitre_attck"}
         ((pulse_st, pulse_params),) = [(st, p) for st, p in seen if "pulse_malware_families" in st]
-        assert pulse_params == {"software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX}
-        assert "m.name IN apoc.coll.toSet([f, trim(apoc.text.replace(f, $software_id_suffix, ''))])" in pulse_st
+        assert pulse_params == {
+            "software_id_suffix": CYPHER_SOFTWARE_ID_SUFFIX,
+            "folded_families": {"agenttesla": "agent tesla", "cobalt strike - s0154": "cobalt strike"},
+        }
+        assert "OPTIONAL MATCH (m:Malware) WHERE m.name IN " + cypher_family_name_variants("f") + " " in pulse_st

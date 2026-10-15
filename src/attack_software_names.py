@@ -14,11 +14,15 @@ This module holds what every site needs to treat such a name as the family it na
 * ``CYPHER_SOFTWARE_ID_SUFFIX`` / ``CYPHER_SUFFIXED_NAME`` — the same rule as Java regular expressions
   for Cypher (``apoc.text.replace`` and ``=~``), passed as query parameters so no escaping is needed
   inside ``apoc.periodic.iterate`` statements (``build_relationships`` steps 9b / 2d, the twin merge's
-  candidate read, the acceptance check);
+  candidate read and merge statement, the acceptance checks);
+* ``cypher_family_name_variants`` / ``folded_family_names`` — how steps 9b / 2d (and the acceptance
+  check that mirrors 9b) find the ``Malware`` node of a family name: as given, without the id, and
+  through the names the twin merge folded into a node (``merged_from``);
 * ``attack_software_id`` — the ATT&CK id of a MITRE ``Malware`` node, read from the record MITRE
   delivered (its ``SOURCED_FROM`` edge's ``raw_data``; the node has no ``mitre_id``);
-* ``plan_twin_folds`` — which non-MITRE node folds into which MITRE node (the enrichment job
-  ``merge_malware_attack_twins`` and ``scripts/verify_fresh_baseline.py``).
+* ``plan_twin_folds`` — which non-MITRE node folds into which node: the MITRE node of its id or base
+  name, else the non-MITRE node of its base name (the enrichment job ``merge_malware_attack_twins`` and
+  ``scripts/verify_fresh_baseline.py``).
 
 Standard library only: ``scripts/verify_fresh_baseline.py`` imports this module outside the
 pipeline's environment.
@@ -43,6 +47,39 @@ _SUFFIXED_NAME_RE = re.compile(r"^(?P<base>.*\S)\s+-\s+(?P<id>S[0-9]{4})\s*$", r
 # for ``=~`` (a name that carries an id).
 CYPHER_SOFTWARE_ID_SUFFIX = r"(?i)(?<=\S)\s+-\s+S[0-9]{4}\s*$"
 CYPHER_SUFFIXED_NAME = r"(?is).*\S\s+-\s+S[0-9]{4}\s*"
+
+# The ``Malware`` nodes that hold folded names (``merged_from``, written only by the merge jobs) and the
+# MITRE-sourced ones, whose names are never redirected: ``folded_family_names`` turns the rows into the
+# ``$folded_families`` map of steps 9b / 2d. Parameter: ``$mitre_source``.
+CYPHER_FOLDED_FAMILIES_READ = (
+    "MATCH (m:Malware) WHERE m.merged_from IS NOT NULL OR $mitre_source IN coalesce(m.source, []) "
+    "RETURN m.name AS name, m.merged_from AS merged_from, $mitre_source IN coalesce(m.source, []) AS mitre"
+)
+
+# The non-MITRE ``Malware`` nodes named by the base name of a twin (``twin_base_names``): the node a
+# twin without a MITRE target folds into. Parameters: ``$bases``, ``$mitre_source``. No APOC: a scalar
+# ``aliases`` is read as a list in Python.
+CYPHER_BASE_NODES_READ = (
+    "MATCH (b:Malware) WHERE b.name IN $bases AND NOT $mitre_source IN coalesce(b.source, []) "
+    "RETURN b.name AS name, b.aliases AS aliases"
+)
+
+
+def cypher_family_name_variants(var: str) -> str:
+    """Cypher list: the ``Malware`` names under which the canonical family name ``var`` is found.
+
+    The name as given and, when it ends with an ATT&CK software id, the name without it
+    (``"cobalt strike - s0154"`` → ``"cobalt strike"``); each replaced by the node it was folded into
+    when the twin merge folded a node of that name (``$folded_families``, ``folded_family_names``:
+    ``"agenttesla"`` → ``"agent tesla"``). De-duplicated. Reads the ``$software_id_suffix`` and
+    ``$folded_families`` parameters; double quotes only, as the statements of ``apoc.periodic.iterate``
+    are wrapped in single quotes.
+    """
+    return (
+        f'apoc.coll.toSet([_fv IN [{var}, trim(apoc.text.replace({var}, $software_id_suffix, ""))] '
+        "| coalesce($folded_families[_fv], _fv)])"
+    )
+
 
 # The link every ATT&CK software description opens with: ``[Cobalt Strike](https://attack.mitre.org/
 # software/S0154)``.
@@ -128,16 +165,60 @@ def software_id_claims(name: Any, aliases: Any = None) -> List[Tuple[str, str]]:
     return claims
 
 
+def folded_family_names(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
+    """``{folded name → name of the Malware node it was folded into}`` for steps 9b / 2d.
+
+    ``rows`` — ``{"name", "merged_from", "mitre"}`` of ``Malware`` nodes (``CYPHER_FOLDED_FAMILIES_READ``).
+    Every ``merged_from`` entry names a node the twin merge folded into this one; an entry that carries
+    an ATT&CK software id also stands for its base name, which the collectors write since 2026-10
+    (``"agenttesla - s0331"`` folded into ``agent tesla`` → ``"agenttesla"`` too). A folded node is
+    gone, and a later pulse that names the family is a MISP cross-event duplicate, so without this map
+    its indicators would find no node. ``merged_from`` is written only by the merge jobs, unlike
+    ``aliases``, which every source writes (PR-N14). A name that leads to two nodes, or that is the
+    name of a MITRE-sourced node, is left out: an ATT&CK node is never redirected.
+    """
+    mitre_names: Set[str] = set()
+    targets: Dict[str, Set[str]] = {}
+    for row in rows:
+        name = row.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        own = _canonical(name)
+        if row.get("mitre"):
+            mitre_names.add(own)
+        for entry in _as_list(row.get("merged_from")):
+            for key in {_canonical(entry), _canonical(split_attack_software_id(entry)[0])}:
+                if key and key != own:
+                    targets.setdefault(key, set()).add(name)
+    return {
+        key: next(iter(nodes)) for key, nodes in sorted(targets.items()) if len(nodes) == 1 and key not in mitre_names
+    }
+
+
+def twin_base_names(twins: Iterable[Mapping[str, Any]]) -> List[str]:
+    """The canonical base names of the rows named with an ATT&CK software id, sorted: the names
+    ``CYPHER_BASE_NODES_READ`` looks up (``"mimikatz - s0002"`` → ``"mimikatz"``)."""
+    bases: Set[str] = set()
+    for row in twins:
+        base, sid = split_attack_software_id(row.get("name"))
+        if sid and base:
+            bases.add(_canonical(base))
+    return sorted(bases)
+
+
 @dataclass(frozen=True)
 class TwinFoldPlan:
     """What ``plan_twin_folds`` decided.
 
-    ``pairs`` — ``(MITRE node name, twin name)``, sorted; ``no_target`` — twins no MITRE node matches
-    (left as they are); ``ambiguous`` — twins whose id and base name lead to more than one MITRE node,
-    with those nodes (skipped); ``candidates`` — the nodes that state an id at all.
+    ``pairs`` — ``(MITRE node name, twin name)``, sorted; ``base_pairs`` — ``(non-MITRE node name, twin
+    name)``, sorted: twins without a MITRE target that fold into the node named by their base name;
+    ``no_target`` — twins with neither (left as they are); ``ambiguous`` — twins whose id and base name
+    lead to more than one MITRE node, with those nodes (skipped); ``candidates`` — the nodes that state
+    an id at all.
     """
 
     pairs: List[Tuple[str, str]] = field(default_factory=list)
+    base_pairs: List[Tuple[str, str]] = field(default_factory=list)
     no_target: List[str] = field(default_factory=list)
     ambiguous: List[Tuple[str, List[str]]] = field(default_factory=list)
     candidates: int = 0
@@ -147,16 +228,26 @@ def plan_twin_folds(
     twins: Iterable[Mapping[str, Any]],
     attack_ids: Mapping[str, Optional[str]],
     software_successors: Optional[Mapping[str, str]] = None,
+    base_nodes: Optional[Mapping[str, Any]] = None,
 ) -> TwinFoldPlan:
-    """The MITRE ``Malware`` node each twin folds into.
+    """The node each twin folds into.
 
     ``twins`` — rows ``{"name", "aliases"}`` of non-MITRE ``Malware`` nodes; ``attack_ids`` — the MITRE
     ``Malware`` nodes, ``name → ATT&CK id`` (``None`` when the id cannot be read); ``software_successors``
-    — revoked software id → successor (``attack_revoked``), applied to the twin's ids first.
+    — revoked software id → successor (``attack_revoked``), applied to the twin's ids first;
+    ``base_nodes`` — the non-MITRE ``Malware`` nodes named by a twin's base name, ``name → aliases``
+    (``CYPHER_BASE_NODES_READ`` over ``twin_base_names``).
 
     A MITRE node is a target when its id is one the twin states, or when its name is the twin's base
     name and its id is unknown or one the twin states (a name whose id contradicts the twin's is not the
-    same software). One target: a pair. None: ``no_target``. Several: ``ambiguous``.
+    same software). One target: a pair. Several: ``ambiguous``.
+
+    None (2026-10): ATT&CK software without a MITRE ``Malware`` node, chiefly the ATT&CK tools. Since the
+    collectors name a family by its base name, a later pulse creates the node ``mimikatz`` beside the
+    twin ``mimikatz - s0002``, and steps 9b / 2d link indicators written before to both. A twin named
+    with an id therefore folds into the non-MITRE node of its base name (``base_pairs``) when that node
+    states no other id; twins of one base name that state different ids are not one software and fold
+    nowhere. Otherwise the twin is ``no_target``.
     """
     successors = dict(software_successors or {})
     by_id: Dict[str, Set[str]] = {}
@@ -168,6 +259,7 @@ def plan_twin_folds(
     pairs: List[Tuple[str, str]] = []
     no_target: List[str] = []
     ambiguous: List[Tuple[str, List[str]]] = []
+    unresolved: List[Tuple[str, Set[str]]] = []
     candidates = 0
     seen: Set[str] = set()
     for row in twins:
@@ -193,20 +285,51 @@ def plan_twin_folds(
         if len(targets) == 1:
             pairs.append((next(iter(targets)), twin))
         elif not targets:
-            no_target.append(twin)
+            unresolved.append((twin, ids))
         else:
             ambiguous.append((twin, sorted(targets)))
+
+    # Twins without a MITRE target: the non-MITRE node of their base name, when it states no other id.
+    by_base_name = {_canonical(n): n for n in (base_nodes or {}) if isinstance(n, str) and n.strip()}
+    folding = {twin for _target, twin in pairs}
+    groups: Dict[str, List[Tuple[str, Set[str]]]] = {}
+    for twin, ids in unresolved:
+        base, base_id = split_attack_software_id(twin)
+        node = by_base_name.get(_canonical(base)) if base_id else None
+        if node is None or node == twin or node in folding or node in attack_ids:
+            no_target.append(twin)
+            continue
+        node_ids = {successors.get(s, s) for _base, s in software_id_claims(node, (base_nodes or {}).get(node))}
+        if node_ids and not node_ids & ids:
+            no_target.append(twin)  # the node of that name states another id: another software
+            continue
+        groups.setdefault(node, []).append((twin, ids | node_ids))
+    base_pairs: List[Tuple[str, str]] = []
+    for node, members in groups.items():
+        if len(set().union(*(ids for _twin, ids in members))) > 1:
+            no_target.extend(twin for twin, _ids in members)
+        else:
+            base_pairs.extend((node, twin) for twin, _ids in members)
     return TwinFoldPlan(
-        pairs=sorted(pairs), no_target=sorted(no_target), ambiguous=sorted(ambiguous), candidates=candidates
+        pairs=sorted(pairs),
+        base_pairs=sorted(base_pairs),
+        no_target=sorted(no_target),
+        ambiguous=sorted(ambiguous),
+        candidates=candidates,
     )
 
 
 __all__ = [
+    "CYPHER_BASE_NODES_READ",
+    "CYPHER_FOLDED_FAMILIES_READ",
     "CYPHER_SOFTWARE_ID_SUFFIX",
     "CYPHER_SUFFIXED_NAME",
     "TwinFoldPlan",
     "attack_software_id",
+    "cypher_family_name_variants",
+    "folded_family_names",
     "plan_twin_folds",
     "software_id_claims",
     "split_attack_software_id",
+    "twin_base_names",
 ]
