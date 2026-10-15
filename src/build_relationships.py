@@ -110,6 +110,7 @@ from canonical_threat_actors import (  # noqa: E402
 from relationship_provenance import MITRE_FEEDS as _MITRE_FEEDS  # noqa: E402
 from relationship_provenance import OTX_FEEDS as _OTX_FEEDS  # noqa: E402
 from relationship_provenance import PROV_VARS as _PROV_VARS  # noqa: E402
+from relationship_provenance import as_list as _as_list  # noqa: E402
 from relationship_provenance import family_feeds as _family_feeds  # noqa: E402
 from relationship_provenance import node_feeds as _node_feeds  # noqa: E402
 from relationship_provenance import prov_set as _prov_set  # noqa: E402
@@ -541,23 +542,25 @@ _q2d_remove_outer = (
     'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
     "WITH r, " + attribution_reports_cypher("r") + " AS reports "
     "WHERE size(reports) > 0 AND all(p IN reports WHERE p IN $several_actor_reports) "
-    "AND all(s IN coalesce(r.sources, []) WHERE s IN $report_feeds) "
+    "AND all(s IN " + _as_list("r.sources") + " WHERE s IN $report_feeds) "
     "RETURN r"
 )
 _q2d_remove_inner = "WITH $r AS r DELETE r"
 _q2d_trim_outer = (
     "MATCH (:Malware)-[r:ATTRIBUTED_TO]->(:ThreatActor) "
     'WHERE r.match_type = "otx_pulse" AND r.edgeguard_managed = true '
-    "AND (any(x IN coalesce(r.source_refs, []) WHERE x IN $several_actor_refs) "
-    "OR any(p IN coalesce(r.report_ids, []) WHERE p IN $several_actor_reports)) "
+    "AND (any(x IN " + _as_list("r.source_refs") + " WHERE x IN $several_actor_refs) "
+    "OR any(p IN " + _as_list("r.report_ids") + " WHERE p IN $several_actor_reports)) "
     "RETURN r"
 )
+# A list stored as a plain string (the actor alias merge's APOC ``combine`` before its normalising
+# statement) is trimmed as a one-entry list and written back as a list.
 _q2d_trim_inner = (
     "WITH $r AS r "
     "SET r.source_refs = CASE WHEN r.source_refs IS NULL THEN null "
-    "ELSE [x IN r.source_refs WHERE NOT x IN $several_actor_refs] END, "
+    "ELSE [x IN " + _as_list("r.source_refs") + " WHERE NOT x IN $several_actor_refs] END, "
     "r.report_ids = CASE WHEN r.report_ids IS NULL THEN null "
-    "ELSE [p IN r.report_ids WHERE NOT p IN $several_actor_reports] END"
+    "ELSE [p IN " + _as_list("r.report_ids") + " WHERE NOT p IN $several_actor_reports] END"
 )
 
 
@@ -899,7 +902,11 @@ def build_relationships():
             "OPTIONAL MATCH (_canonical:ThreatActor {name: coalesce($canonical_actor_names[aname], aname)}) "
             "WITH m, pid, coalesce(_named, _canonical) AS a WHERE a IS NOT NULL "
             # A pair without a pulse: the pulses naming both ends; not only pulses naming several actors.
-            "WITH m, a, pid, [p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared "
+            "WITH m, a, pid, [p IN "
+            + _as_list("m.pulse_ids")
+            + " WHERE p IN "
+            + _as_list("a.pulse_ids")
+            + "] AS _shared "
             "WHERE pid IS NOT NULL OR size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) "
             # Provenance: the pair's pulse; for a pair without one, the OTX pulses (and MISP events) that
             # listed BOTH ends — the intersection of the two nodes' OTX ``SOURCED_FROM`` records, empty

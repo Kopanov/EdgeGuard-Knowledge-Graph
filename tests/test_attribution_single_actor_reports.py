@@ -110,11 +110,27 @@ class TestActorIdentities:
         assert cta.reports_naming_several_actors(rows, reference) == ["p-groups"]
         assert cta.reports_naming_several_actors(rows, None) == ["p-alias", "p-groups"]
 
-    def test_the_report_ids_fragment_has_no_quote(self):
+    def test_the_report_ids_fragment_has_no_single_quote(self):
         # It is used inside statements apoc.periodic.iterate wraps in single quotes.
         fragment = cta.attribution_reports_cypher("r")
-        assert "'" not in fragment and '"' not in fragment
+        assert "'" not in fragment
         assert "r.source_refs" in fragment and "r.report_ids" in fragment and "$otx_ref_prefix" in fragment
+
+    def test_lists_stored_as_a_string_are_read_as_one_entry(self):
+        # The actor alias merge's APOC combine stores two equal one-element lists as a string until
+        # its normalising statement runs; step 2d and the acceptance check read them through as_list.
+        from relationship_provenance import as_list
+
+        fragment = cta.attribution_reports_cypher("r")
+        assert as_list("r.source_refs") in fragment and as_list("r.report_ids") in fragment
+        assert ("UNWIND " + as_list("a.pulse_ids") + " AS pid") in cta.REPORT_ACTORS_QUERY
+        assert ("all(s IN " + as_list("r.sources") + " WHERE s IN $feeds)") in cta.ATTRIBUTION_CHECK_QUERY
+        assert ("all(s IN " + as_list("r.sources") + " WHERE s IN $report_feeds)") in assigned_query(
+            "_q2d_remove_outer"
+        )
+        trim = assigned_query("_q2d_trim_inner")
+        assert ("[x IN " + as_list("r.source_refs") + " WHERE NOT x IN $several_actor_refs]") in trim
+        assert ("[p IN " + as_list("r.report_ids") + " WHERE NOT p IN $several_actor_reports]") in trim
 
 
 # --------------------------------------------------------------------------- the collector and MISP
@@ -475,7 +491,7 @@ class TestStep2d:
             "OPTIONAL MATCH (_canonical:ThreatActor {name: coalesce($canonical_actor_names[aname], aname)}) ",
             # one node: a pair is judged by the pulses of the node it links
             "WITH m, pid, coalesce(_named, _canonical) AS a WHERE a IS NOT NULL ",
-            "[p IN coalesce(m.pulse_ids, []) WHERE p IN coalesce(a.pulse_ids, [])] AS _shared ",
+            "WHERE p IN CASE WHEN a.pulse_ids IS NULL THEN [] ",
             "WHERE pid IS NOT NULL OR size(_shared) = 0 OR any(p IN _shared WHERE NOT p IN $several_actor_reports) ",
             "CASE WHEN pid IS NOT NULL THEN [$otx_ref_prefix + pid] ",
             "ELSE [_x IN _mrefs WHERE _x IN _arefs AND NOT _x IN $several_actor_refs] END AS _prov_refs",
@@ -486,7 +502,7 @@ class TestStep2d:
             'r.match_type = "otx_pulse" AND r.edgeguard_managed = true',
             cta.attribution_reports_cypher("r") + " AS reports",
             "size(reports) > 0 AND all(p IN reports WHERE p IN $several_actor_reports)",
-            "all(s IN coalesce(r.sources, []) WHERE s IN $report_feeds)",
+            "WHERE s IN $report_feeds)",
         ):
             assert fragment in remove
         assert assigned_query("_q2d_remove_inner") == "WITH $r AS r DELETE r"

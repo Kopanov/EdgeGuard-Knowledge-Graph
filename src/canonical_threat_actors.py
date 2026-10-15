@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from node_identity import canonicalize_merge_key, is_placeholder_name
+from relationship_provenance import as_list
 
 REFERENCE_PATH_ENV = "EDGEGUARD_CANONICAL_THREAT_ACTORS"
 DEFAULT_REFERENCE_PATH = Path(__file__).resolve().parent / "reference" / "canonical_threat_actors.json"
@@ -98,9 +99,11 @@ def actor_identities(names: Iterable[Any], reference: Optional[CanonicalReferenc
 # holds, so the OTX collector decides it per pulse instead (``several_actor_pulses``). One row always:
 # ``reports`` (the pulses naming two or more nodes, with the names) and ``pulses`` (how many pulses any
 # actor records), so an empty answer is a failed read, not "no such pulse".
+# The lists are read through ``as_list``: the actor alias merge's APOC ``combine`` stores two equal
+# one-element lists as a plain string until its normalising statement runs.
 REPORT_ACTORS_QUERY = (
-    "MATCH (a:ThreatActor) WHERE size(coalesce(a.pulse_ids, [])) > 0 "
-    "UNWIND a.pulse_ids AS pid WITH pid, collect(DISTINCT a.name) AS names "
+    "MATCH (a:ThreatActor) WHERE size(" + as_list("a.pulse_ids") + ") > 0 "
+    "UNWIND " + as_list("a.pulse_ids") + " AS pid WITH pid, collect(DISTINCT a.name) AS names "
     "WITH collect(CASE WHEN size(names) > 1 THEN {pid: pid, names: names} END) AS reports, count(pid) AS pulses "
     "RETURN reports, pulses"
 )
@@ -137,10 +140,11 @@ def canonical_actor_names(reference: Optional[CanonicalReference]) -> Dict[str, 
 def attribution_reports_cypher(rel: str) -> str:
     """Cypher list of the OTX pulse ids a same-pulse attribution ``rel`` rests on: its OTX entries of
     ``source_refs`` (reads ``$otx_ref_prefix``), and its ``report_ids`` on graphs built before
-    2026-10-14. No quotes, so it fits a statement ``apoc.periodic.iterate`` wraps in quotes."""
+    2026-10-14. A list stored as a plain string is read as one entry (``as_list``). No single quotes,
+    so it fits a statement ``apoc.periodic.iterate`` wraps in them."""
     return (
-        f"[x IN coalesce({rel}.source_refs, []) WHERE x STARTS WITH $otx_ref_prefix "
-        f"| substring(x, size($otx_ref_prefix))] + coalesce({rel}.report_ids, [])"
+        f"[x IN {as_list(rel + '.source_refs')} WHERE x STARTS WITH $otx_ref_prefix "
+        f"| substring(x, size($otx_ref_prefix))] + {as_list(rel + '.report_ids')}"
     )
 
 
@@ -155,7 +159,9 @@ ATTRIBUTION_CHECK_QUERY = (
     "WITH r, " + attribution_reports_cypher("r") + " AS reports "
     "RETURN count(r) AS links, "
     "sum(CASE WHEN size(reports) > 0 AND all(p IN reports WHERE p IN $several) "
-    "AND all(s IN coalesce(r.sources, []) WHERE s IN $feeds) THEN 1 ELSE 0 END) AS resting_on_several_actor_reports, "
+    "AND all(s IN "
+    + as_list("r.sources")
+    + " WHERE s IN $feeds) THEN 1 ELSE 0 END) AS resting_on_several_actor_reports, "
     "sum(CASE WHEN any(p IN reports WHERE p IN $several) THEN 1 ELSE 0 END) AS naming_several_actor_reports, "
     "sum(CASE WHEN size(reports) = 0 THEN 1 ELSE 0 END) AS without_reports"
 )

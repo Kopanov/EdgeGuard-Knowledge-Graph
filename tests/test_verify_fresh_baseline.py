@@ -191,7 +191,7 @@ _ATTRIBUTION_ROW = {
 def _healthy_rows(statement: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Rows a correct fresh baseline would return, keyed on fragments of each check's Cypher."""
     s = statement
-    if "UNWIND a.pulse_ids AS pid" in s:
+    if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in s:
         return [{"reports": [dict(x) for x in _REPORT_ACTOR_ROWS], "pulses": 1530}]
     if "AS resting_on_several_actor_reports" in s:
         return [dict(_ATTRIBUTION_ROW)]
@@ -1025,7 +1025,9 @@ class TestAttributionFromSingleActorReports:
         rep = _run(
             vfb,
             monkeypatch,
-            override=lambda st, rows: [{"reports": [], "pulses": 0}] if "UNWIND a.pulse_ids AS pid" in st else rows,
+            override=lambda st, rows: (
+                [{"reports": [], "pulses": 0}] if "AS pid WITH pid, collect(DISTINCT a.name) AS names" in st else rows
+            ),
         )
         assert _check(rep, "attribution_from_single_actor_reports")["ok"] is None
 
@@ -1054,7 +1056,7 @@ class TestAttributionFromSingleActorReports:
         assert seen["attribution"] == canonical_threat_actors.ATTRIBUTION_CHECK_QUERY
         assert canonical_threat_actors.attribution_reports_cypher("r") in seen["attribution"]
         assert "WHERE r.match_type = 'otx_pulse' AND r.edgeguard_managed = true" in seen["attribution"]
-        assert "all(s IN coalesce(r.sources, []) WHERE s IN $feeds)" in seen["attribution"]
+        assert "THEN r.sources ELSE [r.sources] END WHERE s IN $feeds)" in seen["attribution"]
         assert "(m)-[:ATTRIBUTED_TO]->(:ThreatActor {name: c.actor_name})" in seen["campaign"]
 
 
